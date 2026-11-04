@@ -232,7 +232,7 @@ export const DOCS_MINT_CONSUME_SQL = `DELETE FROM docs_grants
  * about revocation cascading to linked credentials is meant to prevent.
  *
  * The two paths that end EVERY credential do NOT use this one, and should not:
- * `finalizeRevocation` and the owner-only soft delete revoke every session of
+ * `finalizeRevocation` and the tombstone cascade revoke every session of
  * every scope for the account, which is a superset. This statement is for the
  * cases where the app session legitimately survives.
  */
@@ -254,7 +254,9 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  *
  * FIVE CALLERS, and the count is the point: every path that ends or downgrades
  * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
- * role demotion, the owner-only soft delete, and {@link revokeDocsCredentials}
+ * role demotion, the tombstone cascade (`tombstoneUserCascade`, the one
+ * function both the owner-only soft delete and the scheduled sweep of
+ * live-test accounts run, so it counts once), and {@link revokeDocsCredentials}
  * (every route that revokes keys without ending every session; it lists them).
  * The FK's `ON DELETE CASCADE` covers none of them, because none of them
  * deletes the `users` row. A sixth path that ends a credential needs this line
@@ -281,7 +283,11 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * `GET /auth/confirm-key-regeneration` (`routes/auth.ts`), which revokes every
  * key on the account. A new route of that kind calls this too. The three paths
  * that revoke keys and ALSO end the docs credential in their own batch do not
- * need it: a role demotion, `finalizeRevocation` and the owner-only soft delete.
+ * need it: a role demotion, `finalizeRevocation` and the tombstone cascade.
+ * Those same three paths also run `mailReleaseStatements`
+ * (`services/ticket-assignment.ts`) in the same batch, which drops the person's support
+ * tickets, away window, read markers and queue references; key revocation alone does not, because the
+ * person is still an admin. A new path that removes an admin needs both sets.
  *
  * The by-id routes also run it when their revoke changed nothing (a
  * concurrent revoke of the same key won the race), because it is idempotent

@@ -72,6 +72,25 @@ export interface WeeklyAttentionFacts {
    * the consumer predates it, which is also unknown.
    */
   neurobagelFindings?: number | null;
+  /**
+   * The upstream freshness pass (epic #1046 phase 4b, ADR 0111): null when it did not run or
+   * failed, absent when the consumer predates it, which is also unknown. Stale mirrors are NOT a
+   * reason to ask for attention (an expected backlog until the scheduled re-pull exists, and a
+   * permanent alarm gets muted: ADR 0053); only not seeing is. A mirror that could not be
+   * compared, or a pass that stopped early, reaches the headline through `errors`.
+   */
+  upstream?: { counts: unknown } | null;
+  /**
+   * The upstream re-pulls' week (epic #1046 phase 7, ADR 0111): null when it could not be read,
+   * absent when the consumer predates it, which is also unknown. `attention` holds the phrases the
+   * Worker decided, one per reason a person should look, and only a person's work raises one: a
+   * scheduler that stopped while a switch is on, a scheduler that waits for the two first re-pulls
+   * to be run by hand while a switch is on, a dispatch nobody answered or that GitHub did
+   * not accept, a claim to merge held for an hour, a re-pull that ended failed, a re-pull that used
+   * all its resumes or all its finish runs, a cap that cannot be read. A switch that is off, every other hold (a gate waited
+   * on, a fault the path saw) and a run's refusal raise none (ADR 0053).
+   */
+  repulls?: { attention: readonly string[] } | null;
   errors: { stage: string; error: string }[];
 }
 
@@ -135,6 +154,16 @@ export function weeklyAttention(f: WeeklyAttentionFacts): WeeklyAttention {
     problems.push(
       `${f.neurobagelFindings} Neurobagel finding(s) need attention (see the audit log)`,
     );
+  }
+  if (f.upstream === null || f.upstream === undefined) {
+    problems.push("upstream freshness could not be determined");
+  }
+  // The re-pull week decides its own reasons (they need the switches, the scheduler's stamp and
+  // the clock); an unknown week is a reason of its own, as every other unknown is (ADR 0054).
+  if (f.repulls === null || f.repulls === undefined) {
+    problems.push("upstream re-pull activity could not be determined");
+  } else {
+    problems.push(...f.repulls.attention);
   }
   if (f.errors.length > 0) problems.push(`${f.errors.length} part(s) of this report failed`);
   return { attention: problems.length > 0, problems, notChecked };

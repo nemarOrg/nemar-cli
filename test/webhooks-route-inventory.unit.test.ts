@@ -36,10 +36,21 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /identifier-screen-result": 1,
   // Scheduled identifier sweep callback (epic #1610 phase 5, ADR 0088)
   "POST /identifier-sweep-result": 1,
+  // Re-pull identifier-screen callback (epic #1046 phase 6, ADR 0111; domain-tagged, same secret)
+  "POST /identifier-screen-repull-result": 1,
+  // Automatic re-pull run reports (epic #1046 phase 7, ADR 0111; domain-tagged, same secret)
+  "POST /repull-state": 1,
 
   // Dataset pull-request review callback (domain-tagged token, same secret; ADR 0092)
   "POST /pr-review-claim": 1,
   "POST /pr-review-result": 1,
+
+  // Publication review callbacks (domain-tagged token, same secret; ADR 0102)
+  "POST /publication-review-claim": 1,
+  "POST /publication-review-result": 1,
+
+  // Web approval release (the dispatch token alone authenticates; ADR 0105, decision 9)
+  "POST /approval-release": 1,
 
   // OpenNeuro import state callback (bearer token)
   "POST /import-state": 1,
@@ -67,7 +78,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(15);
+    expect(webhooks.routes.length).toBe(20);
   });
 
   // The webhooks router has NO router-level middleware: every route does its

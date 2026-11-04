@@ -46,6 +46,7 @@ import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
+import type { BroadcastOutboxMessage } from "./services/broadcast";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
@@ -61,6 +62,12 @@ import {
   sendStalenessAdminReviewEmail,
   sendStalenessWarningEmail,
 } from "./services/email";
+import {
+  handleEmailEventBatch,
+  isEmailEventMessage,
+  pruneEmailDeliveryEvents,
+} from "./services/email-events";
+import { handleOutboxBatch, isBroadcastOutboxMessage } from "./services/email-outbox";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { sweepIdentifierScreens } from "./services/identifier-screen";
@@ -81,6 +88,7 @@ import {
   runWeeklyImportSummaryCron,
   weeklySummaryCronLine,
 } from "./services/import-weekly-summary-sweep";
+import { handleInboundEmail } from "./services/inbound-mail";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { runNeurobagelReconcileCron } from "./services/neurobagel-hooks";
 import {
@@ -89,6 +97,7 @@ import {
 } from "./services/neurobagel-verify";
 import { getActiveNotices } from "./services/notices";
 import { sweepStalePrReviews } from "./services/pr-review";
+import { sweepPublicationReviews } from "./services/publication-review";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
 import { runSignalDefaultsSweepCron } from "./services/signal-defaults-sweep";
@@ -99,6 +108,18 @@ import {
   deletionDate,
   warningStageForDaysLeft,
 } from "./services/staleness";
+import {
+  TEST_ACCOUNT_SWEEP_NOT_RUN,
+  type TestAccountSweepResult,
+  cleanUpLiveTestAccounts,
+} from "./services/test-account-sweep";
+import { purgeExpiredTickets } from "./services/ticket-retention";
+import { repullAdvanceLogLine, runRepullAdvanceCron } from "./services/upstream-repull-advance";
+import { sweepUnreportedDispatches } from "./services/upstream-repull-dispatch";
+import {
+  repullSchedulerLogLine,
+  runRepullSchedulerCron,
+} from "./services/upstream-repull-scheduler";
 import { publishZarrCatalog } from "./services/zarr-catalog";
 import { runZarrFidelitySweep } from "./services/zarr-fidelity-sweep";
 import type { Bindings, Variables } from "./types/bindings";
@@ -416,6 +437,9 @@ export const PROD_SANDBOX_CLEANUP_QUERY =
  * UPDATEs the CALLING env's own D1: no email, no GitHub, no DOI, no bucket.
  * (`fetchAndSyncCitationCounts`, which it mirrors, is also driven outside the
  * guarded block but was never named here; it is not in this list.)
+ * `purgeExpiredTickets` (services/ticket-retention.ts, epic #1893 phase 6a) qualifies because it
+ * only reads and writes the CALLING env's own D1 mail tables: no email, no GitHub, no DOI, no
+ * bucket (it never touches R2), and it deletes nothing without a valid MAIL_RETENTION_DAYS.
  * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
  * both actually called and called outside the guarded block.
  */
@@ -423,6 +447,7 @@ export const DEV_CRON_ALLOWLIST = [
   "publishZarrCatalog",
   "runZarrFidelitySweep",
   "fetchAndSyncDataPapers",
+  "purgeExpiredTickets",
 ] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
@@ -852,6 +877,28 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     blockedSweep = { ...blockedSweep, errors: 1 };
   }
 
+  // 6. Tombstone the accounts the live integration tests leave in the dev/staging database
+  //    (#1789): addresses of exactly the generated shapes, older than a week, owning
+  //    nothing, at most one bounded batch per run. NON-PRODUCTION ONLY, and
+  //    cleanUpLiveTestAccounts / sweepCiTestAccounts each refuse outside a recognized
+  //    non-production environment on their own too; the guard is repeated here so this call
+  //    site reads as what it is. The tally rides the audit row below, like the
+  //    blocked-publication sweep's. It never throws, so a failure is a tally with errors set.
+  let testAccountSweep: TestAccountSweepResult = { ...TEST_ACCOUNT_SWEEP_NOT_RUN };
+  if (isNonProductionEnv(env)) {
+    testAccountSweep = await cleanUpLiveTestAccounts(env);
+  }
+
+  // 7. Retention for the Email Sending bounce and complaint events (ADR 0110): rows older than
+  //    180 days go. D1 only, so it is safe in every environment. A failure is logged and
+  //    leaves the rows for the next run.
+  try {
+    const pruned = await pruneEmailDeliveryEvents(db, now);
+    if (pruned > 0) console.log(`Scheduled cleanup: pruned ${pruned} email delivery event(s)`);
+  } catch (err) {
+    console.error("Scheduled cleanup: email delivery event retention failed:", err);
+  }
+
   // Log summary to audit_log. `deleted`/`failed` cover only sandbox (xx)
   // datasets now; nm datasets are warned, not deleted, by this job.
   const deleted = results.filter((r) => r.success).length;
@@ -868,6 +915,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
           staleness,
           importsSwept,
           blockedSweep,
+          testAccountSweep,
         }),
       )
       .run();
@@ -875,12 +923,44 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
     console.error("Scheduled cleanup: failed to write audit log:", err);
   }
   console.log(
-    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors} deferred=${blockedSweep.deferred} skipped=${blockedSweep.skipped}`,
+    `Scheduled cleanup: ${deleted} deleted, ${failed} failed; staleness warned=${staleness.warned} adminNotified=${staleness.adminNotified} reset=${staleness.reset}; importsSwept=${importsSwept}; blockedSweep unblocked=${blockedSweep.unblocked} reblocked=${blockedSweep.reblocked} errors=${blockedSweep.errors} deferred=${blockedSweep.deferred} skipped=${blockedSweep.skipped}; testAccountSweep ran=${testAccountSweep.ran} tombstoned=${testAccountSweep.tombstoned} skipped=${testAccountSweep.skipped} errors=${testAccountSweep.errors}`,
   );
+}
+
+/**
+ * Queue consumer entry (epic #1893). One Worker consumes several queues, and a batch holds
+ * messages of one queue, so dispatch is per message on its body. A branch is added here for
+ * each kind of message; anything unrecognised is acked and logged, never retried, because a
+ * retry of a message nobody handles only delays its dead-lettering.
+ */
+export async function dispatchQueueBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  const broadcasts: Message<BroadcastOutboxMessage>[] = [];
+  const emailEvents: Message<unknown>[] = [];
+  for (const message of batch.messages) {
+    if (isBroadcastOutboxMessage(message.body)) {
+      broadcasts.push(message as Message<BroadcastOutboxMessage>);
+    } else if (isEmailEventMessage(message.body)) {
+      emailEvents.push(message);
+    } else {
+      // Stable tag: alert on "[queue] unrecognised message".
+      console.warn(`[queue] unrecognised message queue=${batch.queue}; acking`);
+      message.ack();
+    }
+  }
+  if (broadcasts.length > 0) await handleOutboxBatch(broadcasts, env);
+  if (emailEvents.length > 0) await handleEmailEventBatch(emailEvents, env);
 }
 
 export default {
   fetch: app.fetch,
+  async queue(batch: MessageBatch<unknown>, env: Bindings, _ctx: ExecutionContext) {
+    await dispatchQueueBatch(batch, env);
+  },
+  // Email Routing delivers inbound mail here (epic #1893, ADR 0110). With no MAIL_INBOUND
+  // binding, which is every Worker but staging, the message is rejected.
+  async email(message: ForwardableEmailMessage, env: Bindings) {
+    await handleInboundEmail(message, env);
+  },
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     // Two cron schedules share this handler; branch on which one fired so the
     // daily jobs don't run on the frequent auto-import tick (#775). The
@@ -942,6 +1022,34 @@ export default {
             .catch((err) =>
               console.error(
                 "[pr-review-sweep] sweep failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // ADR 0102: the publication-review watchdog. A review handed to GitHub that never
+        // reports is marked unreported, its nonce kept so a late report still lands, and the
+        // request's admin mail (which waits for the review) is tried, because a dispatch is
+        // answered 204 whether or not a workflow listens. Its deadline is 30 minutes, so it
+        // rides this tick. PRODUCTION-ONLY, by AGENTS.md's default for a new cron job: it
+        // mails administrators, and the dev worker shares the `users` table with production.
+        // It is therefore not in DEV_CRON_ALLOWLIST, and the sweep also refuses outside
+        // production on its own; the dev worker never ages a row, so every surface reads a
+        // row dispatched longer ago than the deadline plus one tick as "did not report". It
+        // does NOT read PUBLICATION_REVIEW_ENABLED: switching the review off must not strand
+        // a request whose mail waits on a review already in flight. D1 and the mail only: no
+        // GitHub call.
+        ctx.waitUntil(
+          sweepPublicationReviews(env)
+            .then((r) => {
+              if (r.timedOut + r.mailed + r.errors > 0) {
+                console.log(
+                  `[publication-review-sweep] timedOut=${r.timedOut} mailed=${r.mailed} errors=${r.errors}`,
+                );
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[publication-review-sweep] sweep failed:",
                 err instanceof Error ? (err.stack ?? err.message) : err,
               ),
             ),
@@ -1011,6 +1119,35 @@ export default {
               ),
             ),
         );
+        // #1913 (epic #1046 phases 7f and 7g, ADR 0111): the automatic re-pull's advance tick. It
+        // reads the open automatic re-pulls, a few of each kind a tick in rotation, and takes each
+        // one step on: it dispatches the identifier screen and starts the review of an open pull
+        // request's head, writes pr_open -> gates_clear for one machine clean, merges a
+        // machine-clean one at gates_clear (the Worker's one merge path, under the daily merge cap
+        // and only while AUTO_REPULL_MERGE_ENABLED and AUTO_REPULL_ENABLED are both "1"), resolves a
+        // claim to merge from GitHub, dispatches the central workflow again to resume a run that
+        // stalled before its pull request opened or to finish one that merged, and records why each
+        // row waits where it is. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it
+        // reads and acts on pull requests in the shared nemarDatasets org, merges into it and
+        // dispatches against it. It also refuses outside exact production on its own; while
+        // AUTO_REPULL_ENABLED is not "1" it merges, gates and resumes nothing, and only resolves a
+        // held claim and finishes a merged re-pull, so no minted DOI is stranded. It never reads an
+        // administrator's re-pull, and sends no mail. One log line, only when it changed
+        // something, was refused or failed.
+        ctx.waitUntil(
+          runRepullAdvanceCron(env)
+            .then((r) => {
+              const log = r ? repullAdvanceLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[repull-advance] tick failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
       }
       return;
     }
@@ -1038,8 +1175,18 @@ export default {
     // Safe outside prod: scheduledCleanup self-narrows to the dev sandbox band
     // and, outside production, runs ONLY its sandbox-delete, stuck-manifest
     // logging and audit-log sections, plus the blocked-publication sweep narrowed to the dev
-    // range and the fixtures dev owns. Its staleness-email and import-recovery sections are
-    // production-only (guards inside).
+    // range and the fixtures dev owns, plus the sweep of the live tests' accounts (#1789),
+    // which is the one section that runs ONLY outside production. Its staleness-email and
+    // import-recovery sections are production-only (guards inside).
+    //
+    // The live-test sweep (services/test-account-sweep.ts) is safe here for the reason this
+    // allowlist exists: it tombstones only addresses of exactly the generated shapes, at
+    // two domains the IANA reserves (an anchored, case-sensitive pattern, re-checked in code
+    // on every row and again by the conditional write), none of which can be a real person
+    // among the ~609 this database shares; it sends no mail, makes no network call (so
+    // nothing reaches the shared nemarDatasets org, a DOI or the prod bucket) and refuses an
+    // account with a dataset, a collaboration, a request or upload access. Bounded to one
+    // batch per run.
     ctx.waitUntil(scheduledCleanup(env));
     // #646 Phase 4: drain stale vectors (embedding_dirty=1) — the backstop for
     // changes that don't go through the inline enrich/reindex re-embed.
@@ -1075,6 +1222,43 @@ export default {
       // from ENVIRONMENT, so a real 10.82901 DOI on a mirror row resolves to
       // production EZID credentials regardless of which worker is running.
       ctx.waitUntil(reconcileReservedVersionDois(env));
+      // #1913 (epic #1046 phase 7b, ADR 0111): end the automatic re-pull's live dispatches that
+      // said nothing within eight hours as `unreported`, so a dead run does not hold its dataset's
+      // one live slot. PROD-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it writes the
+      // dispatch table, whose rows only the production Worker makes. It reads no switch (turning
+      // them off must not strand a live row) and refuses outside exact production on its own.
+      ctx.waitUntil(
+        sweepUnreportedDispatches(env).catch((err) =>
+          console.error(
+            "[repull-dispatch] watchdog failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+      );
+      // #1913 (epic #1046 phase 7c, ADR 0111): the automatic re-pull's scheduler. It reads the
+      // staleness report from where its last tick stopped, takes `stale_ready` mirrors only, and
+      // dispatches the central re-pull workflow for at most REPULL_DAILY_OPEN_CAP of them a day,
+      // each through the dispatch record's capped claim. PRODUCTION-ONLY, and deliberately NOT in
+      // DEV_CRON_ALLOWLIST: it dispatches GitHub work against the shared nemarDatasets org. It also
+      // refuses outside exact production on its own, does nothing while AUTO_REPULL_ENABLED is not
+      // "1", and dispatches nothing until a re-pull has been run by hand to `complete`. It sends no
+      // mail; one log line per tick, at error level when it could not see or could not send.
+      ctx.waitUntil(
+        runRepullSchedulerCron(env)
+          .then((r) => {
+            if (!r) return;
+            const { level, line } = repullSchedulerLogLine(r);
+            if (level === "error") console.error(line);
+            else if (level === "warn") console.warn(line);
+            else console.log(line);
+          })
+          .catch((err) =>
+            console.error(
+              "[repull-scheduler] tick failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
       // #969 (epic #967 Phase 2): reclassify falsely-complete imports, retry
       // incomplete/failed/quarantined ones, and blocklist + report ones whose
       // OpenNeuro source stays inaccessible. PROD-ONLY: dispatches GitHub work
@@ -1493,6 +1677,19 @@ export default {
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
+    );
+    // Epic #1893 phase 6a (ADR 0112): purge support tickets past MAIL_RETENTION_DAYS, keeping
+    // each one's summary. ALLOWED ON THE NON-PROD CRON (see DEV_CRON_ALLOWLIST): it reads and
+    // writes only this env's own mail tables, sends no mail, dispatches nothing and never touches
+    // R2, so it cannot reach a real user, a repository or a production object; staging's shorter
+    // window (30 days) is what the dev [vars] set. A missing or invalid variable deletes nothing.
+    ctx.waitUntil(
+      purgeExpiredTickets(env).catch((err) =>
+        console.error(
+          "[ticket-retention] purge failed:",
+          err instanceof Error ? (err.stack ?? err.message) : err,
+        ),
+      ),
     );
     // #1062 (epic #1181 phase 2): republish the top-level Zarr discovery
     // catalog (zarr-catalog.json), after the sweeps above. ALLOWED ON THE

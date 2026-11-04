@@ -16,12 +16,12 @@
  * local `Bun.serve()` returning a normal messages response is enough, and
  * `clientCommits: true` avoids the commit path entirely.
  *
- * The blocker is `backend/test/manifest-small-root-files.test.ts`, which
- * installs a PROCESS-WIDE `mock.module("../src/services/github", ...)` whose
- * `getTreeAtRef` returns an empty array. `test/` and `backend/test/` share one
- * bun process, `mock.module` is permanent (neither `mock.restore()` nor
- * re-registering the real namespace undoes it -- both were tried), and
- * `enrichDataset` reads the tree early:
+ * The blocker was `backend/test/manifest-small-root-files.test.ts`, which installed a
+ * PROCESS-WIDE `mock.module("../src/services/github", ...)` whose `getTreeAtRef` returned an
+ * empty array. That file now runs in a process of its own, so the blocker is gone from the shared
+ * run. `mock.module` stays permanent for any process that installs one (neither `mock.restore()`
+ * nor re-registering the real namespace undoes it -- both were tried), and `enrichDataset` reads
+ * the tree early:
  *
  *     const readmeFile = tree.find((f) => f.path === "README.md" || ...);
  *     if (!readmeFile) return { ok: true, status: 200, body: { skipped: true } };

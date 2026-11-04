@@ -37,6 +37,7 @@ describe("the contract as text", () => {
       PRIVATE_AUTHORIZE_PATH: "/auth/private/authorize",
       PRIVATE_AUTHORIZE_STATE_PARAM: "state",
       PRIVATE_CALLBACK_PATH: "/__auth/callback",
+      DESCRIBE_ACCOUNTS_MAX: 100,
     });
   });
 
@@ -44,6 +45,42 @@ describe("the contract as text", () => {
     for (const [name, value] of Object.entries(constantsAsText())) {
       expect({ name, value: (contract as Record<string, unknown>)[name] }).toEqual({ name, value });
     }
+  });
+
+  test("the describeAccounts bound is D1's own limit on bound values", () => {
+    // One call is one SELECT with one bound value per id, and D1 binds at most
+    // 100 per statement, so a larger bound would turn a call into several reads
+    // or a fault. A caller reads this constant as text to size its batches.
+    expect(contract.DESCRIBE_ACCOUNTS_MAX).toBe(100);
+  });
+
+  test("a text reader finds every describeAccounts refusal spelled out in both unions", () => {
+    // The other two parties read this file as text, so a union that names
+    // another union (`PrincipalRefusal | "invalid_request"`) shows them one
+    // literal. Each declaration runs to the blank line after it.
+    const declaration = (name: string): string => {
+      const start = TEXT.indexOf(`export type ${name} =`);
+      expect(start).toBeGreaterThan(-1);
+      return TEXT.slice(start, TEXT.indexOf("\n\n", start));
+    };
+    for (const name of ["DescribeAccountsRefusal", "DescribeAccountsResult"]) {
+      const text = declaration(name);
+      for (const literal of [
+        "invalid_credential",
+        "inactive_account",
+        "unresolved_account",
+        "unavailable",
+        "invalid_request",
+      ]) {
+        expect({ name, literal, spelled: text.includes(`"${literal}"`) }).toEqual({
+          name,
+          literal,
+          spelled: true,
+        });
+      }
+      expect(text).not.toContain("PrincipalRefusal");
+    }
+    expect(declaration("DescribeAccountsResult")).not.toContain("DescribeAccountsRefusal");
   });
 
   test("the TTL literals mean what their comments say", () => {

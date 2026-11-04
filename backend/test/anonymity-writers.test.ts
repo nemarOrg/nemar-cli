@@ -8,13 +8,12 @@
  * blinds from `enrich-dataset.ts` and watching the entire backend suite stay
  * green. So these drive the writes themselves.
  *
- * `enrichDataset` cannot be the entry point here, and the reason is written
- * down in `enrich-doi-sync-skip.test.ts`: `manifest-small-root-files.test.ts`
- * installs a process-wide `mock.module("../src/services/github", ...)` whose
- * `getTreeAtRef` returns an empty array, `test/` and `backend/test/` share one
- * bun process, and `mock.module` is permanent -- so `enrichDataset` returns
- * "No README found" long before any blind runs. A test driving it would pass
- * alone and silently stop testing anything in a full run.
+ * `enrichDataset` was not the entry point here. The reason is written down in
+ * `enrich-doi-sync-skip.test.ts`: `manifest-small-root-files.test.ts` used to install a process-wide
+ * `mock.module` on the GitHub service, which made `getTreeAtRef` return an empty array for every
+ * later file, so `enrichDataset` returned "No README found" long before any blind runs. That file
+ * now runs in a process of its own, so this suite sees the real tree; this change does not drive
+ * `enrichDataset` from here.
  *
  * That is why the author blind was MOVED into `writeDatasetCatalogFields`,
  * which is the one writer of `datasets.authors` in the backend and takes the

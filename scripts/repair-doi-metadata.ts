@@ -8,10 +8,11 @@
  * branch nothing reads.
  *
  * This applies the same edit publish would have, now, to main's CURRENT content --
- * not by copying the blobs stranded in June, which are months behind. The rules come
- * from `services/doi.ts` (`applyConceptDoiToDescription`, `buildDoiBadge`,
- * `planReadmeBadgeCommit`), the same functions the orchestrator calls, so the repair
- * cannot drift from the thing it is repairing.
+ * not by copying the blobs stranded in June, which are months behind. The rules live in
+ * `shared/standard-edits/description.ts` (`applyConceptDoiToDescription`) and
+ * `shared/standard-edits/readme.ts` (`buildDoiBadge`, `planReadmeBadgeCommit`), and this
+ * script imports them through `services/doi.ts`, which re-exports them: the same functions
+ * the orchestrator calls, so the repair cannot drift from the thing it is repairing.
  *
  * Two independent sources have to agree on the concept DOI before anything is
  * written: NEMAR's own API (`concept_doi`, from D1) and the value publish actually

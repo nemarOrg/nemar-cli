@@ -39,6 +39,7 @@ import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { MODALITY_FILTER_CLI_HELP } from "../../shared/modality-filter.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
+import { isAnswered } from "../lib/admin-command.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
 import { requestDownloadCredentials, requestUploadCredentials } from "../lib/api/data.js";
@@ -69,19 +70,25 @@ import {
   getPublishStatus,
   requestPublication,
   resendPublishNotification,
+  withdrawPublishRequest,
 } from "../lib/api/publish.js";
 import { type DepositAttestation, resolveAttestation } from "../lib/attestation.js";
 import { isAwsCliAvailable } from "../lib/aws-cli.js";
 import { type BidsFilterResult, buildBidsFilterArgs, chooseGetFilter } from "../lib/bids-filter.js";
 import {
   type BidsValidationResult,
+  VALIDATOR_ERRORS_FOUND_EXIT,
+  VALIDATOR_VERSION,
+  addValidatorVersionToReport,
   checkDenoInstalled,
   formatValidationResult,
   getValidatorVersion,
   isValidatorCacheStale,
+  reportFileFromArgs,
   runBidsValidatorDirect,
   updateValidatorCache,
   validateBidsDataset,
+  withValidatorVersion,
 } from "../lib/bids-validator.js";
 import {
   printNoVerifyMismatches,
@@ -91,13 +98,38 @@ import {
 } from "../lib/cli-output.js";
 import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
-import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
+import {
+  type ConfirmOptions,
+  NO_DESCRIPTION,
+  NO_OPTION,
+  YES_DESCRIPTION,
+  YES_OPTION,
+  confirm,
+} from "../lib/confirm.js";
+import {
+  CredentialHelperError,
+  type DataHostLookup,
+  cloneFromDataHost,
+  credentialHelperCommand,
+  declaresNemarRemote,
+  detectDataHostClone,
+  findDatasetOnDataHosts,
+  specialRemoteOnPath,
+} from "../lib/data-host-clone.js";
+import {
+  type VettedOrigin,
+  allowedDataHosts,
+  isDataHostDatasetId,
+  rejectedDataHostEntries,
+  vetDataHostOrigin,
+} from "../lib/data-hosts.js";
 import {
   type LocalDatasetConfig,
   readLocalConfig,
   updateLastUpload,
   writeLocalConfig,
 } from "../lib/dataset-config.js";
+import { markReportedExit, markUsageExit } from "../lib/debug-log.js";
 import {
   FacetEnumCliError,
   RANGE_FORMS_HELP,
@@ -184,6 +216,25 @@ import {
   listOpenNeuroObjects,
   openNeuroDatasetExists,
 } from "../lib/openneuro.js";
+import {
+  type ChangedFile,
+  type TextKind,
+  buildReleaseTitle,
+  buildUpdateBody,
+  buildUpdateTitle,
+  cleanPrText,
+  describeChangelogWrite,
+  describeSentTitleProblem,
+  describeTextProblem,
+  describeUnopenedPullRequest,
+  findSentTitleProblem,
+  findTextProblem,
+  inspectChangelog,
+  localIsoDate,
+  parsePorcelainPaths,
+  parseStagedChanges,
+  writeChangelogEntry,
+} from "../lib/pr-text.js";
 import { checkPrerequisitesForCommand } from "../lib/prerequisites.js";
 import { DownloadProgressTracker } from "../lib/progress.js";
 import { promptForProvenance } from "../lib/provenance.js";
@@ -197,6 +248,7 @@ import {
 import { renderSnippetLine, truncateTokenList } from "../lib/render/snippet.js";
 import { resolveSandboxCompletion } from "../lib/sandbox-status.js";
 import { bumpVersion, isValidStableVersion, parseVersion } from "../lib/semver.js";
+import { clip } from "../lib/terminal-text.js";
 import { theme } from "../lib/theme.js";
 import type { UploadProgress } from "../lib/upload-progress.js";
 import {
@@ -244,6 +296,7 @@ import {
   createOrResumeDataset,
   initializeAnnexDataset,
 } from "../lib/upload/transfer.js";
+import { isMirror, refuseMirrorMajor } from "../lib/version-policy.js";
 
 /**
  * What to call a failed dataset lookup.
@@ -445,6 +498,8 @@ datasetCommand
 
     // Collect extra args (unknown flags passed through to bids-validator)
     const extraArgs = collectPassthroughArgs();
+    // With --outfile the validator writes its report to that file and prints nothing to stdout.
+    const reportFile = reportFileFromArgs(extraArgs);
 
     // Run validation with spinner, then show native output
     const spinner = ora("Validating BIDS dataset...").start();
@@ -461,8 +516,11 @@ datasetCommand
         forceReload,
       });
 
-      // No output + non-zero exit = real failure (e.g. deno error)
-      if (!stdout.trim() && exitCode !== 0) {
+      // No output + non-zero exit = real failure (e.g. deno error). A run that writes its report
+      // to a file has no stdout by design, so there exit 16 means errors found, not a failure.
+      const errorsFoundInFile =
+        reportFile !== undefined && exitCode === VALIDATOR_ERRORS_FOUND_EXIT;
+      if (!stdout.trim() && exitCode !== 0 && !errorsFoundInFile) {
         spinner.fail("Validation failed");
         if (stderr.trim()) {
           const relevantStderr = stderr
@@ -477,17 +535,42 @@ datasetCommand
         process.exit(1);
       }
 
-      // Has output: validation ran (exit 0 = valid, exit 1 = errors found)
+      // 0 means valid and 16 means the validator found errors. Any other exit is a failed run: its
+      // own output (usage text, a crash) is shown instead of a report.
+      if (exitCode !== 0 && exitCode !== VALIDATOR_ERRORS_FOUND_EXIT) {
+        spinner.fail("Validation failed");
+        console.error(
+          stderr.trim() || stdout.trim() || `BIDS validator exited with code ${exitCode}`,
+        );
+        process.exit(exitCode);
+      }
+
+      // The report went to a file, so name the release in that file too.
+      if (reportFile) {
+        addValidatorVersionToReport(resolve(reportFile), Boolean(options.json));
+      }
+
       spinner.succeed("Validation complete");
 
-      if (stdout.trim()) {
-        console.log(stdout);
+      if (options.json) {
+        if (!reportFile) {
+          console.log(withValidatorVersion(stdout));
+        } else if (stdout.trim()) {
+          // The report is in the file, so stdout is empty by design; pass on anything else as it is.
+          console.log(stdout);
+        }
+      } else {
+        if (stdout.trim()) {
+          console.log(stdout);
+        }
+        console.log(`Validator: @bids/validator ${VALIDATOR_VERSION}`);
       }
 
       process.exit(exitCode);
     } catch (error) {
       spinner.fail("Validation failed");
-      console.log(chalk.red((error as Error).message));
+      // stderr, so stdout carries a report or nothing: a --json consumer never reads an error as one.
+      console.error(chalk.red((error as Error).message));
       process.exit(1);
     }
   });
@@ -2713,10 +2796,18 @@ searchCommand
     "after",
     `
 Description:
-  Performs semantic search across the NEMAR dataset catalog. Unlike
-  --search on the list command (which uses exact text matching), this
-  uses AI embeddings to find conceptually similar datasets. The free-text
-  query is always the <query> argument -- this command has no --search flag.
+  Searches the NEMAR dataset catalog by meaning. Unlike --search on the list
+  command (which uses exact text matching), this uses AI embeddings and a
+  relevance judgment to find datasets that answer what you describe. The
+  free-text query is always the <query> argument -- this command has no
+  --search flag.
+
+  Describe what you want in a few words. A phrase returns only the datasets
+  judged to answer it, so a short list is a real answer, not a gap; a single
+  word lists the datasets that mention it (up to 300). Words found in over a
+  quarter of datasets ("study") do not decide a match, and a modality you
+  name ("sleep eeg") puts datasets with that modality first. A word no dataset contains is
+  replaced by a catalog word one typo away, and the command says so.
 
   Accepts the same license/author/task/doi/complete/recent filters and facet
   flags (--subjects, --age, --source, ...) as 'nemar dataset list --help'.
@@ -2768,6 +2859,19 @@ Examples:
       // vocabulary and treatment as the list command's `response.warning`.
       if (response.warning) {
         console.log(theme.warn(`\n⚠ ${response.warning}`));
+      }
+
+      if (response.modality_boost?.length) {
+        console.log(theme.muted(`\nListing ${response.modality_boost.join(", ")} datasets first.`));
+      }
+
+      // A word no dataset contains was replaced by a catalog word one typo away
+      // (backend search-spelling.ts). Say what was searched, so a wrong guess
+      // is visible rather than a mystery.
+      if (response.corrected_query) {
+        console.log(
+          theme.muted(`\nShowing results for "${response.corrected_query}" instead of "${query}".`),
+        );
       }
 
       // Epic #1144 phase 4 (#1148), D5: same stderr-only, count-gated,
@@ -2977,6 +3081,10 @@ Examples:
           {
             name: `major  ${currentVersion} -> ${bumpVersion(currentVersion, "major")}`,
             value: "major",
+            // A mirror's major is an upstream re-pull's (ADR 0111); the check below refuses it too.
+            ...(isMirror(datasetId, dataset.source)
+              ? { disabled: "a mirror's major is an upstream re-pull (nemar admin repull plan)" }
+              : {}),
           },
           { name: "custom version", value: "custom" },
         ];
@@ -3006,10 +3114,23 @@ Examples:
         }
       }
 
+      // Every spelling that reaches a higher major (--type major, --version, the prompt's major or
+      // custom version) is refused on a mirror here, before the confirmation and any clone.
+      requireNotMirrorMajor({
+        datasetId,
+        source: dataset.source,
+        current: currentVersion,
+        next: newVersion,
+      });
+
       console.log();
       console.log(
         `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
       );
+
+      // The pull request is titled "Release v<version>", and the review reads that title: a version
+      // that starts with a year makes an author-year key of it.
+      requireSentTitle(buildReleaseTitle(newVersion));
 
       // Confirm
       const result = await confirm(`Create release PR for ${datasetId} v${newVersion}?`, {
@@ -3125,7 +3246,7 @@ Examples:
       let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
       try {
-        const prTitle = `Release v${newVersion}`;
+        const prTitle = buildReleaseTitle(newVersion);
         const prBody = `## Version Bump\n\nBumps ${datasetId} from ${currentVersion} to ${newVersion}.\n\nOn merge, CI will:\n- Tag the release (v${newVersion})\n- Publish a version DOI (if concept DOI exists)`;
 
         const prProc = spawn({
@@ -3247,6 +3368,216 @@ Examples:
     },
   );
 
+// ---------------------------------------------------------------------------
+// Pull request text: the author's own words, refused when nobody could read them
+// ---------------------------------------------------------------------------
+
+/** How a command spells the two pieces of pull request text, for what it tells the author. */
+interface PrTextFlags {
+  /** The command, as the first sentence of a refusal names it. */
+  command: string;
+  /** The title option as the author types it, e.g. "--message". */
+  title: string;
+  /** The description option as the author types it. */
+  description: string;
+  /** A complete command that would have worked. */
+  example: string;
+}
+
+interface PrTextGiven {
+  title?: string;
+  description?: string;
+}
+
+/** What decides whether a missing piece of text can be asked for: `--yes`, and a terminal. */
+interface AskMode {
+  yes: boolean;
+  terminal: boolean;
+}
+
+const UPDATE_TEXT_FLAGS: PrTextFlags = {
+  command: "nemar dataset update",
+  title: "--message",
+  description: "--description",
+  example:
+    'nemar dataset update -m "Add twelve subjects" --description "Adds sub-21 to sub-32, each with a resting-state recording."',
+};
+
+const PUSH_TEXT_FLAGS: PrTextFlags = {
+  command: "nemar dataset push --pr",
+  title: "--title",
+  description: "--body",
+  example:
+    'nemar dataset push --pr -t "Add the second session" -b "Adds ses-02 for sub-01 to sub-05."',
+};
+
+const PR_TEXT_QUESTIONS: Record<TextKind, string> = {
+  title: "Title (one line saying what changed):",
+  description: "Description (what changed and why):",
+};
+
+const PR_TEXT_SUBJECT: Record<TextKind, string> = {
+  title: "The title",
+  description: "The description",
+};
+
+/**
+ * Settle the pull request text the author put on the command line, before the command touches the
+ * network or the repository. Text a person could not read is refused. Missing text is refused too,
+ * unless a terminal is attached and there is no `--yes`, where {@link askForPrText} asks for it
+ * once there is a change to describe. `--yes` stands in for a confirmation, never for the words.
+ *
+ * An empty value is text the author gave and got wrong, not text they left out: `-m ""` from an
+ * unset shell variable must not fall through to a prompt, or to nothing.
+ */
+function requirePrText(given: PrTextGiven, flags: PrTextFlags, mode: AskMode): PrTextGiven {
+  const interactive = mode.terminal && !mode.yes;
+  const settled: PrTextGiven = {};
+  const refusals: string[] = [];
+  const missing: string[] = [];
+  for (const [kind, raw, flag] of [
+    ["title", given.title, flags.title],
+    ["description", given.description, flags.description],
+  ] as const) {
+    if (raw === undefined) {
+      missing.push(flag);
+      continue;
+    }
+    const problem = findTextProblem(kind, raw);
+    if (problem) {
+      refusals.push(describeTextProblem(`${PR_TEXT_SUBJECT[kind]} (${flag})`, problem));
+    } else {
+      settled[kind] = cleanPrText(kind, raw);
+    }
+  }
+  if (refusals.length === 0 && (missing.length === 0 || interactive)) return settled;
+
+  for (const refusal of refusals) console.log(chalk.red(`Error: ${refusal}`));
+  if (missing.length > 0 && !interactive) {
+    console.log(
+      chalk.red(
+        `Error: ${flags.command} needs a pull request title and description; missing ${missing.join(" and ")}.`,
+      ),
+    );
+    console.log(
+      "  They are written into the pull request for a person to read, so say in plain words what changed.",
+    );
+    // Say the reason that is true: --yes at a terminal is the one case where asking is possible.
+    console.log(
+      mode.yes
+        ? mode.terminal
+          ? "  --yes does not stand in for them: drop it to be asked for them here, or pass both."
+          : "  --yes does not stand in for them, and without a terminal nothing can ask for them: pass both."
+        : "  Without a terminal nothing can ask for them: pass both.",
+    );
+    console.log(chalk.dim(`  Example: ${flags.example}`));
+  }
+  // A refusal of what was typed, not a failure worth a bug report (see the exit hook in index.ts).
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * Refuse a title the review would refuse as it will be SENT, before anything is changed or pushed.
+ * `update` adds the version to the author's title and `release` writes the title itself, so a title
+ * that passed {@link requirePrText} can still be refused: a calendar version such as 2020.1.0 makes
+ * `(v2020.1.1)`, which the naming rule reads as an author and a year. The message names the title
+ * exactly as it would be sent.
+ */
+function requireSentTitle(sent: string): void {
+  const problem = findSentTitleProblem(sent);
+  if (problem === null) return;
+  console.log(chalk.red(`Error: ${describeSentTitleProblem(sent, problem)}`));
+  console.log(chalk.dim("  Nothing was changed."));
+  // A refusal of the title, which is not a failure worth a bug report (see the exit hook in index.ts).
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * Refuse a major version of a mirror before anything is cloned, changed or pushed: on an OpenNeuro
+ * mirror a major means an upstream re-pull, which only `nemar admin repull` makes (ADR 0006, ADR
+ * 0111 decision 5). The CLI's own rule; the dataset repositories' workflows do not read it.
+ */
+function requireNotMirrorMajor(args: {
+  datasetId: string;
+  source: string | null | undefined;
+  current: string;
+  next: string;
+}): void {
+  const refusal = refuseMirrorMajor(args);
+  if (refusal === null) return;
+  console.log(chalk.red(`Error: ${refusal}`));
+  console.log(
+    chalk.dim("  Nothing was changed. NEMAR's own changes to a mirror take minor and patch."),
+  );
+  // A refusal of what was asked for, not a failure worth a bug report (see the exit hook in index.ts).
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * The version `update` will release, read from the clone's own `dataset_description.json`, or null
+ * when it cannot be told from here: no file, no `Version`, a version or a bump it cannot read. The
+ * steps after sign-in report each of those in their own words; this only answers when it can, so
+ * the title as sent can be checked before sign-in.
+ */
+function plannedUpdateVersion(workDir: string, bump: string): string | null {
+  if (!["patch", "minor", "major"].includes(bump)) return null;
+  try {
+    const desc = JSON.parse(readFileSync(join(workDir, "dataset_description.json"), "utf-8"));
+    if (typeof desc.Version !== "string" || !desc.Version) return null;
+    return bumpVersion(desc.Version, bump as "patch" | "minor" | "major");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask until the text is one a person can read. A refusal asks again on a fresh line rather than
+ * validating in place: inquirer writes the refused text back onto the line to be edited, and under
+ * `TERM=dumb` (an Emacs shell, some wrappers) no editing key works, so the person could never
+ * remove it. Measured with inquirer 9 under Bun: backspace and Ctrl-U edit under `xterm`, and do
+ * nothing under `dumb`.
+ */
+async function promptForPrText(kind: TextKind): Promise<string> {
+  for (;;) {
+    const { value } = await inquirer.prompt<{ value: string }>([
+      { type: "input", name: "value", message: PR_TEXT_QUESTIONS[kind] },
+    ]);
+    const problem = findTextProblem(kind, value);
+    if (!problem) return cleanPrText(kind, value);
+    console.log(chalk.red(`  ${describeTextProblem("That", problem)}`));
+  }
+}
+
+/** At a terminal, ask for the pieces of pull request text the command line did not carry. */
+async function askForPrText(given: PrTextGiven): Promise<Required<PrTextGiven>> {
+  const title = given.title ?? (await promptForPrText("title"));
+  const description = given.description ?? (await promptForPrText("description"));
+  return { title, description };
+}
+
+/** The title and body for `push --pr`: given, asked for at a terminal, or refused. */
+async function settlePushPrText(options: {
+  title?: string;
+  body?: string;
+}): Promise<Required<PrTextGiven>> {
+  const given = requirePrText(
+    { title: options.title, description: options.body },
+    PUSH_TEXT_FLAGS,
+    { yes: false, terminal: process.stdin.isTTY === true },
+  );
+  return askForPrText(given);
+}
+
+/**
+ * The branches `push --pr` never opens a pull request from: the dataset's own main line. One test
+ * for the two places that must agree, the one that settles the text before the push and the one
+ * that skips the pull request after it; if they differed, a prompt could appear after the push.
+ */
+const isTrunkBranch = (name: string): boolean => name === "main" || name === "master";
+
 // Update command - push data/metadata changes via PR
 datasetCommand
   .command("update")
@@ -3254,7 +3585,14 @@ datasetCommand
   .argument("[path]", "Path to local dataset clone (default: current directory)")
   .option("--bump <type>", "Version bump type: patch, minor, or major", "patch")
   .option("--branch <name>", "Custom branch name")
-  .option("-m, --message <msg>", "Commit message")
+  .option(
+    "-m, --message <title>",
+    "Title of the update: the pull request title and the CHANGES entry (required)",
+  )
+  .option(
+    "--description <text>",
+    "What changed and why, in plain words: the pull request body (required)",
+  )
   .option("--monitor", "Watch CI checks and offer to merge")
   .option(YES_OPTION, YES_DESCRIPTION)
   .addHelpText(
@@ -3262,10 +3600,26 @@ datasetCommand
     `
 Description:
   Push local changes (metadata or data files) to a dataset via a pull
-  request. Automatically bumps the version, commits, pushes, and creates
-  a PR. For data files (annexed), copies them to S3 via git-annex.
+  request. Automatically bumps the version, writes the CHANGES entry for
+  it, commits, pushes, and creates a PR. For data files (annexed), copies
+  them to S3 via git-annex.
 
   Run this from inside a dataset clone, or pass the path as an argument.
+
+Title and description (both required):
+  A reviewer reads the title (-m) and the description (--description),
+  and so does NEMAR's automated review, so say in plain words what changed
+  and why. The title is also the new version's entry in CHANGES (created if
+  the dataset has none), and reads there as you wrote it.
+  An empty value, placeholder text such as "Save changes", text with no
+  words in it, a pasted hash or JSON, and a title with a citation in it,
+  an author and a year such as Lee2019 or a DOI, anywhere in it, or an
+  unfilled template field, are refused (cite the paper in
+  ReferencesAndLinks and the README instead). The description may cite the
+  paper as the paper is cited. The title is refused as it will be sent,
+  with the version after it, so a version that starts with a year, such
+  as 2020.1.0, is refused too. At a terminal the command asks for what you
+  leave out; with --yes, or without a terminal, it refuses instead.
 
 Note:
   This is the recommended way to update public datasets. It creates a
@@ -3273,9 +3627,12 @@ Note:
   can also use 'nemar dataset push' for direct updates.
 
 Examples:
-  $ cd nm000104 && nemar dataset update
-  $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects"
-  $ nemar dataset update --branch fix/metadata -m "Fix participant ages"`,
+  $ cd nm000104 && nemar dataset update -m "Add twelve subjects" \\
+      --description "Adds sub-21 to sub-32, each with a resting-state recording."
+  $ nemar dataset update ./nm000104 --bump minor -m "Add new subjects" \\
+      --description "Second cohort, recorded in 2026."
+  $ nemar dataset update --branch fix/metadata -m "Fix participant ages" \\
+      --description "Ages in participants.tsv were in months; they are now in years."`,
   )
   .action(
     async (
@@ -3284,10 +3641,28 @@ Examples:
         bump: string;
         branch?: string;
         message?: string;
+        description?: string;
         monitor?: boolean;
         yes?: boolean;
       },
     ) => {
+      // The pull request text comes first: a missing or unreadable title or description is a
+      // usage error, refused before auth, the network or the repository is touched. A terminal is
+      // asked for what it left out only once there is a change to describe (askForPrText below).
+      const givenText = requirePrText(
+        { title: options.message, description: options.description },
+        UPDATE_TEXT_FLAGS,
+        { yes: options.yes === true, terminal: process.stdin.isTTY === true },
+      );
+
+      // The title the review will see is the author's title and the version, so it is asked about
+      // as sent, here, before sign-in, whenever the clone says which version that will be. A title
+      // typed at a prompt, or a version that cannot be read yet, is asked about again below.
+      const plannedVersion = plannedUpdateVersion(resolve(path || "."), options.bump);
+      if (givenText.title !== undefined && plannedVersion !== null) {
+        requireSentTitle(buildUpdateTitle(givenText.title, plannedVersion));
+      }
+
       requireAuth();
 
       await checkPrerequisitesForCommand("update");
@@ -3322,31 +3697,31 @@ Examples:
         }
       }
 
-      // Check for changes
+      // Check for changes. `-z` keeps every path whole: the plain output was trimmed as a block,
+      // which took the leading space of a work tree change (" M path") off the first line only
+      // and left its path one letter short.
       const statusProc = spawn({
-        cmd: ["git", "status", "--porcelain"],
+        cmd: ["git", "status", "--porcelain", "-z"],
         cwd: workDir,
         stdout: "pipe",
         stderr: "pipe",
       });
-      const statusOutput = (await new Response(statusProc.stdout).text()).trim();
+      const changedPaths = parsePorcelainPaths(await new Response(statusProc.stdout).text());
       if ((await statusProc.exited) !== 0) {
         console.log(chalk.red("Error: Failed to check git status"));
         process.exit(1);
       }
 
-      if (!statusOutput) {
+      if (changedPaths.length === 0) {
         console.log(chalk.yellow("No changes detected."));
         console.log("  Make changes to the dataset files, then run this command again.");
         return;
       }
 
       // Categorize changes
-      const lines = statusOutput.split("\n");
       const dataFiles: string[] = [];
       const metadataFiles: string[] = [];
-      for (const line of lines) {
-        const filePath = line.substring(3).trim();
+      for (const filePath of changedPaths) {
         // Common neuroimaging data file extensions (typically git-annex managed)
         if (/\.(edf|bdf|set|fdt|nwb|eeg|vhdr|vmrk|cnt|mff|gz)$/i.test(filePath)) {
           dataFiles.push(filePath);
@@ -3426,10 +3801,35 @@ Examples:
         process.exit(1);
       }
       const newVersion = bumpVersion(currentVersion, bumpType);
+      // `--bump major` reaches a mirror's next major: refused before the branch or any change.
+      requireNotMirrorMajor({
+        datasetId,
+        source: dataset.source,
+        current: currentVersion,
+        next: newVersion,
+      });
 
       console.log(
         `  ${chalk.bold("Version bump:")} ${currentVersion} -> ${chalk.green(newVersion)}`,
       );
+
+      // A change log the entry cannot safely go into is found now, before the prompts and before
+      // anything is changed. Once the branch exists and the version is bumped, a refusal would
+      // leave the work tree half changed, and a second run would bump the version again.
+      try {
+        inspectChangelog(workDir, newVersion);
+      } catch (error) {
+        console.log(chalk.red(`Error: Cannot update the change log: ${errorDetail(error)}`));
+        console.log(chalk.dim("  Nothing was changed."));
+        // The state of the dataset, not a bug in the CLI: no invitation to file one.
+        markReportedExit();
+        process.exit(1);
+      }
+
+      // At a terminal, ask for whatever the command line left out; every other path already
+      // holds both (requirePrText refused the run above otherwise).
+      const { title, description } = await askForPrText(givenText);
+      requireSentTitle(buildUpdateTitle(title, newVersion));
 
       // Confirm
       const confirmResult = await confirm(`Create update PR for ${datasetId}?`, {
@@ -3474,6 +3874,13 @@ Examples:
       descContent.Version = newVersion;
       writeFileSync(descPath, `${JSON.stringify(descContent, null, 2)}\n`);
 
+      // The change log gets the entry the review looks for: a heading for the new version, with
+      // the author's own title under it. Before the commit, so it is part of it. Everything that
+      // can be refused was refused by inspectChangelog above; an error from the write itself is an
+      // unexpected I/O failure and is reported as one by the top-level handler.
+      const entry = writeChangelogEntry(workDir, newVersion, title, localIsoDate(new Date()));
+      console.log(chalk.dim(`  ${describeChangelogWrite(entry, newVersion)}`));
+
       // Stage all changes and commit
       const commitSpinner = ora("Committing changes...").start();
       const addProc = spawn({
@@ -3488,9 +3895,24 @@ Examples:
         process.exit(1);
       }
 
-      const commitMsg = options.message || `Update ${datasetId} to ${newVersion}`;
+      // What the commit will contain, as git will record it: the pull request body lists it.
+      const stagedProc = spawn({
+        cmd: ["git", "diff", "--cached", "--name-status", "-z", "--no-renames"],
+        cwd: workDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const changedFiles: ChangedFile[] = parseStagedChanges(
+        await new Response(stagedProc.stdout).text(),
+      );
+      if ((await stagedProc.exited) !== 0) {
+        const stderr = await new Response(stagedProc.stderr).text();
+        commitSpinner.fail(`Failed to read the staged changes: ${stderr.trim()}`);
+        process.exit(1);
+      }
+
       const commitProc = spawn({
-        cmd: ["git", "commit", "-m", commitMsg],
+        cmd: ["git", "commit", "-m", title],
         cwd: workDir,
         stdout: "pipe",
         stderr: "pipe",
@@ -3596,13 +4018,15 @@ Examples:
       // Create PR via gh CLI
       let prCreated = false;
       const prSpinner = ora("Creating pull request...").start();
+      const prTitle = buildUpdateTitle(title, newVersion);
+      const prBody = buildUpdateBody({
+        description,
+        datasetId,
+        fromVersion: currentVersion,
+        toVersion: newVersion,
+        files: changedFiles,
+      });
       try {
-        const prTitle = options.message
-          ? `${options.message} (v${newVersion})`
-          : `Update ${datasetId} to v${newVersion}`;
-        const fileList = [...metadataFiles, ...dataFiles].slice(0, 10).join("\n- ");
-        const prBody = `## Dataset Update\n\nBumps ${datasetId} from ${currentVersion} to ${newVersion}.\n\n### Changed files\n- ${fileList}${lines.length > 10 ? `\n- ... and ${lines.length - 10} more` : ""}`;
-
         const prProc = spawn({
           cmd: [
             "gh",
@@ -3639,6 +4063,9 @@ Examples:
         const errorMsg = prError instanceof Error ? prError.message : String(prError);
         console.log(chalk.red(`  ${errorMsg}`));
         console.log(chalk.dim(`  Branch ${branchName} has been pushed. Create the PR manually.`));
+        for (const line of describeUnopenedPullRequest(prTitle, prBody)) {
+          console.log(chalk.dim(line));
+        }
       }
 
       // Monitor mode (only if PR was created successfully)
@@ -4217,6 +4644,8 @@ Possible Statuses:
   approving  - Admin is running the publication process
   published  - Dataset is now public with DOI
   denied     - Request was denied (includes reason)
+               A request you took back with 'nemar dataset publish withdraw' is
+               stored as denied too; this command shows it as "withdrawn".
 
 Steps in Approval Process:
    1. CI check          - Verify BIDS validation passes
@@ -4253,9 +4682,12 @@ Examples:
         denied: chalk.red,
         approving: chalk.yellow,
       };
-      const statusColor = statusColors[result.status] || chalk.dim;
+      // A withdrawal is stored as a finished request, so older backends and
+      // clients read it as "denied"; this one says what it was.
+      const withdrawn = result.status === "denied" && result.withdrawn === true;
+      const statusColor = withdrawn ? chalk.yellow : statusColors[result.status] || chalk.dim;
 
-      console.log(`  Status: ${statusColor(result.status)}`);
+      console.log(`  Status: ${statusColor(withdrawn ? "withdrawn" : result.status)}`);
 
       // #1408: which of the two runs was recorded. Printed on both values,
       // because a depositor who typed --anonymous needs to see the word before
@@ -4278,7 +4710,13 @@ Examples:
         console.log(`  Requested by: ${chalk.dim(result.requested_by)}`);
       }
 
-      if (result.status === "denied" && result.denied_reason) {
+      if (withdrawn) {
+        console.log(
+          chalk.dim(
+            `\n  You withdrew this request. Request again with: nemar dataset publish request ${datasetId}`,
+          ),
+        );
+      } else if (result.status === "denied" && result.denied_reason) {
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
       }
 
@@ -4445,7 +4883,228 @@ Examples:
     }
   });
 
+/** The backend's own `code` of an error body (`error` itself is the sentence for these routes). */
+function withdrawErrorCode(error: ApiError): string | undefined {
+  const body = error.rawBody;
+  if (typeof body === "object" && body !== null && "code" in body) {
+    const code = (body as { code: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  }
+  return undefined;
+}
+
+publishCommand
+  .command("withdraw")
+  .description("Take back your publication request (it ends as a withdrawn request; no admin step)")
+  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Description:
+  Take back your own publication request. It ends as a "withdrawn request":
+  no administrator has to approve that, and nothing about the dataset changes.
+  The dataset stays as it was, and you can request publication again whenever
+  you are ready ('nemar dataset publish request <dataset-id>', with or without
+  --anonymous).
+
+  This is not 'nemar admin withdraw', which takes a broken published dataset
+  out of the catalog.
+
+  Only the dataset owner can withdraw the request, even though an administrator
+  may file a publication request on someone else's dataset. An administrator
+  ends a request with 'nemar admin publish deny'.
+
+  It works while the request is waiting for review ("requested") or held on a
+  fix ("blocked"), as long as publishing has not started. Once an administrator
+  has started publishing it ("approving"), or an earlier run already changed
+  something (even if the request was later held again), it is too late: ask the
+  administrator to stop. A dataset that is already published stays published.
+
+Examples:
+  $ nemar dataset publish withdraw nm000104
+  $ nemar dataset publish withdraw nm000104 --yes`,
+  )
+  .action(async (datasetId: string, options: ConfirmOptions) => {
+    requireAuth();
+
+    const confirmResult = await confirm(
+      `Withdraw the publication request for ${datasetId}?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
+      return;
+    }
+
+    const spinner = ora(`Withdrawing the publication request for ${datasetId}...`).start();
+
+    try {
+      await withdrawPublishRequest(datasetId);
+      spinner.succeed(`Publication request withdrawn for ${datasetId}`);
+      console.log(
+        chalk.dim(`  Request again any time: nemar dataset publish request ${datasetId}`),
+      );
+    } catch (error) {
+      if (error instanceof ApiError) {
+        spinner.fail(error.message);
+        // Keyed on the backend's own code, never on its wording: a missing
+        // dataset, or a backend without the route, carries no such code.
+        const code = withdrawErrorCode(error);
+        // The Worker's refusal, or its 404 for a backend that does not have this route yet, is
+        // the command's answer: exit 1 without the invitation to attach the log to a new issue.
+        if (isAnswered(error)) markReportedExit();
+        if (code === "no_active_request") {
+          console.log(chalk.dim("  There is no active publication request for this dataset."));
+        } else if (code === "withdraw_too_late") {
+          console.log(
+            chalk.dim("  Your request was left as it was. Ask an administrator if it should stop."),
+          );
+        }
+      } else {
+        spinner.fail("Failed to withdraw the publication request");
+        const msg = error instanceof Error ? error.message : String(error);
+        console.log(chalk.dim(`  Error details: ${msg}`));
+      }
+      process.exit(1);
+    }
+  });
+
 datasetCommand.addCommand(publishCommand);
+
+/**
+ * When the main service could not say whether it has a dataset (an error, not a 404), the data
+ * hosts are not asked: a dataset it does hold must not be looked for elsewhere on a guess.
+ */
+function printNoDataHostFallback(datasetId: string): void {
+  if (isDataHostDatasetId(datasetId) && isAuthenticated()) {
+    console.log(
+      chalk.dim("  Data hosts were not asked: the main service did not say it lacks this dataset."),
+    );
+    console.log(chalk.dim("  Try again, or use --host <origin> to read from one data host."));
+  }
+}
+
+/**
+ * Clone a dataset from an authenticated NEMAR data host (ADR 0114).
+ *
+ * `onlyHost` is the value of `--host`: it must be a data host this CLI allows, and only that
+ * host is asked. Without it every allowed host is asked in order and the first that lets this
+ * account read the dataset is used. Returns true when a host had the dataset (the clone was
+ * attempted and its outcome printed, exiting non-zero on failure), false when none did.
+ */
+async function cloneViaDataHost(
+  datasetId: string,
+  options: { output?: string },
+  onlyHost?: string,
+): Promise<boolean> {
+  let only: VettedOrigin | undefined;
+  if (onlyHost !== undefined) {
+    const origin = vetDataHostOrigin(onlyHost);
+    if (origin === null) {
+      console.log(
+        chalk.red(
+          `Error: ${clip(onlyHost, 100)} is not a data host this CLI sends your API key to.`,
+        ),
+      );
+      console.log(chalk.dim(`  Allowed: ${allowedDataHosts().join(", ")}`));
+      console.log(chalk.dim("  NEMAR_DATA_HOSTS adds https origins (for staging)."));
+      process.exit(1);
+    }
+    only = origin;
+    if (!isDataHostDatasetId(datasetId)) {
+      console.log(chalk.red(`Error: ${clip(datasetId, 40)} is not a dataset id on a data host.`));
+      console.log(chalk.dim("  A dataset id is two or three letters and six digits."));
+      process.exit(1);
+    }
+  }
+
+  const apiKey = getConfig().apiKey;
+  if (!apiKey) {
+    console.log(chalk.red("Error: Reading from a data host needs your NEMAR API key."));
+    console.log(chalk.dim("  Run 'nemar auth login' first."));
+    process.exit(1);
+  }
+  for (const entry of rejectedDataHostEntries()) {
+    console.log(
+      chalk.yellow(`  Ignoring NEMAR_DATA_HOSTS entry ${clip(entry, 60)}: not an https origin.`),
+    );
+  }
+
+  const spinner = ora(`Looking for ${datasetId} on ${only ?? "NEMAR data hosts"}...`).start();
+  const lookup: DataHostLookup = await findDatasetOnDataHosts(
+    datasetId,
+    apiKey,
+    only ? [only] : allowedDataHosts(),
+  );
+  if (!lookup.found) {
+    spinner.stop();
+    for (const host of lookup.refused) {
+      console.log(chalk.yellow(`  ${host} did not accept your API key. Run 'nemar auth login'.`));
+    }
+    for (const { origin, detail } of lookup.unreachable) {
+      console.log(chalk.yellow(`  Could not get an answer from ${origin} (${detail}).`));
+    }
+    if (only) console.log(chalk.red(`Error: Dataset ${datasetId} not found on ${only}`));
+    return false;
+  }
+  const { origin, name } = lookup.found;
+  spinner.succeed(`Found: ${name ? clip(name, 100) : datasetId} (${origin})`);
+
+  const outputPath = resolve(options.output || datasetId);
+  if (existsSync(outputPath)) {
+    console.log(chalk.red(`Error: Path already exists: ${outputPath}`));
+    process.exit(1);
+  }
+
+  let helper: string;
+  try {
+    helper = credentialHelperCommand();
+  } catch (error) {
+    if (!(error instanceof CredentialHelperError)) throw error;
+    console.log(chalk.red(`Error: ${error.message}`));
+    process.exit(1);
+  }
+
+  const cloneSpinner = ora("Cloning dataset...").start();
+  const result = await cloneFromDataHost(lookup.found.origin, datasetId, outputPath, helper);
+  if (!result.success) {
+    cloneSpinner.fail("Clone failed");
+    console.log(chalk.red(`  ${result.error}`));
+    process.exit(1);
+  }
+  cloneSpinner.succeed("Dataset cloned");
+
+  if (await declaresNemarRemote(outputPath)) {
+    console.log(chalk.dim("  Data remote enabled for data downloads"));
+  } else if (!specialRemoteOnPath()) {
+    // git-annex enables the remote by running its program, so a program it cannot find is the
+    // likely reason none is enabled.
+    console.log(
+      chalk.yellow(
+        "  Warning: git-annex-remote-nemar is not on your PATH, so git-annex could not enable the data remote.",
+      ),
+    );
+    console.log(
+      chalk.dim("  It is installed with the nemar CLI; check that its bin directory is on PATH."),
+    );
+  } else {
+    console.log(
+      chalk.yellow(
+        "  This dataset does not declare a data remote yet, so data files cannot be fetched.",
+      ),
+    );
+  }
+
+  console.log();
+  console.log(`  Location: ${chalk.cyan(outputPath)}`);
+  console.log();
+  console.log(chalk.dim("Data files are not downloaded yet. To get them:"));
+  console.log(chalk.dim(`  cd ${outputPath}`));
+  console.log(chalk.dim("  nemar dataset get"));
+  return true;
+}
 
 // Clone command
 datasetCommand
@@ -4453,6 +5112,10 @@ datasetCommand
   .description("Clone a dataset from NEMAR")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("-o, --output <path>", "Output directory (default: ./<dataset-id>)")
+  .option(
+    "--host <origin>",
+    "Read the dataset from this authenticated NEMAR data host (must be on the CLI's list)",
+  )
   .addHelpText(
     "after",
     `
@@ -4463,13 +5126,25 @@ Description:
   Private datasets require authentication (nemar auth login) and are
   only accessible to the owner or designated collaborators.
 
+  A dataset that NEMAR's main service does not list may be held on an
+  authenticated NEMAR data host. If you are signed in (nemar auth login; a
+  signed-out run never asks a data host), the CLI then asks each data host
+  on its list whether you can read the dataset, and clones it from the
+  first that says yes (--host asks one host only, and needs you signed in
+  too). If the main service itself fails, no data host is asked. The CLI sends
+  your API key to listed data hosts only, through a git credential helper
+  set for that host in the clone (the key itself is never stored in the
+  clone), and fetches data files with the git-annex-remote-nemar special
+  remote. NEMAR_DATA_HOSTS adds https origins to the list, for staging.
+
 Requirements:
   - git-annex installed
   - NEMAR account (for private datasets)
 
 Examples:
   $ nemar dataset clone nm000104
-  $ nemar dataset clone nm000104 -o ./my-dataset`,
+  $ nemar dataset clone nm000104 -o ./my-dataset
+  $ nemar dataset clone np000001 --host https://<data host>`,
   )
   .action(async (datasetId, options) => {
     // Check required tools first
@@ -4487,6 +5162,13 @@ Examples:
     }
     spinner.succeed("Prerequisites OK");
 
+    // `--host` names one data host and skips the main service.
+    if (options.host) {
+      const handled = await cloneViaDataHost(datasetId, options, options.host);
+      if (!handled) process.exit(1);
+      return;
+    }
+
     // Resolve dataset ID to repo URL
     spinner = ora(`Resolving dataset ${datasetId}...`).start();
     let repoUrl: string;
@@ -4503,6 +5185,11 @@ Examples:
       spinner.succeed(`Found: ${dataset.name}`);
     } catch (error) {
       if (error instanceof ApiError && (error.statusCode === 404 || error.statusCode === 400)) {
+        // Not one the main service knows: it may be held on an authenticated data host.
+        if (isDataHostDatasetId(datasetId) && isAuthenticated()) {
+          spinner.stop();
+          if (await cloneViaDataHost(datasetId, options)) return;
+        }
         spinner.fail(`Dataset ${datasetId} not found`);
         console.log(chalk.red(`Error: Dataset ${datasetId} not found`));
         console.log(chalk.dim(`  ${error.message}`));
@@ -4516,10 +5203,12 @@ Examples:
       } else if (error instanceof ApiError) {
         spinner.fail("Failed to resolve dataset");
         console.log(chalk.red(`Error: ${error.message}`));
+        printNoDataHostFallback(datasetId);
       } else {
         spinner.fail("Failed to resolve dataset");
         const msg = error instanceof Error ? error.message : String(error);
         console.log(chalk.red(`Error: ${msg}`));
+        printNoDataHostFallback(datasetId);
       }
       process.exit(1);
     }
@@ -4594,6 +5283,10 @@ Description:
   For private datasets, credentials are fetched automatically
   if you are logged in (nemar auth login).
 
+  In a clone from an authenticated NEMAR data host, files are fetched through
+  the git-annex-remote-nemar special remote with your stored API key; sign in
+  first (nemar auth login).
+
   By default, content under stimuli/ and derivatives/ is skipped because
   these folders can be very large. Pass --stimuli or --derivatives to
   fetch them. When you supply explicit file paths, the path itself is
@@ -4628,9 +5321,36 @@ Examples:
       process.exit(1);
     }
 
+    // A clone from an authenticated data host is read through git-annex-remote-nemar with the
+    // stored API key (ADR 0114): no download credentials, no dataset lookup at the main service.
+    const dataHostClone = await detectDataHostClone(cwd);
+    if (dataHostClone) {
+      if (!isAuthenticated()) {
+        console.log(chalk.red("Error: This dataset is on an authenticated data host."));
+        console.log(chalk.dim("Run 'nemar auth login' first."));
+        process.exit(1);
+      }
+      if (!(await declaresNemarRemote(cwd))) {
+        console.log(
+          chalk.yellow("This clone declares no data remote, so files cannot be fetched."),
+        );
+        console.log(
+          chalk.dim(
+            "  Once the dataset declares it, 'git fetch' then 'git annex init' here enables it.",
+          ),
+        );
+        process.exit(1);
+      }
+      if (!specialRemoteOnPath()) {
+        console.log(chalk.red("Error: git-annex-remote-nemar is not on your PATH."));
+        console.log(chalk.dim("  It is installed with the nemar CLI; check its bin directory."));
+        process.exit(1);
+      }
+    }
+
     // Detect dataset ID and check if private (needs authenticated S3 creds)
     let getCreds: Awaited<ReturnType<typeof requestDownloadCredentials>> | null = null;
-    const getDatasetId = await getDatasetIdFromRemote(cwd);
+    const getDatasetId = dataHostClone ? null : await getDatasetIdFromRemote(cwd);
     if (getDatasetId) {
       let dsInfo: Awaited<ReturnType<typeof getDataset>> | null = null;
       let apiReachable = true;
@@ -4720,10 +5440,12 @@ Examples:
 
     const getS3Creds = getCreds ? toS3Credentials(getCreds.credentials) : undefined;
 
-    // Enable S3 remote if available (idempotent)
-    const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
-    if (!s3Enable.success && !s3Enable.enabled) {
-      console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+    // Enable the main service's remote if available (idempotent); a data host clone has none.
+    if (!dataHostClone) {
+      const s3Enable = await enableS3Remote(cwd, "nemar-s3", getS3Creds);
+      if (!s3Enable.success && !s3Enable.enabled) {
+        console.log(chalk.yellow(`  Warning: Could not enable S3 remote: ${s3Enable.error}`));
+      }
     }
 
     const paths = files.length > 0 ? files : undefined;
@@ -4884,8 +5606,14 @@ datasetCommand
   .option("-j, --jobs <number>", "Parallel upload streams for S3", "4")
   .option("--no-s3", "Skip pushing data to S3 remote")
   .option("--pr", "Create a pull request after pushing")
-  .option("-t, --title <title>", "Pull request title (with --pr)")
-  .option("-b, --body <body>", "Pull request body (with --pr)")
+  .option(
+    "-t, --title <title>",
+    "Pull request title (with --pr; required, asked for at a terminal)",
+  )
+  .option(
+    "-b, --body <body>",
+    "Pull request body, what changed and why (with --pr; required, asked for at a terminal)",
+  )
   .addHelpText(
     "after",
     `
@@ -4894,6 +5622,12 @@ Description:
   copy annexed data to the S3 remote.
 
   With --pr, creates a pull request after pushing the current branch.
+  The title (-t) and the body (-b) are required: a reviewer reads them, and
+  so does NEMAR's automated review, so say in plain words what changed and
+  why. Placeholder text, an empty value, a pasted hash or JSON, and a title
+  with a citation in it, an author and a year such as Lee2019 or a DOI,
+  anywhere in it, are refused. At a terminal the command asks for what you
+  leave out; without one it refuses, before anything is pushed.
 
   S3 push uses temporary credentials from the NEMAR API. Falls back to
   environment AWS credentials if not logged in.
@@ -4907,7 +5641,7 @@ Examples:
   $ nemar dataset push
   $ nemar dataset push --no-s3      # Git only, skip S3
   $ nemar dataset push -j 8         # More parallel S3 streams
-  $ nemar dataset push --pr -t "Add new recordings"`,
+  $ nemar dataset push --pr -t "Add new recordings" -b "Adds the second session for sub-01 to sub-05."`,
   )
   .action(async (options) => {
     const cwd = process.cwd();
@@ -4925,6 +5659,14 @@ Examples:
       currentBranchName === "main" ||
       currentBranchName === "master" ||
       (currentBranchName?.startsWith("adjusted/main") ?? false);
+
+    // With --pr the title and the body are settled before anything is pushed: a data push can
+    // take hours, and it must not end in "now say what this pull request is". Only a branch that
+    // will get a pull request needs them; on main the pull request is skipped below.
+    let prText: Required<PrTextGiven> | undefined;
+    if (options.pr && currentBranchName && !isTrunkBranch(currentBranchName)) {
+      prText = await settlePushPrText(options);
+    }
     if (isOnMain && !options.pr) {
       const pushDatasetIdCheck = await getDatasetIdFromRemote(cwd);
       if (pushDatasetIdCheck && isAuthenticated()) {
@@ -5116,21 +5858,24 @@ Examples:
         console.log(chalk.dim("  Ensure you are inside a valid git repository."));
         process.exit(1);
       }
-      if (branch === "main" || branch === "master") {
+      if (isTrunkBranch(branch)) {
         console.log(chalk.yellow("  Skipping PR: already on main branch"));
       } else {
+        // Settled before the push. Asked for here only if the branch changed in between, so a
+        // missing value can never fall back to a title or a body the CLI made up.
+        const { title, description } = prText ?? (await settlePushPrText(options));
         spinner = ora("Creating pull request...").start();
-        const prArgs = ["gh", "pr", "create"];
-        if (options.title) {
-          prArgs.push("--title", options.title);
-        } else {
-          prArgs.push("--title", `Update from branch ${branch}`);
-        }
-        if (options.body) {
-          prArgs.push("--body", options.body);
-        } else {
-          prArgs.push("--body", "");
-        }
+        const prArgs = ["gh", "pr", "create", "--title", title, "--body", description];
+        // One way out for every failure, so the text that was typed, which exists nowhere else, is
+        // always shown beside the reason.
+        const failWith = (...reason: string[]): never => {
+          spinner.fail("Failed to create pull request");
+          for (const line of reason) console.log(line);
+          for (const line of describeUnopenedPullRequest(title, description)) {
+            console.log(chalk.dim(line));
+          }
+          process.exit(1);
+        };
 
         try {
           const proc = spawn({
@@ -5144,25 +5889,20 @@ Examples:
           const prStderr = await new Response(proc.stderr).text();
           const prExit = await proc.exited;
 
-          if (prExit !== 0) {
-            spinner.fail("Failed to create pull request");
-            console.log(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
-            process.exit(1);
-          }
+          if (prExit !== 0) failWith(chalk.red(`  ${prStderr.trim() || prStdout.trim()}`));
 
           const prUrl = prStdout.trim();
           spinner.succeed("Pull request created");
           console.log(`  ${chalk.cyan(prUrl)}`);
         } catch (spawnError) {
-          spinner.fail("Failed to create pull request");
           const msg = spawnError instanceof Error ? spawnError.message : String(spawnError);
           if (msg.includes("ENOENT") || msg.includes("not found")) {
-            console.log(chalk.red("  'gh' CLI is not installed or not in PATH"));
-            console.log(chalk.dim("  Install it: https://cli.github.com/"));
-          } else {
-            console.log(chalk.red(`  ${msg}`));
+            failWith(
+              chalk.red("  'gh' CLI is not installed or not in PATH"),
+              chalk.dim("  Install it: https://cli.github.com/"),
+            );
           }
-          process.exit(1);
+          failWith(chalk.red(`  ${msg}`));
         }
       }
     }

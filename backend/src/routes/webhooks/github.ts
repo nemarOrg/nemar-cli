@@ -43,7 +43,7 @@ import type { WebhookRouter } from "./shared.js";
 
 // ─── GitHub App webhook receiver ────────────────────────────────────────────
 //
-// The nemar-publish-bot App is configured to deliver `push` events from every
+// The nemar-bot App is configured to deliver `push` events from every
 // dataset repo under `nemarDatasets` to this endpoint. We decode the event,
 // filter it down to enrichment-relevant pushes, and dispatch the central
 // `run-enrichment` workflow on `nemarDatasets/.github`.
@@ -57,7 +57,7 @@ import type { WebhookRouter } from "./shared.js";
  *
  *  Includes only sources that *feed* enrichment (README + BIDS description).
  *  Crucially excludes `.nemar/metadata.json` — that file IS the enrichment
- *  output, written by `nemar-publish-bot` on every successful run. Listing
+ *  output, written by the `nemar-bot` App on every successful run. Listing
  *  it here turned every enrichment commit into a fresh trigger and Haiku's
  *  non-deterministic prose ensured the file always looked "changed" to the
  *  push filter, so the pipeline self-fired forever (#643, observed on
@@ -544,9 +544,13 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     //
     // Unlike a push, an unexpected failure here (the database, say) answers 500. GitHub does not
     // retry a failed delivery, but it lists it as failed in the App's delivery log, where it can
-    // be redelivered; answering 200 would leave a pull request with no check and no trace.
-    // Redelivering is safe because (dataset, pull request, commit) is unique. A review that fails
-    // AFTER it was recorded is a check that needs a person, not a failure of the delivery.
+    // be redelivered; answering 200 would leave a pull request with no check and no trace. That
+    // includes an exempt pull request's `skipped` check, and an upstream re-pull's waived one
+    // (ADR 0117), that GitHub would not take: neither has a row for the watchdog to retry from.
+    // Redelivering is safe because (dataset, pull request, commit) is unique for a reviewed
+    // commit, and a second `skipped` check on an exempt or waived commit is harmless. A review
+    // that fails AFTER it was recorded is a check that needs a person, not a failure of the
+    // delivery.
     if (eventType === "pull_request") {
       const where = describePullRequest(payload);
       try {

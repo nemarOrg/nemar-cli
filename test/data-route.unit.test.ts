@@ -1826,10 +1826,58 @@ describe("buildLandingPayload", () => {
       version: "v2.0.0",
       doi: "10.0/v2",
       created_at: "2026-02-01T00:00:00Z",
+      // Not an OpenNeuro mirror: false, not null (null is an unknown tag on a mirror).
+      mirror: false,
       manifest_url: "/nm099999/v2.0.0/manifest.json",
       browse_url: "/nm099999/v2.0.0/",
     });
     expect(payload.versions[1].version).toBe("v1.0.0");
+  });
+
+  test("an OpenNeuro mirror's N.0.0 rows carry the three-valued mirror flag, and no tag", () => {
+    const rows: DatasetVersionRow[] = [
+      {
+        version: "3.0.0",
+        doi: "10.0/v3",
+        created_at: "2026-03-01T00:00:00Z",
+        source_version: null,
+        source_version_basis: null,
+      },
+      {
+        version: "2.0.1",
+        doi: "10.0/v2.0.1",
+        created_at: "2026-02-02T00:00:00Z",
+        source_version: "2.0.2",
+        source_version_basis: "doi",
+      },
+      {
+        version: "2.0.0",
+        doi: "10.0/v2",
+        created_at: "2026-02-01T00:00:00Z",
+        source_version: null,
+        source_version_basis: "unknown",
+      },
+      {
+        version: "v1.0.0",
+        doi: "10.0/v1",
+        created_at: "2026-01-01T00:00:00Z",
+        source_version: "1.0.0",
+        source_version_basis: "doi",
+      },
+    ];
+    const payload = buildLandingPayload({ datasetId: "on000001", versionRows: rows });
+    expect(payload.versions.map((v) => [v.version, v.mirror])).toEqual([
+      ["v3.0.0", null],
+      ["v2.0.1", false],
+      ["v2.0.0", null],
+      ["v1.0.0", true],
+    ]);
+    // The public landing exposes the flag only: not the tag, not its basis.
+    for (const v of payload.versions) {
+      expect(Object.keys(v).sort()).toEqual(
+        ["browse_url", "created_at", "doi", "manifest_url", "mirror", "version"].sort(),
+      );
+    }
   });
 
   test("empty version list -> latest=null and no rows", () => {

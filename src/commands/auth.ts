@@ -81,6 +81,7 @@ import {
   describeDeviceOutcome,
   runDeviceLogin,
 } from "../lib/device-login.js";
+import { asksForDataHost, credentialAnswer, parseCredentialInput } from "../lib/git-credential.js";
 import { addVerboseHelp } from "../lib/help.js";
 import { warnMissingPrerequisites } from "../lib/prerequisites.js";
 import {
@@ -1468,6 +1469,41 @@ Examples:
 );
 
 // ============================================================================
+// git credential helper for authenticated data hosts (ADR 0114)
+// ============================================================================
+
+// Hidden: it is plumbing that `nemar dataset clone` writes into a clone's config, not
+// something a person runs. git starts it as `nemar auth git-credential get`.
+authCommand
+  .command("git-credential <operation>", { hidden: true })
+  .description("Git credential helper for authenticated NEMAR data hosts")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Answers git's credential request for an authenticated NEMAR data host with your stored API
+  key, and for no other host. It never stores anything: 'store' and 'erase' do nothing, so
+  the key stays in the CLI's own config and out of git's credential store and any clone.
+
+  'nemar dataset clone' sets this up for the clone; you do not run it yourself.
+
+Examples:
+  $ git config credential.https://private.nemar.org.helper '!nemar auth git-credential'`,
+  )
+  .action(async (operation: string) => {
+    // Read all of git's input first, whatever the operation: git writes it before it reads.
+    const input = parseCredentialInput(await Bun.stdin.text());
+    const apiKey = getConfig().apiKey;
+    const answer = credentialAnswer(operation, input, apiKey);
+    if (answer !== "") {
+      process.stdout.write(answer);
+    } else if (operation === "get" && !apiKey && asksForDataHost(input)) {
+      // Nothing on stdout (git reads it); a hint on stderr for the person at the terminal.
+      process.stderr.write("No NEMAR API key is stored. Run 'nemar auth login'.\n");
+    }
+  });
+
+// ============================================================================
 // Retired: retrieve-key (ADR 0097)
 // ============================================================================
 
@@ -1718,9 +1754,11 @@ addVerboseHelp(
   requestUploadAccessCmd,
   `
 Description:
-  Uploading datasets needs upload access: a one-time grant an admin makes
-  after reviewing who you are and where you are. Verifying your email is
-  not enough on its own, and nothing grants it automatically.
+  Uploading datasets, or being added as a collaborator on someone else's
+  dataset, needs upload access: a one-time grant an admin makes after
+  reviewing who you are and where you are. Your email must be verified
+  first, but verifying it is not enough on its own, and nothing grants
+  access automatically.
 
   Before asking, your account needs a username, your given and family name,
   a GitHub username that exists, and your city and country. Set them in

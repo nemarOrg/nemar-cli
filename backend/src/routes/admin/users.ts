@@ -22,7 +22,7 @@ import { ownerMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
 import { flag } from "../../db/flag";
-import { tombstoneUserStatement } from "../../db/user-tombstone";
+import { tombstoneUserCascade } from "../../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import {
   type RecipientGroup,
@@ -40,6 +40,7 @@ import {
   sendUploadAccessGrantedEmail,
   sendWebUploadAccessGrantedEmail,
 } from "../../services/email";
+import { applyEmailVerification } from "../../services/email-verification";
 import { decrypt } from "../../services/encryption";
 import { isNonProductionEnv } from "../../services/environment";
 import { removeCollaborator } from "../../services/github";
@@ -48,6 +49,7 @@ import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
+import { mailReleaseStatements } from "../../services/ticket-assignment";
 import {
   FUZZY_COLUMNS,
   type RankableUser,
@@ -521,6 +523,8 @@ async function finalizeRevocation(
     db
       .prepare(PRIVATE_GRANTS_PURGE_SQL)
       .bind(user.id),
+    // Their support tickets, queue references and away window go in the same batch (phase 3).
+    ...mailReleaseStatements(user.id, "all").map((s) => db.prepare(s.sql).bind(...s.binds)),
   ]);
 
   // Update user status
@@ -1111,6 +1115,12 @@ export function registerUsersRoutes(admin: AdminRouter): void {
               .bind(target.id),
             db.prepare(DOCS_REVOKE_ALL_SQL).bind(target.id),
             db.prepare(DOCS_GRANTS_PURGE_SQL).bind(target.id),
+            // Support tickets and queue references go in the same batch (phase 3). An
+            // owner demoted to admin still works ordinary tickets, so only the restricted
+            // ones are released; any other demotion ends admin standing altogether.
+            ...mailReleaseStatements(target.id, newRole === "admin" ? "restricted" : "all").map(
+              (s) => db.prepare(s.sql).bind(...s.binds),
+            ),
           ]);
           tokensRevoked = result[0]?.meta?.changes ?? 0;
           docsSessionsRevoked = result[1]?.meta?.changes ?? 0;
@@ -1379,6 +1389,82 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   });
 
   /**
+   * POST /admin/users/by-id/:id/verify - an owner marks a `pending` account's
+   * email as verified and moves it to `verified` (the base tier).
+   *
+   * The recovery for an account the inbox flow cannot reach, so an owner does
+   * not edit the database by hand. It is the SAME transition as the code flow
+   * (`applyEmailVerification`), so the status and the flag move together and
+   * the migration 0096 guard is satisfied. It grants nothing above the base
+   * tier: `service_access` still has one writer, admin approval. Owner only,
+   * because it asserts an inbox the person did not prove.
+   *
+   * Two audit rows, on purpose: `applyEmailVerification` writes the
+   * `email_verified` transition (actor = the verified user, `via` says
+   * `owner_override`), and the `email_verified_by_owner` row below is the only
+   * place the OWNER appears. No admin notification mail: the owner is acting
+   * directly, unlike the two flows where the person verified themselves.
+   */
+  admin.post("/users/by-id/:id/verify", ownerMiddleware, async (c) => {
+    const db = c.env.DB;
+    const owner = c.get("user");
+
+    const id = Number.parseInt(c.req.param("id"), 10);
+    if (!Number.isInteger(id) || id <= 0 || id === SYSTEM_USER_ID) {
+      return c.json({ error: "Invalid user id" }, 400);
+    }
+
+    const user = await db
+      .prepare("SELECT id, status FROM users WHERE id = ? AND deleted_at IS NULL")
+      .bind(id)
+      .first<{ id: number; status: string }>();
+    if (!user) {
+      return c.json({ error: "User not found" }, 404);
+    }
+    if (user.status !== "pending") {
+      return c.json(
+        {
+          error: "User is not pending",
+          status: user.status,
+          message:
+            "Only a pending account can be force-verified; approve or revoke handles the other tiers.",
+        },
+        409,
+      );
+    }
+
+    const { promoted } = await applyEmailVerification(db, id, "owner_override");
+    if (!promoted) {
+      // Lost a race with the owner's own verification or a revoke.
+      return c.json({ error: "User is not pending" }, 409);
+    }
+
+    // Written AFTER the promotion committed, so the failure is logged and never
+    // propagated: the same shape as finalizeApproval's user_approved row. A 500
+    // here would tell the owner their completed action failed and send them
+    // into a retry that now 409s. What a failure costs: the account IS verified
+    // and its `email_verified` row (via `owner_override`) still stands, but
+    // nothing records WHICH owner did it, which is why the log line carries the
+    // owner id for the operator to reconcile by hand.
+    try {
+      await auditLogStatement(db, {
+        userId: owner.id,
+        action: "email_verified_by_owner",
+        resourceType: "user",
+        resourceId: String(id),
+        details: JSON.stringify({ from: "pending", to: "verified" }),
+      }).run();
+    } catch (err) {
+      console.error(
+        `AUDIT GAP: email_verified_by_owner row not written for id=${id} by owner id=${owner.id} (the verification DID commit):`,
+        err,
+      );
+    }
+
+    return c.json({ message: `User id ${id} verified`, user: { id, status: "verified" } });
+  });
+
+  /**
    * POST /admin/revoke/:username - Revoke a user's access.
    *
    * Only reaches accounts that have a username, i.e. CLI signups. Web/ORCID
@@ -1584,56 +1670,15 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       }
     }
 
-    // PII mask + tombstone + credential revocation in a single db.batch(): D1
-    // wraps a batch in one implicit transaction (all statements commit, or all
-    // roll back on any failure — see Cloudflare D1 docs, "Batched statements are
-    // SQL transactions"), so the email mask and the `deleted_at` stamp can never
-    // half-apply and leave an auth-resolvable row. `AND deleted_at IS NULL` on the
-    // mask makes it idempotent. The placeholder email embeds the PK (globally
-    // unique, never reused under AUTOINCREMENT) so the email UNIQUE constraint
-    // can't be hit, and .invalid (RFC 6761) can never be a real/deliverable
-    // address. web_sessions are revoked explicitly because a soft delete does NOT
-    // trigger their ON DELETE CASCADE; collaborator + S3-permission rows likewise.
-    // A batch failure rolls back atomically and is reported as a clear 500 so the
-    // caller knows the user was NOT deleted and can retry (idempotent).
-    let batch: D1Result[];
+    // PII mask + tombstone + credential revocation: one transaction, shared with the scheduled
+    // sweep of the live-test accounts through tombstoneUserCascade (db/user-tombstone.ts), which
+    // says why it is a single batch and what each statement ends. A failure rolls back
+    // atomically and is reported as a clear 500 so the caller knows the user was NOT deleted
+    // and can retry (idempotent).
+    let tokensRevoked: number;
+    let sessionsRevoked: number;
     try {
-      batch = await db.batch([
-        tombstoneUserStatement(db, id),
-        db
-          .prepare(
-            "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-          )
-          .bind(id),
-        db
-          .prepare(
-            "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
-          )
-          .bind(id),
-        // The session revoke above covers every scope (no `scope` predicate, on
-        // purpose), but a docs GRANT is a separate row and a separate 60-second
-        // licence to mint a new session. `docs_grants.user_id` cascades on
-        // DELETE, and this is a tombstone rather than a delete, so nothing else
-        // reaches it.
-        db
-          .prepare(DOCS_GRANTS_PURGE_SQL)
-          .bind(id),
-        // Likewise the private site's grants, which live in their own table
-        // (ADR 0079); the session revoke above already covers that scope.
-        db
-          .prepare(PRIVATE_GRANTS_PURGE_SQL)
-          .bind(id),
-        db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
-        db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
-        // Expire any outstanding passwordless login codes for the original email so
-        // a code issued just before deletion can't be submitted (it would otherwise
-        // be consumed and then cleanly denied — this avoids even that round-trip).
-        db
-          .prepare(
-            "UPDATE auth_codes SET used_at = datetime('now') WHERE email = ? AND used_at IS NULL",
-          )
-          .bind(originalEmail),
-      ]);
+      ({ tokensRevoked, sessionsRevoked } = await tombstoneUserCascade(db, id, originalEmail));
     } catch (error) {
       console.error(`[delete-user] tombstone batch failed for id=${id}:`, error);
       return c.json(
@@ -1645,8 +1690,6 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         500,
       );
     }
-    const tokensRevoked = batch[1]?.meta.changes ?? 0;
-    const sessionsRevoked = batch[2]?.meta.changes ?? 0;
 
     // Audit log (audit_log.user_id has no cascade, so the row survives). resource_id
     // is the non-PII integer id and details carries NO original username/email —
@@ -1779,6 +1822,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     dataset_anonymity: z.boolean().optional(),
     /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
     identifier_sweep: z.boolean().optional(),
+    /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
+    support_tickets: z.boolean().optional(),
   });
 
   /**
@@ -1829,6 +1874,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       announcements: body.announcements ?? current.announcements,
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
+      support_tickets: body.support_tickets ?? current.support_tickets,
     };
 
     await db
@@ -1963,6 +2009,60 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     return c.json(result);
   });
 
+  /**
+   * GET /admin/notify/:id - Progress of one announcement.
+   *
+   * A queued announcement (epic #1893 phase 2) finishes after the POST has answered: the
+   * consumer writes one outcome per message to the audit row. `unknown_count` is sends whose
+   * outcome the provider never confirmed (a timeout, an internal error); they are not retried
+   * because a retry could deliver twice. `failed_recipients` holds the redacted addresses the
+   * row stores, never full ones.
+   */
+  admin.get("/notify/:id", async (c) => {
+    const id = Number(c.req.param("id"));
+    if (!Number.isInteger(id) || id < 1) {
+      return c.json({ error: "Invalid broadcast id" }, 400);
+    }
+    const row = await c.env.DB.prepare(
+      `SELECT id, status, subject, recipient_group, queued_count, delivered_count,
+              failure_count, unknown_count, failed_recipients, sent_at
+         FROM broadcast_emails WHERE id = ?`,
+    )
+      .bind(id)
+      .first<{
+        id: number;
+        status: string;
+        subject: string;
+        recipient_group: string;
+        queued_count: number;
+        delivered_count: number;
+        failure_count: number;
+        unknown_count: number;
+        failed_recipients: string | null;
+        sent_at: string;
+      }>();
+    if (!row) return c.json({ error: "Broadcast not found" }, 404);
+
+    let failed: unknown = [];
+    try {
+      failed = JSON.parse(row.failed_recipients ?? "[]");
+    } catch {
+      failed = [];
+    }
+    return c.json({
+      id: row.id,
+      status: row.status,
+      subject: row.subject,
+      recipient_group: row.recipient_group,
+      queued_count: row.queued_count,
+      delivered_count: row.delivered_count,
+      failure_count: row.failure_count,
+      unknown_count: row.unknown_count,
+      failed_recipients: Array.isArray(failed) ? failed : [],
+      sent_at: row.sent_at,
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Test-only fixtures
   // ---------------------------------------------------------------------------
@@ -2056,8 +2156,11 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       // where the row already has the desired status.
       if (status) {
         const upd = await db
-          .prepare("UPDATE users SET status = ? WHERE email = ?")
-          .bind(desiredStatus, email)
+          // A pending fixture is unverified (migration 0096 refuses the pair).
+          .prepare(
+            "UPDATE users SET status = ?, email_verified = CASE WHEN ? = 'pending' THEN 0 ELSE email_verified END WHERE email = ?",
+          )
+          .bind(desiredStatus, desiredStatus, email)
           .run();
         // Defend against a silent status mismatch: if the UPDATE matched
         // 0 rows (e.g., the email normalised differently between the

@@ -11,9 +11,24 @@ import { CONCEPT_DOI_SQL } from "./anonymity";
 import { buildExcludedUnknownBreakdownSql, isAnyFacetActive } from "./dataset-facets";
 import {
   type DatasetFilterOptions,
+  PUBLIC_SEARCHABLE_SQL,
   buildDatasetFilterClauses,
   buildFtsMatch,
 } from "./dataset-filters";
+import {
+  DATASET_SUMMARY_SELECT_SQL,
+  type DatasetSummaryRow,
+  buildDatasetSummaryText,
+} from "./dataset-summary-text";
+import { type QueryAnalysis, analyzeQuery } from "./search-query";
+import {
+  LEG_SIZE,
+  RERANK_POOL_MAX,
+  rerankScores,
+  rerankSuspended,
+  selectRelevant,
+  suspendRerank,
+} from "./search-rerank";
 
 const EMBEDDING_MODEL = "@cf/baai/bge-small-en-v1.5";
 
@@ -78,29 +93,15 @@ export interface SearchResult {
   snippet?: string;
 }
 
-export interface DatasetEmbedRow {
-  name?: string | null;
-  modalities?: string | null;
-  tasks?: string | null;
-  authors?: string | null;
-  readme?: string | null;
-}
+export type DatasetEmbedRow = DatasetSummaryRow;
 
 /**
- * Build the embedding text for a `datasets` row -- the single embed-text
- * builder (#646); reembedDatasetVector is the only writer of dataset vectors.
+ * The embedding text for a `datasets` row -- the single embed-text builder
+ * (#646); reembedDatasetVector is the only writer of dataset vectors. It is
+ * the same text the reranker reads; see dataset-summary-text.ts for why it is
+ * the abstract and keywords, not the README.
  */
-export function buildDatasetEmbedText(row: DatasetEmbedRow): string {
-  return [
-    row.name ?? "",
-    row.modalities ? `Modalities: ${row.modalities}` : "",
-    row.tasks ? `Tasks: ${row.tasks}` : "",
-    row.authors ? `Authors: ${row.authors}` : "",
-    row.readme ? row.readme.slice(0, 1000) : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
+export const buildDatasetEmbedText = buildDatasetSummaryText;
 
 /**
  * Re-embed a single dataset's Vectorize vector from its current `datasets`
@@ -126,14 +127,14 @@ export async function reembedDatasetVector(
   }
   try {
     const row = await db
-      .prepare("SELECT name, modalities, tasks, authors, readme FROM datasets WHERE dataset_id = ?")
+      .prepare(`SELECT ${DATASET_SUMMARY_SELECT_SQL} FROM datasets d WHERE d.dataset_id = ?`)
       .bind(datasetId)
       .first<DatasetEmbedRow>();
     if (!row) {
       console.warn(`[reembed] No datasets row for ${datasetId}, skipping`);
       return false;
     }
-    const text = buildDatasetEmbedText(row);
+    const text = buildDatasetSummaryText(row);
     if (!text.trim()) {
       console.warn(`[reembed] Empty embed text for ${datasetId} (all fields blank), skipping`);
       return false;
@@ -473,7 +474,19 @@ export async function semanticSearchHydrated(
   return hydrated.map((r) => ({ ...r, score: scoreById.get(r.id) ?? 0 }));
 }
 
-/** FTS5 lexical search over `datasets_fts` (bm25 ranking + readme snippet),
+/**
+ * Per-column bm25 weights for `datasets_fts(name, description, authors, tasks,
+ * modalities, readme)`, in that order. A word in the title or the abstract says
+ * what a dataset is about; the same word in a long README is usually passing
+ * mention. Unweighted, a dataset that says "driving" in a long README can
+ * outrank one named for it. Measured on 37 queries (scripts/search-eval/
+ * calibrate.py): R-precision of the lexical leg 0.811 unweighted, 0.835 with
+ * these weights.
+ */
+export const FTS_BM25_WEIGHTS = [10, 5, 1, 4, 1, 1] as const;
+const FTS_BM25 = `bm25(datasets_fts, ${FTS_BM25_WEIGHTS.join(", ")})`;
+
+/** FTS5 lexical search over `datasets_fts` (column-weighted bm25 ranking + readme snippet),
  *  hydrating display fields from the joined `datasets` row. */
 export async function ftsSearch(
   db: D1Database,
@@ -483,6 +496,16 @@ export async function ftsSearch(
 ): Promise<SearchResult[]> {
   const match = buildFtsMatch(query);
   if (!match) return [];
+  return ftsSearchByMatch(db, match, limit, filters);
+}
+
+/** {@link ftsSearch} for a match expression the caller has already built. */
+async function ftsSearchByMatch(
+  db: D1Database,
+  match: string,
+  limit: number,
+  filters: DatasetFilterOptions,
+): Promise<SearchResult[]> {
   const params: (string | number)[] = [match];
   const filterClauses = buildDatasetFilterClauses(params, filters);
   const results = await db
@@ -495,12 +518,43 @@ export async function ftsSearch(
        WHERE datasets_fts MATCH ?
          AND d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
          AND d.visibility = 'public'${filterClauses}
-       ORDER BY bm25(datasets_fts)
+       ORDER BY ${FTS_BM25}
        LIMIT ?`,
     )
     .bind(...params, limit)
     .all<HydrateRow & { snippet: string | null }>();
   return (results.results || []).map((row) => toResult(row, 1.0, row.snippet || undefined));
+}
+
+/**
+ * Datasets whose name, authors or tasks contain EVERY one of `terms` (prefix
+ * match, any order). The user's words are literally in the dataset's title or
+ * byline, which is evidence a cross-encoder that never reads authors cannot
+ * weigh, so these datasets are exempt from its verdict (see search-rerank.ts).
+ * `terms` are alphanumeric tokens (see `queryTokens`), safe to quote.
+ */
+export async function literalMatchSearch(
+  db: D1Database,
+  terms: string[],
+  limit: number,
+  filters: DatasetFilterOptions = {},
+): Promise<SearchResult[]> {
+  if (terms.length === 0) return [];
+  const match = `{name authors tasks} : (${terms.map((t) => `"${t}"*`).join(" AND ")})`;
+  return ftsSearchByMatch(db, match, limit, filters);
+}
+
+/** The text each dataset is judged as (see dataset-summary-text.ts), by dataset id. */
+async function fetchSummaryTexts(db: D1Database, ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { results } = await db
+    .prepare(
+      `SELECT d.dataset_id AS id, ${DATASET_SUMMARY_SELECT_SQL}
+       FROM datasets d WHERE ${DATASET_ID_IN_JSON_LIST} AND ${PUBLIC_SEARCHABLE_SQL}`,
+    )
+    .bind(datasetIdListParam(ids))
+    .all<DatasetSummaryRow & { id: string }>();
+  return new Map((results ?? []).map((row) => [row.id, buildDatasetSummaryText(row)]));
 }
 
 /**
@@ -705,6 +759,147 @@ export function rrfFuse(semantic: SearchResult[], lexical: SearchResult[], k = 6
     .sort((a, b) => b.score - a.score);
 }
 
+type EnvelopeBuilder = (
+  rows: SearchResult[],
+  method: string,
+  count: number,
+  warning?: string,
+  excludedUnknown?: ExcludedUnknownResult,
+) => DatasetSearchEnvelope;
+
+/** Why {@link searchByRelevance} handed the query back to the fused path. */
+type RelevanceFallback = "embedding-failed" | "rerank-failed";
+
+/**
+ * A phrase answered by relevance rather than by reach (see search-rerank.ts for
+ * why and for the measurements).
+ *
+ * Gathers at most {@link LEG_SIZE} candidates from each of the lexical,
+ * semantic and literal (name/authors/tasks) legs, has the cross-encoder judge
+ * the pool, and returns only the datasets {@link selectRelevant} keeps, best
+ * first. The legs are gathered under the visibility rules ALONE: none of the
+ * request's filters narrows them, so the verdict on a dataset does not depend
+ * on which filters are active (a narrow filter would otherwise leave the
+ * semantic leg, which has no cosine floor here, "finding" every row it kept).
+ * Every request filter is applied afterwards, by `hydrateDatasetsByIds`, and
+ * `excluded_unknown` counts the relevant datasets the default unknown-excluded
+ * policy then hides (ADR 0005). The price is that a filtered phrase search
+ * draws from the best candidates overall, not the best within the filter.
+ *
+ * Returns why it could not answer when the semantic tier or the reranker is
+ * unavailable, so the caller serves the fused list instead (ADR 0005: partial
+ * data still serves). A failure that is neither (a SQL or filter bug, the text
+ * fetch included) propagates.
+ */
+async function searchByRelevance(
+  db: D1Database,
+  ai: Ai,
+  vectorize: VectorizeIndex,
+  analysis: QueryAnalysis,
+  filters: DatasetFilterOptions,
+  buildEnvelope: EnvelopeBuilder,
+): Promise<DatasetSearchEnvelope | RelevanceFallback> {
+  if (rerankSuspended()) return "rerank-failed";
+
+  let lexical: SearchResult[];
+  let literal: SearchResult[];
+  let semantic: SearchResult[];
+  try {
+    [lexical, literal, semantic] = await Promise.all([
+      ftsSearch(db, analysis.lexicalQuery, LEG_SIZE),
+      literalMatchSearch(db, analysis.informative, LEG_SIZE),
+      semanticSearchHydrated(ai, vectorize, db, analysis.semanticQuery, SEMANTIC_TOPK),
+    ]);
+  } catch (err) {
+    if (!(err instanceof Error) || !err.message.startsWith("[embedding]")) throw err;
+    console.error("[search] semantic tier failed, serving the fused list:", err);
+    return "embedding-failed";
+  }
+  semantic = semantic.slice(0, LEG_SIZE);
+
+  const pool = rrfFuse(semantic, lexical).slice(0, RERANK_POOL_MAX);
+  const inPool = new Set(pool.map((r) => r.id));
+  for (const r of literal) if (!inPool.has(r.id)) pool.push(r);
+  if (pool.length === 0) return { ...buildEnvelope([], "semantic", 0), reranked: true };
+
+  const lexicalIds = new Set(lexical.map((r) => r.id));
+  const semanticIds = new Set(semantic.map((r) => r.id));
+  const literalIds = new Set(literal.map((r) => r.id));
+
+  // Outside the try below: a SQL failure here is a bug to surface, not "the reranker is down".
+  const texts = await fetchSummaryTexts(
+    db,
+    pool.map((r) => r.id),
+  );
+  const started = Date.now();
+  let probabilities: number[];
+  try {
+    probabilities = await rerankScores(
+      ai,
+      analysis.rerankQuery,
+      pool.map((r) => texts.get(r.id) || r.name),
+    );
+  } catch (err) {
+    suspendRerank();
+    console.error(
+      `[search] rerank unavailable after ${Date.now() - started} ms, serving the fused list: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "rerank-failed";
+  }
+
+  const kept = selectRelevant(
+    pool.map((r, i) => ({
+      id: r.id,
+      p: probabilities[i] ?? 0,
+      foundByBothLegs: lexicalIds.has(r.id) && semanticIds.has(r.id),
+      literalMatch: literalIds.has(r.id),
+    })),
+  );
+  console.log(
+    `[search] relevance: pool=${pool.length} kept=${kept.length} rerank_ms=${Date.now() - started}`,
+  );
+
+  const keptIds = kept.map((k) => k.id);
+  const scoreById = new Map(kept.map((k) => [k.id, Math.round(k.score * 1000) / 1000]));
+  const snippetById = new Map(pool.flatMap((r) => (r.snippet ? [[r.id, r.snippet] as const] : [])));
+  // Every one of the request's filters, unknown rows excluded, is applied here.
+  const hydrated = await hydrateDatasetsByIds(db, keptIds, filters);
+  const results = hydrated.map((r) => ({
+    ...r,
+    score: scoreById.get(r.id) ?? 0,
+    ...(snippetById.has(r.id) ? { snippet: snippetById.get(r.id) } : {}),
+  }));
+  const excludedUnknown = await computeExcludedUnknownCount(
+    db,
+    null,
+    keptIds,
+    filters,
+    results.length,
+    true,
+  );
+  return {
+    ...buildEnvelope(results, "semantic", results.length, undefined, excludedUnknown),
+    reranked: true,
+  };
+}
+
+/**
+ * `rows` with the datasets that list one of `modalities` first, the more of
+ * them the better, each group keeping its order. Whole-token, so asking for
+ * `eeg` never promotes an `ieeg`-only dataset (ADR 0032, #1711).
+ */
+export function prioritizeModalities(rows: SearchResult[], modalities: string[]): SearchResult[] {
+  if (modalities.length === 0) return rows;
+  const matches = (r: SearchResult) => {
+    const listed = new Set(r.modalities.split(",").map((m) => m.trim().toLowerCase()));
+    return modalities.filter((m) => listed.has(m)).length;
+  };
+  return rows
+    .map((r, order) => ({ r, order, m: matches(r) }))
+    .sort((a, b) => b.m - a.m || a.order - b.order)
+    .map(({ r }) => r);
+}
+
 /** Options for {@link executeDatasetSearch}. HTTP-layer concerns (parsing
  *  query-string values, defaulting) are the caller's job; `limit`/`offset`/
  *  `minScore` are expected to already be validated (e.g. via
@@ -735,6 +930,20 @@ export interface DatasetSearchEnvelope {
   truncated: boolean;
   method: string;
   min_score: number;
+  /** True when the result list was cut by a cross-encoder relevance judgment
+   *  (a phrase query with AI and Vectorize bound). Then `count` is the number
+   *  of datasets judged to answer the query, `results[].score` is that judged
+   *  probability (0..1; a name or author match is floored at 0.5), and `min_score` (a
+   *  cosine floor) was not applied.
+   *  Absent otherwise. */
+  reranked?: true;
+  /** The query as searched, present only when a word that matches no dataset
+   *  was replaced by a catalog word one typo away ("bilinugual" ->
+   *  "bilingual"). Clients should say so ("Showing results for ..."). */
+  corrected_query?: string;
+  /** Modalities the query named ("eeg" in "sleep eeg") whose datasets are
+   *  listed first; absent when none. A preference, not a filter. */
+  modality_boost?: string[];
   warning?: string;
   /** D4/ADR 0005: rows hidden by the default unknown-excluded facet policy
    *  (see {@link computeExcludedUnknownCount}). Absent when no facet is
@@ -762,15 +971,23 @@ export interface DatasetSearchEnvelope {
  * `semanticSearchHydrated(..., limit * 2)` calls and `count: filtered.length`
  * taken from that limit-derived window), not in any individual query.
  *
- * Combines three strategies:
+ * Combines these strategies:
  *  - Exact dataset-ID lookup (nm###### / on###### managed mirrors / ds######
  *    legacy or OpenNeuro source) via D1, since embeddings and the FTS index
  *    (name/description/authors/tasks/modalities/readme) do not cover the id, so
  *    a literal id query would otherwise miss -- notably every `on######` mirror,
  *    whose NEMAR-assigned id appears in none of its OpenNeuro-sourced text.
- *  - Vectorize semantic similarity (when `ai`/`vectorize` are provided).
- *  - D1 LIKE/FTS text search as a fallback, also used to backfill semantic
- *    results when Vectorize returns no hits.
+ *  - A phrase (two or more content words) with AI and Vectorize bound is
+ *    answered by relevance, not reach: {@link searchByRelevance} gathers a
+ *    bounded pool, has a cross-encoder judge it, and returns only what it keeps
+ *    (`reranked: true`; ADR 0116). Any failure there falls through to:
+ *  - Vectorize semantic similarity (when `ai`/`vectorize` are provided),
+ *    fused with FTS5 lexical search by reciprocal-rank fusion.
+ *  - D1 FTS text search alone, also used to backfill semantic results when
+ *    Vectorize returns no hits.
+ *  Before any of these, {@link analyzeQuery} drops words found in over a quarter of
+ *  datasets from the lexical query and replaces a word no dataset contains by a
+ *  catalog word one typo away (`corrected_query`).
  *
  * `modality`/`has_hed` filter in SQL, pushed into every tier (including the
  * exact-id lookup) via `filters`, rather than being re-applied in JS on the
@@ -829,13 +1046,16 @@ export async function executeDatasetSearch(
   // deduped) pool, and for a query with fewer true matches than any ceiling.
   // `truncated` (#1145 review S1) is the derived signal a caller would
   // otherwise have to reconstruct by hand from `count`/`candidate_ceiling`.
+  let correctedQuery: string | undefined;
+  let modalityBoost: string[] = [];
   const buildEnvelope = (
-    rows: SearchResult[],
+    allRows: SearchResult[],
     method: string,
     count: number,
     warning?: string,
     excludedUnknown?: ExcludedUnknownResult,
   ): DatasetSearchEnvelope => {
+    const rows = prioritizeModalities(allRows, modalityBoost);
     const page = rows.slice(offset, offset + limit);
     return {
       results: page,
@@ -847,6 +1067,8 @@ export async function executeDatasetSearch(
       truncated: count > rows.length,
       method,
       min_score: minScore,
+      ...(correctedQuery !== undefined ? { corrected_query: correctedQuery } : {}),
+      ...(modalityBoost.length > 0 ? { modality_boost: modalityBoost } : {}),
       ...(warning !== undefined ? { warning } : {}),
       ...(excludedUnknown !== undefined
         ? {
@@ -867,21 +1089,46 @@ export async function executeDatasetSearch(
       const idHit = await lookupDatasetById(db, trimmed.toLowerCase(), filters);
       if (idHit) return buildEnvelope([idHit], "exact_id", 1);
     }
-    const ftsMatch = buildFtsMatch(trimmed);
+    // What the query is made of: the words that discriminate between datasets
+    // drive the lexical leg ("study" is in 59% of the catalog and must not
+    // decide a match); the caller's own words drive the embedding.
+    const analysis = await analyzeQuery(db, trimmed);
+    correctedQuery = analysis.correctedQuery;
+    modalityBoost = analysis.modalityBoost;
+    let semanticFailed = false;
+    if (analysis.isPhrase && ai && vectorize) {
+      const byRelevance = await searchByRelevance(
+        db,
+        ai,
+        vectorize,
+        analysis,
+        filters,
+        buildEnvelope,
+      );
+      if (typeof byRelevance !== "string") return byRelevance;
+      // An embedding that just failed is not tried a second time on this request.
+      semanticFailed = byRelevance === "embedding-failed";
+    }
+    const ftsMatch = buildFtsMatch(analysis.lexicalQuery);
     // Tier-specific log so a failure here is distinguishable from the
     // semantic/hydration tiers; re-throw so the outer catch still degrades.
     // Fetches a fixed SEARCH_CANDIDATE_CEILING candidates regardless of
     // `limit`, so the population `count` describes doesn't shrink at small
     // page sizes.
-    const lexical = await ftsSearch(db, trimmed, SEARCH_CANDIDATE_CEILING, filters).catch(
-      (ftsErr) => {
-        console.error(
-          `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
-        );
-        throw ftsErr;
-      },
-    );
-    if (!ai || !vectorize) {
+    const lexical = await ftsSearch(
+      db,
+      analysis.lexicalQuery,
+      SEARCH_CANDIDATE_CEILING,
+      filters,
+    ).catch((ftsErr) => {
+      console.error(
+        `[search] FTS tier failed: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`,
+      );
+      throw ftsErr;
+    });
+    // The answer when only the lexical leg is usable; `count` is the size of
+    // the FTS match alone.
+    const lexicalOnly = async (method: "text" | "text_fallback") => {
       const page = lexical.slice(offset, offset + limit);
       const { count, warning } = await countSearchMatchesSafely(
         db,
@@ -898,13 +1145,22 @@ export async function executeDatasetSearch(
         count,
         warning === undefined,
       );
-      return buildEnvelope(lexical, "text", count, warning, excludedUnknown);
-    }
+      return buildEnvelope(lexical, method, count, warning, excludedUnknown);
+    };
+    if (!ai || !vectorize) return lexicalOnly("text");
+    if (semanticFailed) return lexicalOnly("text_fallback");
     let semantic: SearchResult[] = [];
     try {
       // Fixed SEMANTIC_TOPK (also Vectorize's returnMetadata:'none' topK
       // ceiling), not `limit * 2`.
-      semantic = await semanticSearchHydrated(ai, vectorize, db, trimmed, SEMANTIC_TOPK, filters);
+      semantic = await semanticSearchHydrated(
+        ai,
+        vectorize,
+        db,
+        analysis.semanticQuery,
+        SEMANTIC_TOPK,
+        filters,
+      );
     } catch (embErr) {
       const embMsg = embErr instanceof Error ? embErr.message : String(embErr);
       if (!embMsg.startsWith("[embedding]")) {
@@ -915,44 +1171,10 @@ export async function executeDatasetSearch(
         throw embErr;
       }
       console.error("[search] semantic tier failed, using FTS only:", embErr);
-      const page = lexical.slice(offset, offset + limit);
-      const { count, warning } = await countSearchMatchesSafely(
-        db,
-        ftsMatch,
-        [],
-        filters,
-        offset + page.length,
-      );
-      const excludedUnknown = await computeExcludedUnknownCount(
-        db,
-        ftsMatch,
-        [],
-        filters,
-        count,
-        warning === undefined,
-      );
-      return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
+      return lexicalOnly("text_fallback");
     }
     const semanticFiltered = applyMinScore(semantic);
-    if (semanticFiltered.length === 0) {
-      const page = lexical.slice(offset, offset + limit);
-      const { count, warning } = await countSearchMatchesSafely(
-        db,
-        ftsMatch,
-        [],
-        filters,
-        offset + page.length,
-      );
-      const excludedUnknown = await computeExcludedUnknownCount(
-        db,
-        ftsMatch,
-        [],
-        filters,
-        count,
-        warning === undefined,
-      );
-      return buildEnvelope(lexical, "text_fallback", count, warning, excludedUnknown);
-    }
+    if (semanticFiltered.length === 0) return lexicalOnly("text_fallback");
     // The union `count` describes is exactly what the fused results are
     // drawn from: the FTS match plus the (min-score-filtered) semantic ids.
     const fused = rrfFuse(semanticFiltered, lexical);

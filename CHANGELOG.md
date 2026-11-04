@@ -13,6 +13,870 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.27 - 2026-10-29
+
+The production canary and the first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.
+A re-pull's S3 copy no longer fails on the upstream bucket's tag denial; a re-pull merged outside NEMAR's tools can be accepted on evidence instead of stranding the record; and a re-pull's own pull request is no longer failed by the automated review of contributor changes.
+Search stops answering a phrase with most of the catalog (ADR 0116).
+The release has one migration, 0113, which creates one table and changes nothing that exists.
+It sets no Worker variable or secret, and the four re-pull switches and caps stay absent from the wrangler configuration.
+
+### Changed
+
+- **A re-pull's single-object S3 copy sends `--tagging-directive REPLACE` (#1991, #1992).**
+  Upstream's bucket denies reading the tags of its newer, tagged objects (ADR 0063), and a plain cross-bucket `copy-object` reads them, so the canary's first run failed at the copy step with an access denial, and a re-pull of such an object would have failed there.
+  The write guard now refuses a `copy-object` that does not carry exactly `REPLACE`, and the production canary and the S3 stand-in follow the real buckets.
+  The multipart path carries no tags and is unchanged.
+- **A re-pull merged outside NEMAR's tools can be accepted on evidence (#1996, #1997; ADR 0111, amendment of 2026-10-29).**
+  The merge gate writes a re-pull's squash message so that its last paragraph holds the commit's trailers, because the privacy ledger's fresh-clone proof reads the merge as the re-pull's own commit only then.
+  A merge made with GitHub's button has no trailers, the release refuses it as `merge-trailers`, and the record used to stay at `merged` for good.
+  `nemar admin repull resume <dataset> --accept-merge-trailers "<reason>"` (10 to 500 characters, recorded for the administrator who gives it) now verifies, from GitHub, that the merge is the squash merge of the record's own pull request, that its tree is the record's commit outside `.nemar/` and `.github/`, and that its parent is the record's base or a descendant that enrichment moved.
+  The Worker repeats every check with its own credential at the new route `POST /admin/repulls/:id/merge-trailers/accept`, records the acceptance in `upstream_repull_merge_acceptances` (migration 0113), and, when the merge appended a `repull-scrubbed` line beside other files, appends one `repull-merge-accepted` line to `.nemar/corrections.jsonl` on `main`.
+  The line holds the full merge commit id, the plan digest, the version, the scanner and a fixed verification word, and never the reason.
+  The fresh-clone proof vouches for exactly that commit when it is a first-parent commit of a tip and not carried only by a tag.
+  Only the administrator who opened the re-pull can accept its merge (`accept-not-yours`), and a re-pull the automatic path opened is never accepted (`accept-automatic`); the release's `merge-trailers` refusal now says so instead of advising the flag, and a Worker that has no acceptance route is named as such.
+  A lost, timed-out or rate-limited answer exits 3 (run it again); a refusal exits 1.
+  The runbook gains the check an administrator runs before any history rewrite.
+- **A re-pull's own pull request is waived from the automated review (#1998, #2000; ADR 0117).**
+  The review judges a change by contributor-protection rules, and a re-pull's pull request is upstream's delta built by the platform, so it failed, GitHub read the pull request as `unstable`, and `nemar admin repull resume` waited for `clean` while `merge --force` answered `not-ready`.
+  One pure rule decides the waiver from NEMAR's own record: an open record of the same dataset names the pull request as its N.0.0 or N.0.1, in the dataset's own repository, from the record's branch into `main`, at the record's head, with the record at `pr_open`, `gates_clear`, `patch_synthesized` or `patch_gates_clear`.
+  The Worker posts one `skipped` check run titled "Waived: upstream re-pull" and writes a `pr_review_waived` audit row; it creates no review row, dispatches no workflow and calls no model.
+  The waiver is decided before the administrator exemption, a block or a restart.
+  The queue shows a derived verdict `waived`, offers it for merge and leaves it out of `start --all`; `approvalGate` returns `confirm`, so no `--force` is needed.
+  The Worker's own review of the App's re-pull pull request is retired.
+  An existing failed check is updated in place, and a new run is posted when GitHub refuses the update; on the automatic path the tick republishes a waiver GitHub holds back for an N.0.0 pull request, and the 30-minute sweep retries stored review rows and gives up on one after five tries, about two and a half hours.
+  A waiver with no stored row that fails to publish is retried by neither; an administrator's `nemar admin pr-reviews start` or a webhook redelivery publishes it.
+  Findings the review would have raised are listed as recommended issues, none filed automatically.
+- **Phrase search is judged for relevance (#1999; ADR 0116, proposed).**
+  A phrase of two or more content words draws at most 30 candidates from each of the lexical, semantic and name/authors/tasks legs, and `@cf/baai/bge-reranker-base` on Workers AI scores the pool; a dataset is kept when the cross-encoder endorses it, or both retrieval legs found it and the cross-encoder does not strongly reject it, or every informative query word is literally in its name, authors or tasks.
+  Words found in more than 25% of public datasets no longer decide a lexical match, bm25 weights name and description above the README, and the vector and the cross-encoder read one text (name, abstract, keywords, modalities, tasks).
+  A query word that matches no public dataset is replaced by a catalog word one typo away and the response says so (`corrected_query`); a modality named in the query is listed first by whole token (`modality_boost`); filters are applied after relevance.
+  Any model failure, or more than four seconds, serves the fused list as before.
+
+### Production behavior changes
+
+- **Search answers fewer, more relevant datasets for a phrase, and `GET /datasets/search` gains fields.**
+  `reranked: true` marks a cut list; `count` of a phrase is then the number judged relevant and `min_score` is not applied to it.
+  `corrected_query` and `modality_boost` appear when they apply, and the CLI prints "Showing results for ..." and a modality line.
+  The website calls the same endpoint, so its "N results" shows a smaller number.
+  One word is not cut.
+- **A re-pull pull request no longer gets the automated review.**
+  An existing `NEMAR PR Review` failure on a re-pull's pull request clears with `nemar admin pr-reviews start <dataset> <pr>`, which updates the check in place or posts a new run; the automatic path's tick does the same on its own.
+- **`nemar admin repull resume` names the review check when it waits on a pull request that is not `clean`, and says which other check does not pass.**
+- **The privacy-correction runbook gains item 8 under "Before each dataset".**
+  It checks that the ledger names no merge a re-pull accepted before any history rewrite, because the rewrite gives that merge a new id and the proof would then fail closed.
+
+### Deploy coupling
+
+- The migration is applied by the release's deploy. 0113 is one new table, `upstream_repull_merge_acceptances`, keyed by its primary key; `deleteDatasetCascade` deletes its rows explicitly.
+- The flag `--accept-merge-trailers` works only against a Worker that has the new route, so install the CLI after the Worker deploys.
+- Search needs no deploy step of its own beyond the vector rebuild below, and the Workers AI binding (`[ai]`) is already in the production configuration.
+
+### Owner steps after release
+
+None of these is done by the release.
+
+1. Rebuild the search vectors: `POST /admin/vectorize/reindex-all` with the body `{"after": "<last_id of the previous answer>"}` (200 datasets per call; `limit` goes to 500) until `has_more` is false, and read `failed` in each answer.
+   Without `after` every call re-reads the first page.
+   Whether 500 per call stays inside the Worker's subrequest limit is not established, so use the default if a call reports failures.
+   Until it finishes the semantic leg searches README-based vectors, which work with lower recall.
+2. In the first deploy's Worker logs, find `[search] rerank raw scores: ... read as logits` and a sane `rerank_ms`.
+   Workers AI latency and the score scale were never measured live.
+3. For a re-pull that is waiting on the review check, run `nemar admin pr-reviews start <dataset> <pr>`, then `nemar admin repull resume <dataset>`, then `nemar admin repull merge <dataset>` (the merge mints a version DOI and needs the administrator's go).
+4. For a re-pull merged outside NEMAR's tools, run `nemar admin repull resume <dataset> --accept-merge-trailers "<reason>"` once the tag exists on `main`, then confirm the release locked the copied objects and the version DOI resolves.
+5. Run the fleet backfill, `nemar admin upstream-backfill`, as a dry run and then with `--execute`, after the first re-pulls finish.
+
+### Known limits
+
+- Not verified against GitHub yet: that a `skipped` check leaves a pull request `clean`, and that `mergeable_state` reads the newest run of a check name.
+  The first waiver in production shows both; if GitHub keeps the old failure, the pull request stays `unstable` and the record waits.
+- A stamped `skipped` check stays if the record later ends with the pull request still open; closing the pull request is the remedy.
+- The accept path's ledger write is leased on the ledger blob, not on `main`'s head, so a concurrent push to `main` can make the write retry.
+  The Worker re-reads `main` before every write.
+- The accept path was tested against a GitHub stand-in only; its first production use is the check.
+- The waiver cannot tell a human-written `.nemar/` file from an enrichment file on a re-pull's branch, because commit identities are forgeable and the push sender is not recorded.
+  The identifier screen, the BIDS check, the administrator's confirmation and push access to the branch are the mitigations; whether to add a filename allowlist is the owner's decision.
+- An administrator-origin record whose waiver was abandoned after five tries, or never had a stored row, needs `nemar admin pr-reviews start` by hand.
+- A re-pull the automatic path opened and that is merged with GitHub's button stays at `merged`, and no command moves it on: the Worker's own merge carries the trailers, so only the button can cause it, and the acceptance is refused for it (`accept-automatic`).
+  Only the administrator who opened a re-pull can accept its merge (`accept-not-yours`).
+- A plan made before its record exists changes digest once the record is created, because creating it writes the version row's lineage and the plan's `from_tag_basis` then reads `version-row`; a `resume` with the original plan stops as `plan-stale`, and the way on is `abandon`, a fresh `plan`, then `execute` (#1994, open).
+- The phrase search's calibration truth sets read the same fields the cross-encoder reads, so its benchmark favors the cross-encoder; the held-out gap is the part that does not.
+
+## 0.10.26 - 2026-10-28
+
+An OpenNeuro mirror can be moved to a newer upstream snapshot as its next major version, through a reviewed pull request that an administrator drives by hand or, once the owner turns it on, the automatic path drives (epic #1046; Architecture Decision Record (ADR) 0111).
+The release has four migrations, 0104, 0105, 0106 and 0112, each of which adds a column, a table or an index and drops nothing.
+It sets no Worker variable or secret: the four re-pull switches and caps are absent from the wrangler configuration, so the automatic path is off unless a Worker secret of the same name turns it on (`GET /admin/repulls/switches` reports what the Worker reads).
+
+### Changed
+
+- **Phase 2 (#1908): every version records the upstream snapshot it mirrors.**
+  `dataset_versions` gains `source_version` (the OpenNeuro tag) and `source_version_basis` (`doi`, `lineage` or `unknown`; both NULL means never examined).
+  Each version insert of an `on` dataset reads the tagged `dataset_description.json` once through the raw content delivery network (CDN), under a time bound, and records the snapshot; a failed read leaves the row unexamined and never fails the insert.
+  One parser, `sourceSnapshotOf`, reads the dataset's own `SourceDatasets` entry; signals that disagree give `unknown`, and a tag is never guessed.
+  `nemar admin upstream-backfill` records it for versions published before the columns (a dry run unless `--execute`); it writes `unknown` for a missing file only after a control read proves the 404 is about the tag and not the credential.
+- **Phase 3 (#1909): an import is pinned to an upstream snapshot tag, never the mirror's default HEAD (ADR 0111 decision 10).**
+  The auto-import dispatches the tag discovery found (`client_payload.openneuro_tag`, also in its `auto_import_dispatch` audit row), `nemar admin import-openneuro --tag <tag>` names one for a single dataset, and with neither, prepare asks OpenNeuro's GraphQL for `latestSnapshot.tag` when it runs, which is what a retry gets: the retry engine dispatches no tag.
+  The clone's branch is reset to `refs/tags/<tag>` before anything else happens.
+  When an explicit tag is not OpenNeuro's latest, prepare warns: the import's copy still takes the object currently at each upstream path (a re-pull's copy pins the object version).
+  A tag not yet on the GitHub mirror, or a latest tag OpenNeuro cannot name, refuses with `[openneuro-mirror-lag]` before the dataset record is created.
+  The classifier calls it `mirror_lag`; recovery quarantines it as `mirror_lag` rather than `not_found_dataset`, sends no mail and files no issue; the retry engine retries it and, once its 14-day window has passed, parks it as `mirror_lag` and files its one admin issue.
+  A re-import of a released mirror whose upstream moved refuses with `[openneuro-upstream-moved]` before any reset, Simple Storage Service (S3) setup or push (#993); moving a released mirror is a re-pull's job.
+  The tag `origin/main` records is read from its `SourceDatasets` entries naming the dataset's own `ds` (their `Version`, Digital Object Identifier (DOI) or uniform resource locator (URL), never NEMAR's top-level `Version`).
+  The refusal names `nemar admin repull plan <id>` and the repair that passes the guard, `nemar admin import-openneuro <ds> --tag <recorded tag>`.
+  An unreleased import is moved to the new tag instead, as a fast-forward of `origin/main` (`git reset --soft`), which drops `.github/` until finalize deploys it again; it is refused instead when origin's privacy ledger holds a recorded correction (ADR 0085), or an import scrub that changed git, whose originals origin's history still holds (ADR 0089).
+  An unrecorded tag, or the same one, takes the same-version hard reset as before, and an unreadable or missing record is printed as a warning, because the guard cannot fire then.
+  An origin whose `main` cannot be fetched now stops prepare instead of reading as a first import.
+  The #1320 preflight compares the bucket's `annex-uuid` with the `nemar-s3` uuids the git-annex branch records, before the remote is configured, and refuses a disagreement with `[nemar-annex-uuid-conflict]`, both uuids and the recovery that fits.
+  When the comparison is incomplete (Step 4b failed, git cannot read the branch, the bucket cannot be asked, or origin's git-annex branch records no `nemar-s3`), it warns and configures the remote as before.
+  Recovery has no rule for `upstream_moved` or `annex_uuid_conflict`, so a failure usually quarantines the row by the dataset's state first; the retry engine's park, in both wordings of the annex conflict, is the backstop for a `failed` or `incomplete` row that carries one, and an operator restarts a parked annex conflict by hand after fixing the bucket marker.
+  A refusal in a run that persists staging (the workflow's `--phase prepare`) clears the dataset's `staging/` prefix before it exits; the copy and finalize jobs still run under `if: !cancelled()`, and fail at once on the missing manifest instead of acting on one an earlier attempt left.
+  A refusal also removes a work directory the run created, never one named with `--dir`.
+  A first import, and a retargeted one, records the snapshot it mirrors as a `SourceDatasets` entry `{DOI: doi:10.18112/openneuro.<ds>.v<tag>, URL, Version: <tag>}`, all from the tag and kept in git; it is not written after a same-version hard reset, or when an entry already records a tag for the dataset, and an untagged entry naming the dataset alone is completed in place instead of joined by a second.
+  The tag is read with Phase 2's parser, `sourceSnapshotOf`, by the guard and by the record alike, and a record that parser would not read as the tag (an entry for the dataset carrying another tag or naming another dataset too, or a tag such as `2.1.0-rc1` that is not numeric) is not written; prepare warns instead.
+  DataCite gets one `IsDerivedFrom` for it, the DOI: the OpenNeuro page of the same dataset is not a second relation.
+  Publication no longer adds upstream's `DatasetDOI` as a second source when it is the same DOI spelled another way, or another version of a dataset an entry already names (the parser's `isOwnSourceEntry`), so the recorded tag never disagrees with itself.
+- **Phase 4 (#1910): which mirrors are behind upstream.**
+  `GET /admin/upstream-status` (read-only, admin-only) puts each managed mirror in one of eleven states (`current`, `stale_ready`, `mirror_lag`, `stale_unverified`, `anomaly`, `unknown`, `not_examined`, `unpublished`, `in_progress`, `parked`, `unchecked`); upstream's creation order decides which tag is newer, not the number, and `unknown` is never current and never stale.
+  `nemar admin upstream-status` walks it and exits 0 when nothing was unseen (stale is a finding, not a failure), 2 when the pass could not see, 1 when a request failed; `--measure` totals what a re-pull of each stale mirror would carry and estimates the DOI volume, and unknown is never counted as zero.
+  The Monday import report gains `## Upstream freshness`, counts only, with no dataset named.
+- **Phase 5 (#1911): `nemar admin repull plan <id>` plans a re-pull and writes nothing to the mirror, S3, D1 or the NEMAR Application Programming Interface (API).**
+  It writes a plan file (mode 0600, under `$NEMAR_CONFIG_DIR/repull/<id>/`) identified by a digest, and prints counts and that file's location, never a path, key or content of the dataset.
+  Exit 0 means executable, 3 that a plan was made and is not executable, 1 that nothing was planned.
+  The one exception to "writes nothing" is the central workflow's unattended run, `plan --automatic-dispatch` (Phase 7): it reports its dispatch to the Worker, which stores `started` and then `refused` or `failed` if the run ends so.
+  NEMAR's standard edits are recognized and re-applied as functions, never merged as text, and an unexplained path is a conflict or a correction.
+- **Phase 6 (#1912): an administrator takes a re-pull from its plan to a released version.**
+  A re-pull's state is a row of `upstream_repulls` (migration 0105; 17 states, one row per attempt, one open row per dataset), never `import_jobs`; outside production only `xx` datasets are re-pulled, and an anonymous dataset is refused with no override.
+  `nemar admin repull execute <plan-file>` prepares the delta (scrubbed on its own paths, before anything is copied), copies the objects it needs at their pinned S3 `versionId`, registers them, pushes `release/vN.0.0` and opens the pull request; it never merges.
+  `status` and `resume` take it on through the identifier screen, the gates, the release and the lock; the screen is bound to the row and the pull request's head (`upstream_repull_screens`, migration 0106) and its callback sends no mail.
+  `merge` goes through one gate, which `nemar admin pr-reviews` shares for a re-pull's pull request: it reads the record, the review, the screen and GitHub's `clean`, ends the squash message with the two trailers, and claims one unit of `REPULL_DAILY_MERGE_CAP` before it merges, because every merge mints one version DOI.
+  N.0.1 replays NEMAR's corrections after N.0.0 is merged and tagged (`--take-ours`, `--keep-upstream` for conflicts), `abandon` ends an open re-pull, `execute --supersede` replaces one for a newer tag, and `nemar admin exemplar create <xx> --source <on> --mirror <ds>` makes a staging rehearsal fixture.
+  `bun run scripts/repull-canary.ts` checks the copy's S3 calls against the real buckets (a dry run unless `--execute`); it is a script in a checkout, not a subcommand, since the epic cleanup (#1976) moved it out of the shipped command-line interface (CLI).
+- **Phase 7 (#1913): the automatic path, built and off.**
+  `AUTO_REPULL_ENABLED` and `AUTO_REPULL_MERGE_ENABLED` are on only as the exact string `"1"`, and only in production; `REPULL_DAILY_OPEN_CAP` (default 2) and `REPULL_DAILY_MERGE_CAP` (default 5) read 0 when set to anything but one or two digits no larger than 20.
+  `GET /admin/repulls/switches` reports what the Worker reads.
+  A daily scheduler, which runs in production at 03:00 Coordinated Universal Time (UTC), dispatches the central workflow `run-upstream-repull.yml` for `stale_ready` mirrors within the open cap, at most once per dataset in 30 days and not before the first two re-pulls were run by an administrator; a 30-minute tick holds, gates and resumes the pull requests it opened.
+  The unattended run plans once and hands the plan file to `execute` with a digest-checked handoff (the epic cleanup, #1976), opens the pull request as the GitHub App, `nemar-bot[bot]`, and never merges; its public log carries only counts and fixed words.
+  The Worker merges only a machine-clean re-pull pull request the automatic path opened (zero unexplained paths, a `clear` identifier screen, Brain Imaging Data Structure (BIDS) validation and `version-check` green, an ADR 0107 review of that head that passes, the head equal to the screened commit, GitHub `clean`, the merge cap not exhausted), approves nothing, and a finish run then takes the re-pull to `complete`.
+  An administrator may merge a re-pull they opened over a failed BIDS validation (`nemar admin repull merge --bids-failure-reason`, only while GitHub says `unstable` and no other check or status of the head fails); `resume` records the gates of such a pull request, which GitHub never reports `clean` while the validation fails.
+  The ADR 0107 review admits one bot's pull request, the App's automatic re-pull, and only when the Worker starts it.
+  The Monday report gains `## Upstream re-pulls`, `GET /admin/repulls/dispatches` lists the dispatches, and `nemar admin repull auto` shows the switches, the scheduler, the open automatic re-pulls (filtered by origin since the epic cleanup, #1976) and the recent dispatches.
+  The dispatch record is migration 0112, numbered after `dev` took 0111 (the epic cleanup, #1976).
+- **Phase 8 (#1914): documentation, the website contract and the typed field.**
+  The public pages `platform/doi-and-versioning`, `platform/data-api` and `cli/guides/versioning` describe mirror versions and the `mirror` flag, and three gated runbooks cover freshness, the manual re-pull and the automatic path (the links are in `AGENTS.md` and `.context/README.md`).
+  ADR 0111 gains its final amendment, and `dataPlaneVersionListingSchema` in `shared/contract/data-plane.ts` types `mirror` as an optional boolean that may be `null`, so a listing whose `mirror` is any other value fails the CLI's read.
+- **Carried from `dev` by the epic's two syncs (#1979, #1981).**
+  The GitHub App is `nemar-bot`, renamed from `nemar-publish-bot` (#1975); #1979 follows the rename in the epic, and the checks compare the numeric id as well as the login.
+  A dataset held on an authenticated data host can be read with the CLI's own git-annex special remote, `git-annex-remote-nemar`, and its credential helper, `nemar auth git-credential`, and the API key goes only to origins on the CLI's own list (#1978; ADR 0114 is still proposed, so this ships ahead of its acceptance).
+  `nemar dataset clone` also asks each listed data host when a signed-in user's lookup answers 404 or 400, and `--host` names the one host to read from. ADR 0107, which other entries here rely on, is also proposed.
+
+### Production behavior changes
+
+- **Every version in the data plane's landing JavaScript Object Notation (JSON) and the page bundle's `landing.data.versions` carries `mirror`:** `true` for an N.0.0 of an `on` dataset whose upstream tag is recorded, `false` for every other dataset and version, `null` for an N.0.0 of an `on` dataset whose tag is unknown or not yet examined.
+  The tag itself is not on the public wire.
+  `GET /datasets/:id/versions` (owner, collaborators, administrators) also carries `source_version` and `source_version_basis`.
+- **`nemar dataset release` and `nemar dataset update --bump major` refuse a major version of a mirror** (an `on` id, or a row recorded as an OpenNeuro import), exit 1 before anything is cloned, and point at `nemar admin repull plan`.
+  The rule is the CLI's only; the dataset repositories' `version-check` workflow is unchanged (ADR 0020).
+- **The Monday report asks for attention when the scheduler waits for gate G4.**
+  With the open switch on and the scheduler's last tick concluded `waiting-for-manual-run` (the first two re-pulls are not both run by hand to `complete`), the headline and `nemar admin import-weekly` name it as a reason, because a switch turned on early would otherwise change nothing and say nothing.
+  With the switch off the section stays quiet.
+- **Production ignores `OPENNEURO_GRAPHQL_URL`, unless it is a loopback `http` URL.**
+  The staleness reader behind the report, the scheduler and `GET /admin/upstream-status` posts to OpenNeuro's own endpoint in production and in an unknown environment, whatever the binding says, a Worker secret of the same name included.
+  Development, staging and test honor the binding.
+  A loopback `http` address (`127.0.0.1`, `localhost`, `[::1]`) is honored everywhere: the test suites that run the production-only scheduler against a local stand-in use it, and a deployed Worker cannot reach one.
+  `https`, and every other protocol, on a loopback host is refused.
+- **`nemar admin pr-reviews approve --merge` exits 3 while a claim to merge is held.**
+  A lost answer, or a merge GitHub did not make, keeps the claim and exits with the waiting code, as `nemar admin repull merge` does, so the same run again or `nemar admin repull resume` settles it.
+  A refusal with no claim held exits 1.
+- **A re-pull refuses a malformed bucket, region, dataset id, tag, version or commit id where it reads one.**
+  The bucket and datacenter `remote.log` names for `nemar-s3` must be an S3 bucket name and an AWS region: `nemar admin repull plan` refuses (exit 1), `execute` and the release refuse as `nemar-s3-invalid`, and neither the annex-uuid read nor the bucket listing builds a host from one.
+  A plan's dataset ids, tags, versions and its three commit ids must have the shape execution builds a URL, a ref, a branch name or an argument of git from, or `execute` refuses as `plan-schema`.
+  The words name the field and the shape, never the value.
+- **The staleness report and `nemar admin upstream-backfill` read version rows spelled `vN.N.N`.**
+  The report used to ignore them: a mirror whose rows carry the `v` read as unpublished, so it was never compared or dispatched, and a newer `v` row lost to an older bare one.
+  Both spellings are now read together and by number, and the version comes back bare.
+  `nemar admin upstream-backfill --execute` therefore writes more rows than before, the ones spelled `vN.N.N`, each recorded on its own spelling (a dry run, the default, writes nothing).
+  There is no migration, and no recorded value is rewritten.
+- Imports that used to clone HEAD now clone the latest tag. On OpenNeuro's mirrors HEAD and the latest tag normally name the same commit, so most imports are unchanged; a dataset whose mirror carries commits past its latest snapshot is imported at the snapshot.
+- A re-import of a released mirror whose `origin/main` records a tag, and whose upstream published a newer one, used to keep the old tree while copying the new tag's data (#993); it now refuses and parks. An unrecorded tag still takes the hard reset.
+- The Monday import report gains `## Upstream freshness` and `## Upstream re-pulls`, and `nemar admin import-weekly` prints both.
+  Against a Worker that predates this release the command prints them as unknown and exits 1.
+- The production daily tick runs the re-pull scheduler and the dispatch watchdog, and the 30-minute tick runs the advance tick.
+  While the switches are absent they dispatch, advance and merge nothing; they only stamp their own rows.
+- New tracking-issue labels `mirror-lag` and `upstream-moved` on `nemarDatasets/.github`; GitHub creates a label the first time an issue carries it.
+- **The publication Object Lock step reads a 403 back before it counts an object as locked.**
+  A 403 from the retention write used to count as already locked, with no read-back.
+  Now the object's retention is read with `GetObjectRetention`, and the object counts as locked only under GOVERNANCE or COMPLIANCE retention at least 50 years out; any other answer fails the step.
+  The production Worker's identity holds `s3:GetObjectRetention`, so an object that is already locked still passes.
+- **Deleting a dataset also deletes its re-pull records.**
+  `deleteDatasetCascade` removes the dataset's re-pull rows, their screens and their dispatches, so a dataset deleted and re-created under the same id is not blocked by a stale open re-pull, and its re-pull history goes with it.
+  Those rows are also the ledger that the daily open and merge caps, the 30-day spacing and gate G4 are read from, so a delete gives back that UTC day's cap units and resets the spacing; deleting `on003645` or `on004362` returns the scheduler to `waiting-for-manual-run`.
+- **`nemar admin upstream-status --measure` estimates the days to re-pull every stale mirror at the open cap the Worker reports.**
+  When the Worker reports its cap as unreadable (a malformed `REPULL_DAILY_OPEN_CAP`), it opens no automatic re-pull, so any catch-up never finishes until the binding is fixed; a cap of 0 set on purpose gives the same answer.
+  Either way `--json` gives `catch_up_days: null` for such a catch-up.
+  Only when the Worker's reading cannot be used (the call fails, or the answer does not parse) does the estimate use the default cap of 2, and it says so, with a warning on stderr.
+
+### Deploy coupling
+
+- The migrations are applied by the release's deploy; 0112 also seeds the scheduler's one row.
+- `run-upstream-repull.yml` is authored at `.github/dataset-workflows/run-upstream-repull.yml`, and its byte-identical copy is on `main` of `nemarDatasets/.github` (`nemarDatasets/.github#148`, merged first; #1980 here makes the `unit-pure` tier compare the two).
+  It runs only on a `repository_dispatch` of the type `run-upstream-repull`, which only the automatic path sends, so merging it turned nothing on.
+- The onboard workflow change (`openneuro_tag`) shipped in 0.10.24 (#1933), with its copy in `nemarDatasets/.github`.
+  `nemar admin import-openneuro --tag` in dispatch mode sends `openneuro_tag`, which an older workflow answers with 422; it is inert with an older Worker, and with an older CLI the workflow passes `--tag` only when the installed CLI's help lists it.
+- The documentation pull requests (`nemarOrg/docs#90` and `#92`) merged before this release; the pages they add describe what the release carries.
+- The `mirror` field reads `null` for every `on` N.0.0 whose snapshot is not recorded until `nemar admin upstream-backfill --execute` has run, and the website shows no chip for a `null`; the backfill runs after the deploy and the website is promoted after the backfill.
+- No order is required between the Worker and the npm release for imports: a CLI released before its Worker refuses a mirror lag that the older Worker quarantines as `not_found_dataset` with a mail and an issue, and the new Worker's retry query keys on the marker in `last_error`, which recovery keeps, so it picks those rows up once deployed.
+- The jobs of one workflow run install the CLI independently; mixing versions inside a run is harmless, because only prepare changed.
+
+### Owner steps after release
+
+None of these is done by the release.
+The runbooks are [freshness](https://docs.nemar.org/admin/operations/upstream-freshness/), [manual re-pull](https://docs.nemar.org/admin/operations/upstream-repull/) and [automatic re-pull](https://docs.nemar.org/admin/operations/upstream-repull-automatic/).
+
+1. Run `nemar admin upstream-backfill` (the dry run), then `--execute`, then `nemar admin upstream-status` (freshness).
+2. Promote the website after the backfill, by the website's own release procedure.
+3. Run the canary, then make a dry-run plan for `on004362` and `on003645` and review the counts (manual re-pull).
+4. Re-pull those two by hand, either first as upstream's snapshots allow, and read the new version DOI's record: which relation it carries is not known until then (ADR 0111, Amendment 2026-10-27).
+5. In a reviewed change to `backend/wrangler-sccn.toml` that also edits `backend/test/repull-switches-flag.test.ts`, turn on opening only (`AUTO_REPULL_ENABLED = "1"`, `REPULL_DAILY_OPEN_CAP = "1"`), read the first run's public log, then turn on merging (`AUTO_REPULL_MERGE_ENABLED = "1"`, `REPULL_DAILY_MERGE_CAP = "1"`), then set the caps from `nemar admin upstream-status --measure` (automatic re-pull).
+
+### Known limits
+
+- The manual-major refusal is the CLI's only; a major merged outside the CLI is not stopped.
+- A mirror's recorded tag that upstream later re-creates under the same name is not detected: the staleness report compares tags, and a plan to the mirrored tag is refused as `nothing-to-pull` before any tree of upstream is compared.
+  A target tag re-created after a plan has read it is caught: `execute` refuses with `upstream-tag-moved` before the copy, the registration and the pull request, and the record has to be ended with `abandon` and the dataset planned again.
+- Most mirror repositories have no branch protection or ruleset (16 of 21 sampled on 2026-10-24), so GitHub's `clean` proves no check ran on them; the Worker reads the two checks itself.
+- The merge cap binds NEMAR's tools, not the GitHub merge button.
+- The Worker's merge has no staging rehearsal, because outside production only `xx` datasets are re-pulled and the Worker never merges one.
+  Only the first production merge, under a cap of 1, shows whether the App's token reads `mergeable_state` as an administrator does and whether the dataset workflows tag the App's squash.
+- ADR 0107's review may never pass a re-pull diff; until one passes, an administrator merges each re-pull.
+- A re-pull with corrections mints two version DOIs, N.0.0 and N.0.1.
+- The ADR 0111 amendment of 2026-10-27 lists, under "Not yet verified", what only the canary, the first two re-pulls, the first unattended run, the first Worker merge and the release with its first weeks can show.
+
+## 0.10.25 - 2026-10-26
+
+Production sends its mail through the Cloudflare Email Service, and inbound support mail is screened before it reaches anyone (epic #1893).
+This release has one migration, 0111: two `ADD COLUMN`s with safe defaults (`mail_tickets.filtered`, `mail_queues.notify`), a new `mail_blocklist` table, an index on `mail_messages (from_addr, created_at)`, and a rebuild of the leaf table `mail_ticket_events` to allow the `unfiltered` event kind, in the same shape as 0107's rebuild.
+It sets no new Worker secret.
+The production Worker configuration sets `EMAIL_PROVIDER` to `cloudflare`, `EMAIL_FALLBACK` to `resend` and `MAIL_SENDER_HOURLY_CAP` to `20`.
+
+### Changed
+
+- **Production mail goes out through the Cloudflare binding (ADR 0110, #1966).**
+  Sign-in codes, account mail and ticket replies are sent from `noreply@` and `support@nemar.org` by Cloudflare.
+  A refusal for a quota or account-level reason is retried once through Resend; any other refusal is final, so a sign-in code is never sent twice.
+
+### Added
+
+- **Inbound mail is screened (ADR 0113, #1968).**
+  A blocked sender, by address or by domain, is refused at delivery and never stored; a domain block is refused for our own domains, public suffixes and large shared mail providers, and a failed blocklist lookup accepts the mail.
+  Bulk mail, mailing lists, automatic replies and bounces are filed as filtered tickets: stored and listed on request, never assigned and never announced, until a person works the ticket or the requester writes back.
+  More than `MAIL_SENDER_HOURLY_CAP` messages an hour from one address are filed the same way, counted separately for mail that passed DMARC and mail that did not, so forged mail cannot silence a real sender.
+  A queue can be made quiet, which stops its new-ticket notices; escalation notices still go out.
+- **`nemar admin mail spam <id>` and `nemar admin mail blocklist`.**
+  Marking a ticket as spam can block its sender, but only when the sender passed DMARC; an address block for an unverified sender needs `--force`, and a domain block for one is refused.
+  `nemar admin mail queues set <tag> --notify <bool>` and the `--filtered` list option are new.
+
+## 0.10.24 - 2026-10-26
+
+NEMAR mail moves onto the Cloudflare Email Service in code, and the platform gains support tickets and `nemar admin mail`; production keeps sending through Resend (epic #1893).
+This release has eight migrations, 0100, 0101, 0102, 0103, 0107, 0108, 0109 and 0110, all on new tables or additive (`CREATE ... IF NOT EXISTS` or `ADD COLUMN` with defaults); 0107's backfill and 0109's rebuild touch only `mail_tickets`, which this release creates, so they run on empty tables in production.
+It sets no new Worker secret.
+The production Worker configuration adds a `send_email` binding restricted to `noreply@` and `support@nemar.org`, a `MAIL_INBOUND` R2 bucket binding, the `EMAIL_OUTBOX` queue producer, consumers for the outbox and events queues with a dead-letter queue each, and the variable `MAIL_RETENTION_DAYS` (`730`); it does not set `EMAIL_PROVIDER`, and `REPLY_TO` changes to `support@nemar.org`.
+The queues, the bucket and the sending onboarding of the domain have to exist before the deploy, or it fails on a missing resource; they were created and checked before this release.
+One workflow changes: `onboard-openneuro.yml` gains an optional input, and it is deployed by copying it into `nemarDatasets/.github` (ADR 0020), and the copy there already matches this one byte for byte, which the parity test checks.
+The dataset CI shims change in the backend template and reach a dataset repository only when that repository's workflows are next synced.
+
+### Added
+
+- **Sending selects its provider with `EMAIL_PROVIDER`, and a refusal can fall back to Resend (ADR 0110, Phases 1 and 2a).**
+  `EMAIL_PROVIDER=cloudflare` sends through the `send_email` binding; unset, empty or `resend` is Resend, so production, which sets nothing, is unchanged.
+  Any other value, and `cloudflare` with no binding, is a configuration error that sends nothing and never falls back.
+  With `EMAIL_FALLBACK=resend` and a Resend key set, a send falls back to Resend once, only when Cloudflare refuses with a code that certainly sent nothing and that Resend can answer (`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`, `E_ACCOUNT_SUSPENDED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`).
+  A suppressed recipient, a validation or delivery error, a timeout and an internal or unknown error never fall back.
+  Staging sends from `test.nemar.org` through the binding, never sets `EMAIL_FALLBACK`, and so cannot reach Resend; the delivery fence of the development Worker runs before either provider.
+- **Announcements go through a queue when Cloudflare is the provider (Phase 2b).**
+  `nemar admin notify` records the broadcast as `queued` and enqueues one message per allowed, de-duplicated recipient on the outbox queue, which the same Worker consumes.
+  A redelivered message is never re-sent or counted twice (`broadcast_outcomes`, migration 0100).
+  A rate or daily limit retries with a growing delay, other certain non-delivery is a failure with the address redacted, and anything that may have been accepted is counted unknown and never retried.
+  `GET /admin/notify/:id` and `nemar admin notify --status <id>` read the counts, and a partial enqueue answers 200 with `queue_enqueue_failed`.
+- **Bounces and complaints are stored (Phase 2c).**
+  Cloudflare publishes `message.bounced` and `message.complained` for each sending domain to the events queue; the Worker stores them in `email_delivery_events` (migration 0101, one row per event id, no subject, the SMTP response clamped) and prunes rows after 180 days.
+- **Inbound mail is kept in R2 and filed as a support ticket in D1 (ADR 0111 and ADR 0112, Phase 3a).**
+  The raw message is stored in `MAIL_INBOUND`, parsed with `postal-mime` and filed in the tables of migration 0102.
+  A reply threads onto its ticket by the `support+t...@` address, then by `In-Reply-To` and `References`, and reopens a closed or pending ticket; tags come from the recipient's local part and plus tag.
+  Queues are `*` (the default, seeded to the `nemarAdmin` account) and the restricted `security` and `conduct`, which are never assigned automatically and are visible to owners only; a ticket hidden from an administrator answers 404 on every route, counts included.
+  Assignment is `fixed`, `round_robin` or `pool` per queue, with away windows and an optional backup.
+  A message that fails sender authentication, or has no passing result, becomes its own spam ticket: never threaded, assigned or notified, and never linked to an account.
+  A failure after the raw copy is stored keeps the copy and logs one redacted line, and a raw key can be rebuilt idempotently.
+  Demotion, revocation and soft delete release the person's open tickets, away setting and queue references in the same batch.
+  No mail is auto-answered, and ticket notices go only to owners and administrators who have the new `support_tickets` notification preference on.
+- **A ticket admin API under `/admin/mail` (Phase 3b).**
+  It lists tickets (filters, keyset paging) and shows one, and replies, adds a note, assigns, sets status and escalates; it also serves `/admin/mail/queues`, `/admin/mail/availability` and `/admin/mail/reprocess`.
+  A reply is sent from `support@` with reply-to `support+t<ref>@` and carries `In-Reply-To` and `References`.
+  An optional `Idempotency-Key` on a reply returns the first outcome of a retried reply instead of sending twice, and an unknown outcome is never re-sent; a note takes the same key, stored once and replayed (#1945; keys in migration 0108, separate from reply keys in 0103).
+  Migration 0103 also adds an escalation owner per queue, who must be an owner and is cleared by every revocation path.
+- **`nemar admin mail` works tickets from the command line (Phase 4, #1940).**
+  Subcommands are `list`, `show`, `reply`, `note`, `assign`, `status`, `close`, `escalate`, `queues` (list and set), `away` (show, set, clear), `reprocess` and `summarize`; `--json` is available on each, with the API body on stdout and `{error, code}` on stderr.
+  `reply` and `note` always send an `Idempotency-Key`, print it before sending, and after a lost or uncertain send say to retry with it; a reply with no terminal and no `--yes` is refused and sends nothing.
+  Exit codes are 0 for success, 1 for an API or network error, 2 for a usage error or a refused confirmation, 3 for a ticket that is not found or not visible, and 4 for an action the caller is not permitted to take.
+  Users may be named as `me`, `none`, an id or a username.
+  Ticket text comes from outside, so human output escapes every control and bidirectional character except newlines and tabs; `--json` stays verbatim.
+- **Unread tickets are tracked per administrator.**
+  A ticket is unread for an administrator when it has an incoming message newer than that administrator's marker, or no marker exists and it has any incoming message; replies and notes never make a ticket unread.
+  Migration 0110 adds `mail_ticket_reads`, which the release cascade clears; the list carries `unread` for each ticket, `nemar admin mail list` shows it in a NEW column, and `GET /admin/mail/unread-count` counts the unread tickets the caller can see that are not closed or spam.
+- **`nemar admin pr-reviews start` takes `--redo` and `--concurrency` (#1922, #1929).**
+  `--redo` starts a commit whose review already has a result again, or with `--all` every open pull request whose current commit has a finished review; a running review is never superseded, and a blocked contributor's finished review is left alone (`contributor_paused`).
+  A redo is a second run of up to two model calls, which the help and the `--all` question state.
+  `--concurrency <n>` keeps at most `n` of the started reviews in progress at once, as a sliding window, because every review reserves its whole output budget against the workspace's rate limit when it begins.
+  Ctrl-C stops an `--all` run after the request in flight, lists the pull requests never started and exits 130.
+- **`onboard-openneuro.yml` takes an optional `openneuro_tag` (#1933).**
+  The import is pinned to that upstream snapshot tag; `parse-ids` validates it and refuses it with more than one id, and `prepare` passes `--tag` only when the installed CLI's help lists it, so an older CLI imports as before with a warning.
+
+### Changed
+
+- **A ticket is kept for 730 days in production and 30 on staging, then reduced to a summary (Phase 6a, #1944).**
+  `PUT /admin/mail/tickets/:id/summary` and `nemar admin mail summarize` write a summary, and `list --needs-summary` finds closed tickets without one; the Worker never calls a model, restricted tickets are never shown to one, and a summary containing an email address is refused (`summary_has_address`).
+  A daily job, driven by `MAIL_RETENTION_DAYS` (missing or invalid deletes nothing), removes the messages, reply and note keys, non-queue tags, event details, subject, and the requester's address and account link of each ticket whose last message is older than the period.
+  It keeps the id, queue, status, dates, summary and a conduct exclusion, closes active tickets, leaves spam as spam, never sends mail and never touches R2.
+  The raw copies in R2 expire on the bucket's own lifecycle rule (730 days in production, 30 on staging), which matches the period.
+  After a purge an action on the ticket answers 409 `ticket_purged`, a purged ticket's raw key cannot be reprocessed back into existence, and mail to its plus address opens a new ticket.
+  The job joins the development cron allowlist and touches only that environment's own mail tables.
+- **Tickets get three-word references, and reply errors no longer use 502 (#1952).**
+  New tickets are named from the Electronic Frontier Foundation's short word list (`amber-falcon-river`) with the plus tag `support+t-<ref>@`; the earlier ten-character references keep working and are not rewritten (migration 0109 rebuilds `mail_tickets` so it accepts both, preserving every row and child row).
+  Cloudflare treats `Message-ID` as its own, so a reply now sends only `In-Reply-To` and `References`, and the provider's id is stored only when it is a valid message id.
+  `reply_not_sent` is now 422, `reply_delivery_unknown` is 409 and `inbound_not_configured` is 409, so the website's proxy keeps the JSON body; clients decide by `code`, and `ReplyResponse.header_message_id` may be `null`.
+- **The dataset CI shims `bids-validation.yml` and `version-check.yml` run on `pull_request_target` (#1784, #1947).**
+  A pull request from a fork got no secrets under `pull_request`, so the central validation was never dispatched and the check showed red.
+  The job checks out and runs nothing from the pull request; it passes four checked fields to `nemarDatasets/.github` through `env`, where before a branch name was written into the script, and it checks the dataset id, the head sha and the pull request number before calling `gh`.
+  Tests pin the safety properties, and ADR 0020 is amended; the change reaches a dataset repository only through the template sync, and until then its trigger is unchanged.
+- **Continuous integration is faster.**
+  `unit-pure` runs as six shards behind a gate that keeps the required check name and proves every classified file ran, and the migrated test database is built once per process.
+  This changes only CI, not the product.
+- **The staging test-account sweep also removes generated accounts with an open upload-access request, in batches of 300.**
+  An account with granted upload access is still not swept; the sweep runs in non-production environments only.
+
+### Fixed
+
+- **The live test suites delete the accounts they seed.**
+  They left them behind for the daily sweep to find.
+
+### Production behavior changes
+
+- **Reply-To on account mail becomes `support@nemar.org`.**
+  Until the receiving cutover, that address reaches the same inbox as before through the existing catch-all.
+- **No mail is turned into a ticket in production until the receiving cutover.**
+  No routing rule targets the production Worker yet, so its `email()` handler is inert, and the new tables stay empty.
+- **Sending stays on Resend.**
+  The Cloudflare path is deployed but off in production; stored bounce and complaint events will be few or none until it is switched on.
+- **The daily retention job runs and finds nothing to purge.**
+
+### Not in this release
+
+- The production sending switch to Cloudflare (#1895) waits on the sending-limit increase and a soak on staging.
+- The receiving cutover (#1899) and retiring Resend (#1900) follow separately.
+- The website's Mail tab ships in the website's own release.
+
+## 0.10.23 - 2026-10-23
+
+The dataset pull request review now reads a large change as an exact summary the platform computes, and protects what the original authors published.
+This release has no migration, sets no new Worker secret or variable, and changes no workflow or Worker configuration; the review check is still not required (`PR_REVIEW_AUTO_REQUIRE` stays unset).
+The review scripts run from `main`, so reviews dispatched after the merge run the new scripts while the Worker deploys; the Worker's only change is rendering one paragraph, and an older Worker renders the same reports without it.
+The review prompt changed and the model calibration of ADR 0107 on the new prompt is not done; that is acceptable only while the check is not required.
+
+### Changed
+
+- **A modified table or sidecar counts as read when an exact change summary accounts for it (epic #1851, Part A).**
+  The summary parses tables and JSON documents strictly, pairs rows, keys and renames by exact rules, and reports what changed as a few classes with counts, so a bulk pull request such as 125 tables with one edit no longer fills the model's context with 114 diffs.
+  The model reads the summary beside the diffs it still needs, and a file counts as read only when every class in it that is not additive was shown completely.
+  An unrelocated or unkept removal (rows, columns with values, or keys with values that the pull request keeps nowhere else) is a platform blocker on `no_degradation`, placed first in the findings; it can only lower a verdict, and a model cannot raise it.
+- **The review protects what the original authors published (Part B).**
+  A README or CHANGES line altered beyond a minor edit, moved or removed, a line put inside an original paragraph, an author-owned `dataset_description.json` field altered or removed, or a participant value changed fails `no_degradation`, with the codes `original_text_altered` and `original_field_altered` that 0.10.22 made the Worker accept.
+  A replaced recording, a comparison that could not be made and an abandoned pass are `unknown` (`recording_replaced`, `evidence_incomplete`), never clean.
+  Minor edits, text added after the dataset's first version, line endings, added fields and moved pointers are information for the model.
+  The README is compared with the one at the dataset's first version tag (one `git ls-remote --tags origin` per review of a pull request that changes a README); when the lookup fails, finds no tag or finds no ancestor tag, every line at the merge base is protected.
+  The check shows one paragraph under the findings of a report that has one of the two failing codes: contributors add to what the original authors published, describe the change in CHANGES, put new information in a new section, and ask an administrator to correct what the authors wrote.
+- **The review prompt gained the change summary and the `original_content` facts.**
+  The system prompt grows by about 4,000 characters, the longest message stays under the 300,000-character cap, and the model, effort and token ceilings are unchanged.
+
+### Production behavior changes
+
+- **The check of an open pull request changes the next time it is reviewed**, on a push, an edit, a reopen, a ready-for-review or an administrator start; nothing changes retroactively.
+  Of the 129 dataset pull requests open on 2026-10-23, 107 are on public datasets, the only ones the Worker dispatches: measured with the real tag lookup, 79 read clear, 20 fail (three of them the platform account's own `Name` changes, which the Worker exempts), 5 are `unknown` only and 3 carry information.
+  Merging a pull request that fails needs an administrator's `--force` in `nemar admin pr-reviews`, as for any failing review.
+- **Contributors who rewrite original content now read "Needs changes".**
+  An author who reworded or expanded original README lines, edited a participant value or changed a dataset name sees the failing finding and the paragraph above on the check.
+
+### Not in this release
+
+- The 400-name cut (#1861) and the small evidence additions (#1862) follow separately.
+- The calibration tool cannot fetch private datasets online (#1884), the unit-pure job flakes on 5-second timeouts of unrelated backend tests (#1885), CI lint covers only `src/` (#1890), and two GitHub-view-only gaps of the hiding tripwire (#1883) are filed.
+
+## 0.10.22 - 2026-10-21
+
+The Worker's report parser now accepts three finding codes that nothing emits yet.
+This release has no migration and sets no new Worker secret or variable.
+It moves the Brain Imaging Data Structure (BIDS) validator from 2.4.1 to 3.0.2, which changes one dataset's publication gate verdict; see Production behavior changes below before releasing.
+
+### Changed
+
+- **The review report accepts `original_text_altered`, `original_field_altered` and `recording_replaced` (epic #1851, S0).**
+  They are for the rules on what a contributor may change of the original authors' content, which a later release adds.
+  The review script runs from `main` as soon as a release lands while the Worker deploys separately, so a script that emitted a code the Worker did not know would have its report refused as `report_invalid`.
+  The codes are therefore accepted, labeled for the check ("Original text changed", "Original field changed", "Recorded data changed") and kept out of the codes the review model is offered, one release before anything emits them.
+
+- **The BIDS validator is pinned at 3.0.2, and a monthly pull request moves the pin to the newest stable release (issue #1036).**
+  The pin was 2.4.1, and the bump workflow selected only the 2.x line, so the pin could not move to 3.x by itself.
+  The bump runs on the first day of each month, selects the newest stable release of any major version from the JavaScript Registry (JSR) metadata, skips yanked and prerelease versions, and runs the reference-dataset comparison before it opens its pull request.
+  If the comparison is incomplete, the bump fails rather than opening a pull request, and the comparison is kept as a run artifact.
+- **Every validation report names the validator release that produced it.**
+  `nemar dataset validate` prints `Validator: @bids/validator <version>` after the validator's own text report, and adds a top-level `validatorVersion` key to the `--json` report.
+  A report written with `--outfile` names the release in the same way: the key in a `--json` file, or a final `Validator:` line in a text file.
+- **A validator run that fails is reported as a failure.**
+  An exit other than 0 (valid) or 16 (errors found) is a failed run: `nemar dataset validate` shows the validator's own message and exits with its code.
+  A report without a list of issues is refused rather than read as clean.
+  The message for a failed run is written to stderr, not stdout, so a script that reads only stdout sees no error text.
+
+### Production behavior changes
+
+- **One dataset's publication gate verdict changes under 3.0.2.**
+  The comparison covered 1,091 of the 1,093 datasets in the nemarDatasets organization. `nm000255` and `nm000256` crash under both releases, so neither could be compared.
+  `on008837` passes under 2.4.1 and fails under 3.0.2 with 38 HED `SIDECAR_INVALID` errors: its events sidecar has a top-level `HED` key that holds a column description, which 3.0.2 rejects and 2.4.1 accepts.
+  Its next validation refuses it until its sidecar is fixed or the rule is judged wrong.
+  `on003004` already fails the gate and gains one HED error (`SCHEMA_LOAD_FAILED`): its events files have a HED column whose values are all `n/a`, with no HED version declared, and 3.0.2 requires a schema for that column.
+  No other dataset's gating errors change.
+- **Real git-annex links are read the same by both releases.**
+  A link to a git-annex key, the layout real datasets have, gives the same gating errors under 2.4.1 and 3.0.2, and so does a pointer file.
+  A link to no annex key is reported as broken, with its sidecar as orphaned, by 3.0.2 only. The comparison carries that layout as a detector, not as a layout that exists.
+- **Under the upload preflight's flags, which keep warnings, 3.0.2 reports fewer warnings on six reference datasets.**
+  The six are `nm000189`, `xx099905`, and `nm000104` to `nm000107`. The other six reference datasets report the same number of warnings under both releases, and no warning gates.
+
+### Deploy coupling
+
+- **Pushes and pull requests validate with the pin in each dataset's shim until the shim is rewritten.**
+  The `bids-validation.yml` shim in each dataset repository sends the pinned release in its dispatch payload, and the central workflow in `nemarDatasets/.github` runs the release that the payload names.
+  Sampled repositories still sent 2.4.1 when this release was prepared, so until a fleet sync rewrites them, their pushes use 2.4.1.
+- **Revalidation uses the Worker's pin as soon as the Worker deploys.**
+  `POST /admin/datasets/:id/revalidate`, which `nemar admin fleet revalidate` calls, sends the Worker's pin directly, so it validates with 3.0.2 whatever a shim says.
+- **The browser validator is not part of this release.**
+  The in-browser validation planned in website#161 pins its own release, so it has to move to 3.0.2 on its side, with a check against this repository's `validator-version.json`.
+
+## 0.10.21 - 2026-10-20
+
+The dataset pull-request review is given the room to finish, and a bulk edit that repeats one change across files is read once.
+This release has no migration, sets no new Worker secret or variable, and leaves `PR_REVIEW_AUTO_REQUIRE` unset.
+The review workflow's `timeout-minutes` is 50 in `nemarDatasets/.github` and in the source copy here, and has to be merged there before this release reaches `main`: the new script runs from `main` at once, and a 28-minute job would be cancelled in the middle of a long review.
+
+### Changed
+
+- **The review stage may use 128,000 output tokens, and a review that still runs out tells the author to split the pull request (ADR 0107, amendment of 2026-10-20).**
+  On the first day of the shadow run seven of nine reviews on real pull requests ended `model_truncated` at 32,000 tokens, after about five minutes: the model's thinking at effort `max` filled the budget, not its input.
+  The review stage's `max_tokens` is now 128,000, the most `claude-sonnet-5-5` allows in one answer; the screen stays at 32,000.
+  The review's deadline is 30 minutes, the job's `timeout-minutes` is 50 and the Worker's `PR_REVIEW_DEADLINE_MINUTES` is 60, so a check can stay `running` for up to 50 minutes on a pull request that uses all its room, and the watchdog's wait for a review that never reported grows from 40 to 60 minutes.
+  A review that still uses all of its room is `action_required` as before, now titled "Could not decide: split this pull request", and tells the author that the review used all its room and to split the pull request into smaller ones.
+  A review costs up to about $1.28 of output, plus its input, when it uses the whole ceiling, and a pull request that truncates truncates again on each restart; the spend limit is the owner's to raise, and a bulk `pr-reviews start --all` reserves 128,000 output tokens per review against the workspace's per-minute limit.
+- **A change repeated across many files is read once.**
+  A changed metadata file whose diff is identical to one already shown, line for line and at the same lines, with the same mode, is counted on that diff and is not read again: it uses none of the file or character budget, and is covered by that diff when it was shown in full (a cut diff covers nothing).
+  Before this, a sidecar edit made the same way in every subject filled the 40-file budget and left the rest unread, so `no_degradation` could not pass.
+  The match is exact, so a change that differs in one byte, or names its own subject, is shown on its own, and a symlink or an executable is never one with a regular file; at most 500 files' diffs are examined, and, once the patches are full, the search stops early when the content pass is short of time, leaving the rest unread.
+
+## 0.10.20 - 2026-10-20
+
+The Zarr conversion that runs on `hallu` now pins biosigIO 1.2.13 and types the failures caused by missing companion data.
+This release requeues nothing and leaves `ZARR_ENGINE_VERSION` at `3`. A dataset's stores are rebuilt when that dataset next runs: the drain rebuilds every recording with `--clean`, and a biosigIO change makes a published index non-current, so a pending retry round also rebuilds. A recording that converts again gets the new verdicts.
+There is one migration, 0099 (`0099_pr_review_edit_limit.sql`), which rebuilds the `pr_reviews` table, adds the `edit_restarts` count (default 0) and the `edit_limit` word for the review gate below (#1846).
+This release sets no new Worker secret or variable; it adds one optional switch, `PR_REVIEW_AUTO_REQUIRE`, which is left unset.
+The Worker serves the index schema from one route, so the descriptions that route returns change on deploy.
+The conversion changes run on `hallu` from this repository's `main` branch, not from the npm package.
+
+### Changed
+
+- **Zarr conversion pins biosigIO 1.2.13 (`>=1.2.13,<1.2.14`).**
+  A BrainVision data file shorter than its header's `DataPoints` count is refused as `corrupt_or_truncated`.
+  A BrainVision data file with no `DataPoints` count that ends in a partial frame now converts: the converter reads the whole frames, as 1.2.12 did, and records the dropped byte count in the store's recording metadata (`brainvision_dropped_bytes`). A cut inside the last frame of such a file is therefore read rather than refused. Vectorized data with a partial frame, and a file with no whole frame, are still refused.
+  An EDF+C or BDF+C recording whose first time-keeping onset is not zero now converts, where it was refused as not EDF(+) or BDF(+) compliant.
+  A truncated FIF read through `Recording.from_file` is typed `corrupt_or_truncated`, where it was `file_read_error`.
+  A BrainVision cut that falls exactly on a frame boundary of a file with no `DataPoints` count is not detected; that is a known limit of the reader.
+- **The duration backfill counts the same BrainVision frames as the converter (#1837).**
+  `scripts/patch_duration.py` passes `allow_partial_frame=True`, as the converter does, so a file the converter stores gets the same duration.
+  biosigIO ignores the flag for every other format.
+- **Missing companion data gets a typed, terminal verdict (#1808).**
+  A BrainVision header that names a data file the tree does not hold is `companion_missing`; a FIF file whose next split part is not in the tree is `split_part_missing`; an EEGLAB `.set` that stores epoched data is `epoched_recording`.
+  These replace the `retry_exhausted`, `maxshield_probe_failed` and `file_read_error` verdicts that the same recordings used to receive, and none of them is retried.
+  A host error raised while the reader recovers from a refusal keeps its retry: a refusal's code is read from the exception and its direct causes, never from its context.
+  Discovery now lists tree paths with `-z`, so a recording whose name has non-ASCII bytes matches the header that names it.
+  That widens discovery for those datasets. A dataset takes the new discovery when it next runs; the engine stamp, which this release leaves at `3`, governs requeues only.
+- **The source copy of the dataset pull-request review workflow now matches the copy that dataset repositories run (#1820).**
+  The review workflow runs the checkout, the Bun setup and the install after it mints the dataset token, and before it writes the token to the clone's configuration.
+  The install uses `--ignore-scripts`, and the job timeout is 28 minutes, below the 40-minute watchdog deadline.
+  The shared workflow repository already runs this body; this release brings the source copy in this repository to the same content.
+- **The index contract says what a retry can change.**
+  The `failure` description in `shared/zarr-index.schema.json` says that retrying in the same state will not change the outcome.
+  The `failure_count` description excludes content that is not yet fetched locally from the failures that need a change to the data or the converter.
+  The code list names `companion_missing`, `split_part_missing` and `epoched_recording`.
+  This is a description-only change.
+- **The unexpected-skip guard in `test.yml` exempts pytest expected failures (epic #1800).**
+  A pinned known gap no longer fails the run as a skip; a real skip still does.
+- **Dataset pull requests are screened on their content, and NEMAR owners and administrators are exempt from the model review by identity (epic #1813, merged as #1846; Architecture Decision Record (ADR) 0107).**
+  The hourly, daily and platform caps and the automatic tally pause are removed, and the admin list shows a volume line in their place (#1815).
+  The exemption also needs the login to hold admin on the dataset's repository, as GitHub reports it, and an exempt pull request shows its own queue verdict (#1814); the naming rule still applies to it (#1816).
+  A title or a changed dataset name that cites an author and year, a Digital Object Identifier (DOI) or a naming-template token ends the review at the facts, before any model is asked (`shared/naming-rule.ts`; #1816, #1826, #1830).
+  A pull request is reviewed again when its title or body changes, when its base moves onto `main`, or when it is reopened or marked ready; each head commit allows five such restarts, counted in `edit_restarts`, and a sixth is refused as an errored row with `detail = 'edit_limit'` (#1817, #1845).
+- **The required review check has its switch in place, and the switch is off unless it is set to `1` (#1819).**
+  The Worker reads `PR_REVIEW_AUTO_REQUIRE` as on only when it is `1`, and the repository does not set it.
+  The switch gates publishing, visibility changes and `nemar admin fleet enforce`; `nemar admin fleet require-review`, for one dataset or a page, does not wait for it.
+- **The command-line interface (CLI) no longer writes a placeholder pull request title or body (#1818, #1823; `src/lib/pr-text.ts`).**
+  `nemar dataset push --pr` used to write "Update from branch X" and an empty body when given none, and `nemar dataset update` wrote a stock title and a file list that dropped the first letter of its first path.
+  The CLI refuses text that cannot be read as a description of the change.
+  In a script, `nemar dataset update` fails unless both `--message` and `--description` are given, and `nemar dataset push --pr` fails unless both `--title` and `--body` are given.
+- **`nemar dataset update` writes its title into the dataset's change log as the new version's entry (#1823).**
+  The entry goes into the change log the dataset already has (`CHANGES`, `CHANGES.md` and the like), or into a new `CHANGES` file if it has none; an entry the author wrote first is left alone.
+
+### Known limitations
+
+- This release requeues nothing; a dataset's stores change only when that dataset next runs (see the first paragraph above).
+- Streamed export still raises an uncoded error for a truncated FIF (biosigIO #161) and for truncated KIT and 4D/BTi files (biosigIO #168), so those are retried until the retry budget runs out.
+- In a local run, a git-annex pointer whose content was never fetched is a typed `file_read_error` that is never retried; whether it should stay retryable is open (#1812).
+- A BrainVision marker that falls inside a dropped partial frame is not kept; the dropped byte count is in the store's metadata, not in the public index.
+- A store whose recording metadata carries `brainvision_dropped_bytes` is refused by the scrub zarr stage until an operator names the member with `--allow-member`, as for the converter's other technical flags.
+- A host read error during the MaxShield header probe is still recorded as `maxshield_probe_failed`, which is terminal (#1833).
+- A short read of an EEGLAB `.fdt` caused by an I/O error is reported as a sample-count mismatch, which is typed `corrupt_or_truncated` (biosigIO #169).
+- The review check is not required on any dataset yet, so a dataset pull request still merges without it until the owner applies the ruleset.
+- Once a repository carries the review ruleset, an unset or `0` value of `PR_REVIEW_ENABLED` leaves its pull requests waiting for a check that nothing posts, and its merges stop; remove the rulesets before the review is switched off.
+
+## 0.10.19 - 2026-10-16
+
+A publication request now gets one derived verdict that is built by the Worker from the mechanical gates and a no-tools model review of the submission, and approving over anything that is not a clear pass is the administrator's recorded act (epic #1726, #1782; Architecture Decision Record (ADR) 0102 and ADR 0105).
+**The review ships switched off in production.**
+`PUBLICATION_REVIEW_ENABLED` is set in the dev environment's variables only and is absent from the production variables, so no review starts, no model is called and no approval waits for one until a later, reviewed change turns it on (see How to turn the review on).
+Before releasing, check read only that production has no secret or variable of that name (see Deploy coupling).
+What production does change with the flag off is the approval path around the review, and the list below says so item by item (see Production behavior changes): a web approval is attributed to the administrator who clicked by a per-claim token, a terminal approval takes a live web claim over, a denial is refused while an approval is running or once publishing has started, every cookie-authenticated write on the admin routes needs a NEMAR `Origin`, and the write that ends an approval no longer marks a closed request as published.
+The release also carries four independent changes: a depositor can withdraw their own publication request (#1778, ADR 0104), `nemar admin publish list` shows the active requests by default and can search (#1777), a pending account can no longer hold a verified email and an owner can force-verify one (#1769, #1770, ADR 0103), and an owner can attest an Open Researcher and Contributor ID (ORCID iD) on an account (#1788, ADR 0106).
+The dataset pull-request review was enabled in the production configuration on 2026-10-13 (#1768, merged to `main` after the 0.10.18 tag), and its prompt and evidence fixes from the first live run take effect with this release (#1771).
+There are three migrations (0096, 0097, 0098) and no new Worker secret.
+The only new Worker variable is the dev-only flag above.
+The review's workflow lives in the central dataset-workflow repository and checks its script out of this repository's `main`, so the script reaches the workflow only when this release is on `main`; see Deploy coupling.
+
+### Production behavior changes
+
+With `PUBLICATION_REVIEW_ENABLED` off, which is what production runs after this release, the first list below is what changes, and none of it depends on the flag.
+ADR 0102's Phase 2 amendment (item 3) and Phase 3 amendment (item 7) list these, and ADR 0105 records the attribution rule.
+
+**Whatever the flag says (reaches production with this release):**
+
+- A web approval is recorded under the administrator who clicked Approve, and only for a call that presents the click's token (ADR 0105).
+  Before, any call inside the claim's fifteen-minute lease was recorded as the clicker, so a person at a terminal could be recorded as someone else (#1604).
+  Now a terminal approval carries no token and is recorded as its own caller.
+  Once it has passed every gate it takes a live web claim over, and the executor the click dispatched is refused at its next call (409 `dispatch_superseded`).
+  A web run that sat idle past the lease is refused (409 `dispatch_expired`) instead of being recorded under the executing key.
+- A call that carries the click's token may carry no decision of its own: an override, an identifier-screen acknowledgment, a skipped continuous-integration (CI) check or the sandbox is refused (409 `decision_with_dispatch_token`).
+  `nemar admin publish approve` refuses `--force`, `--acknowledge-identifier-screen`, `--skip-ci-check` and `--sandbox` locally while `NEMAR_APPROVAL_DISPATCH_TOKEN` is set.
+  On a non-production Worker a web-dispatched approval therefore cannot create a new concept Digital Object Identifier (DOI), because the sandbox is refused for it; run that approval from a terminal with `--sandbox`.
+- A request that is `blocked` cannot be approved (409 `request_blocked`).
+  The exception is a run that has already started publishing and was walked back to `blocked` because the owner's name went missing: it is resumed with `approve --resume`, and that resume passes neither the identifier screen's gate nor the review's gate, where the screen's gate used to run on it.
+- `/approve`, `approve-dispatch` and `/deny` accept the `request_id` of the request the caller was looking at and answer 409 `request_mismatch` when it is no longer the newest active one (#1579).
+  The command-line interface (CLI) sends it on every `approve` call and on `deny`; `--request-id` names it for a script.
+- A request changed while its approval was being checked is refused (409 `request_changed`) instead of being overwritten.
+- `/deny` is refused while an approval is running (409 `approval_in_flight`) and once publishing has started (409 `deny_after_publishing`), because the data may already be public and the depositor must not be told it was denied.
+  A request whose first public step was only interrupted counts as started.
+- The dispatch route checks the dataset id against the shape the executor accepts before it claims anything, and answers 400 `invalid_dataset_id` (#1583).
+  Before, an id the executor would refuse held the lease for fifteen minutes.
+- A failing executor releases its own claim through `POST /webhooks/approval-release`, authenticated by the dispatch token alone (#1582).
+  Five early exits of `/approve` now record why in `last_error`.
+- Every cookie-authenticated write on the admin routes needs a NEMAR `Origin`, or it is 403 `origin_not_allowed` (#1603, #1584).
+  A request authenticated by an application programming interface (API) key is unaffected, and reads are unaffected.
+  A server-side caller that sends the session cookie to an admin write without that header is now refused.
+- The write that ends an approval requires the request to be still `approving`.
+  A run whose request was denied after its lease lapsed, or blocked again, answers 409 `approval_closed_during_run` and writes the audit row `approval_finished_on_closed_request`; it does not mark the request published.
+  A resumed run whose steps are all done follows the same rule and refuses before it runs any tail job.
+  When a tail job warns in that all-steps-done branch, the request stays `approving` and the answer carries `status: "approving"` and the warning under the key `warning`, so approving again retries it.
+  The step loop's own ending still marks the request `published` after such a warning (see Known limitations).
+- `nemar admin publish` exits non-zero on every failure (#1581), where `approve` used to exit 0 when an approval failed.
+  A declined or cancelled confirmation of `approve`, `deny` and `start --all` exits 1 too, because nothing was done.
+  `approve` also exits 1 when the Worker's answer is not `published`, `screen` exits 1 when the Worker answers 202 with status `error`, and `next` exits 130 after Ctrl+C and 1 when an approval was refused or failed or a denial or comment could not be sent.
+- The audit rows gain content: `dataset_published` carries `review_gate` (`enforced`, `off` or `n/a`) and `skip_ci_check`, and a run finished by a resume also carries `finished_by_resume` and, for a call under a token, `executed_by`.
+  New rows are `publication_ci_check_skipped` (written when a CI check is skipped), `publication_request_commented`, `approval_dispatch_released`, `approval_finished_on_closed_request` and `publication_request_withdrawn`.
+  `publication_review_overridden` is written only when the review's gate is enforced, so never with the flag off.
+- An administrator can mail a depositor a typed message and leave the request open: `POST /admin/publish/:id/comment`, and `c` in `nemar admin publish next`.
+  It is not behind the flag.
+  The mail is a fixed frame around the administrator's escaped words and carries nothing of any review.
+  A failed send is never answered as a success: 502 `comment_not_sent` says that certainly nothing was delivered, and 502 `comment_not_confirmed` says that the mail may have been accepted and may also have arrived, so the administrator is to check with the depositor before sending it again.
+  Each reason in the review detail also carries an additive `line` field, the whole reason in the terminal's words; a client that meets a Worker without it falls back to the sentence and the cure.
+- The `publication_reviews` table, the review watchdog on the 30-minute tick (production only, and it reads no flag), the review's callback routes (`/webhooks/publication-review-claim` and `/webhooks/publication-review-result`) and the administrator's start and detail routes (`POST /admin/publish/:id/review/start`, `GET /admin/publish/:id/review`) exist in production.
+  With the flag off the claim route refuses a new claim so that no model call is spent, and the start route refuses with `review_disabled`.
+- The fixture id `nm099997` is declared dev-owned, so production stops claiming pushes to a repository by that name before anyone creates it.
+
+**With the flag off, what does not change:** no review is started, no model is called for a publication request, the identifier screen's gate and acknowledgment work as before, the administrator's mail does not wait for a review and has no review section, and the advisory pre-screen of ADR 0014 is still dispatched.
+The Worker's approval gate reads nothing and passes (`off`), and any review a request has is shown as advice and gates nothing.
+
+**With the flag on (a later change, not this release):**
+
+- When the identifier screen reports for a commit and its gate is `clear` or `acknowledge`, the Worker starts one model review of that commit.
+  The model is `claude-haiku-5-5` at high effort, with no tools and a schema-constrained answer.
+  A depositor's requests may cost 5 model calls in 24 hours and the platform 50.
+  An administrator's `start` is held by the platform's cap only, but the call still counts toward the depositor's tally.
+- The model is sent the root README (the first of `README.md`, `README`, `README.rst` and `README.txt`), the keys of `dataset_description.json` that the Brain Imaging Data Structure (BIDS) defines, `CHANGES`, `LICENSE`, the column descriptions of `participants.json` and a structural summary of counts and closed words, after the shared mechanical rules have examined exactly the bytes being sent.
+  It is never sent a table file, a recording, a signal header value, an identifier finding or the screen's result.
+  For prose that pre-send check is a consistency control and not a privacy control: no rule recognizes a name, an email address or a date in prose, and the policy pages must say that a model reads this text before the flag is turned on.
+- The verdict is `pass`, `fail` or `action_required`, derived from the report and the live facts, and unknown is never green.
+  The administrator's mail waits for the review, up to its 30-minute deadline plus one 30-minute tick, and gains one section with the headline and reasons.
+  The advisory pre-screen is no longer dispatched for a request the review covers.
+- Approval over a non-pass needs `--force` (or the explicit confirmation in `next` and on the web page), is sent with the id of the review shown and the reasons shown, and is recorded as `publication_review_overridden`.
+  A hard reason (`request_blocked`, `submission_minimum_failed`, `identifier_screen_blocks`, `identifier_screen_not_run`, `identifier_screen_stale`, `identifier_screen_pending` and `version_kept_after_anonymous_release`) refuses, whatever the body says, and names its cure; the screen's own reason needs the existing acknowledgment instead.
+  Anything else refuses with 409 `publication_review_not_clear`.
+- Nothing is denied automatically, and no Worker code path approves.
+  The only status the review changes is the mechanical move of a `requested` request to `blocked` when the submission minimums fail at the reviewed commit.
+
+### Added
+
+- **A derived verdict for a publication request (#1782, ADR 0102).**
+  `nemar admin publish list` shows each request's identifier screen, then the review's outcome and its reason codes on a line of their own.
+  `show <dataset>` prints the screen, the outcome, every reason with what clears it, the four questions' answers, the findings under labels that say who wrote them, what the model was shown and what was withheld, the acknowledgment and the override on record, and the history.
+  `start <dataset>` starts or restarts a review, and `start --all` takes the requests that can be started, oldest first, with `--dry-run`, `--yes` and `--json`.
+  `approve` shows the screen, the review and the gate's state before it asks, and decides before it asks.
+  `next` walks the requests that need a person, oldest first, one card each: `y` approves from the terminal, `n` denies with a typed reason, `c` mails the depositor a message, `d` shows the whole review, `s` skips and `q` stops; it takes `--force`, `--once` and `--dataset`, and it has no `--yes`.
+  `deny` takes `--request-id` and sends the request's id.
+  Every rendering ends with the standing line "Not assessed: whether the text names the depositors."
+- **The administrator's approval page on the website shows the review (ADR 0102, Phase 4).**
+  The page fetches the Worker's detail and prints the Worker's own words for each reason, and offers Approve with the same explicit confirmation as the terminal, Deny and Start review.
+  The page's own words are declared once in `shared/contract/publication-review-copy.ts`, with a parity test against the website's copy that is strict in CI (#1787).
+  Once the website is promoted, the page withholds Approve for a blocked request and when the screen's gate is `blocks`, `rerun` or `wait`, and it always asks for an acknowledgment reason when the screen's gate is `acknowledge`, with the review flag off as well, because the screen's gate applies whatever the flag says; with the review on it also withholds Approve for a hard reason.
+  It offers no fallback to the old bodyless Approve: when the detail cannot be read or the API is older than the page, Approve is withheld.
+  The website must be promoted to production only after the Worker that carries this release; see Deploy coupling.
+- **A per-claim dispatch token (ADR 0105).**
+  A web click's claim gets a token that is a hash-based message authentication code (HMAC) over the claim's own columns, signed with the callback secret the Worker already holds.
+  The Worker stores none of it.
+  The executor presents it as `X-Approval-Dispatch-Token` on every `/approve` call of its run and the CLI reads it only from `NEMAR_APPROVAL_DISPATCH_TOKEN`, in `approve` and never in `next`.
+  Releasing, replacing, denying or taking over the claim revokes it.
+  The CLI's `--debug` log redacts the `x-approval-dispatch-token` header, and the Worker never logs, stores or returns the token.
+- **A depositor can withdraw a publication request (#1778, ADR 0104).**
+  `nemar dataset publish withdraw <dataset-id> [--yes|--no]`, backed by `POST /datasets/:id/publish/withdraw`, ends the request as a withdrawn one with no administrator step.
+  Only the dataset owner may withdraw (403 for anyone else, including an administrator, who ends a request with `deny`).
+  It is allowed while the request is `requested` or `blocked` and nothing has started acting on it; it is refused with 409 `withdraw_too_late` when the request is `approving`, an approval is in flight, or publishing has started, and with 404 `no_active_request` when there is none.
+  A withdrawal is stored as `status = 'denied'` with a new `withdrawn_at` column, so every reader that asks whether a request is finished keeps working.
+  `publish status` keeps `status: "denied"` for older clients and adds `withdrawn` and `withdrawn_at`.
+  Administrators are not mailed; the audit row `publication_request_withdrawn` is the record.
+  A withdrawal that races an approval or a denial cannot both succeed: an approval that loses is told 409 `request_changed`, a denial that loses is told 404 for no active request, and a withdrawal that loses is `withdraw_too_late`.
+- **`nemar admin publish list` takes state flags and a search (#1777).**
+  The default is the active requests (`requested`, `approving` and `blocked`).
+  `--requested`, `--approving`, `--blocked`, `--published` and `--denied` select states and combine, `--all` shows every request, and `-s, --status` keeps its old meaning and combines with the flags.
+  `--search <text>` matches a substring of the dataset id, the requester's username or the dataset name, and lists an exact id first.
+  A withdrawn request is listed wherever `denied` is in scope and is shown as withdrawn.
+  `--needs-me` keeps the requests marked `*`, and `--json` prints the response and nothing else on standard output.
+  The route `GET /admin/publish/requests` takes a comma-separated `status` and a `search`; an unknown status is a 400, and a search whose match pattern exceeds the 50 bytes D1 accepts (about 48 plain characters) is refused with a sentence, by the CLI before it sends and by the route.
+  Omitting both still returns every request, so older CLIs keep working.
+- **An owner can force-verify a pending account (#1770, ADR 0103).**
+  `nemar admin verify <id>` (`POST /admin/users/by-id/:id/verify`) is owner only and takes a `pending` account to `verified` through the same transition the email flows use.
+  It grants no upload access: approval remains the only writer of upload access.
+  Two audit rows record it, the transition (`via: owner_override`) and `email_verified_by_owner`, which names the owner.
+  The command exits 1 when the Worker refuses.
+- **An owner can attest an ORCID iD on an account (#1788, ADR 0106).**
+  `nemar admin users edit <account> --orcid <iD>` sets the iD and marks it verified without writing a sign-in record, and the audit row carries `orcid_attested: true`.
+  It is refused, and nothing is written, when another live account holds the iD, when the account already holds an iD the person proved by signing in (`orcid_already_proven`), for an owner account or an owner editing their own, and when the same request edits a name that the verified iD would then own.
+  The sign-in flow stays the only proof the person gives; an attestation is recorded as one, and a later ORCID link of the same iD only adds the sign-in record.
+  `orcid_verified = 1` no longer implies a sign-in record, and every reader of the flag trusts an attestation as much as a proof.
+- **`NEMAR_APPROVE_RETRY_DELAY_MS` (optional).**
+  A whole number of milliseconds to wait between retries of an approval.
+  It can only shorten the default wait, never lengthen it, and exists so a test of the retry does not sleep.
+
+### Changed
+
+- **`nemar admin publish list --json` now returns only the active requests by default (#1777).**
+  A script that read every request from it, published and denied ones included, now gets `requested`, `approving` and `blocked` ones only, and `--all` restores every request.
+  The shape of the output is the same, and `-s, --status` and the state flags select states as before.
+  The route is unchanged: `GET /admin/publish/requests` without a `status` still returns every request.
+- **Account copy says collaborating needs upload access and a verified email (#1769).**
+  The sentences about upload access, and the help of `nemar auth request-upload-access`, now say that being added as a collaborator on someone else's dataset needs the same grant and that the email must be verified first.
+  The website transcribes the account copy, and a drift test on each side compares them.
+- **The dataset pull-request review is enabled in the production configuration (#1768).**
+  `PR_REVIEW_ENABLED = "1"` is in the production variables, in the configuration file and not in the dashboard, because a deploy replaces dashboard-only variables.
+  It was merged to `main` on 2026-10-13, after the 0.10.18 tag, so this is the first tag that contains it.
+- **The pull-request review's prompt and evidence follow the first live run (#1771).**
+  Files that differ only cosmetically (trailing whitespace, line endings, JSON that parses to the same value) no longer count as unread and no longer use the file-read budget.
+  Changed metadata is shown grouped by path shape, with how many of each group were read, in an untrusted fence.
+  The change log is checked for an added entry for the new version, and an old entry with the same number does not count.
+  The prompt now requires a change log entry (`CHANGES` or `CHANGELOG`) for every new revision and fails `advances_revision` when the platform reports none was added; a log kept only in the README does not count.
+  It also states that Hierarchical Event Descriptors (HED) annotations are additive, that moving identical values into a root sidecar by BIDS inheritance loses nothing, and that field names are judged against the dataset's declared `BIDSVersion`.
+  The steering rule and the verdict derivation are unchanged.
+  The workflow checks the script out of `main`, so this takes effect at the release.
+- **The submission minimums moved to `shared/submission-minimums.ts`.**
+  The Worker's request gate and the review job must not disagree about them, so both read one module and the Worker's file re-exports it.
+  The checks and their sentences are unchanged, and the minimums remain hard blocks.
+- **The README forms come from one list.**
+  `shared/readme-candidates.ts` holds the four README names in the order `README.md`, `README`, `README.rst`, `README.txt`, and the submission gate, the anonymity sweep and the review read it.
+  The submission gate used to try `README.txt` before `README.rst`; its ethics rule reads the first README present, so for a dataset that has both, the one it reads is now `README.rst`.
+- **Admin list and approval commands moved out of `src/commands/admin.ts`.**
+  The `publish` group now lives in `src/commands/admin-publish.ts` and its siblings; the commands' names and flags are as described above.
+
+### Fixed
+
+- **A pending account that changed its email address was stranded (#1769, ADR 0103).**
+  Redeeming an email-change code stamped `email_verified` but left a `pending` account at `pending`, so `/auth/email/verify` answered `already_verified` and nothing could promote it.
+  The email-change write now goes through the one transition from `pending` to `verified`, in the same batch as the address update, and administrators are notified once on the transition.
+  Migration 0096 repairs the accounts already in that state and refuses it from now on (see Migrations).
+- **The ORCID holder lookup no longer hides a different holder behind the account's own row (#1788).**
+  The lookup that tells whether another live account holds an ORCID iD used to drop the account's own row after `LIMIT 1`, so a different holder could be hidden behind it; the exclusion is now in the query.
+  It affects the conflict check of an ORCID link, a relink and the new attestation.
+- **`nemar completion bash` works on bash 3.2 (#1781).**
+  The script used `mapfile`, which needs bash 4, and macOS ships bash 3.2: there it was `command not found`, the candidate list was never split, and TAB offered nothing, with the error hidden behind the prompt.
+  The script now reads the lines with a `while read` loop.
+
+### Migrations
+
+All three apply on deploy, before the new Worker, and are additive or repairing; none rebuilds a table.
+
+- **0096_pending_cannot_have_verified_email (ADR 0103).**
+  Promotes every live `pending` row that already has `email_verified = 1` to `verified`, with one `email_verified` audit row each (`via: migration_0096`), and installs the trigger `users_pending_email_verified_guard`, which aborts any UPDATE that leaves a live row `pending` with `email_verified = 1`.
+  Between this migration and the Worker deploy the previous Worker's email change would abort for a pending account and answer `email_change_incomplete` with the code restored; it succeeds after the deploy.
+  Upload access is untouched.
+- **0097_publication_withdrawn_at (ADR 0104).**
+  Adds the nullable column `publication_requests.withdrawn_at`.
+- **0098_publication_reviews (ADR 0102).**
+  Creates `publication_reviews` and its two indexes, one row per request, screened commit and kind of release, with CHECK constraints that keep a state from being paired with the wrong word.
+  No foreign key, and no column is added to `datasets` or `publication_requests`.
+- `bun run migrations:d1-check`, run on this release's `dev` in a clean worktree: all 100 migrations applied on real D1 (`wrangler d1 execute --local`), and the catalog matched `bun:sqlite` at 110 objects and 30 tables.
+
+### Deploy coupling
+
+- **Order: the API before the website.**
+  The website's approval page withholds Approve when the API predates it, and has no fallback to the old bodyless Approve, so the Worker that carries this release must be deployed first and the website promoted after it.
+  The page is on the website's `staging` branch; it is not in production until the website is promoted.
+- **The executor workflow is already on `main`.**
+  The change that carries the token through the run (`approve-publication.yml`, the central workflow repository's #136) merged on 2026-10-15, and it does nothing against a Worker that sends no token.
+  The review workflow `run-publication-review.yml` (that repository's #137) is on its `main` too, and CI now compares the deployed copy with the authored one byte for byte (#1790).
+- **The package publish and the Worker deploy are separate workflows, within minutes of each other, in either order.**
+  Nothing enforces which comes first, so for a few minutes a new CLI can meet the old Worker.
+  The new CLI behaves sensibly against either Worker for `list`, `show`, `approve`, `start`, `withdraw` and `verify`, and what the 0.10.18 Worker cannot do is this:
+  - `list` shows the active requests, which that Worker cannot filter by a comma-separated status: when the union comes back empty the CLI asks once per status and merges the rows, newest first.
+    That Worker never read `--search`, so the CLI drops the rows that do not match and lists an exact dataset id first.
+    That Worker sent no dataset name and no review, so a search that matches only a dataset's name finds nothing on it, and no row shows a review line.
+  - `show`, `start`, `withdraw` and `verify` cannot do anything on it, because it has none of their routes.
+    Each says that the backend does not support the command yet and exits 1, `start --all` says the Worker is older than the review, and none invites a bug report.
+  - `approve` works as it did: it finds no review, says so, and sends no override and no `request_id`, so that Worker has neither the stale-request check nor the review's gate.
+  A new Worker answers the CLI's comma-separated list and its search itself, and the CLI changes nothing in its answer.
+- **The attribution window of ADR 0105 is the other order: the new Worker with an old CLI on the executor.**
+  The executor installs the CLI from npm, and a CLI without this release ignores `NEMAR_APPROVAL_DISPATCH_TOKEN`.
+  Until it can install this release, a web approval is recorded under the executor's account and not the clicker's, and an approval that needed the clicker's recorded screen acknowledgment (or their override, when the review is on) is refused.
+  Nothing is published wrongly, and the audit rows of `approval_dispatched` joined to the request's approver list the cases to read.
+  Holding the Worker deploy until npm shows this version closes the window, and the pipeline does not enforce that.
+- **The review script reaches the workflow only when this release is on `main`.**
+  The workflow checks the script out of this repository's `main`, and its design forbids a ref chosen by the payload.
+  Until then a review started by the dev Worker cannot complete, which is why the flag is dev-only and why the soak (#1732) runs after this release.
+  The dev fixture `nm099997`, which the soak uses, is created only after this release.
+- **No new Worker secret.**
+  The review reuses the callback secret under its own domain tag, and the dispatch token is signed with the same secret; a Worker without it answers 502 `dispatch_unconfigured` before it claims anything.
+- **Release checklist item, read only: confirm production is dark.**
+  List the production Worker's secret names (never their values) and its variables, and confirm that nothing named `PUBLICATION_REVIEW_ENABLED` exists there.
+  Production's pre-screen was once lit by a secret that the configuration file does not record, so reading the file alone does not show what is on.
+- **New Worker variable: `PUBLICATION_REVIEW_ENABLED`, in the dev environment's variables only.**
+  Do not add it to the production variables in a change that is not reviewed for it.
+- **A rollback of the Worker alone is safe for attribution** in every combination of Worker, workflow and CLI that ADR 0105 lists.
+  It does not undo the migrations: migration 0096's trigger `users_pending_email_verified_guard` stays, so the 0.10.18 Worker's email change on a pending account answers `email_change_incomplete` until the Worker is rolled forward again (ADR 0103).
+
+### How to turn the review on
+
+This is the record issue #1732 asks the release notes to keep.
+It happens after this release, in a reviewed change, and ADR 0102's "Before it is switched on" is the checklist.
+
+1. Read first: `nemar admin publish list` (the active requests, each with its screen), then `nemar admin publish start --all --dry-run`, which lists what would be started and starts nothing.
+   `start --all`, the dry run included, refuses with "the automated review is off" when at least one request exists and every request reports the review off, and when no request can have its review started it prints "Nothing to start".
+   So the dry run shows what would start only on a Worker that has the flag on, and on production before the flag it cannot run.
+2. Create the review's own federation rule and service account and name them in the two organization variables `ANTHROPIC_PUBLICATION_REVIEW_FEDERATION_RULE_ID` and `ANTHROPIC_PUBLICATION_REVIEW_SERVICE_ACCOUNT_ID`.
+3. Soak on the dev Worker with a native, named, private fixture that dev owns (`nm099997`, created after this release): a request that passes, one the model holds, one the identifier screen holds, one with a failing BIDS check, and one whose commit changes after the review.
+   Never approve the fixture under a name.
+4. Make the separate docs change that corrects the policy pages for current practice, then add the review's statement to them, so that they say a model reads the submission text.
+5. Verify the attribution: the executor's workflow sends the token, and the staging audit query shows each web approval attributed to the administrator who clicked.
+   Record the maintainer's decision on a click whose clicker is no longer an active administrator, which ADR 0105 leaves open (see Known limitations).
+6. Add `PUBLICATION_REVIEW_ENABLED = "1"` to the production variables, delete the production pre-screen switch (find it by listing the production secret names, read only), disable `run-prescreen.yml` in the central workflow repository, and run `nemar admin publish start --all` once for the requests already open.
+   The configuration file does not record production's pre-screen switch, which is a Worker secret, so deleting the secret is what turns the pre-screen off and editing the file would not.
+
+### Known limitations
+
+- The importer (`src/lib/import-publication.ts`) reports an approval as published when the Worker left the request `approving` after a tail job warned (#1773); the request is retried by approving again.
+- A valid token whose clicker is no longer an active administrator falls back to the caller, as ADR 0080 decided, and the maintainer has not decided whether such a click should publish at all (ADR 0105).
+  A token also survives the end of the clicker's session or key for as long as its claim stands and its lease is live, which is fifteen minutes after the run's last call, because every `/approve` call of an `approving` request renews the lease.
+- A leaked token can cancel one run through the release endpoint, which checks no lease; nothing is published or lost.
+- A request that has started publishing cannot be denied or withdrawn, and a queued web approval cannot be cancelled by `deny`; a way to stop a half-published run is a follow-up.
+- A request filed again keeps its `steps_completed` (#1766).
+- The review's pre-send check does not see a name, an email address or a date in prose, a `file:` URL, a drive path or a network path in the README, `CHANGES` or `LICENSE` (those files are scanned only for local-user paths, so `C:/Users/x` passes), or a lookalike that Unicode compatibility folding does not map to ASCII; the review is not asked whether the text names the depositors.
+- The cure of a reason can say to start a review where the Start button is not offered (ADR 0102, Phase 4 amendment, item 7).
+- The step loop's own ending, after a tail job warns, still marks the request `published` and tells the administrator to approve again, which finds no active request; a formerly anonymous dataset with more than ten concealed-era versions leaves a request `approving` for good because the warning recurs.
+- The website's page has no control to run the identifier screen again; use `nemar admin publish screen`.
+- A resumed Object Lock step restarts its listing at page 1 (#1580).
+- `isAllowedOrigin` admits any NEMAR subdomain and local addresses (`localhost` and `127.0.0.1` on any port), so the Origin guard is defense in depth and not a boundary against a sibling subdomain.
+- The identifier screen's block of a `requested` request does not clear a live claim, so a retained token verifies again after a re-request until its lease lapses; it carries attribution only.
+
+### Repository process
+
+Nothing here changes what the production Worker does, except that the owner-only delete route now calls a shared function for its masking and credential revocation (#1791).
+The publication-review decision record is ADR 0102, as the 0.10.18 entry anticipated when it said ADR 0101 would be renumbered.
+Two root-cause fixes to tests: the stringified-undefined environment values that polluted later test files are fixed at their sites and guarded by a static scan (#1783), and the flaky manifest memory, upload resume, email fence and EZID tests were each traced to a cause and fixed without loosening an assertion, including a loopback default for `Bun.serve()` so a macOS wildcard bind cannot be answered by an unrelated process (#1781).
+CI now checks the publication-review page copy strictly against the website's `staging` copy (#1787, which also moves two live tests to an id that never resolves) and compares the deployed review workflow with the authored one (#1790).
+A daily dev-only sweep tombstones the accounts the live integration tests leave in the development database (#1791, issue #1789): it matches only the generated test address shapes (the reserved test domain, plus one example.com shape), tombstones at most 100 per run, and never runs in production; the owner-only delete route's masking and credential revocation move into one shared function that both callers use.
+
+## 0.10.18 - 2026-10-13
+
+The Zarr conversion on `hallu` now runs several datasets side by side, so a dataset that takes days no longer holds up everything behind it (#1757, ADR 0101),
+and its memory projection uses what a recording really needs: a 145 GiB float32 recording that was refused as too large now fits.
+A text that names a generic home path before a real one is no longer passed by the identifier screen (#1737).
+The rest is repository process with no change to what the Worker does: CI jobs are bounded, superseded pull-request runs are cancelled while push runs never are, the dev npm publish comes from a dispatch, the dev deploy is a call from `auto-bump-dev.yml`, the production deploy of the strip commit reuses the merge's test gate, and bot version commits skip Tests (#1755, which changes the release pipeline itself); pull-request review is capped at two rounds (#1748); and the review trial is recorded in the ADRs (#1747, with comment-only edits to two backend files).
+There is no migration, no new Worker secret or variable, and no Worker behavior change.
+The conversion changes run on `hallu` from the repository clone, not from the npm package; see Deploy coupling.
+
+### Changed
+
+- **Zarr conversions on `hallu` run in parallel slots instead of one dataset at a time (#1757, ADR 0101).**
+  A cron tick now starts one drain per free slot (`ZARR_SLOTS`, default 4),
+  each with its own lock, scratch directory and log, and four workers (`ZARR_JOBS_PER_SLOT`).
+  A dataset that takes days, such as `nm000276` (40 recordings of 100 to 145 GiB, which held the only lock for 5.5 days while the node sat at a load of 1.1),
+  now occupies one slot instead of the node.
+  Slot 0 keeps the old lock and scratch names, so a drain already running counts as slot 0.
+  The slots share one RAM and scratch budget through an admission ledger (`ZARR_LEDGER_DIR`, default `$ZARR_BASE/zarr-admission-ledger`):
+  a peer's unspent reserves come off the ceiling and the budget,
+  the run-alone exception applies only to an idle node,
+  and a slot that waits an hour for its peers hands its queue back without spending an attempt.
+  `ZARR_JOBS` now lowers the per-slot worker count and never raises it,
+  so a crontab that still says `ZARR_JOBS=24` does not give every slot 24.
+  `zarr_queue.py heartbeat` is new, and the script sends it every five minutes while a queue-claimed dataset converts,
+  so a conversion longer than the six-hour stale window is not reclaimed by another slot's reconcile.
+  A TERM to a slot or to the tick (or an INT to a slot run directly) stops the drivers it started and spends no attempt, and a stop that arrives just after a driver has finished still records the result.
+  A one-off `--dataset` run takes the first free slot and refuses to start on a dataset another slot or run is converting.
+  `--stats` no longer takes a slot, `--limit` now caps each slot rather than the tick,
+  and counts such as `ZARR_SLOTS` must be plain decimal integers (`08` is refused, not read as octal).
+  Set `ZARR_SLOTS=1` to run one drain at a time as before; the ledger, the heartbeat and the sample-width projection below stay in force.
+- **The Zarr converter projects a float32 BrainVision recording at the memory it needs and measures anonymous memory (#1757).**
+  When a recording's sidecar (sampling frequency and duration) and channel count show it is stored at four bytes per sample,
+  the streaming projection is 8 times one channel's bytes instead of 12; every other recording projects as before.
+  The 145 GiB `nm000276` recording that was refused as too large (about 32 channels, a projected 54 GiB against a 46 GiB budget) now projects at about 36 GiB and fits.
+  Workers also sample `RssAnon`,
+  and the "under-reserved" warnings compare the reserve with anonymous memory instead of resident size,
+  which includes the scratch memmap's file-backed pages
+  (on `nm000276` sub-48 the anonymous memory held at 6.2 GiB while the resident size passed 10 GiB).
+  A recording refused before this change stays refused until it is converted again.
+
+### Fixed
+
+- **A real local account later in a text is now found even when a generic one comes first
+  (#1737).** The local-user-path rule examined only the first home path in a text, so
+  `/home/user/project` before `/Users/erin/data.csv` ended the check at the generic account and
+  the real one went unseen. Every path is now examined, with the same single `review` finding
+  per text. The upload preflight, the fleet scan and the identifier screen all share the rule, so
+  a dataset that was reported clean only because of that ordering can now carry a finding.
+
+### Deploy coupling
+
+- The Zarr changes reach `hallu` only when its clone of this repository is updated: the hourly cron runs the clone's `hallu-zarr.sh`, and the clone is refreshed by a run that gets a lock.
+  The drain that was converting `nm000276` before this release holds slot 0's lock and runs the old script, so merging does not by itself start the new slots.
+  Update the clone by hand (`git -C /mnt/local/zarr-state/nemar-cli fetch origin && git -C /mnt/local/zarr-state/nemar-cli reset --hard origin/main`): that is what its `setup()` does on every run, and the running drain has already loaded its code.
+- Register the old drain in the admission ledger before the next tick, so the new slots leave room for the recording it is converting.
+  The file is `/mnt/local/zarr-admission-ledger/<driver pid>.json`:
+  `{"v":1,"pid":<pid>,"start":<field 22 of /proc/<pid>/stat>,"reservations":{"1":{"ram":<bytes>,"scratch":<bytes>,"paths":["<its scratch directories>"]}}}`.
+  The shape matters: a file without `reservations` as an object is taken for debris and deleted by the next driver to look, and the registration silently does nothing.
+  The ledger removes the file when the driver exits.
+  Without it the slots read the volume as nearly empty while the recording is still growing towards its peak.
+- No crontab edit is needed: `ZARR_JOBS=24` is now a ceiling, and the default is four slots of four workers.
+  `ZARR_SLOTS=1` restores one drain at a time.
+- The ADR number 0101 is also claimed on the publication-review epic branch (`feature/issue-1726-epic-publication-review`), which renumbers when it merges.
+
 ## 0.10.17 - 2026-10-13
 
 The website's server-side requests are counted per visitor instead of as one client, which is
@@ -399,7 +1263,7 @@ Deploy coupling.
 - Owner edits of an account's email and GitHub handle (ADR 0096, still proposed) do not end the old
   holder's keys and sessions, and the handle is not checked against GitHub.
 
-## 0.10.15 - 2026-10-07
+## 0.10.15 - 2026-10-08
 
 Epic #1610: identifier screening and an in-place scrub of published datasets. A third party
 reported that EDF and BDF headers in a published dataset carried name-like strings and a date.
@@ -1804,7 +2668,7 @@ the same change. Before this release the data plane answers that URL with a 302 
 host, and a CSP applies to a redirect target, so shipping the website first would break the
 README panel on every dataset page in production.
 
-## 0.10.3 - 2026-09-10
+## 0.10.3 - 2026-09-11
 
 ### Security
 

@@ -13,7 +13,7 @@
  * - nemar admin repo public/private - Change repository visibility
  * - nemar admin ci check/add       - Manage CI workflows
  * - nemar admin doi create/info/update/enrich - DOI management
- * - nemar admin publish list/deny/approve - Publication workflow
+ * - nemar admin publish list/show/start/next/approve/deny/screen - Publication workflow and its automated review
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin withdraw/restore   - Withdraw/restore a published dataset (visibility + EZID DOIs)
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
@@ -21,6 +21,7 @@
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
+ * - nemar admin mail               - Support tickets: list/show/reply/note/assign/status/close/escalate/queues/away/reprocess
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -50,11 +51,17 @@ import {
   neurobagelVerificationState,
 } from "../../shared/contract/neurobagel-admin.js";
 import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
+import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
 import {
-  PUBLICATION_STEPS,
-  PUBLICATION_STEP_LABELS,
-  stepsForRelease,
-} from "../../shared/publication-steps.js";
+  checkedAfterDatasetId,
+  checkedDatasetId,
+  checkedDatasetIdPrefix,
+  failMessage,
+  failWith,
+  handleCommandError,
+  requireSignedIn,
+  say,
+} from "../lib/admin-command.js";
 import {
   CLEAR_FLAGS,
   EDIT_FLAG_FIELDS,
@@ -77,6 +84,7 @@ import {
   type AvailabilityReportSweepBatchResponse,
   type BackfillNamesResponse,
   type BackfillUsernamesResponse,
+  type BroadcastStatusResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
   type DoctorFixLiveResponse,
@@ -96,8 +104,11 @@ import {
   type ReindexFilter,
   type ReindexOptions,
   type ReindexResponse,
+  type ReviewAppIds,
+  type ReviewRulesetOutcome,
   type SignalDefaultsSweepBatchResponse,
   type SummaryVersionCoverage,
+  type UpstreamBackfillResponse,
   type UserListItem,
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
@@ -130,6 +141,7 @@ import {
   enforceDataset,
   getAdminUserById,
   getAdminUserByUsername,
+  getBroadcastStatus,
   getCiStatus,
   getDoiInfo,
   getEmailPreferences,
@@ -157,6 +169,8 @@ import {
   restoreDataset,
   retryImport,
   revalidateDataset,
+  reviewRuleset,
+  reviewRulesetBulk,
   revokeKeyFor,
   revokeUser,
   revokeUserById,
@@ -169,8 +183,10 @@ import {
   updateDoi,
   updateEmailPreferences,
   uploadTierOf,
+  upstreamBackfill,
   validateCi,
   verifyImport,
+  verifyUserById,
   withdrawDataset,
   zarrFidelitySweep,
 } from "../lib/api/admin.js";
@@ -184,7 +200,7 @@ import {
   listDatasets,
   submitEnrichment,
 } from "../lib/api/datasets.js";
-import { ApiError, errorDetail } from "../lib/api/errors.js";
+import { ApiError, errorDetail, isRouteNotFound } from "../lib/api/errors.js";
 import {
   NOTICE_LEVELS,
   type NoticeLevel,
@@ -192,15 +208,6 @@ import {
   deleteNotice,
   listAdminNotices,
 } from "../lib/api/notices.js";
-import {
-  type PublishProgressInfo,
-  type StepResult,
-  approvePublication,
-  denyPublication,
-  getPublishStatus,
-  listPublishRequests,
-  rerunIdentifierScreen,
-} from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -222,7 +229,6 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
-import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -230,46 +236,18 @@ import {
   resolveRecoverTargets,
 } from "../lib/recover-datasets.js";
 import { sanitizeSnippetText as safeText } from "../lib/render/snippet.js";
+import { plain } from "../lib/terminal-text.js";
 import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
   resolveWithdrawTargets,
   stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
+import { mailCommand } from "./admin-mail.js";
 import { prReviewsCommand } from "./admin-pr-reviews.js";
-
-/**
- * Hints keyed on a publication `block_reason`, which outrank the status-code
- * hint: a 422 from the publish paths is not always a CI problem, and telling
- * an admin to "fix the CI issues" when the real problem is a missing
- * researcher name sends them to the wrong place entirely (#1255).
- */
-const BLOCK_REASON_HINTS: Record<string, string> = {
-  owner_name_missing:
-    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; an ORCID-linked owner must otherwise make it public on ORCID and sign in again, and an owner with no linked ORCID can now type it into Settings on nemar.org (ADR 0042).",
-};
-
-/** Handle common error patterns in admin CLI commands */
-function handleCommandError(
-  error: unknown,
-  spinner: ReturnType<typeof ora>,
-  defaultMsg: string,
-  hints?: Record<number, string>,
-): void {
-  if (error instanceof ApiError) {
-    spinner.fail(error.message);
-    const reasonHint = error.blockReason ? BLOCK_REASON_HINTS[error.blockReason] : undefined;
-    const hint = reasonHint ?? hints?.[error.statusCode];
-    if (hint) {
-      console.log(chalk.dim(`  ${hint}`));
-    } else if (error.statusCode === 403) {
-      console.log(chalk.dim("  This command requires admin privileges"));
-    }
-  } else {
-    spinner.fail(defaultMsg);
-    console.log(chalk.dim(`  Error details: ${errorDetail(error)}`));
-  }
-}
+import { publishCommand } from "./admin-publish.js";
+import { repullCommand } from "./admin-repull.js";
+import { upstreamStatusCommand } from "./admin-upstream-status.js";
 
 /**
  * Fetch a file from a GitHub repo via the gh CLI, returning its decoded content.
@@ -938,6 +916,10 @@ adminUsersCommand
   .option("--github <handle>", "GitHub handle (owner only)")
   .option("--clear-github", "Remove the GitHub handle (owner only)")
   .option("--email <address>", "Email address (owner only; marks it unconfirmed)")
+  .option(
+    "--orcid <iD>",
+    "ORCID iD, attested by an owner and marked verified (owner only; ADR 0106)",
+  )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
@@ -955,11 +937,17 @@ Who can change what:
 What this does NOT change (each has its own command):
   role / status / upload access   nemar admin role | approve | revoke
   account kind                    nemar admin kind
-  ORCID iD                        proven by signing in with ORCID, never typed in
+  ORCID iD sign-in record         the person links it in Settings or with
+                                  'nemar auth profile orcid link'; --orcid records
+                                  an owner's attestation without that record, and
+                                  never replaces an iD the person proved (ADR 0106)
   names on an ORCID-verified account: ORCID owns them and rewrites them at the
   next sign-in, so the edit is refused (the person updates orcid.org)
 
 Safeguards:
+  - An attested iD is marked verified with no sign-in record behind it, and the
+    audit row says so (orcid_attested). Use it only when the iD is confirmed for
+    that person, for example against their own message.
   - The account is shown with the exact changes and you confirm (-y skips the
     prompt, but only when the text names the account exactly).
   - Every edit is written to the audit log with the old and new values.
@@ -1355,6 +1343,81 @@ Examples:
         404: "User not found",
         409: "User already has that role",
       });
+    }
+  });
+
+// ============================================================================
+// Force Verify (Owner Only)
+// ============================================================================
+
+adminCommand
+  .command("verify")
+  .description("Mark a pending account's email as verified (owner only)")
+  .argument("<id>", "Numeric user id (find it with 'nemar admin users --pending')")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Moves a pending account to verified (the base tier) without the person
+redeeming an email code. It is the same transition the code flow makes, and the
+audit log records who did it.
+
+Find the numeric id with 'nemar admin users --pending'.
+No admin notification mail is sent: the owner is acting directly, unlike the
+self-verify flows where the person proved their own inbox.
+
+Rules:
+  - Only owners; it asserts an inbox the person did not prove
+  - Only pending accounts; use approve or revoke for the other tiers
+  - It grants no upload access: that is still 'nemar admin approve'
+
+Examples:
+  $ nemar admin verify 80
+  $ nemar admin verify 80 -y`,
+  )
+  .action(async (idArg: string, options: ConfirmOptions) => {
+    const id = Number.parseInt(idArg, 10);
+    if (!Number.isInteger(id) || id <= 0 || String(id) !== idArg.trim()) {
+      console.error(chalk.red(`Error: invalid user id: ${idArg}`));
+      process.exit(1);
+    }
+    if (!requireAuth()) return;
+
+    const confirmResult = await confirm(
+      `Mark user id ${id}'s email as verified without a code?`,
+      options,
+    );
+    if (confirmResult !== "confirmed") {
+      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Canceled"));
+      return;
+    }
+
+    const spinner = ora(`Verifying user id ${id}...`).start();
+    try {
+      const result = await verifyUserById(id);
+      spinner.succeed(result.message);
+    } catch (error) {
+      // A refused force verify must exit 1, or a script that checks the status code reads a
+      // refusal as a success; `failWith` does, and marks the exit as the Worker's answer so no
+      // "attach the log to a new issue" invitation follows it.
+      //
+      // A Worker that predates this command answers 404 for the ROUTE, and "User not found"
+      // under that would blame the id: the sentence the client already printed says the backend
+      // does not support the command yet, and that is all there is to say.
+      failWith(
+        error,
+        spinner,
+        "Failed to verify the account",
+        isRouteNotFound(error)
+          ? undefined
+          : {
+              400: "Invalid user id",
+              403: "Owner access required",
+              404: "User not found",
+              409: "Only a pending account can be force-verified",
+            },
+      );
     }
   });
 
@@ -3095,534 +3158,6 @@ doiCommand
 
 adminCommand.addCommand(doiCommand);
 
-// ============================================================================
-// Publication Workflow (Admin)
-// ============================================================================
-
-const publishCommand = new Command("publish").description("Publication workflow management");
-
-publishCommand
-  .command("list")
-  .description("List publication requests")
-  .option("-s, --status <status>", "Filter by status (requested, approving, published, denied)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  List all publication requests from users, with optional filtering by status.
-  Shows dataset ID, status, requesting user, and current progress.
-
-Filter Options:
-  requested  - Pending requests awaiting admin action
-  approving  - Currently being processed by orchestrator
-  published  - Successfully published datasets
-  denied     - Denied requests with reasons
-
-Examples:
-  $ nemar admin publish list                # All requests
-  $ nemar admin publish list --status requested   # Pending only
-  $ nemar admin publish list --status approving   # In progress
-  $ nemar admin publish list --status denied      # View denied`,
-  )
-  .action(async (options: { status?: string }) => {
-    if (!requireAuth()) return;
-
-    const spinner = ora("Fetching publication requests...").start();
-
-    try {
-      const result = await listPublishRequests(options.status);
-      spinner.stop();
-
-      if (result.requests.length === 0) {
-        console.log(chalk.dim("\n  No publication requests found.\n"));
-        return;
-      }
-
-      console.log(`\n${chalk.cyan("Publication Requests")} (${result.count})\n`);
-
-      for (const req of result.requests) {
-        const statusColor =
-          req.status === "published"
-            ? chalk.green
-            : req.status === "denied"
-              ? chalk.red
-              : req.status === "approving"
-                ? chalk.yellow
-                : chalk.white;
-
-        console.log(
-          `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
-        );
-        // #1408: an anonymous release and a publication reach this list
-        // looking identical, and approving the wrong one is not reversible in
-        // either direction -- publishing names a depositor who asked to be
-        // concealed; releasing anonymously withholds a DOI someone needs.
-        if (req.anonymous === 1) {
-          console.log(
-            `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
-              "repository stays private, DOI stays reserved, depositor is not named",
-            )}`,
-          );
-        }
-        // Epic #1610 phase 4: the identifier screen, in the backend's words.
-        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
-        if (req.current_step && req.status === "approving") {
-          console.log(
-            `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
-          );
-        }
-        // Non-blocking pre-screen advisory (#756): a concern for the admin to
-        // weigh before approving, NOT a block.
-        if (req.prescreen_status === "concern") {
-          let reasons: string[] = [];
-          try {
-            const parsed = JSON.parse(req.prescreen_reasons || "[]");
-            if (Array.isArray(parsed)) reasons = parsed.filter((x) => typeof x === "string");
-          } catch {
-            // malformed -> show the flag without inline reasons
-          }
-          const summary = reasons.length ? reasons.join("; ") : "see pre-screen";
-          console.log(`    ${chalk.yellow("! pre-screen advisory:")} ${chalk.dim(summary)}`);
-        }
-      }
-      console.log();
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to list publication requests");
-    }
-  });
-
-publishCommand
-  .command("deny")
-  .description("Deny a publication request")
-  .argument("<dataset-id>", "Dataset ID")
-  .option("-r, --reason <reason>", "Reason for denial")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .addHelpText(
-    "after",
-    `
-Description:
-  Deny a user's publication request with a specific reason.
-  The user will receive an email notification with your reason.
-
-  A clear, actionable reason helps users understand what to fix
-  before resubmitting their publication request.
-
-Requirements:
-  - Must provide a reason for denial
-  - Reason will be sent to the user via email
-  - User can fix issues and submit a new request
-
-Examples:
-  $ nemar admin publish deny nm000104 --reason "BIDS validation failing"
-  $ nemar admin publish deny nm000104 -r "Dataset incomplete - missing subjects"
-  $ nemar admin publish deny nm000104    # Prompts for reason interactively`,
-  )
-  .action(async (datasetId, options: ConfirmOptions & { reason?: string }) => {
-    if (!requireAuth()) return;
-
-    let reason = options.reason;
-    if (!reason) {
-      const { inputReason } = await inquirer.prompt([
-        { type: "input", name: "inputReason", message: "Reason for denial:" },
-      ]);
-      reason = inputReason;
-    }
-
-    if (!reason) {
-      console.log(chalk.red("Reason is required"));
-      return;
-    }
-
-    const confirmResult = await confirm(`Deny publication of ${datasetId}?`, options);
-    if (confirmResult !== "confirmed") {
-      console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-      return;
-    }
-
-    const spinner = ora(`Denying publication for ${datasetId}...`).start();
-
-    try {
-      await denyPublication(datasetId, reason);
-      spinner.succeed(`Publication denied for ${datasetId}`);
-      console.log(chalk.dim("  User has been notified."));
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to deny publication");
-    }
-  });
-
-publishCommand
-  .command("screen")
-  .description("Re-run the identifier screen of a publication request")
-  .argument("<dataset-id>", "Dataset ID")
-  .addHelpText(
-    "after",
-    `
-Description:
-  Dispatch the identifier screen again for the dataset's active publication
-  request (requested or blocked). Use it when the screen did not run, did not
-  report, or read a commit that is no longer the repository's main. The admins
-  are mailed when it reports, as for a new request.
-
-  Refused while a screen is already running and recent, and for sandbox (xx)
-  datasets, which are not screened.
-
-Examples:
-  $ nemar admin publish screen nm000104`,
-  )
-  .action(async (datasetId: string) => {
-    if (!requireAuth()) return;
-    const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
-    try {
-      const result = await rerunIdentifierScreen(datasetId);
-      if (result.status === "pending") {
-        spinner.succeed(`Identifier screen dispatched for ${datasetId}`);
-        console.log(chalk.dim("  The admins are mailed when it reports."));
-      } else {
-        spinner.warn(`The identifier screen for ${datasetId} could not be started`);
-        for (const line of identifierScreenLines(result.identifier_screen)) console.log(line);
-        console.log(chalk.dim("  The admins have been mailed this result."));
-      }
-    } catch (error) {
-      handleCommandError(error, spinner, "Failed to re-run the identifier screen");
-      process.exitCode = 1;
-    }
-  });
-
-publishCommand
-  .command("approve")
-  .description("Approve and publish a dataset (runs orchestrator)")
-  .argument("<dataset-id>", "Dataset ID")
-  .option("--resume", "Resume from last failed step")
-  .option("--sandbox", "Use Zenodo sandbox for testing")
-  .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
-  .option(
-    "--acknowledge-identifier-screen <reason>",
-    "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
-  )
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .addHelpText(
-    "after",
-    `
-Description:
-  Approve a publication request and run the automated orchestrator
-  to make the dataset publicly accessible with a permanent DOI.
-
-  The request's IDENTIFIER SCREEN must allow it first. A clean screen passes.
-  A screen that needs review, or could not look at everything, passes only with
-  --acknowledge-identifier-screen "<reason>", which is recorded with your name.
-  Direct identifiers cannot be acknowledged: the depositor fixes the data and
-  requests again. A screen that did not run or did not report must be re-run
-  with 'nemar admin publish screen <dataset-id>', and so must one whose commit
-  is no longer the repository's main. 'nemar admin publish list' shows it.
-
-  An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
-  private, no identifier is published, and the depositor is not named. The
-  confirmation banner reads the pending request and lists what will actually
-  run, so approve one and read the banner rather than this list.
-
-  WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
-  Once a DOI is assigned, it is permanent and cannot be deleted.
-
-Orchestrator Steps (execution order; shared/publication-steps.ts):
-   1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
-   2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
-   3. S3 Public Read    - Grant public read access to S3 data
-   4. Repo Public       - Publish the catalog row; for an ordinary publication
-                          this also makes the GitHub repository public, and for
-                          an anonymous release the repository stays private
-   5. Tag Protection    - Enable tag protection rules
-   6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
-   7. Update Metadata   - Update dataset metadata from BIDS description
-   8. Update README     - Add DOI badge and citation info to README
-   9. Create Tag        - Create version tag (e.g., v1.0.0)
-  10. Create Release    - Create GitHub release from tag
-  11. Upload to Zenodo  - Legacy Zenodo upload (disabled; kept for step history)
-  12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  13. Version DOI       - Mint the version DOI and dispatch the manifest job,
-                          which is what records the version. Runs for an
-                          anonymous release too, minting RESERVED (#1447)
-  14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
-  15. Sync NEMAR        - Legacy nemar.org sync (no-op, retired)
-  16. Notify User       - Send publication confirmation email
-
-  (Archive zip generation is not an orchestrator step; the version-DOI
-  workflow dispatches it separately.)
-
-  Steps 7, 8, 11 and 12 are skipped for an anonymous release: each one either
-  publishes an identifier or writes one into a file the data plane serves
-  publicly. See ANONYMOUS_RELEASE_SKIPPED_STEPS in shared/publication-steps.ts,
-  which states the reason for each.
-
-Resume Capability:
-  If a step fails, the orchestrator saves progress. Use --resume to retry
-  from the failed step without re-running successful steps.
-
-  The orchestrator is idempotent - safe to run multiple times. Completed
-  steps are automatically skipped.
-
-Examples:
-  $ nemar admin publish approve nm000104                    # Run full orchestrator
-  $ nemar admin publish approve nm000104 --resume           # Resume from failed step
-  $ nemar admin publish approve nm000104 --skip-ci-check    # Override BIDS validation
-  $ nemar admin publish approve nm000104 --yes              # Skip confirmation
-
-After Approval:
-  - User receives email with DOI and public dataset link
-  - Dataset is publicly visible on GitHub
-  - Tags are protected (prevents version manipulation)
-  - Data is protected by S3 Object Lock`,
-  )
-  .action(
-    async (
-      datasetId,
-      options: ConfirmOptions & {
-        resume?: boolean;
-        sandbox?: boolean;
-        skipCiCheck?: boolean;
-        acknowledgeIdentifierScreen?: string;
-      },
-    ) => {
-      if (!requireAuth()) return;
-
-      const ack = options.acknowledgeIdentifierScreen?.trim();
-      if (ack !== undefined && (ack.length < 10 || ack.length > 500)) {
-        console.log(
-          chalk.red("--acknowledge-identifier-screen needs a reason of 10 to 500 characters."),
-        );
-        process.exitCode = 1;
-        return;
-      }
-
-      const action = options.resume
-        ? `Resume publication of ${datasetId}`
-        : `Approve and publish ${datasetId}`;
-      console.log(chalk.cyan(`\n${action}\n`));
-
-      // Ask the server what this request IS before describing what approving
-      // it will do (#1447). An anonymous release runs a strictly smaller step
-      // set, and the banner used to be a hand-numbered literal of all sixteen:
-      // an admin approving one was told the repository would be made public
-      // and the DOI published irreversibly, and neither happens. A banner that
-      // describes the wrong operation is worse than no banner, because it is
-      // the screen the decision is made from.
-      let anonymousRelease = false;
-      let planUnknownReason: string | null = null;
-      try {
-        anonymousRelease = (await getPublishStatus(datasetId)).anonymous === true;
-      } catch (err) {
-        // Unreadable state is not a reason to refuse an approval the admin can
-        // still make, but it IS a reason to stop asserting what will happen --
-        // and to say WHY. A bare `catch {}` here printed "could not read the
-        // request's state" for an expired key, a 404 and a network failure
-        // alike, which is three different next actions rendered as one.
-        planUnknownReason = err instanceof Error ? err.message : String(err);
-      }
-
-      const steps = stepsForRelease(anonymousRelease);
-      if (planUnknownReason === null) {
-        console.log(
-          anonymousRelease
-            ? `This is an ANONYMOUS RELEASE and will run ${steps.length} of the ${PUBLICATION_STEPS.length} orchestrator steps:`
-            : `This will run the following ${steps.length}-step orchestrator:`,
-        );
-      } else {
-        console.log(
-          chalk.yellow(
-            `Could not read the request's state (${planUnknownReason}), so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
-          ),
-        );
-      }
-      // Two columns, generated from the step list rather than typed out, so
-      // adding a step cannot leave the banner describing the old publication.
-      const half = Math.ceil(steps.length / 2);
-      for (let i = 0; i < half; i++) {
-        const left = steps[i];
-        const right = steps[i + half];
-        const label = (step: (typeof steps)[number], n: number): string => {
-          const text =
-            step === "doi_create" && options.sandbox
-              ? `${PUBLICATION_STEP_LABELS[step]} (SANDBOX)`
-              : PUBLICATION_STEP_LABELS[step];
-          return `${String(n).padStart(2, " ")}. ${text}`;
-        };
-        const leftCell = label(left, i + 1).padEnd(34, " ");
-        console.log(`   ${leftCell}${right ? label(right, i + half + 1) : ""}`.trimEnd());
-      }
-      if (anonymousRelease) {
-        console.log();
-        console.log(
-          chalk.yellow("  The GitHub repository stays PRIVATE and no identifier is published:"),
-        );
-        console.log(
-          chalk.yellow(
-            "  the concept and version DOIs stay reserved until the deposit is published for real.",
-          ),
-        );
-      }
-      console.log();
-
-      // Sandbox warning
-      if (options.sandbox) {
-        console.log(chalk.yellow("━".repeat(60)));
-        console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
-        console.log(chalk.yellow("━".repeat(60)));
-        console.log(chalk.yellow("  • DOI will be created in sandbox mode (EZID test shoulder)"));
-        console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
-        console.log(chalk.yellow("  • DOI will NOT resolve in production"));
-        console.log(chalk.yellow("  • Use this for testing workflows only"));
-        console.log(chalk.yellow("━".repeat(60)));
-        console.log();
-      }
-
-      const confirmResult = await confirm(`${action}?`, options);
-      if (confirmResult !== "confirmed") {
-        console.log(chalk.dim(confirmResult === "declined" ? "Skipped" : "Cancelled"));
-        return;
-      }
-
-      const initialSpinnerText = "Running publication workflow (this may take a few minutes)...";
-      const spinner = ora(initialSpinnerText).start();
-
-      // Most recent step label rendered into the spinner; kept on the
-      // outer scope so onRetry can restore the same line after the
-      // retry notice instead of falling back to the generic text.
-      let currentSpinnerText = initialSpinnerText;
-
-      /**
-       * Render the spinner line for a progress event. Shows the step
-       * position and, for s3_lock, a running locked/total ratio so the
-       * admin can see thousands-of-objects datasets making progress
-       * instead of staring at a static spinner for minutes. See #284.
-       */
-      function renderProgress(info: PublishProgressInfo): string {
-        const stepLabel = info.step.replace(/_/g, " ");
-        const head = `Step ${info.stepIndex}/${info.stepTotal}: ${stepLabel}`;
-        if (
-          info.step === "s3_lock" &&
-          info.s3LockLocked !== undefined &&
-          info.s3LockTotal !== undefined &&
-          info.s3LockTotal > 0
-        ) {
-          const pct = ((info.s3LockLocked / info.s3LockTotal) * 100).toFixed(1);
-          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-          return `${head} | Locking S3 objects: ${info.s3LockLocked}/${info.s3LockTotal} (${pct}%)${resumeSuffix}`;
-        }
-        if (info.step === "s3_lock" && info.s3LockLocked !== undefined) {
-          // Total not yet known (rare; first response before server has
-          // counted). Show running count without the denominator so the
-          // line still advances.
-          const resumeSuffix = info.s3LockResumed ? " (resumed)" : "";
-          return `${head} | Locking S3 objects: ${info.s3LockLocked}${resumeSuffix}`;
-        }
-        return head;
-      }
-
-      try {
-        const result = await approvePublication(
-          datasetId,
-          !!options.resume,
-          !!options.sandbox,
-          !!options.skipCiCheck,
-          (info) => {
-            // Surface transient failures the CLI is about to retry. We pause
-            // the spinner so the message isn't overwritten, then resume it.
-            spinner.stop();
-            const stepLabel = info.step ? info.step.replace(/_/g, " ") : "step";
-            console.log(chalk.yellow(`  [!] ${stepLabel} failed: ${info.error}`));
-            console.log(
-              chalk.dim(
-                `  Retrying in ${Math.round(info.delayMs / 1000)}s (attempt ${info.attempt + 1}/${info.maxAttempts})...`,
-              ),
-            );
-            spinner.start(currentSpinnerText);
-          },
-          (info) => {
-            currentSpinnerText = renderProgress(info);
-            spinner.text = currentSpinnerText;
-          },
-          ack,
-        );
-        spinner.succeed(result.message);
-
-        // Display step-by-step results if available
-        if (result.step_results && result.step_results.length > 0) {
-          console.log();
-          const allSteps = result.step_results;
-          const totalSteps = allSteps.length;
-          allSteps.forEach((sr: StepResult, idx: number) => {
-            const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-            const stepName = sr.step.replace(/_/g, " ");
-            if (sr.status === "completed") {
-              const durationSec = (sr.duration_ms / 1000).toFixed(1);
-              const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-              console.log(
-                `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-              );
-            } else if (sr.status === "failed") {
-              console.log(
-                `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-              );
-            } else {
-              console.log(
-                `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-              );
-            }
-          });
-          console.log();
-        } else if (result.steps_completed) {
-          // Fallback for responses without step_results
-          console.log();
-          for (const step of result.steps_completed) {
-            console.log(`  ${chalk.green("[x]")} ${step.replace(/_/g, " ")}`);
-          }
-          console.log();
-        }
-
-        // Surface non-fatal orchestrator warnings (e.g. notify_user email
-        // failure) so operators know to follow up without re-running.
-        if (result.warning) {
-          console.log(chalk.yellow(`  Warning: ${result.warning}`));
-        }
-      } catch (error) {
-        handleCommandError(error, spinner, "Failed to approve publication", {
-          422: "Fix the CI issues and retry with --resume",
-        });
-
-        // After all retries fail, surface the per-attempt step timeline the
-        // retry loop attached to the error so the admin sees which step
-        // failed when, instead of just the final 500 message.
-        const stepResults = (error as { stepResults?: StepResult[] }).stepResults;
-        if (stepResults && stepResults.length > 0) {
-          console.log();
-          console.log(chalk.dim("Step timeline (last attempt):"));
-          const totalSteps = stepResults.length;
-          stepResults.forEach((sr, idx) => {
-            const stepNum = `[${String(idx + 1).padStart(2, " ")}/${totalSteps}]`;
-            const stepName = sr.step.replace(/_/g, " ");
-            const durationSec = (sr.duration_ms / 1000).toFixed(1);
-            const retryNote = sr.attempts > 1 ? ` (attempt ${sr.attempts})` : "";
-            if (sr.status === "completed") {
-              console.log(
-                `  ${chalk.green("[x]")} ${chalk.dim(stepNum)} ${stepName} ${chalk.dim(`(${durationSec}s${retryNote})`)}`,
-              );
-            } else if (sr.status === "failed") {
-              console.log(
-                `  ${chalk.red("[!]")} ${chalk.dim(stepNum)} ${stepName}${sr.error ? `: ${chalk.red(sr.error)}` : ""}`,
-              );
-            } else {
-              console.log(
-                `  ${chalk.dim("[-]")} ${chalk.dim(stepNum)} ${chalk.dim(stepName)} ${chalk.dim("(skipped)")}`,
-              );
-            }
-          });
-          console.log();
-        }
-      }
-    },
-  );
-
 adminCommand.addCommand(publishCommand);
 
 // ============================================================================
@@ -4507,6 +4042,38 @@ export function chunkDatasetIds(
 }
 
 /**
+ * The `--field` arguments of one `gh workflow run onboard-openneuro.yml`. `openneuro_tag` only when
+ * a tag is given: a workflow older than the tag pin has no such input and GitHub answers 422 for an
+ * unknown one, so a dispatch without `--tag` keeps its old shape. Exported for the test.
+ */
+export function openNeuroDispatchFields(chunk: string[], tag?: string): string[] {
+  return [
+    "--field",
+    `openneuro_ids=${chunk.join(",")}`,
+    ...(tag !== undefined ? ["--field", `openneuro_tag=${tag}`] : []),
+  ];
+}
+
+/**
+ * Why `--tag` cannot be used with these arguments, or null when it can. A tag names one dataset's
+ * snapshot, so it cannot apply to a batch, and only prepare clones: copy and finalize read what
+ * prepare staged. Exported for the test.
+ */
+export function importTagOptionError(
+  tag: string | undefined,
+  ids: string[],
+  phase: string | undefined,
+): string | null {
+  if (tag === undefined) return null;
+  if (!isOpenNeuroTag(tag)) {
+    return `Invalid --tag "${tag}". Expected an OpenNeuro snapshot tag such as 1.0.1.`;
+  }
+  if (ids.length !== 1) return "--tag applies to a single dataset ID";
+  if (phase !== undefined && phase !== "prepare") return "--tag is only valid with --phase prepare";
+  return null;
+}
+
+/**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
@@ -4521,6 +4088,7 @@ export function chunkDatasetIds(
  */
 async function dispatchOpenNeuroImportWorkflow(
   dsIds: string[],
+  tag?: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const { runCommand } = await import("../lib/git-annex/run-command.js");
   const chunks = chunkDatasetIds(dsIds);
@@ -4540,8 +4108,7 @@ async function dispatchOpenNeuroImportWorkflow(
       "onboard-openneuro.yml",
       "--repo",
       "nemarDatasets/.github",
-      "--field",
-      `openneuro_ids=${chunk.join(",")}`,
+      ...openNeuroDispatchFields(chunk, tag),
     ]);
     if (result.exitCode !== 0) {
       return {
@@ -4754,6 +4321,10 @@ adminCommand
     "--screen-wait-minutes <n>",
     "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0089).",
   )
+  .option(
+    "--tag <tag>",
+    "Import this upstream snapshot tag (e.g. 1.0.1) instead of OpenNeuro's latest. One dataset only; with --phase, prepare only. Without it, prepare asks OpenNeuro for the latest tag; it never imports the mirror's default HEAD (ADR 0111). A tag not yet on the GitHub mirror is refused as a mirror lag. When dispatching the workflow, nemarDatasets/.github must carry the onboard-openneuro.yml that takes openneuro_tag (GitHub answers 422 otherwise).",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -4766,6 +4337,7 @@ adminCommand
         shard?: string;
         normalizeMaxGb?: string;
         screenWaitMinutes?: string;
+        tag?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -4774,6 +4346,12 @@ adminCommand
         .split(",")
         .map((id) => id.trim())
         .filter(Boolean);
+
+      const tagError = importTagOptionError(options.tag, ids, options.phase);
+      if (tagError !== null) {
+        console.error(chalk.red(tagError));
+        process.exit(1);
+      }
 
       // Validate all IDs
       for (const id of ids) {
@@ -4851,6 +4429,7 @@ adminCommand
           persistStaging: true,
           normalizeMaxBytes,
           screenWaitMs,
+          tag: options.tag,
         };
         try {
           if (options.phase === "prepare") {
@@ -4882,6 +4461,7 @@ adminCommand
             trustUpstream: options.trustUpstream,
             normalizeMaxBytes,
             screenWaitMs,
+            tag: options.tag,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -4893,9 +4473,13 @@ adminCommand
 
       // Default: dispatch GitHub Actions workflow on nemarDatasets/.github
       const idsStr = ids.join(",");
-      console.log(chalk.cyan(`\nDispatching OpenNeuro import workflow for: ${idsStr}\n`));
+      console.log(
+        chalk.cyan(
+          `\nDispatching OpenNeuro import workflow for: ${idsStr}${options.tag !== undefined ? ` at upstream tag ${options.tag}` : ""}\n`,
+        ),
+      );
 
-      const dispatch = await dispatchOpenNeuroImportWorkflow(ids);
+      const dispatch = await dispatchOpenNeuroImportWorkflow(ids, options.tag);
       if (!dispatch.ok) {
         console.error(chalk.red(`Failed to dispatch workflow: ${dispatch.error}`));
         console.error(
@@ -5611,6 +5195,10 @@ exemplarCommand
   .option("--fleet-file <path>", "Path to the fleet JSON (default: scripts/exemplar-fleet.json)")
   .option("--publish", "Request and approve publication after data lands (mints a sandbox DOI)")
   .option("--include-derived", "Also copy zarr/, archives/, and records.json derived artifacts")
+  .option(
+    "--mirror <ds>",
+    "A mirror rehearsal fixture of this OpenNeuro dataset (from its on mirror): the row says source openneuro, so an upstream re-pull can be rehearsed on staging",
+  )
   .action(
     async (
       xxId: string | undefined,
@@ -5620,6 +5208,7 @@ exemplarCommand
         fleetFile?: string;
         publish?: boolean;
         includeDerived?: boolean;
+        mirror?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -5629,8 +5218,8 @@ exemplarCommand
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
       if (options.all) {
-        if (xxId || options.source) {
-          console.error(chalk.red("--all cannot be combined with an xx-id or --source"));
+        if (xxId || options.source || options.mirror) {
+          console.error(chalk.red("--all cannot be combined with an xx-id, --source or --mirror"));
           process.exit(1);
         }
         let entries: Awaited<ReturnType<typeof loadExemplarFleet>>;
@@ -5701,12 +5290,21 @@ exemplarCommand
         console.error(chalk.red(`Invalid source id "${sourceId}". Expected an nm/on dataset id.`));
         process.exit(1);
       }
+      if (options.mirror !== undefined) {
+        const { mirrorProblem } = await import("../lib/exemplar-clone.js");
+        const problem = mirrorProblem(sourceId, options.mirror);
+        if (problem) {
+          console.error(chalk.red(problem));
+          process.exit(1);
+        }
+      }
 
       try {
         await cloneExemplar({
           xxId,
           sourceId,
           ...cloneOpts,
+          ...(options.mirror !== undefined ? { mirror: options.mirror } : {}),
         });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
@@ -5890,6 +5488,8 @@ fleetCommand
         "PRIVATE_WITH_STRAY_READ",
         "DEFAULT_BRANCH_OUTLIER",
         "DEPRECATED_WORKFLOW_PRESENT",
+        "REVIEW_RULESET_MISSING",
+        "REVIEW_RULESET_STRAY",
         "COMPLIANT",
       ];
       for (const b of order) {
@@ -5991,6 +5591,321 @@ fleetCommand
       process.exit(1);
     }
   });
+
+// ----------------------------------------------------------------------------
+// The required pull-request review (ADR 0107)
+// ----------------------------------------------------------------------------
+
+/** What an action is called before it happens (a dry run) and after. */
+const REVIEW_ACTION_WORDS: Record<string, { dry: string; done: string }> = {
+  create: { dry: "would create", done: "created" },
+  update: { dry: "would update", done: "updated" },
+  remove: { dry: "would remove", done: "removed" },
+  none: { dry: "nothing to remove", done: "nothing to remove" },
+  skip: { dry: "would skip", done: "skipped" },
+};
+
+/** Why a dataset is not one the automated review covers, in the words a person would use. */
+const NOT_REVIEWED_WORDS: Record<string, string> = {
+  inactive: "archived or deleted",
+  private: "private",
+  anonymous: "an anonymous deposit",
+  unpublished: "not yet published",
+};
+
+/**
+ * Which GitHub App posts the review check and which one the ruleset requires it from, said on a
+ * dry run. They have to be the same App, and the Worker has to be able to sign in as it, or the
+ * check never arrives, and then `--apply` is refused.
+ */
+function reviewAppLine(ids: ReviewAppIds): string {
+  if (ids.app_id_matches && ids.installation_configured) {
+    return chalk.dim(
+      `  GitHub App: this Worker posts the check as App ${ids.github_app_id}, the App the ruleset requires it from.`,
+    );
+  }
+  if (ids.app_id_matches) {
+    // The right id, and no way to sign in as the App for nemarDatasets: the Worker would post with
+    // a personal access token, which GitHub does not let post a check run.
+    return chalk.yellow(
+      `  GitHub App: this Worker is set to App ${ids.github_app_id}, the App the ruleset requires it from, but it cannot sign in as that App for nemarDatasets (GITHUB_APP_PRIVATE_KEY or GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS is missing or not valid), so it would post with a personal access token, which cannot post a check run: --apply would be refused, and the check would never arrive.`,
+    );
+  }
+  // Three different things to fix: an unset binding, a value that is not an id, and another App.
+  const posts =
+    ids.github_app_id_state === "id"
+      ? `App ${ids.github_app_id}`
+      : ids.github_app_id_state === "not_a_number"
+        ? "an App whose id is not a number (GITHUB_APP_ID is set but is not a plain number)"
+        : "no App (GITHUB_APP_ID is not set)";
+  return chalk.yellow(
+    `  GitHub App: this Worker posts the check as ${posts}, but the ruleset requires it from App ${ids.ruleset_app_id}, so --apply would be refused: the check would never arrive.`,
+  );
+}
+
+/** What to tell an administrator who tries a page: it is for the owner, and one dataset is not. */
+const BULK_OWNER_ONLY_HINT =
+  "The bulk apply is owner-only. An administrator can bring one dataset at a time to its review spec: nemar admin fleet require-review <dataset-id> --apply.";
+
+/**
+ * A requirement the Worker refused on a row of a page is said in a line there, and the sentence
+ * that explains it is printed once after the page: the same long sentence on up to fifty rows would
+ * bury the rows. Keyed on the outcome's `code`.
+ */
+const REFUSED_ROW_WORDS: Record<string, string> = {
+  review_disabled: "refused: the review is off (PR_REVIEW_ENABLED is not 1)",
+  review_app_mismatch: "refused: this Worker posts the check as a different GitHub App",
+  review_app_not_configured:
+    "refused: this Worker cannot sign in as the GitHub App that posts the check",
+};
+
+/** One dataset's line in a page: what is done, to which dataset, and why when it is not obvious. */
+function reviewRulesetRow(o: ReviewRulesetOutcome, dryRun: boolean): string {
+  const id = plain(o.dataset_id);
+  if (o.error) {
+    const refused = o.code ? REFUSED_ROW_WORDS[o.code] : undefined;
+    return `${chalk.red("error".padEnd(18))} ${id}: ${refused ?? plain(o.error)}`;
+  }
+  const words = o.action ? REVIEW_ACTION_WORDS[o.action] : undefined;
+  const verb = words ? (dryRun ? words.dry : words.done) : "unknown";
+  let note = "";
+  if (o.action === "skip") {
+    note = `default branch is ${plain(o.default_branch ?? "unknown")}, not main`;
+  } else if (!o.reviewable && o.not_reviewable_because) {
+    note = `not reviewed: ${NOT_REVIEWED_WORDS[o.not_reviewable_because] ?? "not reviewed"}`;
+  }
+  const color = o.action === "skip" ? chalk.yellow : o.action === "none" ? chalk.dim : chalk.cyan;
+  return `${color(verb.padEnd(18))} ${id}${note ? chalk.dim(`  (${note})`) : ""}`;
+}
+
+fleetCommand
+  .command("require-review")
+  .description(
+    "Require the NEMAR PR Review check on the datasets the automated review covers, and take it off the rest. Dry run by default.",
+  )
+  .argument("[dataset-id]", "Dataset to bring to its review spec (omit when using --all)")
+  .option("--all", "A page of datasets in id order, not one (owner-only)")
+  .option("--prefix <prefix>", "With --all: only ids that start with this, such as nm or on")
+  .option(
+    "--after <dataset-id>",
+    "With --all: continue after this id, the last of the previous page",
+  )
+  .option("--limit <n>", "With --all: datasets in a page, 1 to 50 (default 25)")
+  .option("--apply", "Change the repositories (the default is a dry run that changes nothing)")
+  .option("--remove", "Take the ruleset off instead, from every dataset asked about (the rollback)")
+  .option("--json", "Output raw JSON")
+  .addHelpText(
+    "after",
+    `
+What it does, per dataset:
+  A dataset the automated review covers (active, public, named, first-published) gets the
+  "NEMAR PR review required" ruleset on its default branch: a pull request cannot merge until the
+  NEMAR PR Review check passes. The NEMAR GitHub App, organization administrators and the
+  repository Admin role bypass it; maintainers and outside collaborators do not.
+  Any other dataset (private, unpublished, anonymous, archived) has the ruleset taken off.
+  A repository whose default branch is not main is skipped, and the standing test fixtures
+  (nm099900 to nm099999) are never touched. No dataset is treated differently for being live.
+
+Nothing changes without --apply. Putting the ruleset on needs the review switched on in the
+environment (PR_REVIEW_ENABLED): a dataset that would get it is refused while the review is off,
+alone or on its row of a page. Taking it off never needs the review, so --remove --apply always
+works, and so does a dataset that is not reviewed.
+
+It also needs this Worker to post the review check as the GitHub App the ruleset requires it from
+(App 3679074), and to be able to sign in as that App for nemarDatasets: the App's private key and
+the nemarDatasets installation id, without which it would post with a personal access token, and
+GitHub does not let one post a check run. The dry run says which, and a dataset that would get the
+ruleset is refused, the same way, when the App is another one or the Worker cannot sign in as it.
+
+Examples:
+  $ nemar admin fleet require-review xx099900                 # dry run: shows the body it would send
+  $ nemar admin fleet require-review xx099900 --apply
+  $ nemar admin fleet require-review --all --prefix nm --limit 50
+  $ nemar admin fleet require-review --all --prefix nm --limit 50 --apply
+  $ nemar admin fleet require-review --all --prefix nm --limit 50 --after nm000312 --apply
+  $ nemar admin fleet require-review nm000456 --remove --apply   # roll one dataset back
+`,
+  )
+  .action(
+    async (
+      datasetArg: string | undefined,
+      options: {
+        all?: boolean;
+        prefix?: string;
+        after?: string;
+        limit?: string;
+        apply?: boolean;
+        remove?: boolean;
+        json?: boolean;
+      },
+    ) => {
+      const json = Boolean(options.json);
+      if (!requireSignedIn(json)) return;
+      const refuse = (message: string, hint?: string) =>
+        failMessage(message, { json, answered: true, hint });
+
+      if (datasetArg && options.all) {
+        return refuse("Name a dataset OR use --all, not both.");
+      }
+      if (!datasetArg && !options.all) {
+        return refuse("Name a dataset, or use --all for a page of datasets.");
+      }
+      if (
+        !options.all &&
+        (options.prefix !== undefined || options.after !== undefined || options.limit !== undefined)
+      ) {
+        return refuse("--prefix, --after and --limit go with --all.");
+      }
+      let limit: number | undefined;
+      if (options.limit !== undefined) {
+        limit = /^\d+$/.test(options.limit) ? Number.parseInt(options.limit, 10) : Number.NaN;
+        if (!(limit >= 1 && limit <= 50)) {
+          return refuse("--limit is a number from 1 to 50.");
+        }
+      }
+      // What the Worker would refuse is refused here first, in a sentence: its own refusal of a
+      // bad prefix or id comes back as an object, which prints as "[object Object]".
+      const prefix =
+        options.prefix === undefined ? undefined : checkedDatasetIdPrefix(options.prefix, json);
+      if (prefix === null) return;
+      const after =
+        options.after === undefined ? undefined : checkedAfterDatasetId(options.after, json);
+      if (after === null) return;
+      const id = datasetArg ? checkedDatasetId(datasetArg, json) : null;
+      if (datasetArg && !id) return;
+
+      const dryRun = !options.apply;
+      const remove = Boolean(options.remove);
+      const tag = dryRun ? "[dry run] " : "";
+      const spinner = json ? null : ora(`${tag}Reading the review ruleset...`).start();
+      const out = say(false);
+      try {
+        if (id) {
+          const r = await reviewRuleset(id, { dryRun, remove });
+          if (json) {
+            console.log(JSON.stringify(r, null, 2));
+            return;
+          }
+          spinner?.stop();
+          out(`${tag}${reviewRulesetRow(r, dryRun)}`);
+          out(
+            chalk.dim(
+              `  The dataset is ${r.reviewable ? "one the automated review covers" : `not reviewed (${NOT_REVIEWED_WORDS[r.not_reviewable_because ?? ""] ?? "not covered"})`}; the ruleset is to be ${r.intent === "require" ? "put on" : "taken off"}.`,
+            ),
+          );
+          if (dryRun && r.payload) {
+            out("");
+            out("  The body that would be sent to GitHub:");
+            for (const line of JSON.stringify(r.payload, null, 2).split("\n")) out(`  ${line}`);
+          }
+          if (dryRun && r.intent === "require") {
+            out("");
+            out(reviewAppLine(r));
+          }
+          if (dryRun && !r.review_enabled && r.intent === "require") {
+            out("");
+            out(
+              chalk.yellow(
+                "  The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would be refused: nothing would post the check. --remove --apply is not refused.",
+              ),
+            );
+          }
+          out("");
+          if (r.action === "skip") {
+            // Adding --apply would skip it again, so say what has to change first.
+            out(
+              chalk.yellow(
+                "Nothing was changed: the default branch has to be main first. `nemar admin fleet drift` lists such repositories as DEFAULT_BRANCH_OUTLIER.",
+              ),
+            );
+          } else if (dryRun) {
+            out(chalk.dim("Dry run: nothing was changed. Add --apply to change it."));
+          } else {
+            out(r.applied ? chalk.green("Done.") : chalk.dim("Nothing needed to change."));
+          }
+          return;
+        }
+
+        const r = await reviewRulesetBulk({
+          prefix,
+          after,
+          limit,
+          dryRun,
+          remove,
+        });
+        if (json) {
+          console.log(JSON.stringify(r, null, 2));
+          if (r.results.some((x) => x.error)) process.exitCode = 1;
+          return;
+        }
+        spinner?.stop();
+        const first = r.results[0]?.dataset_id;
+        const last = r.results[r.results.length - 1]?.dataset_id;
+        out(
+          `${tag}${r.count} dataset(s)${first && last ? ` (${first} to ${last})` : ""}${remove ? ", taking the ruleset off" : ""}`,
+        );
+        for (const row of r.results) out(`  ${reviewRulesetRow(row, dryRun)}`);
+
+        const tally = new Map<string, number>();
+        for (const row of r.results) {
+          const word = row.error
+            ? "error"
+            : row.action
+              ? REVIEW_ACTION_WORDS[row.action][dryRun ? "dry" : "done"]
+              : "unknown";
+          tally.set(word, (tally.get(word) ?? 0) + 1);
+        }
+        out("");
+        out(
+          [...tally.entries()].map(([word, n]) => `${n} ${word}`).join(", ") ||
+            chalk.dim("No datasets matched."),
+        );
+        // Each refusal is explained once, in the Worker's words, however many rows it refused. The
+        // sentence does not say that nothing was changed: on a page, other rows may have been.
+        const explained = new Set<string>();
+        for (const row of r.results) {
+          if (row.code && row.error && REFUSED_ROW_WORDS[row.code] && !explained.has(row.code)) {
+            explained.add(row.code);
+            out(chalk.yellow(plain(row.error)));
+          }
+        }
+        const wouldRefuse = r.results.filter((x) => x.intent === "require").length;
+        if (dryRun && wouldRefuse > 0) out(reviewAppLine(r));
+        if (dryRun && !r.review_enabled && wouldRefuse > 0) {
+          out(
+            chalk.yellow(
+              `The automated review is off in this environment (PR_REVIEW_ENABLED is not 1), so --apply would refuse the ${wouldRefuse} dataset(s) that would get the ruleset, and still take it off the rest. --remove --apply is not refused.`,
+            ),
+          );
+        }
+        if (r.next_after) {
+          const next = [
+            "nemar admin fleet require-review --all",
+            options.prefix ? `--prefix ${options.prefix}` : "",
+            `--limit ${r.limit}`,
+            `--after ${r.next_after}`,
+            remove ? "--remove" : "",
+            dryRun ? "" : "--apply",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          out(chalk.dim(`Next page: ${next}`));
+        }
+        if (dryRun) out(chalk.dim("Dry run: nothing was changed. Add --apply to change it."));
+        if (r.results.some((x) => x.error)) process.exitCode = 1;
+      } catch (error) {
+        // A 403 on a page is the owner-only rule, not a lack of admin privileges (the generic hint
+        // says that), so the page says what it is. A 403 on one dataset keeps the generic hint.
+        failWith(
+          error,
+          spinner,
+          "The review ruleset request failed",
+          id ? undefined : { 403: BULK_OWNER_ONLY_HINT },
+          { json },
+        );
+      }
+    },
+  );
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -7881,6 +7796,171 @@ zarrFidelitySweepCommand
 adminCommand.addCommand(zarrFidelitySweepCommand);
 
 // ============================================================================
+// Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
+// ============================================================================
+
+const BACKFILL_PAUSE_MS = 250;
+
+const upstreamBackfillCommand = new Command("upstream-backfill").description(
+  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+);
+
+upstreamBackfillCommand
+  .option("--execute", "Write the results; without it nothing is recorded")
+  .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
+  .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
+  .option("--max-batches <n>", "Stop after this many batches", "200")
+  .option("--json", "Output one JSON summary instead of progress lines")
+  .action(
+    async (options: {
+      execute?: boolean;
+      limit?: string;
+      after?: string;
+      maxBatches?: string;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
+      const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
+      const execute = options.execute === true;
+      const say = (line: string) => {
+        if (!options.json) console.log(line);
+      };
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      say(
+        chalk.dim(
+          "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
+        ),
+      );
+
+      const total = {
+        batches: 0,
+        scanned: 0,
+        recorded: { doi: 0, unknown: 0 },
+        not_examined: 0,
+        unparseable: 0,
+        absent: 0,
+        skipped_existing: 0,
+      };
+      const errors: UpstreamBackfillResponse["errors"] = [];
+      let cursor = options.after;
+      let last: UpstreamBackfillResponse | null = null;
+      let failure: string | null = null;
+      let suspectCredential = false;
+
+      for (let batch = 0; batch < maxBatches; batch++) {
+        let res: UpstreamBackfillResponse;
+        try {
+          res = await upstreamBackfill({ execute, limit, after: cursor });
+        } catch (err) {
+          failure = errorDetail(err);
+          break;
+        }
+        last = res;
+        total.batches++;
+        total.scanned += res.scanned;
+        total.recorded.doi += res.recorded.doi;
+        total.recorded.unknown += res.recorded.unknown;
+        total.not_examined += res.not_examined;
+        total.unparseable += res.unparseable;
+        total.absent += res.absent;
+        total.skipped_existing += res.skipped_existing;
+        errors.push(...res.errors);
+        say(
+          `${chalk.cyan(`batch ${total.batches}`)}  scanned=${res.scanned} ${execute ? "recorded" : "would record"} doi=${res.recorded.doi} unknown=${res.recorded.unknown}  not_examined=${res.not_examined}  remaining=${res.remaining}`,
+        );
+        for (const sample of res.unknown_samples) {
+          say(
+            `    ${chalk.dim("unknown")} ${sample.dataset_id}@${sample.version}: ${sample.reason}`,
+          );
+        }
+        for (const e of res.errors) {
+          say(
+            `    ${chalk.red("error")}   ${e.dataset_id}@${e.version}${e.kind === "needs_admin" ? " [needs admin]" : ""}: ${e.error}`,
+          );
+        }
+        if (!res.ok) {
+          suspectCredential = res.suspect_credential;
+          failure = res.error ?? "the batch failed";
+          cursor = res.next_cursor ?? cursor;
+          break;
+        }
+        cursor = res.next_cursor ?? undefined;
+        if (!res.next_cursor) break;
+        await new Promise((resolve) => setTimeout(resolve, BACKFILL_PAUSE_MS));
+      }
+
+      const done = failure === null && last !== null && last.next_cursor === null;
+      const resumeCursor = done ? null : (cursor ?? null);
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              execute,
+              done,
+              failure,
+              suspect_credential: suspectCredential,
+              ...total,
+              errors,
+              next_cursor: resumeCursor,
+              counts: last?.counts ?? null,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        if (failure) console.error(chalk.red(`Stopped: ${failure}`));
+        if (!done && !failure) {
+          console.log(
+            chalk.yellow(`Stopped at --max-batches ${maxBatches}; the pass is not done.`),
+          );
+        }
+        if (resumeCursor) console.log(`Resume with: --after ${resumeCursor}`);
+        if (done && total.not_examined > 0) {
+          // An error without a kind comes from an older backend; a rerun is the safe advice.
+          const needsAdmin = errors.filter((e) => e.kind === "needs_admin");
+          const transient = total.not_examined - needsAdmin.length;
+          if (transient > 0) {
+            console.log(
+              chalk.yellow(
+                `${transient} row(s) were not examined after a transient error: rerun without --after to try them again.`,
+              ),
+            );
+          }
+          if (needsAdmin.length > 0) {
+            console.log(
+              chalk.yellow(
+                `${needsAdmin.length} row(s) have no description at the tag or at main (or the default branch is not main): a rerun will not fix them and they need an admin look. They are the 'error' lines above (${needsAdmin
+                  .slice(0, 3)
+                  .map((e) => `${e.dataset_id}@${e.version}`)
+                  .join(", ")}${needsAdmin.length > 3 ? ", ..." : ""}).`,
+              ),
+            );
+          }
+        }
+        if (last) {
+          console.log(
+            chalk.cyan(
+              `On versions now: doi=${last.counts.doi} lineage=${last.counts.lineage} unknown=${last.counts.unknown} not_examined=${last.counts.not_examined}`,
+            ),
+          );
+        }
+        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+      }
+
+      // Non-zero on any error, any failed batch, and any pass that did not finish, so a
+      // caller never reads a partial or uncertain backfill as success.
+      if (failure !== null || errors.length > 0 || !done) process.exit(1);
+    },
+  );
+
+adminCommand.addCommand(upstreamBackfillCommand);
+adminCommand.addCommand(upstreamStatusCommand);
+
+// ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
 // ============================================================================
 
@@ -8275,6 +8355,7 @@ emailPrefsCommand
         { key: "announcements", label: "Announcement emails" },
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
         { key: "identifier_sweep", label: "Identifier sweep weekly report" },
+        { key: "support_tickets", label: "Support tickets assigned to you" },
       ];
 
       for (const cat of categories) {
@@ -8299,6 +8380,7 @@ emailPrefsCommand
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
+  .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -8308,6 +8390,7 @@ emailPrefsCommand
       announcements?: string;
       datasetAnonymity?: string;
       identifierSweep?: string;
+      supportTickets?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8336,19 +8419,22 @@ emailPrefsCommand
         updates.announcements = val;
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
+        updates.support_tickets = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
         const anon = parseBool(options.datasetAnonymity);
         const sweep = parseBool(options.identifierSweep);
+        const tickets = parseBool(options.supportTickets);
 
         if (
           ua === undefined &&
           pr === undefined &&
           ann === undefined &&
           anon === undefined &&
-          sweep === undefined
+          sweep === undefined &&
+          tickets === undefined
         ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
@@ -8356,6 +8442,7 @@ emailPrefsCommand
           console.log("  --announcements <bool>         Announcement emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
+          console.log("  --support-tickets <bool>       Support ticket notifications");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8365,6 +8452,7 @@ emailPrefsCommand
         if (ann !== undefined) updates.announcements = ann;
         if (anon !== undefined) updates.dataset_anonymity = anon;
         if (sweep !== undefined) updates.identifier_sweep = sweep;
+        if (tickets !== undefined) updates.support_tickets = tickets;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8387,6 +8475,9 @@ emailPrefsCommand
         );
         console.log(
           `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");
@@ -8550,22 +8641,54 @@ adminCommand.addCommand(noticeCommand);
 // Broadcast Notifications
 // ============================================================================
 
+/** The lines `nemar admin notify --status` prints for one announcement. */
+export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
+  const lines = [
+    `${chalk.bold(`Announcement ${s.id}`)} ${chalk.cyan(s.status)}`,
+    `  Subject: ${s.subject}`,
+    `  To: ${s.recipient_group}`,
+    `  Sent at: ${s.sent_at}`,
+  ];
+  if (s.status === "sent") {
+    lines.push(`  Delivered: ${s.queued_count > 0 ? s.delivered_count : "n/a (sent inline)"}`);
+    lines.push(`  Failed: ${s.failure_count}`);
+  } else {
+    lines.push(`  Queued: ${s.queued_count}`);
+    lines.push(`  Delivered: ${s.delivered_count}`);
+    lines.push(`  Failed: ${s.failure_count}`);
+    lines.push(
+      `  Unconfirmed: ${s.unknown_count} (not retried; the provider never confirmed them)`,
+    );
+    const pending = s.queued_count - s.delivered_count - s.failure_count - s.unknown_count;
+    if (pending > 0) lines.push(`  Pending: ${pending}`);
+  }
+  if (s.failed_recipients.length > 0) {
+    lines.push("  Failed addresses are shown redacted and may not be unique:");
+    for (const address of s.failed_recipients) lines.push(chalk.red(`  Failed: ${address}`));
+  }
+  return lines;
+}
+
 adminCommand
   .command("notify")
   .description("Send an email to a group or a single user")
   .option("--to <group>", "Recipient group: all, admins, members")
   .option("--user <username>", "Send to a single user by username")
-  .requiredOption("--subject <text>", "Email subject line")
+  .option("--subject <text>", "Email subject line")
   .option("--body <text>", "Email body (markdown)")
   .option("--body-file <path>", "Read email body from file (markdown)")
   .option("--dry-run", "Preview recipients without sending")
+  .option("--status <id>", "Show the progress of a queued announcement by its ID")
+  .option("--json", "Output raw JSON (with --status)")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(
     async (options: {
       to?: string;
       user?: string;
-      subject: string;
+      subject?: string;
+      status?: string;
+      json?: boolean;
       body?: string;
       bodyFile?: string;
       dryRun?: boolean;
@@ -8576,6 +8699,33 @@ adminCommand
         console.error(chalk.red("Not authenticated. Run: nemar auth login"));
         process.exit(1);
       }
+
+      if (options.status !== undefined) {
+        const id = Number(options.status);
+        if (!Number.isInteger(id) || id < 1) {
+          console.error(chalk.red(`Invalid announcement ID: ${options.status}`));
+          process.exit(1);
+        }
+        const spinner = options.json ? null : ora("Fetching announcement status...").start();
+        try {
+          const status = await getBroadcastStatus(id);
+          if (options.json) {
+            console.log(JSON.stringify(status, null, 2));
+            return;
+          }
+          spinner?.stop();
+          for (const line of formatBroadcastStatus(status)) console.log(line);
+        } catch (err) {
+          handleCommandError(err, spinner ?? ora(), "Failed to fetch announcement status");
+        }
+        return;
+      }
+
+      if (!options.subject) {
+        console.error(chalk.red("Email subject required. Use --subject."));
+        process.exit(1);
+      }
+      const subject = options.subject;
 
       // Mutual exclusion: exactly one of --to or --user
       if (options.to && options.user) {
@@ -8609,8 +8759,8 @@ adminCommand
 
       const target = options.user ? `user:${options.user}` : (options.to as string);
       const requestPayload = options.user
-        ? { user: options.user, subject: options.subject, body }
-        : { to: options.to as string, subject: options.subject, body };
+        ? { user: options.user, subject, body }
+        : { to: options.to as string, subject, body };
 
       if (options.dryRun) {
         const spinner = ora("Checking recipients...").start();
@@ -8634,7 +8784,7 @@ adminCommand
       // Preview and confirm
       console.log(chalk.bold("Email preview:"));
       console.log(`  To: ${chalk.cyan(target)}`);
-      console.log(`  Subject: ${options.subject}`);
+      console.log(`  Subject: ${subject}`);
       console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
       console.log();
 
@@ -8651,7 +8801,15 @@ adminCommand
         const result = await sendBroadcast(requestPayload);
 
         if ("broadcast_id" in result) {
-          if (result.failure_count > 0) {
+          if (result.error === "queue_enqueue_failed") {
+            spinner.warn(
+              `Enqueue failed (ID ${result.broadcast_id}): ${result.recipient_count} queued, ${result.failure_count} not queued; check progress with: nemar admin notify --status ${result.broadcast_id}`,
+            );
+          } else if (result.status === "queued" && result.failure_count === 0) {
+            spinner.succeed(
+              `Queued ${result.recipient_count} announcement(s) (ID ${result.broadcast_id}); check progress with: nemar admin notify --status ${result.broadcast_id}`,
+            );
+          } else if (result.failure_count > 0) {
             spinner.warn(
               `Email send: ${result.recipient_count} delivered, ${result.failure_count} failed`,
             );
@@ -8663,6 +8821,13 @@ adminCommand
               ? `Email sent to ${options.user}`
               : `Broadcast sent to ${result.recipient_count} recipient(s)`;
             spinner.succeed(`${label} (ID: ${result.broadcast_id})`);
+          }
+          if ((result.suppressed_count ?? 0) > 0) {
+            console.log(
+              chalk.yellow(
+                `  ${result.suppressed_count} recipient(s) withheld by the non-production delivery fence`,
+              ),
+            );
           }
         }
       } catch (err) {
@@ -9585,6 +9750,51 @@ importWeeklyCommand
           `closed_this_week=${weeklyCount(f.issuesClosed)} relabelled=${weeklyCount(f.issuesRelabelled)}`,
       ),
     );
+    // Epic #1046 phase 4b: the upstream freshness pass, as counts. Absent or null is unknown.
+    if (f.upstream == null) {
+      console.log(chalk.cyan(`upstream=${chalk.yellow("unknown")}`));
+    } else {
+      const u = f.upstream.counts.states;
+      const partial = f.upstream.truncated
+        ? ` ${chalk.yellow("(did not reach every mirror)")}`
+        : "";
+      const line =
+        `upstream: stale=${weeklyCount(f.upstream.counts.stale)} current=${weeklyCount(u.current)} ` +
+        `anomaly=${weeklyCount(u.anomaly)} unknown=${weeklyCount(u.unknown)} unchecked=${weeklyCount(u.unchecked)}`;
+      console.log(chalk.cyan(`${line}${partial}`));
+    }
+    // Epic #1046 phase 7: the upstream re-pulls' week, as the report counts it. Absent or null is
+    // unknown; the reasons to look arrive below with the rest, from the shared rule.
+    if (f.repulls == null) {
+      console.log(chalk.cyan(`repulls=${chalk.yellow("unknown")}`));
+    } else {
+      const r = f.repulls;
+      const sw = r.switches;
+      const switches = sw.auto_repull_merge_enabled
+        ? "open+merge"
+        : sw.auto_repull_enabled
+          ? "open"
+          : "off";
+      console.log(
+        chalk.cyan(
+          `repulls: switches=${switches} dispatched=${weeklyCount(r.dispatches.sent)} ` +
+            `opened=${weeklyCount(r.dispatches.by_status.opened)} ` +
+            `refused=${weeklyCount(r.dispatches.by_status.refused)} ` +
+            `failed=${weeklyCount(r.dispatches.by_status.failed)} ` +
+            `unreported=${weeklyCount(r.dispatches.by_status.unreported)} ` +
+            `not_accepted=${weeklyCount(r.dispatches.by_status.dispatch_failed)}`,
+        ),
+      );
+      console.log(
+        chalk.cyan(
+          `repulls: open=${weeklyCount(r.open_automatic.total)} held=${weeklyCount(r.open_automatic.held)} ` +
+            `claims_held=${weeklyCount(r.held_claims)} ended_failed=${weeklyCount(r.ended_failed)} ` +
+            `merged_worker=${weeklyCount(r.merged.worker)} merged_admin=${weeklyCount(r.merged.administrator)} ` +
+            `merged_outside=${weeklyCount(r.merged.outside_tool)} ` +
+            `merged_unattributed=${weeklyCount(r.merged.unattributed)}`,
+        ),
+      );
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);
@@ -10285,3 +10495,5 @@ neurobagelCommand
 
 adminCommand.addCommand(neurobagelCommand);
 adminCommand.addCommand(prReviewsCommand);
+adminCommand.addCommand(repullCommand);
+adminCommand.addCommand(mailCommand);

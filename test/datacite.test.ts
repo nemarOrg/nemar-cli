@@ -911,6 +911,56 @@ describe("bidsToDataCite", () => {
     expect(derived?.[0]?.relatedIdentifierType).toBe("DOI");
   });
 
+  test("an imported OpenNeuro entry gives one IsDerivedFrom, its DOI (ADR 0111 decision 10)", () => {
+    // The entry the importer records: DOI, OpenNeuro page and tag. The page names the same
+    // snapshot, so it must not become a second relation to the same upstream.
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      SourceDatasets: [
+        {
+          DOI: "doi:10.18112/openneuro.ds004362.v1.0.1",
+          URL: "https://openneuro.org/datasets/ds004362/versions/1.0.1",
+          Version: "1.0.1",
+        },
+      ],
+    };
+    const metadata = bidsToDataCite("on004362", "10.82901/NEMAR.ABC", bids);
+    const derived = metadata.relatedIdentifiers?.filter((r) => r.relationType === "IsDerivedFrom");
+    expect(derived).toEqual([
+      {
+        identifier: "10.18112/openneuro.ds004362.v1.0.1",
+        relatedIdentifierType: "DOI",
+        relationType: "IsDerivedFrom",
+      },
+    ]);
+  });
+
+  test("a URL naming another dataset than its entry's DOI still counts", () => {
+    const bids = {
+      Name: "Test",
+      Authors: ["Doe, John"],
+      SourceDatasets: [
+        {
+          DOI: "doi:10.18112/openneuro.ds004362.v1.0.1",
+          URL: "https://physionet.org/content/hd-semg/1.0.0/",
+        },
+        {
+          DOI: "doi:10.18112/openneuro.ds004362.v1.0.1",
+          URL: "https://openneuro.org/datasets/ds000002/versions/1.0.0",
+        },
+      ],
+    };
+    const metadata = bidsToDataCite("on004362", "10.82901/NEMAR.ABC", bids);
+    const urls = metadata.relatedIdentifiers
+      ?.filter((r) => r.relationType === "IsDerivedFrom" && r.relatedIdentifierType === "URL")
+      .map((r) => r.identifier);
+    expect(urls).toEqual([
+      "https://physionet.org/content/hd-semg/1.0.0/",
+      "https://openneuro.org/datasets/ds000002/versions/1.0.0",
+    ]);
+  });
+
   test("extracts bare DOI from doi.org URL in ReferencesAndLinks", () => {
     const bids = {
       Name: "Test",

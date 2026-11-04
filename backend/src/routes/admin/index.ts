@@ -8,7 +8,7 @@
  */
 
 import { Hono } from "hono";
-import { adminMiddleware, authMiddleware } from "../../middleware/auth";
+import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../../middleware/auth";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerExemplarRoutes } from "./exemplar";
@@ -18,12 +18,18 @@ import { registerImportCoverageRoutes } from "./import-coverage";
 import { registerImportIssueTriageRoutes } from "./import-issue-triage";
 import { registerImportWeeklyRoutes } from "./import-weekly";
 import { registerImportRoutes } from "./imports";
+import { registerMailRoutes } from "./mail";
 import { registerNeurobagelRoutes } from "./neurobagel";
 import { registerNewsRoutes } from "./news";
 import { registerNoticeRoutes } from "./notices";
 import { registerPrReviewRoutes } from "./pr-reviews";
+import { registerPublicationReviewRoutes } from "./publication-review";
 import { registerPublishRoutes } from "./publish";
+import { registerPublishCommentRoutes } from "./publish-comment";
 import type { AdminRouter } from "./shared";
+import { registerUpstreamBackfillRoutes } from "./upstream-backfill";
+import { registerUpstreamRepullRoutes } from "./upstream-repulls";
+import { registerUpstreamStatusRoutes } from "./upstream-status";
 import { registerUserDuplicateRoutes } from "./user-duplicates";
 import { registerUserEditRoutes } from "./user-edit";
 import { registerUserKeyRoutes } from "./user-keys";
@@ -36,9 +42,13 @@ import { registerZarrFidelitySweepRoutes } from "./zarr-fidelity-sweep";
 
 export const adminRoutes: AdminRouter = new Hono();
 
-// All admin routes require authentication and admin role
+// All admin routes require authentication and admin role, and a write made with a session cookie
+// has to come from a NEMAR page (#1603, #1584; ADR 0105, decision 10). The guard reads what
+// authMiddleware set, and runs after the role check so a member is told "Admin access required"
+// and not asked about an Origin.
 adminRoutes.use("*", authMiddleware);
 adminRoutes.use("*", adminMiddleware);
+adminRoutes.use("*", cookieOriginGuard);
 
 // BEFORE registerUsersRoutes, and it has to be. Hono runs every handler whose
 // pattern matches, in REGISTRATION order, and `GET /users/:username` matches
@@ -56,6 +66,8 @@ registerUserUsernameRoutes(adminRoutes);
 registerDoiRoutes(adminRoutes);
 registerFleetRoutes(adminRoutes);
 registerPublishRoutes(adminRoutes);
+registerPublicationReviewRoutes(adminRoutes);
+registerPublishCommentRoutes(adminRoutes);
 registerDatasetLifecycleRoutes(adminRoutes);
 registerImportRoutes(adminRoutes);
 registerImportIssueTriageRoutes(adminRoutes);
@@ -70,3 +82,7 @@ registerZarrFidelitySweepRoutes(adminRoutes);
 registerNeurobagelRoutes(adminRoutes);
 registerIdentifierSweepAdminRoutes(adminRoutes);
 registerPrReviewRoutes(adminRoutes);
+registerUpstreamBackfillRoutes(adminRoutes);
+registerUpstreamStatusRoutes(adminRoutes);
+registerUpstreamRepullRoutes(adminRoutes);
+registerMailRoutes(adminRoutes);

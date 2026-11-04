@@ -155,3 +155,13 @@ Setting both day and month also removes the month, which the maintainer's readin
 - Importer: `src/lib/import-scrub.ts`, `test/import-scrub.test.ts` ("a first import sets acquisition dates to 1 January", "a re-import changes no date").
 - Upload: `src/lib/upload/date-normalization.ts`, `src/lib/upload/identifier-preflight.ts`, `src/commands/dataset.ts`, `test/upload-date-normalization.test.ts`, `test/upload-identifier-preflight-cli.test.ts`.
 - Provenance sentences: `shared/privacy-correction-text.ts`.
+
+## Amendment 2026-10-23 (#1046): a re-pull is a third place, on its delta paths only
+
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) and not yet built.
+*Annotated 2026-10-27: built by epic #1046.
+The re-pull's scrub sets acquisition dates on the delta's recordings and scans tables only, and nothing already published is changed (ADR 0111, the Phase 6b and Phase 6c amendments).
+The future tense below states the rule.*
+ADR 0091 limits the rule to a first import and an upload.
+A re-pull is neither, and this adds it as a third place, on its delta paths only: it will apply the rules a first import applies to the paths its commit adds or changes, and to nothing else.
+A recording the re-pull does not touch will keep its dates, its bytes and its key, so "nothing already published is changed" holds across a re-pull.

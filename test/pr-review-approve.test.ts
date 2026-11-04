@@ -9,12 +9,14 @@
  */
 
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { buildBranchRulesetPayload } from "../backend/src/services/github";
 import {
   adminGitHubToken,
   approvalGate,
   asVerdict,
   checkMergeable,
   closePullRequest,
+  fetchDatasetRepoJson,
   fetchPullRequest,
   githubApiBase,
   identityMatches,
@@ -231,9 +233,52 @@ describe("what the review's verdict allows", () => {
     expect(approvalGate({ verdict: "pass", staleVerdict: null })).toEqual({ kind: "proceed" });
     expect(approvalGate({ verdict: "fail", staleVerdict: null }).kind).toBe("needs_force");
     expect(approvalGate({ verdict: "in_progress", staleVerdict: null }).kind).toBe("needs_force");
-    for (const v of ["uncertain", "could_not_decide", "not_reviewed"] as const) {
+    for (const v of ["uncertain", "could_not_decide", "not_reviewed", "exempt"] as const) {
       expect(approvalGate({ verdict: v, staleVerdict: null }).kind).toBe("confirm");
     }
+  });
+
+  test("an exempt pull request asks first and says why: it is neither a pass nor a block", () => {
+    const gate = approvalGate({ verdict: "exempt", staleVerdict: null });
+    expect(gate.kind).toBe("confirm");
+    if (gate.kind === "confirm") {
+      expect(gate.warning).toContain("did not run");
+      expect(gate.warning).toContain("owner or administrator");
+    }
+    // An unreadable answer still beats it: nothing is assumed about a review that cannot be read.
+    expect(approvalGate({ verdict: "exempt", staleVerdict: null, unread: "down" }).kind).toBe(
+      "needs_force",
+    );
+  });
+
+  test("an upstream re-pull's waived head is allowed without --force, says why, and is not a pass (ADR 0117)", () => {
+    const gate = approvalGate({ verdict: "waived", staleVerdict: null });
+    expect(gate.kind).toBe("confirm");
+    if (gate.kind === "confirm") {
+      expect(gate.warning).toContain("waived for this commit");
+      expect(gate.warning).toContain("upstream re-pull's own head");
+      expect(gate.warning).toContain("a recommendation and holds nothing");
+    }
+    // An unreadable answer still beats it, and a Worker's word is read as this commit's only.
+    expect(approvalGate({ verdict: "waived", staleVerdict: null, unread: "down" }).kind).toBe(
+      "needs_force",
+    );
+    const read = reviewForApproval({ verdict: "waived", head_sha: "a".repeat(40) }, "a".repeat(40));
+    expect(read).toMatchObject({ ok: true, verdict: "waived" });
+    expect(
+      reviewForApproval({ verdict: "waived", head_sha: "b".repeat(40) }, "a".repeat(40)).ok,
+    ).toBe(false);
+  });
+
+  test("an exempt pull request says what an earlier commit's review concluded, because that change is still in it", () => {
+    const gate = approvalGate({ verdict: "exempt", staleVerdict: "fail" });
+    expect(gate.kind).toBe("confirm");
+    if (gate.kind === "confirm") {
+      expect(gate.warning).toContain("did not run on this commit");
+      expect(gate.warning).toContain("An earlier commit of it was reviewed and read fail");
+    }
+    const none = approvalGate({ verdict: "exempt", staleVerdict: null });
+    if (none.kind === "confirm") expect(none.warning).not.toContain("earlier commit");
   });
 
   test("a review of a different commit says what it concluded, so its pass is not read as this one's", () => {
@@ -297,7 +342,26 @@ describe("reading the review the API sent", () => {
       SHA_A,
     );
     expect(r).toMatchObject({ ok: true, detail: "contributor_paused" });
-    if (r.ok) expect(r.contributorNote).toContain("paused by a maintainer");
+    if (r.ok) expect(r.contributorNote).toContain("paused by an administrator's block");
+  });
+
+  test("a pause whose cause this CLI does not know is a plain pause, not a block", () => {
+    const r = reviewForApproval(
+      {
+        ...good,
+        verdict: "not_reviewed",
+        detail: "contributor_paused",
+        review_current: null,
+        author: { standing: { paused: true, because: "tally" } },
+      },
+      SHA_A,
+    );
+    expect(r).toMatchObject({ ok: true });
+    if (r.ok) {
+      expect(r.contributorNote).toBe(
+        "The contributor's pull requests are not reviewed automatically (paused).",
+      );
+    }
   });
 
   test("anything that cannot be read as an answer about THIS commit is unread, which needs --force", () => {
@@ -355,10 +419,29 @@ describe("reading the pull request", () => {
         state: "open",
         draft: false,
         baseRef: "main",
+        // The head branch, which tells a `release/*` pull request (maybe a re-pull's) apart.
+        headRef: "add-subjects",
         headSha: SHA_A,
+        // The two repositories, which a re-pull's merge requires be the dataset's own.
+        headRepo: "nemarDatasets/nm000201",
+        baseRepo: "nemarDatasets/nm000201",
         authorLogin: "alice",
         mergeableState: "blocked",
+        // No merge yet, so no merge commit: a re-pull's acceptance reads it only once merged.
+        mergeCommitSha: null,
       },
+    });
+    // Merged: GitHub's merge commit, the one a re-pull's acceptance checks the record against.
+    gh.pulls["nm000201#8"] = {
+      sha: SHA_A,
+      merged: true,
+      state: "closed",
+      mergeCommitSha: "c".repeat(40),
+    };
+    const merged = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 8, base());
+    expect(merged).toMatchObject({
+      ok: true,
+      value: { state: "merged", mergeCommitSha: "c".repeat(40) },
     });
   });
 
@@ -366,6 +449,70 @@ describe("reading the pull request", () => {
     const r = await fetchPullRequest(ADMIN_TOKEN, "nm000201", 99, base());
     expect(r).toMatchObject({ ok: false, status: 404 });
     if (!r.ok) expect(r.reason).toContain("has no pull request #99");
+  });
+});
+
+describe("reading a dataset repository's JSON", () => {
+  // The read the BIDS-only override rests on (src/lib/repull/bids-only.ts): an answer that is not a
+  // 2xx, or not JSON, or no answer at all, is never a value. The error answers come from
+  // one-request servers, error-path fixtures.
+  async function answeredBy(res: () => Response) {
+    const srv = Bun.serve({ port: 0, fetch: res });
+    try {
+      return await fetchDatasetRepoJson(
+        ADMIN_TOKEN,
+        "nm000201",
+        `/commits/${SHA_A}/check-runs`,
+        `http://127.0.0.1:${srv.port}`,
+      );
+    } finally {
+      srv.stop(true);
+    }
+  }
+
+  test("a 2xx JSON answer is the value", async () => {
+    const r = await fetchDatasetRepoJson(
+      ADMIN_TOKEN,
+      "nm000201",
+      `/commits/${SHA_A}/status`,
+      base(),
+    );
+    expect(r).toMatchObject({ ok: true, value: { state: "pending", total_count: 0 } });
+  });
+
+  test("an HTTP error is refused with GitHub's message and its status", async () => {
+    const r = await answeredBy(() =>
+      Response.json({ message: "Resource not accessible by integration" }, { status: 403 }),
+    );
+    expect(r).toEqual({
+      ok: false,
+      status: 403,
+      reason: "Resource not accessible by integration (HTTP 403)",
+    });
+  });
+
+  test("an HTTP error with no JSON body is refused with its status", async () => {
+    const r = await answeredBy(() => new Response("<html>bad gateway</html>", { status: 502 }));
+    expect(r).toEqual({ ok: false, status: 502, reason: "GitHub answered HTTP 502." });
+  });
+
+  test("a 200 that is not JSON is refused, not read as empty", async () => {
+    const r = await answeredBy(() => new Response("not json", { status: 200 }));
+    expect(r).toEqual({ ok: false, status: 200, reason: "GitHub's answer could not be read." });
+  });
+
+  test("no answer at all is refused, with status 0", async () => {
+    const srv = Bun.serve({ port: 0, fetch: () => new Response() });
+    const port = srv.port;
+    srv.stop(true);
+    const r = await fetchDatasetRepoJson(
+      ADMIN_TOKEN,
+      "nm000201",
+      `/commits/${SHA_A}/status`,
+      `http://127.0.0.1:${port}`,
+    );
+    expect(r).toMatchObject({ ok: false, status: 0 });
+    if (!r.ok) expect(r.reason).toStartWith("GitHub could not be reached");
   });
 });
 
@@ -772,6 +919,42 @@ describe("what GitHub's mergeable state allows, asked before anything is written
       expect(said, state).toContain(`'${state}'`);
       expect(said, state).toContain(why);
       expect(said, state).toContain("so a merge would not be attempted");
+    }
+  });
+
+  test("a blocked state names what can block, and names the review check, and no other, as the one to override in the GitHub UI, where its ruleset is in force", () => {
+    // GitHub says `blocked` for any required check or review that is not satisfied. The review is
+    // one of them where a dataset's ruleset requires it (ADR 0107), and it is the one check this
+    // tool names as overridable in the GitHub UI by an owner or administrator: the tool never uses
+    // the bypass they hold there. Saying so of every blocked pull request would send an
+    // administrator to override a block that is not the review's.
+    const why = refusal("blocked") ?? "";
+    expect(why).toContain("a required check or review is not satisfied");
+    // The other blocks are named, not left to be read as the review.
+    expect(why).toContain("the BIDS validation, the version check");
+    expect(why).toContain("where its ruleset is in force, the NEMAR PR Review");
+    // What the tool names as overridable is the review check alone, and only where its ruleset is
+    // in force. It is what the tool names, and not a claim about what GitHub allows.
+    expect(why).toContain(
+      "this tool names the NEMAR PR Review check, and no other, as one an owner or administrator can override in the GitHub UI, and only where its ruleset is in force",
+    );
+    expect(why).toContain("never uses the bypass");
+    // It must not say that the review is the only check anyone can override. An organization owner
+    // bypasses the NEMAR branch protection ruleset too, and that is the ruleset that carries the
+    // BIDS validation and the version check.
+    expect(
+      buildBranchRulesetPayload({ checks: [] }).bypass_actors.map((a) => a.actor_type),
+    ).toContain("OrganizationAdmin");
+    expect(why).not.toContain("can override only");
+    expect(why).not.toContain("override only");
+    // The old sentence told them to merge "such a pull request", whichever check was blocking it.
+    expect(why).not.toContain("such a pull request");
+    expect(why).not.toContain("merges");
+    // The same sentence reaches the card `next` shows, and no other state says it.
+    const check = mergeCheckOf("blocked");
+    if (!check.ok) expect(check.card).toContain("in the GitHub UI");
+    for (const state of ["behind", "dirty", "unstable", "draft", "unknown"]) {
+      expect(refusal(state), state).not.toContain("GitHub UI");
     }
   });
 

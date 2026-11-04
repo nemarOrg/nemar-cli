@@ -74,6 +74,10 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  *  - `helper`       not a sweep at all: a SQL/query builder, or an output
  *                   formatter for a sweep's result, that happens to carry the
  *                   word in its name
+ *  - `nonprod-only` the inverse of `prod-only`: it must run ONLY outside production, and is
+ *                   driven from a section of `scheduledCleanup` (via a section function in its own
+ *                   service file), not called by name from `scheduled()`. Its placement is pinned
+ *                   by the dedicated block at the foot of this file, not by the generic loops.
  *  - `tick-prod-only` driven from the 30-minute `AUTO_IMPORT_CRON` branch of
  *                   `scheduled()` (which returns before the daily block), inside
  *                   that branch's own `if (!isNonProductionEnv(env)) {` guard: a
@@ -81,7 +85,7 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  */
 const SWEEP_WIRING: Record<
   string,
-  "prod-only" | "all-envs" | "cron-wrapped" | "helper" | "tick-prod-only"
+  "prod-only" | "all-envs" | "cron-wrapped" | "helper" | "tick-prod-only" | "nonprod-only"
 > = {
   archiveRetrySweep: "prod-only",
   manifestIntegritySweep: "prod-only",
@@ -118,7 +122,34 @@ const SWEEP_WIRING: Record<
   // outside production on its own. It deliberately ignores PR_REVIEW_ENABLED, so switching the
   // review off does not strand the checks of reviews already in flight.
   sweepStalePrReviews: "tick-prod-only",
+  // ADR 0102: the publication-review watchdog. Its deadline is 30 minutes, so it rides the
+  // 30-minute tick; it mails administrators (the request's mail waits for the review), so it
+  // is production-only there and absent from DEV_CRON_ALLOWLIST. It also refuses outside
+  // production on its own. It deliberately ignores PUBLICATION_REVIEW_ENABLED, so switching
+  // the review off does not strand a request whose mail waits on a review already in flight.
+  sweepPublicationReviews: "tick-prod-only",
+  // ADR 0111, the Phase 7b slice: the automatic re-pull's dispatch watchdog. It ends a live
+  // dispatch that said nothing in eight hours, so its dataset's one live slot is not held for
+  // good. It is production-only, reads no switch (turning them off must not strand a live row) and
+  // refuses outside exact production on its own; it is absent from DEV_CRON_ALLOWLIST because
+  // only the production Worker makes dispatch rows.
+  sweepUnreportedDispatches: "prod-only",
+  // ADR 0111, the Phase 7c slice: the automatic re-pull's scheduler. It dispatches the central
+  // re-pull workflow against the shared nemarDatasets org, so it is production-only and absent
+  // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and acts only
+  // while AUTO_REPULL_ENABLED is exactly "1".
+  runRepullSchedulerCron: "prod-only",
+  // ADR 0111, the Phase 7f and 7g slices: the automatic re-pull's advance tick. It reads and acts
+  // on the automatic re-pulls' pull requests in the shared nemarDatasets org every 30 minutes, and
+  // merges a machine-clean one there, so it rides that tick's production guard and is absent from
+  // DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and while
+  // AUTO_REPULL_ENABLED is not "1" only resolves a held claim and finishes a merged re-pull.
+  runRepullAdvanceCron: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
+  // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
+  // foot of this file pins the call site, the section function and the sweep's own guard.
+  sweepCiTestAccounts: "nonprod-only",
   // Epic #1610 phase 4: the identifier-screen watchdog. Its deadline is 50
   // minutes, so it rides the 30-minute tick; it mails admins, so it is
   // production-only there and absent from DEV_CRON_ALLOWLIST.
@@ -331,7 +362,7 @@ describe("every sweep service is declared and driven", () => {
   }
 
   for (const [name, kind] of Object.entries(SWEEP_WIRING)) {
-    if (kind === "helper" || kind === "cron-wrapped") continue;
+    if (kind === "helper" || kind === "cron-wrapped" || kind === "nonprod-only") continue;
 
     test(`${name} is actually called in scheduled()`, () => {
       expect(callCount(allCode, name)).toBeGreaterThanOrEqual(1);
@@ -376,6 +407,14 @@ describe("every sweep service is declared and driven", () => {
         // be dangerous. Do not read this comment as evidence that it would.
         // #1167 review, finding 3.
         expect(callCount(allCode, name)).toBe(callCount(prodOnlyCode, name));
+      });
+
+      test(`${name} is NOT in DEV_CRON_ALLOWLIST`, () => {
+        // The allowlist is the declared set of daily jobs safe on the dev worker; a prod-only
+        // job named there would be a declaration that contradicts its call site (#1913).
+        const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+        expect(allowlist).toContain("DEV_CRON_ALLOWLIST");
+        expect(allowlist).not.toContain(`"${name}"`);
       });
     }
   }
@@ -618,6 +657,57 @@ describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep
 });
 
 /**
+ * `purgeExpiredTickets` (epic #1893 phase 6a, ADR 0112) deletes support tickets past
+ * `MAIL_RETENTION_DAYS`, keeping each one's summary. It is not sweep-shaped, so it gets targeted
+ * assertions like `fetchAndSyncDataPapers`. It is allowed on the dev cron because it reads and
+ * writes only the calling env's own mail tables: no mail, no GitHub, no DOI, no R2.
+ */
+describe("purgeExpiredTickets is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "purgeExpiredTickets";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block, so it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its own ctx.waitUntil call contains its own .catch", () => {
+    const body = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(body).toContain(".catch(");
+  });
+
+  test("the service neither sends mail nor reaches R2, GitHub or the DOI registrar", () => {
+    const src = readFileSync(join(SERVICES_DIR, "ticket-retention.ts"), "utf-8");
+    const code = src
+      .split("\n")
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join("\n");
+    for (const forbidden of [
+      "sendEmail",
+      "MAIL_INBOUND",
+      "S3_BUCKET",
+      "github",
+      "ezid",
+      "fetch(",
+    ]) {
+      expect(code.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+});
+
+/**
  * The text inside the `ctx.waitUntil( ... )` call that directly wraps `call`,
  * found by matching parentheses (string and template literals skipped), so an
  * assertion about a chain cannot be satisfied by code that belongs to the next
@@ -644,3 +734,66 @@ function waitUntilBody(code: string, call: string): string {
   }
   throw new Error(`unbalanced parentheses after ${call}`);
 }
+
+/**
+ * `sweepCiTestAccounts` (#1789) is the inverse of every prod-only sweep above: it must run
+ * ONLY outside production. It tombstones accounts, which on the production database could only
+ * ever be a real person's, so a call site without a guard is the failure to pin. Three guards
+ * are required and checked from each side: the call site in `scheduledCleanup`, the section
+ * function it calls, and the sweep's own first statement. The behavioural half (production does
+ * nothing, however `ENVIRONMENT` is spelled) lives in `test-account-sweep.test.ts`.
+ */
+describe("sweepCiTestAccounts is wired non-production only", () => {
+  const SECTION = "cleanUpLiveTestAccounts";
+  const NAME = "sweepCiTestAccounts";
+
+  /** The body of the guard that opens section 6 of scheduledCleanup, found by indentation. */
+  function section6Guard(): string[] {
+    const marker = indexLines.findIndex((l) => l.trim().startsWith("// 6. Tombstone the accounts"));
+    expect(marker).toBeGreaterThanOrEqual(0);
+    const guard = blockAfter(indexLines, "if (isNonProductionEnv(env)) {", marker);
+    // The guard must be section 6's own, not some later one in the file.
+    expect(guard.start - marker).toBeLessThan(15);
+    return guard.body;
+  }
+
+  test("the section function is called from scheduledCleanup, outside the prod-only block", () => {
+    expect(callCount(allCode, SECTION)).toBe(1);
+    expect(callCount(prodOnlyCode, SECTION)).toBe(0);
+  });
+
+  test("the call is INSIDE the body of section 6's isNonProductionEnv guard", () => {
+    const body = codeLines(section6Guard()).join("\n");
+    expect(callCount(body, SECTION)).toBe(1);
+  });
+
+  test("the sweep itself is not called from index.ts by name", () => {
+    expect(callCount(allCode, NAME)).toBe(0);
+  });
+
+  test("the section function guards, then calls the sweep", () => {
+    const code = serviceFileCodeLinesDefining(SECTION)?.join("\n") ?? "";
+    const start = code.indexOf(`export async function ${SECTION}(`);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const guard = code.indexOf("if (!isNonProductionEnv(env)) return", start);
+    const call = code.indexOf(`${NAME}(env`, start);
+    expect(guard).toBeGreaterThan(start);
+    expect(call).toBeGreaterThan(guard);
+  });
+
+  test("the sweep refuses in production before it reads or writes anything", () => {
+    const code = serviceFileCodeLinesDefining(NAME)?.join("\n") ?? "";
+    const body = code.indexOf(`export async function ${NAME}(`);
+    const guard = code.indexOf("if (!isNonProductionEnv(env)) return", body);
+    expect(body).toBeGreaterThanOrEqual(0);
+    expect(guard).toBeGreaterThan(body);
+    expect(guard).toBeLessThan(code.indexOf(".prepare(", body));
+    expect(guard).toBeLessThan(code.indexOf("tombstoneUserCascade(db", body));
+  });
+
+  test("it is not in the daily-job allowlist, which names jobs driven directly", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).not.toContain(NAME);
+    expect(allowlist).not.toContain(SECTION);
+  });
+});

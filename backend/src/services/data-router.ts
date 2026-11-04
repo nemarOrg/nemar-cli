@@ -30,6 +30,7 @@ import type {
   StructuredDate,
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
+import { mirrorFlagOf } from "../../../shared/source-snapshot.js";
 import { escapeHtml } from "../lib/escape";
 import { VERSION_DOI_SQL } from "./anonymity";
 import { isArchiveStaleForLatestVersion } from "./archive-policy";
@@ -907,6 +908,12 @@ export interface DatasetVersionRow {
   version: string;
   doi: string | null;
   created_at: string;
+  /**
+   * The upstream tag and how it is known (ADR 0111). Read only to derive the `mirror` flag; they
+   * never reach the wire as themselves on the public data plane. Absent counts as NULL.
+   */
+  source_version?: string | null;
+  source_version_basis?: string | null;
 }
 
 /**
@@ -926,7 +933,8 @@ export interface DatasetVersionRow {
  * runs its own query on purpose, because the depositor is entitled to the
  * version DOI this one hides from the public.
  */
-export const PUBLIC_DATASET_VERSIONS_SQL = `SELECT dv.version, ${VERSION_DOI_SQL}, dv.created_at
+export const PUBLIC_DATASET_VERSIONS_SQL = `SELECT dv.version, ${VERSION_DOI_SQL}, dv.created_at,
+          dv.source_version, dv.source_version_basis
      FROM dataset_versions dv
      JOIN datasets d ON d.dataset_id = dv.dataset_id
     WHERE dv.dataset_id = ?
@@ -1739,6 +1747,13 @@ export interface LandingVersion {
   version: string;
   doi: string | null;
   created_at: string | null;
+  /**
+   * Is this version a mirror of an OpenNeuro snapshot? `true`: an N.0.0 whose upstream tag is
+   * known. `false`: not a mirror. `null`: an N.0.0 of an OpenNeuro dataset whose tag could not be
+   * established; render it without a mirror chip, never as a mirror (ADR 0111, decision 5; ADR 0054).
+   * The tag itself is not exposed here.
+   */
+  mirror: boolean | null;
   manifest_url: string;
   browse_url: string;
 }
@@ -1786,6 +1801,7 @@ export function buildLandingPayload(args: {
       version: tag,
       doi: row.doi ?? null,
       created_at: row.created_at ?? null,
+      mirror: mirrorFlagOf(datasetId, row),
       manifest_url: `/${datasetId}/${tag}/manifest.json`,
       browse_url: `/${datasetId}/${tag}/`,
     };

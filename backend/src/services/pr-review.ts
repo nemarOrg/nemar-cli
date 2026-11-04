@@ -6,17 +6,88 @@
  * The Worker decides whether to review it, records the attempt in `pr_reviews`, and dispatches a
  * workflow to `nemarDatasets/.github`. The workflow CLAIMS the review (the Worker accepts the
  * one-shot token and records the time) before it spends anything, reads the change as git
- * data, and asks a model three questions. It posts a report back; the Worker validates it against
- * the closed vocabulary in `shared/pr-review.ts`, derives the verdict, and publishes a check-run
- * and one pull-request comment.
+ * data, applies the naming rule, and runs two model stages: a screen that may stop only spam, and a
+ * review of the content. It posts a report back; the Worker validates it against the closed
+ * vocabulary in `shared/pr-review.ts` (version 2 only, by callback), derives the verdict, and
+ * publishes a check-run and one pull-request comment.
  *
  * **Why the Worker is the gate.** Every pull request reaches it, a fork's included, from a
  * delivery GitHub signs; no workflow in a dataset repository takes part, so no collaborator can
  * edit the review or reach the credentials it uses by editing a branch. It is also the only place
- * that can count: who opened which pull request, how many were rejected, how many reviews were
- * started this hour. Those counts decide whether a review is spent at all. A `repository_dispatch`
- * can be sent by anyone holding a dataset repository's workflow credentials, so the caps bind
- * only reviews the Worker started; the claim step is what makes a forged dispatch buy nothing.
+ * that knows who opened a pull request and whether an administrator has blocked them.
+ * {@link gateDecision} is that decision, made once per delivery: exempt, then blocked, then
+ * reviewed. **No count decides it** (ADR 0107): not how many reviews a contributor or the platform
+ * started this hour or day, and not how many of a contributor's pull requests were rejected. Only
+ * an administrator's block holds a contributor back. What bounds the cost is decided in that ADR
+ * (a content screen first, and the workspace's spend limit), and the claim step is what makes a
+ * forged `repository_dispatch` buy nothing, since anyone holding a dataset repository's workflow
+ * credentials can send one.
+ *
+ * **Owners and administrators are not reviewed** (ADR 0107). A pull request opened by a NEMAR
+ * owner or administrator, when an owner or administrator also caused the delivery (the push, the
+ * reopening) and no review has yet touched that commit, is answered with a `skipped` check and
+ * nothing else: no row, no model call. {@link isReviewExempt} decides from the accounts, never from
+ * anything the pull request says, and before any row is written. A commit that already has a row
+ * keeps what its review said, whoever acts on it next, when the delivery changes no text (a
+ * force-push back to it, an administrator's start of a review that has a result): `skipped` is never
+ * written over a review. The deliveries that do change the text are the exceptions, and they restart
+ * the review of a commit that has a row, an exempt author's included: an edit, a reopening and a
+ * marking as ready (below).
+ * They are not exempt from the naming rule, which runs first: a title or a new dataset name it
+ * refuses fails their check, and only an administrator's recorded waiver for that commit
+ * (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`) turns it back into
+ * `skipped`.
+ *
+ * **An edit of the title, the body or the base re-runs the review** (ADR 0107). The job reads the
+ * pull request from the API when it starts, so a review describes the text as it was then, and an
+ * author who fixes a title or a description has to be judged on the fix. An `edited` delivery that
+ * names `title`, `body` or `base` in `changes` (keys only, never the old text) restarts the review of
+ * the commit it is on from any state, a running one and a stored result included
+ * ({@link restartReview} rotates the nonce, so the superseded job's claim and report are refused).
+ * A job that had already claimed is not stopped: it still spends its model call before its report is
+ * refused, so superseding a claimed review costs that run in full, while one that never claimed
+ * spends nothing. Only a commit with no row is a new delivery (an owner's or administrator's takes
+ * the exempt path above); a commit with a row is restarted, an edit that moves the base onto `main`
+ * included. A base moved off `main` is not a pull request this review applies to and is ignored
+ * like any other. An edit that names nothing else is ignored.
+ *
+ * **A reopening and a marking as ready restart it too**, because an edit made while the pull
+ * request was closed or a draft was not taken up (it is not open, or is a draft, as for any
+ * delivery) and the first delivery after it is one of these two (`PrIntake.resumed`). The comment
+ * the pull request carries keeps the last completed review's text until the new result lands, while
+ * the check shows running: a running review publishes its check only.
+ *
+ * **Five such restarts are allowed for one head commit, and the sixth is refused** (ADR 0107,
+ * decision 4; the owner set the number, {@link PR_REVIEW_EDIT_CAP}). {@link restartReview} counts
+ * them in `pr_reviews.edit_restarts`, an administrator's start resets the count, and a push is a new
+ * row. {@link refuseEdit} fails closed: the row becomes an errored review with the detail
+ * `edit_limit`, a running review or a stored result superseded, and every later change only
+ * restates it. A restart a race made fail is tried again (up to three tries) and counts once. The
+ * cap is asked after the gate, so a contributor an administrator has blocked is declined and not
+ * told "too many edits", and a declined restart is not counted.
+ *
+ * **A bot's pull request is not reviewed** (ADR 0092 says "not bots"). A delivery from GitHub of a
+ * bot's pull request, the NEMAR App's included, is skipped as `bot_author`, and so is an
+ * administrator's start of one. The App's automatic re-pull pull request, which ADR 0111's Phase 7e
+ * amendment admitted to the review through the Worker's own start, is waived at its recorded head
+ * instead (ADR 0117, which retires that start), and its waived check is published by the record's
+ * transition.
+ *
+ * **An upstream re-pull's own pull request is waived at the head NEMAR recorded** (ADR 0117). The
+ * pull request of an open `upstream_repulls` record, from and into the dataset's own repository,
+ * from the record's release branch, at the head the record holds, is answered with one `skipped`
+ * check titled "Waived: upstream re-pull" and nothing else: no row, no dispatch, no model call
+ * ({@link publishWaived}). It is decided from NEMAR's record and GitHub's facts about the pull
+ * request (`shared/repull-review-waiver.ts`), before the exemption and before any row is read for
+ * restarting, so no delivery, edit, reopening or administrator's start (a redo included) of such a
+ * head runs the review. A head the record does not hold yet (enrichment moved it and no NEMAR tool
+ * has recorded the move) is reviewed as any other, because the Worker cannot tell enrichment from a
+ * stranger's push; once the record holds it, every publish of that head's review publishes the
+ * waiver instead ({@link publishOutcome}), with what the review found as recommendations, and the
+ * record's own transition publishes it at once ({@link publishRecordedRepullHead}).
+ *
+ * **A publish is checked against the row once GitHub has answered** ({@link publishOutcome}): a slow
+ * write that lands after a newer result must not leave the older one on the pull request.
  *
  * **Nothing here trusts the pull request.** The event is read by {@link readPullRequestEvent},
  * which accepts only the shapes it expects; the dispatch carries the review's coordinates and not
@@ -30,53 +101,112 @@
  * publishes it again, so a GitHub outage delays a check and never leaves it "in progress".
  *
  * Database failures inside {@link handlePullRequestEvent} throw: the webhook route answers 500 so
- * the delivery shows as failed in the App's delivery log, where it can be redelivered. Redelivery
- * is safe because (dataset, pull request, commit) is unique.
+ * the delivery shows as failed in the App's delivery log, where it can be redelivered. So does an
+ * exempt pull request's check, or a re-pull's waived one, that could not be published, which has
+ * no row for the watchdog to retry from. Redelivery of a reviewed commit is safe because (dataset,
+ * pull request, commit) is unique; redelivery of an exempt or waived commit is safe because a
+ * second `skipped` check is harmless. A redelivered edit starts the review again, which
+ * supersedes the first, costs one more run and counts toward the cap.
  */
 
 import {
   type AuthorOverride,
   type AuthorTally,
   type CallbackOutcome,
-  DAILY_REVIEW_CAP,
-  type DeclineReason,
+  PR_REVIEW_EDIT_CAP,
   PrReviewReportError,
+  type ProducedDeclineReason,
   type ReviewOutcome,
   type ReviewState,
+  type StoredOutcome,
   conclusionOf,
-  dailyAuthorCapFor,
-  hourlyCapFor,
   isDeclineReason,
   isOverrideMode,
   isRunError,
-  parsePrReviewReport,
+  parseStoredPrReviewReport,
   renderCheck,
   renderComment,
   standingOf,
   verdictOf,
 } from "../../../shared/pr-review.js";
+import {
+  type WaiverSubject,
+  type WaiverVerdict,
+  repullReviewWaiver,
+  repullReviewWaiverOf,
+  subjectOfPull,
+} from "../../../shared/repull-review-waiver.js";
+import {
+  PULL_REQUEST_COLUMNS,
+  type RepullPullRequest,
+  type RepullRow,
+} from "../../../shared/repull-state.js";
+import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isValidDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken, getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { signPrReviewCallbackToken } from "./github/callback-tokens.js";
 import { approvalDispatchEnvironment, triggerPrReviewRun } from "./github/dispatch.js";
-import { upsertReviewCheckRun, upsertReviewComment } from "./github/pr-review-api.js";
+import {
+  CheckRunWriteRefused,
+  upsertReviewCheckRun,
+  upsertReviewComment,
+} from "./github/pr-review-api.js";
 import { ORG_NAME } from "./github/shared.js";
+import { isReviewExempt } from "./pr-review-exemption.js";
+import {
+  type NamingSubject,
+  isNamingWaived,
+  namingClean,
+  namingFactsFor,
+} from "./pr-review-naming.js";
+import { readPullRequestWaiverRecords, readRepullWaiver } from "./pr-review-repull-waiver.js";
+import { githubRead, pullRequestFacts, readRecordedPullRequest } from "./upstream-repull-github.js";
 
-/** `pull_request` actions that put new content in front of a reviewer. */
+/**
+ * `pull_request` actions that put new content in front of a reviewer. `edited` is on the list and
+ * is taken up only when it changed what the review reads (see {@link EDIT_KEYS}).
+ */
 export const PR_REVIEW_ACTIONS: ReadonlySet<string> = new Set([
   "opened",
   "synchronize",
   "reopened",
   "ready_for_review",
+  "edited",
 ]);
+
+/**
+ * The keys of an `edited` delivery's `changes` object that make an edit one the review must be run
+ * for again (ADR 0107): the title and the body, which the review reads from the pull request, and
+ * the base, which decides whether the pull request is reviewed at all. An edit that names none of
+ * them (the milestone, say, or a label) changed nothing the review saw. Only the keys are looked
+ * at; what they hold is the text from before the edit, and nothing here reads it.
+ */
+const EDIT_KEYS = ["title", "body", "base"] as const;
 
 /** The branch whose pull requests are reviewed. */
 export const PR_REVIEW_BASE_BRANCH = "main";
 
-/** How long a dispatched review may take before the watchdog gives up on it. The workflow's own limit is 20. */
-export const PR_REVIEW_DEADLINE_MINUTES = 30;
+/**
+ * How long a dispatched review may take, counted from when its row was recorded, before the
+ * watchdog gives up on it. The review workflow's `timeout-minutes` (50) is kept below this, and the
+ * job's worst case (the setup steps, both model stages at their deadlines, the callback's retries)
+ * below that; a test in `test/pr-review-workflow.test.ts` checks both. The deadline runs from when
+ * the row was recorded and the job's limit from when it starts, so the gap between them is the time
+ * a dispatch may wait in GitHub's queue.
+ */
+export const PR_REVIEW_DEADLINE_MINUTES = 60;
+
+/**
+ * How long a job that has claimed its review may still be running: the review workflow's
+ * `timeout-minutes`, counted from the claim. The deadline above runs from when the row was recorded,
+ * so a job that waited in GitHub's queue can still be inside this limit when the watchdog has closed
+ * its row as `unreported`, and an administrator's start must not supersede it (it would waste the
+ * job's model calls and refuse its report). `test/pr-review-workflow.test.ts` pins this to the
+ * workflow.
+ */
+export const PR_REVIEW_JOB_MINUTES = 50;
 
 /**
  * A result that did not reach GitHub is eligible to be tried again this long after it was decided,
@@ -89,8 +219,22 @@ export const PUBLISH_MAX_ATTEMPTS = 5;
 /** Rows the watchdog handles per query (it runs two: overdue reviews, and unpublished results). */
 const SWEEP_LIMIT = 20;
 
+/**
+ * How many times an edit's restart is tried when the row moves under it (a result or the watchdog's
+ * verdict landing between the read and the write), the first try included. Every try reads the row
+ * again, so three is enough for any one writer to have finished, and the limit is what keeps a row
+ * that keeps moving from holding the webhook.
+ */
+const EDIT_RESTART_TRIES = 3;
+
 /** How long the dispatch may wait for GitHub before the Worker answers the webhook. */
 const DISPATCH_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a restart waits before it publishes the running check a second time, after the first
+ * publish failed. Short, because the publish runs inside the webhook's own request.
+ */
+export const RUNNING_PUBLISH_RETRY_WAIT_MS = 1_000;
 
 /** A review may only use a dataset that is currently a named public publication (ADR 0092). */
 const REVIEWABLE_DATASET_PREDICATE = `d.status = 'active' AND d.visibility = 'public'
@@ -127,8 +271,50 @@ export interface PrIntake {
   headSha: string;
   authorId: number;
   authorLogin: string;
+  /**
+   * GitHub's relationship label for the author, stored with the review for people to read. Nothing
+   * in the gate reads it: it says CONTRIBUTOR for a private organization member, so it is no reason
+   * to exempt or to reject anyone (ADR 0107).
+   */
   authorAssociation: string | null;
   fromFork: boolean;
+  /**
+   * The head branch GitHub names, or the empty string when it names none, which no record's branch
+   * is. Read for one purpose: the upstream re-pull's waiver (ADR 0117), which compares it with the
+   * branch NEMAR's record holds and never takes it as a reason by itself. Never shown, stored or
+   * logged.
+   */
+  headRef: string;
+  /**
+   * Who caused the delivery (GitHub's `sender`): whoever pushed, reopened or marked the pull
+   * request ready. Null when the delivery names no one or a shape a login does not have, and for an
+   * administrator's start, which is built from GitHub's record of the pull request and has no
+   * sender. It is read only to decide the exemption, never shown or stored.
+   */
+  senderLogin: string | null;
+  /**
+   * The pull request's title, read for one purpose: the naming rule on an exempt pull request
+   * (`pr-review-naming.ts`), which the review job applies to everyone else's from its own read of
+   * the pull request. It is never shown, stored, logged or sent anywhere.
+   */
+  title: string;
+  /** The base branch's commit GitHub named with the pull request, for the naming rule; or null. */
+  baseSha: string | null;
+  /**
+   * The delivery is an edit of the title, the body or the base ({@link EDIT_KEYS}), not new
+   * content. A commit that already has a review is started again for it, from whatever state it is
+   * in, because the text the review judged has changed.
+   */
+  edited: boolean;
+  /**
+   * The delivery is a `reopened` or a `ready_for_review`: the pull request comes back into view
+   * after a stretch in which edits were not taken up (a closed pull request, a draft), so an
+   * earlier review of the commit may have judged text that is no longer the pull request's. A
+   * commit that already has a review is started again for it, as for an edit.
+   */
+  resumed: boolean;
+  /** The delivery's action (one of {@link PR_REVIEW_ACTIONS}), for the log line of a restart. */
+  action: string;
 }
 
 /** Why a delivery was not taken up. Fixed words, safe to return and log. */
@@ -142,7 +328,14 @@ export type IntakeSkip =
   | "draft"
   | "bot_author";
 
-export type IntakeResult = { ok: true; pr: PrIntake } | { ok: false; reason: IntakeSkip };
+export type IntakeResult =
+  | { ok: true; pr: PrIntake }
+  /**
+   * `waiverSubject` is set for a bot's pull request alone: the facts of it the upstream re-pull's
+   * waiver reads, so the one bot pull request NEMAR's record names is answered with its waiver
+   * (ADR 0117) while every bot's pull request stays unreviewed.
+   */
+  | { ok: false; reason: IntakeSkip; waiverSubject?: WaiverSubject };
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -157,10 +350,24 @@ function posInt(x: unknown): number | null {
   return typeof x === "number" && Number.isSafeInteger(x) && x > 0 ? x : null;
 }
 
+/** Whether an `edited` delivery's `changes` names a key in {@link EDIT_KEYS}. Keys only. */
+function changesWhatTheReviewReads(changes: unknown): boolean {
+  const named = rec(changes);
+  return named !== null && EDIT_KEYS.some((key) => Object.hasOwn(named, key));
+}
+
 /**
  * Read a `pull_request` delivery. Everything in it is attacker-influenced (the title, the branch
- * names, the fork's name), and none of that text is used: only ids, the head commit, the base
- * branch and fixed-shape logins are read, each checked against the shape it must have.
+ * names, the fork's name). Only ids, the head and base commits, the base branch and fixed-shape
+ * logins are read, each checked against the shape it must have, and the title, which only the
+ * naming rule reads (see {@link PrIntake.title}). For an edit, the keys of `changes` are looked at
+ * and what they hold, the text from before the edit, is not.
+ *
+ * A bot's pull request is not reviewed (`bot_author`, ADR 0092), the NEMAR App's included. The
+ * answer carries what the re-pull waiver reads of it (`waiverSubject`), because the App's automatic
+ * re-pull pull request is waived at the head its record holds (ADR 0117): its check is published
+ * when the record's own transition records that head, and again by a delivery or an
+ * administrator's start of it.
  */
 export function readPullRequestEvent(payload: unknown): IntakeResult {
   const p = rec(payload);
@@ -168,6 +375,12 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   const repo = rec(p?.repository);
   if (!p || !pr || !repo) return { ok: false, reason: "malformed" };
   if (typeof p.action !== "string" || !PR_REVIEW_ACTIONS.has(p.action)) {
+    return { ok: false, reason: "action_ignored" };
+  }
+  // An edit counts only when it changed what the review reads. Anything else (a milestone, a
+  // label, an edit that names nothing) puts nothing new in front of it.
+  const edited = p.action === "edited";
+  if (edited && !changesWhatTheReviewReads(p.changes)) {
     return { ok: false, reason: "action_ignored" };
   }
   const owner = rec(repo.owner);
@@ -192,25 +405,45 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   const user = rec(pr.user);
   const prNumber = posInt(pr.number);
   const authorId = posInt(user?.id);
+  // GitHub always sends a title. One that is not a string is a delivery this cannot read, and the
+  // naming rule must never take it for a clean one.
   if (
     prNumber === null ||
     authorId === null ||
     typeof head?.sha !== "string" ||
     !SHA40.test(head.sha) ||
-    typeof user?.login !== "string"
+    typeof user?.login !== "string" ||
+    typeof pr.title !== "string"
   ) {
     return { ok: false, reason: "malformed" };
   }
-  if (user.type === "Bot" || user.login.endsWith("[bot]")) {
-    return { ok: false, reason: "bot_author" };
-  }
-  if (!LOGIN.test(user.login)) return { ok: false, reason: "malformed" };
-
   // A deleted fork leaves `head.repo` null; that is a fork. Same-repo branches name the base repo.
   const headRepo = rec(head.repo);
   const fromFork =
     typeof headRepo?.full_name !== "string" ||
     headRepo.full_name.toLowerCase() !== repo.full_name.toLowerCase();
+  // A branch GitHub does not name is the empty string, which no record's release branch is.
+  const headRef = typeof head.ref === "string" ? head.ref : "";
+
+  if (user.type === "Bot" || user.login.endsWith("[bot]")) {
+    return {
+      ok: false,
+      reason: "bot_author",
+      waiverSubject: {
+        datasetId: repo.name,
+        prNumber,
+        headSha: head.sha,
+        ownRepository: !fromFork,
+        headRef,
+        baseRef: base.ref,
+      },
+    };
+  }
+  if (!LOGIN.test(user.login)) return { ok: false, reason: "malformed" };
+
+  // The sender of a bot (`name[bot]`) is not a login, so it reads as no sender at all, and an
+  // exemption never rests on one.
+  const sender = rec(p.sender);
 
   return {
     ok: true,
@@ -222,23 +455,25 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
       authorLogin: user.login,
       authorAssociation: typeof pr.author_association === "string" ? pr.author_association : null,
       fromFork,
+      headRef,
+      senderLogin:
+        typeof sender?.login === "string" && LOGIN.test(sender.login) ? sender.login : null,
+      title: pr.title,
+      baseSha: typeof base.sha === "string" && SHA40.test(base.sha) ? base.sha : null,
+      edited,
+      resumed: p.action === "reopened" || p.action === "ready_for_review",
+      action: p.action,
     },
   };
 }
 
 // ---------------------------------------------------------------------------------------------
-// The gate: who is reviewed, and how often
+// The gate: who is reviewed
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Rows that cost a model call, or may yet: everything except a decline (never sent) and a run
- * that errored before the model was reached (the dataset was ineligible, a newer delivery
- * superseded it, or the dispatch failed).
- */
-const COUNTS_TOWARD_CAPS = `state != 'declined' AND NOT (state = 'errored' AND detail IN ('stale_head', 'dispatch_failed'))`;
-
-/**
- * The tally for one contributor, counted from the reviews themselves.
+ * The tally for one contributor, counted from the reviews themselves. It is shown to
+ * administrators and decides nothing (see `AuthorTally`).
  *
  * `decided` is the number of distinct pull requests with at least one decided (pass or fail)
  * review; `rejected` is how many of those were most recently decided as a fail. Counting the
@@ -259,19 +494,6 @@ export const AUTHOR_TALLY_SQL = `
     FROM latest
    WHERE rn = 1`;
 
-/**
- * A row's place in its allowance: how many rows that count against it, up to and including this
- * one, were created inside the window. Counted AFTER the row is inserted, so two deliveries that
- * race each see the other and at most the cap survive; checking before inserting let a burst of
- * pull requests all pass the same check.
- */
-const AUTHOR_HOURLY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
-  WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 hour') AND id <= ?`;
-const AUTHOR_DAILY_RANK_SQL = `SELECT COUNT(*) AS n FROM pr_reviews
-  WHERE author_id = ? AND ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
-const PLATFORM_DAILY_RANK_SQL = `SELECT COALESCE(SUM(attempts), 0) AS n FROM pr_reviews
-  WHERE ${COUNTS_TOWARD_CAPS} AND created_at >= datetime('now', '-1 day') AND id <= ?`;
-
 export async function readAuthorTally(db: Db, authorId: number): Promise<AuthorTally> {
   const row = await db
     .prepare(AUTHOR_TALLY_SQL)
@@ -288,35 +510,6 @@ export async function readAuthorOverride(db: Db, authorId: number): Promise<Auth
   return isOverrideMode(row?.mode) ? row.mode : null;
 }
 
-/** Which allowance, if any, the row just inserted is over. */
-async function capDecision(
-  db: Db,
-  pr: PrIntake,
-  rowId: number,
-  skipAuthorCaps = false,
-  extraCalls = 0,
-): Promise<Extract<DeclineReason, "rate_limited" | "daily_limit"> | null> {
-  // An administrator who asks for a review by name is not an outsider spending the platform's
-  // money, so the per-contributor allowances do not hold it back; the platform's pool still does.
-  if (!skipAuthorCaps) {
-    const hourly = await db
-      .prepare(AUTHOR_HOURLY_RANK_SQL)
-      .bind(pr.authorId, rowId)
-      .first<{ n: number }>();
-    if ((hourly?.n ?? 0) > hourlyCapFor(pr.authorAssociation)) return "rate_limited";
-    const daily = await db
-      .prepare(AUTHOR_DAILY_RANK_SQL)
-      .bind(pr.authorId, rowId)
-      .first<{ n: number }>();
-    if ((daily?.n ?? 0) > dailyAuthorCapFor(pr.authorAssociation)) return "rate_limited";
-  }
-  const platform = await db.prepare(PLATFORM_DAILY_RANK_SQL).bind(rowId).first<{ n: number }>();
-  // The pool counts model calls, not rows: a restart of an attempt that already spent one is a
-  // second call that no row yet shows, so it is added here and recorded once it is handed over.
-  if ((platform?.n ?? 0) + extraCalls > DAILY_REVIEW_CAP) return "daily_limit";
-  return null;
-}
-
 // ---------------------------------------------------------------------------------------------
 // Rows
 // ---------------------------------------------------------------------------------------------
@@ -331,6 +524,14 @@ interface ReviewRow {
   report: string | null;
   checkRunId: number | null;
   commentId: number | null;
+  claimedAt: string | null;
+  /** Restarts an edit, a reopening or a marking as ready has caused for this commit (the cap's count). */
+  editRestarts: number;
+  /** The standing a publish is of: with `state`, `detail` and `report`, what {@link sameStanding} compares. */
+  verdict: string | null;
+  decidedAt: string | null;
+  /** The head lived in another repository when the review was taken up (a fork's pull request). */
+  fromFork: boolean;
 }
 
 interface RawRow {
@@ -338,15 +539,20 @@ interface RawRow {
   dataset_id: string;
   pr_number: number;
   head_sha: string;
+  from_fork: number;
   state: ReviewState;
   detail: string | null;
   report: string | null;
   check_run_id: number | null;
   comment_id: number | null;
+  claimed_at: string | null;
+  edit_restarts: number;
+  verdict: string | null;
+  decided_at: string | null;
 }
 
 const ROW_COLUMNS =
-  "id, dataset_id, pr_number, head_sha, state, detail, report, check_run_id, comment_id";
+  "id, dataset_id, pr_number, head_sha, from_fork, state, detail, report, check_run_id, comment_id, claimed_at, edit_restarts, verdict, decided_at";
 
 function toRow(r: RawRow): ReviewRow {
   return {
@@ -354,11 +560,17 @@ function toRow(r: RawRow): ReviewRow {
     datasetId: r.dataset_id,
     prNumber: r.pr_number,
     headSha: r.head_sha,
+    // Anything but a stored 0 is a fork's, which is never waived.
+    fromFork: r.from_fork !== 0,
     state: r.state,
     detail: r.detail,
     report: r.report,
     checkRunId: r.check_run_id,
     commentId: r.comment_id,
+    claimedAt: r.claimed_at,
+    editRestarts: r.edit_restarts,
+    verdict: r.verdict,
+    decidedAt: r.decided_at,
   };
 }
 
@@ -385,11 +597,20 @@ async function readRowByKey(
   return r ? toRow(r) : null;
 }
 
-/** The outcome a stored row stands for, or null for a review still waiting for its report. */
-export function outcomeOfRow(row: ReviewRow): ReviewOutcome | null {
+/**
+ * The outcome a stored row stands for, or null for a review still waiting for its report. A stored
+ * report is read by the stored parser, which reads a version 1 report by its own rules, so a review
+ * stored before the screen existed keeps the verdict it had.
+ */
+export function outcomeOfRow(
+  row: Pick<ReviewRow, "id" | "datasetId" | "prNumber" | "state" | "detail" | "report">,
+): StoredOutcome | null {
   if (row.state === "reported") {
     try {
-      return { kind: "reported", report: parsePrReviewReport(JSON.parse(row.report ?? "null")) };
+      return {
+        kind: "reported",
+        report: parseStoredPrReviewReport(JSON.parse(row.report ?? "null")),
+      };
     } catch (err) {
       // A stored report that no longer parses (the contract moved under it, or the column was
       // edited by hand) is shown as "could not decide". Anything else is a bug and surfaces.
@@ -456,6 +677,30 @@ function errName(err: unknown): string {
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * How many times one {@link publishOutcome} may publish, the first included: it publishes again
+ * when the row moved while it was publishing, and gives up after this many and leaves the result
+ * unpublished, so the watchdog's sweep takes over. Three is enough for one other writer to have
+ * finished, and the limit keeps a row that keeps moving from holding the request.
+ */
+const PUBLISH_ROUNDS = 3;
+
+/**
+ * Whether two reads of a row stand for the same thing on the pull request: the same state, the
+ * same decision time, the same verdict, reason and report. A restart of a running review changes
+ * none of them (it clears nothing a check shows), so a review that was started again while its
+ * running check was published is not a move.
+ */
+function sameStanding(a: ReviewRow, b: ReviewRow): boolean {
+  return (
+    a.state === b.state &&
+    a.decidedAt === b.decidedAt &&
+    a.verdict === b.verdict &&
+    a.detail === b.detail &&
+    a.report === b.report
+  );
+}
+
+/**
  * Publish an outcome to GitHub: the check-run on the reviewed commit, and (for any outcome but
  * `running`, and only while this is still the last commit of the pull request seen) the
  * pull-request comment. Each surface fails on its own and is logged by status; neither can lose
@@ -463,14 +708,40 @@ function errName(err: unknown): string {
  * did is marked published; one that did not stays unpublished and the watchdog tries again.
  * `running` is bounded (it runs inside the webhook request) and publishes the in-progress check
  * only. `commentOnly` re-states a stored result on the pull request without touching the check.
+ *
+ * **A publish is a read of the row, and the row can move while GitHub is being written to.** A
+ * callback stores a pass and starts updating the check; the sixth edit refuses the row and
+ * publishes the refusal; the callback's slower update lands last, and GitHub shows a pass for a
+ * row that says it needs a person. So after the check or the comment is acknowledged the row is
+ * read again, and when it no longer stands for what was just published (see {@link sameStanding})
+ * what its row says now is published, up to {@link PUBLISH_ROUNDS} times in all. The row is stamped
+ * `published_at` only while it still has the state and decision time that were published, so a
+ * result that moved on after the last read is not marked as shown, and the republish sweep, which
+ * selects the unstamped, corrects it. Every publisher goes through here, so every publisher has
+ * this: the callback's store, the refusal, the running check, a decline and the sweep itself.
+ *
+ * **A head an upstream re-pull's record holds is published as waived, whatever its row says**
+ * (ADR 0117). The records are read first, and GitHub's record of the pull request when one of them
+ * could waive the row ({@link waiverOfRow}, unless the caller already decided): when the rule waives
+ * this head, every round publishes the waiver, with the row's own report, if it has one, as
+ * recommendations. So a review that was dispatched before NEMAR recorded the head, and reports
+ * after, cannot put its verdict back on the check, and neither can the watchdog. The row keeps what
+ * the review said, as the history of that run; only what GitHub shows is the waiver. A record or a
+ * pull request that could not be read is not a waiver: the row's own outcome is published, and the
+ * row is not stamped as published, so the republish sweep decides again later.
  */
 export async function publishOutcome(
   env: Bindings,
   row: ReviewRow,
-  outcome: ReviewOutcome | "running",
-  opts: { commentOnly?: boolean } = {},
+  outcome: StoredOutcome | "running",
+  opts: {
+    commentOnly?: boolean;
+    waiver?: Waived | null;
+    quick?: boolean;
+    /** Told why a check write failed, the last time one did. */
+    onCheckFailure?: (err: unknown) => void;
+  } = {},
 ): Promise<boolean> {
-  let checked = false;
   let token: string;
   let refresh: () => Promise<string>;
   try {
@@ -480,6 +751,100 @@ export async function publishOutcome(
     return false;
   }
   const db = env.DB;
+  const decided = opts.waiver !== undefined ? opts.waiver : await waiverOfRow(env, row);
+  const waiver = decided === "undecided" ? null : decided;
+  // A head a record could waive whose waiver could not be decided is published as the review says,
+  // and left unstamped, so the watchdog's republish sweep asks again and corrects it once it can.
+  const stampable = decided !== "undecided";
+
+  let shown = row;
+  let what = outcome;
+  for (let round = 1; round <= PUBLISH_ROUNDS; round++) {
+    const done = await publishRound(env, { token, refresh }, shown, what, { ...opts, waiver });
+    // Nothing reached GitHub, so nothing can be stale there, and the row stays as it was.
+    if (!done.acknowledged) return done.checked;
+    let fresh: ReviewRow | null;
+    try {
+      fresh = await readRow(db, row.id);
+    } catch (err) {
+      // Not knowing whether the row moved is not knowing the check is right: no stamp, and the
+      // sweep publishes it again.
+      console.error(
+        `[pr-review] review ${row.id}: row not read after publishing (${errName(err)})`,
+      );
+      return done.checked;
+    }
+    if (fresh === null || sameStanding(fresh, shown)) {
+      if (done.checked && what !== "running" && stampable) await stampPublished(db, shown);
+      return done.checked;
+    }
+    // The row moved while it was being published, so what GitHub holds may be what it was.
+    if (round === PUBLISH_ROUNDS) {
+      console.error(
+        `[pr-review] review ${row.id}: the row kept moving while it was published; left for the sweep`,
+      );
+      return false;
+    }
+    shown = fresh;
+    what = outcomeOfRow(fresh) ?? "running";
+  }
+  return false;
+}
+
+/** Whether a row is marked as shown on GitHub. A read that fails is not a stamp. */
+async function isStamped(db: Db, id: number): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare("SELECT published_at FROM pr_reviews WHERE id = ?")
+      .bind(id)
+      .first<{ published_at: string | null }>();
+    return row?.published_at != null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record that a row's result reached GitHub, and only for the row as it was published: the same
+ * state and decision time. A row that moved on since is not stamped, so its new result still waits
+ * for a publish, and the sweep takes it up if nothing else does.
+ */
+async function stampPublished(db: Db, row: ReviewRow): Promise<void> {
+  try {
+    await db
+      .prepare(
+        "UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ? AND state = ? AND decided_at IS ?",
+      )
+      .bind(row.id, row.state, row.decidedAt)
+      .run();
+  } catch (err) {
+    console.error(`[pr-review] review ${row.id}: published_at not stored (${errName(err)})`);
+  }
+}
+
+/**
+ * One publish of `outcome` for `row`: the check, and the comment for a decided outcome. Says whether
+ * the check reached GitHub and whether anything did (the comment alone is something). A head an
+ * upstream re-pull's record holds (`opts.waiver`) is published as waived, a decided outcome, with
+ * the row's report as recommendations.
+ */
+async function publishRound(
+  env: Bindings,
+  { token, refresh }: { token: string; refresh: () => Promise<string> },
+  row: ReviewRow,
+  stored: StoredOutcome | "running",
+  opts: {
+    commentOnly?: boolean;
+    waiver: Waived | null;
+    quick?: boolean;
+    onCheckFailure?: (err: unknown) => void;
+  },
+): Promise<{ checked: boolean; acknowledged: boolean }> {
+  let checked = false;
+  let commented = false;
+  const db = env.DB;
+  const outcome: ReviewOutcome | "running" =
+    opts.waiver === null ? stored : waivedOutcome(opts.waiver, stored);
 
   if (!opts.commentOnly) {
     const rendered =
@@ -494,7 +859,9 @@ export async function publishOutcome(
       const id = await upsertReviewCheckRun({
         token,
         refresh,
-        quick: outcome === "running",
+        quick: outcome === "running" || opts.quick === true,
+        // A waiver that GitHub will not write over the old run is posted as a new run (ADR 0117).
+        newRunOnRefusal: opts.waiver !== null,
         repo: row.datasetId,
         headSha: row.headSha,
         checkRunId: row.checkRunId,
@@ -516,10 +883,11 @@ export async function publishOutcome(
       }
     } catch (err) {
       console.error(`[pr-review] review ${row.id}: check-run not published (${errName(err)})`);
+      opts.onCheckFailure?.(err);
     }
   }
 
-  if (outcome === "running") return checked;
+  if (outcome === "running") return { checked, acknowledged: checked };
   try {
     if (await isLatestReview(db, row)) {
       const commentId = row.commentId ?? (await existingCommentId(db, row.datasetId, row.prNumber));
@@ -530,7 +898,9 @@ export async function publishOutcome(
         prNumber: row.prNumber,
         commentId,
         body: renderComment(outcome, row.headSha),
+        quick: opts.quick === true,
       });
+      commented = true;
       if (id !== row.commentId) {
         try {
           await db
@@ -547,38 +917,37 @@ export async function publishOutcome(
     // Typically the App lacks pull_requests: write. The check still carries the whole review.
     console.error(`[pr-review] review ${row.id}: comment not published (${errName(err)})`);
   }
-
-  if (checked) {
-    try {
-      await db
-        .prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
-        .bind(row.id)
-        .run();
-    } catch (err) {
-      console.error(`[pr-review] review ${row.id}: published_at not stored (${errName(err)})`);
-    }
-  }
-  return checked;
+  return { checked, acknowledged: checked || commented };
 }
 
 /**
  * A stranger pushing commit after commit would otherwise cost two GitHub writes per push for a
  * message that never changes. A decline is published the first time; the same decline for the
  * same pull request within the hour is recorded without being published again.
+ *
+ * "The same pull request" includes this very row: an edit restarts a commit's row, and a blocked
+ * contributor editing a title repeatedly would otherwise publish the decline again each time. The
+ * restart keeps the row's `published_at` only when the row already carried this decline, told
+ * within the hour ({@link KEEP_RECENT_DECLINE_STAMP}), so a stamp on the row itself is the proof
+ * and its own `created_at`, which a restart renews, is not asked about.
  */
-async function publishDecline(env: Bindings, row: ReviewRow, reason: DeclineReason): Promise<void> {
+async function publishDecline(
+  env: Bindings,
+  row: ReviewRow,
+  reason: ProducedDeclineReason,
+): Promise<void> {
   const repeat = await env.DB.prepare(
     `SELECT 1 AS ok FROM pr_reviews
       WHERE dataset_id = ? AND pr_number = ? AND state = 'declined' AND detail = ?
-        AND published_at IS NOT NULL AND id < ? AND created_at >= datetime('now', '-1 hour')
+        AND published_at IS NOT NULL
+        AND ((id < ? AND created_at >= datetime('now', '-1 hour')) OR id = ?)
       LIMIT 1`,
   )
-    .bind(row.datasetId, row.prNumber, reason, row.id)
+    .bind(row.datasetId, row.prNumber, reason, row.id, row.id)
     .first<{ ok: number }>();
   if (repeat) {
-    await env.DB.prepare("UPDATE pr_reviews SET published_at = datetime('now') WHERE id = ?")
-      .bind(row.id)
-      .run();
+    // Recorded as told, for the row as it stands: a row that moved on since is not stamped.
+    await stampPublished(env.DB, row);
     return;
   }
   await publishOutcome(env, row, { kind: "declined", reason });
@@ -605,10 +974,455 @@ const no = (reason: string, reviewId?: number): PrReviewResponse => ({
 export interface PrReviewOptions {
   /**
    * An administrator asked for this review by name (`startPullRequestReview`). The payload was built
-   * from GitHub's own record of the pull request. It lifts the per-contributor allowances for this
-   * one review and lets a commit whose review ended without a verdict be started again.
+   * from GitHub's own record of the pull request. It lets a commit whose review ended without a
+   * verdict be started again, which a new delivery of the commit does only for a dispatch GitHub did
+   * not run. It names no sender, so whether the pull request is exempt is judged on its author alone.
    */
   adminStart?: boolean;
+  /**
+   * The administrator also asked for a commit whose review has a result (`reported`) to be run
+   * again (`start --redo`). Meaningful only with `adminStart`: nothing else asks for it. It reaches
+   * no further than that: a review that is running is not superseded, and the gate, the block and
+   * the exemption apply as to any start.
+   */
+  redo?: boolean;
+  /**
+   * The administrator who started it, for the audit row of a waiver the start publishes (an upstream
+   * re-pull's own pull request, ADR 0117). Meaningful only with `adminStart`.
+   */
+  adminUserId?: number;
+}
+
+/**
+ * Whether this delivery is one the review does not apply to (ADR 0107): the pull request's author
+ * is an owner or administrator AND so is whoever caused the delivery.
+ *
+ * The second half is what keeps the exemption from reaching a stranger's work. Anyone with write
+ * access can push to an owner's branch, reopen the pull request or mark it ready, and what they put
+ * in front of the review must not be skipped because the pull request carries another name. A
+ * sender who is the author (compared as GitHub does, without regard to case) needs no second look.
+ * Anyone else must be exempt in their own right. A delivery that names no usable sender cannot be
+ * attributed, and an unattributed delivery is reviewed.
+ *
+ * An administrator's start is the one delivery with no sender: its payload is GitHub's own record
+ * of the pull request, built by the Worker, and nobody pushed. It is judged on the author alone.
+ */
+async function isExemptDelivery(
+  env: Bindings,
+  pr: PrIntake,
+  options: PrReviewOptions,
+): Promise<boolean> {
+  const repo = pr.datasetId;
+  if (!(await isReviewExempt(env, { login: pr.authorLogin, repo }))) return false;
+  if (options.adminStart === true) return true;
+  const sender = pr.senderLogin;
+  if (sender === null) return false;
+  if (sender.toLowerCase() === pr.authorLogin.toLowerCase()) return true;
+  return await isReviewExempt(env, { login: sender, repo });
+}
+
+/** What the gate decides for a delivery. */
+type Gate = "exempt" | "blocked" | "review";
+
+/**
+ * Whether a review is spent on this delivery, the one decision (ADR 0107), in this order:
+ *
+ *  1. **exempt**: an owner or administrator is behind the delivery ({@link isExemptDelivery}, the
+ *     author AND whoever caused it, never the author alone). Asked only for a commit with no row
+ *     (`commit` is `"new"`): a commit a review has touched keeps what that review said, so there
+ *     `skipped` can never be the answer.
+ *  2. **blocked**: an administrator has blocked the author. It holds back a restart of a commit
+ *     already on record (`"on_record"`) as it does a new commit, and it never reaches an exempt
+ *     delivery, because exempt is asked first.
+ *  3. **review**: everything else. No count decides it: not how many reviews the author or the
+ *     platform started lately, and not how many of the author's pull requests were rejected.
+ *     That is what the earlier hourly, daily and platform caps and the automatic pause did, and
+ *     ADR 0107 removed them.
+ *
+ * A database error throws, like every read of the intake.
+ */
+async function gateDecision(
+  env: Bindings,
+  pr: PrIntake,
+  options: PrReviewOptions,
+  commit: "new" | "on_record",
+): Promise<Gate> {
+  if (commit === "new" && (await isExemptDelivery(env, pr, options))) return "exempt";
+  const standing = standingOf(await readAuthorOverride(env.DB, pr.authorId));
+  return standing.paused ? "blocked" : "review";
+}
+
+/**
+ * The exempt pull request's check could not be published. Thrown, so the webhook answers 500 and
+ * the delivery shows as failed where it can be redelivered; an administrator's start turns it into
+ * a sentence.
+ */
+export class ExemptCheckNotPublished extends Error {
+  constructor() {
+    super("exempt check not published");
+    this.name = "ExemptCheckNotPublished";
+  }
+}
+
+/**
+ * What an exempt pull request's commit comes to under the naming rule (ADR 0107), which runs
+ * before the exemption takes effect: `exempt` when the rule finds nothing, `exempt` and `waived`
+ * when it finds something an administrator waived for this commit, and `naming` otherwise (a
+ * failure, or a check that needs a person when the dataset's name could not be read).
+ */
+export async function exemptOutcomeFor(
+  env: Bindings,
+  pr: NamingSubject,
+): Promise<Extract<ReviewOutcome, { kind: "exempt" | "naming" }>> {
+  const facts = await namingFactsFor(env, pr);
+  if (namingClean(facts)) return { kind: "exempt" };
+  if (await isNamingWaived(env.DB, pr, facts)) return { kind: "exempt", waived: true };
+  return { kind: "naming", facts };
+}
+
+/**
+ * The fixed word an exempt outcome is answered with, for the webhook and an administrator's start.
+ * A name that could not be read is `naming_unchecked` whatever the title says, because that is what
+ * the check says (it needs a person) and what a waiver answers: nothing can be waived until the
+ * name is read.
+ */
+export function exemptReason(
+  outcome: Extract<ReviewOutcome, { kind: "exempt" | "naming" }>,
+): string {
+  if (outcome.kind === "exempt") return outcome.waived ? "exempt_naming_waived" : "exempt_author";
+  return outcome.facts.name === "unchecked" ? "naming_unchecked" : "naming_rule";
+}
+
+/**
+ * Post an exempt pull request's one check: a NEW check run on the commit. Throws
+ * {@link ExemptCheckNotPublished} when GitHub will not take it.
+ */
+export async function postExemptCheck(
+  env: Bindings,
+  pr: { datasetId: string; prNumber: number; headSha: string },
+  outcome: Extract<ReviewOutcome, { kind: "exempt" | "naming" }>,
+): Promise<void> {
+  try {
+    const { token, refresh } = await getDatasetsTokenWithRefresher(env);
+    await upsertReviewCheckRun({
+      token,
+      refresh,
+      quick: true,
+      repo: pr.datasetId,
+      headSha: pr.headSha,
+      checkRunId: null,
+      conclusion: conclusionOf(outcome),
+      ...renderCheck(outcome),
+    });
+  } catch (err) {
+    console.error(
+      `[pr-review] ${pr.datasetId}#${pr.prNumber}: exempt check not published (${errName(err)})`,
+    );
+    throw new ExemptCheckNotPublished();
+  }
+}
+
+/**
+ * Answer a pull request nobody reviews (ADR 0107) with the one check that says so, and nothing
+ * else: no row, no dispatch, no model call, no "in progress" check, no comment. The naming rule
+ * runs first (see {@link exemptOutcomeFor}): a title or a new dataset name it refuses fails the
+ * check, because owners and administrators are exempt from the review and not from the rule.
+ *
+ * It is only reached for a commit that has no row (see `handlePullRequestEvent`): a commit a review
+ * has touched keeps what the review said, so `skipped` is never written over a verdict, a decline
+ * or an error. For the same reason a NEW check run is created and an old one is never updated (a
+ * review that starts for the same commit between the row read and this publish therefore leaves
+ * the commit with two checks; the ADR says so). The pull request's review comment, when an earlier
+ * commit's review left one, is not touched: it names the commit it is about.
+ *
+ * It writes nothing, so there is nothing for the watchdog to publish again. A check that cannot
+ * be published is therefore thrown ({@link ExemptCheckNotPublished}) and the webhook answers 500:
+ * the delivery shows as failed in the App's delivery log, where it can be redelivered, instead of
+ * leaving a pull request with no check and no trace (see the module comment).
+ */
+async function publishExempt(env: Bindings, pr: PrIntake): Promise<PrReviewResponse> {
+  const where = `${pr.datasetId}#${pr.prNumber}`;
+  const outcome = await exemptOutcomeFor(env, pr);
+  await postExemptCheck(env, pr, outcome);
+  const reason = exemptReason(outcome);
+  // The only record that a commit was exempted: it has no row and no comment. No login, no title.
+  console.info(
+    `[pr-review] ${where}: exempt, ${conclusionOf(outcome)} check posted for ${pr.headSha.slice(0, 7)} (${reason})`,
+  );
+  return no(reason);
+}
+
+// ---------------------------------------------------------------------------------------------
+// An upstream re-pull's own pull request (ADR 0117)
+// ---------------------------------------------------------------------------------------------
+
+/** The waiver of one head: which record holds it, and as which of the record's pull requests. */
+export type Waived = Extract<WaiverVerdict, { waived: true }>;
+
+/**
+ * The outcome a waived head is published as: the waiver, with the row's own report (a review of the
+ * head that ran before NEMAR recorded it) as recommendations, and none for any other row.
+ */
+function waivedOutcome(
+  waiver: Waived,
+  stored: StoredOutcome | "running",
+): Extract<ReviewOutcome, { kind: "waived" }> {
+  return {
+    kind: "waived",
+    repullId: waiver.repullId,
+    advice: stored !== "running" && stored.kind === "reported" ? stored.report : null,
+  };
+}
+
+/**
+ * Whether the head a stored review is about is waived, decided on the same facts the intake decides
+ * on: the records read now, and GitHub's record of the pull request. The row holds no branch, so the
+ * records are asked first on the pull request's number, its head and whether it came from a fork,
+ * and only a row that some record could waive costs the read of the pull request, whose branch,
+ * base and repositories then decide with the rule as a whole (`shared/repull-review-waiver.ts`).
+ * `undecided` is a record or a pull request that could not be read: not a waiver, so the review's
+ * own outcome is published, and logged, and its caller does not mark the row as shown.
+ */
+async function waiverOfRow(env: Bindings, row: ReviewRow): Promise<Waived | null | "undecided"> {
+  try {
+    const records = await readPullRequestWaiverRecords(env.DB, row.datasetId, row.prNumber);
+    const identity: WaiverSubject = {
+      datasetId: row.datasetId,
+      prNumber: row.prNumber,
+      headSha: row.headSha,
+      ownRepository: !row.fromFork,
+      headRef: null,
+      baseRef: null,
+    };
+    if (!repullReviewWaiverOf(records, identity).waived) return null;
+    const read = await githubRead(env, row.datasetId, `/pulls/${row.prNumber}`);
+    const live = read.ok && read.status === 200 ? pullRequestFacts(read.body) : null;
+    if (live === null) {
+      console.error(
+        `[pr-review] review ${row.id}: the pull request was not read, so no waiver of ${row.headSha.slice(0, 7)}`,
+      );
+      return "undecided";
+    }
+    const subject = subjectOfPull(row.datasetId, row.prNumber, row.headSha, live);
+    const verdict = repullReviewWaiverOf(records, {
+      ...subject,
+      ownRepository: subject.ownRepository && identity.ownRepository,
+    });
+    return verdict.waived ? verdict : null;
+  } catch (err) {
+    console.error(
+      `[pr-review] review ${row.id}: the re-pull record was not read, so no waiver (${errName(err)})`,
+    );
+    return "undecided";
+  }
+}
+
+/**
+ * The waived check could not be published. Thrown, so the webhook answers 500 and the delivery
+ * shows as failed where it can be redelivered, as for an exempt pull request; an administrator's
+ * start turns it into a sentence.
+ */
+export class WaiverCheckNotPublished extends Error {
+  constructor(readonly failure: WaiverCheckFailure) {
+    super("waived check not published");
+    this.name = "WaiverCheckNotPublished";
+  }
+}
+
+/**
+ * Why a waived check did not reach GitHub: a refusal of one write, with GitHub's status (see
+ * {@link CheckRunWriteRefused}), or no answer (a timeout, a network failure, no token to write with).
+ */
+export type WaiverCheckFailure =
+  | { kind: "refused"; write: CheckRunWriteRefused["write"]; status: number }
+  | { kind: "unanswered" };
+
+function waiverCheckFailureOf(err: unknown): WaiverCheckFailure {
+  return err instanceof CheckRunWriteRefused
+    ? { kind: "refused", write: err.write, status: err.status }
+    : { kind: "unanswered" };
+}
+
+/** What caused a waiver to be published, for its audit row and its log line. Fixed words. */
+export type WaiverTrigger = "delivery" | "admin_start" | "recorded";
+
+/**
+ * Publish the waiver of one head (ADR 0117) and nothing else: no row, no dispatch, no model call.
+ * A head a review has touched (it ran before NEMAR recorded the head) has its own check run, which
+ * is updated in place to the waiver, and its comment, which then says the same with the review's
+ * findings as recommendations; the row keeps what the review said. A head with no row gets a NEW
+ * check run and no comment, as an exempt pull request does. A check that does not reach GitHub is
+ * thrown ({@link WaiverCheckNotPublished}). One audit row says what was waived, for which record
+ * and why; it is best effort, because the check is what a merge reads.
+ */
+async function publishWaived(
+  env: Bindings,
+  target: { datasetId: string; prNumber: number; headSha: string },
+  waiver: Waived,
+  trigger: WaiverTrigger,
+  actorUserId: number | null = null,
+): Promise<PrReviewResponse> {
+  const db = env.DB;
+  const where = `${target.datasetId}#${target.prNumber}`;
+  const row = await readRowByKey(db, target.datasetId, target.prNumber, target.headSha);
+  let checked: boolean;
+  let failure: unknown = null;
+  const onCheckFailure = (err: unknown) => {
+    failure = err;
+  };
+  if (row) {
+    // The waived head is the pull request's current one, which is what `seen_at` says.
+    await db.prepare(`UPDATE pr_reviews SET seen_at = ${NOW_MS} WHERE id = ?`).bind(row.id).run();
+    // Inside a request (a delivery, a start, the record's transition): every write is bounded.
+    checked = await publishOutcome(env, row, outcomeOfRow(row) ?? "running", {
+      waiver,
+      quick: true,
+      onCheckFailure,
+    });
+  } else {
+    checked = await postWaivedCheck(env, target, waiver, onCheckFailure);
+  }
+  if (!checked) {
+    console.error(`[pr-review] ${where}: the waived check was not published`);
+    throw new WaiverCheckNotPublished(waiverCheckFailureOf(failure));
+  }
+  try {
+    await auditLogStatement(db, {
+      userId: actorUserId,
+      action: "pr_review_waived",
+      resourceType: "pr_review",
+      resourceId: where,
+      details: JSON.stringify({
+        head_sha: target.headSha,
+        repull_id: waiver.repullId,
+        pull_request: waiver.pr,
+        origin: waiver.origin,
+        trigger,
+        review_id: row?.id ?? null,
+      }),
+    }).run();
+  } catch (err) {
+    console.error(`[pr-review] ${where}: waived, audit row not written (${errName(err)})`);
+  }
+  // No login, no title: the record's id and fixed words.
+  console.info(
+    `[pr-review] ${where}: waived for re-pull ${waiver.repullId} (${waiver.pr}), skipped check posted for ${target.headSha.slice(0, 7)} (${trigger})`,
+  );
+  return no("repull_waived", row?.id);
+}
+
+/** A NEW check run that says the head is waived, with no recommendations: no review ran on it. */
+async function postWaivedCheck(
+  env: Bindings,
+  target: { datasetId: string; headSha: string },
+  waiver: Waived,
+  onCheckFailure: (err: unknown) => void,
+): Promise<boolean> {
+  const outcome = waivedOutcome(waiver, "running");
+  try {
+    const { token, refresh } = await getDatasetsTokenWithRefresher(env);
+    await upsertReviewCheckRun({
+      token,
+      refresh,
+      quick: true,
+      repo: target.datasetId,
+      headSha: target.headSha,
+      checkRunId: null,
+      conclusion: conclusionOf(outcome),
+      ...renderCheck(outcome),
+    });
+    return true;
+  } catch (err) {
+    console.error(
+      `[pr-review] ${target.datasetId}: waived check not posted for ${target.headSha.slice(0, 7)} (${errName(err)})`,
+    );
+    onCheckFailure(err);
+    return false;
+  }
+}
+
+/** The facts of a delivery the waiver reads: what GitHub said, never what the pull request says. */
+function waiverSubjectOf(pr: PrIntake): WaiverSubject {
+  return {
+    datasetId: pr.datasetId,
+    prNumber: pr.prNumber,
+    headSha: pr.headSha,
+    ownRepository: !pr.fromFork,
+    headRef: pr.headRef,
+    // The intake takes up only a pull request into `main`.
+    baseRef: PR_REVIEW_BASE_BRANCH,
+  };
+}
+
+/**
+ * Publish the waiver of the head an upstream re-pull's record has just recorded for one of its pull
+ * requests (ADR 0117): the record's own transition calls this once its edge is written, so a head
+ * enrichment moved, whose review may already have run and failed, shows the waiver as soon as a
+ * NEMAR tool records the move, and the automatic path's pull request, which no delivery reviews,
+ * carries the waived check too. The caller has applied the dev/production ownership fence.
+ *
+ * GitHub's own record of the pull request is read first and the rule asked of it, so nothing is
+ * posted for a head the pull request no longer has, a pull request that is closed, or one that is
+ * not the record's (a fork, another branch, another base). Nothing is posted while the review is
+ * off or for a dataset it may not read, as for any pull request. Never throws: the transition has
+ * already happened, and a waiver not published now is published by the next delivery, the next
+ * transition, or an administrator's start of the pull request. Answers what it did, in fixed words.
+ */
+export async function publishRecordedRepullHead(
+  env: Bindings,
+  record: RepullRow,
+  pr: RepullPullRequest,
+): Promise<string> {
+  const number = record[PULL_REQUEST_COLUMNS[pr].number];
+  const where = `${record.dataset_id}#${number ?? "?"}`;
+  try {
+    if (env.PR_REVIEW_ENABLED !== "1") return "pr_review_disabled";
+    if (number === null) return "no_pull_request";
+    if ((await reviewableDataset(env.DB, record.dataset_id)) !== "reviewable") {
+      return "dataset_not_reviewable";
+    }
+    const read = await readRecordedPullRequest(env, record, pr);
+    if (!read.ok) return `not_read:${read.refusal.code}`;
+    const live = read.facts;
+    if (live.state !== "open" || live.merged) return "not_open";
+    // A draft is not taken up by the review's intake either.
+    if (live.draft) return "draft";
+    const verdict = repullReviewWaiver(
+      record,
+      subjectOfPull(record.dataset_id, number, live.headSha, live),
+    );
+    if (!verdict.waived) return `not_waived:${verdict.why}`;
+    await publishWaived(
+      env,
+      { datasetId: record.dataset_id, prNumber: number, headSha: live.headSha },
+      verdict,
+      "recorded",
+    );
+    return "waived";
+  } catch (err) {
+    console.error(
+      `[pr-review] ${where}: the waiver of the recorded head was not published (${errName(err)})`,
+    );
+    return "failed";
+  }
+}
+
+/**
+ * The waiver of a bot's pull request, when NEMAR's record names it at its head and its dataset is
+ * one the review may read, else null (the pull request stays a bot's, `bot_author`). Nothing is
+ * ever reviewed here.
+ */
+async function waiveBotPullRequest(
+  env: Bindings,
+  s: WaiverSubject,
+  options: PrReviewOptions,
+): Promise<PrReviewResponse | null> {
+  if ((await reviewableDataset(env.DB, s.datasetId)) !== "reviewable") return null;
+  const waiver = await readRepullWaiver(env.DB, s);
+  if (!waiver.waived) return null;
+  return options.adminStart === true
+    ? await publishWaived(env, s, waiver, "admin_start", options.adminUserId ?? null)
+    : await publishWaived(env, s, waiver, "delivery");
 }
 
 /**
@@ -623,7 +1437,16 @@ export async function handlePullRequestEvent(
 ): Promise<PrReviewResponse> {
   if (env.PR_REVIEW_ENABLED !== "1") return no("pr_review_disabled");
   const intake = readPullRequestEvent(payload);
-  if (!intake.ok) return no(intake.reason);
+  if (!intake.ok) {
+    // A bot's pull request is never reviewed. The one NEMAR's record names, an upstream re-pull's
+    // own at its recorded head (the NEMAR App's automatic one), is answered with its waiver, so a
+    // delivery or an administrator's start can publish it again (ADR 0117); any other stays a bot's.
+    if (intake.waiverSubject !== undefined) {
+      const waived = await waiveBotPullRequest(env, intake.waiverSubject, options);
+      if (waived !== null) return waived;
+    }
+    return no(intake.reason);
+  }
   const pr = intake.pr;
   const db = env.DB;
 
@@ -642,14 +1465,32 @@ export async function handlePullRequestEvent(
   if (reviewable === "unknown") return no("unknown_dataset");
   if (reviewable === "not_reviewable") return no("dataset_not_reviewable");
 
+  // An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117), before
+  // anything else is asked: the exemption, a block, a row to restart. Nothing a delivery or an
+  // administrator's start (a redo included) can do runs the review of such a head; its check is
+  // published as waived, over whatever an earlier review of it said.
+  const waiver = await readRepullWaiver(db, waiverSubjectOf(pr));
+  if (waiver.waived) {
+    return options.adminStart === true
+      ? await publishWaived(env, pr, waiver, "admin_start", options.adminUserId ?? null)
+      : await publishWaived(env, pr, waiver, "delivery");
+  }
+
+  // A commit a review has touched keeps what that review said, whoever acts on it next: a row means
+  // someone put this commit through review (a stranger's push to an owner's branch, or an author
+  // who was not exempt yet), and an exempt author's push back to it, or an administrator's start,
+  // must not turn another person's failed or undecided review into `skipped`, which a required
+  // check counts as passing. `handleRepeat` re-states the row instead, or, for an edit, a reopening
+  // and a marking as ready, which change the text the review judged, starts the review again (and
+  // never writes `skipped` either).
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
   if (existing) return await handleRepeat(env, existing, secret, pr, options);
 
-  const standing = standingOf(
-    await readAuthorTally(db, pr.authorId),
-    await readAuthorOverride(db, pr.authorId),
-  );
-  const paused = standing.paused;
+  // Every other delivery meets the gate once, before any row is written: an exempt pull request
+  // stores no row, so no redelivery or restart can carry it into the review.
+  const gate = await gateDecision(env, pr, options, "new");
+  if (gate === "exempt") return await publishExempt(env, pr);
+  const paused = gate === "blocked";
   const nonce = crypto.randomUUID();
   const inserted = await db
     .prepare(
@@ -679,43 +1520,55 @@ export async function handlePullRequestEvent(
   }
   const reviewId = Number(inserted.meta.last_row_id);
   try {
-    return await decideInserted(env, pr, reviewId, paused, nonce, secret, options);
+    return await decideInserted(env, reviewId, paused, nonce, secret);
   } catch (err) {
-    await markDispatchFailed(db, reviewId);
+    await markDispatchFailed(db, reviewId, nonce);
     throw err;
   }
 }
 
 /**
  * The row exists but nothing has run for it (a database error between the insert and the
- * dispatch). Left as 'dispatched' it would count against the caps and wait for the watchdog to call
- * it late, and a redelivery would find it and answer "duplicate". Mark it as a dispatch that did not
- * happen, which a redelivery retries; the caller lets the route answer 500.
+ * dispatch). Left as 'dispatched' it would wait for the watchdog to call it late, and a redelivery
+ * would find it and answer "duplicate". Mark it as a dispatch that did not happen, which a
+ * redelivery retries; the caller lets the route answer 500.
+ *
+ * `nonce` is the one the failed attempt set, and the row is marked only while it still carries it.
+ * A row can be restarted again while this attempt fails (an edit during a database fault), and the
+ * newer attempt's nonce is the one a live job holds a token for: clearing it would refuse that
+ * job's claim and report for a failure that was not its own.
  */
-async function markDispatchFailed(db: Db, reviewId: number): Promise<void> {
+async function markDispatchFailed(db: Db, reviewId: number, nonce: string): Promise<void> {
   try {
     await db
       .prepare(
         `UPDATE pr_reviews SET state = 'errored', detail = 'dispatch_failed', nonce = NULL,
                 decided_at = datetime('now')
-          WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL`,
+          WHERE id = ? AND state = 'dispatched' AND claimed_at IS NULL AND nonce = ?`,
       )
-      .bind(reviewId)
+      .bind(reviewId, nonce)
       .run();
   } catch (inner) {
     console.error(`[pr-review] review ${reviewId}: failure not recorded (${errName(inner)})`);
   }
 }
 
-/** Everything after the insert: publish a decline, or check the allowances and start the review. */
+/**
+ * Everything after the insert: publish a decline for a blocked contributor, or start the review.
+ * `secondCall` is set when this attempt restarts a row whose earlier attempt already cost a model
+ * call, and adds one to the row's `attempts`, which the administrator's volume sums. That is the
+ * best record there is and not an exact one: the count is made before the hand-over, so a
+ * hand-over GitHub refuses leaves the row one call over until a later run, and a restart a block
+ * declined has overwritten the state this rule reads, so the call after it can read one short.
+ * Nothing decides on it.
+ */
 async function decideInserted(
   env: Bindings,
-  pr: PrIntake,
   reviewId: number,
   paused: boolean,
   nonce: string,
   secret: string,
-  options: PrReviewOptions & { restarted?: boolean; extraCalls?: number } = {},
+  options: { secondCall?: boolean } = {},
 ): Promise<PrReviewResponse> {
   const db = env.DB;
   const row = await readRow(db, reviewId);
@@ -726,33 +1579,11 @@ async function decideInserted(
     return no("contributor_paused", reviewId);
   }
 
-  // A restarted row keeps its old id, which the allowance queries (`id <= ?`) would rank ahead of
-  // everything inserted since: it is ranked as the newest instead.
-  const over = await capDecision(
-    db,
-    pr,
-    options.restarted ? Number.MAX_SAFE_INTEGER : reviewId,
-    options.adminStart === true,
-    options.extraCalls ?? 0,
-  );
-  if (over) {
-    await db
-      .prepare(
-        `UPDATE pr_reviews SET state = 'declined', detail = ?, nonce = NULL, decided_at = datetime('now')
-          WHERE id = ? AND state = 'dispatched'`,
-      )
-      .bind(over, reviewId)
-      .run();
-    const declined = await readRow(db, reviewId);
-    await publishDecline(env, declined ?? row, over);
-    return no(over, reviewId);
-  }
-
   // The attempt is going ahead, so a call the row had already spent is now a second one.
-  if ((options.extraCalls ?? 0) > 0) {
+  if (options.secondCall) {
     await db
-      .prepare("UPDATE pr_reviews SET attempts = attempts + ? WHERE id = ?")
-      .bind(options.extraCalls, reviewId)
+      .prepare("UPDATE pr_reviews SET attempts = attempts + 1 WHERE id = ?")
+      .bind(reviewId)
       .run();
   }
   return await startReview(env, row, nonce, secret);
@@ -763,7 +1594,9 @@ async function decideInserted(
  * current commit, which is what force-pushing back to an earlier reviewed commit means), its
  * stored result is re-stated on the pull request, and a review whose dispatch failed is tried
  * again. Nothing else is reviewed twice, except that an administrator's start also restarts a
- * commit whose review ended without a verdict (see `isRestartable`).
+ * commit whose review ended without a verdict (and, for a `redo`, one that has a result), and an
+ * edit of the title, the body or the base, a reopening and a marking as ready restart the review of
+ * the commit they are on, whatever state that is in (see `isRestartable`).
  */
 async function handleRepeat(
   env: Bindings,
@@ -778,60 +1611,238 @@ async function handleRepeat(
     .bind(existing.id)
     .run();
 
+  // A restart is a conditional write, so it finds nothing to change when something else moved the
+  // row between the read and the write: a result stored, the watchdog's verdict, another delivery.
+  // For most deliveries that is the answer (what is re-stated below is what the row is now, not what
+  // this call read before the other writer ran). For a delivery that changes the text (an edit, a
+  // reopening, a marking as ready) it is not: the text the stored result judged is no longer the
+  // pull request's, whoever moved the row, so the change is dropped only after the restart has been
+  // tried against the row as it is now, up to three times in all.
+  //
+  // A delivery that changes the text is also held to the cap (ADR 0107, decision 4): once the
+  // commit's review has been restarted that many times by such deliveries, the next one is refused
+  // instead of restarted, and every one after it re-states the refusal. The cap comes after the
+  // gate: a contributor an administrator has blocked is declined by the restart below, as for any
+  // delivery, and is never told "too many edits" (a declined restart is not counted either).
   let current = existing;
-  if (await isRestartable(db, existing, options)) {
-    const restarted = await restartReview(env, existing, pr, secret, options);
+  const textChange = changesTheText(pr);
+  // An administrator's start is tried again like a change of the text: the row it meant to restart
+  // may have moved between the read and the write (the watchdog closing it, a report stored), and
+  // the restart is then tried against the row as it is now instead of answering `duplicate`.
+  const tries = textChange || options.adminStart === true ? EDIT_RESTART_TRIES : 1;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    if (
+      textChange &&
+      current.editRestarts >= PR_REVIEW_EDIT_CAP &&
+      (await gateDecision(env, pr, options, "on_record")) !== "blocked"
+    ) {
+      if (current.detail === "edit_limit") break;
+      const refused = await refuseEdit(env, current, pr);
+      if (refused) return refused;
+      current = (await readRow(db, existing.id)) ?? current;
+      continue;
+    }
+    if (!(await isRestartable(db, current, pr, options))) break;
+    // A redo does not change the text the review judged, so a block on the author does not replace
+    // a finished review with a decline: the answer is the block, and the stored result stands.
+    if (
+      options.redo === true &&
+      current.state === "reported" &&
+      (await gateDecision(env, pr, options, "on_record")) === "blocked"
+    ) {
+      return no("contributor_paused", existing.id);
+    }
+    const restarted = await restartReview(env, current, pr, secret, options);
     if (restarted) return restarted;
-    // Another delivery moved the row first; what is re-stated below is what it is now, not what
-    // this call read before the other one ran.
-    current = (await readRow(db, existing.id)) ?? existing;
+    current = (await readRow(db, existing.id)) ?? current;
   }
 
   const outcome = outcomeOfRow(current);
   if (outcome) await publishOutcome(env, current, outcome, { commentOnly: true });
+  // A redo that found the review still running says so: "already has a review" would be true and
+  // would read as if the redo had been refused for having a result.
+  if (options.adminStart === true && options.redo === true && (await mayBeRunning(db, current))) {
+    return no("review_running", existing.id);
+  }
   return no("duplicate", existing.id);
 }
 
 /**
- * A commit whose review can be tried again. A dispatch that failed was not run by GitHub (and a late
- * claim of it is refused, its nonce having been cleared), so a redelivery restarts it. A commit that
- * was declined, ended in an error or never reported is restarted only when an administrator asks by
- * name: a new delivery of the same commit must not buy a second model call. So is one handed to
- * GitHub that is past the watchdog's deadline: the production watchdog would have closed it as
- * `unreported`, and the dev Worker never runs it. A review that is running, or has a result, is never
- * restarted.
+ * Refuse a delivery that would restart a review past the cap: the row becomes an errored review
+ * with the detail `edit_limit`, its check and comment are published as such, and nothing is
+ * dispatched. The state it is in is deliberately not asked about. A running review is superseded
+ * (its nonce is cleared, so its claim and its report are refused), and a result stored between the
+ * read and this write judged the text from before the edit, so it is overwritten too: a pass or a
+ * fail that stood would be a verdict on text the pull request no longer has, and the queue that
+ * approval reads would show it.
+ *
+ * The write is conditional on the count that was read and on the row not already being refused,
+ * so it is null when another delivery moved the count (an administrator's start resets it) or
+ * refused first, and the caller reads the row again. A refusal whose publish fails stays
+ * unpublished, and the watchdog's republish sweep says it again.
  */
-async function isRestartable(db: Db, row: ReviewRow, options: PrReviewOptions): Promise<boolean> {
+async function refuseEdit(
+  env: Bindings,
+  existing: ReviewRow,
+  pr: PrIntake,
+): Promise<PrReviewResponse | null> {
+  const db = env.DB;
+  const refused = await db
+    .prepare(
+      `UPDATE pr_reviews
+          SET state = 'errored', detail = 'edit_limit', verdict = NULL, report = NULL, nonce = NULL,
+              decided_at = datetime('now'), published_at = NULL, publish_attempts = 0
+        WHERE id = ? AND edit_restarts = ? AND detail IS NOT 'edit_limit'`,
+    )
+    .bind(existing.id, existing.editRestarts)
+    .run();
+  if ((refused.meta.changes ?? 0) !== 1) return null;
+  console.warn(
+    `[pr-review] review ${existing.id} (${existing.datasetId}#${existing.prNumber}): restart refused at the cap of ${PR_REVIEW_EDIT_CAP} on ${existing.headSha.slice(0, 7)}, sender ${pr.senderLogin ?? "unknown"}`,
+  );
+  const row = (await readRow(db, existing.id)) ?? existing;
+  await publishOutcome(env, row, { kind: "error", error: "edit_limit" });
+  return no("edit_limit", existing.id);
+}
+
+/** What caused a restart, in the words of the log line: the delivery's action, in plain words. */
+function causeOf(pr: PrIntake): string {
+  if (pr.edited) return "an edit";
+  return pr.action === "reopened" ? "a reopen" : "ready for review";
+}
+
+/**
+ * Whether the delivery may have changed the text a review of its commit judged: an edit of the
+ * title, the body or the base, or the return of a pull request that was closed or a draft (an edit
+ * made meanwhile was not taken up, so the first thing that follows it is the reopening or the
+ * marking as ready).
+ */
+function changesTheText(pr: PrIntake): boolean {
+  return pr.edited || pr.resumed;
+}
+
+/**
+ * A commit whose review can be tried again. An edit of the title, the body or the base, a
+ * reopening and a marking as ready always restart it, from any state, a running review and a stored
+ * result included: the review judged text that is no longer the pull request's, and a result for it
+ * must not stand, as a pass or as a fail (ADR 0107). A dispatch that failed was not run by GitHub
+ * (and a late claim of it is refused, its nonce having been cleared), so a redelivery restarts it.
+ * A commit that was declined, ended in an error or never reported is restarted otherwise only when
+ * an administrator asks by name: a new delivery of the same commit must not buy a second model
+ * call. So is one handed to GitHub that is past the watchdog's deadline: the production watchdog
+ * would have closed it as `unreported`, and the dev Worker never runs it, unless a job claimed it
+ * less than its limit ago ({@link mayBeRunning}). A review that has a result (`reported`) is
+ * restarted by an administrator only when the start says `redo`, which is the administrator
+ * choosing to pay for a second run of a finished review (the owner re-judges after the rules
+ * changed). A review that is running is not restarted by anything else, a redo included:
+ * superseding it would waste its calls and could cut off a job about to report.
+ */
+async function isRestartable(
+  db: Db,
+  row: ReviewRow,
+  pr: PrIntake,
+  options: PrReviewOptions,
+): Promise<boolean> {
+  if (changesTheText(pr)) return true;
   if (row.state === "errored" && row.detail === "dispatch_failed") return true;
   if (options.adminStart !== true) return false;
+  if (await mayBeRunning(db, row)) return false;
   if (row.state === "declined" || row.state === "errored" || row.state === "unreported") {
     return true;
   }
-  if (row.state !== "dispatched") return false;
-  const overdue = await db
-    .prepare(
-      `SELECT 1 AS overdue FROM pr_reviews
-        WHERE id = ? AND created_at < datetime('now', '-' || ? || ' minutes')`,
-    )
-    .bind(row.id, PR_REVIEW_DEADLINE_MINUTES)
-    .first<{ overdue: number }>();
-  return overdue !== null;
+  if (row.state === "reported") return options.redo === true;
+  // A review handed to GitHub, past the deadline, and no job inside its limit: it never came back.
+  return row.state === "dispatched";
 }
 
-/** Whether a row's attempt may have cost a model call: the complement of a decline or an attempt GitHub never ran. */
-function spentACall(row: ReviewRow): boolean {
+/**
+ * Whether a job may still be working on the row: it was handed to GitHub less than the watchdog's
+ * deadline ago, or a job claimed it less than the workflow's limit ago (the deadline runs from when
+ * the row was recorded and the limit from the claim, so the watchdog can have closed a row as
+ * `unreported` while its job is still inside its limit). An administrator's start never supersedes
+ * such a review: its model calls would be wasted and its report refused.
+ */
+async function mayBeRunning(db: Db, row: ReviewRow): Promise<boolean> {
+  if (row.state !== "dispatched" && row.state !== "unreported") return false;
+  const live = await db
+    .prepare(
+      `SELECT 1 AS live FROM pr_reviews
+        WHERE id = ? AND state IN ('dispatched', 'unreported')
+          AND ((state = 'dispatched' AND created_at >= datetime('now', '-' || ? || ' minutes'))
+            OR claimed_at >= datetime('now', '-' || ? || ' minutes'))`,
+    )
+    .bind(row.id, PR_REVIEW_DEADLINE_MINUTES, PR_REVIEW_JOB_MINUTES)
+    .first<{ live: number }>();
+  return live !== null;
+}
+
+/**
+ * Whether a row's attempt may have reached the model (one run, of up to two calls): the complement
+ * of a decline, an attempt GitHub never ran, a run that ended at the facts stage (`stage` is
+ * `facts`: the naming rule decided it before any model was asked, so it made no call), and a review
+ * handed to GitHub that no job has claimed (`claimed_at` is null while it is `dispatched` or
+ * `unreported`: the claim comes before anything is spent, so the job that was started cannot have
+ * made a call, and several quick edits before it starts are still one run). A restart of a row that
+ * did spend one adds a second run to its `attempts`, and the administrator's volume count sums
+ * `attempts` over the rows that did. `stage` is the stage of a stored version 2 report and is
+ * absent for any other row; only a change of the text, or an administrator's redo, restarts a
+ * reported row, and {@link stageOfReport} reads its stage for this. `claimed_at` is left out by a caller that does not
+ * have it (the volume's groups), and absent is not null: it says nothing, so the row is counted.
+ *
+ * A review refused at the edit cap (`edit_limit`) counts as a spent call: it is a refusal and not a
+ * run, but the review it superseded may have been claimed, and counting it errs the safe way, which
+ * is the way this count is allowed to be wrong (nothing decides on it).
+ */
+export function spentACall(row: {
+  state: string;
+  detail: string | null;
+  stage?: string | null;
+  claimed_at?: string | null;
+}): boolean {
   if (row.state === "declined") return false;
+  if (row.stage === "facts") return false;
+  if ((row.state === "dispatched" || row.state === "unreported") && row.claimed_at === null) {
+    return false;
+  }
   return !(
     row.state === "errored" &&
     (row.detail === "stale_head" || row.detail === "dispatch_failed")
   );
 }
 
+/** The stage of a stored version 2 report (`facts`, `screen` or `full`), or null for any other. */
+function stageOfReport(report: string | null): string | null {
+  if (report === null) return null;
+  try {
+    const stage = (JSON.parse(report) as { stage?: unknown } | null)?.stage;
+    return typeof stage === "string" ? stage : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Give a commit a fresh attempt, held to the same gate as a new one: a contributor who is paused is
- * declined, and the allowances that apply to it are asked again (an administrator's start only the
- * platform's pool), with the row ranked as the newest (see `decideInserted`). Null when another
- * delivery moved the row first.
+ * A restart that ends in a decline keeps the row's `published_at` when the row already stands as
+ * this decline and told it within the hour (the old values are the ones a `SET` expression reads),
+ * and drops it otherwise. {@link publishDecline} then finds that stamp and does not tell the pull
+ * request again. A row that stood as anything else (a pass, a fail, a running review) has a check
+ * that says that, so the decline is published.
+ */
+const KEEP_RECENT_DECLINE_STAMP = `CASE WHEN state = 'declined' AND detail = 'contributor_paused'
+    AND published_at >= datetime('now', '-1 hour') THEN published_at END`;
+
+/**
+ * Give a commit a fresh attempt, held to the same gate as a new one except for the exemption (see
+ * {@link gateDecision}; the commit has a row, so `skipped` is never an answer): a contributor an
+ * administrator has blocked is declined. Null when another delivery moved the row first.
+ *
+ * The nonce is replaced, and that is what retires the attempt this one supersedes. The superseded
+ * job's token was signed over the old nonce, so its claim and its result are refused (401, the same
+ * bytes as for any token that is not for the review waiting now) and its report is never stored;
+ * `claimed_at` is cleared so the new job can claim. A restart of a reported row also clears its
+ * `verdict` and `report`, which the table keeps null unless the state is `reported`; the old
+ * result stops being the commit's the moment the review runs again, and the check shows it
+ * running.
  */
 async function restartReview(
   env: Bindings,
@@ -841,19 +1852,29 @@ async function restartReview(
   options: PrReviewOptions,
 ): Promise<PrReviewResponse | null> {
   const db = env.DB;
-  const standing = standingOf(
-    await readAuthorTally(db, pr.authorId),
-    await readAuthorOverride(db, pr.authorId),
-  );
-  const paused = standing.paused;
+  const paused = (await gateDecision(env, pr, options, "on_record")) === "blocked";
   const nonce = crypto.randomUUID();
+  // The cap's count: an administrator's start begins it again when it starts the review (a start
+  // that a block declines is a restart too, and a decline is no run to count), except a redo of a
+  // finished review, which is no edit and must not lift the cap a contributor is near; a delivery
+  // that changes the text adds one unless it was declined, and anything else (a push that restarts
+  // a review whose dispatch failed) leaves it as it is.
+  const redoOfResult = options.redo === true && existing.state === "reported";
+  const count = options.adminStart
+    ? paused || redoOfResult
+      ? "edit_restarts"
+      : "0"
+    : changesTheText(pr) && !paused
+      ? "edit_restarts + 1"
+      : "edit_restarts";
   const reset = await db
     .prepare(
       `UPDATE pr_reviews
-          SET state = ?, detail = ?, nonce = ?, claimed_at = NULL, published_at = NULL,
-              publish_attempts = 0, decided_at = ${paused ? "datetime('now')" : "NULL"},
-              created_at = datetime('now')
-        WHERE id = ? AND state = ? AND detail IS ?`,
+          SET state = ?, detail = ?, nonce = ?, claimed_at = NULL,
+              published_at = ${paused ? KEEP_RECENT_DECLINE_STAMP : "NULL"},
+              publish_attempts = 0, edit_restarts = ${count}, decided_at = ${paused ? "datetime('now')" : "NULL"},
+              created_at = datetime('now'), verdict = NULL, report = NULL
+        WHERE id = ? AND state = ? AND detail IS ? AND edit_restarts = ? AND claimed_at IS ?`,
     )
     .bind(
       paused ? "declined" : "dispatched",
@@ -862,24 +1883,47 @@ async function restartReview(
       existing.id,
       existing.state,
       existing.detail,
+      existing.editRestarts,
+      existing.claimedAt,
     )
     .run();
   if ((reset.meta.changes ?? 0) !== 1) return null;
+  // One line for each restart a change of the text caused, so a commit that keeps being restarted
+  // can be traced to who is doing it. The sender's login has the shape of one (it was checked on
+  // the way in); the title and the body, which the pull request's author controls, are not in it.
+  if (changesTheText(pr)) {
+    console.info(
+      `[pr-review] review ${existing.id} (${existing.datasetId}#${existing.prNumber}): restarted by ${causeOf(pr)} (${existing.editRestarts + 1} of ${PR_REVIEW_EDIT_CAP}) on ${existing.headSha.slice(0, 7)}, sender ${pr.senderLogin ?? "unknown"}`,
+    );
+  }
   try {
-    const res = await decideInserted(env, pr, existing.id, paused, nonce, secret, {
-      ...options,
-      restarted: true,
+    const res = await decideInserted(env, existing.id, paused, nonce, secret, {
       // The earlier attempt cost a model call unless it never got that far.
-      extraCalls: spentACall(existing) ? 1 : 0,
+      secondCall: spentACall({
+        state: existing.state,
+        detail: existing.detail,
+        stage: stageOfReport(existing.report),
+        claimed_at: existing.claimedAt,
+      }),
     });
-    return res.dispatched && res.reason === "dispatched" ? { ...res, reason: "redispatched" } : res;
+    return res.dispatched && res.reason === "dispatched"
+      ? { ...res, reason: pr.edited ? "redispatched_after_edit" : "redispatched" }
+      : res;
   } catch (err) {
-    await markDispatchFailed(db, existing.id);
+    await markDispatchFailed(db, existing.id, nonce);
     throw err;
   }
 }
 
-/** Show the review as running, hand it to GitHub, and record a failure to do so. */
+/**
+ * Show the review as running, hand it to GitHub, and record a failure to do so.
+ *
+ * A restart takes a completed result off the required check by updating that check run back to
+ * `in_progress`. GitHub's documentation neither allows nor forbids that transition (ADR 0107 lists
+ * it as unverified), so the publish can be refused, and a refused or timed-out publish must not be
+ * silent: the old result would keep standing on the check until the callback or the watchdog. It is
+ * tried a second time after a short wait, and a second failure is logged once, naming the review.
+ */
 async function startReview(
   env: Bindings,
   row: ReviewRow,
@@ -887,7 +1931,14 @@ async function startReview(
   secret: string,
 ): Promise<PrReviewResponse> {
   const db = env.DB;
-  await publishOutcome(env, row, "running");
+  if (!(await publishOutcome(env, row, "running"))) {
+    await new Promise((resolve) => setTimeout(resolve, RUNNING_PUBLISH_RETRY_WAIT_MS));
+    if (!(await publishOutcome(env, row, "running"))) {
+      console.error(
+        `[pr-review] review ${row.id} (${row.datasetId}#${row.prNumber}): the running check was not published after a retry; the old result may still stand on the check until the callback or the watchdog`,
+      );
+    }
+  }
   try {
     const token = await signPrReviewCallbackToken(
       { datasetId: row.datasetId, reviewId: row.id, nonce },
@@ -980,10 +2031,11 @@ const NEWER_REVIEW_EXISTS = `EXISTS (
 
 /**
  * The workflow's first real step, before it mints an identity or reads anything: take the review. The
- * caller has verified the token. A review is claimed once, so one dispatch buys one model call;
- * a dispatch for a commit that is no longer the latest delivery recorded by the Worker is refused
- * and recorded as `stale_head`. The workflow also compares the dispatched SHA against the fetched
- * pull ref and current pull-request API response before the model call.
+ * caller has verified the token. A review is claimed once, so one dispatch buys one run (the
+ * screen, and the review unless the screen stops it); a dispatch for a commit that is no longer the
+ * latest delivery recorded by the Worker is refused and recorded as `stale_head`. The workflow also
+ * compares the dispatched SHA against the fetched pull ref and current pull-request API response
+ * before any model call.
  */
 export async function claimPrReview(
   env: Bindings,
@@ -1213,7 +2265,11 @@ export async function sweepStalePrReviews(env: Bindings): Promise<PrReviewSweepR
         const row = await readRow(db, id);
         const outcome = row ? outcomeOfRow(row) : null;
         if (!row || !outcome) continue;
-        const published = await publishOutcome(env, row, outcome);
+        // Published means stamped: a check that reached GitHub while an upstream re-pull's waiver
+        // of its head could not be decided (ADR 0117) is left unstamped, and is an attempt that
+        // failed, which counts toward the bound like any other.
+        const published =
+          (await publishOutcome(env, row, outcome)) && (await isStamped(db, row.id));
         if (published) {
           result.republished++;
         } else if (publish_attempts + 1 >= PUBLISH_MAX_ATTEMPTS) {

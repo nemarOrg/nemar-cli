@@ -1274,8 +1274,16 @@ export async function cloneDataset(
      * should be used.
      */
     identity?: { name: string; email: string };
+    /**
+     * Leave the clone's branch at this tag instead of the remote's default HEAD (ADR 0111
+     * decision 10). Checked right after `git clone`, before `git annex init`: a tag the remote
+     * does not have answers `missingTag`, and the clone is otherwise left untouched. The whole
+     * repository is still cloned -- git-annex needs its branch -- and only the checked-out branch
+     * moves, with `git reset --hard` to the tag's commit.
+     */
+    tag?: string;
   } = {},
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; missingTag?: boolean; commit?: string }> {
   try {
     let cloneUrl = repoUrl;
     let credentialHelper: string | undefined;
@@ -1321,6 +1329,32 @@ export async function cloneDataset(
 
     if (cloneExitCode !== 0) {
       return { success: false, error: cloneStderr.trim() || "Failed to clone dataset" };
+    }
+
+    let commit: string | undefined;
+    if (options.tag !== undefined) {
+      // `refs/tags/<tag>`, never the bare name: a branch of the same name must not stand in for it.
+      const resolved = await runCommand(
+        ["git", "rev-parse", "--verify", "--quiet", `refs/tags/${options.tag}^{commit}`],
+        { cwd: outputPath },
+      );
+      commit = resolved.stdout.trim();
+      if (resolved.exitCode !== 0 || !/^[0-9a-f]{40,64}$/.test(commit)) {
+        return {
+          success: false,
+          missingTag: true,
+          error: `tag ${options.tag} is not in ${repoUrl}`,
+        };
+      }
+      const reset = await runCommand(["git", "reset", "--hard", "--quiet", commit], {
+        cwd: outputPath,
+      });
+      if (reset.exitCode !== 0) {
+        return {
+          success: false,
+          error: `Cloned, but could not move the branch to tag ${options.tag}: ${reset.stderr.trim()}`,
+        };
+      }
     }
 
     // Persist the credential helper so subsequent pushes to origin authenticate;
@@ -1372,7 +1406,7 @@ export async function cloneDataset(
       console.warn("git annex init returned non-zero but annex is initialized");
     }
 
-    return { success: true };
+    return commit === undefined ? { success: true } : { success: true, commit };
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : String(e) };
   }

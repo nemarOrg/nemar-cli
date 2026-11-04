@@ -1,0 +1,12 @@
+{
+  "query": "query UpstreamSnapshots($a0: ID!, $a1: ID!, $a2: ID!, $a3: ID!, $a4: ID!, $a5: ID!, $a6: ID!) { a0: dataset(id: $a0) { id latestSnapshot { tag created } snapshots { tag created } } a1: dataset(id: $a1) { id latestSnapshot { tag created } snapshots { tag created } } a2: dataset(id: $a2) { id latestSnapshot { tag created } snapshots { tag created } } a3: dataset(id: $a3) { id latestSnapshot { tag created } snapshots { tag created } } a4: dataset(id: $a4) { id latestSnapshot { tag created } snapshots { tag created } } a5: dataset(id: $a5) { id latestSnapshot { tag created } snapshots { tag created } } a6: dataset(id: $a6) { id latestSnapshot { tag created } snapshots { tag created } } }",
+  "variables": {
+    "a0": "ds003645",
+    "a1": "ds004362",
+    "a2": "ds000001",
+    "a3": "ds006903",
+    "a4": "ds999999",
+    "a5": "ds002893",
+    "a6": "ds003082"
+  }
+}

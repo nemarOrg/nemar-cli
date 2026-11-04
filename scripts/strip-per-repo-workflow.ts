@@ -191,8 +191,8 @@ async function deleteFile(
       // delete still lands on whatever the default points at, which is
       // the correct behavior — that's the branch the legacy workflow
       // would have been firing from.
-      author: { name: "nemar-publish-bot", email: "nemar-publish-bot@users.noreply.github.com" },
-      committer: { name: "nemar-publish-bot", email: "nemar-publish-bot@users.noreply.github.com" },
+      author: { name: "nemar-bot", email: "nemar-bot@users.noreply.github.com" },
+      committer: { name: "nemar-bot", email: "nemar-bot@users.noreply.github.com" },
     }),
   });
   if (!res.ok) {

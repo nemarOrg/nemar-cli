@@ -18,6 +18,7 @@ import {
   isValidPipelineStage,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
+import { openNeuroDatasetOfDoi, openNeuroUrlParts } from "../../../shared/openneuro-tag.js";
 import { escapeXml } from "../lib/escape.js";
 import type { UploaderIdentity } from "./uploader-identity.js";
 
@@ -1502,6 +1503,11 @@ export function bidsToDataCite(
         addRelatedId(s.DOI, "DOI", "IsDerivedFrom");
       }
       if (typeof s.URL === "string" && s.URL) {
+        // An OpenNeuro snapshot an import records (ADR 0111 decision 10) carries its DOI and its
+        // page; both name one upstream, so the page adds no second relation. Narrow on purpose:
+        // only when the DOI and the URL name the same OpenNeuro dataset.
+        const doiDataset = typeof s.DOI === "string" ? openNeuroDatasetOfDoi(s.DOI) : null;
+        if (doiDataset !== null && openNeuroUrlParts(s.URL)?.ds === doiDataset) continue;
         // Skip URL if it's a doi.org URL (already handled via DOI field)
         const doiMatch = (s.URL as string).match(/^https?:\/\/(dx\.)?doi\.org\/(10\.\d{4,}\/.+)$/i);
         if (doiMatch) {

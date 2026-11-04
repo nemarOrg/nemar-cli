@@ -22,6 +22,27 @@ Actions minutes bill against `nemarDatasets` (GitHub Team) rather than the const
 - The Worker no longer does the work inline, so completion is asynchronous and needs callback authentication, idempotency, and a stuck-job story.
 - Feature-flagged cutovers mean two code paths coexist during rollout, which must be actively retired rather than left indefinitely.
 
+## Amendment (2026-10-24): shims run on pull_request_target
+
+The per-dataset shims for BIDS validation and version check trigger on `pull_request_target`, so that pull requests from forks are validated (#1784).
+On `pull_request`, GitHub gives a fork's run no secrets, and the shim could not mint its token.
+This clarifies how the shims dispatch; the decision to run automation centrally stands.
+
+`pull_request_target` runs the file from the default branch with the repository's secrets, so it is safe only while each shim holds to these properties:
+
+- It checks out nothing from the pull request and runs nothing from it.
+- It passes only shape-checked identifiers (dataset id, head commit, pull request number) through `env`, and never interpolates event fields into a `run:` script.
+- It holds no permissions of its own (`permissions: {}`).
+- It mints a token scoped to the `.github` repository and nothing wider.
+- Its dispatch payload carries only the pinned set of keys, so no text written by the pull request author is forwarded.
+
+The central workflows re-validate the payload they receive, so the shim is not the only check.
+
+A change to the shims reaches about 785 repositories only when they are redeployed.
+Until a repository's shim is redeployed, fork pull requests there are not validated.
+
+The tests in `test/workflow-fork-shims.test.ts` enforce these properties against the generated templates.
+
 ## Alternatives considered
 
 - **Per-repo workflow copies (the original):** self-contained per dataset, but unmaintainable at scale and drifted silently. Rejected.

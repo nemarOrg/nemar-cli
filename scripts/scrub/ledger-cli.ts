@@ -50,6 +50,8 @@ import { ContractError, type LedgerEntry, parseDeleted } from "./contract";
 import {
   DELETION_VERIFICATION,
   LedgerRefused,
+  MERGE_ACCEPTED_ACTION,
+  SCRUB_ACTIONS,
   appendLedger,
   ledgerS3Key,
   parseLedgerText,
@@ -251,6 +253,12 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
   if (command === "append") {
     const dataset = need(v.dataset, "dataset");
     const action = need(v.action, "action") as LedgerEntry["action"];
+    // Written only by the tool that scrubbed, in the same commit as what it scrubbed: a typed one
+    // would claim a scrub nobody ran, and the proof and the planner trust the word.
+    if (SCRUB_ACTIONS.has(action)) throw new Refused("action-written-by-the-scrub-only");
+    // Written only by NEMAR's Worker, after it read the accepted merge on GitHub: a typed one would
+    // vouch for a commit nobody checked, and the fresh-clone proof trusts the line it names.
+    if (action === MERGE_ACCEPTED_ACTION) throw new Refused("action-written-by-nemar-only");
     let counts: Record<string, number>;
     let verification: string;
     if (action === "old-versions-deleted" || v.verification === DELETION_VERIFICATION) {

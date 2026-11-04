@@ -7,6 +7,8 @@
  * intentional changes are import paths.
  */
 
+import { isOpenNeuroTag, sameUpstreamTag } from "../../../../shared/openneuro-tag";
+import { DISPATCH_ID_MAX } from "../../../../shared/repull-state";
 import { GITHUB_API, VALIDATOR_VERSION } from "./shared";
 
 /**
@@ -290,18 +292,46 @@ export async function triggerEnrichmentRun(
 }
 
 /**
+ * The `client_payload` of an `onboard-openneuro` dispatch. `openneuro_tag` is
+ * present only when a well-formed tag is given: a workflow older than the tag
+ * pin ignores an unknown key, and the CLI resolves OpenNeuro's latest tag
+ * itself when none arrives (ADR 0111 decision 10), so omitting it is always
+ * safe and sending a malformed one never is. Pure, for the test.
+ */
+export function buildOpenNeuroOnboardPayload(
+  openneuroIds: string,
+  tag: string | null | undefined,
+): { event_type: "onboard-openneuro"; client_payload: Record<string, string> } {
+  const client_payload: Record<string, string> = { openneuro_ids: openneuroIds };
+  if (tag !== null && tag !== undefined) {
+    if (isOpenNeuroTag(tag)) {
+      client_payload.openneuro_tag = tag;
+    } else {
+      console.warn(
+        `[onboard-openneuro] not sending malformed tag ${JSON.stringify(tag).slice(0, 80)} for ${openneuroIds}; the import resolves the latest tag itself`,
+      );
+    }
+  }
+  return { event_type: "onboard-openneuro", client_payload };
+}
+
+/**
  * Dispatch the `onboard-openneuro` workflow on `nemarDatasets/.github` to import
  * one or more OpenNeuro datasets (epic #775). Same repository_dispatch shape as
  * `triggerEnrichmentRun`; the workflow's parse-ids reads
- * `client_payload.openneuro_ids`. `pat` must carry dispatch write on
- * `nemarDatasets/.github` -- use `getDatasetsToken()`. `fetchImpl` defaults to
- * the global fetch (injectable for tests).
+ * `client_payload.openneuro_ids`, and `client_payload.openneuro_tag` when
+ * `tag` is given (see {@link buildOpenNeuroOnboardPayload}). The auto-import
+ * passes the tag discovery found; the retry engine passes none, so a retry is
+ * prepared at the tag OpenNeuro names when it runs. `pat` must carry dispatch
+ * write on `nemarDatasets/.github` -- use `getDatasetsToken()`. `fetchImpl`
+ * defaults to the global fetch (injectable for tests).
  */
 export async function triggerOpenNeuroOnboard(
   openneuroIds: string,
   pat: string,
-  fetchImpl: typeof fetch = fetch,
+  options: { tag?: string | null; fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
+  const fetchImpl = options.fetchImpl ?? fetch;
   const response = await fetchImpl(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
     headers: {
@@ -310,16 +340,152 @@ export async function triggerOpenNeuroOnboard(
       "User-Agent": "NEMAR-API",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      event_type: "onboard-openneuro",
-      client_payload: { openneuro_ids: openneuroIds },
-    }),
+    body: JSON.stringify(buildOpenNeuroOnboardPayload(openneuroIds, options.tag)),
   });
 
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Failed to trigger OpenNeuro onboard: HTTP ${response.status} - ${error}`);
   }
+}
+
+/** The event the central re-pull workflow listens for (epic #1046 phase 7, #1913; ADR 0111). */
+export const UPSTREAM_REPULL_EVENT = "run-upstream-repull";
+
+/** How long a re-pull dispatch waits for GitHub before its answer counts as lost. */
+export const UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS = 10_000;
+
+/** What a re-pull dispatch names: the claimed dispatch row, its token, and the CLI the run installs. */
+export interface UpstreamRepullDispatchFields {
+  /** `open` runs a plan to an open pull request, or resumes a row that stalled before it; `finish` walks a merged re-pull to `complete`. */
+  mode: "open" | "finish";
+  datasetId: string;
+  upstreamDs: string;
+  fromTag: string;
+  toTag: string;
+  dispatchId: number;
+  /** The recorded re-pull a resume or a finish continues; null for a first dispatch. */
+  repullId: number | null;
+  /** The dispatch token the Worker signed over the claimed row. A secret: never logged. */
+  token: string;
+  /** The version of `nemar-cli` the run installs: the dispatching Worker's own, a release only. */
+  cliVersion: string;
+}
+
+const DISPATCH_TOKEN_SHAPE = /^[0-9a-f]{64}$/;
+const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
+
+/**
+ * The `client_payload` of a `run-upstream-repull` dispatch (ADR 0111, the Phase 7 slices). Pure,
+ * for the test.
+ *
+ * The run is unattended and its log is public, so every field is checked here and a malformed one
+ * THROWS before anything is sent: a value the workflow would have to refuse, or worse echo, never
+ * leaves the Worker. The messages name the field and never its value, because one of them is the
+ * token. The values are strings, as the workflow's `env` reads them; `repull_id` is present only
+ * when the dispatch continues a recorded re-pull (a resume or a finish), and a finish must name
+ * one. There are at most nine keys, under GitHub's limit of ten top-level properties of a
+ * `client_payload`. The CLI version must be a release (`X.Y.Z`), so a Worker built from a
+ * development version can never dispatch a run that installs one.
+ *
+ * The token rides in the payload because the run presents it at the automatic create and at its
+ * report callback; the workflow masks it before any step can print it, and nothing here logs it.
+ */
+export function buildUpstreamRepullPayload(p: UpstreamRepullDispatchFields): {
+  event_type: typeof UPSTREAM_REPULL_EVENT;
+  client_payload: Record<string, string>;
+} {
+  const bad = (field: string): never => {
+    throw new Error(`buildUpstreamRepullPayload: ${field} is malformed`);
+  };
+  if (p.mode !== "open" && p.mode !== "finish") bad("mode");
+  if (!/^on\d{6}$/.test(p.datasetId)) bad("the dataset id");
+  if (!/^ds\d{6}$/.test(p.upstreamDs)) bad("the upstream dataset");
+  if (!isOpenNeuroTag(p.fromTag)) bad("the from tag");
+  if (!isOpenNeuroTag(p.toTag)) bad("the to tag");
+  if (sameUpstreamTag(p.fromTag, p.toTag)) bad("the tag pair");
+  const id = (n: number) => Number.isSafeInteger(n) && n >= 1 && n <= DISPATCH_ID_MAX;
+  if (!id(p.dispatchId)) bad("the dispatch id");
+  if (p.repullId !== null && !id(p.repullId)) bad("the re-pull id");
+  if (p.mode === "finish" && p.repullId === null) bad("the re-pull id of a finish");
+  if (typeof p.token !== "string" || !DISPATCH_TOKEN_SHAPE.test(p.token)) bad("the dispatch token");
+  if (!RELEASE_VERSION.test(p.cliVersion)) bad("the CLI version");
+
+  const client_payload: Record<string, string> = {
+    mode: p.mode,
+    dataset_id: p.datasetId,
+    upstream_ds: p.upstreamDs,
+    from_tag: p.fromTag,
+    to_tag: p.toTag,
+    dispatch_id: String(p.dispatchId),
+    dispatch_token: p.token,
+    cli_version: p.cliVersion,
+  };
+  if (p.repullId !== null) client_payload.repull_id = String(p.repullId);
+  return { event_type: UPSTREAM_REPULL_EVENT, client_payload };
+}
+
+/**
+ * What GitHub's answer to a re-pull dispatch says about the run:
+ *  - `sent`: a 2xx. GitHub took the event; whether a workflow listens is not shown (it answers 204
+ *    for an event no workflow takes), which is why the dispatch row waits for the run's report and
+ *    the watchdog ends one that never comes;
+ *  - `{ refused }`: a 4xx. GitHub refused the request before it created an event, so nothing ran
+ *    and the caller frees the unit of the cap;
+ *  - `unknown`: a 5xx, a network error or the timeout. GitHub may have queued the event and lost
+ *    only the answer (a 502, 503 or 504 can come from GitHub's edge after the event was accepted,
+ *    the reasoning {@link DispatchRejectedError} records), so the caller must not assume nothing
+ *    started: the unit stays used.
+ */
+export type UpstreamRepullSend = "sent" | { refused: number } | "unknown";
+
+/**
+ * The class of an error as a fixed word (`TypeError`, `TimeoutError`), never its message: a
+ * message can carry a URL, a path or a value, and the callers log this where a token must never
+ * appear. A name that is not a plain identifier reads `Error`.
+ */
+export function errorClassName(err: unknown): string {
+  const name = err instanceof Error ? err.name : "";
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ? name : "Error";
+}
+
+/**
+ * Send a `run-upstream-repull` dispatch to the central workflow repository. It never throws and
+ * never forwards GitHub's body: the answer is one of three words (see {@link UpstreamRepullSend}),
+ * so no error text can carry the token or a dataset's path. A send that got no answer is logged
+ * by its error's class only ({@link errorClassName}), so a failure that repeats on this side (a
+ * malformed base URL, a runtime refusal) can be told from a timeout without echoing any text.
+ * `pat` must carry dispatch write on `nemarDatasets/.github` (use `getDatasetsToken()`).
+ * `fetchImpl` defaults to the global fetch.
+ */
+export async function triggerUpstreamRepullRun(
+  payload: ReturnType<typeof buildUpstreamRepullPayload>,
+  pat: string,
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {},
+): Promise<UpstreamRepullSend> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${pat}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "NEMAR-API",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(options.timeoutMs ?? UPSTREAM_REPULL_DISPATCH_TIMEOUT_MS),
+    });
+  } catch (err) {
+    console.error(`[repull-dispatch] the dispatch got no answer: ${errorClassName(err)}`);
+    return "unknown";
+  }
+  // The body is not read: it is GitHub's, not ours to forward.
+  await response.body?.cancel().catch(() => undefined);
+  if (response.ok) return "sent";
+  if (response.status >= 400 && response.status < 500) return { refused: response.status };
+  return "unknown";
 }
 
 /**
@@ -563,8 +729,12 @@ export class DispatchRejectedError extends Error {
  * drives the same caller-side loop (S3 Object Lock batches, retries,
  * `--resume`) a terminal does, which is why the approval does not run inside
  * the Worker: that loop is long and its cost belongs on the runner. The payload
- * names the dataset, the request it was claimed for, whether to resume, and the
- * environment. It carries no credential and no URL.
+ * names the dataset, the request it was claimed for, whether to resume, the
+ * environment, and the claim's dispatch token (#1604; ADR 0105, decision 3): the proof the
+ * runner's `/approve` calls present so the click is recorded as the approver.
+ * It carries no GitHub credential, no Worker secret and no URL; the token is a
+ * MAC over the claim's own columns, authorizes nothing by itself, and is never
+ * logged (the error text below has any copy of it removed).
  *
  * Failure has two meanings, and the difference matters to the caller:
  *   - {@link DispatchRejectedError} with `definitelyNotSent` (a 4xx): GitHub
@@ -573,9 +743,9 @@ export class DispatchRejectedError extends Error {
  *     `TimeoutError` after `timeoutMs`, or a {@link DispatchRejectedError} for a
  *     5xx): UNKNOWN. GitHub may have accepted the dispatch and lost only the
  *     reply, so a caller must not assume nothing started.
- * The error text names GitHub's status and body, never the token. `pat` must
- * carry write access on the central repo's dispatch endpoint -- use
- * `getDatasetsToken()`.
+ * The error text names GitHub's status and body, never the GitHub credential
+ * or the dispatch token. `pat` must carry write access on the central repo's
+ * dispatch endpoint -- use `getDatasetsToken()`.
  */
 export async function triggerApprovePublication(
   datasetId: string,
@@ -583,6 +753,7 @@ export async function triggerApprovePublication(
   resume: boolean,
   environment: ApprovalDispatchEnvironment,
   pat: string,
+  dispatchToken: string,
   timeoutMs: number = APPROVE_DISPATCH_TIMEOUT_MS,
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
@@ -600,13 +771,20 @@ export async function triggerApprovePublication(
         request_id: requestId,
         resume,
         environment,
+        dispatch_token: dispatchToken,
       },
     }),
     signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) {
-    throw new DispatchRejectedError(response.status, await response.text());
+    // GitHub's body is part of the error the caller logs, and a 4xx can quote what it refused.
+    // The token is a secret in the log of a Worker, so no copy of it leaves with the error.
+    const detail = await response.text();
+    throw new DispatchRejectedError(
+      response.status,
+      dispatchToken ? detail.split(dispatchToken).join("[redacted]") : detail,
+    );
   }
 }
 
@@ -658,5 +836,61 @@ export async function triggerPrReviewRun(
   });
   if (!response.ok) {
     throw new Error(`PR review dispatch rejected: HTTP ${response.status}`);
+  }
+}
+
+/**
+ * The fields the central publication review workflow needs (ADR 0102), and nothing it could use to
+ * choose a target. The workflow reads the dataset's root documents from GitHub itself, at the
+ * commit named here: it is given the review's coordinates, never the dataset's text, and it maps
+ * `environment` to an API origin from a fixed table of its own, so a payload can never steer the
+ * callback to a host it chose. `anonymous` is the release kind the review was started for; the
+ * report echoes it and the Worker refuses a report whose echo differs from the row.
+ */
+export interface PublicationReviewDispatch {
+  datasetId: string;
+  requestId: number;
+  reviewId: number;
+  headSha: string;
+  anonymous: boolean;
+  callbackToken: string;
+  environment: ApprovalDispatchEnvironment;
+}
+
+/**
+ * Trigger the publication review via `repository_dispatch[run-publication-review]` on
+ * `nemarDatasets/.github` (ADR 0102). Throws with the status only: GitHub's body is not ours to
+ * forward, and the caller logs this message. This is the only call the Worker makes to GitHub for
+ * a review; nothing is written to a dataset repository.
+ */
+export async function triggerPublicationReviewRun(
+  d: PublicationReviewDispatch,
+  pat: string,
+  timeoutMs?: number,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-publication-review",
+      client_payload: {
+        dataset_id: d.datasetId,
+        request_id: d.requestId,
+        review_id: d.reviewId,
+        head_sha: d.headSha,
+        anonymous: d.anonymous,
+        callback_token: d.callbackToken,
+        environment: d.environment,
+      },
+    }),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+  });
+  if (!response.ok) {
+    throw new Error(`Publication review dispatch rejected: HTTP ${response.status}`);
   }
 }

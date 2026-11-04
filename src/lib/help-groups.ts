@@ -43,6 +43,7 @@ export const COMMON_COMMANDS: Readonly<Record<string, readonly string[]>> = {
     "revoke",
     "publish",
     "pr-reviews",
+    "mail",
     "doi",
     "make-public",
     "delete-dataset",

@@ -26,7 +26,7 @@
 - [OSA NEMAR assistant state](osa-nemar-assistant-state.md) — its nemar assistant is the LEGACY one and the replacement is unbuilt epic work; dead against legacy API; no MCP runtime; OSA at api.osc.earth/osa, api.osc.earth/nemar is gone
 - [Python-urllib UA gets 403](api-hosts-block-python-urllib-ua.md) — api and zarr hosts block only the urllib UA; send a named UA when probing from Python
 - [Wrangler via cfman](wrangler-via-cfman.md) — `bunx cfman wrangler --account sccn ...` is how wrangler runs here; bare wrangler "Not logged in" is not a lack of access
-- [Release PR needs its own review](release-pr-needs-own-review.md) — review the full main...dev diff before promoting; follow-ups reviewed alone still leave seams
+- [Release PR needs its own review](release-pr-needs-own-review.md): one integration-scoped review of the full main...dev diff before promoting; one fix PR into dev per round, accepted findings never ship in the next release
 - [Website release: prepare first](website-release-prepare-first.md) — run prepare-release.yml on staging before the staging->main PR; nemar-cli strips on main, the website strips on staging
 - [New tooling repos are MIT](new-tooling-repos-mit.md) — public reusable tools under nemarOrg get MIT; nemar-cli CC BY-NC-ND is the exception
 - [orcid-mock project](orcid-mock-project.md) — charter-only repo for the mock ORCID server; decisions, open questions, how to start it
@@ -65,3 +65,6 @@
 - [curl --retry with -o /dev/null](curl-retry-with-devnull-fails-23.md) — exits 23 on a retried transfer and masks the status; loop in bash, and test the step with Bun.spawn (not spawnSync) against a Bun.serve stand-in
 - [PR review: three faults behind no review](pr-review-three-faults-behind-no-review.md): dev showed nothing for three reasons: webhook secrets differed (a signed ping is the oracle), ANTHROPIC_* must be org variables not secrets, and the federation rule must accept the main-branch subject
 - [Debug the PR review chain with two tails](debug-pr-review-chain-with-two-tails.md): tail production and dev filtered by x-github-event, then read the public workflow run log; each link answers 2xx so check them in order
+- [Bun.serve wildcard port hijack](bun-serve-wildcard-port-hijack.md): a `port: 0` test fake can be answered by another process's loopback listener on macOS; the preload binds loopback; do not retry a one-off failure with a response nobody wrote
+- [Workers AI is unreachable from dev machines](workers-ai-unreachable-from-dev-machines.md): `wrangler dev` AI binding fails to create a preview session under the cfman token; calibrate on the open BAAI weights locally and read latency and score scale from the first deploy's logs
+- [CrossEncoder.predict already sigmoids](cross-encoder-predict-already-applies-sigmoid.md): a second sigmoid squeezes all scores into 0.50 to 0.73 and looks plausible; pass activation_fn=Identity for logits

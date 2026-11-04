@@ -88,6 +88,7 @@ export const searchDatasetsInputSchema4 = z4
       .optional()
       .describe(
         "Free-text search over dataset name, description, authors, tasks and modalities. " +
+          'Describe what you want in a few words ("sleep stage classification"); a phrase returns only datasets judged to answer it. ' +
           "Omit to browse the public catalog instead (a plain, filtered list).",
       ),
     modality: z4.string().optional().describe(MODALITY_FILTER_DESCRIPTION),

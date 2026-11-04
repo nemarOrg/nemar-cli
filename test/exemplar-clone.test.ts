@@ -3,16 +3,19 @@
  * Phase 5). The orchestration functions (prepareExemplar/copyExemplarData/
  * finalizeExemplar/cloneExemplar) touch git, S3, and the live backend and can
  * only be exercised end-to-end on staging (no-mocks policy) — what's tested
- * here are the pure decision/transform helpers.
+ * here are the pure decision/transform helpers, and the dev-remote seam
+ * (`prepareDevRemote`, `renameInheritedRemote`) with real git and git-annex
+ * over directory remotes.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,17 +26,24 @@ import { join } from "node:path";
 import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import {
   type ExemplarFleetEntry,
+  INHERITED_REMOTE,
   type PrepareExemplarResult,
   copyExemplarData,
   findMissingCopiedKeys,
   isAnnexContentKey,
+  mirrorProblem,
   parseExemplarFleet,
   planSubPrefixCopy,
+  prepareDevRemote,
+  renameInheritedRemote,
   rewriteArchiveKeyPrefix,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
+import { runCommand } from "../src/lib/git-annex/run-command";
+import { uuidsNamedInRemoteLog } from "../src/lib/git-annex/s3-remote";
 import type { CopyItem } from "../src/lib/s3-server-copy";
+import { useTestGitIdentity } from "./helpers/git-identity";
 
 describe("scrubDatasetDescription", () => {
   test("prefixes Name with [TEST COPY] and drops DatasetDOI", () => {
@@ -468,4 +478,214 @@ exit 0
     expect(cpCalls[0]).toContain(`s3://nemar-dev/${xxId}/archives/${xxId}_v1.0.0.zip`);
     expect(cpCalls[0]).not.toContain(`${xxId}/archives/${sourceId}_v1.0.0.zip`);
   });
+});
+
+describe("a mirror rehearsal fixture (--mirror, ADR 0111)", () => {
+  // git-annex commits to its branch (init, initremote, renameremote): the identity comes from the
+  // environment, never from the runner's git config, which a CI host does not have.
+  let restoreIdentity: () => void = () => {};
+  beforeAll(() => {
+    restoreIdentity = useTestGitIdentity();
+  });
+  afterAll(() => restoreIdentity());
+
+  test("names the ds its on source mirrors, and nothing else", () => {
+    expect(mirrorProblem("on004362", "ds004362")).toBeNull();
+    expect(mirrorProblem("on004362", "ds003645")).toContain("on003645");
+    expect(mirrorProblem("nm000132", "ds000132")).toContain("on000132");
+    expect(mirrorProblem("on004362", "004362")).toContain("OpenNeuro dataset id");
+  });
+
+  /** A repository with a `nemar-s3` directory special remote that clones enable (autoenable). */
+  async function inheritedClone(root: string): Promise<{ clone: string; oldUuid: string }> {
+    const run = async (cwd: string, args: string[]) => {
+      const r = await runCommand(args, {
+        cwd,
+        env: {
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t",
+        },
+      });
+      if (r.exitCode !== 0) throw new Error(`${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const source = join(root, "source");
+    const store = join(root, "production-store");
+    mkdirSync(source);
+    mkdirSync(store);
+    await run(source, ["git", "init", "-q", "--initial-branch", "main"]);
+    await run(source, ["git", "annex", "init", "-q", "source"]);
+    await run(source, [
+      "git",
+      "annex",
+      "initremote",
+      "nemar-s3",
+      "type=directory",
+      `directory=${store}`,
+      "encryption=none",
+      "autoenable=true",
+    ]);
+    writeFileSync(join(source, "README.md"), "x\n");
+    await run(source, ["git", "add", "README.md"]);
+    await run(source, ["git", "commit", "-qm", "init"]);
+    const oldUuid = await run(source, ["git", "config", "remote.nemar-s3.annex-uuid"]);
+    const clone = join(root, "clone");
+    await run(root, ["git", "clone", "-q", source, clone]);
+    await run(clone, ["git", "annex", "init", "-q", "clone"]);
+    // What autoenable does for an S3 remote on init; a directory remote keeps its path out of
+    // remote.log, so it is enabled with it here.
+    await run(clone, ["git", "annex", "enableremote", "nemar-s3", `directory=${store}`]);
+    return { clone, oldUuid };
+  }
+
+  test("the inherited nemar-s3 is renamed out of the way, so the fixture's own remote takes the name", async () => {
+    const root = mkdtempSync(join(tmpdir(), "nemar-exemplar-mirror-"));
+    try {
+      const { clone, oldUuid } = await inheritedClone(root);
+      // The clone enabled the production remote under its name.
+      expect(
+        (
+          await runCommand(["git", "config", "remote.nemar-s3.annex-uuid"], { cwd: clone })
+        ).stdout.trim(),
+      ).toBe(oldUuid);
+      await renameInheritedRemote(clone, "nemar-s3", INHERITED_REMOTE);
+      const dev = join(root, "dev-store");
+      mkdirSync(dev);
+      const init = await runCommand(
+        [
+          "git",
+          "annex",
+          "initremote",
+          "nemar-s3",
+          "type=directory",
+          `directory=${dev}`,
+          "encryption=none",
+        ],
+        { cwd: clone },
+      );
+      expect(init.exitCode, init.stderr).toBe(0);
+      const log = (
+        await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd: clone })
+      ).stdout;
+      const named = uuidsNamedInRemoteLog(log, "nemar-s3");
+      // Exactly one nemar-s3, the fixture's own, which a re-pull reads.
+      expect(named).toHaveLength(1);
+      expect(named[0]).not.toBe(oldUuid);
+      expect(uuidsNamedInRemoteLog(log, INHERITED_REMOTE)).toEqual([oldUuid]);
+      expect(
+        (
+          await runCommand(["git", "config", `remote.${INHERITED_REMOTE}.annex-uuid`], {
+            cwd: clone,
+          })
+        ).stdout.trim(),
+      ).toBe(oldUuid);
+      expect(
+        (
+          await runCommand(["git", "config", "remote.nemar-s3.annex-uuid"], { cwd: clone })
+        ).stdout.trim(),
+      ).toBe(named[0] as string);
+    } finally {
+      Bun.spawnSync(["chmod", "-R", "u+w", root]);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+  /** `git config <key>` in `cwd`, trimmed; "" when unset. */
+  const config = async (cwd: string, key: string) =>
+    (await runCommand(["git", "config", key], { cwd })).stdout.trim();
+  /** A directory remote named `name` for `configure`, as the dev bucket's S3 remote is made. */
+  const directoryRemote = (clone: string, store: string) => async (name: string) => {
+    mkdirSync(store, { recursive: true });
+    const r = await runCommand(
+      [
+        "git",
+        "annex",
+        "initremote",
+        name,
+        "type=directory",
+        `directory=${store}`,
+        "encryption=none",
+      ],
+      { cwd: clone },
+    );
+    return r.exitCode === 0 ? { success: true } : { success: false, error: r.stderr.trim() };
+  };
+  const remoteLogOf = async (clone: string) =>
+    (await runCommand(["git", "cat-file", "blob", "git-annex:remote.log"], { cwd: clone })).stdout;
+  const withRoot = async (fn: (root: string) => Promise<void>) => {
+    const root = mkdtempSync(join(tmpdir(), "nemar-exemplar-dev-remote-"));
+    try {
+      await fn(root);
+    } finally {
+      Bun.spawnSync(["chmod", "-R", "u+w", root]);
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  test("a mirror fixture's dev remote takes nemar-s3, and the renamed production one is ignored", async () => {
+    await withRoot(async (root) => {
+      const { clone, oldUuid } = await inheritedClone(root);
+      const dev = await prepareDevRemote(clone, {
+        mirror: true,
+        configure: directoryRemote(clone, join(root, "dev-store")),
+      });
+      expect(dev.devRemote).toBe("nemar-s3");
+      expect(dev.uuid).not.toBe(oldUuid);
+      expect(uuidsNamedInRemoteLog(await remoteLogOf(clone), "nemar-s3")).toEqual([dev.uuid]);
+      expect(await config(clone, `remote.${INHERITED_REMOTE}.annex-uuid`)).toBe(oldUuid);
+      expect(await config(clone, `remote.${INHERITED_REMOTE}.annex-ignore`)).toBe("true");
+      expect(await config(clone, "remote.nemar-s3.annex-ignore")).toBe("");
+    });
+  }, 60_000);
+
+  test("an ordinary exemplar's dev remote is nemar-s3-dev, and the inherited nemar-s3 is ignored in place", async () => {
+    await withRoot(async (root) => {
+      const { clone, oldUuid } = await inheritedClone(root);
+      const dev = await prepareDevRemote(clone, {
+        mirror: false,
+        configure: directoryRemote(clone, join(root, "dev-store")),
+      });
+      expect(dev.devRemote).toBe("nemar-s3-dev");
+      expect(uuidsNamedInRemoteLog(await remoteLogOf(clone), "nemar-s3")).toEqual([oldUuid]);
+      expect(await config(clone, "remote.nemar-s3.annex-ignore")).toBe("true");
+      expect(await config(clone, "remote.nemar-s3-dev.annex-uuid")).toBe(dev.uuid);
+    });
+  }, 60_000);
+
+  test("a git-annex branch that cannot be read refuses the rename, never reads as nothing named", async () => {
+    await withRoot(async (root) => {
+      const plain = join(root, "plain");
+      mkdirSync(plain);
+      await runCommand(["git", "init", "-q"], { cwd: plain });
+      await expect(renameInheritedRemote(plain, "nemar-s3", INHERITED_REMOTE)).rejects.toThrow(
+        "git-annex branch could not be read (run git annex init in the clone first)",
+      );
+    });
+  }, 60_000);
+
+  test("a git-annex branch with no remote.log has nothing to rename", async () => {
+    await withRoot(async (root) => {
+      const repo = join(root, "annexed");
+      mkdirSync(repo);
+      expect((await runCommand(["git", "init", "-q"], { cwd: repo })).exitCode).toBe(0);
+      const init = await runCommand(["git", "annex", "init", "-q", "repo"], { cwd: repo });
+      expect(init.exitCode, init.stderr).toBe(0);
+      await renameInheritedRemote(repo, "nemar-s3", INHERITED_REMOTE);
+    });
+  }, 60_000);
+
+  test("a remote still named after the rename refuses, before anything is configured", async () => {
+    await withRoot(async (root) => {
+      const { clone, oldUuid } = await inheritedClone(root);
+      // The uuid also comes from an included file, which renaming the local section leaves.
+      writeFileSync(join(root, "extra.config"), `[remote "nemar-s3"]\n\tannex-uuid = ${oldUuid}\n`);
+      await runCommand(["git", "config", "include.path", join(root, "extra.config")], {
+        cwd: clone,
+      });
+      await expect(renameInheritedRemote(clone, "nemar-s3", INHERITED_REMOTE)).rejects.toThrow(
+        "still named after the rename",
+      );
+    });
+  }, 60_000);
 });

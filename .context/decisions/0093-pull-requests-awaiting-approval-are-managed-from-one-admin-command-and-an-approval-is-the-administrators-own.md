@@ -4,6 +4,13 @@
 **Date:** 2026-10-08
 **Owner:** Seyed Yahya Shirazi
 
+Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the `exempt` verdict, the changes to `allow`, `start --all` and the list's volume line, and the review ruleset exist, and the required check is not switched on):
+`allow` only clears an administrator's block, `start --all` no longer stops on a daily pool, the queue gains the verdict `exempt` and a volume line, and the review will join the required checks where its ruleset exists.
+Its "What this supersedes" section lists what it replaces here.
+Narrowed by [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (its Phase 7g amendment, 2026-10-26) in one aspect, the merge, for one class only: a machine-clean re-pull pull request the automatic path opened, which the Worker merges while `AUTO_REPULL_MERGE_ENABLED` is on, approving nothing; the approval sentences stand as written, and every other pull request is approved and merged as this record says.
+*Annotated 2026-10-27: "while `AUTO_REPULL_MERGE_ENABLED` is on" is shorter than the rule.
+The Worker merges only in production, and only when `AUTO_REPULL_ENABLED` and `AUTO_REPULL_MERGE_ENABLED` are both exactly `"1"` (`autoRepullMergeEnabled`, `backend/src/services/repull-switches.ts`); the merge switch alone does nothing.*
+
 Follows ADR 0092 (the review this command lists and acts on), ADR 0001 (published datasets are
 PR-only), ADR 0054 and ADR 0086 (unknown is never zero, and never clear).
 
@@ -274,3 +281,69 @@ anything.
 The observation does not say what the state is for the held verdicts (`uncertain`, `declined`,
 `errored`, which are `action_required`), and it does not settle whether `unstable` should be accepted
 when both required checks pass: that stays the maintainer's decision, tracked in issue #1743.
+
+## Amendment 2026-10-23 (#1046): narrowed by ADR 0111 for re-pull pull requests
+
+Designed in [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (decision 7) and not yet built: nothing in this command or in the Worker behaves differently today.
+*Annotated 2026-10-26: built: this command merges a re-pull pull request only through the re-pull's gate, which reads that screen and claims the cap (ADR 0111, its Phase 6f amendment), and the Worker merges a machine-clean automatic re-pull pull request (its Phase 7g amendment).*
+ADR 0107 already partially supersedes this record, and ADR 0111 narrows one more aspect of it, the merge, for one class of pull request: an upstream re-pull on `release/vN.0.0` that the automatic path opened and `upstream_repulls` records.
+The approval sentences stand as written, "its approval is made by the administrator, from their machine, with their own GitHub login" and "No Worker code path approves", because the Worker will submit no review.
+What will change for that class is that a merge no longer always follows an administrator's approval and `--merge` or `y`.
+While `AUTO_REPULL_MERGE_ENABLED` is on, the Worker will merge one that is machine clean: zero unexplained paths, an identifier screen that says `clear`, BIDS validation and `version-check` green, an ADR 0107 review stored for that head whose verdict is `pass` (any other verdict, or none, is not machine clean), a head equal to the screened SHA, the daily merge cap claimed, and GitHub reporting `clean`.
+*Annotated 2026-10-27: and only in production with `AUTO_REPULL_ENABLED` exactly `"1"` as well; see the annotation on this record's header.*
+Every other pull request, and a re-pull pull request that is not machine clean or that an administrator opened, will be approved and merged as this record says.
+For a re-pull pull request this command will add two checks once built: an identifier screen of that head that is `clear` or carries the administrator's recorded acknowledgment (ADR 0086), which `approve --merge` does not require today, and a claim on the re-pull daily merge cap from the backend before the merge is sent.
+AGENTS.md's summary of this record ("nothing merges without `--merge` or a `y`") is updated by the phase that builds the merge.
+
+## Amendment 2026-10-24: `start --redo`
+
+A commit whose review has a result was never started again by an administrator: `start` answered `duplicate`, and a finished review ran again only when the pull request's title, body or base was edited, or it was reopened or marked ready, at most five times for one commit ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md), decision 4).
+That is the right rule for a contributor, who must not be able to buy a second model call by resending the same commit.
+It left the administrator without a way to re-judge the pull requests already reviewed after the rules or the prompt changed (release 0.10.23 changed both), which is the one time a second run is wanted.
+
+`nemar admin pr-reviews start <dataset> <pr> --redo` asks for it by name, and `start --all --redo` asks for every open pull request whose current commit has a finished review (pass, fail or uncertain), behind the same cost question and `--dry-run` as `--all`, with each finished review marked in the list.
+The Worker takes `?redo=1` on the start route and restarts the commit on its row through the restart that edits use: the nonce is replaced, so the superseded job's claim and report are refused, the verdict and report are cleared, the check goes back to running, and `attempts` goes up by one when the earlier run could have cost a call.
+A redo is not an edit, so it leaves the row's count of edit restarts as it is: a bulk redo must not give a contributor who is one edit from the cap five more.
+(Any other administrator's start, of a declined, errored, unreported or capped row, begins the count again, as before.)
+Everything else a start is held to still applies: the dataset must be reviewable, the pull request is read from GitHub, and an owner's or administrator's pull request is not reviewed unless a review of its current commit is on record, in which case it is handled like anyone's, as [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) says of every start.
+A block on the contributor answers `contributor_paused` and leaves the row's result alone: a redo does not change the text the review judged, so the finished review is not replaced by a decline (an edit does replace it, because the text changed).
+
+Two further limits are part of the decision.
+A review that is running is never started again, by a redo or by a plain start; the redo's answer is `review_running`.
+A review is running while it was handed to GitHub less than the watchdog's 60 minutes ago, or while a job claimed it less than the workflow's 50 minutes ago.
+The second test is new: the deadline counts from when the row was recorded and the job's limit from its claim, so a job that waited in GitHub's queue is still inside its limit when the watchdog has closed its row as `unreported`, and a second bulk redo must not supersede it.
+`--all --redo` leaves out drafts, reviews in progress, exempt pull requests and the commits capped for edits, which are started by name, as `--all` does.
+An administrator's start is tried against the row as it is now, up to three times, like a change of the text, so a redo that loses a race (the watchdog closing the row, a report stored) is not answered `duplicate`.
+
+The Worker echoes `redo: true` in every answer to a start that asked for it.
+A CLI that sent the flag and does not see the echo knows the Worker predates it: it reports what the Worker did, says the flag was ignored and exits 1, so an older Worker's `duplicate` is never read as "nothing to redo".
+The word `review_running` is also a reason code of the publication review (ADR 0102); the vocabularies do not meet, and this one appears only in the answer of a start.
+
+There is no migration: the restart is the SQL that already exists.
+The cost is the administrator's to decide (a review is up to two model calls, and a bulk redo of about a hundred reviews is a hundred runs); nothing automatic redoes a review.
+The first run's tokens leave the volume's token and cost sums when the report is cleared, as for any restart ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) names this), while the run count keeps both.
+A bulk redo cannot be resumed (running it again redoes the reviews that finished in between), and a `--limit` to stage it is not built.
+
+## Amendment 2026-10-24 (second): `start --all --concurrency`
+
+A bulk start began every review at once, and each review reserves its whole output budget (128,000 tokens) against the workspace's output-tokens-per-minute limit when its request begins ([ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md), Consequences), so about a hundred starts asked for a hundred budgets together and queued a hundred jobs in one repository.
+`start --all [--redo] --concurrency <n>` paces it: at most `n` of the reviews that run started are in progress at any time, and the next one starts as each leaves `in_progress`.
+It is a sliding window, not fixed batches, because a batch waits for its slowest review (one that truncates runs for half an hour) while the other slots sit idle.
+
+The pacing is in the CLI alone.
+While it waits it reads the admin list (`verdict=in_progress`) every 30 seconds, one request that answers for every pull request, and a started review counts as running while it is in that list.
+Leaving the list is not proof of finishing: the list is built from GitHub's search of open pull requests, so a pull request that was closed or merged, or that the search leaves out for a moment, drops out of it while its job may still be running.
+A review that left the list is therefore confirmed finished by a read of its stored review before its slot is freed, naming the commit the run started it for (without a commit the Worker judges the pull request's current head, and reads "not reviewed" whenever GitHub cannot be asked or the head has moved); a read that fails or takes longer than two minutes keeps the slot, and a pull request GitHub no longer has counts as finished.
+No slot is held for ever: a job cannot outlive its limit, so a slot is freed after 100 minutes whatever the queue says (the Worker's 60-minute deadline plus 30 minutes of grace is 90, and the queue stops showing an overdue review as running after that).
+A start that fails with a connection error, an unreadable response (the client reports both as status 0) or a 5xx may have reached the Worker before it failed, so it takes a slot until the queue shows it is not running; a refusal with a 4xx cannot have started anything and takes none.
+An answer that is not a start (a blocked contributor, an exempt author, `review_running`) takes no slot.
+Only the reviews this run started are counted: reviews that contributors' pushes started are running too, but counting them would let a busy hour stall the run for something it did not cause.
+
+A list that is incomplete (GitHub returned fewer pull requests than exist, or some could not be read), a request that fails and a request that takes longer than two minutes cannot tell what finished, so it is never taken as "finished": the window stays full, the run says so, and ten such reads in a row (about five minutes) stop it, because it cannot keep its limit blind.
+
+Ctrl-C ends any `--all` run, paced or not: it stops after the request in flight, lists the pull requests never started, as commands to continue by name for a redo (a rerun of `--all --redo` would redo the finished ones again), lists any start that failed so it can be checked, and exits 130.
+A second Ctrl-C leaves at once, because a request in flight cannot be taken back, and says which start was in flight so it can be checked.
+The same list is printed when ten reads fail (exit 1).
+Reviews already started keep running on the Worker either way.
+Without the flag the starts are unchanged, except that every `--all` run now ends on Ctrl-C this way, and above ten starts at once the list ends with a line naming the limit and the flag.
+The administrator chooses `n` from the workspace's limit (`n` x 128,000 output tokens must fit it); the CLI does not read or guess that limit.

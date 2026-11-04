@@ -6,6 +6,12 @@
  */
 
 import { spawn } from "bun";
+import {
+  buildUpstreamSnapshotQuery,
+  parseUpstreamSnapshotBatch,
+} from "../../shared/openneuro-snapshots.js";
+import { isOpenNeuroTag } from "../../shared/openneuro-tag.js";
+import type { SnapshotFile, UpstreamRead } from "../../shared/upstream-staleness.js";
 import { isAwsCliAvailable } from "./aws-cli.js";
 import { type RemoteFile, downloadFiles } from "./file-download.js";
 
@@ -16,6 +22,271 @@ const OPENNEURO_DATASET_REGEX = /^ds\d{6}$/;
 
 export function isOpenNeuroDatasetId(id: string): boolean {
   return OPENNEURO_DATASET_REGEX.test(id);
+}
+
+/** OpenNeuro's GraphQL endpoint: the same one the Worker's discovery reads. */
+export const OPENNEURO_GRAPHQL_URL = "https://openneuro.org/crn/graphql";
+
+/** The latest snapshot tag OpenNeuro names for a dataset, or why there is none. */
+export type LatestTagLookup = { tag: string } | { tag: null; reason: string };
+
+/**
+ * Ask OpenNeuro which snapshot tag is a dataset's latest (`latestSnapshot.tag`), the tag an import
+ * with no `--tag` is pinned to (ADR 0111 decision 10). Never throws: every way of not knowing --
+ * the API unreachable, an error answer, a dataset with no snapshot, a tag of an unexpected shape --
+ * comes back as `{ tag: null, reason }`, which prepare refuses as a mirror lag, so the retry engine
+ * tries again later rather than an import guessing at HEAD.
+ *
+ * `graphqlUrl` moves the endpoint for a test of the refusal paths; `attempts` bounds the retries
+ * of a transient failure (an HTTP error or a network error, not an answer that says "no snapshot").
+ */
+export async function fetchOpenNeuroLatestTag(
+  datasetId: string,
+  options: {
+    graphqlUrl?: string;
+    attempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+  } = {},
+): Promise<LatestTagLookup> {
+  const url = options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL;
+  const attempts = Math.max(1, options.attempts ?? 3);
+  let reason = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let json: unknown;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": "nemar-cli" },
+        body: JSON.stringify({
+          query: "query LatestTag($id: ID!) { dataset(id: $id) { latestSnapshot { tag } } }",
+          variables: { id: datasetId },
+        }),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      });
+      if (!res.ok) {
+        reason = `OpenNeuro GraphQL answered HTTP ${res.status}`;
+        if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+        continue;
+      }
+      json = await res.json();
+    } catch (err) {
+      reason = `OpenNeuro GraphQL unreachable (${err instanceof Error ? err.message : String(err)})`;
+      if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+      continue;
+    }
+    // An answer: whatever it says is final for this run, so no retry.
+    const root = isRecord(json) ? json : {};
+    const data = isRecord(root.data) ? root.data : {};
+    const dataset = isRecord(data.dataset) ? data.dataset : null;
+    const snapshot = dataset && isRecord(dataset.latestSnapshot) ? dataset.latestSnapshot : null;
+    const tag = snapshot?.tag;
+    if (isOpenNeuroTag(tag)) return { tag };
+    if (typeof tag === "string") {
+      return { tag: null, reason: "OpenNeuro named a latest tag of an unexpected shape" };
+    }
+    const errors = Array.isArray(root.errors) ? root.errors : [];
+    const message = errors
+      .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : null))
+      .filter((m): m is string => m !== null)
+      .join("; ")
+      .slice(0, 200);
+    if (dataset === null) {
+      return {
+        tag: null,
+        reason: message ? `OpenNeuro: ${message}` : "OpenNeuro knows no such dataset",
+      };
+    }
+    return { tag: null, reason: "OpenNeuro names no snapshot for this dataset yet" };
+  }
+  return { tag: null, reason };
+}
+
+/** Two snapshots' file listings, or why they could not be read. */
+export type SnapshotFilePairLookup =
+  | { ok: true; from: SnapshotFile[]; to: SnapshotFile[] }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * True when OpenNeuro was not reached or did not answer (network error, timeout, HTTP error,
+       * a body that is not JSON): the only failures that suggest an outage. False when it
+       * answered and the answer is unusable for this dataset.
+       */
+      transport: boolean;
+    };
+
+const SNAPSHOT_FILE_PAIR_QUERY = `query SnapshotFilePair($ds: ID!, $from: String!, $to: String!) {
+  a: snapshot(datasetId: $ds, tag: $from) { files(recursive: true) { id filename size annexed directory } }
+  b: snapshot(datasetId: $ds, tag: $to) { files(recursive: true) { id filename size annexed directory } }
+}`;
+
+/**
+ * A listing as OpenNeuro sends it, or the reason it is not one. A listing that cannot be a BIDS
+ * snapshot is a failure, never a delta: no non-directory entry (an empty tree would make every
+ * file of the other snapshot look added or deleted), no root `dataset_description.json`, a size
+ * that is not a non-negative integer, or two entries with one filename.
+ */
+function readFileList(node: unknown, which: string): SnapshotFile[] | string {
+  const files = isRecord(node) ? node.files : undefined;
+  if (!Array.isArray(files)) return `OpenNeuro sent no file list for the ${which} snapshot`;
+  const out: SnapshotFile[] = [];
+  const seen = new Set<string>();
+  for (const [i, f] of files.entries()) {
+    const ok =
+      isRecord(f) &&
+      typeof f.filename === "string" &&
+      typeof f.id === "string" &&
+      typeof f.annexed === "boolean" &&
+      (f.size === null || (Number.isSafeInteger(f.size) && (f.size as number) >= 0)) &&
+      (f.directory === undefined || f.directory === null || typeof f.directory === "boolean");
+    if (!ok) return `OpenNeuro sent a malformed file entry (${which} snapshot, entry ${i})`;
+    const entry = f as Record<string, unknown>;
+    if (seen.has(entry.filename as string)) {
+      return `OpenNeuro listed ${entry.filename} twice (${which} snapshot, entry ${i})`;
+    }
+    seen.add(entry.filename as string);
+    out.push({
+      filename: entry.filename as string,
+      id: entry.id as string,
+      size: entry.size as number | null,
+      annexed: entry.annexed as boolean,
+      directory: entry.directory === true,
+    });
+  }
+  if (!out.some((f) => !f.directory)) {
+    return `OpenNeuro sent an empty file list for the ${which} snapshot`;
+  }
+  if (!out.some((f) => !f.directory && f.filename === "dataset_description.json")) {
+    return `OpenNeuro sent a file list with no root dataset_description.json for the ${which} snapshot`;
+  }
+  return out;
+}
+
+/**
+ * Read the recursive file listings of two snapshots of one dataset in ONE request (`nemar admin
+ * upstream-status --measure`, ADR 0111 Phase 4c). Listings are large (a few MB for a dataset of
+ * thousands of files), so this runs on the administrator's machine and never in the Worker.
+ *
+ * Never throws, and NEVER turns a failure into an empty list: an empty list would claim that a
+ * snapshot has no files, and the delta computed from it would be a confident wrong number. A
+ * non-2xx, a network error, a timeout, a body that is not JSON, a snapshot OpenNeuro could not
+ * serve, a `files` that is not a list, or a malformed entry each come back as `{ ok: false }`.
+ * The dataset and tags travel only as variables.
+ */
+export async function fetchSnapshotFilePair(
+  ds: string,
+  fromTag: string,
+  toTag: string,
+  options: { graphqlUrl?: string; timeoutMs?: number } = {},
+): Promise<SnapshotFilePairLookup> {
+  let json: unknown;
+  try {
+    const res = await fetch(options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "nemar-cli" },
+      body: JSON.stringify({
+        query: SNAPSHOT_FILE_PAIR_QUERY,
+        variables: { ds, from: fromTag, to: toTag },
+      }),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 120_000),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `OpenNeuro GraphQL answered HTTP ${res.status}`, transport: true };
+    }
+    json = await res.json();
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `OpenNeuro GraphQL unreadable (${why})`, transport: true };
+  }
+  const root = isRecord(json) ? json : {};
+  const data = isRecord(root.data) ? root.data : {};
+  const errors = Array.isArray(root.errors) ? root.errors : [];
+  const message = errors
+    .map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : null))
+    .filter((m): m is string => m !== null)
+    .join("; ")
+    .slice(0, 200);
+  // Data beside errors is a partial answer: nothing in it can be trusted as the whole listing.
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      error: `OpenNeuro reported an error${message ? `: ${message}` : ""}`,
+      transport: false,
+    };
+  }
+  const from = readFileList(data.a, fromTag);
+  const to = readFileList(data.b, toTag);
+  if (typeof from !== "string" && typeof to !== "string") return { ok: true, from, to };
+  const why = typeof from === "string" ? from : (to as string);
+  return { ok: false, error: why, transport: false };
+}
+
+/**
+ * Ask OpenNeuro for one dataset's latest snapshot and its whole snapshot list, each with its
+ * creation time: the query the Worker's staleness report sends (`shared/openneuro-snapshots.ts`),
+ * read with the same parser, so the re-pull plan orders tags by OpenNeuro's creation order as the
+ * report does (ADR 0111's Phase 4a amendment) and never by the number. `latestSnapshot.tag` is
+ * the same field {@link fetchOpenNeuroLatestTag} reads.
+ *
+ * Never throws. A transient failure (an HTTP error, the network, a body that is not JSON) is
+ * retried up to `attempts` times and then is an `error` read; an answer is final for this run,
+ * whatever it says (`deleted`, `absent`, an empty list, or an `error` the parser did not
+ * understand).
+ */
+export async function fetchOpenNeuroSnapshots(
+  datasetId: string,
+  options: {
+    graphqlUrl?: string;
+    attempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+  } = {},
+): Promise<UpstreamRead> {
+  const url = options.graphqlUrl ?? OPENNEURO_GRAPHQL_URL;
+  const attempts = Math.max(1, options.attempts ?? 3);
+  let reason = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let json: unknown;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "nemar-cli",
+        },
+        body: JSON.stringify(buildUpstreamSnapshotQuery([datasetId])),
+        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        reason = `OpenNeuro GraphQL answered HTTP ${res.status}`;
+        if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+        continue;
+      }
+      json = await res.json();
+    } catch (err) {
+      reason = `OpenNeuro GraphQL unreachable (${err instanceof Error ? err.message : String(err)})`;
+      if (attempt < attempts) await delay(options.retryDelayMs ?? 2_000 * attempt);
+      continue;
+    }
+    return (
+      parseUpstreamSnapshotBatch(json, [datasetId]).get(datasetId) ?? {
+        kind: "error",
+        reason: `OpenNeuro did not answer ${datasetId}`,
+      }
+    );
+  }
+  return { kind: "error", reason };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export interface S3Object {

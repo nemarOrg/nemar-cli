@@ -16,9 +16,10 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { weeklyAttention } from "../../shared/contract/weekly-attention";
 import { NEUROBAGEL_STORE_CHECK } from "../src/services/anonymity-sweep";
 import type { GitHubIssue } from "../src/services/github/issues";
 import type { ImportCoverageSweepResult } from "../src/services/import-coverage-sweep";
@@ -38,57 +39,69 @@ import { readLedger, recordLedgerState } from "../src/services/neurobagel-plan";
 import { neurobagelStatus } from "../src/services/neurobagel-status";
 import { runNeurobagelVerificationSweep } from "../src/services/neurobagel-verify";
 import type { Bindings } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 import {
   RECORDED,
   type UpstreamStandin,
   startUpstreamStandin,
 } from "./helpers/neurobagel-upstream";
+import { startOpenNeuroStandin } from "./helpers/openneuro-standin";
+import { startRawHost } from "./helpers/raw-mirror-standin";
+import { lastWeeklyCronFiring } from "./helpers/weekly-cron-firing";
 
 const WEEK_MS = 7 * 86_400_000;
 
 /**
- * Monday 03:00 UTC of the CURRENT ISO week, the hour and weekday the cron fires.
+ * The instant the weekly cron last fired: the latest Monday 03:00 UTC that is not later
+ * than the real clock (`lastWeeklyCronFiring`).
  *
- * DERIVED RATHER THAN HARDCODED, and that is a fix rather than a style choice.
- * `audit_log.timestamp` is written by SQL `datetime('now')` -- the real clock --
- * while the once-per-week gate compares that stamp's ISO week against the `now`
- * these tests inject. A fixed literal therefore agreed with the database only
- * for as long as the wall clock happened to sit in the same ISO week as it.
- * `2026-09-07T03:00:00Z` is 2026-W37: the three gate tests passed all week and
- * then failed on every run from 2026-09-14 (2026-W38) onward, on every branch,
- * taking the required `unit-pure` check with them. Nothing had changed but the
- * date.
+ * THE PREMISE. A report comes from a scheduled firing, or from an admin run (the
+ * `force` tests) that this fixture pins to one; either way `now` is an instant the real
+ * clock has already passed. The tests inject this as `now`, while
+ * three other things read the REAL clock: `audit_log.timestamp` (SQL `datetime('now')`),
+ * `seedImported`, and the imported-this-week window. An injected `now` AHEAD of the real
+ * clock therefore describes a window the database cannot fill.
  *
- * Deriving Monday from today keeps the injected clock and the database's clock
- * in the same ISO week by construction, which is the property the gate needs.
- * It does not disturb the counting tests: every window query in
- * `import-weekly-summary-sweep.ts` is SQL-side (`datetime('now', '-7 days')`)
- * and `seedImported` seeds against the same real clock, so those never depended
- * on this value.
+ * THE WINDOW. An ISO week starts at Monday 00:00 UTC but the cron fires at 03:00, so
+ * from Monday 00:00 to 02:59:59 UTC the current week's firing is still ahead and the
+ * latest one is seven days earlier. Two earlier fixtures each missed something different:
  *
- * The residual is one narrow window: a run that crosses Sunday midnight UTC
- * between the audit write and the comparison would still straddle two weeks.
- * That is inherent in comparing two clocks and is not what broke here.
+ *   1. A hardcoded `2026-09-07T03:00:00Z` (2026-W37) missed that the real clock moves.
+ *      It agreed with the database only while the wall clock sat in the same ISO week,
+ *      so the three gate tests failed on every run from 2026-09-14 onward, on every
+ *      branch, taking the required `unit-pure` check with them. Nothing had changed but
+ *      the date.
+ *   2. Monday 03:00 of the CURRENT ISO week followed the clock but missed the window. It
+ *      failed "NOW is never in the future" for the first three hours of every Monday
+ *      (#1843): the instant it named had not happened yet.
+ *
+ * Inside the window NOW is therefore in the week BEFORE the real clock's, by design:
+ * the cron has not fired yet this week. Anything that has the product write a row
+ * stamped by the real clock and then reads it back through NOW's ISO week has to move
+ * that stamp to NOW; see `stampReservationsAt`, which the gate tests use.
+ *
+ * The audit-log window queries are bound from `now`, and their fixtures are dated
+ * relative to NOW, so they are unaffected. Apart from that reservation stamp, only the
+ * imported-this-week window and `seedImported` (with the boundary rows seeded against
+ * that window) still read the real clock, on both sides, so they never depended on
+ * this value.
+ *
+ * The residual is a run that crosses Monday 03:00:00 UTC itself between this line and
+ * the guard below, which would leave NOW a week and a few seconds behind. That is
+ * inherent in reading a clock once at load and is not what broke here.
  */
-function mondayOfCurrentIsoWeek(): Date {
-  const d = new Date();
-  const utcMidnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  // getUTCDay: 0 = Sunday. ISO counts Monday = 1 ... Sunday = 7.
-  const isoDay = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
-  return new Date(utcMidnight - (isoDay - 1) * 86_400_000 + 3 * 3_600_000);
-}
+const NOW = lastWeeklyCronFiring(new Date());
 
-/** A Monday, so the calendar is never the thing under test here. */
-const NOW = mondayOfCurrentIsoWeek();
-
-describe("the injected clock agrees with the database's clock", () => {
-  // THE GUARD FOR THE BUG ABOVE. It fires the moment someone re-hardcodes NOW,
-  // rather than a week later on an unrelated pull request, which is how the
-  // original was discovered. Cheap, and it names the invariant the three gate
-  // tests silently depend on.
-  test("NOW is in the current ISO week", () => {
-    expect(isoWeekLabel(NOW)).toBe(isoWeekLabel(new Date()));
+describe("the injected clock is the last cron firing on the database's clock", () => {
+  // THE GUARDS FOR THE BUGS ABOVE, one property each. Together they fail the moment
+  // someone re-hardcodes NOW (the age bound), rounds it to the wrong weekday or hour
+  // (the shape), or lets it run ahead of the real clock (the future check), rather
+  // than a week later on an unrelated pull request, which is how the first was found.
+  test("NOW is the most recent firing, less than seven days behind the real clock", () => {
+    // The NEXT firing is still ahead. A hardcoded literal fails this once a week has
+    // passed; the current-week fixture passes it all week, which is what the
+    // never-in-the-future test below is for.
+    expect(NOW.getTime() + WEEK_MS).toBeGreaterThan(Date.now());
   });
 
   test("NOW is a Monday at 03:00 UTC, when the cron fires", () => {
@@ -98,8 +111,9 @@ describe("the injected clock agrees with the database's clock", () => {
   });
 
   test("NOW is never in the future", () => {
-    // The window queries are SQL-side and end at the real now, so an injected
-    // clock ahead of it would describe a window the database cannot fill.
+    // The imported-this-week window and the audit stamps end at the real now, so an
+    // injected clock ahead of it would describe a window the database cannot fill.
+    // This is the assertion that failed from Monday 00:00 to 03:00 UTC (#1843).
     expect(NOW.getTime()).toBeLessThanOrEqual(Date.now());
   });
 });
@@ -117,8 +131,30 @@ const coveredWeekOf = (d: Date): string => isoWeekLabel(new Date(d.getTime() - W
 const runWeekOf = (d: Date): string => isoWeekLabel(d);
 const THIS_WEEK = coveredWeekOf(NOW);
 
+/**
+ * The OpenNeuro GraphQL endpoint and OpenNeuro's GitHub mirror, as local stand-ins. EVERY env
+ * built here points at them, so the real upstream freshness pass runs in every weekly test and no
+ * test can reach openneuro.org or raw.githubusercontent.com (the report has no dependency seam).
+ */
+const openneuro = startOpenNeuroStandin();
+const rawMirror = startRawHost();
+afterAll(() => {
+  openneuro.stop();
+  rawMirror.stop();
+});
+beforeEach(() => {
+  openneuro.reset();
+  rawMirror.reset();
+});
+
 function envFor(db: Database, environment = "test"): Bindings {
-  return { DB: realD1(db), ENVIRONMENT: environment } as unknown as Bindings;
+  return {
+    DB: realD1(db),
+    ENVIRONMENT: environment,
+    OPENNEURO_GRAPHQL_URL: openneuro.url,
+    GITHUB_RAW_BASE: rawMirror.base,
+    GITHUB_ADMIN_PAT: "weekly-test-pat",
+  } as unknown as Bindings;
 }
 
 function seedImported(db: Database, sourceId: string, opts: { daysAgo?: number } = {}): void {
@@ -164,6 +200,47 @@ function seedImportJob(
  *  `parseSqliteUtc` reads. */
 function sqliteUtc(d: Date): string {
   return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
+ * Stamp the weekly reservation(s) as of `at`.
+ *
+ * The product writes the reservation with SQL `datetime('now')`, the real clock. In
+ * production that IS the run's `now`; here `now` is injected, and from Monday 00:00 to
+ * 02:59:59 UTC the latest cron firing (NOW) is in the ISO week BEFORE the real clock's
+ * (#1843). The gate compares ISO weeks, so an unmoved stamp reads as a post from the
+ * following week and a second run sails through. Moving the stamp to the injected
+ * instant restores what production has by construction: the row and the run agree on
+ * when it ran. Same move `heartbeat` makes for the verification sweep's row.
+ *
+ * It overwrites what the product wrote, so it first checks that there is something real
+ * to overwrite: exactly one reservation, with a stamp that parses, written within the
+ * last minute by the run the test just made. Otherwise a run that wrote nothing, wrote
+ * twice, or left an old row behind would be "repaired" into a gate test that passes for
+ * the wrong reason. Age is measured on SQLite's own clock, the one that wrote the stamp,
+ * because that is the clock a test of the window cannot move.
+ */
+function stampReservationsAt(db: Database, at: Date): void {
+  const rows = db
+    .query<{ age: number | null }, [string]>(
+      `SELECT CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', timestamp) AS INTEGER) AS age
+         FROM audit_log WHERE action = ?`,
+    )
+    .all(WEEKLY_SUMMARY_AUDIT_ACTION);
+  if (rows.length !== 1) {
+    throw new Error(`expected exactly one weekly reservation to restamp, found ${rows.length}`);
+  }
+  const age = rows[0]?.age;
+  if (age === null || age === undefined) {
+    throw new Error("the weekly reservation's timestamp does not parse, so it was not restamped");
+  }
+  if (Math.abs(age) > 60) {
+    throw new Error(`the weekly reservation is ${age}s old, not the run just made; not restamping`);
+  }
+  db.query("UPDATE audit_log SET timestamp = ? WHERE action = ?").run(
+    sqliteUtc(at),
+    WEEKLY_SUMMARY_AUDIT_ACTION,
+  );
 }
 
 /**
@@ -281,6 +358,10 @@ describe("the report is produced from real queries", () => {
 
     expect(r.facts?.importedThisWeek).toBe(3);
     expect(r.facts?.importedTotal).toBe(4);
+    // Mirrors with no version are `unpublished`: none is sent to OpenNeuro, and the pass says 4.
+    expect(openneuro.log).toHaveLength(0);
+    expect(r.facts?.upstream?.population).toBe(4);
+    expect(r.facts?.upstream?.counts.states.unpublished).toBe(4);
   });
 
   test("a folded legacy shadow row counts as neither", async () => {
@@ -450,7 +531,9 @@ describe("a failure in one section does not zero it or abort the report", () => 
     expect(r.facts?.parked).toBeNull();
     // ...and the sections that could be read are intact.
     expect(r.facts?.importedThisWeek).toBe(1);
-    expect(r.facts?.errors?.map((e) => e.stage).sort()).toEqual(["failures", "parked"]);
+    // ...and the upstream pass, which joins import_jobs, is unknown too, listed under its own stage.
+    expect(r.facts?.errors?.map((e) => e.stage).sort()).toEqual(["failures", "parked", "upstream"]);
+    expect(r.facts?.upstream).toBeNull();
   });
 
   test("an unknown anywhere marks the week as needing attention", async () => {
@@ -458,6 +541,164 @@ describe("a failure in one section does not zero it or abort the report", () => 
     db.run("DROP TABLE import_jobs");
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
     // A report that cannot see is not a report that found nothing.
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upstream freshness (epic #1046 phase 4b)
+// ---------------------------------------------------------------------------
+
+function seedMirror(
+  db: Database,
+  id: string,
+  versions: { version?: string; tag: string | null; basis: "doi" | "unknown" | null }[],
+): void {
+  db.query(
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility)
+     VALUES (?, ?, 1, 'openneuro', ?, 'active', 'public')`,
+  ).run(id, id, `ds${id.slice(2)}`);
+  for (const v of versions) {
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, source_version, source_version_basis, created_at)
+       VALUES (?, ?, ?, ?, ?, '2025-06-01 00:00:00')`,
+    ).run(id, v.version ?? "1.0.0", `10.82901/${id}`, v.tag, v.basis);
+  }
+}
+
+describe("the upstream freshness section", () => {
+  test("stale mirrors are counted by state and are not a reason to ask for attention", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]); // stale_ready
+    seedMirror(db, "on004362", [{ tag: "1.0.0", basis: "doi" }]); // mirror_lag
+    seedMirror(db, "on002893", [{ tag: "2.0.0", basis: "doi" }]); // current
+    rawMirror.serve("ds003645", "2.1.0");
+    rawMirror.serve("ds004362", "HEAD");
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    const counts = r.facts?.upstream?.counts;
+    expect(counts?.states.stale_ready).toBe(1);
+    expect(counts?.states.mirror_lag).toBe(1);
+    expect(counts?.states.current).toBe(1);
+    expect(counts?.stale).toBe(2);
+    expect(r.facts?.upstream?.truncated).toBe(false);
+    // Reported, not attention: no `upstream` error, and the attention rule names nothing upstream.
+    expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
+    const problems = weeklyAttention(r.facts as NonNullable<typeof r.facts>).problems;
+    expect(problems.filter((p) => /upstream/i.test(p))).toEqual([]);
+    expect(r.renderedBody).toContain("## Upstream freshness");
+    expect(r.renderedBody).toContain("Stale in total: 2.");
+  });
+
+  test("the public report names no dataset of the pass", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]);
+    seedMirror(db, "on004362", [{ tag: "1.0.0", basis: "doi" }]);
+    rawMirror.serve("ds003645", "2.1.0");
+    openneuro.status(503);
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+    for (const id of ["on003645", "on004362", "ds003645", "ds004362"]) {
+      expect(r.renderedBody).not.toContain(id);
+    }
+  });
+
+  test("OpenNeuro down: the rows are unchecked, the week says so and asks for attention", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003645", [{ tag: "2.0.2", basis: "doi" }]);
+    seedMirror(db, "on002893", [{ tag: "2.0.0", basis: "doi" }]);
+    openneuro.status(503);
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(2);
+    expect(r.facts?.upstream?.counts.stale).toBe(0);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors.some((e) => e.error.includes("2 mirror(s) could not be compared"))).toBe(true);
+    expect(errors.some((e) => e.error.includes("503"))).toBe(true);
+    // The pass stopped at the refused page: the population is 2, both examined, none missing.
+    expect(r.renderedBody).toContain("Needs attention");
+    expect(r.renderedBody).toContain("| Could not be compared (OpenNeuro unavailable) | 2 |");
+  });
+
+  test("a failed read of an unknown-tag mirror leaves it unknown, with nothing unchecked and no error", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003082", [{ tag: null, basis: "unknown" }]);
+    openneuro.override("ds003082", { id: "ds000002", latestSnapshot: null, snapshots: [] });
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    // The documented caveat: `errors[]` carries batch-level failures only, so this row is not
+    // "verified clean"; it is counted as unknown, which the section says was not compared.
+    expect(r.facts?.upstream?.counts.states.unknown).toBe(1);
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(0);
+    expect(r.facts?.errors?.filter((e) => e.stage === "upstream")).toEqual([]);
+    expect(r.renderedBody).toContain("| Tag unknown (not compared) | 1 |");
+    expect(r.renderedBody).toContain(
+      "Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
+    );
+  });
+
+  test("a batch failure with only unknown-tag mirrors is listed even though nothing is unchecked", async () => {
+    const db = freshDb();
+    seedMirror(db, "on003082", [{ tag: null, basis: "unknown" }]);
+    openneuro.status(503);
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.counts.states.unchecked).toBe(0);
+    expect(r.facts?.upstream?.counts.states.unknown).toBe(1);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.error).toContain("OpenNeuro reported 1 problem(s)");
+    expect(errors[0]?.error).toContain("503");
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+
+  test("a pass that stops before the end of a large fleet is listed as not reaching every mirror", async () => {
+    const db = freshDb();
+    // 2001 mirrors need 21 pages of 100; the pass reads at most 20. None has a version, so no
+    // network is involved.
+    db.run("BEGIN");
+    const insert = db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, source, source_id, status, visibility)
+       VALUES (?, ?, 1, 'openneuro', ?, 'active', 'public')`,
+    );
+    for (let i = 0; i < 2001; i++) {
+      const id = `on${String(500000 + i)}`;
+      insert.run(id, id, `ds${id.slice(2)}`);
+    }
+    db.run("COMMIT");
+
+    const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream?.truncated).toBe(true);
+    expect(r.facts?.upstream?.examined).toBe(2000);
+    expect(r.facts?.upstream?.population).toBe(2001);
+    const errors = r.facts?.errors?.filter((e) => e.stage === "upstream") ?? [];
+    expect(errors.some((e) => e.error.includes("did not reach every mirror: 2000 of 2001"))).toBe(
+      true,
+    );
+    expect(r.renderedBody).toContain("**The pass did not reach every mirror.**");
+    expect(r.renderedBody).toContain("Needs attention");
+  });
+
+  test("a D1 failure in the pass leaves upstream unknown and every other section intact", async () => {
+    const db = freshDb();
+    seedImported(db, "ds000001", { daysAgo: 1 });
+    const failing = wrapD1(realD1(db), (sql) => {
+      if (sql.includes("WITH page AS")) throw new Error("D1_ERROR: upstream page failed");
+    });
+    const env = { ...envFor(db), DB: failing } as Bindings;
+
+    const r = await runWeeklyImportSummary(env, { now: NOW }, recordingDeps());
+
+    expect(r.facts?.upstream).toBeNull();
+    const error = r.facts?.errors?.find((e) => e.stage === "upstream");
+    expect(error?.error).toContain("upstream page failed");
+    expect(r.facts?.importedThisWeek).toBe(1);
+    expect(r.facts?.coverageStatus).toBe("healthy");
+    expect(r.renderedBody).toContain("**unknown**, not zero");
     expect(r.renderedBody).toContain("Needs attention");
   });
 });
@@ -485,6 +726,7 @@ describe("the same week is never posted twice", () => {
     const db = freshDb();
     const first = recordingDeps();
     await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, first);
+    stampReservationsAt(db, NOW);
 
     const second = recordingDeps();
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, second);
@@ -515,6 +757,7 @@ describe("the same week is never posted twice", () => {
   test("the following week proceeds", async () => {
     const db = freshDb();
     await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, recordingDeps());
+    stampReservationsAt(db, NOW);
     const next = new Date(NOW.getTime() + WEEK_MS);
     const deps = recordingDeps();
 
@@ -789,6 +1032,7 @@ describe("weeklySummaryCronLine", () => {
   test("a gate refusal says so rather than pretending to report", async () => {
     const db = freshDb();
     await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, recordingDeps());
+    stampReservationsAt(db, NOW);
     const r = await runWeeklyImportSummary(envFor(db), { apply: true, now: NOW }, recordingDeps());
     expect(weeklySummaryCronLine(r)).toContain("not posted:");
   });
@@ -1031,8 +1275,8 @@ describe("malformed audit rows do not corrupt the section", () => {
     const db = freshDb();
     db.query(
       `INSERT INTO audit_log (user_id, action, details, timestamp)
-       VALUES (1, 'import_issue_triage', '{"closed":9,"relabelled":9}', datetime('now','-1 days'))`,
-    ).run();
+       VALUES (1, 'import_issue_triage', '{"closed":9,"relabelled":9}', ?)`,
+    ).run(sqliteUtc(new Date(NOW.getTime() - 86_400_000)));
 
     const r = await runWeeklyImportSummary(envFor(db), { now: NOW }, recordingDeps());
 

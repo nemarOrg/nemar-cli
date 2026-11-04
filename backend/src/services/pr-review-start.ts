@@ -6,13 +6,28 @@
  * request comes from the caller: the Worker reads it from GitHub with the datasets token, shapes it
  * as the `pull_request` delivery it would have been, and hands it to the one gate every delivery
  * goes through (`handlePullRequestEvent`). So the flag, the "public, named, first-published"
- * test, the per-commit dedupe, the contributor pause and the platform's daily pool all apply
- * exactly as they would to a delivery. Two things differ, and both are the administrator's choice
- * made by name: the per-contributor allowances do not hold the review back, and a commit whose
- * review ended without a verdict (declined, errored, never reported) is started again.
+ * test, the per-commit dedupe and the contributor pause all apply exactly as they would to a
+ * delivery, and so does the exemption: a pull request opened by an owner or administrator is not
+ * reviewed and nothing is started for it (ADR 0107), unless a review has already touched its
+ * current commit, which is then handled like anyone's. It gets one check, which the naming rule
+ * decides, and the answer names which: `exempt_author` with a `skipped` check when the rule finds
+ * nothing, `exempt_naming_waived` with a `skipped` check that says so when an administrator waived
+ * the rule for this commit, `naming_rule` with a failed check when the title or the new dataset
+ * name breaks it, and `naming_unchecked` with a check that needs a person when the dataset's name
+ * could not be read (whatever the title says). One thing differs, and it is the administrator's choice made by name: a
+ * commit whose review ended without a verdict (declined, errored, never reported) is started again,
+ * and with `redo` so is one whose review has a result (a second run, which costs model calls). A
+ * review that is running is never started again, a redo included: the answer is `review_running`.
  *
  * Nothing here approves, merges or comments on a pull request itself; the review's own check and
  * comment are published by the same code that publishes them for a delivery.
+ *
+ * A bot's pull request is not reviewed through the administrator's start either (`bot_author`).
+ * An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117): a start of
+ * it, a `redo` included, publishes the waived check and starts nothing (`repull_waived`), which is
+ * how an administrator corrects a check a review of that head failed before NEMAR recorded the head.
+ * The NEMAR App's automatic re-pull pull request, which the Worker used to review on its own
+ * (ADR 0111, the Phase 7e amendment), is waived at its recorded head and reviewed by no one.
  */
 
 import type { StartReviewResponse } from "../../../shared/contract/pr-review-admin.js";
@@ -23,7 +38,13 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
-import { handlePullRequestEvent, reviewableDataset } from "./pr-review.js";
+import {
+  ExemptCheckNotPublished,
+  type WaiverCheckFailure,
+  WaiverCheckNotPublished,
+  handlePullRequestEvent,
+  reviewableDataset,
+} from "./pr-review.js";
 
 /** A GitHub login's shape; anything else is not echoed back. */
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -39,11 +60,16 @@ function said(err: unknown): string {
   return sanitizeNote(err instanceof Error ? err.message : String(err), 160) || "no reason given";
 }
 
-/** GitHub's REST record of one pull request, or why there is none. */
-async function readPullRequest(
+/**
+ * GitHub's REST record of one pull request, or why there is none (a {@link QueueError}). Shared
+ * with the naming rule's waiver, which acts on the same record.
+ */
+export async function readPullRequest(
   env: Bindings,
   datasetId: string,
   prNumber: number,
+  /** What did not happen when GitHub cannot be read, for the administrator's sentence. */
+  consequence = "nothing was started",
 ): Promise<Record<string, unknown>> {
   const where = `${datasetId}#${prNumber}`;
   let res: Response;
@@ -65,14 +91,10 @@ async function readPullRequest(
       throw new QueueError(
         502,
         "github_timeout",
-        "GitHub took too long to answer, so nothing was started.",
+        `GitHub took too long to answer, so ${consequence}.`,
       );
     }
-    throw new QueueError(
-      502,
-      "github_unavailable",
-      "GitHub did not answer, so nothing was started.",
-    );
+    throw new QueueError(502, "github_unavailable", `GitHub did not answer, so ${consequence}.`);
   }
   if (res.status === 404) {
     // GitHub also answers 404 for a repository the token cannot see, so the sentence says both.
@@ -102,14 +124,10 @@ async function readPullRequest(
       throw new QueueError(
         502,
         "github_refused",
-        `GitHub refused the read (HTTP ${res.status}), so nothing was started.`,
+        `GitHub refused the read (HTTP ${res.status}), so ${consequence}.`,
       );
     }
-    throw new QueueError(
-      502,
-      "github_unavailable",
-      "GitHub did not answer, so nothing was started.",
-    );
+    throw new QueueError(502, "github_unavailable", `GitHub did not answer, so ${consequence}.`);
   }
   const parsed = (await res.json().catch((err) => {
     console.error(`[pr-review-start] ${where}: GitHub's answer could not be read (${said(err)})`);
@@ -124,16 +142,23 @@ async function readPullRequest(
 /**
  * Review `datasetId#prNumber` now. The answer is the gate's own: `dispatched`, or the fixed word for
  * why not. A pull request that cannot be reviewed (a draft, closed, not aimed at `main`, a bot's) is
- * an answer, not an error; a dataset this Worker does not own, a pull request GitHub does not have
- * and a GitHub that does not answer are errors.
+ * an answer, not an error, and so is one whose author is an owner or administrator (`exempt_author`,
+ * `exempt_naming_waived`, `naming_rule` or `naming_unchecked`, see the module comment); a dataset
+ * this Worker does not own, a pull request GitHub does not have and a GitHub that does not answer
+ * are errors.
  */
 export async function startPullRequestReview(
   env: Bindings,
   adminUserId: number,
   datasetId: string,
   prNumber: number,
+  options: { redo?: boolean } = {},
 ): Promise<StartReviewResponse> {
   const environment = environmentName(env);
+  const redo = options.redo === true;
+  // Echoed in every answer when asked for, so a CLI can tell a Worker that honored the flag from
+  // one that predates it and ignored it.
+  const echo = redo ? { redo: true as const } : {};
   if (!ownedHere(env, datasetId)) {
     throw new QueueError(
       404,
@@ -148,6 +173,7 @@ export async function startPullRequestReview(
       reason: "pr_review_disabled",
       review_id: null,
       author_login: null,
+      ...echo,
     };
   }
 
@@ -161,18 +187,37 @@ export async function startPullRequestReview(
       reason: reviewable === "unknown" ? "unknown_dataset" : "dataset_not_reviewable",
       review_id: null,
       author_login: null,
+      ...echo,
     };
   }
 
   const pull = await readPullRequest(env, datasetId, prNumber);
   const base = pull.base as { repo?: unknown } | null | undefined;
-  const result = await handlePullRequestEvent(
-    env,
-    // The shape a `pull_request` delivery has: GitHub's own record of the pull request, and the
-    // repository it targets. `synchronize` is only the delivery's name for "take it up".
-    { action: "synchronize", pull_request: pull, repository: base?.repo },
-    { adminStart: true },
-  );
+  let result: Awaited<ReturnType<typeof handlePullRequestEvent>>;
+  try {
+    result = await handlePullRequestEvent(
+      env,
+      // The shape a `pull_request` delivery has: GitHub's own record of the pull request, and the
+      // repository it targets. `synchronize` is only the delivery's name for "take it up".
+      { action: "synchronize", pull_request: pull, repository: base?.repo },
+      { adminStart: true, redo, adminUserId },
+    );
+  } catch (err) {
+    // The author is exempt and GitHub would not take the check the naming rule decided on (skipped,
+    // failed or needing a person): a sentence, not the generic failure, because retrying is exactly
+    // what the administrator should do.
+    if (err instanceof ExemptCheckNotPublished) {
+      throw new QueueError(
+        502,
+        "github_unavailable",
+        "GitHub would not take the check for this pull request, whose author is exempt from the review, so nothing was posted. Try again in a moment.",
+      );
+    }
+    if (err instanceof WaiverCheckNotPublished) {
+      throw new QueueError(502, "github_unavailable", waiverNotPublishedWords(err.failure));
+    }
+    throw err;
+  }
 
   const login = (pull.user as { login?: unknown } | null | undefined)?.login;
   const answer: StartReviewResponse = {
@@ -181,6 +226,7 @@ export async function startPullRequestReview(
     reason: result.reason,
     review_id: result.review_id ?? null,
     author_login: typeof login === "string" && LOGIN.test(login) ? login : null,
+    ...echo,
   };
   // Only a start is a fact worth an audit row; a decision not to start changed nothing an
   // administrator did. And the row is best effort: a review that is already running must not be
@@ -197,6 +243,7 @@ export async function startPullRequestReview(
           head_sha: typeof head === "string" ? head : null,
           reason: answer.reason,
           review_id: answer.review_id,
+          ...(redo ? { redo: true } : {}),
         }),
       }).run();
     } catch (err) {
@@ -206,4 +253,28 @@ export async function startPullRequestReview(
     }
   }
   return answer;
+}
+
+/**
+ * What an administrator's start says when the waived check did not reach GitHub, by what happened:
+ * an update refused for a reason not about the run (a credential, a throttle, GitHub's own error),
+ * so no new run was posted; a new run refused after the update was; a first run refused; or no
+ * answer at all.
+ */
+export function waiverNotPublishedWords(f: WaiverCheckFailure): string {
+  const lead =
+    "GitHub would not take the waived check for this pull request, an upstream re-pull's at the head NEMAR recorded";
+  const why =
+    f.kind === "unanswered"
+      ? "GitHub did not answer in time, could not be reached, or the Worker had no token to write with"
+      : f.write === "update"
+        ? `GitHub refused the update of its check (HTTP ${f.status}) for a reason that is not about the check run itself, so no new check was posted`
+        : f.write === "new-run"
+          ? `GitHub refused the update of its check, and then the new check posted in its place (HTTP ${f.status})`
+          : `GitHub refused the new check (HTTP ${f.status})`;
+  const credential = f.kind === "refused" && (f.status === 401 || f.status === 403);
+  const next = credential
+    ? "Look at the App's credential and its permission to write checks on the repository, then try again."
+    : "Try again in a moment.";
+  return `${lead}: ${why}. Its check is as it was and nothing was recorded. ${next}`;
 }

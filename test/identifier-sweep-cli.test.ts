@@ -24,6 +24,7 @@ const PREFS = {
   announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
+  support_tickets: true,
 };
 
 function startServer() {
@@ -111,6 +112,7 @@ describe("nemar admin email-preferences and the identifier sweep", () => {
           announcements: false,
           dataset_anonymity: false,
           identifier_sweep: false,
+          support_tickets: false,
         },
       ]);
       expect(`${r.stdout}${r.stderr}`).toMatch(/Identifier sweep:\s+disabled/);

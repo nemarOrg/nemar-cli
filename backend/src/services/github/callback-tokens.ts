@@ -282,6 +282,151 @@ export async function verifyIdentifierSweepCallbackToken(
 }
 
 // ============================================================================
+// Identifier-screen callback HMAC tokens of a re-pull (epic #1046 phase 6, ADR 0111)
+// ============================================================================
+//
+// A re-pull makes no publication request; its pull request is screened with a callback bound to
+// the re-pull row (ADR 0111, decision 7), through the same workflow as the publication screen and
+// the sweep, with a callback route and a token of its own kind. Signed with the same secret and
+// domain-separated the same way: the message begins with a tag line that no other kind's message
+// begins with (`identifier-screen` and `identifier-sweep` differ from it, and a pre-screen message
+// begins with a dataset id), so a token minted for one screen cannot answer for another.
+//
+// The token binds the dataset, the re-pull row, which of its two pull requests, the screened
+// commit and the attempt's nonce; the workflow echoes `request_id` 0. Single-use is enforced by
+// the screen row (its nonce, cleared when a result is stored), not by the HMAC.
+
+/** The first line of every re-pull identifier-screen message. Never shared with another token kind. */
+export const IDENTIFIER_REPULL_TOKEN_DOMAIN = "identifier-repull";
+
+export interface IdentifierRepullCallbackPayload {
+  datasetId: string;
+  repullId: number;
+  /** `n0` for N.0.0's pull request, `n1` for N.0.1's. */
+  pr: string;
+  sha: string;
+  nonce: string;
+}
+
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
+function encodeIdentifierRepullCallbackPayload(payload: IdentifierRepullCallbackPayload): string {
+  return `${IDENTIFIER_REPULL_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.repullId}\n${payload.pr}\n${payload.sha}\n${payload.nonce}`;
+}
+
+/** Sign a re-pull identifier-screen callback payload with HMAC-SHA256 (hex digest). */
+export async function signIdentifierRepullCallbackToken(
+  payload: IdentifierRepullCallbackPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signIdentifierRepullCallbackToken: secret is required");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodeIdentifierRepullCallbackPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify a re-pull identifier-screen callback token (constant-time). */
+export async function verifyIdentifierRepullCallbackToken(
+  token: string,
+  payload: IdentifierRepullCallbackPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret) return false;
+  const expected = await signIdentifierRepullCallbackToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}
+
+// ============================================================================
+// Re-pull dispatch HMAC tokens (epic #1046 phase 7, ADR 0111)
+// ============================================================================
+//
+// The automatic re-pull dispatches a central workflow run (ADR 0111, decision 6). This token is
+// what that run presents to the Worker, twice: at the automatic create (`POST /admin/repulls`,
+// where it is the only way a record is written with `origin = 'automatic'`) and at its report
+// callback (`/webhooks/repull-state`). Signed with the same secret as every other callback
+// (PRESCREEN_CALLBACK_SECRET) and DOMAIN-SEPARATED the same way: the message begins with a tag
+// line no other kind's message begins with (`identifier-screen`, `identifier-sweep`,
+// `identifier-repull`, `pr-review`, `publication-review` and `approval-dispatch` all differ from
+// it, and a manifest or pre-screen message begins with a dataset id), so a token minted for any
+// other callback cannot stand for a dispatch, and a dispatch token cannot answer for them.
+//
+// The token binds the dispatch row, its dataset and the row's one-shot nonce. Single use is the
+// row's nonce, not the HMAC: the nonce is set only while the dispatch is live and cleared by the
+// edge that ends it, so a token replayed after its run ended has nothing to verify against. The
+// message is four lines, so no field may carry a line break; the signer refuses one and the
+// verifier answers false.
+
+/** The first line of every re-pull dispatch message. Never shared with another token kind. */
+export const REPULL_DISPATCH_TOKEN_DOMAIN = "repull-dispatch";
+
+export interface RepullDispatchTokenPayload {
+  dispatchId: number;
+  datasetId: string;
+  nonce: string;
+}
+
+function repullDispatchHasLineBreak(payload: RepullDispatchTokenPayload): boolean {
+  return [payload.dispatchId, payload.datasetId, payload.nonce].some((field) =>
+    /[\r\n]/.test(String(field)),
+  );
+}
+
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
+function encodeRepullDispatchTokenPayload(payload: RepullDispatchTokenPayload): string {
+  return `${REPULL_DISPATCH_TOKEN_DOMAIN}\n${payload.dispatchId}\n${payload.datasetId}\n${payload.nonce}`;
+}
+
+/** Sign a re-pull dispatch payload with HMAC-SHA256 (hex digest). */
+export async function signRepullDispatchToken(
+  payload: RepullDispatchTokenPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signRepullDispatchToken: secret is required");
+  }
+  if (repullDispatchHasLineBreak(payload)) {
+    throw new Error("signRepullDispatchToken: a field holds a line break");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodeRepullDispatchTokenPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify a re-pull dispatch token (constant-time). */
+export async function verifyRepullDispatchToken(
+  token: string,
+  payload: RepullDispatchTokenPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret || repullDispatchHasLineBreak(payload)) return false;
+  const expected = await signRepullDispatchToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}
+
+// ============================================================================
 // PR-review callback HMAC tokens (ADR 0092)
 // ============================================================================
 //
@@ -341,5 +486,161 @@ export async function verifyPrReviewCallbackToken(
 ): Promise<boolean> {
   if (!token || !secret) return false;
   const expected = await signPrReviewCallbackToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}
+
+// ============================================================================
+// Publication-review callback HMAC tokens (ADR 0102)
+// ============================================================================
+//
+// The publication review workflow claims its review at /webhooks/publication-review-claim and
+// posts its report to /webhooks/publication-review-result with one token. Signed with the same
+// secret as every other callback (PRESCREEN_CALLBACK_SECRET, one fewer secret to provision on two
+// Workers) and DOMAIN-SEPARATED the same way: the message begins with a tag line no other kind's
+// message can begin with (`pr-review`, `identifier-screen` and `identifier-sweep` all differ from
+// it, and a pre-screen or manifest message begins with a dataset id), so a token minted for any
+// other callback cannot answer for a publication review, and a review token cannot answer for
+// them.
+//
+// The token binds the dataset, the review row and the attempt's nonce. Single-use is enforced by
+// the row (`state` and `nonce`, cleared when a result is stored), not by the HMAC. It grants
+// nothing beyond posting that one review's report, and joins no revocation list.
+
+/** The first line of every publication-review message. Never shared with another token kind. */
+export const PUBLICATION_REVIEW_TOKEN_DOMAIN = "publication-review";
+
+export interface PublicationReviewCallbackPayload {
+  datasetId: string;
+  reviewId: number;
+  nonce: string;
+}
+
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
+function encodePublicationReviewCallbackPayload(payload: PublicationReviewCallbackPayload): string {
+  return `${PUBLICATION_REVIEW_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.reviewId}\n${payload.nonce}`;
+}
+
+/** Sign a publication-review callback payload with HMAC-SHA256 (hex digest). */
+export async function signPublicationReviewCallbackToken(
+  payload: PublicationReviewCallbackPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signPublicationReviewCallbackToken: secret is required");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodePublicationReviewCallbackPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify a publication-review callback token (constant-time). */
+export async function verifyPublicationReviewCallbackToken(
+  token: string,
+  payload: PublicationReviewCallbackPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret) return false;
+  const expected = await signPublicationReviewCallbackToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}
+
+// ============================================================================
+// Approval-dispatch HMAC tokens (ADR 0105, decisions 1 to 3)
+// ============================================================================
+//
+// A web click on Approve claims the request (`approval_requested_by`, `approval_dispatched_at`)
+// and dispatches an executor, which calls `/approve` under its own key. This token is how that call
+// proves it belongs to THAT claim, so the clicker is recorded as the approver for it and for no
+// other caller. It travels in the dispatch `client_payload.dispatch_token`, and the executor
+// presents it in the `X-Approval-Dispatch-Token` header.
+//
+// Signed with the same secret as every other callback (PRESCREEN_CALLBACK_SECRET) and
+// DOMAIN-SEPARATED the same way: the message begins with a tag line no other kind's message can
+// begin with (`identifier-screen`, `identifier-sweep`, `pr-review` and `publication-review` all
+// differ from it, and a manifest or pre-screen message begins with a dataset id, which is never
+// the tag), so a token minted for any other callback cannot answer for an approval, and an
+// approval token cannot answer for them.
+//
+// There is NO stored nonce. The token is derived from the claim's own columns: the dataset, the
+// request, the administrator who clicked and the instant of the claim (`approval_dispatched_at`).
+// Replacing or clearing the claim therefore changes or removes what the token is checked
+// against, which is the whole of its revocation: a released, taken-over or re-claimed claim
+// refuses the run that held the older one. The token grants no access of its own; it only lets a
+// call that already authenticated as an administrator be recorded as the one who clicked.
+//
+// The message is five lines, so no field may carry a line break: a dataset id of
+// `nm000001\n7` would otherwise sign the same bytes as dataset `nm000001` with request 7. The
+// signer refuses such a field and the verifier answers false for it.
+
+/** The first line of every approval-dispatch message. Never shared with another token kind. */
+export const APPROVAL_DISPATCH_TOKEN_DOMAIN = "approval-dispatch";
+
+export interface ApprovalDispatchTokenPayload {
+  datasetId: string;
+  requestId: number;
+  /** The administrator who clicked (`publication_requests.approval_requested_by`). */
+  clickerId: number;
+  /** The claim's instant, exactly as `approval_dispatched_at` stores it. */
+  claimedAt: string;
+}
+
+/** Does any field of the payload hold a character that would move a line boundary? */
+function hasLineBreak(payload: ApprovalDispatchTokenPayload): boolean {
+  return [payload.datasetId, payload.requestId, payload.clickerId, payload.claimedAt].some(
+    (field) => /[\r\n]/.test(String(field)),
+  );
+}
+
+/** Canonical, domain-tagged payload encoding, pinned so signer and verifier agree. */
+function encodeApprovalDispatchTokenPayload(payload: ApprovalDispatchTokenPayload): string {
+  return `${APPROVAL_DISPATCH_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.requestId}\n${payload.clickerId}\n${payload.claimedAt}`;
+}
+
+/** Sign an approval-dispatch payload with HMAC-SHA256 (hex digest). */
+export async function signApprovalDispatchToken(
+  payload: ApprovalDispatchTokenPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signApprovalDispatchToken: secret is required");
+  }
+  if (hasLineBreak(payload)) {
+    throw new Error("signApprovalDispatchToken: a field holds a line break");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodeApprovalDispatchTokenPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify an approval-dispatch token (constant-time). */
+export async function verifyApprovalDispatchToken(
+  token: string,
+  payload: ApprovalDispatchTokenPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret || hasLineBreak(payload)) return false;
+  const expected = await signApprovalDispatchToken(payload, secret);
   return timingSafeEqual(token, expected);
 }

@@ -89,6 +89,69 @@ function postJson(body: unknown = {}): RequestInit {
   return { method: "POST", body: JSON.stringify(body) };
 }
 
+/**
+ * The three collaborator cases need two rows that scripts/seed-dev-db.sql seeds for test-user on
+ * nm099999: its dataset_collaborators row, which all three need, and its user_s3_permissions row
+ * for the prefix, which the two upload routes need as well. POST /admin/datasets/nm099999/reset
+ * deletes both and restores neither, and the only routes that write a collaborator row (invite,
+ * and approving an access request) first invite test-user's GitHub login to
+ * nemarDatasets/nm099999 on GitHub, which a test must not do. So each case reads its rows first and
+ * fails with a message that names the one that is missing, instead of the route's 403.
+ *
+ * Nothing is written. The collaborator row is read from the collaborator list, as test-admin. No
+ * route reads the permission row but the upload routes themselves, so it is read from
+ * POST /datasets/:id/upload-urls as test-user, which checks the two rows in turn and writes nothing
+ * (it signs URLs locally); while the collaborator row is missing it never reaches the second. A
+ * row found is kept; a missing row, or an answer that cannot be read, is asked again by the next
+ * case.
+ */
+const RESEED =
+  "A reset of nm099999 deletes test-user's dataset_collaborators and user_s3_permissions rows for it and nothing restores them; re-seed them from scripts/seed-dev-db.sql (an owner's action on the dev database).";
+const NO_S3_PERMISSION = "You do not have S3 upload permission for this dataset";
+const found = { collaborator: false, s3Permission: false };
+
+async function requireTestUserRows(needs: { s3Permission: boolean }): Promise<void> {
+  if (!found.collaborator) {
+    const { status, data } = await testRequest<{ collaborators?: { username?: string }[] }>(
+      "/datasets/nm099999/collaborators",
+      {},
+      adminKey,
+    );
+    if (status !== 200) {
+      throw new Error(
+        `Precondition unread: GET /datasets/nm099999/collaborators answered ${status} to test-admin, so whether test-user has a dataset_collaborators row for nm099999 is unknown.`,
+      );
+    }
+    if (!(data.collaborators ?? []).some((c) => c.username === "test-user")) {
+      const s3 = needs.s3Permission
+        ? " Its user_s3_permissions row, which the upload routes check only after that one, cannot be read until it exists."
+        : "";
+      throw new Error(
+        `Missing precondition: test-user has no dataset_collaborators row for nm099999 on this backend.${s3} ${RESEED}`,
+      );
+    }
+    found.collaborator = true;
+  }
+  if (!needs.s3Permission || found.s3Permission) return;
+  const { status, data } = await testRequest<{ error?: unknown }>(
+    "/datasets/nm099999/upload-urls",
+    postJson({ files: ["iam-precondition-probe.txt"] }),
+    userKey,
+  );
+  if (status === 200) {
+    found.s3Permission = true;
+    return;
+  }
+  if (status === 403 && data.error === NO_S3_PERMISSION) {
+    throw new Error(
+      `Missing precondition: test-user has no user_s3_permissions row for nm099999 on this backend (upload-urls answered "${NO_S3_PERMISSION}"). ${RESEED}`,
+    );
+  }
+  throw new Error(
+    `Precondition unread: POST /datasets/nm099999/upload-urls answered ${status} to test-user (${JSON.stringify(data.error ?? null)}), so whether test-user has a user_s3_permissions row for nm099999 is unknown.`,
+  );
+}
+
 // -- Tests -----------------------------------------------------------------
 
 describeLive("IAM Removal: Upload credentials (STS tokens)", () => {
@@ -167,6 +230,7 @@ describeLive("IAM Removal: Presigned upload URLs", () => {
 
 describeLive("IAM Removal: Collaborator access", () => {
   test("collaborator (test-user) can get upload credentials for nm099999", async () => {
+    await requireTestUserRows({ s3Permission: true });
     const { status, data } = await testRequest<UploadCredentialsResponse>(
       "/datasets/nm099999/upload-credentials",
       postJson(),
@@ -178,6 +242,7 @@ describeLive("IAM Removal: Collaborator access", () => {
   });
 
   test("collaborator can get presigned upload URLs", async () => {
+    await requireTestUserRows({ s3Permission: true });
     const { status, data } = await testRequest<UploadUrlsResponse>(
       "/datasets/nm099999/upload-urls",
       postJson({ files: ["collaborator-test.txt"] }),
@@ -219,6 +284,7 @@ describeLive("IAM Removal: Download credentials", () => {
   });
 
   test("collaborator gets download credentials", async () => {
+    await requireTestUserRows({ s3Permission: false });
     const { status, data } = await testRequest<{
       credentials: StsCredentials;
     }>("/datasets/nm099999/download-credentials", postJson(), userKey);

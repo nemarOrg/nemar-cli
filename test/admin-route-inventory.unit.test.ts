@@ -18,12 +18,35 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { adminMiddleware, authMiddleware } from "../backend/src/middleware/auth";
+import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../backend/src/middleware/auth";
 import { adminRoutes } from "../backend/src/routes/admin";
 
 const EXPECTED_ENTRIES: Record<string, number> = {
-  // Router-level middleware (authMiddleware + adminMiddleware).
-  "ALL /*": 2,
+  // Router-level middleware (authMiddleware + adminMiddleware + cookieOriginGuard, #1603/#1584).
+  "ALL /*": 3,
+
+  // Epic #1893 phase 3b (ADR 0112): support tickets. Each is one handler; the owner-only ones
+  // check the role inside it, not in extra middleware.
+  "GET /mail/tickets": 1,
+  "GET /mail/tickets/:id": 1,
+  "GET /mail/unread-count": 1,
+  "POST /mail/tickets/:id/reply": 1,
+  "POST /mail/tickets/:id/note": 1,
+  "POST /mail/tickets/:id/assign": 1,
+  "POST /mail/tickets/:id/status": 1,
+  "POST /mail/tickets/:id/escalate": 1,
+  "POST /mail/tickets/:id/spam": 1,
+  "GET /mail/blocklist": 1,
+  "POST /mail/blocklist": 1,
+  "DELETE /mail/blocklist/:id": 1,
+  "GET /mail/queues": 1,
+  "PUT /mail/queues/:tag": 1,
+  "GET /mail/availability": 1,
+  "PUT /mail/availability": 1,
+  "GET /mail/availability/:userId": 1,
+  "PUT /mail/availability/:userId": 1,
+  "POST /mail/reprocess": 1,
+  "PUT /mail/tickets/:id/summary": 1,
 
   // Users / accounts
   "GET /users": 1,
@@ -31,6 +54,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /users/:username/role": 3,
   // #1284, epic #1272 phase 4 (ADR 0048): account kinds.
   "POST /users/:username/kind": 3,
+  // Owner recovery for a stuck pending account: ownerMiddleware plus the handler.
+  "POST /users/by-id/:id/verify": 2,
   "GET /users/:username/keys": 2,
   "POST /users/:username/keys": 3,
   "DELETE /users/:username/keys/:id": 2,
@@ -48,6 +73,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /email-preferences": 1,
   "PUT /email-preferences": 2,
   "POST /notify": 2,
+  // Epic #1893 phase 2: progress of a queued announcement (handler only; the router gates).
+  "GET /notify/:id": 1,
   "POST /test-fixtures/seed-web-user": 2,
   // #1255, epic #1250: ORCID name backfill (zValidator + handler).
   "POST /users/backfill-names": 2,
@@ -82,6 +109,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/:id/enforce": 2,
   "POST /datasets/:id/revalidate": 1,
   "POST /datasets/enforce/bulk": 2,
+  // ADR 0107: the required pull-request review's ruleset. Both are zValidator + handler on a
+  // strict body, and the bulk one checks for the owner inside the handler.
+  "POST /datasets/:id/review-ruleset": 2,
+  "POST /datasets/review-ruleset/bulk": 2,
   "GET /datasets/:id/ci": 1,
   "POST /datasets/:id/ci": 1,
   "POST /datasets/:id/ci/validate": 1,
@@ -89,6 +120,13 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Publication workflow
   "GET /publish/requests": 1,
+  // ADR 0102: the review of the active request, with its history.
+  "GET /publish/:id/review": 1,
+  // ADR 0102: start (or start again) the review of the screened commit; one route, no `--all`.
+  "POST /publish/:id/review/start": 1,
+  // ADR 0102: mail the depositor an administrator's typed message and leave the request open; the
+  // body is parsed by hand, so there is one handler and no validator.
+  "POST /publish/:id/comment": 1,
   "POST /publish/:id/deny": 2,
   "POST /publish/:id/approve": 2,
   // ADR 0080: launch an approval from the web by dispatching it to an executor.
@@ -157,6 +195,37 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /datasets/zarr-fidelity-sweep": 1,
   "POST /datasets/anonymity-sweep": 1,
 
+  // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111): dry run by default.
+  "POST /datasets/upstream-backfill": 1,
+
+  // Upstream staleness report (epic #1046 phase 4a, #1910; ADR 0111): read-only.
+  "GET /upstream-status": 1,
+
+  // The record of an upstream re-pull (epic #1046 phase 6, #1912; ADR 0111): create and
+  // transition carry a zod validator beside the handler; the two reads are the handler alone.
+  "POST /repulls": 2,
+  "GET /repulls": 1,
+  // The automatic re-pull's switches (epic #1046 phase 7, #1913): a handler alone, registered
+  // BEFORE `GET /repulls/:id`, which would otherwise answer 400 for "switches".
+  "GET /repulls/switches": 1,
+  // The automatic path's dispatches (epic #1046 phase 7h): a handler alone, before `:id` for the
+  // same reason.
+  "GET /repulls/dispatches": 1,
+  "GET /repulls/:id": 1,
+  "POST /repulls/:id/transition": 2,
+  // The re-pull's screen and its verified facts (epic #1046 phase 6, #1912; ADR 0111): every write
+  // carries a zod validator beside the handler; the screens read is the handler alone.
+  "GET /repulls/:id/screens": 1,
+  "POST /repulls/:id/screen": 2,
+  "POST /repulls/:id/screen/acknowledge": 2,
+  "POST /repulls/:id/merge-claim/release": 2,
+  "POST /repulls/:id/merge-claim/check": 2,
+  "POST /repulls/:id/merged": 2,
+  // ADR 0111, the amendment of 2026-10-29 (#1996): the acceptance of a merge made without its
+  // trailers, its body validated like the merged and released routes'.
+  "POST /repulls/:id/merge-trailers/accept": 2,
+  "POST /repulls/:id/released": 2,
+
   // Import coverage sweep (issue #1311, epic #1306 phase 3)
   "POST /imports/coverage-sweep": 1,
 
@@ -181,6 +250,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /pr-reviews": 1,
   "GET /pr-reviews/:dataset/:pr": 1,
   "POST /pr-reviews/:dataset/:pr/start": 1,
+  // The naming rule's one override (ADR 0107): zValidator + handler (a strict body).
+  "POST /pr-reviews/:dataset/:pr/allow": 2,
   "GET /pr-review-authors/:login": 1,
   "PUT /pr-review-authors/:login": 2,
   "DELETE /pr-review-authors/:login": 1,
@@ -215,15 +286,43 @@ describe("admin route inventory", () => {
     expect(dup).toBeLessThan(byUsername);
   });
 
-  test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(142);
+  // `GET /repulls/switches` is reachable only registered before `GET /repulls/:id`, for the reason
+  // the duplicate report above gives: `:id` would match "switches" first and answer 400.
+  test("GET /repulls/switches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const switches = paths.indexOf("GET /repulls/switches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(switches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(switches).toBeLessThan(byId);
   });
 
-  // The count pin above can't see a SWAP of the two router-level middleware
-  // entries. Order is load-bearing: authMiddleware resolves the user that
-  // adminMiddleware's role check reads.
-  test("router-level middleware order is pinned (auth before admin)", () => {
+  // The same for `GET /repulls/dispatches`: both patterns match it, the router takes the first
+  // handler in registration order, and `:id` would answer 400 `invalid-id` for "dispatches".
+  test("GET /repulls/dispatches is registered before GET /repulls/:id", () => {
+    const paths = adminRoutes.routes.map((r) => `${r.method} ${r.path}`);
+    const dispatches = paths.indexOf("GET /repulls/dispatches");
+    const byId = paths.indexOf("GET /repulls/:id");
+    expect(dispatches).toBeGreaterThanOrEqual(0);
+    expect(byId).toBeGreaterThanOrEqual(0);
+    expect(dispatches).toBeLessThan(byId);
+  });
+
+  test("entry total is pinned", () => {
+    expect(adminRoutes.routes.length).toBe(200);
+  });
+
+  // The count pin above can't see a SWAP of the router-level middleware
+  // entries. Order is load-bearing: authMiddleware resolves the user and the
+  // `authMethod` that adminMiddleware's role check and cookieOriginGuard read,
+  // and the guard answers after the role check so a member hears "Admin
+  // access required" and is not asked about an Origin.
+  test("router-level middleware order is pinned (auth, admin, then the cookie Origin guard)", () => {
     const star = adminRoutes.routes.filter((r) => r.method === "ALL" && r.path === "/*");
-    expect(star.map((r) => r.handler)).toEqual([authMiddleware, adminMiddleware]);
+    expect(star.map((r) => r.handler)).toEqual([
+      authMiddleware,
+      adminMiddleware,
+      cookieOriginGuard,
+    ]);
   });
 });

@@ -8,6 +8,8 @@ import type { LedgerEntry } from "../../scripts/scrub/contract";
 import {
   LEDGER_REPO_PATH,
   LedgerRefused,
+  SCRUB_ACTIONS,
+  TOOL_ACTIONS,
   appendLedger,
   changeLogEntry,
   ledgerLine,
@@ -16,6 +18,7 @@ import {
   readLedger,
   validateLedgerEntry,
 } from "../../scripts/scrub/ledger";
+import { mergeAcceptanceLine } from "../../shared/repull-merge-acceptance";
 
 const entry = (over: Partial<LedgerEntry> = {}): LedgerEntry => ({
   version: 1,
@@ -164,6 +167,68 @@ describe("a deletion line carries its proof (I9)", () => {
         LedgerRefused,
       );
     }
+  });
+});
+
+describe("an accepted merge names one commit and one plan, and nothing else may (ADR 0111, 2026-10-29)", () => {
+  const commit = "0123456789abcdef0123456789abcdef01234567";
+  const plan = `sha256:${"a".repeat(64)}`;
+  const accepted = (over: Partial<LedgerEntry> = {}): LedgerEntry =>
+    entry({
+      action: "repull-merge-accepted",
+      versions: ["v2.0.0"],
+      counts: {},
+      verification: "squash-merge-verified",
+      actor: "nemar-repull",
+      commit,
+      plan,
+      ...over,
+    });
+
+  test("the line the Worker writes is a valid ledger line, and parses back as itself", () => {
+    const line = mergeAcceptanceLine({
+      dataset: "nm000348",
+      version: "2.0.0",
+      mergeSha: commit,
+      planDigest: plan,
+      scanner: "identifier-scan@4758fcf",
+      at: "2026-10-29T12:00:00.000Z",
+    });
+    const [parsed] = parseLedgerText(`${line}\n`);
+    expect(parsed).toEqual(accepted({ at: "2026-10-29T12:00:00.000Z" }));
+    expect(ledgerLine(parsed as LedgerEntry)).toBe(line);
+    // It is a tool's word, so a re-pull plan never counts it as a recorded correction.
+    expect(TOOL_ACTIONS.has("repull-merge-accepted")).toBe(true);
+    expect(SCRUB_ACTIONS.has("repull-merge-accepted")).toBe(false);
+  });
+
+  test("a missing or malformed commit or plan, more than one version, or the word elsewhere is refused", () => {
+    expect(validateLedgerEntry(accepted())).toEqual(accepted());
+    for (const [label, over] of [
+      ["no commit", { commit: undefined }],
+      ["a short commit", { commit: commit.slice(0, 12) }],
+      ["an upper-case commit", { commit: commit.toUpperCase() }],
+      ["no plan", { plan: undefined }],
+      ["a plan that is not a digest", { plan: "sha256:abc" }],
+      ["two versions", { versions: ["v2.0.0", "v2.0.1"] }],
+      ["another verification", { verification: "none" }],
+      [
+        "the acceptance's verification on another action",
+        { action: "plan", commit: undefined, plan: undefined },
+      ],
+      ["a commit on another action", { action: "plan", verification: "plan-only" }],
+    ] as const) {
+      expect(() => validateLedgerEntry(accepted(over as Partial<LedgerEntry>)), label).toThrow(
+        LedgerRefused,
+      );
+    }
+    // No other action carries a commit or a plan.
+    expect(() => validateLedgerEntry(entry({ commit } as Partial<LedgerEntry>))).toThrow(
+      LedgerRefused,
+    );
+    expect(() => validateLedgerEntry(entry({ plan } as Partial<LedgerEntry>))).toThrow(
+      LedgerRefused,
+    );
   });
 });
 

@@ -20,6 +20,7 @@ import {
   resolveMinIntervalMs,
 } from "../src/services/auto-import";
 import { triggerOpenNeuroOnboard } from "../src/services/github";
+import { buildOpenNeuroOnboardPayload } from "../src/services/github/dispatch";
 import type { DiscoveredDataset } from "../src/services/openneuro-discovery";
 
 const ds = (id: string): DiscoveredDataset => ({ id, latestTag: "1.0.0", modalities: ["eeg"] });
@@ -128,6 +129,23 @@ describe("pickNextDataset", () => {
 });
 
 describe("triggerOpenNeuroOnboard (injected fetch, real Response)", () => {
+  function capturing(): { fetchImpl: typeof fetch; body: () => Record<string, unknown> } {
+    let captured: { url: string; init: RequestInit } | null = null;
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      captured = { url: String(url), init: init ?? {} };
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    return {
+      fetchImpl,
+      body: () => {
+        const cap = captured as unknown as { url: string; init: RequestInit };
+        expect(cap.url).toMatch(/\/repos\/nemarDatasets\/\.github\/dispatches$/);
+        expect(cap.init.method).toBe("POST");
+        return JSON.parse(cap.init.body as string);
+      },
+    };
+  }
+
   test("POSTs the onboard-openneuro repository_dispatch with the ids", async () => {
     let captured: { url: string; init: RequestInit } | null = null;
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -135,7 +153,7 @@ describe("triggerOpenNeuroOnboard (injected fetch, real Response)", () => {
       return new Response(null, { status: 204 });
     }) as unknown as typeof fetch;
 
-    await triggerOpenNeuroOnboard("ds007964", "tok123", fetchImpl);
+    await triggerOpenNeuroOnboard("ds007964", "tok123", { fetchImpl });
 
     expect(captured).not.toBeNull();
     const cap = captured as unknown as { url: string; init: RequestInit };
@@ -147,10 +165,35 @@ describe("triggerOpenNeuroOnboard (injected fetch, real Response)", () => {
     expect(body.client_payload.openneuro_ids).toBe("ds007964");
   });
 
+  test("the discovered tag rides in the payload (ADR 0111 decision 10)", async () => {
+    const c = capturing();
+    await triggerOpenNeuroOnboard("ds004362", "tok", { tag: "1.0.1", fetchImpl: c.fetchImpl });
+    expect(c.body().client_payload).toEqual({ openneuro_ids: "ds004362", openneuro_tag: "1.0.1" });
+  });
+
+  test("no tag, no key: the retry engine's dispatch, and an older workflow's shape", async () => {
+    for (const tag of [undefined, null]) {
+      const c = capturing();
+      await triggerOpenNeuroOnboard("ds004362", "tok", { tag, fetchImpl: c.fetchImpl });
+      expect(c.body().client_payload).toEqual({ openneuro_ids: "ds004362" });
+    }
+  });
+
+  test("a malformed tag is left out rather than sent: the import resolves the latest itself", () => {
+    for (const tag of ["", "1.0.0; rm -rf /", "-x", "../main", "1..2", "a/b", "x".repeat(65)]) {
+      expect(buildOpenNeuroOnboardPayload("ds004362", tag).client_payload).toEqual({
+        openneuro_ids: "ds004362",
+      });
+    }
+    expect(buildOpenNeuroOnboardPayload("ds004362", "00001").client_payload.openneuro_tag).toBe(
+      "00001",
+    );
+  });
+
   test("non-2xx throws", async () => {
     const fetchImpl = (async () =>
       new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
-    await expect(triggerOpenNeuroOnboard("ds1", "tok", fetchImpl)).rejects.toThrow(/HTTP 403/);
+    await expect(triggerOpenNeuroOnboard("ds1", "tok", { fetchImpl })).rejects.toThrow(/HTTP 403/);
   });
 });
 

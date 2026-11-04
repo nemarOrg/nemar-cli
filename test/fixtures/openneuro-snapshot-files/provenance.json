@@ -1,0 +1,16 @@
+{
+  "recorded_at": "2026-10-24",
+  "endpoint": "https://openneuro.org/crn/graphql",
+  "openneuro_server_version": "5.10.1",
+  "user_agent": "NEMAR-plan-probe",
+  "note": "Real recorded OpenNeuro responses (public, unauthenticated). Never edit the JSON files; a test that needs a shape OpenNeuro does not produce builds it in the test and says so.",
+  "files": {
+    "snapshot-files-ds002893-1.0.0-2.0.0.response.json": "query { a: snapshot(datasetId: \"ds002893\", tag: \"1.0.0\") { files(recursive: true) { id filename size annexed directory } } b: snapshot(datasetId: \"ds002893\", tag: \"2.0.0\") { ...same } }; a data-changing pair",
+    "snapshot-files-ds003082-1.0.0-1.0.1.response.json": "the same query for ds003082 1.0.0 and 1.0.1; a metadata-only pair"
+  },
+  "expected_deltas": {
+    "ds002893 1.0.0 -> 2.0.0": {"files_from": 448, "files_to": 400, "added": 28, "changed": 318, "deleted": 76, "annexed_added": 20, "annexed_changed": 53, "annexed_deleted": 6, "new_annex_keys": 73, "bytes_to_copy": 3431782003, "data_changing": true},
+    "ds003082 1.0.0 -> 1.0.1": {"files_from": 82, "files_to": 83, "added": 1, "changed": 8, "deleted": 0, "annexed_added": 0, "annexed_changed": 0, "annexed_deleted": 0, "new_annex_keys": 0, "bytes_to_copy": 0, "data_changing": false}
+  },
+  "expected_deltas_note": "Computed on 2026-10-24 by a separate script from these two files, not by the code under test. The unit test quotes them as constants."
+}

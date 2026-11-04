@@ -48,6 +48,7 @@ Trust these for how things work today.
 | [pr_architecture.md](pr_architecture.md) | PR + staging mechanics. **The branch-protection payload it described is superseded**; see ADR 0001. | public |
 | [phase5-cross-repo-owner-deploys.md](phase5-cross-repo-owner-deploys.md) | Known cross-repo gaps needing owner action. | public |
 | [epic_browser_compute_state.md](epic_browser_compute_state.md) | The live map of the in-browser compute epic across osa, eegprep, nemar-cli and website: what is decided, what blocks what, what is still open. | public |
+| [epic_email_cloudflare.md](epic_email_cloudflare.md) | The live map of the email epic (#1893): moving all NEMAR mail to the Cloudflare Email Service, what is decided (ADR 0110), the phases and what is still open. | public |
 | [eegprep_lean_contract.md](eegprep_lean_contract.md) | What `eegprep-lean` will guarantee and where it deliberately differs from eegprep. The deliverable ADR 0069 names; drafted before the package exists. | public |
 | [ideas.md](ideas.md) | Exploratory design notes. Frequently rewritten; promote settled items to an ADR. | public |
 | [research.md](research.md) | Prior art from the `nemar-tools` scripts. Describes the **pre-NEMAR** Zenodo flow; DOIs are EZID now (ADR 0007). | public |
@@ -63,9 +64,11 @@ here, since an index that misses a document cannot classify it either.
 | [draft-zarr-inference-ecosystem-plan.md](draft-zarr-inference-ecosystem-plan.md) | Draft plan for inference over the Zarr serving copy. | public |
 | [draft-817-submission-minimums-policy.md](draft-817-submission-minimums-policy.md) | Draft submission-minimums policy. | public |
 | [draft-1036-validator-3x-evaluation.md](draft-1036-validator-3x-evaluation.md) | Evaluation of bids-validator 3.x. | public |
+| [design-upstream-repull.md](design-upstream-repull.md) | Design record for epic #1046: re-pulling a newer OpenNeuro snapshot as a major version. Analysis; the verdict is [ADR 0111](decisions/0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md). Runbooks, gated, at [docs.nemar.org/admin/operations/upstream-repull](https://docs.nemar.org/admin/operations/upstream-repull/), with [upstream-freshness](https://docs.nemar.org/admin/operations/upstream-freshness/) and [upstream-repull-automatic](https://docs.nemar.org/admin/operations/upstream-repull-automatic/) beside it. | public |
 | [draft-anonymous-deposit-analysis.md](draft-anonymous-deposit-analysis.md) | Pseudonymous deposit for double-blind review: the leak inventory, and what the chosen design (public data, private repository) requires. ADR still to be written. | public |
 | [draft-eegdash-zarr-issues.sh](draft-eegdash-zarr-issues.sh) | Script drafting the EEGDash Zarr issues. The one non-markdown document here, which is why a markdown-only sweep missed it. | public |
 | [plans/spec-pr1.md](plans/spec-pr1.md) | Column-budget rebuild spec (issue #1182). In `plans/`, which a top-level sweep missed. | public |
+| [publication-review-design.md](publication-review-design.md) | The analysis behind ADR 0102 (epic #1726): what was read, the pull-request review compared with the publication review, the data flow, the screen-first options, the cost arithmetic, the calibration plan, the initial vocabularies, the refined phase plan and the risks. Analysis, not a ruling. | public |
 | [first-party-processing-design.md](first-party-processing-design.md) | **Draft** design for NEMAR's own cleaning, independent component analysis and quality assurance with signalJourney provenance and DOI-bearing products. Three owner questions are open in #1750, #1751 and #1752; the plan is not final and no epic is filed. Supporting files are in `first-party-processing/`: the first cut (`design-v1.md`, historical, still cited by v2), the measured evidence, and the SDSC Expanse spike code and results (`sp-p/`). | public |
 
 ## Research — point-in-time findings
@@ -84,6 +87,7 @@ Measurements and investigations. Accurate as of their date; re-verify before rel
 | [plan-multi-archive-importer.md](plan-multi-archive-importer.md) | Architecture RFC for multi-archive import (-> ADR 0013, **proposed**). | public |
 | [research-make-vs-take-audit.md](research-make-vs-take-audit.md) | 2026-09-03 audit of bespoke code an established library or platform feature already covers, with replace / wrap / keep verdicts (-> ADR 0037). | public |
 | [research-agent-findability.md](research-agent-findability.md) | 2026-09-03: how AI agents and crawlers actually find datasets (robots tokens, sitemaps, JSON-LD, registries, DataCite); evidence that llms.txt and markdown mirrors are not read; Zarr guidance for agents (-> OSCAR epic). | public |
+| [research-publication-review-calibration.md](research-publication-review-calibration.md) | How often the publication review's model is judged wrong on published datasets and how many seeded defects it catches, so the model for the soak can be chosen (-> ADR 0102, call 6). Method and empty results tables; **awaiting the operator's run**. | public |
 
 ## Historical — completed work
 
