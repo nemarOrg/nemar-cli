@@ -474,17 +474,48 @@ const RECIPE_NAME_RE = /^[a-z][a-z0-9-]{0,63}$/;
 export const COMPUTE_IMAGE_REF_RE =
   /^(?:docker:\/\/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$/;
 
+/**
+ * Whether `text` is well-formed UTF-16: every surrogate is half of a high-then-low pair. A lone
+ * surrogate is a valid JavaScript string and a valid JSON escape (`\ud800`) but it is not text, and
+ * no process argument can carry it. The same answer as `String.prototype.isWellFormed`, written as
+ * a loop because that method is newer than the ES2022 this tree builds for.
+ */
+export function computeIsWellFormed(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(i + 1); // NaN at the end, which is no low surrogate
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * A string that reaches the launch specification and from it a process: the entry, a command item,
+ * an argument or an include pattern. It must be well-formed, so a job never fails after its hold
+ * exists on text the node cannot pass on. An environment value needs no such check: it is printable
+ * ASCII, which holds no surrogate.
+ */
+const processText = <T extends z.ZodTypeAny>(schema: T) =>
+  schema.refine(computeIsWellFormed, {
+    message: "a lone surrogate is not text a process argument can carry",
+  });
+
 const bundleRefSchema = z.object({ size: safeInt(1), sha256: sha256Schema }).strict();
 
 const datasetRefSchema = z
   .object({
     id: z.string().regex(COMPUTE_DATASET_ID_RE),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE),
-    include: z.array(computeGlobSchema).max(64).optional(),
+    include: z.array(processText(computeGlobSchema)).max(64).optional(),
   })
   .strict();
 
-const argSchema = z.string().max(1024);
+const argSchema = processText(z.string().max(1024));
 
 /**
  * The bytes a string takes as a JSON string value in the launch specification, which is ASCII-only
@@ -551,6 +582,11 @@ export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
  * The output directory is `outputs`, which the launcher's layout fixes (`work/outputs/`). `matlab`
  * is a valid specification; a route refuses it as `runtime_unavailable` until it is licensed.
  *
+ * A valid specification always becomes a launch specification a process can use: it fits the 64 KiB
+ * (see {@link LAUNCH_VARIABLE_BYTES_MAX}) and every string that reaches a process is well-formed
+ * UTF-16 (see {@link computeIsWellFormed}), each refused here, with the field named by its path,
+ * rather than after the hold exists.
+ *
  * Two digests are named apart. `spec_digest` is the JOB ROW's digest of this document: the SHA-256,
  * in lowercase hex, of the exact bytes of `records/<id>/spec.json` (set by phase A3). It is not a
  * launcher key. The launcher's own is `launch_spec_digest` in `provenance.json` (see
@@ -560,8 +596,12 @@ export const JobSpecSchema = z
   .object({
     name: z.string().regex(JOB_NAME_RE),
     runtime: z.enum(JOB_RUNTIMES),
-    entry: relativePath(240).optional(),
-    command: z.array(z.string().min(1).max(1024)).min(1).max(64).optional(),
+    entry: processText(relativePath(240)).optional(),
+    command: z
+      .array(processText(z.string().min(1).max(1024)))
+      .min(1)
+      .max(64)
+      .optional(),
     args: z.array(argSchema).max(64).default([]),
     bundle: bundleRefSchema.optional(),
     datasets: z.array(datasetRefSchema).max(20).default([]),

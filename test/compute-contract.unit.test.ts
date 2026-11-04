@@ -53,6 +53,7 @@ import {
   RECORDS_RESULT_MANIFEST_FILE,
   RESULT_MAX_FILE_BYTES,
   ResultManifestSchema,
+  computeIsWellFormed,
   estimateSuMilli,
   formatSu,
   isSafeComputePath,
@@ -864,6 +865,148 @@ describe("the job specification", () => {
     expect(specRefused(specWith({ command: ["python", "run.py"] }))).toBe(true);
     // Neither, and no recipe: nothing to run.
     expect(specRefused(specWithout("entry"))).toBe(true);
+  });
+
+  describe("a lone surrogate is refused, in every string that reaches the launch specification", () => {
+    // A lone surrogate is a valid JavaScript string and encodes as `\ud800`, but it is not text:
+    // no process argument can carry it, so the job would fail only after the hold exists.
+    const HIGH = "\ud800";
+    const LOW = "\udc00";
+    const PAIR = "\ud83d\ude00";
+    /** The lone-surrogate strings, each in a spot of its own: start, middle, end, doubled. */
+    const LONE: Array<[string, string]> = [
+      ["a lone high surrogate", `a${HIGH}b`],
+      ["a lone low surrogate", `a${LOW}b`],
+      ["a reversed pair", `a${LOW}${HIGH}b`],
+      ["a lone high surrogate at the end", `ab${HIGH}`],
+      ["a lone low surrogate at the start", `${LOW}ab`],
+      ["two high surrogates", `a${HIGH}${HIGH}b`],
+      ["two low surrogates", `a${LOW}${LOW}b`],
+      ["a lone high surrogate before a valid pair", `a${HIGH}${PAIR}`],
+      ["a lone low surrogate after a valid pair", `a${PAIR}${LOW}`],
+      ["the first unit of the high range alone", "\ud800"],
+      ["the last unit of the high range alone", "\udbff"],
+      ["the first unit of the low range alone", "\udc00"],
+      ["the last unit of the low range alone", "\udfff"],
+      ["a high surrogate before U+E000, the first unit above the range", `a${HIGH}\ue000`],
+      ["a low surrogate after U+D7FF, the last unit below the range", `\ud7ff${LOW}`],
+      ["a high surrogate before a high surrogate", `a\udbff${HIGH}b`],
+    ];
+    /** Text that is well-formed, the units either side of the surrogate range among it. */
+    const WELL_FORMED = [
+      PAIR,
+      `a${PAIR}b${PAIR}`,
+      "caf\u00e9",
+      "\u65e5\u672c",
+      "\uffff",
+      "ab",
+      "\ud7ff",
+      "\ue000",
+      "\ud7ff\ue000",
+      "\udbff\udfff",
+      "\ud800\udc00",
+    ];
+    /** Where such a string goes: the field, how a job puts it there, and the issue path. */
+    const FIELDS: Array<[string, (s: string) => Record<string, unknown>, Array<string | number>]> =
+      [
+        ["entry", (s) => specWith({ entry: `d/${s}.py` }), ["entry"]],
+        [
+          "a command item",
+          (s) => ({
+            name: "t",
+            runtime: "image",
+            image: `ghcr.io/e/t@sha256:${HEX_B}`,
+            command: ["ok", s],
+            partition: "shared",
+            minutes: 5,
+          }),
+          ["command", 1],
+        ],
+        ["an argument", (s) => specWith({ args: ["ok", s] }), ["args", 1]],
+        [
+          "an include pattern",
+          (s) =>
+            specWith({ datasets: [{ id: "nm000104", version: "1", include: ["ok", `${s}/*`] }] }),
+          ["datasets", 0, "include", 1],
+        ],
+      ];
+
+    for (const [field, build, path] of FIELDS) {
+      for (const [label, text] of LONE) {
+        test(`${label} in ${field} is refused, naming the field`, () => {
+          const refused = JobSpecSchema.safeParse(build(text));
+          expect(refused.success).toBe(false);
+          if (refused.success) return;
+          expect(refused.error.issues).toHaveLength(1);
+          expect(refused.error.issues[0].path).toEqual(path);
+          // The message names the problem and never carries the value.
+          expect(refused.error.issues[0].message).toBe(
+            "a lone surrogate is not text a process argument can carry",
+          );
+        });
+      }
+
+      test(`a valid surrogate pair, and any other non-ASCII text, is accepted in ${field}`, () => {
+        for (const text of WELL_FORMED) {
+          expect(specRefused(build(text)), JSON.stringify(text)).toBe(false);
+        }
+      });
+    }
+
+    test("an environment value cannot carry one: it is printable ASCII only", () => {
+      for (const [label, text] of LONE) {
+        const refused = JobSpecSchema.safeParse(specWith({ env: { OMP_NUM_THREADS: text } }));
+        expect(refused.success, label).toBe(false);
+        if (refused.success) continue;
+        expect(refused.error.issues, label).toHaveLength(1);
+        expect(refused.error.issues[0].path, label).toEqual(["env", "OMP_NUM_THREADS"]);
+      }
+      // A valid pair is no better there: the value is ASCII, so it is refused as well.
+      expect(specRefused(specWith({ env: { OMP_NUM_THREADS: PAIR } }))).toBe(true);
+    });
+
+    test("every lone-surrogate string really is one, and every accepted one really is not", () => {
+      // Guards the table against the engine: String.prototype.isWellFormed is the reference.
+      const wellFormed = (s: string) => (s as string & { isWellFormed(): boolean }).isWellFormed();
+      for (const [label, text] of LONE) expect(wellFormed(text), label).toBe(false);
+      for (const text of WELL_FORMED) expect(wellFormed(text), JSON.stringify(text)).toBe(true);
+    });
+
+    test("computeIsWellFormed agrees with String.prototype.isWellFormed on every shape", () => {
+      const reference = (s: string) => (s as string & { isWellFormed(): boolean }).isWellFormed();
+      // Every one of the 2048 surrogate units alone, at the start, middle and end of a string.
+      for (let unit = 0xd800; unit <= 0xdfff; unit++) {
+        const c = String.fromCharCode(unit);
+        for (const text of [c, `a${c}`, `${c}a`, `a${c}b`, `${c}${c}`]) {
+          expect(computeIsWellFormed(text), unit.toString(16)).toBe(reference(text));
+        }
+      }
+      // Pairs, high then low and low then high, on a stride that still reaches both ends.
+      for (let high = 0xd800; high <= 0xdbff; high += high < 0xd840 || high > 0xdbc0 ? 1 : 37) {
+        for (let low = 0xdc00; low <= 0xdfff; low += low < 0xdc40 || low > 0xdfc0 ? 1 : 41) {
+          const h = String.fromCharCode(high);
+          const l = String.fromCharCode(low);
+          expect(computeIsWellFormed(`${h}${l}`), `${high.toString(16)} ${low.toString(16)}`).toBe(
+            true,
+          );
+          expect(computeIsWellFormed(`${l}${h}`)).toBe(false);
+        }
+      }
+      // A seeded fuzz over the units that matter, so the run is the same every time.
+      const alphabet = ["a", "\ud7ff", "\ud800", "\udbff", "\udc00", "\udfff", "\ue000", "\u00e9"];
+      let seed = 12345;
+      const next = () => {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        return seed;
+      };
+      for (let i = 0; i < 20000; i++) {
+        const length = next() % 7;
+        let text = "";
+        for (let j = 0; j < length; j++) text += alphabet[next() % alphabet.length];
+        expect(computeIsWellFormed(text), JSON.stringify(text)).toBe(reference(text));
+      }
+      expect(computeIsWellFormed("")).toBe(true);
+    });
   });
 
   test("an entry needs the bundle that holds it", () => {
