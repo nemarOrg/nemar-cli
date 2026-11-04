@@ -266,6 +266,15 @@ describe("the table", () => {
     ).toBeNull();
   });
 
+  // `id TEXT PRIMARY KEY` alone lets SQLite keep a NULL id (a primary key is not NOT NULL in a rowid
+  // table), and `length(NULL) = 28` is NULL, which a CHECK accepts: a NULL must be refused by NOT NULL.
+  onEveryEngine("a NULL id is refused, and the refusal is the NOT NULL one", async (e) => {
+    expect(await insertJob(e, { id: null })).toMatch(NOT_NULL);
+    const { id: _omitted, ...withoutId } = job();
+    expect(await insertRow(e, "compute_jobs", withoutId)).toMatch(NOT_NULL);
+    expect((await e.all("SELECT 1 FROM compute_jobs WHERE id IS NULL")).length).toBe(0);
+  });
+
   onEveryEngine("a second row with the same id is refused", async (e) => {
     const id = jobId();
     expect(await insertJob(e, { id })).toBeNull();
@@ -423,6 +432,7 @@ describe("the table", () => {
 
   onEveryEngine("a missing required column is refused", async (e) => {
     for (const column of [
+      "id",
       "source",
       "kind",
       "app_id",
@@ -727,16 +737,25 @@ describe("compute_gateway_users", () => {
       expect(
         await insertRow(e, "compute_gateway_users", { account_id: account, gateway_user }),
       ).toBeNull();
-      // An account has one, and a pseudonym is never given to two accounts.
+      // An account has one, and a pseudonym is never given to two accounts: the second row is ignored
+      // whole (the trigger `compute_gateway_users_keeps_first`), and the first stays as it was.
+      const other = next();
       expect(
         await insertRow(e, "compute_gateway_users", {
           account_id: account,
           gateway_user: pseudonym(),
         }),
-      ).toMatch(UNIQUE);
+      ).toBeNull();
       expect(
-        await insertRow(e, "compute_gateway_users", { account_id: next(), gateway_user }),
-      ).toMatch(UNIQUE);
+        await insertRow(e, "compute_gateway_users", { account_id: other, gateway_user }),
+      ).toBeNull();
+      expect(
+        await e.all(
+          "SELECT * FROM compute_gateway_users WHERE account_id IN (?, ?)",
+          account,
+          other,
+        ),
+      ).toEqual([expect.objectContaining({ account_id: account, gateway_user })]);
       for (const bad of [
         "",
         "gw_",
@@ -752,11 +771,19 @@ describe("compute_gateway_users", () => {
           await insertRow(e, "compute_gateway_users", { account_id: next(), gateway_user: bad }),
         ]).toEqual([bad, expect.stringMatching(NAMED("compute_gateway_users_shape"))]);
       }
-      for (const account_id of [0, -3]) {
-        expect(
+      for (const account_id of [0, -3, 1.5, "x"]) {
+        expect([
+          account_id,
           await insertRow(e, "compute_gateway_users", { account_id, gateway_user: pseudonym() }),
-        ).toMatch(NAMED("compute_gateway_users_account"));
+        ]).toEqual([account_id, expect.stringMatching(NAMED("compute_gateway_users_account"))]);
       }
+      // A NULL account is refused: it would otherwise be given a row number as its id.
+      expect(
+        await insertRow(e, "compute_gateway_users", {
+          account_id: null,
+          gateway_user: pseudonym(),
+        }),
+      ).toMatch(NOT_NULL);
       const stored = (
         await e.all<Row>("SELECT * FROM compute_gateway_users WHERE account_id = ?", account)
       )[0];
@@ -794,6 +821,40 @@ describe("compute_gateway_users", () => {
     ).toBe(1);
   });
 
+  // The delete trigger does not fire for the delete a REPLACE does (recursive triggers are off on D1),
+  // so a REPLACE would rewrite a pseudonym while "never rotated" stayed true on paper.
+  onEveryEngine("INSERT OR REPLACE and REPLACE INTO change nothing", async (e) => {
+    const account = next();
+    const first = pseudonym();
+    expect(
+      await insertRow(e, "compute_gateway_users", { account_id: account, gateway_user: first }),
+    ).toBeNull();
+    const other = next();
+    for (const verb of ["INSERT OR REPLACE INTO", "REPLACE INTO"]) {
+      // The same account again, and another account taking this account's pseudonym.
+      for (const [id, pseud] of [
+        [account, pseudonym()],
+        [other, first],
+      ] as const) {
+        expect([
+          verb,
+          await e.run(
+            `${verb} compute_gateway_users (account_id, gateway_user) VALUES (?, ?)`,
+            id,
+            pseud,
+          ),
+        ]).toEqual([verb, null]);
+      }
+    }
+    expect(
+      await e.all<Row>(
+        "SELECT account_id, gateway_user FROM compute_gateway_users WHERE account_id IN (?, ?)",
+        account,
+        other,
+      ),
+    ).toEqual([{ account_id: account, gateway_user: first }]);
+  });
+
   onEveryEngine("INSERT OR IGNORE keeps the first pseudonym of an account", async (e) => {
     const account = next();
     const first = pseudonym();
@@ -815,6 +876,29 @@ describe("compute_gateway_users", () => {
     )[0];
     expect(stored?.gateway_user).toBe(first);
   });
+});
+
+describe("the triggers", () => {
+  // The A2 test of migration 0114's triggers is scoped to its own three tables, so this is what says
+  // which triggers 0115's tables have: none on the jobs, exactly three on the pseudonyms.
+  onEveryEngine(
+    "compute_jobs has none, and compute_gateway_users has exactly its three",
+    async (e) => {
+      const of = async (table: string) =>
+        (
+          await e.all<{ name: string }>(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? ORDER BY name",
+            table,
+          )
+        ).map((r) => r.name);
+      expect(await of("compute_jobs")).toEqual([]);
+      expect(await of("compute_gateway_users")).toEqual([
+        "compute_gateway_users_keeps_first",
+        "compute_gateway_users_no_delete",
+        "compute_gateway_users_no_update",
+      ]);
+    },
+  );
 });
 
 describe("the indexes", () => {

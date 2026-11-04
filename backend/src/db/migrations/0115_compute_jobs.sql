@@ -25,9 +25,13 @@
 -- failure code, a cancel reason, a failure detail, a partition) are checked by SHAPE
 -- (`NOT GLOB '*[^a-z0-9_]*'`), never by a list, so a new word never forces a rebuild of the table;
 -- a test holds every word declared today to the shape. `state = 'failed'` if and only if a failure
--- code is set. Every CHECK term is TRUE or FALSE, never NULL (a CHECK passes on NULL), and every
--- CHECK is named so that a test can say which one refused a row. D1 rejects SQL that bun:sqlite
--- accepts, so every GLOB below is at most 50 characters. A numeric column is checked with
+-- code is set. A CHECK passes on NULL, so a term over a column that may be NULL is written
+-- `col IS NULL OR (...)`, and every column a term reads without that guard is NOT NULL: that includes
+-- the primary keys, because SQLite lets a NULL into a primary key that is not declared NOT NULL (a rowid
+-- table), and `INTEGER PRIMARY KEY` would turn a NULL into a fresh row number instead. So `id` is
+-- `TEXT PRIMARY KEY NOT NULL`, and the pseudonym table's key is `INT NOT NULL PRIMARY KEY` (not a rowid
+-- alias). Every CHECK is named, so that a test can say which one refused a row. D1 rejects SQL that
+-- bun:sqlite accepts, so every GLOB below is at most 50 characters. A numeric column is checked with
 -- `typeof(...) = 'integer'`: SQLite would otherwise keep 1.5 in an INTEGER column.
 --
 -- compute_jobs, column by column:
@@ -58,7 +62,7 @@
 --   * `webhook_nonce`: the secret half of the job's webhook address, a random UUID.
 
 CREATE TABLE compute_jobs (
-  id TEXT PRIMARY KEY CONSTRAINT compute_jobs_id CHECK (
+  id TEXT PRIMARY KEY NOT NULL CONSTRAINT compute_jobs_id CHECK (
     length(id) = 28 AND substr(id, 1, 4) = 'job_' AND substr(id, 5) NOT GLOB '*[^0-9a-f]*'),
   account_id INTEGER CONSTRAINT compute_jobs_account CHECK (
     account_id IS NULL OR (typeof(account_id) = 'integer' AND account_id >= 1)),
@@ -181,17 +185,33 @@ CREATE INDEX compute_jobs_account_created ON compute_jobs (account_id, created_a
 --   * `account_id`: the account; one pseudonym each (it is the key). No foreign key, none cascades.
 --   * `gateway_user`: `gw_` and 20 lowercase base32 characters (a-z, 2-7), unique.
 --   * `created_at`: when, on D1's clock.
--- The triggers say "never rotated and never reused": a pseudonym is not changed and a row is not
--- removed. Their retention, and the anonymisation of a deleted account's row, are phase A7's (#2012),
--- which adds its own narrowly scoped exception in its own migration.
+-- THE TRIGGERS, and what they do and do not cover. `compute_gateway_users_no_update` refuses every
+-- UPDATE and `compute_gateway_users_no_delete` every DELETE, so a pseudonym is not changed or removed
+-- by a statement that says so. `compute_gateway_users_keeps_first` ignores (RAISE IGNORE, which no
+-- conflict clause overrides) an INSERT whose account or whose pseudonym is already stored: that keeps
+-- `INSERT OR IGNORE` working, and it makes `INSERT OR REPLACE` and `REPLACE INTO` a no-op, which they
+-- would otherwise not be: REPLACE deletes the conflicting row WITHOUT firing the DELETE trigger
+-- (recursive triggers cannot be enabled on D1), so it could rewrite a pseudonym or hand one to
+-- another account. NOT covered: `DROP TABLE` (it takes the triggers with it) and a rebuild of the
+-- table, which must copy the rows and recreate the three triggers and the unique index. Their
+-- retention, and the anonymisation of a deleted account's row, are phase A7's (#2012), which adds its
+-- own narrowly scoped exception in its own migration. The job table has no trigger.
 
 CREATE TABLE compute_gateway_users (
-  account_id INTEGER PRIMARY KEY CONSTRAINT compute_gateway_users_account CHECK (account_id >= 1),
+  account_id INT NOT NULL PRIMARY KEY CONSTRAINT compute_gateway_users_account CHECK (
+    typeof(account_id) = 'integer' AND account_id >= 1),
   gateway_user TEXT NOT NULL UNIQUE CONSTRAINT compute_gateway_users_shape CHECK (
     length(gateway_user) = 23 AND substr(gateway_user, 1, 3) = 'gw_'
     AND substr(gateway_user, 4) NOT GLOB '*[^a-z2-7]*'),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TRIGGER compute_gateway_users_keeps_first BEFORE INSERT ON compute_gateway_users
+WHEN EXISTS (SELECT 1 FROM compute_gateway_users
+              WHERE account_id = NEW.account_id OR gateway_user = NEW.gateway_user)
+BEGIN
+  SELECT RAISE(IGNORE);
+END;
 
 CREATE TRIGGER compute_gateway_users_no_update BEFORE UPDATE ON compute_gateway_users
 BEGIN
