@@ -49,6 +49,8 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `state` is returned unchanged and `nonce` is copied into the ID token.
    The authorization response carries `iss` (RFC 9207), so a client can tell which provider answered.
    `prompt=none` without a NEMAR session answers `login_required` and shows no page; `max_age` older than the session forces a fresh sign-in.
+   Until the client and a redirect address that is exactly one it registered are known, an error is shown on NEMAR's page and the person is sent nowhere; after that, every error is a redirect to that address carrying `error`, `state` and `iss`.
+   A sign-in the authorization page sent the person to satisfies `prompt=login`, `max_age` and an `id_token_hint` for another subject, and is recognized by the session being newer than the moment the person was sent (phase #2017).
    A refresh token is issued only when the client asks for `offline_access` and is allowed it.
    Redeeming an authorization code twice revokes every token already issued from it (RFC 6749, section 4.1.2).
 4. **Tokens.**
@@ -101,6 +103,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    A first-party origin is an `https` address on `nemar.org` or a subdomain of it, on the default port, whose host is not a partner host (rule 9); outside production a loopback address (any port, `http` or `https`) and a website preview (a Pages host of the website's two projects) count as well, and in production they never do.
    That is its own rule, not the cross-origin rule `isNemarWebOrigin`, which admits loopback and previews everywhere.
    First-party is refused at registration for a client with any other redirect address, and checked again at every authorization, so a partner or a third party can never skip the consent screen.
+   At authorization, a client registered first-party whose redirect addresses no longer all qualify is treated as third-party and asked, and a grant recorded while it was first-party is never taken for the person's consent (phase #2017).
    A client that is not first-party is third-party: it never skips the consent screen, and follows its consent mode.
    `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
 9. **A partner subdomain is not trusted as a NEMAR origin.**
@@ -122,6 +125,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
       A header that carries more than one `__Host-nemar_session` is no session.
     - A `__Host-` session cookie is minted only by a sign-in, never by a slide or by any read of a legacy value: with the flag on, the expiry slide re-issues the cookie only for a session read under the `__Host-` name.
     - The authorization and consent page of phase B3 treats a session read under the legacy name as no session, so a delegation is never granted on the cookie a sibling host can set.
+      Its two routes answer 404 while `HOST_PREFIXED_SESSION_COOKIE` is off, because no session could approve a grant then and a person sent to sign in would come back to the same answer.
     - The legacy name stops being read no earlier than 31 days after the production flag is turned on, because every legacy cookie issued before the flag has then passed its 30-day maximum age.
       The date is a later decision (see the not-decided list).
     - Until then the window keeps an exposure open, and it is named here.
