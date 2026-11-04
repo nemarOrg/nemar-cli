@@ -10,8 +10,8 @@ As of 2026-09-08 its NEMAR assistant (`src/assistants/nemar/`) still calls the l
 so the assistant is dead in production.
 It is not hosted where ADR 0025 assumes; where it runs is not a NEMAR fact and is not recorded here.
 
-**Do not confuse the two APIs** (checked 2026-09-15): OSA's own API answers 200 for the Open Science Assistant itself (with `nemar` among its communities),
-while the LEGACY NEMAR API path on OSA's host now 404s.
+**Do not confuse the two APIs** (checked 2026-09-15): OSA's own API on `api.osc.earth` answers 200 for the Open Science Assistant itself (with `nemar` among its communities),
+while the LEGACY NEMAR API path on that host, `api.osc.earth/nemar`, now 404s.
 NEMAR's API is `api.nemar.org`, which also answers on `/nemar` because the app is mounted twice
 ([[api-mounted-twice-full-path]]); a 200 there is NEMAR's own API, never OSA.
 
