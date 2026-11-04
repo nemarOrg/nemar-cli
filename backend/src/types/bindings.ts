@@ -1,4 +1,5 @@
 import type { CloudflareSendEmail } from "../services/email";
+import type { ClaimAccount } from "../services/oidc-claims";
 import type { WebSessionUser } from "../services/web-session";
 import type { MaintenanceMode } from "./maintenance";
 
@@ -503,4 +504,21 @@ export interface Variables {
    *  The expiry slide re-issues the cookie only from a value read under the `__Host-` name: that
    *  cookie is minted by a sign-in and never from a legacy value (ADR 0119 decision 10). */
   webSessionCookieName?: string;
+  /** Set by `oidcBearer` (epic #2014 phase #2018, ADR 0119): the OpenID Connect access token that
+   *  authenticated the request, read live. Only the OIDC resource routes carry `oidcBearer`; every
+   *  other route refuses such a token (`resolveApiKeyUser`'s `oidc_token`). */
+  oidcToken?: OidcTokenContext;
+}
+
+/**
+ * What `oidcBearer` knows of a live access token: the client it was issued to, the account it names
+ * (null for a client credentials token) with the account's claim columns as they were read in the
+ * same statement that found the token active, its scopes and its audience.
+ */
+export interface OidcTokenContext {
+  tokenId: number;
+  client: { id: number; clientId: string };
+  user: (ClaimAccount & { id: number }) | null;
+  scopes: string[];
+  audience: string;
 }

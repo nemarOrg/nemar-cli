@@ -115,7 +115,9 @@ export async function startOidcHarness(over: Partial<Bindings> = {}): Promise<Oi
       let body: string | undefined;
       if (opts.rawBody !== undefined) body = opts.rawBody;
       else if (opts.body !== undefined) body = JSON.stringify(opts.body);
-      if (body !== undefined) headers["Content-Type"] = "application/json";
+      // JSON unless the caller named a type (the token endpoint reads a form).
+      const typed = Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
+      if (body !== undefined && !typed) headers["Content-Type"] = "application/json";
       const res = await worker.fetch(
         new Request(`${opts.base ?? ISSUER}${path}`, { method, headers, body }),
         { ...env, ...(opts.env ?? {}) },
