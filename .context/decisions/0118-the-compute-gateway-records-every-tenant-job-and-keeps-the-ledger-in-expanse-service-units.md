@@ -120,3 +120,41 @@ What the build settled, each a rule and not a description of today:
 **Retention is not decided here.**
 The ledger and the policy are append-only and are never removed by a cascade from the account row.
 Their retention, and the anonymisation of `holder_ref` and `actor_user_id`, are the job of phase A7 (#2012), which adds its own narrowly scoped exception in its own migration.
+
+## Amendment 2026-11-04 (#2008): the job index and the two buckets are built (phase A3)
+
+Migration `0115_compute_jobs.sql`, `backend/src/services/compute-jobs.ts`, `compute-records.ts` and `compute-s3.ts` build decisions 2, 7 and 9.
+What the build settled, each a rule and not a description of today:
+
+1. **A job and its hold are one batch, and the job is gated on the hold.**
+   The batch is the ledger's hold statement (the person's live-job limit is a guard read inside that statement, so two requests racing for the last slot cannot both win), then the pseudonym's `INSERT OR IGNORE`, then the job's INSERT, each of the last two written only if the hold row of this job exists.
+   A refused hold therefore leaves no job row, no ledger entry, no pseudonym and no object in either bucket, and the reason is read after the refusal and never decided by a second hold.
+   A job id has one hold for ever, so a resubmission is a new job; a retried `(account, idempotency key)` returns the existing job, and the same key for another request is an error and never an answer with the first job.
+2. **Records are written after the commit, never before, and once.**
+   A bucket lock makes a record for a refused job permanent, so nothing is copied into `records/` before the job's row, and with it the hold, has been read back; a bundle waits in `incoming/`, which a lifecycle rule empties.
+   Every record write is create-only, and a record that exists is never rewritten.
+   `records_written_at` says the job's records have landed, and phase A5 refuses to submit without it: `createJob` sets it for a job that uploads nothing, and `finalizeBundle` or `finalizeSubmittedFiles` (a partner batch job's own files) sets it after the copy.
+   A failed write leaves the job and its hold, is logged by job id and a fixed word, and is finished by a replay of the same key.
+3. **D1 job rows carry the account id and fixed words only; identity is in the records bucket only.**
+   There is no column for a name, an email, a country, an ORCID iD, an affiliation or a subject, and a test refuses one.
+   `identity.json` holds exactly the ORCID iD, name, email, country, affiliation, account id, a null subject and the capture time.
+   The words that a later epic may add (a failure code, a detail, a cancel reason, a partition) are checked by shape, never by a list, so adding one never rebuilds the table.
+4. **The gateway pseudonym is random and stored.**
+   `gw_` and 20 lowercase base32 characters, made on an account's first job, stored in `compute_gateway_users`, copied to every job of that account, never rotated and never reused (triggers refuse a change and a removal until a later phase's narrowly scoped exception).
+   It is not derived from a key, because a derived value would change if the key were rotated; the issue's earlier wording, a derivation from `ENCRYPTION_KEY`, is superseded.
+   NEMAR's own pipeline jobs carry the literal `nemar-pipelines`, which is not stored there.
+5. **`spec_digest` is the SHA-256 of the exact bytes of `records/<id>/spec.json`,** made once before the INSERT and written after the commit, and it is never the launch specification, which carries a token; the launcher's `launch_spec_digest` is a different column, added by phase A5.
+6. **Reading identity or a submitted file is owner-only, reasoned and audited first.**
+   The role is read from the database in the audit statement itself, the reason is 8 to 200 characters, the `compute.record.read` row is written before any byte is read, and the read is refused when that write fails.
+   A read that then finds nothing still leaves its row, because the attempt is what is audited.
+7. **Compute storage is reached by the binding, and by the S3 interface only for what a binding cannot do.**
+   A binding has no copy and no presigned address, so a presigned PUT (one hour), a presigned GET (10 minutes for the launcher's own bundle, 5 minutes for an owner's read) and the server-side `CopyObject` are signed with aws4fetch against the account endpoint, path style.
+   The endpoint is `globalThis.NEMAR_COMPUTE_S3_URL` when set and otherwise the Worker secret; `S3_ENDPOINT_URL` is never read for compute; an expiry above seven days is refused.
+   A key is encoded segment by segment and judged by the contract's own path predicate, never by `assertValidS3Key`, which refuses `a..b.csv` and throws on `100%.txt` and so would fail an upload with a code that refunds the job.
+8. **The checksum header is signed for an incoming PUT and is not trusted.**
+   `x-amz-checksum-sha256` is signed with the URL when a digest is given; whether R2 enforces it on a presigned PUT has not been checked against the real service, so the size read back through the binding is the bound `finalizeBundle` relies on.
+   On an output PUT the header is deferred to epic A, to be decided once it has been verified on R2.
+9. **The outputs request's body cap is derived from the owner's `maxFiles`.**
+   The policy lets `maxFiles` reach 100,000 and the launcher caps its own request at 1 MiB, so the Worker neither bounds `maxFiles` nor reads less than 1 MiB: it reads at most `8 KiB + maxFiles x 1,700 bytes`, never above 64 MiB.
+   The launcher's 1 MiB is the tighter bound today, and raising it is the launcher's change.
+10. **A partner's per-file upload is at most 500 files,** whatever the owner's bundle limit, because each file is one `CopyObject` and a Worker invocation may make at most 1,000 subrequests; the sizes of the uploaded files are read from one listing before any file is copied, so a file of the wrong size refuses the whole set and copies nothing.

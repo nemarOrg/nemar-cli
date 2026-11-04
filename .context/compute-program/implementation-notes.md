@@ -187,3 +187,36 @@ Call these; never write a second statement that moves a total.
   Today's code is option B (both move the budget with the pool), and choosing option A changes the code, not the migration.
   `frozen` has no writer yet: whoever suspends access (phase D, A8) sets it, and a hold reads it (the holder's own pool; a frozen budget pool does not refuse a hold).
 - **Not here**: the job table, the job-count guards on a hold (phase A3), the callers of settle (phases A5 and A7), automatic renewal and the default grant at approval (Epic D), mail.
+
+## 8. Job index, records and the two buckets shipped in phase A3 (ADR 0118, amendment of 2026-11-04, #2008)
+
+Call these; never write a second statement that makes a job, and never reach a compute bucket by any other path.
+
+- **Tables** (migration `0115_compute_jobs.sql`): `compute_jobs` (one index row per job: the account id and fixed words only, no foreign key, shape checks for the words a later epic may add) and `compute_gateway_users` (the ACCESS pseudonym, `gw_` and 20 base32 characters, random and stored, never rotated and never reused; the triggers say so).
+  Every state, source, kind and pool is an `IN` list that a test compares with `shared/compute-state.ts`; `failure_code`, `failure_detail`, `cancel_reason` and `partition` are checked by shape, so a new word needs no rebuild.
+  `state = 'failed'` if and only if a failure code is set.
+  `launch_spec_digest` is not here: it is phase A5's migration 0116.
+- **`createJob(env, input)`** (`services/compute-jobs.ts`): one batch of the ledger's hold (`holdStatements`, with the person's live-job limit as a guard read inside the same statement), the pseudonym's `INSERT OR IGNORE` and the job's INSERT, the last two gated on `EXISTS` of the hold row, so a refused hold leaves no row, no entry, no pseudonym and no object.
+  It validates before any hold exists: the strict schema, the dataset version tags (`datasetVersionWithoutTag`, `launchSpecFits`), the owner's per-job ceilings and the partitions offered to people (not for a pipeline job), and the bundle's size.
+  It returns the job, or a refusal word (`invalid_spec` naming the field, `over_job_limit`, `partition_not_offered`, `bundle_too_large`, `insufficient_balance`, `suspended`, `platform_budget_exhausted`, `over_concurrency`, `compute_disabled`).
+  It throws `ComputeJobError` for a key reused for another request (`idempotency_conflict`), an argument the table cannot take and a missing platform pool.
+  A retried `(account, key)` returns the existing job and finishes its records; two requests with one key racing make one job.
+  The routes (#2010, D3, D4) validate what is theirs (the runtime, the registries an image may come from, dataset eligibility) before they call it.
+  What it does not do: it moves no state (the `uploading` state and every edge after `created` are phase A5's), submits nothing to Tapis, and applies no pipeline cap (a daily count and a live count per pool are the dispatch phase's, as extra guards).
+- **Records** (`services/compute-records.ts`): `records/<id>/identity.json`, `spec.json`, `submitted/bundle.tar.gz` (or `submitted/<path>` per partner file), `bundle-manifest.json`, `result-manifest.json` (the launcher's `manifest.json`, renamed; there is no `failure.json`), `provenance.json`, `result.json`; `logs/<id>/tapisjob.out` and `launcher.log`; `incoming/<id>/bundle.tar.gz` or `incoming/<id>/<path>`.
+  The builders are `recordKey`, `submittedKey`, `logKey` and `incomingKey`; the results bucket's keys are the contract's `resultsOutputKey` and `resultsLauncherKey`.
+  A record is written once (create-only), after the job's batch has committed, and never rewritten; the bucket's lock is configuration, never code.
+  `records_written_at` is set by `createJob` for a job that uploads nothing, and by `finalizeBundle` or `finalizeSubmittedFiles` (a partner batch job's own files) after the copy; phase A5 refuses to submit without it.
+- **Uploads**: `presignIncomingUploads` (one-hour PUTs; a bundle job gets one for `bundle.tar.gz`, the size and digest of its recorded specification; a partner gets one per file, at most `PARTNER_FILES_MAX`; traversal in any encoding is refused), then `finalizeBundle` or `finalizeSubmittedFiles` (the declared manifest is validated for the owner's limits and traversal, the uploaded size must match, a mismatch deletes nothing, and only after the job and its hold have been read back is the one `CopyObject` made; idempotent, resumable, and an object already at the destination is never overwritten).
+  The addresses are asked again after expiry, and never after the job's records are written.
+- **Reads**: `presignBundleRead(env, jobId)` is the launcher's 10-minute address for the job's own bundle and no other key.
+  `readRecordObject(env, db, { actor, jobId, name, reason })` is owner-only, takes a reason of 8 to 200 characters, writes the `compute.record.read` audit row before any byte is read, is refused if that write fails, and returns the bytes of a JSON record or a 5-minute presigned GET of one submitted file or log.
+- **The S3 interface** (`services/compute-s3.ts`): R2 has no copy and no presigned address through a binding, so `computeS3(env)` (null when anything is missing) signs with aws4fetch, region `auto`, path style.
+  The endpoint is `globalThis.NEMAR_COMPUTE_S3_URL` when set, else the Worker secret `COMPUTE_R2_S3_ENDPOINT`; `S3_ENDPOINT_URL` is never read here.
+  A key is encoded segment by segment and judged by the contract's own path predicate, never by `assertValidS3Key` (it refuses `a..b.csv` and throws on `100%.txt`).
+  An expiry above seven days is refused.
+  The checksum header `x-amz-checksum-sha256` is signed for an incoming PUT when a digest is given and is not verified against the real R2; the object's size, read back through the binding, is the bound the Worker relies on.
+- **The outputs route's body cap** (`outputsBodyLimitBytes(maxFiles)`, for #2010): the owner's policy lets `maxFiles` reach 100,000 and the launcher caps its own request at 1 MiB, so the Worker derives the cap from `maxFiles` (never below 1 MiB, never above 64 MiB) and does not bound `maxFiles`; the launcher's 1 MiB is the tighter bound today.
+- **Test seams**: `backend/test/helpers/compute-s3-standin.ts` is a real server speaking path-style S3 over the same Miniflare R2 buckets the bindings use (it verifies the SigV4 signature and the expiry, enforces the checksum header, and logs every request); `compute-harness.ts` assembles it with the bindings and a production-flagged environment; `compute-seed.ts` seeds users, pools and policies through the real services.
+  Miniflare does not enforce bucket lock.
+- **Not here**: the routes and the CLI that read records (#2012), the outputs and bundle routes and the job lifecycle (#2010), the results bucket's writer, the retention sweep and the anonymisation of a deleted account's rows (#2012), compute access (Epic D).
