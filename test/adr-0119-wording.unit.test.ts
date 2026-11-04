@@ -105,3 +105,30 @@ describe("ADR 0119 records the key and secret decisions", () => {
     expect(consequences).toMatch(/removing the unreadable key rows by hand/);
   });
 });
+
+describe("ADR 0119 records what the token phase settled (#2018)", () => {
+  test("rule 13: replay, rotation, the retry, the expiries and client authentication", () => {
+    const thirteen = rule(13);
+    expect(thirteen).toContain("`code_replay`");
+    expect(thirteen).toContain("`refresh_reuse`");
+    expect(thirteen).toMatch(/one more child, never two/);
+    expect(thirteen).toMatch(/30 days after it was minted/);
+    expect(thirteen).toMatch(/90 days after the code was redeemed/);
+    expect(thirteen).toMatch(/code's scopes, never the grant's/);
+    expect(thirteen).toMatch(/HTTP Basic only/);
+    expect(thirteen).toMatch(/machine-only scopes/);
+  });
+
+  test("rule 14: the claim names, the refusal elsewhere and introspection's blindness", () => {
+    const fourteen = rule(14);
+    for (const claim of ["nemar_kind", "nemar_status", "nemar_tier"]) {
+      expect(fourteen).toContain(claim);
+      expect(readmeLine).toContain(claim);
+    }
+    expect(fourteen).toContain("oidc_token_not_accepted");
+    expect(fourteen).toMatch(/`oidcBearer` is the one middleware/);
+    expect(fourteen).toMatch(/shown to its own client only/);
+    expect(readmeLine).toContain("oidc_token_not_accepted");
+    expect(adr).toMatch(/Fourteen rules inside that/);
+  });
+});
