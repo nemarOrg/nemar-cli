@@ -12,8 +12,10 @@
  * THESE SCHEMAS ARE STRICT ON PURPOSE (`.strict()`, exempted by name in
  * `test/contract-schemas.test.ts`): a job specification, an owner policy and the launcher's files
  * are validated as they come in, or written by the Worker, and a mistyped key must be refused, not
- * stripped. A schema a released CLI uses to parse a RESPONSE must never be strict (an old CLI
- * would fail on a newer server's extra key); build that one lenient, in its own file.
+ * stripped. NEVER PARSE A RESPONSE WITH THEM AND NEVER BUILD ONE FROM THEM (`.extend()`, `.pick()`,
+ * `.partial()`): a released CLI or a running launcher would fail on a newer server's extra key.
+ * A response schema is lenient and lives in its own file; `./compute-launch.ts` shows the two
+ * responses the launcher reads, which are `.passthrough()`.
  *
  * NOTHING HERE WAS MEASURED AGAINST THE TENANT YET. The rate table, the `debug` ceilings and the
  * preempt basis below are the design's, unconfirmed with SDSC (design section 12, question 5);
@@ -34,8 +36,13 @@ import {
 /** The characters no path or pattern may hold: control characters and DEL, written as escapes. */
 const CONTROL_CHARS = "\\u0000-\\u001f\\u007f";
 
-/** A path segment holds no slash, backslash, control character or DEL. */
-const SEGMENT = `[^/\\\\${CONTROL_CHARS}]+`;
+/**
+ * A path segment, as a regular-expression source: one or more characters that are not a slash, a
+ * backslash, a control character or DEL. Every path grammar in the contract is built from this
+ * one string, here and in `./compute-launch.ts`.
+ */
+export const COMPUTE_PATH_SEGMENT = `[^/\\\\${CONTROL_CHARS}]+`;
+const SEGMENT = COMPUTE_PATH_SEGMENT;
 
 /** A relative path of non-empty segments; `.` and `..` segments are refused separately. */
 export const COMPUTE_PATH_RE = new RegExp(`^(?:${SEGMENT}/)*${SEGMENT}$`);
@@ -59,6 +66,13 @@ export function isSafeComputePath(path: string, maxLength = 512): boolean {
     !COMPUTE_DOT_SEGMENT_RE.test(path)
   );
 }
+
+/**
+ * The most files one job lists: the outputs of a result manifest and of an outputs request. The
+ * owner's `resultLimits.maxFiles` may be lower, never higher; the launcher files are counted
+ * apart (`LAUNCHER_FILE_NAMES.length` more upload addresses).
+ */
+export const COMPUTE_MAX_OUTPUT_FILES = 100_000;
 
 /** A NEMAR job id: `job_` and 24 lowercase hex digits. */
 export const COMPUTE_JOB_ID_RE = /^job_[0-9a-f]{24}$/;
@@ -231,8 +245,8 @@ export const PARTITIONS: Readonly<Record<PartitionName, ComputePartition>> = dee
  * The rate table, version 1, in milli-SU. UNCONFIRMED with SDSC before the first charge (design
  * section 12, question 5): the 2048 MB per core-unit and the 94208 MB (92 GB) per GPU-unit are the
  * design's reading of Expanse's published definition, the 800/1000 preempt factor is Expanse's
- * published 0.8 and the basis it applies to (the final amount, rounded up once) is the design's,
- * and the minimum of one SU per job is Expanse's charge on reservation.
+ * published 0.8, and the minimum of one SU per job is Expanse's charge on reservation. The order
+ * is the design's reading: the exact amount times 800/1000, rounded up once, then the minimum.
  */
 export const RATE_TABLE_V1 = {
   version: 1,
@@ -268,14 +282,17 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
 }
 
 /**
- * What a run of `seconds` costs in milli-SU on `partition` with `resources`: the rate per hour
- * times the seconds over 3600, times 800/1000 on a preempt partition, rounded up to the next
- * thousandth ONCE, and never under the 1000 minimum (which applies to the final amount, so a
- * preempt job also pays at least one SU). Exact integer arithmetic throughout.
+ * What a run of `seconds` costs in milli-SU on `partition` with `resources`, in three steps:
+ * (1) the exact amount, the rate per hour times the seconds over 3600, times 800/1000 on a preempt
+ * partition; (2) that amount rounded up to a whole milli-SU, ONCE; (3) raised to the 1000 minimum if
+ * it is smaller. The minimum is applied AFTER the 800/1000 factor, so a preempt charge is also at
+ * least 1000. Exact integer arithmetic throughout.
  *
  * Throws RangeError for a partition that is not one, a resource or a time that is not a whole
- * non-negative number (`nodes` at least 1), or an amount too large to hold exactly. A caller that
- * has Tapis's times rounds the seconds up first.
+ * non-negative number (`nodes` at least 1), an amount too large to hold exactly, and a rate with no
+ * driver: a per-core or per-GPU partition asked with neither cores (or GPUs) nor memory would
+ * otherwise price the 1000 minimum for a job that names nothing to charge. A caller that has
+ * Tapis's times rounds the seconds up first.
  */
 export function suMilliFor(
   partition: PartitionName,
@@ -295,6 +312,7 @@ export function suMilliFor(
   let perNode: bigint;
   switch (info.rate) {
     case "core_or_memory": {
+      if (cores === 0n && memoryMb === 0n) throw new RangeError("a rate needs cores or memory");
       const byCores = cores * unit;
       const byMemory = ceilDiv(memoryMb * unit, BigInt(t.memoryMbPerCoreUnit));
       perNode = byCores > byMemory ? byCores : byMemory;
@@ -304,6 +322,7 @@ export function suMilliFor(
       perNode = BigInt(t.cpuNodeCores) * unit;
       break;
     case "gpu_or_memory": {
+      if (gpus === 0n && memoryMb === 0n) throw new RangeError("a rate needs GPUs or memory");
       const byGpus = gpus * unit;
       const byMemory = ceilDiv(memoryMb * unit, BigInt(t.memoryMbPerGpuUnit));
       perNode = byGpus > byMemory ? byGpus : byMemory;
@@ -386,6 +405,13 @@ export const LAUNCHER_FILES = {
   log: "launcher.log",
 } as const;
 
+/**
+ * The records bucket keeps the launcher's `manifest.json` under this name,
+ * `records/<id>/result-manifest.json`; phase A3 builds the key. In the results bucket and on the
+ * node the file is still `manifest.json`.
+ */
+export const RECORDS_RESULT_MANIFEST_FILE = "result-manifest.json";
+
 export const LAUNCHER_FILE_NAMES = [
   "result.json",
   "provenance.json",
@@ -467,6 +493,11 @@ const argSchema = z.string().max(1024);
  *
  * The output directory is `outputs`, which the launcher's layout fixes (`work/outputs/`). `matlab`
  * is a valid specification; a route refuses it as `runtime_unavailable` until it is licensed.
+ *
+ * Two digests are named apart. `spec_digest` is the JOB ROW's digest of this document: the SHA-256,
+ * in lowercase hex, of the exact bytes of `records/<id>/spec.json` (set by phase A3). It is not a
+ * launcher key. The launcher's own is `launch_spec_digest` in `provenance.json` (see
+ * {@link LauncherProvenanceSchema}).
  */
 export const JobSpecSchema = z
   .object({
@@ -507,6 +538,9 @@ export const JobSpecSchema = z
     if (spec.entry !== undefined && spec.bundle === undefined) {
       refuse("bundle", "an entry needs the bundle that holds it");
     }
+    const pool = PARTITIONS[spec.partition].pool;
+    if (pool === "gpu" && spec.gpus < 1) refuse("gpus", "a GPU partition needs at least one GPU");
+    if (pool === "cpu" && spec.gpus !== 0) refuse("gpus", "a CPU partition takes no GPU");
   });
 
 export type JobSpec = z.infer<typeof JobSpecSchema>;
@@ -562,14 +596,14 @@ export const ComputePolicySchema = z
       .object({
         recordsYears: safeInt(1, 30),
         logsDays: safeInt(1, 3650),
-        /** Results are never kept fewer than 14 days, which a download link renewal relies on. */
+        /** Design section 1: results are "kept 30 days and never fewer than 14". */
         resultsDays: safeInt(14, 365),
       })
       .strict(),
     resultLimits: z
       .object({
         maxJobBytes: safeInt(1),
-        maxFiles: safeInt(1, 100_000),
+        maxFiles: safeInt(1, COMPUTE_MAX_OUTPUT_FILES),
         maxStoredBytesPerPerson: safeInt(1),
         maxStoredBytesTotal: safeInt(1),
       })
@@ -632,7 +666,10 @@ const manifestFileSchema = z
 
 /** `launcher/manifest.json`: every output's path, size and checksum, hashed by the launcher. */
 export const ResultManifestSchema = z
-  .object({ job_id: jobIdSchema, files: z.array(manifestFileSchema).max(100_000) })
+  .object({
+    job_id: jobIdSchema,
+    files: z.array(manifestFileSchema).max(COMPUTE_MAX_OUTPUT_FILES),
+  })
   .strict();
 
 const entryExitCodeSchema = z.number().int().min(-255).max(255).nullable();

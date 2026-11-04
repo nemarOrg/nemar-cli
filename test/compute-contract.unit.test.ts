@@ -24,6 +24,8 @@ import { Ajv2020 } from "ajv/dist/2020";
 import { LAUNCHER_FAILURE_CODES } from "../shared/compute-state";
 import {
   COMPUTE_JOB_ID_RE,
+  COMPUTE_MAX_OUTPUT_FILES,
+  COMPUTE_PATH_SEGMENT,
   COMPUTE_POOLS,
   ComputePolicySchema,
   DEFAULT_COMPUTE_POLICY,
@@ -41,7 +43,9 @@ import {
   PARTITIONS,
   PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
+  type PartitionName,
   RATE_TABLE_V1,
+  RECORDS_RESULT_MANIFEST_FILE,
   RESULT_MAX_FILE_BYTES,
   ResultManifestSchema,
   estimateSuMilli,
@@ -232,7 +236,120 @@ describe("estimateSuMilli and suMilliFor", () => {
   });
 });
 
+describe("preempt rounding: one exact round-up, then the minimum", () => {
+  test("4501, 9001 and 13501 seconds on one preempt core", () => {
+    // 1000 milli-SU an hour times 0.8: 4501 s is 1000.2222..., 9001 s is 2000.2222..., 13501 s is
+    // 3000.2222.... Each rounds UP to 1001, 2001, 3001. Rounding the base first (1251) and then
+    // truncating the 0.8 gives 1000 for the first: the mutant this case exists to catch.
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 4501)).toBe(1001);
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 9001)).toBe(2001);
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 13501)).toBe(3001);
+  });
+
+  test("the same on one GPU of gpu-preempt", () => {
+    expect(suMilliFor("gpu-preempt", { nodes: 1, gpus: 1 }, 4501)).toBe(1001);
+    expect(suMilliFor("gpu-preempt", { nodes: 1, gpus: 1 }, 9001)).toBe(2001);
+    expect(suMilliFor("gpu-preempt", { nodes: 1, gpus: 1 }, 13501)).toBe(3001);
+    expect(suMilliFor("gpu-preempt", { nodes: 2, gpus: 2 }, 4501)).toBe(
+      suMilliFor("preempt", { nodes: 2, cores: 2 }, 4501),
+    );
+  });
+
+  test("the minimum is applied after the factor: a short preempt job costs 1000, not 800", () => {
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 3600)).toBe(1000);
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 1)).toBe(1000);
+    // 3600 s at 800/1000 of 1000 is exactly 800, under the minimum; 4500 s is exactly 1000.
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 4500)).toBe(1000);
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 4499)).toBe(1000);
+    expect(suMilliFor("preempt", { nodes: 1, cores: 1 }, 4502)).toBe(1001);
+  });
+
+  /** ceil(rate * seconds * num / (3600 * den)), then the 1000 floor, by long division. */
+  function exact(ratePerHour: number, seconds: number, num: number, den: number): number {
+    const n = BigInt(ratePerHour) * BigInt(seconds) * BigInt(num);
+    const d = 3600n * BigInt(den);
+    const q = n / d;
+    const amount = n % d === 0n ? q : q + 1n;
+    return Number(amount < 1000n ? 1000n : amount);
+  }
+
+  test("every second from 0 to 20000, against an exact rational computed separately", () => {
+    for (const [partition, resources, rate] of [
+      ["preempt", { nodes: 1, cores: 1 }, 1000],
+      ["preempt", { nodes: 1, cores: 3 }, 3000],
+      ["preempt", { nodes: 2, cores: 7 }, 14000],
+      ["gpu-preempt", { nodes: 1, gpus: 1 }, 1000],
+      ["gpu-preempt", { nodes: 2, gpus: 3 }, 6000],
+    ] as const) {
+      for (let s = 0; s <= 20000; s++) {
+        const got = suMilliFor(partition, resources, s);
+        const want = exact(rate, s, 800, 1000);
+        if (got !== want)
+          throw new Error(`${partition} ${JSON.stringify(resources)} ${s}s: ${got} !== ${want}`);
+      }
+    }
+  });
+
+  test("a non-preempt partition is the same loop with the factor 1", () => {
+    for (let s = 0; s <= 8000; s += 7) {
+      expect(suMilliFor("shared", { nodes: 1, cores: 5 }, s), String(s)).toBe(exact(5000, s, 1, 1));
+    }
+  });
+});
+
+describe("a rate needs something to charge", () => {
+  test("a per-core partition with neither cores nor memory is refused, not priced at the minimum", () => {
+    expect(() => suMilliFor("shared", { nodes: 1 }, 7200)).toThrow(RangeError);
+    expect(() => suMilliFor("shared", { nodes: 1, cores: 0, memory_mb: 0 }, 7200)).toThrow(
+      RangeError,
+    );
+    expect(() => suMilliFor("debug", { nodes: 1 }, 600)).toThrow(RangeError);
+    expect(() => suMilliFor("large-shared", { nodes: 1 }, 600)).toThrow(RangeError);
+    expect(() => suMilliFor("preempt", { nodes: 1 }, 600)).toThrow(RangeError);
+  });
+
+  test("a per-GPU partition with neither GPUs nor memory is refused", () => {
+    expect(() => estimateSuMilli({ partition: "gpu-shared", nodes: 1, minutes: 2880 })).toThrow(
+      RangeError,
+    );
+    expect(() => suMilliFor("gpu-debug", { nodes: 1, gpus: 0, memory_mb: 0 }, 60)).toThrow(
+      RangeError,
+    );
+    expect(() => suMilliFor("gpu-preempt", { nodes: 1 }, 60)).toThrow(RangeError);
+  });
+
+  test("either driver alone is enough", () => {
+    expect(suMilliFor("shared", { nodes: 1, memory_mb: 4096 }, 3600)).toBe(2000);
+    expect(suMilliFor("shared", { nodes: 1, cores: 2 }, 3600)).toBe(2000);
+    expect(suMilliFor("gpu-shared", { nodes: 1, memory_mb: 94208 }, 3600)).toBe(1000);
+    expect(suMilliFor("gpu-shared", { nodes: 1, gpus: 2 }, 3600)).toBe(2000);
+  });
+
+  test("a whole-node partition needs no driver, because the node is the charge", () => {
+    expect(suMilliFor("compute", { nodes: 1 }, 3600)).toBe(128000);
+    expect(suMilliFor("gpu", { nodes: 1 }, 3600)).toBe(4000);
+  });
+});
+
+describe("a partition name is an own key, not anything on Object.prototype", () => {
+  test("suMilliFor refuses a name that is not a partition, including inherited ones", () => {
+    for (const name of ["toString", "__proto__", "constructor", "hasOwnProperty", "valueOf", ""]) {
+      expect(() => suMilliFor(name as never, { nodes: 1, cores: 1 }, 10), name).toThrow(RangeError);
+    }
+    expect(() =>
+      estimateSuMilli({ partition: "toString" as never, nodes: 1, cores: 1, minutes: 1 }),
+    ).toThrow(RangeError);
+  });
+});
+
 describe("parseSuToMilli and formatSu", () => {
+  test("a value that is not text is refused, not coerced", () => {
+    // A number 12 would match the pattern as the string "12" if it were not guarded.
+    for (const value of [12, 12.5, 0, null, undefined, {}, [], ["12"], true]) {
+      expect(parseSuToMilli(value as never), String(value)).toBeNull();
+    }
+  });
+
   test("12.5 SU is 12500", () => {
     expect(parseSuToMilli("12.5")).toBe(12500);
   });
@@ -312,6 +429,22 @@ describe("parseSuToMilli and formatSu", () => {
 
 // --- Partitions and policy ---------------------------------------------------------------------
 
+/**
+ * The six partitions offered to people and their default per-job ceilings (design section 5):
+ * 1 node of up to 64 cores in `shared`, 2 whole nodes in `compute`, 1 node of up to 3 GPUs in
+ * `gpu-shared`, 1 whole node of 4 GPUs in `gpu`, 48 hours (2880 minutes) for each of those four
+ * and 30 minutes for the two debug partitions. The `debug` node count and the 40 cores of a GPU
+ * node are unconfirmed (design section 12, question 5).
+ */
+const LITERAL_CEILINGS = {
+  shared: { maxNodes: 1, maxCoresPerNode: 64, maxGpusPerNode: 0, maxMinutes: 2880 },
+  compute: { maxNodes: 2, maxCoresPerNode: 128, maxGpusPerNode: 0, maxMinutes: 2880 },
+  debug: { maxNodes: 2, maxCoresPerNode: 128, maxGpusPerNode: 0, maxMinutes: 30 },
+  "gpu-shared": { maxNodes: 1, maxCoresPerNode: 40, maxGpusPerNode: 3, maxMinutes: 2880 },
+  gpu: { maxNodes: 1, maxCoresPerNode: 40, maxGpusPerNode: 4, maxMinutes: 2880 },
+  "gpu-debug": { maxNodes: 1, maxCoresPerNode: 40, maxGpusPerNode: 4, maxMinutes: 30 },
+} as const;
+
 describe("partitions and their default ceilings (design section 5)", () => {
   test("the four partitions offered with a 48-hour ceiling", () => {
     expect(PARTITIONS.shared.ceiling).toEqual({
@@ -353,11 +486,50 @@ describe("partitions and their default ceilings (design section 5)", () => {
     }
   });
 
-  test("the default policy offers exactly the partitions that have a default ceiling", () => {
-    const offered = PARTITION_NAMES.filter((p) => PARTITIONS[p].ceiling !== null).sort();
-    expect(Object.keys(DEFAULT_COMPUTE_POLICY.ceilings).sort()).toEqual(offered);
-    for (const p of offered)
-      expect(DEFAULT_COMPUTE_POLICY.ceilings[p] as unknown).toEqual(PARTITIONS[p].ceiling);
+  test("every default ceiling field of the six offered partitions, against literals", () => {
+    // Written out, not read from PARTITIONS: a changed number must change this test too.
+    expect(Object.keys(LITERAL_CEILINGS).sort()).toEqual([
+      "compute",
+      "debug",
+      "gpu",
+      "gpu-debug",
+      "gpu-shared",
+      "shared",
+    ]);
+    for (const [name, ceiling] of Object.entries(LITERAL_CEILINGS)) {
+      expect(PARTITIONS[name as PartitionName].ceiling as unknown, name).toEqual(ceiling);
+    }
+    for (const name of ["large-shared", "preempt", "gpu-preempt"] as const) {
+      expect(PARTITIONS[name].ceiling, name).toBeNull();
+    }
+  });
+
+  test("the default policy offers exactly those six, with those ceilings", () => {
+    expect(DEFAULT_COMPUTE_POLICY.ceilings as unknown).toEqual(LITERAL_CEILINGS);
+  });
+});
+
+describe("the whole default policy, against literals", () => {
+  test("every field of DEFAULT_COMPUTE_POLICY", () => {
+    expect(DEFAULT_COMPUTE_POLICY as unknown).toEqual({
+      defaultGrantMilli: { cpu: 0, gpu: 0 },
+      renewal: { enabled: false, everyDays: null },
+      ceilings: LITERAL_CEILINGS,
+      maxLiveJobsPerPerson: 4,
+      pipelines: { dailyJobCap: 50, maxLiveJobs: { cpu: 8, gpu: 4 } },
+      clients: {},
+      reservationWaitMinutes: 30,
+      retention: { recordsYears: 7, logsDays: 365, resultsDays: 30 },
+      resultLimits: {
+        maxJobBytes: 21474836480,
+        maxFiles: 5000,
+        maxStoredBytesPerPerson: 53687091200,
+        maxStoredBytesTotal: 1099511627776,
+      },
+      settle: { toleranceMilli: 1000, tolerancePercent: 5 },
+      registries: [],
+      bundleLimits: { maxTotalBytes: 104857600, maxFiles: 2000, maxFileBytes: 26214400 },
+    });
   });
 });
 
@@ -797,6 +969,36 @@ describe("the job specification", () => {
     expect(specRefused(specWith({ memory_mb: 16384, cores: 8, nodes: 2, gpus: 0 }))).toBe(false);
   });
 
+  test("a GPU partition needs at least one GPU and a CPU partition takes none", () => {
+    for (const partition of ["gpu-shared", "gpu", "gpu-debug", "gpu-preempt"]) {
+      expect(specRefused(specWith({ partition })), `${partition} with the default 0 GPUs`).toBe(
+        true,
+      );
+      expect(specRefused(specWith({ partition, gpus: 0 })), partition).toBe(true);
+      expect(specRefused(specWith({ partition, gpus: 1 })), `${partition} with 1`).toBe(false);
+      expect(specRefused(specWith({ partition, gpus: 4 })), `${partition} with 4`).toBe(false);
+    }
+    for (const partition of ["shared", "compute", "debug", "large-shared", "preempt"]) {
+      expect(specRefused(specWith({ partition })), `${partition} with the default`).toBe(false);
+      expect(specRefused(specWith({ partition, gpus: 1 })), `${partition} with 1 GPU`).toBe(true);
+    }
+    const issue = JobSpecSchema.safeParse(specWith({ partition: "gpu-shared" }));
+    expect(issue.success).toBe(false);
+    if (!issue.success) expect(issue.error.issues.map((i) => i.path.join("."))).toEqual(["gpus"]);
+  });
+
+  test("a partition name that is only an inherited key is refused", () => {
+    for (const partition of ["toString", "__proto__", "constructor", "hasOwnProperty"]) {
+      expect(specRefused(specWith({ partition })), partition).toBe(true);
+    }
+  });
+
+  test("memory is at most 16777216 MB (16 TiB)", () => {
+    expect(specRefused(specWith({ memory_mb: 16_777_216 }))).toBe(false);
+    expect(specRefused(specWith({ memory_mb: 16_777_217 }))).toBe(true);
+    expect(specRefused(specWith({ memory_mb: 1 }))).toBe(false);
+  });
+
   test("the output directory is `outputs`, which the launcher's layout fixes", () => {
     expect(JobSpecSchema.parse(SPEC).output_dir).toBe("outputs");
     expect(specRefused(specWith({ output_dir: "results" }))).toBe(true);
@@ -863,6 +1065,39 @@ describe("isSafeComputePath", () => {
 // --- The launcher's files ----------------------------------------------------------------------
 
 describe("the launcher contract", () => {
+  test("the records bucket keeps the launcher's manifest under its own name", () => {
+    expect(RECORDS_RESULT_MANIFEST_FILE).toBe("result-manifest.json");
+    expect(LAUNCHER_FILES.manifest).toBe("manifest.json");
+    // The launcher's failure code lives in result.json; there is no separate failure file.
+    expect((LAUNCHER_FILE_NAMES as readonly string[]).includes(RECORDS_RESULT_MANIFEST_FILE)).toBe(
+      false,
+    );
+    for (const rel of [
+      "../shared/compute-state.ts",
+      "../shared/contract/compute.ts",
+      "../shared/contract/compute-launch.ts",
+      "../shared/contract/compute-launch.schema.json",
+    ]) {
+      expect(readFileSync(join(import.meta.dir, rel), "utf8").includes("failure.json"), rel).toBe(
+        false,
+      );
+    }
+  });
+
+  test("one path-segment grammar and one output-file bound serve the whole contract", () => {
+    expect(COMPUTE_MAX_OUTPUT_FILES).toBe(100_000);
+    const segment = new RegExp(`^${COMPUTE_PATH_SEGMENT}$`);
+    for (const ok of ["a", "a b", "..a", "é"]) expect(segment.test(ok), ok).toBe(true);
+    for (const bad of ["", "a/b", "a\\b", "a\u0001", "a\u007f", "a\n"]) {
+      expect(segment.test(bad), JSON.stringify(bad)).toBe(false);
+    }
+    // A path built from the segment grammar is exactly isSafeComputePath's.
+    const built = new RegExp(`^(?:${COMPUTE_PATH_SEGMENT}/)*${COMPUTE_PATH_SEGMENT}$`);
+    for (const p of ["a", "a/b", "a//b", "/a", "a/", "a\\b", ""]) {
+      expect(built.test(p), JSON.stringify(p)).toBe(isSafeComputePath(p));
+    }
+  });
+
   test("names and layout the launcher and the Worker agree on", () => {
     expect(PIPELINES_TAPIS_OWNER).toBe("nemar-pipelines");
     expect(LAUNCHER_WORK_DIR).toBe("work");
