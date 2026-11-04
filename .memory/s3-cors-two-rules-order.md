@@ -8,15 +8,14 @@ metadata:
   modified: 2026-09-16T19:45:58.123Z
 ---
 
-The `nemar` S3 bucket (us-east-2) has a two-rule CORS configuration as of 2026-09-16.
+The `nemar` S3 bucket has a two-rule CORS configuration as of 2026-09-16.
+The exact origins and the rest of the configuration are on the gated documentation site, admin operations.
 Order is load-bearing: S3 applies the FIRST rule matching origin plus method plus headers.
 
-1. `browser-reads` -- GET/HEAD. Origins: `https://nemar.org`, `https://*.nemar.org`, both Pages
-   projects plus their preview wildcards, `https://demo.osc.earth`, `http://localhost:*`,
-   `http://127.0.0.1:*`. Exposes `ETag, Content-Length, Content-Range, Accept-Ranges,
-   Content-Type, Last-Modified`. MaxAge 86400.
-2. `website-uploads` -- PUT/GET/HEAD, `https://nemar.org` and `https://app.nemar.org`,
-   exposes `ETag` only, MaxAge 3600. This is the pre-existing rule, unchanged.
+1. `browser-reads` -- GET/HEAD for browser readers.
+   Exposes `ETag, Content-Length, Content-Range, Accept-Ranges, Content-Type, Last-Modified`, with a MaxAge of one day.
+2. `website-uploads` -- PUT/GET/HEAD for the website's upload flow, exposes `ETag` only, with a MaxAge of one hour.
+   This is the pre-existing rule, unchanged.
 
 Put the read rule second and every GET falls into the upload rule, which exposes only `ETag`;
 drop the upload rule and the website upload flow's `PUT` preflight fails.
@@ -29,7 +28,6 @@ expose list is a correctness requirement, not a convenience.
 
 **How to apply:** Probing the bucket with an origin that matches no rule returns NO CORS headers at
 all and a 403 preflight, which reads exactly like "the bucket has no CORS config". It is not.
-Always probe with `Origin: https://nemar.org` before concluding anything. CORS never grants access:
-private objects still 403 (checked against `xx099907` with a public control).
-`zarr.nemar.org` and `mcp.nemar.org` deliberately stay NEMAR-origin-only; browser readers address
-`data_base` on S3 directly instead. Related: [[s3-403-is-not-absence]], [[prove-the-inverse-path-too]].
+Always probe with an origin the configuration lists (the main site's) before concluding anything.
+CORS never grants access: private objects still 403 (checked against `xx099907` with a public control).
+Browser readers address `data_base` on S3 directly. Related: [[s3-403-is-not-absence]], [[prove-the-inverse-path-too]].
