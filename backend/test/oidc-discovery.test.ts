@@ -197,7 +197,7 @@ describe("a rotation shows in the key set at once, in the isolate that made it",
   test("the new next key is published the moment it exists", async () => {
     const before = (await h.call("GET", JWKS)).json as { keys: Array<{ kid: string }> };
     expect(before.keys).toHaveLength(2);
-    const rotated = await rotateSigningKeys(h.env, { actorId: h.ids.owner, force: true });
+    const rotated = await rotateSigningKeys(h.env, { actorId: h.ids.owner, force: true, emergency: true });
     expect(rotated.ok).toBe(true);
     const after = (await h.call("GET", JWKS)).json as { keys: Array<{ kid: string }> };
     expect(after.keys).toHaveLength(3);

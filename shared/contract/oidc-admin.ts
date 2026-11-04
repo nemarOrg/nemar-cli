@@ -9,6 +9,7 @@
  *   POST /admin/oidc/clients/:client_id/disable       cut a client off
  *   GET  /admin/oidc/keys                             the signing keys, never their private half
  *   POST /admin/oidc/keys/rotate                      make the first keys, or rotate them
+ *   POST /admin/oidc/keys/:kid/revoke                 withdraw a retired key from the key set
  *
  * Owner role, on the issuer's host only. A refusal is `{ error: <sentence>, code: <word> }`; the
  * words are {@link OIDC_ADMIN_ERROR_CODES} and are the API.
@@ -54,7 +55,12 @@ export const OIDC_ADMIN_ERROR_CODES = [
   "client_not_found",
   "client_disabled",
   "rotation_too_early",
+  "rotation_next_too_new",
   "rotation_conflict",
+  "key_unreadable",
+  "invalid_kid",
+  "key_not_found",
+  "key_not_revocable",
 ] as const;
 
 export type OidcAdminErrorCode = (typeof OIDC_ADMIN_ERROR_CODES)[number];
@@ -104,7 +110,11 @@ export const OIDC_CLIENT_ROTATE_FIELDS: readonly string[] = Object.keys(
 );
 
 /** The body of `POST /admin/oidc/keys/rotate`; an empty body is not forced. */
-export const oidcKeysRotateRequestSchema = z.object({ force: z.boolean().optional() });
+export const oidcKeysRotateRequestSchema = z.object({
+  force: z.boolean().optional(),
+  /** With `force`: rotate even though the next key was published under 6 minutes ago. */
+  emergency: z.boolean().optional(),
+});
 export const OIDC_KEYS_ROTATE_FIELDS: readonly string[] = Object.keys(
   oidcKeysRotateRequestSchema.shape,
 );
@@ -182,6 +192,8 @@ export const oidcKeyViewSchema = z
     created_at: z.string(),
     promoted_at: z.string().nullable(),
     retired_at: z.string().nullable(),
+    // Optional: a Worker that predates the revoked state does not send it.
+    revoked_at: z.string().nullable().optional(),
     promotable_at: z.string().nullable(),
   })
   .passthrough();
@@ -196,3 +208,9 @@ export const oidcKeysRotateResponseSchema = z
   .object({ action: z.string(), keys: z.array(oidcKeyViewSchema) })
   .passthrough();
 export type OidcKeysRotateResponse = z.infer<typeof oidcKeysRotateResponseSchema>;
+
+/** `POST /admin/oidc/keys/:kid/revoke`: `changed` is false when the key already was revoked. */
+export const oidcKeyRevokeResponseSchema = z
+  .object({ key: oidcKeyViewSchema, changed: z.boolean() })
+  .passthrough();
+export type OidcKeyRevokeResponse = z.infer<typeof oidcKeyRevokeResponseSchema>;

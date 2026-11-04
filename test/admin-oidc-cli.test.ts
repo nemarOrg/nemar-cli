@@ -467,6 +467,10 @@ describe("nemar admin oidc keys", () => {
     expect(early.plain).toMatch(/24 hours/);
     expect(early.plain).toMatch(/--force/);
     expect(early.json).toMatch(/24 hours/);
+    // A key published seconds ago is not forced without --yes (an emergency); age it past the floor.
+    db.run(
+      "UPDATE oidc_signing_keys SET created_at = datetime('now', '-10 minutes') WHERE state = 'next'",
+    );
     const forced = await runCli(["keys", "rotate", "--force", "--json"]);
     expect(forced.exitCode, forced.stderr).toBe(0);
     const parsed = JSON.parse(forced.stdout) as { action: string; keys: unknown[] };

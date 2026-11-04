@@ -272,6 +272,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /oidc/clients/:client_id/disable": 1,
   "GET /oidc/keys": 1,
   "POST /oidc/keys/rotate": 1,
+  "POST /oidc/keys/:kid/revoke": 1,
 };
 
 describe("admin route inventory", () => {
@@ -326,7 +327,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(212);
+    expect(adminRoutes.routes.length).toBe(213);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

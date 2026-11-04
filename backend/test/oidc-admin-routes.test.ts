@@ -11,6 +11,7 @@
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
+  oidcKeyRevokeResponseSchema,
   oidcKeysResponseSchema,
   oidcKeysRotateResponseSchema,
 } from "../../shared/contract/oidc-admin";
@@ -31,17 +32,24 @@ beforeEach(async () => {
 });
 
 const CLIENT_ID = "oc_0123456789abcdef01234567";
+const KID = "0123456789abcdef";
 
 /** Every OIDC owner route the admin router has, as `[method, path with params filled in]`. */
 function oidcRoutes(): Array<[string, string]> {
   return adminRoutes.routes
     .filter((r) => r.path.startsWith("/oidc/") && r.method !== "ALL")
-    .map((r) => [r.method, `/admin${r.path.replace(":client_id", CLIENT_ID)}`] as [string, string])
+    .map(
+      (r) =>
+        [r.method, `/admin${r.path.replace(":client_id", CLIENT_ID).replace(":kid", KID)}`] as [
+          string,
+          string,
+        ],
+    )
     .filter(([m, p], i, all) => all.findIndex(([m2, p2]) => m2 === m && p2 === p) === i);
 }
 
 describe("the owner routes the admin router has", () => {
-  test("are exactly the seven this phase adds", () => {
+  test("are exactly the eight this phase adds", () => {
     expect(oidcRoutes().sort()).toEqual(
       [
         ["GET", "/admin/oidc/clients"],
@@ -51,6 +59,7 @@ describe("the owner routes the admin router has", () => {
         ["POST", `/admin/oidc/clients/${CLIENT_ID}/disable`],
         ["GET", "/admin/oidc/keys"],
         ["POST", "/admin/oidc/keys/rotate"],
+        ["POST", `/admin/oidc/keys/${KID}/revoke`],
       ].sort(),
     );
   });
@@ -198,7 +207,7 @@ describe("the signing keys, over HTTP", () => {
     expect(early.status).toBe(409);
     expect(early.json?.code).toBe("rotation_too_early");
     expect(typeof early.json?.promotable_at).toBe("string");
-    const forced = await rotate({ force: true });
+    const forced = await rotate({ force: true, emergency: true });
     expect(forced.status, forced.text).toBe(200);
     expect(forced.json?.action).toBe("rotated");
     expect(
@@ -219,14 +228,14 @@ describe("the signing keys, over HTTP", () => {
 
   test("no response holds a private member, a ciphertext, or the secret", async () => {
     await rotate();
-    await rotate({ force: true });
+    await rotate({ force: true, emergency: true });
     const rows = h.db
       .query<{ private_jwk_encrypted: string }, []>(
         "SELECT private_jwk_encrypted FROM oidc_signing_keys",
       )
       .all();
     expect(rows.length).toBe(3);
-    const texts = [(await list()).text, (await rotate({ force: true })).text];
+    const texts = [(await list()).text, (await rotate({ force: true, emergency: true })).text];
     for (const text of texts) {
       for (const r of rows) expect(text).not.toContain(r.private_jwk_encrypted);
       expect(text).not.toContain("private");
@@ -237,8 +246,48 @@ describe("the signing keys, over HTTP", () => {
     }
   });
 
-  test("a body that is not {force: boolean} is refused and changes nothing", async () => {
-    for (const body of [{ force: "yes" }, { force: 1 }, { forced: true }, [], "force"]) {
+  test("a forced rotation of a key published a moment ago is 409 unless it is an emergency", async () => {
+    await rotate();
+    const refused = await rotate({ force: true });
+    expect(refused.status).toBe(409);
+    expect(refused.json?.code).toBe("rotation_next_too_new");
+    expect(String(refused.json?.error)).toMatch(/emergency/i);
+    expect(
+      oidcKeysResponseSchema
+        .parse((await list()).json)
+        .keys.map((k) => k.state)
+        .sort(),
+    ).toEqual(["current", "next"]);
+    expect((await rotate({ force: true, emergency: true })).status).toBe(200);
+  });
+
+  test("a rotation under another OIDC_SECRET is 409 key_unreadable and says which secret was used", async () => {
+    await rotate();
+    h.db.run(
+      "UPDATE oidc_signing_keys SET created_at = datetime('now', '-25 hours') WHERE state = 'next'",
+    );
+    const other = "another-oidc-secret-0123456789abcdef0123456789";
+    const res = await h.call("POST", "/admin/oidc/keys/rotate", {
+      key: OWNER_KEY,
+      body: {},
+      env: { OIDC_SECRET: other },
+    });
+    expect(res.status).toBe(409);
+    expect(res.json?.code).toBe("key_unreadable");
+    expect(String(res.json?.error)).toMatch(/different OIDC_SECRET/);
+    expect(res.text).not.toContain(other);
+    expect((await list()).json).toMatchObject({ keys: [{ state: "current" }, { state: "next" }] });
+  });
+
+  test("a body that is not {force: boolean, emergency: boolean} is refused and changes nothing", async () => {
+    for (const body of [
+      { force: "yes" },
+      { force: 1 },
+      { emergency: "yes" },
+      { forced: true },
+      [],
+      "force",
+    ]) {
       const res = await rotate(body);
       expect(res.status, JSON.stringify(body)).toBe(400);
       expect(res.json?.code).toBe("invalid_body");
@@ -248,7 +297,7 @@ describe("the signing keys, over HTTP", () => {
 
   test("a rotation is in the audit trail by who made it and whether it was forced", async () => {
     await rotate();
-    await rotate({ force: true });
+    await rotate({ force: true, emergency: true });
     const rows = h.db
       .query<{ user_id: number; details: string }, []>(
         "SELECT user_id, details FROM audit_log WHERE action = 'oidc.keys.rotate' ORDER BY id",
@@ -256,5 +305,72 @@ describe("the signing keys, over HTTP", () => {
       .all();
     expect(rows.map((r) => r.user_id)).toEqual([h.ids.owner, h.ids.owner]);
     expect(rows.map((r) => JSON.parse(r.details).forced)).toEqual([false, true]);
+  });
+});
+
+describe("revoking a signing key, over HTTP", () => {
+  const rotate = (body?: unknown) =>
+    h.call("POST", "/admin/oidc/keys/rotate", { key: OWNER_KEY, body });
+  const revoke = (kid: string) =>
+    h.call("POST", `/admin/oidc/keys/${kid}/revoke`, { key: OWNER_KEY });
+  const kidOf = (state: string): string =>
+    (h.db.query("SELECT kid FROM oidc_signing_keys WHERE state = ?").get(state) as { kid: string })
+      .kid;
+
+  test("a retired key is revoked, and stops being published at once", async () => {
+    await rotate();
+    const first = kidOf("current");
+    await rotate({ force: true, emergency: true });
+    await rotate({ force: true, emergency: true });
+    const before = (await h.call("GET", "/oauth/jwks")).json as { keys: Array<{ kid: string }> };
+    expect(before.keys.map((k) => k.kid)).toContain(first);
+    const res = await revoke(first);
+    expect(res.status, res.text).toBe(200);
+    const body = oidcKeyRevokeResponseSchema.parse(res.json);
+    expect(body.changed).toBe(true);
+    expect(body.key.state).toBe("revoked");
+    expect(typeof body.key.revoked_at).toBe("string");
+    const after = (await h.call("GET", "/oauth/jwks")).json as { keys: Array<{ kid: string }> };
+    expect(after.keys.map((k) => k.kid)).not.toContain(first);
+    // Twice is the same answer, with changed false.
+    const again = await revoke(first);
+    expect(again.status).toBe(200);
+    expect(again.json?.changed).toBe(false);
+  });
+
+  test("the current and the next key are 409, an unknown key is 404, and a malformed id is 400", async () => {
+    await rotate();
+    for (const state of ["current", "next"]) {
+      const res = await revoke(kidOf(state));
+      expect(res.status, state).toBe(409);
+      expect(res.json?.code).toBe("key_not_revocable");
+      expect(String(res.json?.error)).toMatch(/rotate/i);
+    }
+    const missing = await revoke("00000000000000ff");
+    expect(missing.status).toBe(404);
+    expect(missing.json?.code).toBe("key_not_found");
+    for (const bad of ["nope", "0123456789ABCDEF", "0123456789abcde", "0123456789abcdef0"]) {
+      const res = await revoke(bad);
+      expect(res.status, bad).toBe(400);
+      expect(res.json?.code).toBe("invalid_kid");
+    }
+  });
+
+  test("it is audited by who did it, and the answer holds no key material", async () => {
+    await rotate();
+    await rotate({ force: true, emergency: true });
+    const retired = kidOf("retired");
+    const res = await revoke(retired);
+    const row = h.db
+      .query("SELECT user_id, resource_id FROM audit_log WHERE action = 'oidc.keys.revoke'")
+      .get();
+    expect(row).toEqual({ user_id: h.ids.owner, resource_id: retired });
+    const ciphertexts = h.db
+      .query<{ private_jwk_encrypted: string }, []>(
+        "SELECT private_jwk_encrypted FROM oidc_signing_keys",
+      )
+      .all();
+    for (const c of ciphertexts) expect(res.text).not.toContain(c.private_jwk_encrypted);
+    expect(res.text).not.toContain('"d"');
   });
 });

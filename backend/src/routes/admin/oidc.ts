@@ -11,6 +11,7 @@
  *                                                      client holds is revoked by phase #2019)
  *   GET  /admin/oidc/keys                              the signing keys, never their private half
  *   POST /admin/oidc/keys/rotate                       make the first keys, or rotate them
+ *   POST /admin/oidc/keys/:kid/revoke                  withdraw a retired key from the key set
  *
  * WHO AND WHERE. `ownerMiddleware` first, so a caller is told what they are (401, 403) whether or not
  * the surface exists; then `oidcSurface`, which makes every route 404 unless the provider is on
@@ -40,7 +41,15 @@ import {
   oidcClientRotateRequestSchema,
   oidcKeysRotateRequestSchema,
 } from "../../../../shared/contract/oidc-admin";
-import { isOidcClientId } from "../../../../shared/oidc";
+import {
+  OIDC_CLIENT_ID_HEX_LENGTH,
+  OIDC_CLIENT_ID_PREFIX,
+  OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
+  OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_KID_HEX_LENGTH,
+  isOidcClientId,
+  isOidcKid,
+} from "../../../../shared/oidc";
 import { ownerMiddleware } from "../../middleware/auth";
 import {
   createClient,
@@ -49,7 +58,7 @@ import {
   listClients,
   rotateClientSecret,
 } from "../../services/oidc-clients";
-import { listSigningKeys, rotateSigningKeys } from "../../services/oidc-keys";
+import { listSigningKeys, revokeSigningKey, rotateSigningKeys } from "../../services/oidc-keys";
 import type { Bindings, Variables } from "../../types/bindings";
 import { oidcSurface } from "../oidc-discovery";
 import type { AdminRouter } from "./shared";
@@ -124,7 +133,7 @@ function clientIdParam(c: Ctx): { id: string } | { response: Response } {
         c,
         400,
         "invalid_client_id",
-        "That is not a client id (oc_ and 24 lowercase hex characters).",
+        `That is not a client id (${OIDC_CLIENT_ID_PREFIX} and ${OIDC_CLIENT_ID_HEX_LENGTH} lowercase hex characters).`,
       ),
     };
   }
@@ -207,15 +216,32 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
     if (!parsed.ok) return parsed.response;
     const result = await rotateSigningKeys(c.env, {
       force: parsed.value.force === true,
+      emergency: parsed.value.emergency === true,
       actorId: c.get("user").id,
     });
     if (result.ok) return c.json({ action: result.action, keys: result.keys });
+    if (result.code === "forced_too_early") {
+      return refusal(
+        c,
+        409,
+        "rotation_next_too_new",
+        `The next key was published under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes ago. A client may not have it in the key set it cached, so tokens signed with it can fail verification there for about five minutes. Wait, or say it is an emergency.`,
+      );
+    }
+    if (result.code === "key_unreadable") {
+      return refusal(
+        c,
+        409,
+        "key_unreadable",
+        "The key about to sign cannot be read: it was encrypted under a different OIDC_SECRET, so the rotation was not done.",
+      );
+    }
     if (result.code === "too_early") {
       return refusal(
         c,
         409,
         "rotation_too_early",
-        `The next key is not 24 hours old yet; it may become current at ${result.promotable_at} UTC. Use --force to rotate now.`,
+        `The next key is not ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old yet; it may become current at ${result.promotable_at} UTC. Use --force to rotate now.`,
         { promotable_at: result.promotable_at },
       );
     }
@@ -224,6 +250,29 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
       409,
       "rotation_conflict",
       "The keys changed while this rotation ran; read them again.",
+    );
+  });
+
+  admin.post("/oidc/keys/:kid/revoke", async (c) => {
+    const kid = c.req.param("kid") ?? "";
+    if (!isOidcKid(kid)) {
+      return refusal(
+        c,
+        400,
+        "invalid_kid",
+        `That is not a key id (${OIDC_KID_HEX_LENGTH} lowercase hex characters).`,
+      );
+    }
+    const result = await revokeSigningKey(c.env, kid, c.get("user").id);
+    if (result.ok) return c.json({ key: result.key, changed: result.changed });
+    if (result.code === "key_not_found") {
+      return refusal(c, 404, "key_not_found", "There is no signing key with that id.");
+    }
+    return refusal(
+      c,
+      409,
+      "key_not_revocable",
+      "Only a retired key can be revoked. Rotate the keys first, then revoke the key once it is retired.",
     );
   });
 }
