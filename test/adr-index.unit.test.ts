@@ -34,8 +34,10 @@ function indexedFiles(readme: string): string[] {
  * directory is not responsible for. ADR 0118 belongs to the compute gateway epic, which runs beside
  * the OpenID Connect provider epic that wrote ADR 0119.
  *
- * DELETE the entry in the pull request that adds ADR 0118: with the file on disk the entry is no
- * longer a gap, and "a tolerated gap is still a gap on disk" below fails until it is gone.
+ * DELETE the entry in the first change that has both this entry and the 0118 file. The compute
+ * gateway epic's own pull request cannot carry the deletion (it is cut from a branch that has no
+ * entry), so it is whichever merge first brings the two together: with the file on disk the entry
+ * is no longer a gap, and "a tolerated gap is still a gap on disk" below fails until it is gone.
  */
 const TOLERATED_GAPS: ReadonlySet<number> = new Set([118]);
 
