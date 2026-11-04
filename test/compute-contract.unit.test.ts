@@ -1109,6 +1109,24 @@ const LAUNCH_CASES: readonly Case[] = [
   ["a sif in a directory", set(LAUNCH, "image.sif", "images/runtime-1.2.sif"), true],
 
   ["an unknown top-level key", { ...LAUNCH, upload: {} }, false],
+  // A trailing newline is the one input `$` lets Python's `re` accept and JavaScript's refuse; the
+  // schema ends its patterns with `(?![\s\S])` so every engine agrees.
+  ["an entry with a trailing newline", set(LAUNCH, "entry", "run.py\n"), false],
+  ["an env value with a trailing newline", set(LAUNCH, "env", { OMP_NUM_THREADS: "4\n" }), false],
+  ["a job token with a trailing newline", set(LAUNCH, "job_token", `${"t".repeat(43)}\n`), false],
+  ["a job id with a trailing newline", set(LAUNCH, "job_id", `${JOB_ID}\n`), false],
+  ["a bundle digest with a trailing newline", set(LAUNCH, "bundle.sha256", `${HEX_A}\n`), false],
+  [
+    "an api_base with a trailing newline",
+    set(LAUNCH, "api_base", "https://api.example.test\n"),
+    false,
+  ],
+  [
+    "a dataset id with a trailing newline",
+    set(LAUNCH, "datasets", [{ id: "nm000104\n", version: "1" }]),
+    false,
+  ],
+  ["a sif with a trailing newline", set(LAUNCH, "image.sif", "runtime.sif\n"), false],
   ["a bundle url", set(LAUNCH, "bundle.url", "https://x.test/b.tar.gz"), false],
   ["an unknown image key", set(LAUNCH, "image.extra", 1), false],
   ["an unknown limits key", set(LAUNCH, "limits.extra", 1), false],
@@ -1685,6 +1703,27 @@ describe("the JSON Schema file read back against the constants it mirrors", () =
         "result",
       ].sort(),
     );
+  });
+
+  test("no pattern that must match ends in `$`, which Python lets match before a trailing newline", () => {
+    // A pattern under `not` only ever refuses more with `$`, so only the positive ones matter.
+    const open: string[] = [];
+    const walk = (node: unknown, where: string, underNot: boolean) => {
+      if (Array.isArray(node)) return node.forEach((n, i) => walk(n, `${where}[${i}]`, underNot));
+      if (node && typeof node === "object") {
+        for (const [k, v] of Object.entries(node)) {
+          if (k === "pattern" && typeof v === "string") {
+            if (!underNot && !v.endsWith("(?![\\s\\S])")) open.push(`${where}.pattern`);
+          } else {
+            walk(v, `${where}.${k}`, underNot || k === "not");
+          }
+        }
+      }
+    };
+    walk(schema, "$", false);
+    expect(open).toEqual([]);
+    // A guard against a vacuous pass: the walk did reach patterns.
+    expect(JSON.stringify(schema).split('"pattern"').length).toBeGreaterThan(30);
   });
 
   test("every object in it is closed", () => {
