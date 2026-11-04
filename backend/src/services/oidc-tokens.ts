@@ -448,9 +448,9 @@ export async function redeemAuthorizationCode(
   const scopes = JSON.parse(code.scopes) as string[];
   const accessToken = generateOidcToken("access");
   const accessHash = await hashOidcToken(accessToken);
-  const wantsRefresh =
-    scopes.includes("offline_access") && client.allowedGrants.includes("refresh_token");
-  const refreshToken = wantsRefresh ? generateOidcToken("refresh") : null;
+  // Whether a refresh token is issued is the statement's to decide (`offline_access` in the code,
+  // the refresh token grant on the client), and the answer carries one only when its row exists.
+  const refreshToken = generateOidcToken("refresh");
 
   // Signed before the batch, so a signing failure mints nothing; discarded if the claim is lost.
   const idToken = await signJwt(env, {
@@ -464,7 +464,7 @@ export async function redeemAuthorizationCode(
     ...claimsForScopes(scopes, account),
   });
 
-  const statements = [
+  const results = await db.batch([
     db.prepare(TOKENS_PRUNE_SQL),
     db
       .prepare(ACCESS_FROM_CODE_SQL)
@@ -476,21 +476,16 @@ export async function redeemAuthorizationCode(
         client.id,
         MACHINE_ONLY_SCOPES_JSON,
       ),
-  ];
-  if (refreshToken !== null) {
-    statements.push(
-      db
-        .prepare(REFRESH_FROM_CODE_SQL)
-        .bind(
-          await hashOidcToken(refreshToken),
-          OIDC_REFRESH_TOKEN_IDLE_SECONDS,
-          OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS,
-          accessHash,
-        ),
-    );
-  }
-  statements.push(db.prepare(CODE_SPEND_SQL).bind(code.id, accessHash));
-  const results = await db.batch(statements);
+    db
+      .prepare(REFRESH_FROM_CODE_SQL)
+      .bind(
+        await hashOidcToken(refreshToken),
+        OIDC_REFRESH_TOKEN_IDLE_SECONDS,
+        OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS,
+        accessHash,
+      ),
+    db.prepare(CODE_SPEND_SQL).bind(code.id, accessHash),
+  ]);
   const minted = results[1]?.meta?.changes ?? 0;
 
   if (minted !== 1) {
@@ -500,10 +495,10 @@ export async function redeemAuthorizationCode(
     if (used) await db.prepare(CODE_REPLAY_REVOKE_SQL).bind(codeHash, client.id).run();
     return invalid();
   }
-  if ((results.at(-1)?.meta?.changes ?? 0) !== 1) {
+  if ((results[3]?.meta?.changes ?? 0) !== 1) {
     throw new Error("an access token was minted from a code that was not then marked used");
   }
-  const refreshMinted = refreshToken !== null && (results[2]?.meta?.changes ?? 0) === 1;
+  const refreshMinted = (results[2]?.meta?.changes ?? 0) === 1;
   return {
     ok: true,
     body: {

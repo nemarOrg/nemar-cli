@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { oidcBearer } from "../src/middleware/oidc-bearer";
+import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import {
   authorize,
@@ -119,6 +120,65 @@ describe("oidcBearer on a compute-scope route", () => {
       const res = await call("/compute/me", authorization);
       expect({ authorization, status: res.status }).toEqual({ authorization, status: 401 });
       expect(res.headers.get("WWW-Authenticate")).toBe('Bearer error="invalid_token"');
+    }
+  });
+
+  test("only an access token's row and only an access token's prefix are accepted", async () => {
+    // Rows written here by hand, which is the point: no route writes either. A REFRESH row stored
+    // under the hash of an `nmo_at_` value, and an ACCESS row stored under the hash of a value without
+    // the prefix. Each is refused by its own check, so neither check is the other's only cover.
+    const client = await registerClient(h, {
+      allowed_scopes: ["openid", "compute.read"],
+      allowed_grants: ["authorization_code"],
+    });
+    const userId = seedAccount(h);
+    const code = await authorize(h, client, await sessionCookie(h, userId), {
+      scope: "openid compute.read",
+    });
+    expect((await redeem(h, client, code)).status).toBe(200);
+    const issued = h.db
+      .query<Record<string, unknown>, []>("SELECT * FROM oidc_tokens WHERE kind = 'access'")
+      .get() as Record<string, unknown>;
+    const asRefresh = `nmo_at_${"R".repeat(43)}`;
+    const unprefixed = `plain_${"P".repeat(43)}`;
+    h.db
+      .query(
+        `INSERT INTO oidc_tokens (token_hash, kind, client_id, user_id, grant_id, code_id, family_id,
+           audience, scopes, expires_at, absolute_expires_at)
+         VALUES (?, 'refresh', ?, ?, ?, ?, ?, ?, ?, datetime('now', '+1 day'), datetime('now', '+2 days'))`,
+      )
+      .run(
+        await hashApiKey(asRefresh),
+        issued.client_id as number,
+        issued.user_id as number,
+        issued.grant_id as number,
+        issued.code_id as number,
+        issued.family_id as string,
+        issued.audience as string,
+        issued.scopes as string,
+      );
+    h.db
+      .query(
+        `INSERT INTO oidc_tokens (token_hash, kind, client_id, user_id, grant_id, code_id, family_id,
+           audience, scopes, expires_at)
+         VALUES (?, 'access', ?, ?, ?, ?, ?, ?, ?, datetime('now', '+600 seconds'))`,
+      )
+      .run(
+        await hashApiKey(unprefixed),
+        issued.client_id as number,
+        issued.user_id as number,
+        issued.grant_id as number,
+        issued.code_id as number,
+        issued.family_id as string,
+        issued.audience as string,
+        issued.scopes as string,
+      );
+    for (const token of [asRefresh, unprefixed]) {
+      const res = await call("/compute/me", `Bearer ${token}`);
+      expect({ token: token.slice(0, 7), status: res.status }).toEqual({
+        token: token.slice(0, 7),
+        status: 401,
+      });
     }
   });
 

@@ -203,11 +203,14 @@ describe("rotation", () => {
     expectInvalidGrant(await refresh(f.client, two.refresh_token));
   });
 
-  test("inside the grace, at 29 seconds, the retry is still honoured", async () => {
+  test("inside the grace, at 29 seconds, the retry is still honoured, and moves nothing", async () => {
     const f = await family();
     expect((await refresh(f.client, f.first.refresh_token)).status).toBe(200);
     await age(f.first.refresh_token, 29);
+    const spentAt = (await rowOf(f.first.refresh_token)).used_at;
     expect((await refresh(f.client, f.first.refresh_token)).status).toBe(200);
+    // The retry left the first rotation's time where it was: the grace never stretches.
+    expect((await rowOf(f.first.refresh_token)).used_at).toBe(spentAt);
   });
 
   test("a revoked refresh token presented again revokes its family", async () => {

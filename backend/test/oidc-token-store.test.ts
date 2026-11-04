@@ -24,6 +24,7 @@ import {
   CODE_REPLAY_REVOKE_SQL,
   CODE_SPEND_SQL,
   REFRESH_CHILD_SQL,
+  REFRESH_FROM_CODE_SQL,
   REFRESH_REUSE_REVOKE_SQL,
   REFRESH_SPEND_SQL,
   TOKENS_PRUNE_SQL,
@@ -570,6 +571,25 @@ describe("ACCESS_FROM_CODE_SQL on its own: the claim predicate and the gates", (
 // ---------------------------------------------------------------------------------------------
 // Rotation
 // ---------------------------------------------------------------------------------------------
+
+describe("REFRESH_FROM_CODE_SQL on its own", () => {
+  const refreshFor = (e: Engine, accessHash: string) =>
+    e.run(REFRESH_FROM_CODE_SQL, HASH(), 2_592_000, 7_776_000, accessHash);
+
+  onEveryEngine(
+    "mints beside the access token only with offline_access and the refresh grant",
+    async (e) => {
+      const w = await world(e);
+      expect((await refreshFor(e, (await mintFromCode(e, w)).hash)).changes).toBe(1);
+      const noOffline = await world(e, { codeScopes: ["openid"] });
+      expect((await refreshFor(e, (await mintFromCode(e, noOffline)).hash)).changes).toBe(0);
+      const noGrant = await world(e, { grants: ["authorization_code"] });
+      expect((await refreshFor(e, (await mintFromCode(e, noGrant)).hash)).changes).toBe(0);
+      // Beside nothing: no access token of that hash.
+      expect((await refreshFor(e, HASH())).changes).toBe(0);
+    },
+  );
+});
 
 describe("REFRESH_CHILD_SQL on its own: first use, one retry, nothing else", () => {
   onEveryEngine(
