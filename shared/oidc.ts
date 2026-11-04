@@ -25,10 +25,11 @@ export interface OidcScopeDefinition {
    */
   readonly machineOnly: boolean;
   /**
-   * The claims the scope adds to what a client reads, as ADR 0119 rule 6 names them. A scope the
-   * ADR gives no claim (`nemar.account` is "account kind, status and tier" with no claim name;
-   * the compute scopes are read through the API, never from a token) declares none, and discovery
-   * advertises none: the userinfo phase names `nemar.account`'s claims.
+   * The claims the scope adds to what a client reads, as ADR 0119 rule 6 names them
+   * (`backend/src/services/oidc-claims.ts` serves exactly these). `nemar.account`'s "account kind,
+   * status and tier" are `nemar_kind`, `nemar_status` and `nemar_tier` (rule 14). A scope with no
+   * claim (`offline_access` is a grant; the compute scopes are read through the API, never from a
+   * token) declares none, and discovery advertises none for it.
    */
   readonly claims: readonly string[];
 }
@@ -39,7 +40,11 @@ export const OIDC_SCOPES: readonly OidcScopeDefinition[] = [
   { name: "profile", machineOnly: false, claims: ["name", "given_name", "family_name"] },
   { name: "email", machineOnly: false, claims: ["email", "email_verified"] },
   { name: "orcid", machineOnly: false, claims: ["orcid", "orcid_verified"] },
-  { name: "nemar.account", machineOnly: false, claims: [] },
+  {
+    name: "nemar.account",
+    machineOnly: false,
+    claims: ["nemar_kind", "nemar_status", "nemar_tier"],
+  },
   { name: "offline_access", machineOnly: false, claims: [] },
   { name: "compute.read", machineOnly: false, claims: [] },
   { name: "compute.reserve", machineOnly: false, claims: [] },
@@ -61,13 +66,13 @@ export function isMachineOnlyScope(name: string): boolean {
 }
 
 /**
- * The claims discovery advertises (`claims_supported`): the identity token's own, then each
- * scope's in catalogue order. An advertised list that is shorter than what is served is allowed
- * by the discovery specification; one that names a claim that is never served is not, which is why
- * `nemar.account` is absent until its claims are named.
+ * The claims discovery advertises (`claims_supported`): the identity token's own (`auth_time` and
+ * `at_hash` included, which the token endpoint signs into every identity token), then each scope's
+ * in catalogue order. An advertised list that is shorter than what is served is allowed by the
+ * discovery specification; one that names a claim that is never served is not.
  */
 export function oidcClaimsSupported(): string[] {
-  const own = ["iss", "sub", "aud", "exp", "iat", "nonce"];
+  const own = ["iss", "sub", "aud", "exp", "iat", "nonce", "auth_time", "at_hash"];
   const fromScopes = OIDC_SCOPES.flatMap((s) => s.claims).filter((c) => !own.includes(c));
   return [...own, ...fromScopes];
 }

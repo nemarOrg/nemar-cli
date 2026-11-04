@@ -81,15 +81,16 @@ describe("the scope catalogue is the ADR's table", () => {
     }
   });
 
-  test("the claims each scope carries are the ADR's (nemar.account names none yet)", () => {
+  test("the claims each scope carries are the ADR's", () => {
     const claims = Object.fromEntries(OIDC_SCOPES.map((s) => [s.name, [...s.claims]]));
     expect(claims.openid).toEqual(["sub"]);
     expect(claims.profile).toEqual(["name", "given_name", "family_name"]);
     expect(claims.email).toEqual(["email", "email_verified"]);
     expect(claims.orcid).toEqual(["orcid", "orcid_verified"]);
-    // ADR 0119 rule 6 says "account kind, status and tier" and names no claim, so none is declared
-    // and discovery does not advertise one. The userinfo phase names them.
-    expect(claims["nemar.account"]).toEqual([]);
+    // ADR 0119 rule 6 says "account kind, status and tier"; the token phase (#2018) named them, and
+    // `services/oidc-claims.ts` serves exactly these.
+    expect(claims["nemar.account"]).toEqual(["nemar_kind", "nemar_status", "nemar_tier"]);
+    expect(claims.offline_access).toEqual([]);
     for (const compute of ["compute.read", "compute.reserve", "compute.submit", "compute.stats"]) {
       expect(claims[compute]).toEqual([]);
     }
@@ -103,6 +104,8 @@ describe("the scope catalogue is the ADR's table", () => {
       "exp",
       "iat",
       "nonce",
+      "auth_time",
+      "at_hash",
       "name",
       "given_name",
       "family_name",
@@ -110,6 +113,9 @@ describe("the scope catalogue is the ADR's table", () => {
       "email_verified",
       "orcid",
       "orcid_verified",
+      "nemar_kind",
+      "nemar_status",
+      "nemar_tier",
     ]);
   });
 

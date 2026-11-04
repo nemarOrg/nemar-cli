@@ -11,6 +11,7 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import { __limits } from "../src/middleware/rateLimit";
 import { rotateSigningKeys } from "../src/services/oidc-keys";
 import type { Bindings } from "../src/types/bindings";
 import { wrapD1 } from "./helpers/d1";
@@ -338,12 +339,25 @@ describe("exempt from the rate limiter", () => {
 
   test("the exemption is not a way to the rest of the surface", async () => {
     await exhaust();
-    const res = await h.call("GET", "/oauth/token", {
+    const res = await h.call("GET", "/oauth/userinfo", {
       headers: edge(ADDRESS),
       env: asProduction,
       bypass: false,
     });
     expect(res.status).toBe(429);
+    // The token endpoint is limited too, by its own bucket (#2018).
+    await limiter.seed(`oauth-ip:${ADDRESS}`, {
+      count: __limits.OAUTH_MAX_REQUESTS,
+      warned: false,
+      windowEnd: T0 + 30_000,
+    });
+    const token = await h.call("POST", "/oauth/token", {
+      headers: edge(ADDRESS),
+      env: asProduction,
+      bypass: false,
+    });
+    expect(token.status).toBe(429);
+    expect(token.headers.get("X-RateLimit-Bucket")).toBe("oauth-ip");
     const legacy = await h.call("GET", `/nemar${DISCOVERY}`, {
       headers: edge(ADDRESS),
       env: asProduction,
