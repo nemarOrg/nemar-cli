@@ -10,8 +10,8 @@
  *    compute on. Development is allowed so staging can run compute against a development tenant with
  *    its own credentials; every compute SCHEDULE stays production-only (the cron allowlist), and in
  *    development a job advances by its webhook, by a read, and by an administrator's command.
- *  - A switch is on only as the exact string `"1"` (as `AUTO_REPULL_ENABLED`). `"true"`, `" 1"`, `"yes"`
- *    and an unset binding are off.
+ *  - A switch is on only as the exact string `"1"` (as `AUTO_REPULL_ENABLED`). `"true"`, `" 1"`, `"yes"`,
+ *    an unset binding, and a value that only converts to it (the number 1, `true`, `["1"]`) are off.
  *  - The pipelines switch acts only while the compute switch is also on, so turning compute off stops
  *    NEMAR's own dispatch whatever the second switch says.
  *
@@ -24,6 +24,15 @@ import type { Bindings } from "../types/bindings";
 /** The environments compute may run in: exactly these two words. */
 const COMPUTE_ENVIRONMENTS = ["production", "development"] as const;
 
+/**
+ * Whether a binding is the STRING `"1"`, and nothing that merely converts to it. A variable set in the
+ * wrangler configuration as a TOML integer arrives as the number 1, and `1 == "1"`, `String(1) === "1"`
+ * and `["1"] == "1"` are all true in JavaScript: none of them may turn a dark switch on.
+ */
+function isOne(value: unknown): boolean {
+  return typeof value === "string" && value === "1";
+}
+
 /** Whether `ENVIRONMENT` is exactly `production` or exactly `development`. */
 export function isComputeEnvironment(env: Pick<Bindings, "ENVIRONMENT">): boolean {
   return (COMPUTE_ENVIRONMENTS as readonly unknown[]).includes(env.ENVIRONMENT);
@@ -31,12 +40,12 @@ export function isComputeEnvironment(env: Pick<Bindings, "ENVIRONMENT">): boolea
 
 /** Compute may run: production or development, and the switch exactly `"1"`. */
 export function computeEnabled(env: Pick<Bindings, "ENVIRONMENT" | "COMPUTE_ENABLED">): boolean {
-  return isComputeEnvironment(env) && env.COMPUTE_ENABLED === "1";
+  return isComputeEnvironment(env) && isOne(env.COMPUTE_ENABLED);
 }
 
 /** NEMAR's own pipelines may be dispatched: compute is on, and this switch is exactly `"1"`. */
 export function computePipelinesDispatchEnabled(
   env: Pick<Bindings, "ENVIRONMENT" | "COMPUTE_ENABLED" | "COMPUTE_PIPELINES_DISPATCH_ENABLED">,
 ): boolean {
-  return computeEnabled(env) && env.COMPUTE_PIPELINES_DISPATCH_ENABLED === "1";
+  return computeEnabled(env) && isOne(env.COMPUTE_PIPELINES_DISPATCH_ENABLED);
 }

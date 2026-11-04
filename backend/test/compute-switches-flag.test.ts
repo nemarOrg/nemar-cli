@@ -117,6 +117,18 @@ describe("computeEnabled", () => {
     },
   );
 
+  test("is false for a value that only converts to '1' (a TOML integer arrives as a number)", () => {
+    const converts: unknown[] = [1, true, ["1"], [1], new String("1"), { toString: () => "1" }, 1n];
+    for (const value of converts) {
+      expect(computeEnabled(env({ ENVIRONMENT: "production", COMPUTE_ENABLED: value }))).toBe(
+        false,
+      );
+      expect(computeEnabled(env({ ENVIRONMENT: "development", COMPUTE_ENABLED: value }))).toBe(
+        false,
+      );
+    }
+  });
+
   test("is false when the switch is unset", () => {
     expect(computeEnabled(env({ ENVIRONMENT: "production" }))).toBe(false);
     expect(computeEnabled(env({ ENVIRONMENT: "production", COMPUTE_ENABLED: undefined }))).toBe(
@@ -195,6 +207,32 @@ describe("computePipelinesDispatchEnabled", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  test("is false for a value that only converts to '1', in either switch", () => {
+    const converts: unknown[] = [1, true, ["1"], new String("1"), { toString: () => "1" }];
+    for (const value of converts) {
+      // The compute switch is the string "1"; only the dispatch switch is the odd value.
+      expect(
+        computePipelinesDispatchEnabled(
+          env({
+            ENVIRONMENT: "production",
+            COMPUTE_ENABLED: "1",
+            COMPUTE_PIPELINES_DISPATCH_ENABLED: value,
+          }),
+        ),
+      ).toBe(false);
+      // And the dispatch switch is the string "1": only the compute switch is the odd value.
+      expect(
+        computePipelinesDispatchEnabled(
+          env({
+            ENVIRONMENT: "production",
+            COMPUTE_ENABLED: value,
+            COMPUTE_PIPELINES_DISPATCH_ENABLED: "1",
+          }),
+        ),
+      ).toBe(false);
+    }
   });
 
   test("is false outside production and development whatever both switches say", () => {
