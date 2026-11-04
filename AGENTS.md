@@ -51,7 +51,7 @@ All ids sit inside the 0-99999 cap (`xx900001` is invalid). The top 100 ids of e
 returns one (ADR 0068); fixtures are assigned downward from `nm099999`, and `nm099900` is
 `ABSENT_DATASET_ID`, never to be declared dev-owned. The exemplar fleet (`xx0999NN`) is permanent.
 **`nm099998` is the standing anonymous deposit: never publish it non-anonymously, a named publication
-destroys it** (ADR 0065). The band table, the fixture gate and both fixtures:
+destroys it** (ADR 0065). The band table, the fixture gate and the fixtures:
 [`.rules/datasets-and-fixtures.md`](.rules/datasets-and-fixtures.md).
 
 ### Dev D1 shares production users and the GitHub org
@@ -80,6 +80,7 @@ Ending a credential has to end everything minted from it (the GitHub token, S3 c
 and `private` sessions). Every route that revokes keys without ending every session calls
 `revokeDocsCredentials`. The docblocks of `services/docs-auth.ts` and `services/private-auth.ts` name the
 callers of their revoke and purge statements; **those counts are load-bearing, so add yourself to them**.
+A role demotion and an API-key revocation deliberately leave `private` sessions alone.
 Detail: [`.rules/revocation.md`](.rules/revocation.md).
 
 ### Never hand-bump the version
@@ -111,6 +112,7 @@ Do not edit the primary checkout; concurrent sessions share it: `git worktree ad
 **Bun** for JavaScript and TypeScript, never npm or npx. **Biome** for lint and format, never ESLint or
 Prettier. **uv** for anything Python, never pip or conda. Wrangler runs through cfman only:
 `bunx cfman wrangler --account sccn <arguments>`.
+Commands: `bun install`, `bun run src/index.ts` (run the CLI from source), `bun run typecheck`, `bun run lint`, and `bun test` (targeted; see Test cost below).
 
 ## Development workflow
 
@@ -138,4 +140,6 @@ Prettier. **uv** for anything Python, never pip or conda. Wrangler runs through 
   [`.rules/docs-site.md`](.rules/docs-site.md); `nemar <group> --help` is authoritative for commands.
 - **Observations:** [`.memory/`](.memory/README.md), one per file, binding nobody (an ADR is a ruling, a
   `.context/` document an argument, a memory an observation). **Plans and research:**
-  [`.context/README.md`](.context/README.md) marks what is current and what is historical.
+  [`.context/README.md`](.context/README.md) marks what is current and what is historical;
+  start from [`plan.md`](.context/plan.md), [`ideas.md`](.context/ideas.md) and [`research.md`](.context/research.md)
+  (prior art from before NEMAR, not the production path).
