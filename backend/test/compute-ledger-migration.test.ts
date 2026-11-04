@@ -1714,7 +1714,8 @@ describe("the tables and indexes", () => {
   onEveryEngine("the triggers exist", async (e) => {
     const names = (
       await e.all<{ name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'compute_%' ORDER BY name",
+        // The triggers of migration 0114's three tables: a later migration (0115's pseudonym table) has its own.
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('compute_ledger', 'compute_policy', 'compute_pools') ORDER BY name",
       )
     ).map((r) => r.name);
     expect(names).toEqual([
