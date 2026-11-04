@@ -40,6 +40,11 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    The authorization endpoint is `https://app.nemar.org/oauth/authorize`, because the sign-in cookie lives only on the app host: the page that proves the session and asks for consent is there, it cannot be framed (`frame-ancestors 'none'`) and its consent form is protected against cross-site request forgery.
    Introspection tells a caller only about tokens issued to itself or to a resource server registered for that token's audience.
    NEMAR tells a client about a revoked, deleted or suspended account at the client's registered back-channel logout address.
+   Each Worker's issuer is its own `API_BASE_URL` and nothing derived from a request: the staging Worker's is `https://api-test.nemar.org`, and a Worker reached under any other host answers 404 for discovery, the key set and every owner route.
+   The signing keys are ES256 (ECDSA over the P-256 curve with SHA-256), and a key is `next`, `current`, `retired` or `revoked`.
+   A `next` key is published at once and signs only when it is 24 hours old, unless the owner forces it, and a forced rotation refuses a key published under 6 minutes ago unless the owner says it is an emergency, because a client may not have it in the key set it cached.
+   A `retired` key is published for 7 days (at most 5 of them), and a `revoked` key is a retired key the owner withdrew, never published again; only a retired key can be revoked, so the owner rotates first.
+   The private half is encrypted under the Worker secret `OIDC_SECRET`, may be wiped from a retired or revoked key, and a rotation first proves it can decrypt the key it is about to promote, so a key encrypted under another secret is refused and nothing changes.
 3. **Request handling.**
    `state` is returned unchanged and `nonce` is copied into the ID token.
    The authorization response carries `iss` (RFC 9207), so a client can tell which provider answered.
@@ -56,6 +61,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    | Refresh token | opaque, prefix `nmo_rt_`, rotated on every use with a 30-second grace for a retried request; reusing a spent one after the grace revokes the whole family | 30 days idle, 90 days absolute |
 
    API keys are `nm_`, and the OIDC prefixes are chosen so that neither can be read as the other: a prefix test for `nm_` does not match `nmo_at_`.
+   A client secret is `nmo_cs_` plus 256 random bits in base64url, shown once and stored only as a hash, so that a secret scanner can find one; like the token prefixes it is a convention inside the Worker and nothing else depends on it.
    **An OIDC access token is accepted only by the routes that serve its scopes.**
    Every existing API route, `/users/me` included, refuses it, just as the OIDC routes refuse a command-line interface (CLI) key.
    A NEMAR API key has no scopes and carries its user's full authority, so the two token kinds must never be interchangeable.
@@ -90,9 +96,12 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `compute.nemar.org` uses `person_proven_orcid`, and does not require compute access to sign in, so a person can see why they cannot launch and follow a link to request access.
 8. **Clients are registered by the owner, and by no one else.**
    A client carries a name, exact redirect addresses (no wildcards), allowed scopes and grants, its sign-in rule, its consent mode, its back-channel logout address, and caps on open reservations and on service units reserved per day.
-   A client the owner marks first-party skips the consent screen; any other client asks once per set of scopes.
-   **A client is first-party only when every one of its redirect addresses is on a NEMAR web origin** (`isNemarWebOrigin`, which a partner host never is, rule 9): first-party is refused for a client with any redirect address on a partner host or on any other host that NEMAR does not run, at registration and again at every authorization, so a partner or a third party can never skip consent.
-   A client with any other redirect address is third-party and always shows the consent page.
+   A client the owner marks first-party skips the consent screen; any other client is asked, once per set of scopes or every time as its consent mode says.
+   **A client is first-party only when every one of its redirect addresses is a first-party origin.**
+   A first-party origin is an `https` address on `nemar.org` or a subdomain of it, on the default port, whose host is not a partner host (rule 9); outside production a loopback address (any port, `http` or `https`) and a website preview (a Pages host of the website's two projects) count as well, and in production they never do.
+   That is its own rule, not the cross-origin rule `isNemarWebOrigin`, which admits loopback and previews everywhere.
+   First-party is refused at registration for a client with any other redirect address, and checked again at every authorization, so a partner or a third party can never skip the consent screen.
+   A client that is not first-party is third-party: it never skips the consent screen, and follows its consent mode.
    `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
 9. **A partner subdomain is not trusted as a NEMAR origin.**
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
@@ -168,7 +177,6 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - Public clients (PKCE with no secret).
 - `private_key_jwt` client authentication.
 - A connected-apps page where a person revokes a grant themselves, which is also what the sign-out departure in rule 12 waits for.
-- The issuer of the staging Worker, which shares the shape of the production one and is for the discovery phase to fix.
 - The date the legacy session cookie name stops being read, which is when the exposure in rule 10 ends. Rule 10 sets only the earliest: 31 days after the production flag is turned on.
 - Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
   If the answer makes the format unusable, it is superseded here before any client registers, and not worked around.
@@ -179,6 +187,9 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   A reader of an ID token learns an opaque subject, so a client that stores only `sub` stores nothing it could later regret.
 - **Harder:** the subject and the issuer are forever.
   Every later phase builds against them, and a mistake in this ADR is not an amendment.
+- **`OIDC_SECRET` is for good once a key exists.**
+  Changing it after the first rotation makes every stored key unreadable.
+  A rotation refuses to promote a key it cannot read, so the mistake is caught and nothing changes, but nothing re-encrypts the stored keys: the re-encryption path, with a version on each row, is the runbook of phase #2020.
 - **The cookie rename is a three-step release.**
   Until the website reads the new name, turning the flag on logs everyone out of the website: the API would set a cookie the website's middleware does not know.
   The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys, and the website pull request that reads it (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.

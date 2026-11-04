@@ -56,6 +56,11 @@ describe("OIDC_SECRET is a secret", () => {
     expect(raw).toContain("The owner sets it; an agent never does.");
   });
 
+  test("the comment says it must differ from ENCRYPTION_KEY and be random, with a way to make one", () => {
+    expect(raw).toMatch(/OIDC_SECRET[\s\S]{0,900}MUST differ from ENCRYPTION_KEY/);
+    expect(raw).toContain("openssl rand -base64 48");
+  });
+
   test("the bindings declare it optional, so a Worker without it still starts", () => {
     const bindings = readFileSync(join(import.meta.dir, "../src/types/bindings.ts"), "utf-8");
     expect(bindings).toMatch(/^\s*OIDC_SECRET\?: string;/m);

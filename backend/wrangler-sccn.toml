@@ -427,6 +427,7 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                           least 32 characters. Without it the provider is OFF: discovery, the key set and the owner routes answer 404.
 #                           Set it BEFORE the first key rotation (`nemar admin oidc keys rotate`), and do not change it afterwards: every
 #                           stored key becomes unreadable, and no re-encryption path exists yet. Separate values for production and dev.
+#                           It MUST differ from ENCRYPTION_KEY and should be random, for example `openssl rand -base64 48`.
 #                           The owner sets it; an agent never does. Never a [vars] entry.)
 # - CLOUDFLARE_API_TOKEN   (epic #684; scoped token with Zone.Cache Purge on the SCCN zone, used by
 #                           /webhooks/zarr-ready cache purge. WARNING: same name as wrangler's own

@@ -237,8 +237,8 @@ the administrator exemption or a block; the queue verdict is `waived` and the me
 Worker's own review of the App's re-pull pull request is retired, and what the rule cannot tell, such as a
 human-written `.nemar/` file on the branch, is listed in the ADR),
 0119 (PROPOSED; NEMAR is an OpenID Connect (OIDC) provider and ORCID stays the upstream identity: the production
-issuer `https://api.nemar.org` and the subject format can never change, and the token prefixes `nmo_at_` and `nmo_rt_`
-(API keys are `nm_`) are a convention inside the Worker, since tokens are opaque to clients,
+issuer `https://api.nemar.org` and the subject format can never change, and the token prefixes `nmo_at_` and `nmo_rt_`, and `nmo_cs_` for a client secret
+(API keys are `nm_`), are a convention inside the Worker, since tokens are opaque to clients,
 an OIDC access token is refused by every existing route, `sub` is `nmu_` plus 32 lowercase hex in
 `users.oidc_subject` (set once, never changed, on no existing response, and `nmu_` is a reserved username prefix),
 sign-in is a per-client rule (`active_account` or `person_proven_orcid`, where an ADR 0106 attestation is not proof),
