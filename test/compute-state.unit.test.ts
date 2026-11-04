@@ -20,6 +20,7 @@ import {
   COMPUTE_FAILURE_CODES,
   COMPUTE_JOB_FLAGS,
   COMPUTE_KINDS,
+  COMPUTE_LEDGER_REASONS,
   COMPUTE_REFUSAL_CODES,
   COMPUTE_REFUSAL_STATUS,
   COMPUTE_SOURCES,
@@ -392,11 +393,14 @@ describe("refusal codes", () => {
     ["results_expired", 410],
     ["job_not_found", 404],
     ["bad_state", 409],
+    // Phase A2 (#2007): a hold the caller's own guard refused. It names no limit of its own
+    // because the caller knows which guard it passed; the ledger answers it as one word.
+    ["guard_refused", 409],
   ];
 
-  test("the list is the seven of section 6 plus the seventeen the phase names", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names, and the ledger's one", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(24);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(25);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
@@ -421,6 +425,21 @@ describe("refusal codes", () => {
 
   test("the three result refusal details are also refusal codes", () => {
     for (const d of RESULT_REFUSAL_DETAILS) expect(COMPUTE_REFUSAL_CODES).toContain(d);
+  });
+});
+
+describe("ledger reasons", () => {
+  test("the words the ledger writes of itself, each a valid word, once", () => {
+    expect([...COMPUTE_LEDGER_REASONS]).toEqual([
+      "admin_grant",
+      "grant",
+      "released",
+      "refund",
+      "expired",
+      "final_settlement",
+    ]);
+    expect(new Set(COMPUTE_LEDGER_REASONS).size).toBe(COMPUTE_LEDGER_REASONS.length);
+    for (const w of COMPUTE_LEDGER_REASONS) expect(COMPUTE_WORD_RE.test(w), w).toBe(true);
   });
 });
 

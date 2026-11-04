@@ -449,6 +449,9 @@ export const COMPUTE_REFUSAL_CODES = [
   "results_expired",
   "job_not_found",
   "bad_state",
+  // Phase A2 (#2007): a hold the caller's own guard refused (a person's live-job limit, say). The
+  // ledger cannot name the guard, so it answers with this word and the caller says which one.
+  "guard_refused",
 ] as const;
 
 export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
@@ -487,6 +490,7 @@ export const COMPUTE_REFUSAL_STATUS = {
   results_expired: 410,
   job_not_found: 404,
   bad_state: 409,
+  guard_refused: 409,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
 // --- The rest of the vocabulary ----------------------------------------------------------------
@@ -504,6 +508,23 @@ export const LEDGER_ENTRY_KINDS = [
 ] as const;
 
 export type LedgerEntryKind = (typeof LEDGER_ENTRY_KINDS)[number];
+
+/**
+ * The reasons the ledger writes of itself (phase A2, #2007), each a fixed word. An administrator's
+ * own reason is any word of {@link COMPUTE_WORD_RE}; these are the ones the service defaults to:
+ * a grant (`admin_grant` from an administrator's route, `grant` otherwise), a release, a refund,
+ * an expiry and a job's final settlement.
+ */
+export const COMPUTE_LEDGER_REASONS = [
+  "admin_grant",
+  "grant",
+  "released",
+  "refund",
+  "expired",
+  "final_settlement",
+] as const;
+
+export type ComputeLedgerReason = (typeof COMPUTE_LEDGER_REASONS)[number];
 
 /** The front door that submitted a job. */
 export const COMPUTE_SOURCES = ["cli", "web", "partner", "pipeline"] as const;
