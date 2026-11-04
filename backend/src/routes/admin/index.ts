@@ -22,6 +22,7 @@ import { registerMailRoutes } from "./mail";
 import { registerNeurobagelRoutes } from "./neurobagel";
 import { registerNewsRoutes } from "./news";
 import { registerNoticeRoutes } from "./notices";
+import { registerOidcAdminRoutes } from "./oidc";
 import { registerPrReviewRoutes } from "./pr-reviews";
 import { registerPublicationReviewRoutes } from "./publication-review";
 import { registerPublishRoutes } from "./publish";
@@ -85,4 +86,7 @@ registerPrReviewRoutes(adminRoutes);
 registerUpstreamBackfillRoutes(adminRoutes);
 registerUpstreamStatusRoutes(adminRoutes);
 registerUpstreamRepullRoutes(adminRoutes);
+// The OpenID Connect provider's client registry and signing keys (epic #2014 phase #2016; ADR 0119):
+// owner only, on the issuer's host only, behind one `use` for the whole /oidc prefix.
+registerOidcAdminRoutes(adminRoutes);
 registerMailRoutes(adminRoutes);

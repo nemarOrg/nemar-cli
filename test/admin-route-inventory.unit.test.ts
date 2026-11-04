@@ -258,6 +258,21 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /pr-review-authors/:login": 1,
   "PUT /pr-review-authors/:login": 2,
   "DELETE /pr-review-authors/:login": 1,
+
+  // The OpenID Connect provider's client registry and signing keys (epic #2014 phase #2016, ADR
+  // 0119): one `use` for the whole prefix carries three handlers (the owner check, the surface
+  // check that makes every route 404 off the issuer's host, and the no-store header), so a route
+  // added under /oidc/ inherits all three, and each route is its handler alone. A body is read and
+  // checked inside the handler (a contract shape, unknown fields refused by name), not by a validator.
+  "ALL /oidc/*": 3,
+  "POST /oidc/clients": 1,
+  "GET /oidc/clients": 1,
+  "GET /oidc/clients/:client_id": 1,
+  "POST /oidc/clients/:client_id/rotate-secret": 1,
+  "POST /oidc/clients/:client_id/disable": 1,
+  "GET /oidc/keys": 1,
+  "POST /oidc/keys/rotate": 1,
+  "POST /oidc/keys/:kid/revoke": 1,
 };
 
 describe("admin route inventory", () => {
@@ -312,7 +327,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(202);
+    expect(adminRoutes.routes.length).toBe(213);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

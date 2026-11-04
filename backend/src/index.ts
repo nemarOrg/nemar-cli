@@ -36,6 +36,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
 import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
+import { oidcDiscoveryRoutes } from "./routes/oidc-discovery";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
@@ -220,6 +221,12 @@ api.route("/news", newsRoutes);
 // and artifacts the node's loader pulls, behind one shared bearer secret, each answer
 // re-checked against D1. Off (404) until NEUROBAGEL_READ_TOKEN and the bucket exist.
 api.route("/neurobagel", neurobagelRoutes);
+
+// OpenID Connect discovery and the signing keys' public set (epic #2014 phase #2016, ADR 0119): the
+// issuer is this host, permanently, so both documents are exempt from the maintenance mode and the
+// rate limiter, and both are 404 unless OIDC_SECRET is set and the request names the issuer's own
+// host with no /nemar prefix (routes/oidc-discovery.ts, `oidcSurface`).
+api.route("/", oidcDiscoveryRoutes);
 
 // Mount route handlers
 api.route("/auth", authRoutes);

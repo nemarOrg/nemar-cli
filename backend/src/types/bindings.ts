@@ -207,6 +207,12 @@ export interface Bindings {
   EZID_SANDBOX_PASSWORD?: string;
   GITHUB_WEBHOOK_SECRET?: string; // HMAC secret for /webhooks/github signature verification (GitHub App push deliveries)
   NEMAR_WEBHOOK_TOKEN?: string; // Bearer token for /publish-version-doi and /llm-enrich (X-Webhook-Token header from dataset workflows)
+  /** Worker SECRET (never a var): the key the OpenID Connect provider's private signing keys are
+   *  encrypted under at rest (epic #2014 phase #2016; ADR 0119). At least 32 characters or the
+   *  provider is off: discovery, the key set and the owner routes then answer 404, as if they did
+   *  not exist (`services/oidc-config.ts`, `oidcEnabled`). The owner sets it; an agent never does.
+   *  Changing it makes every stored key unreadable, and there is no re-encryption path yet. */
+  OIDC_SECRET?: string;
   /** Prod-only mirror target for dev-OWNED GitHub deliveries (epic #923;
    *  widened from dev-range to dev-owned by #1440, so it now also carries the
    *  reserved `nm` fixtures). When set on the PRODUCTION worker, a push to a
