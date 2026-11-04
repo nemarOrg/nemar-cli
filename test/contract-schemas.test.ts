@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import * as computeModule from "../shared/contract/compute";
 import * as launchModule from "../shared/contract/compute-launch";
@@ -801,26 +801,339 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     .filter(([, c]) => c.side === "strict")
     .map(([name]) => name);
 
-  test("no other file under shared/contract imports a strict compute schema", () => {
+  /**
+   * What a file under shared/contract takes from the strict compute schemas, by any route. Pure:
+   * it reads source text and a path, never the disk, so each shape it must catch has a probe below.
+   *
+   * A specifier is resolved against the importing file and judged by the file it names, never by
+   * how it is spelled: `./compute`, `./compute.js`, `./compute.ts` and `../contract/compute.js` are
+   * one file. Three things are offences, from the strict files AND from `index` (which re-exports
+   * them): a namespace (`import * as`, `export *`), any strict name (`{ A }`, `{ A as B }`,
+   * `default, { A }`, a type-only one too, since the rule is by name), and a dynamic `import()` or
+   * `require()`, which takes the whole module; a dynamic one whose specifier is not a plain string
+   * cannot be resolved and is an offence too. The one exemption is index.ts's own `export *`.
+   * A comment that quotes an import is read as one: reword it.
+   */
+  function strictComputeTakes(
+    contractDir: string,
+    file: string,
+    text: string,
+    strictNames: readonly string[],
+  ): string[] {
+    const strictFiles = [...STRICT_BY_DESIGN].map((name) =>
+      join(contractDir, name.replace(/\.ts$/, "")),
+    );
+    const indexFile = join(contractDir, "index");
+    const target = (specifier: string): "strict" | "index" | null => {
+      if (!specifier.startsWith(".")) return null; // a package: nothing in it is ours
+      const resolved = resolve(dirname(join(contractDir, file)), specifier).replace(
+        /\.(?:js|ts)$/,
+        "",
+      );
+      if (strictFiles.includes(resolved)) return "strict";
+      if (resolved === indexFile || resolved === contractDir) return "index";
+      return null;
+    };
+    const offenders: string[] = [];
+    const statement = /\b(import|export)\s+([\w$\s,{}*]+?)\s*from\s*(["'])([^"']+)\3/g;
+    for (const [, keyword, clause, , specifier] of text.matchAll(statement)) {
+      const where = target(specifier);
+      if (where === null) continue;
+      const ownReexport = file === "index.ts" && where === "strict" && clause.trim() === "*";
+      if (ownReexport) continue;
+      const names: string[] = clause.match(/[\w$]+/g) ?? [];
+      if (clause.includes("*") || strictNames.some((name) => names.includes(name))) {
+        offenders.push(`${keyword} ${clause.trim()} from "${specifier}"`);
+      }
+    }
+    for (const call of text.matchAll(/(?<![\w$.])(import|require)\s*\(\s*([^)]*)/g)) {
+      const [, keyword, argument] = call;
+      const literal = /^(["'`])([^"'`$\n]*)\1(?:\s*,[\s\S]*)?$/.exec(argument.trim());
+      if (literal === null) {
+        offenders.push(`${keyword}(${argument.trim()}): a specifier the guard cannot resolve`);
+      } else if (target(literal[2]) !== null) {
+        offenders.push(`${keyword}("${literal[2]}")`);
+      }
+    }
+    return offenders;
+  }
+
+  /** One probe per shape: a file, its text, and whether the guard must report it. */
+  const IMPORT_PROBES: Array<[label: string, file: string, text: string, offends: boolean]> = [
+    // The named import the old guard already caught, and its spellings.
+    ["a named import", "x.ts", `import { JobSpecSchema } from "./compute.js";`, true],
+    ["a specifier in single quotes", "x.ts", `import { JobSpecSchema } from './compute.js';`, true],
+    ["a specifier with no extension", "x.ts", `import { JobSpecSchema } from "./compute";`, true],
+    [
+      "a specifier with a .ts extension",
+      "x.ts",
+      `import { JobSpecSchema } from "./compute.ts";`,
+      true,
+    ],
+    [
+      "the launch file with a .ts extension",
+      "x.ts",
+      `import { LaunchSpecSchema } from "./compute-launch.ts";`,
+      true,
+    ],
+    [
+      "an alias",
+      "x.ts",
+      `import { OutputsRequestSchema as Req } from "./compute-launch.js";`,
+      true,
+    ],
+    [
+      "a name among others on several lines",
+      "x.ts",
+      `import {\n  computePathSchema,\n  JobSpecSchema,\n} from "./compute.js";`,
+      true,
+    ],
+    [
+      "a type-only import of a strict name",
+      "x.ts",
+      `import type { JobSpecSchema } from "./compute.js";`,
+      true,
+    ],
+    [
+      "an inline type modifier beside a strict name",
+      "x.ts",
+      `import { type JobSpec, LaunchSpecSchema } from "./compute-launch.js";`,
+      true,
+    ],
+    [
+      "a path through the parent directory",
+      "x.ts",
+      `import { JobSpecSchema } from "../contract/compute.js";`,
+      true,
+    ],
+    [
+      "a file in a subdirectory",
+      "neuroschema/x.ts",
+      `import { JobSpecSchema } from "../compute.js";`,
+      true,
+    ],
+    // Namespaces, and a default beside either.
+    ["a namespace import", "x.ts", `import * as compute from "./compute.js";`, true],
+    ["a namespace re-export", "x.ts", `export * from "./compute.js";`, true],
+    [
+      "a named namespace re-export in index.ts",
+      "index.ts",
+      `export * as compute from "./compute.js";`,
+      true,
+    ],
+    [
+      "a named re-export in index.ts",
+      "index.ts",
+      `export { JobSpecSchema } from "./compute.js";`,
+      true,
+    ],
+    [
+      "a default and a strict name",
+      "x.ts",
+      `import compute, { JobSpecSchema } from "./compute.js";`,
+      true,
+    ],
+    [
+      "a default and an aliased strict name",
+      "x.ts",
+      `import compute, { JobSpecSchema as J } from "./compute.ts";`,
+      true,
+    ],
+    ["a default and a namespace", "x.ts", `import compute, * as all from "./compute.js";`, true],
+    // Through index, which re-exports the strict files.
+    [
+      "a strict name through ./index.js",
+      "x.ts",
+      `import { JobSpecSchema } from "./index.js";`,
+      true,
+    ],
+    ["a strict name through ./index", "x.ts", `import { JobSpecSchema } from "./index";`, true],
+    [
+      "a strict name through ./index.ts",
+      "x.ts",
+      `import { JobSpecSchema } from "./index.ts";`,
+      true,
+    ],
+    [
+      "a strict name through the directory, ./",
+      "x.ts",
+      `import { JobSpecSchema } from "./";`,
+      true,
+    ],
+    ["a strict name through the directory, .", "x.ts", `import { JobSpecSchema } from ".";`, true],
+    [
+      "a strict name through ../index.js",
+      "neuroschema/x.ts",
+      `import { JobSpecSchema } from "../index.js";`,
+      true,
+    ],
+    ["a strict name through ..", "neuroschema/x.ts", `import { JobSpecSchema } from "..";`, true],
+    [
+      "a strict name re-exported through index",
+      "x.ts",
+      `export { LaunchSpecSchema } from "./index.js";`,
+      true,
+    ],
+    ["a namespace import of index", "x.ts", `import * as all from "./index.js";`, true],
+    ["a namespace re-export of index", "x.ts", `export * from "./index.js";`, true],
+    [
+      "a default and a strict name through index",
+      "x.ts",
+      `import all, { OutputsRequestSchema } from "./index.js";`,
+      true,
+    ],
+    // Dynamic.
+    ["a dynamic import", "x.ts", `const m = await import("./compute.js");`, true],
+    [
+      "a dynamic import with single quotes and .ts",
+      "x.ts",
+      `await import('./compute-launch.ts');`,
+      true,
+    ],
+    ["a dynamic import of a template literal", "x.ts", "await import(`./compute.js`);", true],
+    [
+      "a dynamic import with an options argument",
+      "x.ts",
+      `await import("./compute.js", { with: {} });`,
+      true,
+    ],
+    [
+      "a dynamic import of index",
+      "x.ts",
+      `const { JobSpecSchema } = await import("./index.js");`,
+      true,
+    ],
+    ["a require", "x.ts", `const m = require("./compute");`, true],
+    ["a require with .ts", "x.ts", `const m = require('./compute-launch.ts');`, true],
+    ["a require of index", "x.ts", `const m = require("./index");`, true],
+    [
+      "a concatenation that starts with another file",
+      "x.ts",
+      `await import("./other.js" + suffix);`,
+      true,
+    ],
+    ["a dynamic import of a variable", "x.ts", "const m = await import(name);", true],
+    ["a require of a variable", "x.ts", "const m = require(path);", true],
+    [
+      "a dynamic import built from a template",
+      "x.ts",
+      "await import(`./compute${suffix}.js`);",
+      true,
+    ],
+    ["a dynamic import built by concatenation", "x.ts", `await import("./compute" + ".js");`, true],
+    [
+      "a forbidden one after allowed ones",
+      "x.ts",
+      `import { z } from "zod";\nimport type { JobSpec } from "./compute.js";\nawait import("./other.js");\nawait import("./compute.js");`,
+      true,
+    ],
+    [
+      "index.ts export * from a file in a subdirectory called index.ts",
+      "neuroschema/index.ts",
+      `export * from "../compute.js";`,
+      true,
+    ],
+    // What stays allowed.
+    ["a namespace import in index.ts", "index.ts", `import * as c from "./compute.js";`, true],
+    ["index.ts re-exporting index", "index.ts", `export * from "./index.js";`, true],
+    [
+      "index.ts re-exports the compute file whole",
+      "index.ts",
+      `export * from "./compute.js";`,
+      false,
+    ],
+    [
+      "a type that is not a strict name",
+      "x.ts",
+      `import type { JobSpec } from "./compute.js";`,
+      false,
+    ],
+    [
+      "a plain helper",
+      "x.ts",
+      `import { COMPUTE_PATH_RE, computePathSchema } from "./compute.js";`,
+      false,
+    ],
+    [
+      "launch helpers and types",
+      "x.ts",
+      `import type { LaunchSpec } from "./compute-launch.js";\nimport { LAUNCH_SPEC_MAX_BYTES, encodeLaunchSpec } from "./compute-launch.js";`,
+      false,
+    ],
+    [
+      "a lenient name through index",
+      "x.ts",
+      `import { catalogItemSchema } from "./index.js";`,
+      false,
+    ],
+    ["a type through index", "x.ts", `import type { JobSpec } from "./index.js";`, false],
+    ["a package", "x.ts", `import { z } from "zod";`, false],
+    [
+      "a package that is named like the file",
+      "x.ts",
+      `import { JobSpecSchema } from "compute";`,
+      false,
+    ],
+    [
+      "a dynamic import of another file with options",
+      "x.ts",
+      `await import("./other.js", { with: { type: "json" } });`,
+      false,
+    ],
+    [
+      "a sibling that only starts like it",
+      "x.ts",
+      `import { a } from "./compute-state.js";`,
+      false,
+    ],
+    ["another sibling", "x.ts", `import { a } from "./computed.js";`, false],
+    [
+      "the shared compute words",
+      "x.ts",
+      `import { COMPUTE_WORD_RE } from "../compute-state.js";`,
+      false,
+    ],
+    ["a default import of something else", "x.ts", `import other from "./other.js";`, false],
+    [
+      "a name that only contains a strict name",
+      "x.ts",
+      `import { JobSpecSchemaNote } from "./other.js";`,
+      false,
+    ],
+    [
+      "a name that only contains a strict name, from the compute file",
+      "x.ts",
+      `import { JobSpecSchemaNote } from "./compute.js";`,
+      false,
+    ],
+    ["a template literal of another file", "x.ts", "await import(`./other.js`);", false],
+    ["a strict name that is not imported", "x.ts", `const name = "JobSpecSchema";`, false],
+    ["a dynamic import of another file", "x.ts", `await import("./other.js");`, false],
+    ["a dynamic import of a package", "x.ts", `await import("zod");`, false],
+    ["a require of a package", "x.ts", `const z = require("zod");`, false],
+    ["a method named require", "x.ts", "loader.require(name);", false],
+    ["a function whose name ends in import", "x.ts", "reimport(name);", false],
+  ];
+
+  test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
     expect(STRICT_NAMES).toHaveLength(9);
+    expect(IMPORT_PROBES.length).toBeGreaterThan(55);
+    for (const [label, file, text, offends] of IMPORT_PROBES) {
+      const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);
+      expect(found.length > 0, `${label}: ${JSON.stringify(found)}`).toBe(offends);
+    }
+  });
+
+  test("no other file under shared/contract takes a strict compute schema", () => {
     const files = readdirSync(CONTRACT_DIR, { recursive: true, encoding: "utf8" })
       .filter((name) => name.endsWith(".ts") && !STRICT_BY_DESIGN.has(name))
       .map((name) => ({ name, text: readFileSync(join(CONTRACT_DIR, name), "utf8") }));
+    // Guards the guard: a mistyped directory would scan nothing and pass, and index.ts must be in it.
     expect(files.length).toBeGreaterThan(5);
-    const offenders: string[] = [];
-    const clause =
-      /(?:import|export)\s+(type\s+)?(\{[^}]*\}|\*(?:\s+as\s+\w+)?)\s+from\s+["']([^"']+)["']/g;
-    for (const { name, text } of files) {
-      for (const match of text.matchAll(clause)) {
-        const [, , what, from] = match;
-        if (!/(^|\/)compute(-launch)?(\.js)?$/.test(from)) continue;
-        // index.ts re-exports the contract with `export *`; nothing else may take a namespace.
-        if (name === "index.ts" && what === "*") continue;
-        if (what.startsWith("*") || STRICT_NAMES.some((s) => new RegExp(`\\b${s}\\b`).test(what))) {
-          offenders.push(`${name} -> ${from}`);
-        }
-      }
-    }
+    expect(files.map((f) => f.name)).toContain("index.ts");
+    const offenders = files.flatMap(({ name, text }) =>
+      strictComputeTakes(CONTRACT_DIR, name, text, STRICT_NAMES).map((o) => `${name}: ${o}`),
+    );
     expect(offenders, "Build a response schema in its own file, from nothing strict.").toEqual([]);
   });
 
