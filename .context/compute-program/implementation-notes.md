@@ -32,7 +32,7 @@ Those live in the gated docs page `admin/design/compute-gateway` and in secrets.
 - **Uploading a folder.** Do not depend on the AWS CLI or git-annex for compute.
   The backend returns presigned PUT URLs for a declared manifest (path, size), the CLI PUTs with `fetch`, then finalizes.
   Reuse the ignore and size logic of `src/lib/upload/plan.ts` and `src/lib/bids-filter.ts` where it fits.
-  Presigning lives in `backend/src/services/s3.ts` (`generatePresignedPutUrls`, `generatePresignedGetUrl`, aws4fetch, path-traversal refusals).
+  Presigning lives in `backend/src/services/s3.ts` (`generatePresignedPutUrls`, `generatePresignedGetUrl`, aws4fetch, path-traversal refusals), but those hardcode the AWS host; compute storage is Cloudflare R2 (owner, 2026-11-04), so compute signs with aws4fetch against the R2 S3 endpoint (region `auto`, presigned URLs at most 7 days) and reaches the buckets through R2 bindings, like the Neurobagel binding in `backend/wrangler-sccn.toml`.
 - **Account state cache.** The CLI caches `serviceAccess` in `src/lib/config.ts`; absent means unknown, never "not granted".
   A new wire field is `.optional()` and never defaulted (`shared/contract/user.ts`).
 

@@ -33,7 +33,7 @@ If a phase needs more, take the next unreserved number and say so in the PR.
 
 **Outside gates** that no phase can pass on its own:
 the Tapis tenant and the answers in the design's section 12 (the owner asks SDSC);
-Worker secrets, AWS buckets and IAM users (the owner creates them);
+Worker secrets, the two Cloudflare R2 buckets with their lock and lifecycle rules, and the R2 API token (the owner creates them);
 UC San Diego counsel's approval of the policies and the official-request procedure (Epic D, phase 5);
 registering compute.nemar.org as an OIDC client (the owner, after Epic B merges).
 Everything else is built and tested against local stand-ins first.
@@ -105,7 +105,7 @@ Escalate, with one message naming the issue, what is blocked, the options and a 
 
 - a phase would change a decision in the design page, an ADR or another issue, or an ADR must be superseded;
 - a security, privacy or data-integrity finding cannot be fixed inside the phase;
-- something needs a secret, a credential, an account, a bucket, an IAM user, a repository setting, a DNS record or a Tapis registration;
+- something needs a secret, a credential, an account, a bucket or a bucket rule, an API token, a repository setting, a DNS record or a Tapis registration;
 - something would reach outside: mail to real people, a post to SDSC or the tenant operator, a production deploy, turning on a switch, merging into `dev` or `main`;
 - a gate still fails after two fix attempts and an advisor consultation;
 - review round two still finds substantial problems;
@@ -162,7 +162,7 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
 
 - **Public repositories.** nemar-cli, nemar-process and website are public.
   Tenant names, allocation ids, account names, host details, spend figures and real home paths stay in the gated docs and in secrets.
-- **No mocks of NEMAR logic.** Real D1, real routes, `Bun.serve` stand-ins for Tapis, S3 and ACCESS; say in a test when no real response could be recorded yet.
+- **No mocks of NEMAR logic.** Real D1, real routes, Miniflare R2 for the bucket bindings, `Bun.serve` stand-ins for Tapis, R2's S3 interface and ACCESS; say in a test when no real response could be recorded yet.
 - **Fences.** New crons are production-only by default; switches (`COMPUTE_ENABLED`, `COMPUTE_PIPELINES_DISPATCH_ENABLED`) are absent from `backend/wrangler-sccn.toml` and pinned by tests; dev and production use separate Tapis credentials, because dev D1 shares real users.
 - **Revocation cascades, always,** with the docblock caller counts updated.
 - **Compute access is not upload access** (ADR 0040), and approval is a person's decision (ADR 0042).
@@ -174,7 +174,7 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
 ## 8. Owner actions
 
 - [ ] Send the design page to the SDSC colleague and collect answers to its section 12; ask for the dev and production tenants.
-- [ ] Create the records bucket (versioning, Object Lock in governance mode, encryption) and the results bucket, with their IAM users; set the Worker secrets.
+- [ ] Create the two private Cloudflare R2 buckets (2026-11-04: compute storage is R2, not AWS), for production and for dev: records, with bucket lock rules `records/` 7 years and `logs/` 1 year and a lifecycle rule deleting `incoming/` after 2 days; results, with a lifecycle rule deleting objects after 30 days and aborting incomplete multipart uploads after 1 day. Create one R2 API token with Object Read & Write on the two buckets and set `COMPUTE_R2_ACCESS_KEY_ID`, `COMPUTE_R2_SECRET_ACCESS_KEY` and `COMPUTE_R2_S3_ENDPOINT` as Worker secrets. No AWS bucket or IAM user is needed for compute.
 - [ ] Set the Tapis credentials as Worker secrets for dev and production once the tenant exists.
 - [ ] Generate the ACCESS gateway attributes key for the community account and set it as a Worker secret.
 - [ ] Take the policies and the official-request procedure (Epic D, phase 5) to UC San Diego counsel.
