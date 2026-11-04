@@ -16,7 +16,6 @@
 
 import { describe, expect, test } from "bun:test";
 import * as ledgerModule from "../src/services/compute-ledger";
-import * as policyModule from "../src/services/compute-policy";
 import {
   ComputeLedgerError,
   type PoolRow,
@@ -35,6 +34,7 @@ import {
   settleFinal,
   settleProvisional,
 } from "../src/services/compute-ledger";
+import * as policyModule from "../src/services/compute-policy";
 import { jobId, totalsDisagreements } from "./helpers/compute-ledger";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 
@@ -70,7 +70,10 @@ async function grant(w: World, pool: PoolRow, amountMilli: number) {
 }
 
 /** A person with a grant, a platform budget with one, and a job held on them. */
-async function held(w: World, o: { grantMilli?: number; budgetMilli?: number; holdMilli?: number } = {}) {
+async function held(
+  w: World,
+  o: { grantMilli?: number; budgetMilli?: number; holdMilli?: number } = {},
+) {
   const person = await ensurePool(w.d1, "account", String(20000 + next()), "cpu");
   const budget = await platform(w, "people", "cpu");
   await grant(w, person, o.grantMilli ?? 100000);
@@ -87,8 +90,11 @@ async function held(w: World, o: { grantMilli?: number; budgetMilli?: number; ho
 }
 
 const count = async (w: World, where = "1 = 1") =>
-  (await w.d1.prepare(`SELECT COUNT(*) AS n FROM compute_ledger WHERE ${where}`).first<{ n: number }>())
-    ?.n;
+  (
+    await w.d1
+      .prepare(`SELECT COUNT(*) AS n FROM compute_ledger WHERE ${where}`)
+      .first<{ n: number }>()
+  )?.n;
 
 describe("the keys the ledger writes of itself", () => {
   test("a hold's key is made of its job, and a job has one", async () => {
@@ -118,9 +124,11 @@ describe("the keys the ledger writes of itself", () => {
           idempotencyKey,
         }),
       ).rejects.toMatchObject({ code: "invalid_argument" });
-      await expect(expireUnused(w.d1, { poolId: person.id, idempotencyKey })).rejects.toMatchObject({
-        code: "invalid_argument",
-      });
+      await expect(expireUnused(w.d1, { poolId: person.id, idempotencyKey })).rejects.toMatchObject(
+        {
+          code: "invalid_argument",
+        },
+      );
     }
     expect(await findEntryByKey(w.d1, finalKey(job))).toBeNull();
   });
@@ -257,6 +265,60 @@ describe("a job's final settlement happens once, even of nothing", () => {
       .bind(job)
       .first<{ s: number }>();
     expect(sum?.s).toBe(6000);
+  });
+});
+
+describe("a job's charge is the job's own, not its pool's", () => {
+  /** Two jobs on one pool, one settled to 3000 and the other released. */
+  async function twoJobs() {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", String(20000 + next()), "cpu");
+    const budget = await platform(w, "people", "cpu");
+    await grant(w, person, 100000);
+    await grant(w, budget, 100000);
+    const [a, b] = [jobId(next()), jobId(next())];
+    for (const jobId of [a, b]) {
+      expect(
+        (
+          await placeHold(w.d1, {
+            poolId: person.id,
+            budgetPoolId: budget.id,
+            amountMilli: 5000,
+            jobId,
+          })
+        ).ok,
+      ).toBe(true);
+    }
+    return { w, person, a, b };
+  }
+
+  test("a final settlement is replayed by the job's own figure while another job charges the pool", async () => {
+    const { w, a, b } = await twoJobs();
+    await settleProvisional(w.d1, { jobId: a, chargeMilli: 3000 });
+    await settleProvisional(w.d1, { jobId: b, chargeMilli: 4000 });
+    expect(await settleFinal(w.d1, { jobId: a, finalMilli: 3500 })).toMatchObject({
+      ok: true,
+      replayed: false,
+      deltaMilli: 500,
+    });
+    // The pool holds 7500 and the job 3500: the replay is of the job's figure.
+    expect(await settleFinal(w.d1, { jobId: a, finalMilli: 3500 })).toMatchObject({
+      ok: true,
+      replayed: true,
+    });
+    expect(await settleFinal(w.d1, { jobId: a, finalMilli: 7500 })).toEqual({
+      ok: false,
+      code: "already_final",
+    });
+  });
+
+  test("a job that was released has nothing to refund, though its pool has charge", async () => {
+    const { w, a, b } = await twoJobs();
+    await settleProvisional(w.d1, { jobId: a, chargeMilli: 3000 });
+    await releaseHold(w.d1, { jobId: b });
+    expect(await refundJob(w.d1, { jobId: b })).toEqual({ ok: false, code: "nothing_to_refund" });
+    // And a refund returns the job's charge only.
+    expect(await refundJob(w.d1, { jobId: a })).toMatchObject({ ok: true, refundedMilli: 3000 });
   });
 });
 
@@ -401,7 +463,10 @@ describe("an idempotency key is compared on every field of the request", () => {
       ["no reason (the default)", { reason: undefined }],
     ];
     for (const [name, over] of variants) {
-      await expect(grantPool(w.d1, { ...base, ...over, idempotencyKey: k }), name).rejects.toMatchObject({
+      await expect(
+        grantPool(w.d1, { ...base, ...over, idempotencyKey: k }),
+        name,
+      ).rejects.toMatchObject({
         code: "idempotency_conflict",
       });
     }
@@ -418,6 +483,18 @@ describe("an idempotency key is compared on every field of the request", () => {
       grantPool(w.d1, { poolId: a.id, amountMilli: 5, actorUserId: 1, idempotencyKey: adj }),
     ).rejects.toMatchObject({ code: "idempotency_conflict" });
     expect((await reread(w, a)).granted_milli).toBe(1005);
+    // The same pool, amount and reason on an entry of ANOTHER KIND is still not a replay of a grant.
+    const sameShape = key("same-shape");
+    await adjustPool(w.d1, {
+      poolId: a.id,
+      grantedDeltaMilli: 7,
+      actorUserId: 1,
+      reason: "grant",
+      idempotencyKey: sameShape,
+    });
+    await expect(
+      grantPool(w.d1, { poolId: a.id, amountMilli: 7, actorUserId: 1, idempotencyKey: sameShape }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
   });
 
   test("an adjustment: pool, budget, each delta and the reason", async () => {
@@ -446,7 +523,10 @@ describe("an idempotency key is compared on every field of the request", () => {
       ["another pool", { poolId: b.id }],
       ["another budget (none)", { budgetPoolId: null }],
       ["another charged delta", { chargedDeltaMilli: 701 }],
-      ["the grant instead of the charge", { chargedDeltaMilli: undefined, grantedDeltaMilli: 700, budgetPoolId: null }],
+      [
+        "the grant instead of the charge",
+        { chargedDeltaMilli: undefined, grantedDeltaMilli: 700, budgetPoolId: null },
+      ],
       ["another reason", { reason: "expanse_figure" }],
     ];
     for (const [name, over] of variants) {
@@ -469,11 +549,15 @@ describe("an idempotency key is compared on every field of the request", () => {
     await grant(w, a, 500);
     await grant(w, b, 500);
     const k = key("expire");
-    expect(await expireUnused(w.d1, { poolId: a.id, reason: "expired", idempotencyKey: k })).toMatchObject({
+    expect(
+      await expireUnused(w.d1, { poolId: a.id, reason: "expired", idempotencyKey: k }),
+    ).toMatchObject({
       ok: true,
       replayed: false,
     });
-    expect(await expireUnused(w.d1, { poolId: a.id, reason: "expired", idempotencyKey: k })).toMatchObject({
+    expect(
+      await expireUnused(w.d1, { poolId: a.id, reason: "expired", idempotencyKey: k }),
+    ).toMatchObject({
       ok: true,
       replayed: true,
     });
@@ -565,25 +649,61 @@ describe("a total that would pass 2^53 - 1", () => {
         ...over,
       } as never);
     expect(
-      await grantPool(w.d1, { poolId: person.id, amountMilli: 6, actorUserId: 1, idempotencyKey: `grant-${next()}` }),
+      await grantPool(w.d1, {
+        poolId: person.id,
+        amountMilli: 6,
+        actorUserId: 1,
+        idempotencyKey: `grant-${next()}`,
+      }),
     ).toEqual({ ok: false, code: "would_exceed_limit" });
     expect(await adj({ grantedDeltaMilli: 6 })).toEqual({ ok: false, code: "would_exceed_limit" });
     expect(await count(w)).toBe(before);
     // A charge that fills the pool's charged to the largest total is accepted, and one more is not.
-    expect(await adj({ chargedDeltaMilli: MAX, budgetPoolId: people.id })).toMatchObject({ ok: true });
+    expect(await adj({ chargedDeltaMilli: MAX, budgetPoolId: people.id })).toMatchObject({
+      ok: true,
+    });
     expect(await adj({ chargedDeltaMilli: 1, budgetPoolId: people.id })).toEqual({
       ok: false,
       code: "would_exceed_limit",
     });
     // Exactly the room is accepted, and then there is none.
     expect(
-      await grantPool(w.d1, { poolId: person.id, amountMilli: 5, actorUserId: 1, idempotencyKey: `grant-${next()}` }),
+      await grantPool(w.d1, {
+        poolId: person.id,
+        amountMilli: 5,
+        actorUserId: 1,
+        idempotencyKey: `grant-${next()}`,
+      }),
     ).toMatchObject({ ok: true });
     expect((await reread(w, person)).granted_milli).toBe(MAX);
-    expect(await grantPool(w.d1, { poolId: person.id, amountMilli: 1, actorUserId: 1, idempotencyKey: `grant-${next()}` })).toEqual({
+    expect(
+      await grantPool(w.d1, {
+        poolId: person.id,
+        amountMilli: 1,
+        actorUserId: 1,
+        idempotencyKey: `grant-${next()}`,
+      }),
+    ).toEqual({
       ok: false,
       code: "would_exceed_limit",
     });
+  });
+
+  test("is would_exceed_limit when it is the pool's own charged, with no budget to say so", async () => {
+    const w = world();
+    const pipelines = await platform(w, "pipelines", "cpu");
+    const adj = (chargedDeltaMilli: number) =>
+      adjustPool(w.d1, {
+        poolId: pipelines.id,
+        chargedDeltaMilli,
+        actorUserId: 1,
+        reason: "correction",
+        idempotencyKey: `adjust-${next()}`,
+      });
+    expect(await adj(MAX)).toMatchObject({ ok: true });
+    const before = await count(w);
+    expect(await adj(1)).toEqual({ ok: false, code: "would_exceed_limit" });
+    expect(await count(w)).toBe(before);
   });
 
   test("is would_exceed_limit when it is the budget's charged that would pass it", async () => {
@@ -619,14 +739,19 @@ describe("a total that would pass 2^53 - 1", () => {
 describe("every statement the service exports searches compute_ledger by an index", () => {
   const exported = (): Array<[string, string]> =>
     [ledgerModule, policyModule].flatMap((m) =>
-      Object.entries(m).filter((e): e is [string, string] => e[0].endsWith("_SQL") && typeof e[1] === "string"),
+      Object.entries(m).filter(
+        (e): e is [string, string] => e[0].endsWith("_SQL") && typeof e[1] === "string",
+      ),
     );
 
   /** The names a statement calls compute_ledger by: its own, and every alias it gives it. */
   function ledgerNames(sql: string): string[] {
     const aliases = [...sql.matchAll(/(?:FROM|JOIN)\s+compute_ledger\s+(\w+)/gi)]
       .map((m) => m[1] as string)
-      .filter((a) => !/^(WHERE|JOIN|ON|UNION|ORDER|GROUP|LIMIT|AND|OR|SET|VALUES|LEFT|INNER|CROSS)$/i.test(a));
+      .filter(
+        (a) =>
+          !/^(WHERE|JOIN|ON|UNION|ORDER|GROUP|LIMIT|AND|OR|SET|VALUES|LEFT|INNER|CROSS)$/i.test(a),
+      );
     return ["compute_ledger", ...aliases];
   }
 
@@ -659,9 +784,9 @@ describe("every statement the service exports searches compute_ledger by an inde
     const offences: string[] = [];
     for (const [name, sql] of exported()) {
       const params = Math.max(0, ...[...sql.matchAll(/\?(\d+)/g)].map((m) => Number(m[1])));
-      const plan = db
-        .prepare(`EXPLAIN QUERY PLAN ${sql}`)
-        .all(...Array(params).fill(1)) as Array<{ detail: string }>;
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(params).fill(1)) as Array<{
+        detail: string;
+      }>;
       const names = ledgerNames(sql);
       for (const { detail } of plan) {
         const scanned = /^SCAN (\w+)/.exec(detail)?.[1];

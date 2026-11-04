@@ -221,6 +221,11 @@ describe("a grant", () => {
     expect(await totalsDisagreements(realD1(db))).toEqual([]);
   });
 
+  test("a grant that names no reason says admin_grant", async () => {
+    const r = await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 5 });
+    expect(r.body.entry.reason).toBe("admin_grant");
+  });
+
   test("a repeated key grants once, and says it was a repeat", async () => {
     const key = freshKey();
     const body = { pool: "cpu", amount_milli: 7000 };
