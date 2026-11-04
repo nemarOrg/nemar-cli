@@ -185,6 +185,52 @@ describe("putPolicy", () => {
     expect(audits("compute.policy.set")).toHaveLength(1);
   });
 
+  test("refuses an owner account that was deleted or is not active, by the statement itself", async () => {
+    const d1 = realD1(db);
+    db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [ids.owner]);
+    expect(await putPolicy(d1, ids.owner, policy(), null)).toEqual({
+      ok: false,
+      code: "not_owner",
+    });
+    db.run("UPDATE users SET deleted_at = NULL WHERE id = ?", [ids.owner]);
+    for (const status of ["pending", "revoked"]) {
+      db.run("UPDATE users SET status = ?, email_verified = 0 WHERE id = ?", [status, ids.owner]);
+      expect([status, await putPolicy(d1, ids.owner, policy(), null)]).toEqual([
+        status,
+        { ok: false, code: "not_owner" },
+      ]);
+    }
+    expect(rows("compute_policy")).toBe(0);
+    expect(rows("audit_log")).toBe(0);
+    // Both active statuses write.
+    for (const status of ["verified", "approved"]) {
+      db.run("UPDATE users SET status = ?, email_verified = 1 WHERE id = ?", [status, ids.owner]);
+      expect((await putPolicy(d1, ids.owner, policy(), null)).ok).toBe(true);
+    }
+  });
+
+  test("names where a policy is wrong under a prefix when asked, and the same paths without one", async () => {
+    const d1 = realD1(db);
+    const bad = { ...policy(), defaultGrantMilli: { cpu: "x", gpu: -1 } };
+    const plain = await putPolicy(d1, ids.owner, bad, null);
+    const prefixed = await putPolicy(d1, ids.owner, bad, null, "policy");
+    if (plain.ok || plain.code !== "invalid_policy") throw new Error("expected invalid_policy");
+    if (prefixed.ok || prefixed.code !== "invalid_policy")
+      throw new Error("expected invalid_policy");
+    expect(plain.issues.map((i) => i.path)).toEqual([
+      "defaultGrantMilli.cpu",
+      "defaultGrantMilli.gpu",
+    ]);
+    expect(prefixed.issues.map((i) => i.path)).toEqual([
+      "policy.defaultGrantMilli.cpu",
+      "policy.defaultGrantMilli.gpu",
+    ]);
+    // A problem at the root of the policy is the prefix alone, and plain it is the empty path.
+    const root = await putPolicy(d1, ids.owner, [], null, "policy");
+    if (root.ok || root.code !== "invalid_policy") throw new Error("expected invalid_policy");
+    expect(root.issues.map((i) => i.path)).toEqual(["policy"]);
+  });
+
   test("refuses a policy the strict schema refuses, naming where and never what", async () => {
     const d1 = realD1(db);
     const bad = {
@@ -292,6 +338,32 @@ describe("PUT /admin/compute/policy", () => {
     expect(audits("compute.policy.set")).toEqual([]);
   });
 
+  test("the route's owner gate answers before the body is read: an invalid or non-JSON body is owner_only too", async () => {
+    const bad: Array<[string, unknown, string | undefined]> = [
+      [
+        "an invalid policy",
+        { policy: { ...policy(), defaultGrantMilli: { cpu: MARK, gpu: 1 } } },
+        undefined,
+      ],
+      ["a body with an unknown key", { policy: policy(), [MARK]: 1 }, undefined],
+      ["no policy", {}, undefined],
+      ["not JSON", undefined, "{not json"],
+      ["an empty body", undefined, ""],
+    ];
+    for (const [name, body, raw] of bad) {
+      const admin = await call("admin", "PUT", body, raw);
+      expect([name, admin.status, admin.body.code]).toEqual([name, 403, "owner_only"]);
+      // It says nothing about what was wrong with the body, which an admin has no right to probe.
+      expect([name, "fields" in admin.body]).toEqual([name, false]);
+      expect(admin.text).not.toContain(MARK);
+      const member = await call("member", "PUT", body, raw);
+      expect([name, member.status]).toEqual([name, 403]);
+      expect([name, "fields" in member.body]).toEqual([name, false]);
+    }
+    expect(rows("compute_policy")).toBe(0);
+    expect(audits("compute.policy.set")).toEqual([]);
+  });
+
   test("an owner's valid body is stored as the next version and audited", async () => {
     const r1 = await call("owner", "PUT", { policy: policy(), note: "first" });
     expect(r1.status).toBe(200);
@@ -347,6 +419,9 @@ describe("PUT /admin/compute/policy", () => {
     const r = await call("owner", "PUT", {
       policy: { ...policy(), defaultGrantMilli: { cpu: "x", gpu: 1 } },
     });
-    expect(r.body.error).toContain("defaultGrantMilli.cpu");
+    expect(r.body.error).toContain("policy.defaultGrantMilli.cpu");
+    expect(r.body.fields.map((f: { path: string }) => f.path)).toEqual([
+      "policy.defaultGrantMilli.cpu",
+    ]);
   });
 });

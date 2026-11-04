@@ -8,34 +8,45 @@
  *   GET  /compute/pools                               admin     a page of pools
  *   GET  /compute/pools/by-id/:accountId              admin     one account's pools
  *   POST /compute/pools/by-id/:accountId/grant        admin     SU into an account's pool
- *   POST /compute/pools/by-id/:accountId/adjust       admin     a correction of its grant or charge
+ *   POST /compute/pools/by-id/:accountId/adjust       admin     a correction of its grant (a charge: owner)
  *   POST /compute/pools/platform/:key/grant           owner     SU into a platform budget
  *   POST /compute/pools/platform/:key/adjust          owner     a correction of a platform budget
  *
- * Admin-only through the router's middleware; the owner-only routes check the role here and say so
- * (403, `owner_only`). A grant and an adjustment need an `Idempotency-Key` header, and a repeat of
- * one grants once. Every refusal is `{ error: <sentence>, code: <word> }`; an invalid body names
- * the fields and never echoes a value. Every write is audited in the same batch as its ledger entry
- * (`compute.policy.set`, `compute.pool.grant`, `compute.pool.adjust`).
+ * Admin-only through the router's middleware; the owner-only routes check the role here, before the
+ * body is read, and say so (403, `owner_only`). A grant and an adjustment need an `Idempotency-Key`
+ * header, which the ledger stores behind the kind and the actor (`adminKey`), so a repeat of one
+ * grants once and a second administrator's same key is their own request. Every refusal is
+ * `{ error: <sentence>, code: <word> }`; an invalid body names the fields and never echoes a value.
+ * Every write is audited in the same batch as its ledger entry (`compute.policy.set`,
+ * `compute.pool.grant`, `compute.pool.adjust`). One request moves at most 2^40 milli-SU
+ * (`COMPUTE_REQUEST_MILLI_MAX`), and a total that would pass 2^53 - 1 is a 409 `would_exceed_limit`.
  *
- * Nothing here mails anyone, calls GitHub, or is a cron. The platform budget is counted when a
- * person's charge is adjusted: an adjustment of the charge of an account's pool also moves the
- * `people` budget of the same word, so the budget and the people never disagree.
+ * INTERIM OWNER RULES, easy to loosen: a correction of an account's CHARGE is the owner's (an
+ * administrator may correct a grant), because whether a charge correction credits the platform
+ * budget back is the owner's decision. What this does today: an adjustment of the charge of an
+ * account's pool also moves the `people` budget of the same word, so the budget and the people
+ * never disagree (the table refuses an account's spend that names no such budget). A grant to a
+ * deleted account is refused; its pools are still read and its grant corrected, for the record.
+ *
+ * Nothing here mails anyone, calls GitHub, or is a cron.
  */
 
 import type { Context, MiddlewareHandler } from "hono";
 import { z } from "zod";
-import { COMPUTE_WORD_RE } from "../../../../shared/compute-state";
+import { type COMPUTE_LEDGER_REASONS, COMPUTE_WORD_RE } from "../../../../shared/compute-state";
 import { COMPUTE_POOLS, type ComputePool } from "../../../../shared/contract/compute";
 import {
   COMPUTE_ADJUST_TARGETS,
   COMPUTE_ADMIN_ERROR_STATUS,
   COMPUTE_IDEMPOTENCY_KEY_RE,
+  COMPUTE_PEOPLE_BUDGET,
   COMPUTE_POOLS_PAGE_MAX,
   COMPUTE_POOL_HOLDER_KINDS,
+  COMPUTE_REQUEST_MILLI_MAX,
   type ComputeAdminErrorCode,
   type ComputeLedgerEntryView,
   type ComputePoolView,
+  isComputePlatformKey,
 } from "../../../../shared/contract/compute-admin";
 import {
   ComputeLedgerError,
@@ -43,8 +54,10 @@ import {
   type PoolRow,
   accountPools,
   adjustPool,
+  adminKey,
   availableMilli,
   ensurePool,
+  findEntryByKey,
   getPool,
   grantPool,
   listPools,
@@ -56,14 +69,13 @@ import {
   fieldPath,
   getPolicy,
   getPolicyVersion,
+  issuesOf,
   putPolicy,
 } from "../../services/compute-policy";
 import type { Bindings, Variables } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
 type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
-
-const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   invalid_body: "The request body is not valid.",
@@ -75,6 +87,8 @@ const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   account_not_found: "There is no such account.",
   pool_not_found: "There is no such pool.",
   would_go_negative: "That would make a stored total negative, so nothing was written.",
+  would_exceed_limit:
+    "That would take a stored total past the largest NEMAR keeps, so nothing was written.",
   policy_unreadable: "The stored policy cannot be read, so nothing is served from it.",
   internal: "The compute routes failed unexpectedly.",
 };
@@ -91,17 +105,6 @@ function invalidBody(c: Ctx, fields: PolicyIssue[]) {
   const named = fields.slice(0, 5).map((f) => `${f.path || "body"}: ${f.code}`);
   return refuse(c, "invalid_body", `The request body is not valid: ${named.join("; ")}`, {
     fields,
-  });
-}
-
-function zodFields(error: z.ZodError, prefix = ""): PolicyIssue[] {
-  return error.issues.slice(0, 20).map((i) => {
-    const path = fieldPath(i.path);
-    return {
-      path: [prefix, path].filter((p) => p !== "").join("."),
-      code: i.code,
-      ...(i.code === "custom" ? { message: i.message } : {}),
-    };
   });
 }
 
@@ -172,14 +175,15 @@ function entryView(row: LedgerRow): ComputeLedgerEntryView {
 
 const poolWord = z.enum(COMPUTE_POOLS);
 const reasonWord = z.string().regex(COMPUTE_WORD_RE);
-const wholeMilli = z.number().int().min(-MAX_SAFE).max(MAX_SAFE);
+/** A whole number of milli-SU, either sign, at most one request's worth. */
+const movedMilli = z.number().int().min(-COMPUTE_REQUEST_MILLI_MAX).max(COMPUTE_REQUEST_MILLI_MAX);
 
 const putPolicyBody = z.object({ policy: z.unknown(), note: z.string().optional() }).strict();
 
 const grantBody = z
   .object({
     pool: poolWord,
-    amount_milli: z.number().int().min(1).max(MAX_SAFE),
+    amount_milli: z.number().int().min(1).max(COMPUTE_REQUEST_MILLI_MAX),
     reason: reasonWord.optional(),
   })
   .strict();
@@ -188,7 +192,7 @@ const adjustBody = z
   .object({
     pool: poolWord,
     target: z.enum(COMPUTE_ADJUST_TARGETS),
-    delta_milli: wholeMilli.refine((n) => n !== 0, {
+    delta_milli: movedMilli.refine((n) => n !== 0, {
       message: "an adjustment of 0 changes nothing",
     }),
     reason: reasonWord,
@@ -197,7 +201,7 @@ const adjustBody = z
 
 const listQuery = z.object({
   holder_kind: z.enum(COMPUTE_POOL_HOLDER_KINDS).optional(),
-  after: z.coerce.number().int().min(0).max(MAX_SAFE).optional(),
+  after: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   limit: z.coerce.number().int().min(1).max(COMPUTE_POOLS_PAGE_MAX).default(50),
 });
 
@@ -221,49 +225,89 @@ function idempotencyKey(c: Ctx): { key: string } | { refusal: Response } {
 
 const ACCOUNT_ID_RE = /^[1-9]\d{0,14}$/;
 
-async function accountExists(db: D1Database, id: number): Promise<boolean> {
-  return (await db.prepare("SELECT id FROM users WHERE id = ?1").bind(id).first()) !== null;
+/** What a grant says when its administrator names no reason. */
+const ADMIN_GRANT_REASON: (typeof COMPUTE_LEDGER_REASONS)[number] = "admin_grant";
+
+/**
+ * Whether an account is there. A deleted account (its row tombstoned, `deleted_at` set) is not,
+ * unless `includeDeleted`: its pools and entries stay and are read and corrected for the record,
+ * but nothing new is granted to it.
+ */
+async function accountExists(db: D1Database, id: number, includeDeleted = false): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT deleted_at FROM users WHERE id = ?1")
+    .bind(id)
+    .first<{ deleted_at: string | null }>();
+  return row !== null && (includeDeleted || row.deleted_at === null);
 }
 
 // --- The grant and the adjustment, for an account's pool and for a platform pool --------------
 
 type Holder = { kind: "account"; id: number } | { kind: "platform"; key: string };
 
-/** The pool a write is about, or the refusal: an account's is made on its first grant, a platform's must exist. */
+/** Whether a pool is the one a holder's pool of a word is. */
+function isPoolOf(pool: PoolRow, holder: Holder, word: ComputePool): boolean {
+  return holder.kind === "account"
+    ? pool.holder_kind === "account" && pool.holder_ref === String(holder.id) && pool.pool === word
+    : pool.holder_kind === "platform" && pool.holder_ref === holder.key && pool.pool === word;
+}
+
+/**
+ * The pool a write is about, or the refusal: an account's is made on its first grant (`create`), a
+ * platform's must exist. A deleted account is not granted to, but its pools are found to be
+ * corrected. `prior` is the pool of an earlier entry that holds this request's key: when it is the
+ * pool asked for, nothing is made; when it is not, the key is reused for another request, and
+ * nothing is made either.
+ */
 async function targetPool(
   c: Ctx,
   holder: Holder,
   word: ComputePool,
   create: boolean,
+  prior?: PoolRow | null,
 ): Promise<PoolRow | Response> {
   const db = c.env.DB;
   if (holder.kind === "account") {
-    if (!(await accountExists(db, holder.id))) return refuse(c, "account_not_found");
+    if (!(await accountExists(db, holder.id, !create))) return refuse(c, "account_not_found");
+    if (prior !== undefined && prior !== null) {
+      return isPoolOf(prior, holder, word) ? prior : refuse(c, "idempotency_conflict");
+    }
     if (create) return ensurePool(db, "account", String(holder.id), word);
     const existing = (await accountPools(db, holder.id)).find((p) => p.pool === word);
     return existing ?? refuse(c, "pool_not_found");
   }
   // Only the platform's own budgets are there to find; nothing here makes one.
-  const pool = await platformPool(db, holder.key, word);
-  return pool ?? refuse(c, "pool_not_found");
+  const pool = isComputePlatformKey(holder.key) ? await platformPool(db, holder.key, word) : null;
+  if (!pool) return refuse(c, "pool_not_found");
+  if (prior !== undefined && prior !== null && !isPoolOf(prior, holder, word)) {
+    return refuse(c, "idempotency_conflict");
+  }
+  return pool;
 }
 
 async function grantRoute(c: Ctx, holder: Holder) {
   const idem = idempotencyKey(c);
   if ("refusal" in idem) return idem.refusal;
   const parsed = grantBody.safeParse(await readJson(c));
-  if (!parsed.success) return invalidBody(c, zodFields(parsed.error));
+  if (!parsed.success) return invalidBody(c, issuesOf(parsed.error));
+  const actor = c.get("user").id;
+  const key = adminKey("grant", actor, idem.key);
   try {
-    const pool = await targetPool(c, holder, parsed.data.pool, true);
+    // The key is looked at FIRST: a key an earlier request used for another pool is a conflict, and
+    // answering it must not make the pool this request names.
+    const priorEntry = await findEntryByKey(c.env.DB, key);
+    const prior = priorEntry ? await getPool(c.env.DB, priorEntry.pool_id) : null;
+    const pool = await targetPool(c, holder, parsed.data.pool, true, prior);
     if (pool instanceof Response) return pool;
     const result = await grantPool(c.env.DB, {
       poolId: pool.id,
       amountMilli: parsed.data.amount_milli,
-      actorUserId: c.get("user").id,
-      reason: parsed.data.reason ?? "admin_grant",
-      idempotencyKey: `grant:${idem.key}`,
-      audit: { userId: c.get("user").id, action: "compute.pool.grant" },
+      actorUserId: actor,
+      reason: parsed.data.reason ?? ADMIN_GRANT_REASON,
+      idempotencyKey: key,
+      audit: { userId: actor, action: "compute.pool.grant" },
     });
+    if (!result.ok) return refuse(c, result.code);
     const after = (await getPool(c.env.DB, pool.id)) ?? pool;
     return c.json(
       { pool: poolView(after), entry: entryView(result.entry), replayed: result.replayed },
@@ -278,8 +322,13 @@ async function adjustRoute(c: Ctx, holder: Holder) {
   const idem = idempotencyKey(c);
   if ("refusal" in idem) return idem.refusal;
   const parsed = adjustBody.safeParse(await readJson(c));
-  if (!parsed.success) return invalidBody(c, zodFields(parsed.error));
+  if (!parsed.success) return invalidBody(c, issuesOf(parsed.error));
   const body = parsed.data;
+  // Interim: an account's charge is corrected by an owner (a platform pool's route is owner-only
+  // already). Easy to loosen once the owner decides what a charge correction does to the budget.
+  if (holder.kind === "account" && body.target === "charged" && c.get("user").role !== "owner") {
+    return refuse(c, "owner_only");
+  }
   try {
     const pool = await targetPool(c, holder, body.pool, false);
     if (pool instanceof Response) return pool;
@@ -287,7 +336,7 @@ async function adjustRoute(c: Ctx, holder: Holder) {
     // same word; a platform pool is its own budget, and a correction of a grant has none.
     let budgetPoolId: number | null = null;
     if (body.target === "charged" && pool.holder_kind !== "platform") {
-      const budget = await platformPool(c.env.DB, "people", body.pool);
+      const budget = await platformPool(c.env.DB, COMPUTE_PEOPLE_BUDGET, body.pool);
       if (!budget) throw new Error("the platform people budget is missing");
       budgetPoolId = budget.id;
     }
@@ -299,7 +348,7 @@ async function adjustRoute(c: Ctx, holder: Holder) {
         : { chargedDeltaMilli: body.delta_milli }),
       actorUserId: c.get("user").id,
       reason: body.reason,
-      idempotencyKey: `adjust:${idem.key}`,
+      idempotencyKey: adminKey("adjust", c.get("user").id, idem.key),
       audit: { userId: c.get("user").id, action: "compute.pool.adjust" },
     });
     if (!result.ok) return refuse(c, result.code);
@@ -326,26 +375,21 @@ export function registerComputeAdminRoutes(admin: AdminRouter): void {
 
   admin.put("/compute/policy", requireOwner, async (c) => {
     const parsed = putPolicyBody.safeParse(await readJson(c));
-    if (!parsed.success) return invalidBody(c, zodFields(parsed.error));
+    if (!parsed.success) return invalidBody(c, issuesOf(parsed.error));
     try {
       const result = await putPolicy(
         c.env.DB,
         c.get("user").id,
         parsed.data.policy,
         parsed.data.note,
+        "policy",
       );
       if (!result.ok) {
         if (result.code === "not_owner") return refuse(c, "owner_only");
         if (result.code === "invalid_note") {
           return invalidBody(c, [{ path: "note", code: "invalid_string" }]);
         }
-        return invalidBody(
-          c,
-          result.issues.map((i) => ({
-            ...i,
-            path: ["policy", i.path].filter((p) => p !== "").join("."),
-          })),
-        );
+        return invalidBody(c, result.issues);
       }
       const written = await getPolicyVersion(c.env.DB, result.version);
       if (!written) throw new Error("a policy version that was just written could not be read");
@@ -384,7 +428,8 @@ export function registerComputeAdminRoutes(admin: AdminRouter): void {
     if (!ACCOUNT_ID_RE.test(raw)) return refuse(c, "account_not_found");
     const id = Number(raw);
     try {
-      if (!(await accountExists(c.env.DB, id))) return refuse(c, "account_not_found");
+      // Read for the record: a deleted account's pools stay readable.
+      if (!(await accountExists(c.env.DB, id, true))) return refuse(c, "account_not_found");
       const pools = await accountPools(c.env.DB, id);
       return c.json({ account_id: id, pools: pools.map(poolView) });
     } catch (err) {

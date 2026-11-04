@@ -19,18 +19,20 @@ export const COMPUTE_KEYS = {
   owner: "cmp-owner-key-0123456789abcdef0123456789abcdef01",
   owner2: "cmp-owner2-key-0123456789abcdef0123456789abcdef0",
   admin: "cmp-admin-key-0123456789abcdef0123456789abcdef01",
+  admin2: "cmp-admin2-key-0123456789abcdef0123456789abcdef0",
   member: "cmp-member-key-0123456789abcdef0123456789abcdef0",
 };
 
 export type ComputeWho = keyof typeof COMPUTE_KEYS;
 
-/** Seed an owner, a second owner, an admin and a member, each with a key; their user ids. */
+/** Seed an owner, a second owner, two admins and a member, each with a key; their user ids. */
 export async function seedComputeUsers(db: Database): Promise<Record<ComputeWho, number>> {
   const ids = {} as Record<ComputeWho, number>;
   const roles: Record<ComputeWho, "owner" | "admin" | "member"> = {
     owner: "owner",
     owner2: "owner",
     admin: "admin",
+    admin2: "admin",
     member: "member",
   };
   for (const who of Object.keys(COMPUTE_KEYS) as ComputeWho[]) {

@@ -18,6 +18,7 @@
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
+import { ensurePool, grantPool } from "../src/services/compute-ledger";
 import {
   COMPUTE_KEYS,
   type ComputeWho,
@@ -300,8 +301,8 @@ describe("a grant", () => {
       "job.1.final",
     );
     expect(db.query("SELECT idempotency_key FROM compute_ledger ORDER BY id").all()).toEqual([
-      { idempotency_key: "grant:hold.1.charge" },
-      { idempotency_key: "adjust:job.1.final" },
+      { idempotency_key: `grant:${ids.admin}:hold.1.charge` },
+      { idempotency_key: `adjust:${ids.admin}:job.1.final` },
     ]);
     expect(
       count("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'hold:%'"),
@@ -387,13 +388,174 @@ describe("a grant", () => {
     expect(r.body.fields).toEqual([{ path: "amount_milli", code: "invalid_type" }]);
   });
 
-  test("the largest exact amount is accepted, and one more SU of it is refused by the table", async () => {
-    const r = await grant("owner", PEOPLE, { pool: "cpu", amount_milli: Number.MAX_SAFE_INTEGER });
+  test("a request may move at most 2^40 milli-SU, and exactly that is accepted", async () => {
+    const MOST = 2 ** 40;
+    const r = await grant("owner", PEOPLE, { pool: "cpu", amount_milli: MOST });
     expect(r.status).toBe(201);
-    expect(r.body.pool.available_milli).toBe(Number.MAX_SAFE_INTEGER);
-    const again = await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 1 });
-    expect([again.status, again.body.code]).toEqual([500, "internal"]);
+    expect(r.body.pool.available_milli).toBe(MOST);
+    for (const amount_milli of [MOST + 1, Number.MAX_SAFE_INTEGER]) {
+      const over = await grant("owner", PEOPLE, { pool: "cpu", amount_milli });
+      expect([amount_milli, over.status, over.body.code]).toEqual([
+        amount_milli,
+        400,
+        "invalid_body",
+      ]);
+    }
+    const adj = (delta_milli: number) =>
+      adjust("owner", PEOPLE, {
+        pool: "cpu",
+        target: "granted",
+        delta_milli,
+        reason: "correction",
+      });
+    expect((await adj(MOST + 1)).body.code).toBe("invalid_body");
+    expect((await adj(-(MOST + 1))).body.code).toBe("invalid_body");
+    expect(poolOf("platform", "people", "cpu")?.granted_milli).toBe(MOST);
+  });
+
+  test("a total that would pass 2^53 - 1 is a 409 would_exceed_limit, and writes nothing", async () => {
+    // Many grants of the largest request would get there; the service is asked directly, as a long
+    // run of them would be.
+    const people = await ensurePool(realD1(db), "platform", "people", "cpu");
+    const filled = await grantPool(realD1(db), {
+      poolId: people.id,
+      amountMilli: Number.MAX_SAFE_INTEGER - 5,
+      actorUserId: ids.owner,
+      idempotencyKey: "fill-to-the-top",
+    });
+    expect(filled.ok).toBe(true);
+    const before = ledger();
+    const over = await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 6 });
+    expect([over.status, over.body.code]).toEqual([409, "would_exceed_limit"]);
+    const adj = await adjust("owner", PEOPLE, {
+      pool: "cpu",
+      target: "granted",
+      delta_milli: 6,
+      reason: "correction",
+    });
+    expect([adj.status, adj.body.code]).toEqual([409, "would_exceed_limit"]);
+    expect(ledger()).toBe(before);
+    expect(audits("compute.pool.grant")).toEqual([]);
+    // Exactly the room is accepted.
+    expect((await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 5 })).status).toBe(201);
     expect(poolOf("platform", "people", "cpu")?.granted_milli).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("a key reused for another pool word is a 409, and makes no pool", async () => {
+    const key = freshKey();
+    expect((await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 5 }, key)).status).toBe(
+      201,
+    );
+    const other = await grant("admin", ACCOUNT(), { pool: "gpu", amount_milli: 5 }, key);
+    expect([other.status, other.body.code]).toEqual([409, "idempotency_conflict"]);
+    expect(count("SELECT COUNT(*) AS n FROM compute_pools WHERE holder_kind = 'account'")).toBe(1);
+    // And for another amount of the pool it is.
+    const again = await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 6 }, key);
+    expect(again.body.code).toBe("idempotency_conflict");
+  });
+
+  test("a key reused with another reason is a 409, not a silent replay of the first", async () => {
+    const key = freshKey();
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 5, reason: "top_up" }, key);
+    const other = await grant(
+      "admin",
+      ACCOUNT(),
+      { pool: "cpu", amount_milli: 5, reason: "goodwill" },
+      key,
+    );
+    expect([other.status, other.body.code]).toEqual([409, "idempotency_conflict"]);
+    const same = await grant(
+      "admin",
+      ACCOUNT(),
+      { pool: "cpu", amount_milli: 5, reason: "top_up" },
+      key,
+    );
+    expect([same.status, same.body.replayed]).toEqual([200, true]);
+  });
+});
+
+describe("whose key it is", () => {
+  test("two administrators sending the same key and body each grant: a key belongs to its actor", async () => {
+    const key = freshKey();
+    const body = { pool: "cpu", amount_milli: 1000 };
+    const first = await grant("admin", ACCOUNT(), body, key);
+    const second = await grant("admin2", ACCOUNT(), body, key);
+    expect([first.status, first.body.replayed]).toEqual([201, false]);
+    expect([second.status, second.body.replayed]).toEqual([201, false]);
+    expect(first.body.entry.id).not.toBe(second.body.entry.id);
+    expect(poolOf("account", String(accountId), "cpu")?.granted_milli).toBe(2000);
+    // Each one's own repeat is a replay of their own.
+    const again = await grant("admin2", ACCOUNT(), body, key);
+    expect([again.status, again.body.replayed, again.body.entry.id]).toEqual([
+      200,
+      true,
+      second.body.entry.id,
+    ]);
+    const keys = db.query("SELECT idempotency_key FROM compute_ledger ORDER BY id").all() as Array<{
+      idempotency_key: string;
+    }>;
+    expect(keys.map((k) => k.idempotency_key)).toEqual([
+      `grant:${ids.admin}:${key}`,
+      `grant:${ids.admin2}:${key}`,
+    ]);
+  });
+
+  test("the longest header key still fits the table's 128 characters, for a grant and an adjustment", async () => {
+    const key = "k".repeat(100);
+    expect((await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 10 }, key)).status).toBe(
+      201,
+    );
+    const adj = await adjust(
+      "admin",
+      ACCOUNT(),
+      { pool: "cpu", target: "granted", delta_milli: 1, reason: "correction" },
+      key,
+    );
+    expect(adj.status).toBe(201);
+  });
+});
+
+describe("who may correct a charge (an interim rule, easy to loosen)", () => {
+  test("an administrator corrects an account's grant, and only an owner corrects its charge", async () => {
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 10000 });
+    const charged = { pool: "cpu", target: "charged", delta_milli: 100, reason: "correction" };
+    const before = ledger();
+    const refused = await adjust("admin", ACCOUNT(), charged);
+    expect([refused.status, refused.body.code]).toEqual([403, "owner_only"]);
+    expect(ledger()).toBe(before);
+    expect(audits("compute.pool.adjust")).toEqual([]);
+    expect((await adjust("admin", ACCOUNT(), { ...charged, target: "granted" })).status).toBe(201);
+    expect((await adjust("owner", ACCOUNT(), charged)).status).toBe(201);
+    // The refusal does not leak whether the body was valid.
+    const invalid = await adjust("admin", ACCOUNT(), { ...charged, delta_milli: 0 });
+    expect(invalid.status).toBe(400);
+  });
+});
+
+describe("an account that was deleted", () => {
+  const tombstone = () =>
+    db.run("UPDATE users SET deleted_at = datetime('now') WHERE id = ?", [accountId]);
+
+  test("is not granted to: 404 account_not_found, and no pool is made", async () => {
+    tombstone();
+    const r = await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1 });
+    expect([r.status, r.body.code]).toEqual([404, "account_not_found"]);
+    expect(count("SELECT COUNT(*) AS n FROM compute_pools WHERE holder_kind = 'account'")).toBe(0);
+    expect(ledger()).toBe(0);
+  });
+
+  test("is still read and corrected, for the record: a deleted account's pools and entries stay", async () => {
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 5000 });
+    tombstone();
+    const read = await call("admin", "GET", ACCOUNT());
+    expect([read.status, read.body.pools[0].granted_milli]).toEqual([200, 5000]);
+    const adj = await adjust("admin", ACCOUNT(), {
+      pool: "cpu",
+      target: "granted",
+      delta_milli: -1000,
+      reason: "correction",
+    });
+    expect([adj.status, adj.body.pool.granted_milli]).toEqual([201, 4000]);
   });
 });
 
@@ -431,13 +593,13 @@ describe("an adjustment", () => {
   test("an adjustment of the charge follows the people budget of the same word", async () => {
     await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 100000 });
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 10000 });
-    const up = await adjust("admin", ACCOUNT(), body({ target: "charged", delta_milli: 3000 }));
+    const up = await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 3000 }));
     expect(up.body.pool).toMatchObject({ charged_milli: 3000, available_milli: 7000 });
     expect(up.body.entry).toMatchObject({ charged_delta_milli: 3000, granted_delta_milli: 0 });
     expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(3000);
     expect(poolOf("platform", "people", "gpu")?.charged_milli).toBe(0);
     expect(poolOf("platform", "pipelines", "cpu")?.charged_milli).toBe(0);
-    const down = await adjust("admin", ACCOUNT(), body({ target: "charged", delta_milli: -3000 }));
+    const down = await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: -3000 }));
     expect(down.body.pool.charged_milli).toBe(0);
     expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(0);
     expect(await totalsDisagreements(realD1(db))).toEqual([]);
@@ -461,28 +623,36 @@ describe("an adjustment", () => {
   test("one that would make a stored total negative is a 409 and writes nothing", async () => {
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1000 });
     const before = ledger();
-    for (const over of [{ delta_milli: -1001 }, { target: "charged", delta_milli: -1 }]) {
-      const r = await adjust("admin", ACCOUNT(), body(over));
+    const refusals: Array<[ComputeWho, Record<string, unknown>]> = [
+      ["admin", { delta_milli: -1001 }],
+      ["owner", { target: "charged", delta_milli: -1 }],
+    ];
+    for (const [who, over] of refusals) {
+      const r = await adjust(who, ACCOUNT(), body(over));
       expect([r.status, r.body.code]).toEqual([409, "would_go_negative"]);
     }
-    // And one the budget could not take: the person has charge the budget never counted.
-    db.run(
-      "INSERT INTO compute_ledger (kind, pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, 500, 'job_000000000000000000000001', 'seed-1')",
-      [(poolOf("account", String(accountId), "cpu") as { id: number }).id],
-    );
+    // And one the budget could not take: the owner took the budget's charge back, so the person
+    // holds what the budget does not.
+    expect(
+      (await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 500 }))).status,
+    ).toBe(201);
+    expect(
+      (await adjust("owner", PEOPLE, body({ target: "charged", delta_milli: -500 }))).status,
+    ).toBe(201);
+    const writes = ledger();
     const budgetRefusal = await adjust(
-      "admin",
+      "owner",
       ACCOUNT(),
       body({ target: "charged", delta_milli: -500 }),
     );
     expect([budgetRefusal.status, budgetRefusal.body.code]).toEqual([409, "would_go_negative"]);
-    expect(ledger()).toBe(before + 1);
-    expect(audits("compute.pool.adjust")).toEqual([]);
+    expect(ledger()).toBe(writes);
+    expect(writes).toBe(before + 2);
   });
 
   test("a grant adjusted below what is used is allowed, and available says so", async () => {
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1000 });
-    await adjust("admin", ACCOUNT(), body({ target: "charged", delta_milli: 800 }));
+    await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 800 }));
     const r = await adjust("admin", ACCOUNT(), body({ delta_milli: -900 }));
     expect(r.status).toBe(201);
     expect(r.body.pool).toMatchObject({
@@ -620,8 +790,8 @@ describe("reading pools", () => {
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1000 });
     const id = (poolOf("account", String(accountId), "cpu") as { id: number }).id;
     db.run(
-      "INSERT INTO compute_ledger (kind, pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, 1500, 'job_000000000000000000000002', 'seed-2')",
-      [id],
+      "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, ?, 1500, 'job_000000000000000000000002', 'seed-2')",
+      [id, (poolOf("platform", "people", "cpu") as { id: number }).id],
     );
     const r = await call("admin", "GET", ACCOUNT());
     expect(r.body.pools[0]).toMatchObject({
@@ -636,7 +806,7 @@ describe("after all of it", () => {
   test("the totals equal the ledger's sums", async () => {
     await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 50000 });
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 9000 });
-    await adjust("admin", ACCOUNT(), {
+    await adjust("owner", ACCOUNT(), {
       pool: "cpu",
       target: "charged",
       delta_milli: 2000,

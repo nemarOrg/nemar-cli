@@ -28,6 +28,7 @@ import {
   ComputePolicySchema,
   DEFAULT_COMPUTE_POLICY,
 } from "../../../shared/contract/compute.js";
+import { ACTIVE_ACCOUNT_STATUSES } from "./account-tier.js";
 
 /** The longest stored policy, in characters; the table refuses more. */
 export const POLICY_MAX_CHARS = 65536;
@@ -117,11 +118,13 @@ export async function getPolicyVersion(
 
 /**
  * The new version, only if `?3` is an owner's id: `?1` the policy JSON, `?2` the note. The role is
- * read in this statement, so a caller that skipped the route's check still cannot write a version
- * without one.
+ * read in this statement, with the account not deleted and in an active status, so a caller that
+ * skipped the route's check, and an owner whose account was ended, still cannot write a version.
  */
 export const POLICY_INSERT_SQL = `INSERT INTO compute_policy (policy_json, set_by, note)
-  SELECT ?1, u.id, ?2 FROM users u WHERE u.id = ?3 AND u.role = 'owner'`;
+  SELECT ?1, u.id, ?2 FROM users u
+   WHERE u.id = ?3 AND u.role = 'owner' AND u.deleted_at IS NULL
+     AND u.status IN (${ACTIVE_ACCOUNT_STATUSES.map((s) => `'${s}'`).join(", ")})`;
 
 /** The audit row of that version, written only if the insert before it was: who and which version. */
 export const AUDIT_POLICY_SET_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
@@ -144,10 +147,17 @@ export function fieldPath(path: ReadonlyArray<string | number>): string {
     .join(".");
 }
 
-/** The issues of a zod failure, without a value, at most 20. */
-export function issuesOf(error: z.ZodError): PolicyIssue[] {
+/** A path under a prefix: the prefix alone for a problem at the root, and `prefix.path` otherwise. */
+const under = (prefix: string | undefined, path: string): string =>
+  [prefix ?? "", path].filter((p) => p !== "").join(".");
+
+/**
+ * The issues of a zod failure, without a value, at most 20, each path under `prefix` when one is
+ * given (a route names a field of its body: `policy.defaultGrantMilli.cpu`). The one copy.
+ */
+export function issuesOf(error: z.ZodError, prefix?: string): PolicyIssue[] {
   return error.issues.slice(0, 20).map((i) => ({
-    path: fieldPath(i.path),
+    path: under(prefix, fieldPath(i.path)),
     code: i.code,
     ...(i.code === "custom" ? { message: i.message } : {}),
   }));
@@ -161,14 +171,16 @@ export type PutPolicyResult =
 
 /**
  * Write the next version of the policy, as `ownerId`, with an optional note. The input is checked
- * with the strict schema; an invalid one names the fields and writes nothing. The version and its
- * audit row are one batch. A caller that is not an owner (`not_owner`) writes nothing either.
+ * with the strict schema; an invalid one names the fields (under `issuePrefix` when one is given)
+ * and writes nothing. The version and its audit row are one batch. A caller that is not an owner
+ * (`not_owner`), or whose account was deleted or is not active, writes nothing either.
  */
 export async function putPolicy(
   db: D1Database,
   ownerId: number,
   input: unknown,
   note?: string | null,
+  issuePrefix?: string,
 ): Promise<PutPolicyResult> {
   const text = note ?? null;
   if (
@@ -178,10 +190,16 @@ export async function putPolicy(
     return { ok: false, code: "invalid_note" };
   }
   const parsed = ComputePolicySchema.safeParse(input);
-  if (!parsed.success) return { ok: false, code: "invalid_policy", issues: issuesOf(parsed.error) };
+  if (!parsed.success) {
+    return { ok: false, code: "invalid_policy", issues: issuesOf(parsed.error, issuePrefix) };
+  }
   const json = JSON.stringify(parsed.data);
   if (json.length > POLICY_MAX_CHARS) {
-    return { ok: false, code: "invalid_policy", issues: [{ path: "", code: "too_large" }] };
+    return {
+      ok: false,
+      code: "invalid_policy",
+      issues: [{ path: under(issuePrefix, ""), code: "too_large" }],
+    };
   }
   const results = await db.batch([
     db.prepare(POLICY_INSERT_SQL).bind(json, text, ownerId),
