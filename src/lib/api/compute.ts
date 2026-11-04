@@ -14,6 +14,8 @@
 import {
   type ComputeAccountPoolsResponse,
   ComputeAccountPoolsResponseSchema,
+  type ComputeJobAdminResponse,
+  ComputeJobAdminResponseSchema,
   type ComputePolicyResponse,
   ComputePolicyResponseSchema,
   type ComputePoolAdjustRequest,
@@ -138,4 +140,32 @@ export async function adjustPlatformComputePool(
  */
 export async function getComputeStatus(): Promise<ComputeStatusResponse> {
   return request("/admin/compute/status", {}, true, ComputeStatusResponseSchema);
+}
+
+/**
+ * `POST /admin/compute/jobs/:id/cancel` (admin): cancel a job at Tapis (a job that never started is ended
+ * here and its hold released). The Worker records the intent and carries it out; a job Tapis could not be
+ * asked about is retried by the Worker's own sweep.
+ */
+export async function cancelComputeJobAsAdmin(jobId: string): Promise<ComputeJobAdminResponse> {
+  return request(
+    `/admin/compute/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+    true,
+    ComputeJobAdminResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/compute/jobs/:id/advance` (admin): one step of a job, wherever it is: a `created` job is
+ * submitted, a submitted one is read back from Tapis and applied, and a finished one gets what it is
+ * owed. The way a job advances in development, where no compute cron runs.
+ */
+export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJobAdminResponse> {
+  return request(
+    `/admin/compute/jobs/${encodeURIComponent(jobId)}/advance`,
+    { method: "POST" },
+    true,
+    ComputeJobAdminResponseSchema,
+  );
 }

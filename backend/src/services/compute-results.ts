@@ -7,11 +7,21 @@
  * forwarded copy of it) download a result: a presigned address is a bearer link, so it is made only
  * when the owner asks for it on the page (`mintResultLinks`), never put in a mail and never logged.
  * Nothing the job wrote is in the mail: not its name, its output paths or its log.
+ *
+ * LINKS ARE BEARER LINKS. `mintResultLinks` makes a 7-day presigned GET for each declared output of a
+ * finished, verified job, only for the job's owner (the route checks), only while the objects exist
+ * (a head finds them gone: `results_expired`), and at most `RESULT_LINKS_MAX` at a time. Anyone who
+ * holds a link can download until it expires, and the terms say so. A link is returned to the owner and
+ * never logged, never mailed and never stored.
  */
 
+import { COMPUTE_REFUSAL_STATUS } from "../../../shared/compute-state.js";
+import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
 import { escapeHtml } from "../lib/escape.js";
 import type { Bindings } from "../types/bindings.js";
 import type { ComputeJobRow } from "./compute-jobs.js";
+import { COMPUTE_PRESIGN_MAX_SECONDS, computeS3, presignGet } from "./compute-s3.js";
+import { readDeclared } from "./compute-verify.js";
 import { resolveEmailConfig, sendEmail } from "./email.js";
 import { appBase } from "./environment.js";
 
@@ -98,4 +108,72 @@ export async function sendComputeResultsReadyEmail(
     env,
   );
   return "sent";
+}
+
+// --- Links ---------------------------------------------------------------------------------------
+
+/** What a result link lives: seven days, S3's and R2's own maximum. */
+export const RESULT_LINK_SECONDS = COMPUTE_PRESIGN_MAX_SECONDS;
+
+/** The most links one call makes: a response is a few hundred kilobytes, never a megabyte per thousand. */
+export const RESULT_LINKS_MAX = 1000;
+
+export interface ResultLink {
+  path: string;
+  size: number;
+  url: string;
+}
+
+export type LinksResult =
+  | { ok: true; links: ResultLink[]; expires_at: string; total: number; truncated: boolean }
+  | { ok: false; code: "bad_state" | "results_expired" | "compute_disabled"; status: number };
+
+const linkRefusal = (code: "bad_state" | "results_expired" | "compute_disabled"): LinksResult => ({
+  ok: false,
+  code,
+  status: COMPUTE_REFUSAL_STATUS[code],
+});
+
+/**
+ * 7-day presigned GETs for a finished job's declared outputs, in path order, at most `RESULT_LINKS_MAX`
+ * (`truncated` says there are more, and `total` how many). The job must be `finished` and verified
+ * (`bad_state` otherwise). The objects must still be there: the declared file and the first output are
+ * read with a head through the binding, and one that is gone is `results_expired` (the bucket's rule
+ * deletes results after their retention; a renewal never makes a link for an object that is not there).
+ * The caller has already checked that the person is the job's owner.
+ */
+export async function mintResultLinks(env: Bindings, job: ComputeJobRow): Promise<LinksResult> {
+  if (job.state !== "finished" || job.results_verified_at === null) return linkRefusal("bad_state");
+  const bucket = env.COMPUTE_RESULTS;
+  const s3 = computeS3(env);
+  if (!bucket || !s3) return linkRefusal("compute_disabled");
+  const declared = await readDeclared(bucket, job.id);
+  if (declared.kind !== "ok") return linkRefusal("results_expired");
+  const outputs = [...declared.value.outputs].sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+  );
+  const first = outputs[0];
+  if (first !== undefined && (await bucket.head(resultsOutputKey(job.id, first.path))) === null) {
+    return linkRefusal("results_expired");
+  }
+  const chosen = outputs.slice(0, RESULT_LINKS_MAX);
+  const links: ResultLink[] = [];
+  let expires = "";
+  for (const o of chosen) {
+    const signed = await presignGet(s3, "results", resultsOutputKey(job.id, o.path), {
+      expiresIn: RESULT_LINK_SECONDS,
+    });
+    links.push({ path: o.path, size: o.size, url: signed.url });
+    expires = expires === "" || signed.expires_at < expires ? signed.expires_at : expires;
+  }
+  if (expires === "") {
+    expires = new Date(Date.now() + RESULT_LINK_SECONDS * 1000).toISOString();
+  }
+  return {
+    ok: true,
+    links,
+    expires_at: expires,
+    total: outputs.length,
+    truncated: outputs.length > chosen.length,
+  };
 }

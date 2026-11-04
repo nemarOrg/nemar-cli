@@ -239,6 +239,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   compute: [
     "adjustAccountComputePool",
     "adjustPlatformComputePool",
+    "advanceComputeJobAsAdmin",
+    "cancelComputeJobAsAdmin",
     "getAccountComputePools",
     "getComputePolicy",
     "getComputeStatus",
@@ -371,6 +373,8 @@ const POST_SPLIT_ADDITIONS = [
   "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
   "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
   "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status
+  "cancelComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/cancel
+  "advanceComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/advance
   "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
   "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
   "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant

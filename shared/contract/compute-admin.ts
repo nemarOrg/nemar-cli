@@ -259,3 +259,57 @@ export const ComputeStatusResponseSchema = z
   .passthrough();
 
 export type ComputeStatusResponse = z.infer<typeof ComputeStatusResponseSchema>;
+
+const nullableString = z.string().nullable();
+
+/**
+ * A job as an administrator's command prints it (epic #2005 phase A5, #2010): fixed words, numbers and
+ * times. No identity, no specification, no token, no address and no log. `platform_failure` is an
+ * INFORMATION flag, true when NEMAR, the node, the runtime or the contract caused the failure, so that an
+ * administrator can compensate it by a manual grant: nothing is refunded automatically. Every word is a
+ * string here, not an enum, so a word the Worker adds does not break a released CLI.
+ */
+export const ComputeJobViewSchema = z
+  .object({
+    id: z.string(),
+    account_id: z.number().int().nullable(),
+    source: z.string(),
+    kind: z.string(),
+    state: z.string(),
+    tapis_status: nullableString,
+    failure_code: nullableString,
+    failure_detail: nullableString,
+    platform_failure: z.boolean(),
+    cancel_requested: z.boolean(),
+    cancel_reason: nullableString,
+    partition: z.string(),
+    pool: z.string(),
+    held_milli: milli,
+    charged_milli: milli,
+    settled: z.boolean(),
+    flags: z.array(z.string()),
+    created_at: z.string(),
+    submitted_at: nullableString,
+    started_at: nullableString,
+    ended_at: nullableString,
+    tapis_synced_at: nullableString,
+    outputs_completed: z.boolean(),
+    results_verified: z.boolean(),
+    results_bytes: z.number().int().nullable(),
+    records_copied: z.boolean(),
+  })
+  .passthrough();
+
+export type ComputeJobView = z.infer<typeof ComputeJobViewSchema>;
+
+/** `POST /admin/compute/jobs/:id/cancel` and `.../advance`: what happened, and the job as it is now. */
+export const ComputeJobAdminResponseSchema = z
+  .object({
+    ok: z.boolean(),
+    outcome: z.string(),
+    submit: z.string().optional(),
+    job: ComputeJobViewSchema.nullable(),
+  })
+  .passthrough();
+
+export type ComputeJobAdminResponse = z.infer<typeof ComputeJobAdminResponseSchema>;

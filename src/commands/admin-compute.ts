@@ -8,6 +8,7 @@
  *   nemar admin compute pool grant <amount> ...           SU into one pool (admin; a platform budget: owner)
  *   nemar admin compute pool adjust <amount> ...          a correction of its grant (a charge: owner)
  *   nemar admin compute status [--json]                   the switches, Tapis and storage, as the Worker reads them (admin)
+ *   nemar admin compute jobs cancel|advance <id> [--json] cancel a job, or take it one step on (admin; src/commands/admin-compute-jobs.ts)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
  * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so within one invocation the
@@ -56,6 +57,7 @@ import {
   putComputePolicy,
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
+import { jobsCommand } from "./admin-compute-jobs.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
 const POLICY_FILE_MAX_BYTES = 256 * 1024;
@@ -605,3 +607,4 @@ export const computeCommand = new Command("compute").description(
 computeCommand.addCommand(policyCommand);
 computeCommand.addCommand(poolCommand);
 computeCommand.addCommand(statusCommand);
+computeCommand.addCommand(jobsCommand);

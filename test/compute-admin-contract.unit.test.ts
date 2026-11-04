@@ -46,6 +46,35 @@ const entry = {
   created_at: "2026-11-04 10:00:00",
 };
 
+const job = {
+  id: "job_0123456789abcdef01234567",
+  account_id: 12,
+  source: "cli",
+  kind: "batch",
+  state: "failed",
+  tapis_status: "FAILED",
+  failure_code: "launch_failed",
+  failure_detail: null,
+  platform_failure: true,
+  cancel_requested: false,
+  cancel_reason: null,
+  partition: "shared",
+  pool: "cpu",
+  held_milli: 4000,
+  charged_milli: 2000,
+  settled: true,
+  flags: ["mismatch"],
+  created_at: "2026-11-04 10:00:00",
+  submitted_at: "2026-11-04 10:00:05",
+  started_at: null,
+  ended_at: "2026-11-04 10:30:00",
+  tapis_synced_at: "2026-11-04 10:30:01",
+  outputs_completed: false,
+  results_verified: false,
+  results_bytes: null,
+  records_copied: true,
+};
+
 /** A valid document for each exported schema. */
 const VALID: Record<string, unknown> = {
   ComputeStatusResponseSchema: {
@@ -69,6 +98,8 @@ const VALID: Record<string, unknown> = {
   ComputePoolsResponseSchema: { pools: [pool, pool], next_after: null },
   ComputeAccountPoolsResponseSchema: { account_id: 12, pools: [pool] },
   ComputePoolWriteResponseSchema: { pool, entry, replayed: false },
+  ComputeJobViewSchema: job,
+  ComputeJobAdminResponseSchema: { ok: true, outcome: "advanced", submit: "submitted", job },
   ComputePolicyResponseSchema: {
     version: 2,
     is_default: false,

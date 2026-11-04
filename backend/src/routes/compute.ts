@@ -4,17 +4,73 @@
  *   POST /compute/jobs/:id/bundle             the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
+ *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it
+ *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results
  *
  * The callbacks are registered FIRST and carry no middleware of their own beyond the Worker's global
  * ones: the launcher has no account. Every route that has a person behind it declares its own
- * authentication on the route (there is no `use("*")` here, which would put a session in front of a
- * launcher). `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
+ * authentication ON THE ROUTE (`authMiddleware`, then `cookieOriginGuard`, which a write made with a
+ * session cookie must pass): there is no `use("*")` here, which would put a session in front of a
+ * launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
+ *
+ * THE OWNER ONLY. A job is the person's own: any other signed-in account, an administrator included
+ * (an administrator has `/admin/compute/jobs/:id/cancel`), is answered `job_not_found`, which never
+ * says whether the job exists for someone else. Neither route reads the compute switch: a person can
+ * always cancel what is running and fetch what they have been given.
  */
 
 import { Hono } from "hono";
+import { COMPUTE_REFUSAL_STATUS } from "../../../shared/compute-state.js";
+import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
+import { authMiddleware, cookieOriginGuard } from "../middleware/auth.js";
+import { getJob } from "../services/compute-jobs.js";
+import { requestComputeCancel } from "../services/compute-lifecycle.js";
+import { mintResultLinks } from "../services/compute-results.js";
 import type { Bindings, Variables } from "../types/bindings.js";
 import { registerComputeJobCallbackRoutes } from "./callbacks/compute-job-callbacks.js";
 
 export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 registerComputeJobCallbackRoutes(computeRoutes);
+
+const SENTENCES = {
+  job_not_found: "No such job.",
+  bad_state: "The job is not in a state that accepts this.",
+  results_expired: "The results of this job have expired.",
+  compute_disabled: "Compute storage is not configured.",
+} as const;
+
+const refuse = (
+  c: { json: (body: unknown, status: number) => Response },
+  code: keyof typeof SENTENCES,
+) => c.json({ error: SENTENCES[code], code }, COMPUTE_REFUSAL_STATUS[code]);
+
+/** The job a signed-in person owns, or null for any other reason (never says which). */
+async function ownJob(env: Bindings, id: string, userId: number) {
+  if (!COMPUTE_JOB_ID_RE.test(id)) return null;
+  const job = await getJob(env.DB, id);
+  return job && job.account_id === userId ? job : null;
+}
+
+computeRoutes.post("/jobs/:id/cancel", authMiddleware, cookieOriginGuard, async (c) => {
+  const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
+  if (!job) return refuse(c, "job_not_found");
+  const result = await requestComputeCancel(c.env, job.id, "user");
+  if (!result.ok)
+    return refuse(c, result.outcome === "job_not_found" ? "job_not_found" : "bad_state");
+  return c.json({ ok: true, state: result.state, outcome: result.outcome });
+});
+
+computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (c) => {
+  const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
+  if (!job) return refuse(c, "job_not_found");
+  const result = await mintResultLinks(c.env, job);
+  if (!result.ok) return refuse(c, result.code);
+  // Bearer links: returned to the owner in this answer and nowhere else, never logged.
+  return c.json({
+    links: result.links,
+    expires_at: result.expires_at,
+    total: result.total,
+    truncated: result.truncated,
+  });
+});
