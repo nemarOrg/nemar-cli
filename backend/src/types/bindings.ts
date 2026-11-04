@@ -216,8 +216,8 @@ export interface Bindings {
    *  provider is off: discovery, the key set and the owner routes then answer 404, as if they did
    *  not exist (`services/oidc-config.ts`, `oidcEnabled`). The owner sets it; an agent never does.
    *  Changing it makes every stored key unreadable, and there is no re-encryption path yet.
-   *  The authorization routes (`/auth/oidc/*`) also answer 404 until `HOST_PREFIXED_SESSION_COOKIE`
-   *  is "1": set both. */
+   *  The authorization routes (`/auth/oidc/*`) and the `/oauth` token, userinfo, revocation and
+   *  introspection endpoints also answer 404 until `HOST_PREFIXED_SESSION_COOKIE` is "1": set both. */
   OIDC_SECRET?: string;
   /** Prod-only mirror target for dev-OWNED GitHub deliveries (epic #923;
    *  widened from dev-range to dev-owned by #1440, so it now also carries the
