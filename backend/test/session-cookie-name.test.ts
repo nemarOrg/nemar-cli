@@ -257,7 +257,7 @@ const WRITERS: Writer[] = [
       return app.request(
         new Request(`${APP}/auth/orcid/callback?state=${CSRF}&code=fake-code`, {
           headers: {
-            Cookie: `nemar_oauth_state=${encodeState({ csrf: CSRF, mode: "login", next: "/dashboard" })}`,
+            Cookie: `__Host-nemar_oauth_state=${encodeState({ csrf: CSRF, mode: "login", next: "/dashboard" })}`,
           },
         }),
         undefined,
@@ -275,7 +275,7 @@ const WRITERS: Writer[] = [
         ENCRYPTION_KEY,
       );
       return app.request(
-        "/auth/orcid/finalize",
+        "https://app.nemar.org/auth/orcid/finalize",
         {
           method: "POST",
           headers: {

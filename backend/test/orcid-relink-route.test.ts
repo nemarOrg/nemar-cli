@@ -93,14 +93,14 @@ async function sessionCookie(userId: number): Promise<string> {
 }
 
 function stateCookie(mode: string, next = "/settings"): string {
-  return `nemar_oauth_state=${encodeState({ csrf: CSRF, mode: mode as "login", next })}`;
+  return `__Host-nemar_oauth_state=${encodeState({ csrf: CSRF, mode: mode as "login", next })}`;
 }
 
 function stateFromSetCookie(res: Response): ReturnType<typeof decodeState> {
   const setCookies = res.headers.getSetCookie();
-  const state = setCookies.find((c) => c.startsWith("nemar_oauth_state="));
+  const state = setCookies.find((c) => c.startsWith("__Host-nemar_oauth_state="));
   if (!state) return null;
-  const value = state.split(";")[0].slice("nemar_oauth_state=".length);
+  const value = state.split(";")[0].slice("__Host-nemar_oauth_state=".length);
   return value ? decodeState(value) : null;
 }
 
@@ -113,7 +113,7 @@ beforeEach(() => {
 describe("relink intent minting (#913)", () => {
   test("GET /orcid/start?mode=relink degrades to login — a link can never arm a swap", async () => {
     const res = await app.request(
-      "/auth/orcid/start?mode=relink&next=/settings",
+      "https://app.nemar.org/auth/orcid/start?mode=relink&next=/settings",
       { method: "GET" },
       env(),
     );
@@ -126,7 +126,7 @@ describe("relink intent minting (#913)", () => {
   test("POST /orcid/start?mode=relink mints relink for a same-origin, authenticated request", async () => {
     const user = seedUser("relink-mint@nemar.test", OLD_ID);
     const res = await app.request(
-      "/auth/orcid/start?mode=relink&next=/settings",
+      "https://app.nemar.org/auth/orcid/start?mode=relink&next=/settings",
       {
         method: "POST",
         headers: { Origin: APP, Cookie: await sessionCookie(user.id) },
@@ -142,7 +142,7 @@ describe("relink intent minting (#913)", () => {
 
   test("POST without a session redirects to login; cross-site Origin is refused outright", async () => {
     const anon = await app.request(
-      "/auth/orcid/start?mode=relink",
+      "https://app.nemar.org/auth/orcid/start?mode=relink",
       { method: "POST", headers: { Origin: APP } },
       env(),
     );
@@ -151,7 +151,7 @@ describe("relink intent minting (#913)", () => {
 
     const user = seedUser("relink-origin@nemar.test", OLD_ID);
     const forged = await app.request(
-      "/auth/orcid/start?mode=relink",
+      "https://app.nemar.org/auth/orcid/start?mode=relink",
       {
         method: "POST",
         headers: { Origin: "https://evil.example", Cookie: await sessionCookie(user.id) },
