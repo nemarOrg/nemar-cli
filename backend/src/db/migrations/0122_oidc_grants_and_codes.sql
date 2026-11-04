@@ -8,6 +8,10 @@
 -- first-party) and THE CODE (sixty seconds of permission to collect tokens, bound to everything
 -- the token endpoint has to check again).
 --
+-- `client_id` IN BOTH TABLES IS THE `oidc_clients.id` ROW ID, NOT THE PUBLIC `oc_...` STRING. The
+-- name is the column's; what it holds is the integer every reader joins on (`c.id = client_id`).
+-- The public identifier lives only in `oidc_clients.client_id`.
+--
 -- NO FOREIGN KEYS, AS IN 0121. `user_id` and the two client and grant references are bare
 -- integers. A cascade from `users` would let the deletion of an account silently delete what the
 -- revocation cascades (#2019) must find and end; a restricting key would make a hard delete of an
@@ -18,7 +22,8 @@
 -- oidc_grants: AT MOST ONE LIVE ROW PER ACCOUNT AND CLIENT (the partial unique index below).
 --   id            the row number; a code names its grant by it.
 --   user_id       the account, `users.id`.
---   client_id     the client's ROW, `oidc_clients.id`, not its public `client_id` string.
+--   client_id     the client's ROW id, `oidc_clients.id`: an integer, NOT the public `oc_...`
+--                 string.
 --   scopes        a JSON array of 1 to 20 scope names, sorted, with no repeat. The table checks
 --                 the shape and the characters (as 0121 does for `allowed_scopes`); that each is a
 --                 scope of the catalogue is the service's rule.
@@ -30,10 +35,14 @@
 --   revoked_at    NULL while the grant is live. Set by the revocation phase (#2019); a revoked
 --                 row stays for the record and a new grant is a new row.
 --
--- oidc_codes: ONE ROW PER AUTHORIZATION CODE, KEYED BY ITS HASH.
---   code_hash       the SHA-256 of the code, 64 lowercase hex characters. The code itself (256
---                   random bits) is in the redirect to the client and stored nowhere.
---   client_id       the client's row, `oidc_clients.id`.
+-- oidc_codes: ONE ROW PER AUTHORIZATION CODE.
+--   id              the row number: a stable reference to one code for what the token endpoint
+--                   records about it (#2018), so nothing else has to carry the hash.
+--   code_hash       the SHA-256 of the code, 64 lowercase hex characters, unique: a code is looked
+--                   up by it. The code itself (256 random bits) is in the redirect to the client
+--                   and stored nowhere.
+--   client_id       the client's ROW id, `oidc_clients.id`: an integer, NOT the public `oc_...`
+--                   string.
 --   user_id         the account, `users.id`.
 --   grant_id        the grant the code was minted under, `oidc_grants.id`.
 --   redirect_uri    the exact redirect address the code was sent to, which the token request must
@@ -45,10 +54,12 @@
 --   auth_time       when the person signed in: the session's own `created_at`.
 --   created_at      UTC `datetime('now')`.
 --   expires_at      sixty seconds after `created_at`, written by D1's clock, and never later (the
---                   CHECK below).
+--                   CHECK below, which also refuses a `created_at` or `expires_at` that is not a
+--                   time: without that, its comparison would be NULL and a CHECK passes on NULL).
 --   used_at         NULL until the token endpoint redeems the code (#2018). A used row is kept
 --                   until an hour past its expiry, so a second redemption is recognized as a replay
---                   and not mistaken for an unknown code; the check route prunes what is older.
+--                   and not mistaken for an unknown code. What is older is pruned in the batch of
+--                   the next mint, from either authorization route.
 --
 -- D1 limits kept in mind: every GLOB pattern is far under the 50-character limit, no CHECK needs a
 -- subquery, and a JSON function in a CHECK is guarded by `json_valid` inside a CASE, because SQLite
@@ -74,7 +85,8 @@ CREATE UNIQUE INDEX oidc_grants_one_live ON oidc_grants (user_id, client_id)
   WHERE revoked_at IS NULL;
 
 CREATE TABLE oidc_codes (
-  code_hash TEXT NOT NULL PRIMARY KEY CHECK (length(code_hash) = 64
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_hash TEXT NOT NULL UNIQUE CHECK (length(code_hash) = 64
     AND code_hash NOT GLOB '*[^0-9a-f]*'),
   client_id INTEGER NOT NULL CHECK (typeof(client_id) = 'integer' AND client_id >= 1),
   user_id INTEGER NOT NULL CHECK (typeof(user_id) = 'integer' AND user_id >= 1),
@@ -91,8 +103,9 @@ CREATE TABLE oidc_codes (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL,
   used_at TEXT,
-  CHECK (expires_at > created_at AND expires_at <= datetime(created_at, '+60 seconds'))
+  CHECK (datetime(created_at) IS NOT NULL AND datetime(expires_at) IS NOT NULL
+    AND expires_at > created_at AND expires_at <= datetime(created_at, '+60 seconds'))
 );
 
--- The prune deletes by expiry, and the token endpoint reads by hash (the primary key).
+-- The prune deletes by expiry; the token endpoint reads by hash (the UNIQUE constraint's index).
 CREATE INDEX oidc_codes_expires_at ON oidc_codes (expires_at);

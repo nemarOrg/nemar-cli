@@ -207,6 +207,12 @@ async function world(
   return { userId: user.id, sessionId: session.id, clientRow: client.id, clientId };
 }
 
+/** A second account, with a proven iD and a live session, on the client of `w`. */
+async function anotherAccount(e: Engine, w: World): Promise<World> {
+  const other = await world(e);
+  return { ...other, clientRow: w.clientRow, clientId: w.clientId };
+}
+
 /** Run the real grant upsert. Binds as the service does. */
 function upsertGrant(e: Engine, w: World, scopes: string[], kind: "user" | "first_party") {
   return e.run(GRANT_UPSERT_SQL, JSON.stringify(scopes), kind, w.clientId, w.sessionId);
@@ -339,6 +345,30 @@ describe("oidc_codes", () => {
   onEveryEngine("refuses a nonce over 512 characters, and an empty one", async (e) => {
     expect((await insertCode(e, { nonce: `'${"n".repeat(513)}'` })).error).toContain("CHECK");
     expect((await insertCode(e, { nonce: "''" })).error).toContain("CHECK");
+  });
+
+  onEveryEngine("refuses a created_at or expires_at that is not a time", async (e) => {
+    // Without the IS NOT NULL terms the 60-second CHECK is NULL for a malformed time, and a CHECK
+    // passes on NULL: the bound would hold for every row but these.
+    expect((await insertCode(e, { created_at: "'garbage'", expires_at: "'zzz'" })).error).toContain(
+      "CHECK",
+    );
+    expect(
+      (await insertCode(e, { created_at: "datetime('now')", expires_at: "'zzz-later'" })).error,
+    ).toContain("CHECK");
+  });
+
+  onEveryEngine("gives every code a stable row id, and keeps its hash unique", async (e) => {
+    const hash = HASH(5_000_000 + counter++);
+    expect((await insertCode(e, { code_hash: `'${hash}'` })).error).toBeNull();
+    expect((await insertCode(e, { code_hash: `'${hash}'` })).error).toContain("UNIQUE");
+    const row = await one<{ id: number; t: string }>(
+      e,
+      "SELECT id, typeof(id) AS t FROM oidc_codes WHERE code_hash = ?",
+      hash,
+    );
+    expect(row.t).toBe("integer");
+    expect(row.id).toBeGreaterThan(0);
   });
 });
 
@@ -521,6 +551,43 @@ describe("CODE_INSERT_SQL on its own", () => {
   onEveryEngine("mints nothing for a redirect address the client did not register", async (e) => {
     const w = await granted(e);
     expect((await mintCode(e, w, { redirect: `${REDIRECT}/` })).changes).toBe(0);
+  });
+
+  onEveryEngine("mints nothing on another account's grant to the same client", async (e) => {
+    // A and C hold live grants on one client; B, on the same client, holds none. The grant the
+    // code is minted under must be B's own.
+    const a = await granted(e);
+    const b = await anotherAccount(e, a);
+    const c = await anotherAccount(e, a);
+    await ok(
+      e,
+      "INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind) VALUES (?, ?, ?, 'user')",
+      c.userId,
+      c.clientRow,
+      '["openid","profile"]',
+    );
+    expect((await mintCode(e, b)).changes).toBe(0);
+    expect((await mintCode(e, a)).changes).toBe(1);
+  });
+
+  onEveryEngine("records the session's own sign-in time as auth_time", async (e) => {
+    const w = await granted(e);
+    await ok(
+      e,
+      "UPDATE web_sessions SET created_at = datetime('now', '-10 minutes') WHERE id = ?",
+      w.sessionId,
+    );
+    const hash = HASH(6_000_000 + counter);
+    expect((await mintCode(e, w, { hash })).changes).toBe(1);
+    const row = await one<{ same: number; tenAgo: number }>(
+      e,
+      `SELECT oc.auth_time = ws.created_at AS same,
+              oc.auth_time <= datetime('now', '-9 minutes') AS tenAgo
+         FROM oidc_codes oc JOIN web_sessions ws ON ws.id = ? WHERE oc.code_hash = ?`,
+      w.sessionId,
+      hash,
+    );
+    expect(row).toEqual({ same: 1, tenAgo: 1 });
   });
 
   onEveryEngine("mints nothing without a live grant", async (e) => {
