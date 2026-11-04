@@ -33,9 +33,11 @@
  *  - no token, password, launch specification or webhook address is ever in an error or a log line.
  */
 
-import { isSafeComputePath } from "../../../../shared/contract/compute";
-import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute";
-import type { PartitionName } from "../../../../shared/contract/compute";
+import {
+  COMPUTE_JOB_ID_RE,
+  type PartitionName,
+  isSafeComputePath,
+} from "../../../../shared/contract/compute";
 import { withRetry } from "../retry";
 import { getTapisToken, invalidateTapisToken, requireTapisConfig } from "./auth";
 import { type TapisEnv, tapisBaseOrProblem } from "./config";
@@ -194,6 +196,8 @@ interface Call {
   /** Whether a failure that may clear is tried again. Never for a call that changes something. */
   retry: boolean;
   maxBytes: number;
+  /** The `Accept` header: JSON for a record, anything for a file's bytes. */
+  accept: "application/json" | "*/*";
 }
 
 /**
@@ -210,7 +214,7 @@ async function perform(ctx: TapisContext, call: Call): Promise<Uint8Array> {
       method: call.method,
       headers: {
         "X-Tapis-Token": token,
-        Accept: call.maxBytes === TAPIS_MAX_JSON_BYTES ? "application/json" : "*/*",
+        Accept: call.accept,
         ...(call.body === undefined ? {} : { "Content-Type": "application/json" }),
       },
       body: call.body,
@@ -245,10 +249,14 @@ async function perform(ctx: TapisContext, call: Call): Promise<Uint8Array> {
 /** One call whose answer is JSON: parse it and check it against `schema`, or `invalid_response`. */
 async function performJson<T>(
   ctx: TapisContext,
-  call: Omit<Call, "maxBytes">,
+  call: Omit<Call, "maxBytes" | "accept">,
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
 ): Promise<T> {
-  const bytes = await perform(ctx, { ...call, maxBytes: TAPIS_MAX_JSON_BYTES });
+  const bytes = await perform(ctx, {
+    ...call,
+    maxBytes: TAPIS_MAX_JSON_BYTES,
+    accept: "application/json",
+  });
   const parsed = schema.safeParse(parseJsonBody(bytes, call.what));
   if (!parsed.success) throw invalidResponse(call.what, null);
   return parsed.data;
@@ -537,6 +545,7 @@ export async function downloadOutput(
     path: `/jobs/${encodeURIComponent(uuid)}/output/download/${encodePath(path)}`,
     retry: true,
     maxBytes,
+    accept: "*/*",
   });
 }
 
