@@ -220,7 +220,6 @@ function idempotencyKey(c: Ctx): { key: string } | { refusal: Response } {
 }
 
 const ACCOUNT_ID_RE = /^[1-9]\d{0,14}$/;
-const PLATFORM_KEY_RE = /^[a-z0-9_.-]{1,64}$/;
 
 async function accountExists(db: D1Database, id: number): Promise<boolean> {
   return (await db.prepare("SELECT id FROM users WHERE id = ?1").bind(id).first()) !== null;
@@ -244,7 +243,8 @@ async function targetPool(
     const existing = (await accountPools(db, holder.id)).find((p) => p.pool === word);
     return existing ?? refuse(c, "pool_not_found");
   }
-  const pool = PLATFORM_KEY_RE.test(holder.key) ? await platformPool(db, holder.key, word) : null;
+  // Only the platform's own budgets are there to find; nothing here makes one.
+  const pool = await platformPool(db, holder.key, word);
   return pool ?? refuse(c, "pool_not_found");
 }
 
