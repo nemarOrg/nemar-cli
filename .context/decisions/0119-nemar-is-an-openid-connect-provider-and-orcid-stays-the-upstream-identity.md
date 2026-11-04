@@ -16,12 +16,13 @@ The app session cookie is scoped to `app.nemar.org` on purpose (ADR 0056), so it
 ORCID (Open Researcher and Contributor ID) is the identity underneath every person's account (ADR 0047, ADR 0048), and NEMAR adds what it knows about the account.
 
 Three things about the platform as it stands make a partner subdomain dangerous.
-The application programming interface (API) trusts any `*.nemar.org` origin, both in its cross-origin allow-list and in the origin check on every write that carries the session cookie.
-The partner site serves pages whose JavaScript people write themselves, so a page on it could call the API with a visitor's cookie, or plant a cookie named `nemar_session` for the whole `nemar.org` zone.
-And the session cookie has no `__Host-` prefix, so nothing stops a sibling host from planting one.
+The application programming interface (API) trusts any `*.nemar.org` origin in its cross-origin allow-list, and in `isAllowedOrigin`, which is the origin check of the admin router's cookie-authenticated writes and of the authentication, profile, documentation and private-site routes.
+Other cookie-authenticated writes (datasets, the upload-access request, sandbox) are not covered by that function: today they are covered by the website's own origin check and by the absence of a cross-origin preflight allowance for the app host.
+The partner site serves pages whose JavaScript people write themselves, so a page on it could call the API with a visitor's cookie, or set a cookie for the whole `nemar.org` zone.
+And the session cookie has no `__Host-` prefix, so nothing stops a sibling host from setting a cookie of that name for the zone.
 
-A provider's issuer, token prefixes and subject format can never change once a client trusts them.
-They are therefore fixed here, before the first client registers, and before any `/oauth` route exists.
+A provider's issuer and subject format can never change once a client trusts them, so they are fixed here, before the first client registers and before any `/oauth` route exists.
+The token prefixes are fixed here too, for secret scanning and so that the two token kinds cannot be confused, but tokens are opaque to clients: a prefix is a convention inside this Worker, and changing one is a coordinated change here and not a break for a client.
 This phase builds none of the provider: it records the decisions and lands the three changes that must precede any client (the partner-host exclusion, the `__Host-` cookie and the subject).
 
 ## Decision
@@ -96,27 +97,46 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
    `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the Model Context Protocol (MCP) host all use) and `isAllowedOrigin` (the origin check on writes that carry the session cookie) return false for a partner host before they test anything else.
    A partner reaches NEMAR only through OIDC and bearer tokens.
-   A future partner subdomain is added to the same list, in the same pull request that registers its client.
-10. **The session cookie moves to the name `__Host-nemar_session`, with a safe dual-read window.**
-    The `__Host-` prefix makes a browser refuse a cookie with a `Domain` attribute, so no sibling host can plant one for `app.nemar.org`.
-    The reader tries the new name first and the legacy `nemar_session` second.
-    A legacy cookie therefore never outranks a `__Host-` one, and an invalid, empty or revoked `__Host-` cookie is **not** rescued by a valid legacy one.
-    That protects only a browser that already holds a `__Host-` cookie.
-    A request with no `__Host-nemar_session` still has its legacy cookie read: signed-out visitors, sessions not yet moved to the new name, and every session until the flag is on in production.
-    That is the exposure the window keeps open: a page on a partner host can plant a legacy cookie with `Domain=nemar.org`, which for those visitors is a login cross-site request forgery style session fixation on `app.nemar.org`, until the window closes.
+   A client is registered by an owner command, so a partner host is added to the list and released before the owner registers that partner's client.
+   The exclusion is not enough on its own, because a partner host's page can still set a cookie for the parent domain: rule 10 is the other half.
+10. **Every cookie the API or the website trusts to authenticate or link a session is host-only and `__Host-` prefixed.**
+    The principle is that a page on a sibling host can set a cookie for the parent domain, and the partner-host rule (rule 9) does not stop that; a `__Host-` cookie (`Secure`, `Path=/`, no `Domain`) is the one kind a browser accepts from no other host.
+    Three cookies are in scope.
+    The session cookie moves from `nemar_session` to `__Host-nemar_session`, behind a flag and with a dual-read window, as below.
+    The ORCID flow's state cookie (`nemar_oauth_state`) and pending-signup cookie (`nemar_orcid_pending`) move to `__Host-nemar_oauth_state` and `__Host-nemar_orcid_pending` at once, NOT behind the flag: nothing on the website reads the state cookie, and the website checks the pending cookie only for presence, under either name.
+    The state cookie is read only under the new name, with no fallback, so a flow in flight at the deploy fails once with `orcid_state`; the old names are only cleared, with and without `Domain`.
+    On a plain-http request to a loopback host (local development) the old unprefixed names are kept, because a `__Host-` cookie must be `Secure` and a browser on plain http may refuse it; the website's development login keeps the legacy session cookie name for the same reason.
+    The session cookie's rules:
+    - The reader tries the new name first and the legacy `nemar_session` second, and returns the name it read.
+      A legacy cookie therefore never outranks a `__Host-` one, and an invalid, empty or revoked `__Host-` cookie is **not** rescued by a valid legacy one.
+      A header that carries more than one `__Host-nemar_session` is no session.
+    - A `__Host-` session cookie is minted only by a sign-in, never by a slide or by any read of a legacy value: with the flag on, the expiry slide re-issues the cookie only for a session read under the `__Host-` name.
+    - The authorization and consent page of phase B3 treats a session read under the legacy name as no session, so a delegation is never granted on the cookie a sibling host can set.
+    - The legacy name stops being read no earlier than 31 days after the production flag is turned on, because every legacy cookie issued before the flag has then passed its 30-day maximum age.
+      The date is a later decision (see the not-decided list).
+    - Until then the window keeps an exposure open, and it is named here.
+      A legacy cookie is still read for any browser that holds no `__Host-` cookie: signed-out visitors, sessions not yet moved to the new name, and every session until the flag is on in production.
+      A page on a sibling host can set a legacy cookie for the parent domain, so for those visitors the legacy cookie is not a trustworthy credential.
+      A sibling host can also fill a browser's cookie jar until the real `__Host-` cookie is evicted, after which the legacy one is read.
+      Both end when the window closes; nothing inside the window removes them.
     The writer is behind `HOST_PREFIXED_SESSION_COOKIE`.
-    Unset, it sends today's header byte for byte.
-    Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by two clears of the legacy name, with and without its `Domain` (one when no `Domain` is configured, as on staging, where they are the same cookie).
+    Unset, and for a request that carried no `__Host-nemar_session`, it sends today's header byte for byte.
+    Unset, and for a request that carried one, it also sends a clear of `__Host-nemar_session`, so the flag is reversible: a person who signs out and in again after the flag is turned off is not left behind a stale `__Host-` cookie that the reader prefers.
+    Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by clears of the legacy name with the configured `Domain`, host-only, and for the parent domain `nemar.org` (none is sent twice, so staging, which configures no `Domain`, gets two).
     The cookie stays host-only (ADR 0056); the new name never goes through `WEB_SESSION_COOKIE_DOMAIN`.
+    Sign-out ends the session behind every session cookie the request carries, under either name.
     The order of release is fixed because a reader must exist before a writer: the website's reader first, then the API, then the flag in production, which is the owner's act.
     The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys: the website's reader (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.
-11. **The partner uses the `sub` as the username of a person's compute credential, and is never trusted to say who ran a job.**
+11. **The partner uses the `sub`, or a fixed and reversible transform of it, as the username of a person's compute credential, and is never trusted to say who ran a job.**
+    The design asks for the `sub` "in a form the job platform accepts as a username", and this ADR keeps that latitude: the partner may apply a fixed transform (for example a change of case or of separator) that NEMAR can undo, so that the credential's username maps to exactly one `sub`.
+    If the answer to design question 13 is that no such transform can satisfy the platform's username rules, the `sub` format itself is wrong and the only path is to supersede this ADR before any client registers.
     It mints that credential only while `GET /compute/me` says the person is active.
     Because whoever controls the partner site can mint a credential for any username, the owner of an unreserved job is never taken as proof of who ran it.
     The compute design carries the consequences; they are recorded here only so that the subject's form and its use are read together.
 12. **The credential-ending table.**
     Every path that ends or downgrades a credential says what it does to OIDC grants and tokens.
     A new path that ends a credential adds a line here and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts`.
+    Because a path can be missed, every token use also re-checks the account's status, kind and proof against the client's sign-in rule (rule 7), so a path not listed here still takes effect at the next use of a token, even if it did not end the grant.
 
     | Path | OIDC grants and tokens | Why |
     |---|---|---|
@@ -124,11 +144,18 @@ Twelve rules inside that, each of which reopens a hole if reversed.
     | Owner soft delete (`tombstoneUserCascade`) | Ends all, and sends back-channel logout | Same, and the subject stays on the row. |
     | Account merge (manual, ADR 0043), through an owner command | Ends all of the loser's, and sends back-channel logout | The loser stops being a person; the winner's grants are untouched. |
     | Compute suspension | Ends only grants that carry a `compute.` scope, and tells only those clients | The person stays signed in elsewhere. |
-    | ORCID unlink or relink | Ends the grants of every client whose rule is `person_proven_orcid` | The proof they were granted on is gone. |
+    | ORCID unlink or relink | Ends the grants of every client whose rule is `person_proven_orcid`, and sends back-channel logout to those clients | The proof they were granted on is gone, and a client that relied on it should stop honoring the session. |
+    | Account kind changed away from `person` (the owner route that holds `KIND_CHANGE_GUARDED_UPDATE_SQL`) | Ends the grants of every client whose rule is `person_proven_orcid`, and sends back-channel logout to those clients | The account no longer meets that rule. A change to `person` ends nothing. |
     | Client disable | Revokes everything the client holds, and sends no logout | The owner has cut the client off; telling it is not owed. |
     | Role demotion | Leaves them alone | A token carries no role and no OIDC scope confers admin authority (rule 4), so there is nothing to downgrade. `PRIVATE_REVOKE_ALL_SQL` says the same of private sessions. |
     | API key revocation | Leaves them alone | A grant is not minted from a key and depends on none. |
-    | Sign-out of the app session | Leaves them alone | Signing out of NEMAR does not withdraw access a person delegated; `prompt=none` answers `login_required` until they sign in again. |
+    | Sign-out of the app session | Leaves them alone | See the departure below. |
+
+    **Leaving grants alone on sign-out is a departure from the cascade the earlier ADRs describe.**
+    ADR 0021, ADR 0056 decision 5 and ADR 0079 end whatever was minted from a credential when that credential ends, and an OIDC grant is minted from an app session.
+    This ADR does not follow them here, because signing out of NEMAR is not withdrawing a third party's delegated access, and ending every partner session whenever someone closes their NEMAR tab would make the partner unusable.
+    The consequence is that a person has no self-service way to withdraw a partner's access for up to 90 days (the refresh token's absolute lifetime) until a connected-apps page exists, which is in the not-decided list.
+    This is a decision for the repository owner, who can reverse it before the first client registers, and it is marked as such so that acceptance of this ADR does not carry it unseen.
 
 ### What this phase builds, and what it does not
 
@@ -139,10 +166,9 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 
 - Public clients (PKCE with no secret).
 - `private_key_jwt` client authentication.
-- A connected-apps page where a person revokes a grant themselves.
+- A connected-apps page where a person revokes a grant themselves, which is also what the sign-out departure in rule 12 waits for.
 - The issuer of the staging Worker, which shares the shape of the production one and is for the discovery phase to fix.
-- When the legacy cookie name stops being read, which is when the exposure in rule 10 ends.
-- Whether the flag may be turned off again once people hold a `__Host-` cookie. It is effectively one-way (see Consequences), and a flag-off writer that also clears a `__Host-` cookie the request carried is a possible later change.
+- The date the legacy session cookie name stops being read, which is when the exposure in rule 10 ends. Rule 10 sets only the earliest: 31 days after the production flag is turned on.
 - Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
   If the answer makes the format unusable, it is superseded here before any client registers, and not worked around.
 
@@ -156,15 +182,13 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   Until the website reads the new name, turning the flag on logs everyone out of the website: the API would set a cookie the website's middleware does not know.
   The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys, and the website pull request that reads it (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.
   Production's flag is the owner's, after both releases.
-- **The dual-read window is a cost, and this is what it keeps open.**
-  A legacy cookie never outranks a `__Host-` one, but it is still read for any browser that holds no `__Host-` cookie: signed-out visitors, sessions not yet moved to the new name, and every session until the flag is on in production.
-  A page on a partner host can plant a legacy cookie with `Domain=nemar.org`, a login cross-site request forgery style session fixation on `app.nemar.org` for those visitors.
-  The window ends by a later decision, not by this one.
-- **The flag is effectively one-way once people hold a `__Host-` cookie.**
-  Turned off again, the writers send only the legacy header, byte for byte, because the flag-off bytes are pinned, and they never clear a `__Host-nemar_session` the browser holds.
-  The reader prefers that stale cookie, so after a sign-out and a new sign-in the person is unauthenticated until it expires: a browser close, or up to 30 days for a remembered session.
-  Reverting therefore needs a clear of the `__Host-` cookie shipped first.
-  A flag-off writer that also clears a `__Host-` cookie the request carried is a possible later change, not made here.
+  The ORCID state and pending cookies are not behind the flag: the API deploy moves them, and the website must already accept either pending name.
+- **The dual-read window is a cost, and rule 10 says what it keeps open.**
+  A legacy cookie never outranks a `__Host-` one, but it is still read for any browser that holds no `__Host-` cookie, and a sibling host can set one for the parent domain or evict the real `__Host-` cookie by filling the jar.
+  The window ends by a later decision, not by this one, and no earlier than 31 days after the production flag is on.
+- **The flag is reversible.**
+  Turned off again, a request that carries a `__Host-nemar_session` gets a clear of it with the legacy header, and a request that carries none gets today's bytes exactly, so nothing production can receive changes.
+  The clear is what keeps a person who signs out and in again after the flag is turned off from being locked out behind a stale `__Host-` cookie that the reader prefers.
 - **Account kinds matter more.**
   `person_proven_orcid` makes ADR 0048's kinds a gate on a third party's sign-in.
 - **A username that starts `nmu_` is refused from now on.**
@@ -184,9 +208,20 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   An opaque token is looked up, so ending a grant ends its tokens at once.
 - **An off-the-shelf provider.**
   It would bring a second user table and a second revocation path to keep in step with NEMAR's, and none of NEMAR's rules (kinds, ORCID proof, cascades) would be expressible in it.
-- **Keep `nemar_session` and add a defensive check for a planted cookie.**
-  There is no signal in a request that distinguishes a planted cookie from a real one.
+- **Keep `nemar_session` and add a defensive check for a cookie that was set by another host.**
+  There is no signal in a request that tells a cookie set by a sibling host from one the API issued.
   The `__Host-` prefix is enforced by the browser, which is the only party that can enforce it.
+- **A different issuer than `https://api.nemar.org`.**
+  The issuer cannot change once a client trusts it, so the choice is made once.
+  `https://app.nemar.org` would put discovery and the signing keys on the website, a separate deployment that would have to proxy or duplicate them, and would tie the issuer to a host the API does not control.
+  A dedicated host such as `auth.nemar.org` is cleaner and carries its own limits, at the cost of a new host, certificate and routing fork that nothing else on the platform needs.
+  The API host already carries every other cross-host contract and the tokens, keys and revocation live there, so it is the issuer.
+  The price is that discovery and the signing keys live on the API host for good and must be exempt from `maintenanceMode` and from the rate limiter: a client that cannot fetch them during maintenance or a burst cannot validate a token.
+  Moving the issuer later means the old one keeps answering for as long as any client still trusts it.
+- **A pairwise `sub` (a different subject per client) instead of one public subject.**
+  Pairwise stops two clients from correlating an account, which matters for a general provider with unrelated clients.
+  The first client needs a stable name that it and NEMAR's compute records share (rule 11), and there is one partner, so one public `sub` per account is the choice.
+  Pairwise can be added per client later, as a client setting that derives a subject from the account's `sub` and the client's identifier, without changing the stored subject; a client switched to it would see a different value and is told first.
 
 ## Receipts
 

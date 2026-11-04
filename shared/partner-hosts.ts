@@ -12,7 +12,8 @@
  * cross-origin grant that only NEMAR's own pages were meant to have.
  *
  * Adding a host is a deliberate act: it takes the host (and every subdomain of it) out of both
- * checks, so it belongs in the same pull request that registers that partner's client.
+ * checks. A client is registered by an owner command, so a partner host is added to this list and
+ * released BEFORE the owner registers that partner's client.
  */
 
 /** Lowercase hostnames, without a scheme, a port or a trailing dot. */
