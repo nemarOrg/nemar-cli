@@ -84,7 +84,7 @@
             "pattern": "^[a-z]{2}[0-9]{6}(?![\\s\\S])"
           },
           "version": {
-            "description": "The data-plane tag of the dataset version: latest, or v<major>.<minor>.<patch>, exactly what the data plane accepts. A job names a version more loosely (1.0.2); NEMAR's Worker writes the tag (1.0.2 becomes v1.0.2).",
+            "description": "The data-plane tag of the dataset version: latest, or v<major>.<minor>.<patch>, exactly what the data plane accepts.",
             "type": "string",
             "maxLength": 64,
             "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
@@ -117,7 +117,7 @@
       "required": ["uri", "digest", "sif"],
       "properties": {
         "uri": {
-          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character.",
+          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule, like the one for sif): the @sha256:<hex> it ends with must equal image.digest.",
           "type": "string",
           "maxLength": 512,
           "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"
@@ -127,7 +127,7 @@
           "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
         },
         "sif": {
-          "description": "The Singularity image file the launcher runs: exactly the basename <64 lowercase hex>.sif, the file name of the SIF built from the image's digest, relative to the directory in the environment variable NEMAR_SIF_ROOT. NEMAR_SIF_ROOT is required: the launcher has no fallback and ends image_missing when it is unset. Cross-field rule this schema cannot express: the 64 hex digits of image.digest followed by .sif must equal this value. NEMAR enforces it where it writes the document (its encoder refuses one that breaks it), so every launch specification it hands the launcher satisfies it. The launcher does not verify the file's content hash: the name is all that ties the file to the digest.",
+          "description": "The Singularity image file the launcher runs: exactly the basename <64 lowercase hex>.sif, the file name of the SIF built from the image's digest, relative to the directory in the environment variable NEMAR_SIF_ROOT. NEMAR_SIF_ROOT is required: the launcher has no fallback and ends image_missing when it is unset. Cross-field rule this schema cannot express (a zod-only rule): the 64 hex digits of image.digest followed by .sif must equal this value. The launcher does not verify the file's content hash: the name is all that ties the file to the digest.",
           "type": "string",
           "pattern": "^[0-9a-f]{64}\\.sif(?![\\s\\S])"
         }

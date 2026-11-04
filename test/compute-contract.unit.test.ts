@@ -2110,7 +2110,11 @@ const LAUNCH_CASES: readonly Case[] = [
   // The image file is exactly `<64 lowercase hex>.sif`, a basename relative to NEMAR_SIF_ROOT.
   [
     "an image of another digest, with its own sif",
-    set(set(LAUNCH, "image.digest", `sha256:${HEX_A}`), "image.sif", `${HEX_A}.sif`),
+    set(
+      set(set(LAUNCH, "image.digest", `sha256:${HEX_A}`), "image.sif", `${HEX_A}.sif`),
+      "image.uri",
+      `docker://ghcr.io/example/runtime@sha256:${HEX_A}`,
+    ),
     true,
   ],
   ["the old fixed sif name", set(LAUNCH, "image.sif", "runtime.sif"), false],
@@ -2292,22 +2296,48 @@ const LAUNCH_CASES: readonly Case[] = [
  * the two engines is always a row in this table and never a surprise: `agree` above holds every other
  * document to one verdict. Each row says which key the zod issue names.
  */
-const ZOD_ONLY_LAUNCH_CASES: ReadonlyArray<readonly [label: string, doc: unknown, key: string]> = [
-  ["a sif named for another image's digest", set(LAUNCH, "image.sif", `${HEX_A}.sif`), "image.sif"],
+const ZOD_ONLY_LAUNCH_CASES: ReadonlyArray<
+  readonly [label: string, doc: unknown, keys: readonly string[]]
+> = [
   [
-    "a digest that is not the one the sif is named for",
+    "a sif named for another image's digest",
+    set(LAUNCH, "image.sif", `${HEX_A}.sif`),
+    ["image.sif"],
+  ],
+  [
+    "a digest that is neither the one the sif is named for nor the one the uri is pinned to",
     set(LAUNCH, "image.digest", `sha256:${HEX_A}`),
-    "image.sif",
+    ["image.sif", "image.uri"],
   ],
   [
     "a sif that differs from the digest in its last hex digit",
     set(LAUNCH, "image.sif", `${"b".repeat(63)}c.sif`),
-    "image.sif",
+    ["image.sif"],
   ],
   [
     "a sif that differs from the digest in its first hex digit",
     set(LAUNCH, "image.sif", `c${"b".repeat(63)}.sif`),
-    "image.sif",
+    ["image.sif"],
+  ],
+  [
+    "an image uri pinned to another digest than image.digest",
+    set(LAUNCH, "image.uri", `docker://ghcr.io/example/runtime@sha256:${HEX_A}`),
+    ["image.uri"],
+  ],
+  [
+    "an image uri with no prefix pinned to another digest",
+    set(LAUNCH, "image.uri", `ghcr.io/example/runtime@sha256:${HEX_A}`),
+    ["image.uri"],
+  ],
+  [
+    "an image uri that differs from the digest in its last hex digit",
+    set(LAUNCH, "image.uri", `docker://ghcr.io/example/runtime@sha256:${"b".repeat(63)}c`),
+    ["image.uri"],
+  ],
+  [
+    "an image uri that differs from the digest in its first hex digit",
+    set(LAUNCH, "image.uri", `docker://ghcr.io/example/runtime@sha256:c${"b".repeat(63)}`),
+    ["image.uri"],
   ],
 ];
 
@@ -2328,17 +2358,21 @@ describe("the launch specification", () => {
   });
 
   test("the rules only zod enforces are listed, and each is one the JSON Schema accepts", () => {
-    expect(ZOD_ONLY_LAUNCH_CASES.length).toBeGreaterThanOrEqual(4);
-    for (const [label, doc, key] of ZOD_ONLY_LAUNCH_CASES) {
+    expect(ZOD_ONLY_LAUNCH_CASES.length).toBeGreaterThanOrEqual(8);
+    for (const [label, doc, keys] of ZOD_ONLY_LAUNCH_CASES) {
       expect(validateRoot(doc), `JSON Schema: ${label}`).toBe(true);
       const refused = LaunchSpecSchema.safeParse(doc);
       expect(refused.success, `zod: ${label}`).toBe(false);
       if (refused.success) continue;
-      // One issue, naming the field, and neither value.
-      expect(refused.error.issues, label).toHaveLength(1);
-      expect(refused.error.issues[0].path.join("."), label).toBe(key);
-      expect(refused.error.issues[0].message, label).not.toContain(HEX_A);
-      expect(refused.error.issues[0].message, label).not.toContain(HEX_B);
+      // One issue for each field the rule names, in order, and never a digest in a message.
+      expect(
+        refused.error.issues.map((i) => i.path.join(".")),
+        label,
+      ).toEqual([...keys]);
+      for (const issue of refused.error.issues) {
+        expect(issue.message, label).not.toContain(HEX_A);
+        expect(issue.message, label).not.toContain(HEX_B);
+      }
     }
   });
 
@@ -2375,7 +2409,11 @@ describe("the launch specification", () => {
   test("the zod rule is the helper: a document is accepted exactly when its sif is the helper's", () => {
     for (const hex of [HEX_A, HEX_B, "0123456789abcdef".repeat(4)]) {
       const named = sifFileNameForDigest(`sha256:${hex}`);
-      const doc = set(set(LAUNCH, "image.digest", `sha256:${hex}`), "image.sif", named);
+      const doc = set(
+        set(set(LAUNCH, "image.digest", `sha256:${hex}`), "image.sif", named),
+        "image.uri",
+        `docker://ghcr.io/example/runtime@sha256:${hex}`,
+      );
       expect(LaunchSpecSchema.safeParse(doc).success, hex).toBe(true);
     }
   });
@@ -2423,6 +2461,69 @@ describe("the launch specification", () => {
     for (const other of [`${HEX_A}.sif`, `${"b".repeat(63)}c.sif`, `c${"b".repeat(63)}.sif`]) {
       expect(messages(other), other).toEqual([NAMED]);
     }
+  });
+
+  test("an image uri that is not pinned to image.digest is refused for its own reason, once", () => {
+    const messages = (uri: unknown) => {
+      const refused = LaunchSpecSchema.safeParse(set(LAUNCH, "image.uri", uri));
+      return refused.success ? [] : refused.error.issues.map((i) => i.message);
+    };
+    const FORM = "the image reference is not a digest-pinned reference";
+    const NAMED = "the image reference is not pinned to the image digest";
+    // A well-formed reference of another digest: only the cross rule speaks.
+    for (const other of [
+      `docker://ghcr.io/example/runtime@sha256:${HEX_A}`,
+      `ghcr.io/example/runtime@sha256:${"b".repeat(63)}c`,
+    ]) {
+      expect(messages(other), other).toEqual([NAMED]);
+    }
+    // A malformed one: the field's own rule speaks, and the cross rule keeps quiet.
+    for (const bad of ["docker://ghcr.io/example/runtime", "--rm", `ghcr.io@sha256:${HEX_B}`, ""]) {
+      expect(messages(bad), bad).toEqual([FORM]);
+    }
+    // And a bad digest is named once, by the digest's own rule, whatever the uri ends with.
+    for (const digest of [
+      HEX_B,
+      "sha256:zzz",
+      "nope",
+      "",
+      `sha256:${HEX_B}\n`,
+      `sha256:${"b".repeat(63)}`,
+    ]) {
+      const refused = LaunchSpecSchema.safeParse(set(LAUNCH, "image.digest", digest));
+      expect(
+        refused.success ? [] : refused.error.issues.map((i) => i.path.join(".")),
+        JSON.stringify(digest),
+      ).toEqual(["image.digest"]);
+    }
+  });
+
+  test("the shared descriptions of version, sif and uri state the contract and carry no Worker narrative", () => {
+    const image = (launchSchema as Doc).properties.image.properties;
+    const version = (launchSchema as Doc).properties.datasets.items.properties.version;
+    for (const [name, text] of [
+      ["version", version.description],
+      ["sif", image.sif.description],
+      ["uri", image.uri.description],
+    ] as const) {
+      expect(typeof text, name).toBe("string");
+      for (const narrative of [
+        "Worker",
+        "encoder",
+        "NEMAR enforces",
+        "writes the tag",
+        "1.0.2 becomes",
+      ]) {
+        expect(text, `${name}: ${narrative}`).not.toContain(narrative);
+      }
+    }
+    expect(version.description).toContain("latest, or v<major>.<minor>.<patch>");
+    expect(version.description).toContain("exactly what the data plane accepts");
+    // The two cross-field rules are named as rules only zod enforces.
+    expect(image.sif.description).toContain("zod-only");
+    expect(image.uri.description).toContain("zod-only");
+    expect(image.uri.description).toContain("cannot express");
+    expect(image.uri.description).toContain("image.digest");
   });
 
   test("the schema says plainly which rule it cannot express", () => {
@@ -3616,7 +3717,8 @@ const COMMAND_BASE = {
   command: ["c"],
 };
 /** A digest-pinned image reference of exactly `n` characters. */
-const imageRef = (n: number) => `docker://ghcr.io/${"a".repeat(n - 89)}@sha256:${HASH}`;
+// Pinned to the launch specification's own image digest, as the cross rule requires.
+const imageRef = (n: number) => `docker://ghcr.io/${"a".repeat(n - 89)}@sha256:${HEX_B}`;
 
 /**
  * The one table of every numeric and length bound in the launch schema, as literals. The corpus
@@ -4053,7 +4155,7 @@ const EXTRA_BOUNDS: readonly Bound[] = [
     kind: "max",
     at: 5,
     build: (n) =>
-      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HASH}`),
+      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HEX_B}`),
   },
   {
     label: "image uri port digits, at least",
@@ -4061,7 +4163,7 @@ const EXTRA_BOUNDS: readonly Bound[] = [
     kind: "min",
     at: 1,
     build: (n) =>
-      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HASH}`),
+      set(LAUNCH, "image.uri", `registry.example.test:${"1".repeat(n)}/team/tool@sha256:${HEX_B}`),
   },
   {
     label: "launcher file size, at least",

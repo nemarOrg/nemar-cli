@@ -95,6 +95,8 @@ const SIF_FILE_RE = /^[0-9a-f]{64}\.sif$/;
 const EXACTLY_ONE = " Exactly one of entry and command is present.";
 const SIF_FORM_MESSAGE = "the image file is not <64 lowercase hex>.sif";
 const SIF_NAMED_MESSAGE = "the image file is not the one named for the image digest";
+const IMAGE_REF_FORM_MESSAGE = "the image reference is not a digest-pinned reference";
+const IMAGE_REF_NAMED_MESSAGE = "the image reference is not pinned to the image digest";
 /** UTC, as the presigning calls write it; the shape is checked, not the calendar. */
 const TIMESTAMP_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$/;
 /** Where an upload goes under `jobs/<id>/`: an output, or one of the four launcher files. */
@@ -143,7 +145,12 @@ export const LaunchSpecSchema = z
         z
           .object({
             id: z.string().regex(COMPUTE_DATASET_ID_RE),
-            /** The data-plane tag: `latest` or `v<major>.<minor>.<patch>`, as `dataTagForVersion` makes it. */
+            /**
+             * The data-plane tag: `latest` or `v<major>.<minor>.<patch>`. A job names a version more
+             * loosely (`1.0.2`); the Worker writes the tag with `dataTagForVersion` (`1.0.2` becomes
+             * `v1.0.2`) and refuses a job whose version has none, naming `datasetVersionWithoutTag`'s
+             * field, before the hold.
+             */
             version: z.string().max(COMPUTE_DATA_TAG_MAX).regex(COMPUTE_DATA_TAG_RE),
             include: z
               .array(computeGlobSchema)
@@ -158,15 +165,22 @@ export const LaunchSpecSchema = z
     api_base: z.string().max(512).regex(API_BASE_RE),
     image: z
       .object({
-        /** A digest-pinned reference, as a job's own `image` is: no leading `-`, no control character. */
-        uri: z.string().max(512).regex(COMPUTE_IMAGE_REF_RE),
+        /**
+         * A digest-pinned reference, as a job's own `image` is: no leading `-`, no control character.
+         * The `@sha256:<hex>` it ends with is the one in `digest`: a rule the JSON Schema cannot
+         * express and the refinement below enforces, because `digest` names the file that runs and
+         * the provenance records it as the image's.
+         */
+        uri: z.string().max(512).regex(COMPUTE_IMAGE_REF_RE, IMAGE_REF_FORM_MESSAGE),
         digest: z.string().regex(COMPUTE_IMAGE_DIGEST_RE),
         /**
          * The Singularity image file the launcher runs: `<64 lowercase hex>.sif`, a basename relative
          * to `NEMAR_SIF_ROOT`, which the launcher requires (it has no fallback and ends
          * `image_missing` when it is unset). The hex is the one in `digest`: a rule the JSON Schema
-         * cannot express and the refinement below enforces. The file's content hash is NOT verified
-         * by the launcher: the name is all that ties the file to the digest.
+         * cannot express and the refinement below enforces (NEMAR's encoder refuses a document that
+         * breaks it, so every launch specification NEMAR hands the launcher satisfies it). The file's
+         * content hash is NOT verified by the launcher: the name is all that ties the file to the
+         * digest.
          */
         sif: z.string().regex(SIF_FILE_RE, SIF_FORM_MESSAGE),
       })
@@ -187,13 +201,24 @@ export const LaunchSpecSchema = z
     if (spec.entry !== undefined && spec.bundle === undefined) {
       refuse("bundle", "an entry needs the bundle that holds it");
     }
-    // Only when both are well formed, so the two field issues are not doubled by this one.
+    // Each cross rule only when both its fields are well formed, so the field issues are not doubled.
     const named = sifFileNameForDigest(spec.image.digest);
     if (named !== null && SIF_FILE_RE.test(spec.image.sif) && spec.image.sif !== named) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["image", "sif"],
         message: SIF_NAMED_MESSAGE,
+      });
+    }
+    if (
+      named !== null &&
+      COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
+      !spec.image.uri.endsWith(spec.image.digest)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["image", "uri"],
+        message: IMAGE_REF_NAMED_MESSAGE,
       });
     }
   });
