@@ -642,12 +642,19 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   const JOB = "job_0123456789abcdef01234567";
   const CLOSED = ["strict", "lenient"] as const;
   /**
-   * Every object schema the two compute files export, a valid document for it, and which side of
-   * the line it is on. Checked BY BEHAVIOUR below: an unknown key is refused by a strict schema and
-   * kept by a lenient one. A new exported object schema that is not in this table fails the test, so
-   * it is classified on purpose rather than by accident.
+   * Every schema the two compute files export that is, or holds, an object (an array of them, a
+   * union), a valid document for it, and which side of the line it is on. Checked BY BEHAVIOUR below:
+   * an unknown key is refused by a strict schema and kept by a lenient one. A new export that is not
+   * in this table fails the test, so it is classified on purpose rather than by accident; one that
+   * the test cannot read at all (a kind of schema it does not know) fails it too.
    */
-  const CLASSIFIED: Record<string, { side: (typeof CLOSED)[number]; valid: () => unknown }> = {
+  type Classified = {
+    side: (typeof CLOSED)[number];
+    valid: () => unknown;
+    /** Where an unknown key goes, for a schema that is not itself an object (an array, a union). */
+    withUnknown?: (doc: unknown) => unknown;
+  };
+  const CLASSIFIED: Record<string, Classified> = {
     JobSpecSchema: {
       side: "strict",
       valid: () => ({
@@ -742,32 +749,297 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     },
   };
 
-  /** A zod object schema, possibly wrapped in effects (a `superRefine`). */
-  function isObjectSchema(value: unknown): boolean {
-    let current: unknown = value;
-    while (current instanceof z.ZodType) {
-      const def = current._def as { typeName?: string; schema?: unknown };
-      if (def.typeName === "ZodObject") return true;
-      if (def.typeName !== "ZodEffects") return false;
-      current = def.schema;
-    }
-    return false;
+  type ZodDef = { typeName?: string } & Record<string, unknown>;
+  const defOf = (schema: z.ZodTypeAny): ZodDef => schema._def as ZodDef;
+
+  /** A zod schema, seen through the effects (a `superRefine`, a `refine`) around it. */
+  function withoutEffects(schema: z.ZodTypeAny): z.ZodTypeAny {
+    let current = schema;
+    while (defOf(current).typeName === "ZodEffects")
+      current = defOf(current).schema as z.ZodTypeAny;
+    return current;
   }
 
-  test("every object schema the compute files export is classified, and behaves as classified", () => {
-    const exported = Object.entries({ ...computeModule, ...launchModule }).filter(([, value]) =>
-      isObjectSchema(value),
+  /** The kinds of zod schema that hold no other schema. */
+  const LEAF_KINDS = new Set([
+    "ZodString",
+    "ZodNumber",
+    "ZodBigInt",
+    "ZodBoolean",
+    "ZodDate",
+    "ZodNaN",
+    "ZodLiteral",
+    "ZodEnum",
+    "ZodNativeEnum",
+    "ZodNull",
+    "ZodUndefined",
+    "ZodVoid",
+    "ZodAny",
+    "ZodUnknown",
+    "ZodNever",
+    "ZodSymbol",
+  ]);
+
+  /**
+   * The schemas one level inside `schema`: what an array holds, what a union offers, what a wrapper
+   * wraps. A KIND this table does not know throws, so a new way of building a schema is never
+   * skipped by accident: the test fails until the table learns it.
+   */
+  function innerSchemas(schema: z.ZodTypeAny): z.ZodTypeAny[] {
+    const def = defOf(schema);
+    const at = (key: string) => def[key] as z.ZodTypeAny;
+    const kind = String(def.typeName);
+    if (LEAF_KINDS.has(kind)) return [];
+    switch (kind) {
+      case "ZodArray":
+      case "ZodPromise":
+      case "ZodBranded":
+        return [at("type")];
+      case "ZodSet":
+        return [at("valueType")];
+      case "ZodMap":
+      case "ZodRecord":
+        return [at("keyType"), at("valueType")];
+      case "ZodTuple":
+        return [...(def.items as z.ZodTypeAny[]), ...(def.rest ? [at("rest")] : [])];
+      case "ZodUnion":
+      case "ZodDiscriminatedUnion":
+        return [...(def.options as Iterable<z.ZodTypeAny>)];
+      case "ZodIntersection":
+        return [at("left"), at("right")];
+      case "ZodOptional":
+      case "ZodNullable":
+      case "ZodDefault":
+      case "ZodCatch":
+      case "ZodReadonly":
+        return [at("innerType")];
+      case "ZodEffects":
+        return [at("schema")];
+      case "ZodLazy":
+        return [(def.getter as () => z.ZodTypeAny)()];
+      case "ZodPipeline":
+        return [at("in"), at("out")];
+      default:
+        throw new Error(`cannot classify a ${kind}: teach innerSchemas about it`);
+    }
+  }
+
+  /** Whether an object schema is `schema` or anywhere inside it: an array's element, a union's member. */
+  function containsObject(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
+    if (seen.has(schema)) return false;
+    seen.add(schema);
+    if (defOf(schema).typeName === "ZodObject") return true;
+    return innerSchemas(schema).some((inner) => containsObject(inner, seen));
+  }
+
+  const addUnknownKey = (doc: unknown) => ({ ...(doc as object), zz_unknown_key: 1 });
+
+  /**
+   * Which side of the line a schema is on, BY BEHAVIOUR: its valid document must parse, and the same
+   * document with an unknown key is refused by a strict schema and kept by a lenient one. Where the
+   * key goes is the top level of the document unless `withUnknown` says otherwise, which a schema
+   * that is not itself an object (an array of them, a union) must: a key added to an array proves
+   * nothing about its elements.
+   */
+  function sideOf(
+    schema: z.ZodTypeAny,
+    valid: () => unknown,
+    withUnknown?: (doc: unknown) => unknown,
+  ): "strict" | "lenient" | "invalid" {
+    if (!schema.safeParse(valid()).success) return "invalid";
+    return schema.safeParse((withUnknown ?? addUnknownKey)(valid())).success ? "lenient" : "strict";
+  }
+
+  /** Every zod schema the two compute files export that is, or holds, an object schema. */
+  const exportedObjectSchemas = (...modules: object[]) =>
+    Object.entries(Object.assign({}, ...modules)).filter(
+      (entry): entry is [string, z.ZodTypeAny] =>
+        entry[1] instanceof z.ZodType && containsObject(entry[1]),
     );
+
+  /** What is wrong with how `schema` is classified as `entry`, or null if nothing is. */
+  function classificationProblem(schema: z.ZodTypeAny, entry: Classified): string | null {
+    if (defOf(withoutEffects(schema)).typeName !== "ZodObject" && entry.withUnknown === undefined) {
+      return "is not an object itself: say where its unknown key goes";
+    }
+    const side = sideOf(schema, entry.valid, entry.withUnknown);
+    return side === entry.side ? null : `is ${side}, classified ${entry.side}`;
+  }
+
+  test("every schema the compute files export that holds an object is classified, and behaves as classified", () => {
+    const exported = exportedObjectSchemas(computeModule, launchModule);
     // Guards the guard: the walk found the schemas, not nothing.
     expect(exported.length).toBeGreaterThanOrEqual(11);
     expect(exported.map(([name]) => name).sort()).toEqual(Object.keys(CLASSIFIED).sort());
     for (const [name, schema] of exported) {
-      const { side, valid } = CLASSIFIED[name];
-      const parse = (doc: unknown) => (schema as z.ZodTypeAny).safeParse(doc);
-      expect(parse(valid()).success, `${name}: its valid document`).toBe(true);
-      const withExtra = parse({ ...(valid() as object), zz_unknown_key: 1 });
-      expect(withExtra.success, `${name}: an unknown key`).toBe(side === "lenient");
+      expect(classificationProblem(schema, CLASSIFIED[name]), name).toBeNull();
     }
+  });
+
+  describe("the classifier itself, on schemas built here", () => {
+    const strictObject = z.object({ a: z.string() }).strict();
+    const openObject = z.object({ a: z.string() }).passthrough();
+    const element = (doc: unknown) => [addUnknownKey((doc as unknown[])[0])];
+
+    test("it finds an object schema however the export wraps it", () => {
+      const holds: Array<[string, z.ZodTypeAny]> = [
+        ["an object", strictObject],
+        ["an object behind effects", strictObject.superRefine(() => {})],
+        ["an array of objects", z.array(strictObject)],
+        ["an array of an array of objects", z.array(z.array(strictObject))],
+        ["a union of objects", z.union([strictObject, openObject])],
+        ["a union of an object and a string", z.union([z.string(), openObject])],
+        [
+          "a discriminated union of objects",
+          z.discriminatedUnion("k", [
+            z.object({ k: z.literal("a") }).strict(),
+            z.object({ k: z.literal("b") }).strict(),
+          ]),
+        ],
+        ["an optional object", strictObject.optional()],
+        ["a nullable object", strictObject.nullable()],
+        ["an object with a default", strictObject.default({ a: "x" })],
+        ["a record of objects", z.record(z.string(), strictObject)],
+        ["a tuple holding an object", z.tuple([z.string(), strictObject])],
+        ["a tuple whose rest is an object", z.tuple([z.string()]).rest(strictObject)],
+        ["an intersection ending in an object", z.intersection(z.record(z.string()), strictObject)],
+        [
+          "an intersection starting with an object",
+          z.intersection(strictObject, z.record(z.string())),
+        ],
+        ["a map keyed by objects", z.map(strictObject, z.string())],
+        ["a pipe from an object", strictObject.pipe(z.unknown())],
+        ["a lazy object", z.lazy(() => strictObject)],
+        ["a set of objects", z.set(strictObject)],
+        ["a map of objects", z.map(z.string(), strictObject)],
+        ["a branded object", strictObject.brand("b")],
+        ["an object with a catch", strictObject.catch({ a: "x" })],
+        ["a readonly object", strictObject.readonly()],
+        ["a promise of an object", z.promise(strictObject)],
+        [
+          "a piped object",
+          z.string().pipe(
+            z
+              .string()
+              .transform(() => ({}))
+              .pipe(strictObject),
+          ),
+        ],
+        ["an object holding an array of objects", z.object({ list: z.array(strictObject) })],
+      ];
+      for (const [label, schema] of holds) expect(containsObject(schema), label).toBe(true);
+    });
+
+    test("it does not take a schema with no object in it for one", () => {
+      const holds: Array<[string, z.ZodTypeAny]> = [
+        ["a string", z.string()],
+        ["an enum", z.enum(["a", "b"])],
+        ["an array of strings", z.array(z.string())],
+        ["a record of strings", z.record(z.enum(["a"]), z.string().max(3))],
+        ["a union of strings and numbers", z.union([z.string(), z.number()])],
+        ["a tuple of scalars", z.tuple([z.string(), z.number()])],
+        ["a refined string", z.string().refine(() => true)],
+        ["a nullable number", z.number().nullable()],
+        ["a literal", z.literal("x")],
+        ["a number", z.number()],
+        ["a bigint", z.bigint()],
+        ["a boolean", z.boolean()],
+        ["a date", z.date()],
+        ["a NaN", z.nan()],
+        ["a native enum", z.nativeEnum({ A: "a" } as const)],
+        ["a null", z.null()],
+        ["an undefined", z.undefined()],
+        ["a void", z.void()],
+        ["any", z.any()],
+        ["unknown", z.unknown()],
+        ["never", z.never()],
+        ["a symbol", z.symbol()],
+        ["a set of strings", z.set(z.string())],
+        ["a map of strings", z.map(z.string(), z.number())],
+        ["a promise of a string", z.promise(z.string())],
+        ["a readonly array", z.array(z.string()).readonly()],
+        ["a catch", z.string().catch("x")],
+        ["a branded string", z.string().brand("b")],
+        ["an intersection of strings", z.intersection(z.string(), z.string().max(3))],
+        ["a pipe of strings", z.string().pipe(z.string())],
+        ["a lazy string", z.lazy(() => z.string())],
+        ["a union of literals", z.union([z.literal("a"), z.literal("b")])],
+      ];
+      for (const [label, schema] of holds) expect(containsObject(schema), label).toBe(false);
+    });
+
+    test("it stops on a schema that refers to itself", () => {
+      type Node = { next?: Node };
+      const node: z.ZodType<Node> = z.lazy(() => z.object({ next: node.optional() }));
+      expect(containsObject(node)).toBe(true);
+      const loop: z.ZodTypeAny = z.lazy(() => z.array(loop));
+      expect(containsObject(loop)).toBe(false);
+    });
+
+    test("a kind it does not know fails the test instead of being skipped", () => {
+      class Mystery extends z.ZodType {
+        _parse(): never {
+          throw new Error("never parsed");
+        }
+      }
+      const mystery = new Mystery({ typeName: "ZodMystery" } as never);
+      expect(() => containsObject(mystery)).toThrow(/cannot classify a ZodMystery/);
+      expect(() => containsObject(z.array(mystery))).toThrow(/cannot classify a ZodMystery/);
+      expect(() => containsObject(z.union([mystery, strictObject]))).toThrow(/ZodMystery/);
+    });
+
+    test("an export that is not an object itself must say where its unknown key goes", () => {
+      const list: Classified = { side: "strict", valid: () => [{ a: "x" }] };
+      expect(classificationProblem(z.array(strictObject), list)).toMatch(
+        /where its unknown key goes/,
+      );
+      expect(
+        classificationProblem(z.array(strictObject), { ...list, withUnknown: element }),
+      ).toBeNull();
+      // Said, and wrong: the array is strict, not lenient.
+      expect(
+        classificationProblem(z.array(strictObject), {
+          ...list,
+          side: "lenient",
+          withUnknown: element,
+        }),
+      ).toBe("is strict, classified lenient");
+      expect(classificationProblem(z.array(openObject), { ...list, withUnknown: element })).toBe(
+        "is lenient, classified strict",
+      );
+      // An object behind effects needs no such word, and a document that does not parse is a problem.
+      const object: Classified = { side: "strict", valid: () => ({ a: "x" }) };
+      expect(
+        classificationProblem(
+          strictObject.superRefine(() => {}),
+          object,
+        ),
+      ).toBeNull();
+      expect(classificationProblem(strictObject, { ...object, valid: () => ({ a: 1 }) })).toBe(
+        "is invalid, classified strict",
+      );
+    });
+
+    test("sideOf reads the behaviour, at the top or where the key is told to go", () => {
+      const doc = () => ({ a: "x" });
+      expect(sideOf(strictObject, doc)).toBe("strict");
+      expect(sideOf(openObject, doc)).toBe("lenient");
+      expect(sideOf(z.object({ a: z.string() }), doc)).toBe("lenient");
+      expect(
+        sideOf(
+          strictObject.superRefine(() => {}),
+          doc,
+        ),
+      ).toBe("strict");
+      expect(sideOf(strictObject, () => ({ a: 1 }))).toBe("invalid");
+      // An array of objects: a key at the top says nothing, a key on the element does.
+      const list = () => [{ a: "x" }];
+      expect(sideOf(z.array(strictObject), list, element)).toBe("strict");
+      expect(sideOf(z.array(openObject), list, element)).toBe("lenient");
+      const union = z.union([strictObject, z.object({ b: z.number() }).strict()]);
+      expect(sideOf(union, doc)).toBe("strict");
+      expect(sideOf(z.union([openObject, z.string()]), doc)).toBe("lenient");
+    });
   });
 
   test("the open responses are open all the way down, and the closed requests closed all the way down", () => {
