@@ -40,7 +40,7 @@ type Env = { Bindings: Bindings; Variables: Variables };
  * they are before they are told whether the surface exists.
  */
 export const oidcSurface: MiddlewareHandler<Env> = async (c, next) => {
-  if (!onOidcSurface(c.env, c.req.url)) return notFoundResponse(c);
+  if (!onOidcSurface(c.env, c.req.url, c.req.path)) return notFoundResponse(c);
   await next();
 };
 

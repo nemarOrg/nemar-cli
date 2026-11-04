@@ -164,6 +164,31 @@ describe("where they exist", () => {
     expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_clients").get()).toEqual({ n: 0 });
   });
 
+  test("the router's decoded path is the one that decides: spellings a plain string test misses", async () => {
+    const SPELLINGS: Array<[string, string]> = [
+      ["GET", `/admin/oidc/clients/${CLIENT_ID}%ff`],
+      ["POST", `/admin/oidc/clients/${CLIENT_ID}%ff/rotate-secret`],
+      ["POST", `/admin/oidc/clients/${CLIENT_ID}%ff/disable`],
+      ["POST", `/admin/oidc/keys/${KID}%ff/revoke`],
+    ];
+    for (const mount of ["%6eemar", "%6Eemar", "n%65mar"]) {
+      for (const [method, path] of SPELLINGS) {
+        const res = await h.call(method, `/${mount}${path}`, {
+          key: OWNER_KEY,
+          body: method === "POST" ? {} : undefined,
+        });
+        expect(res.status, `${method} /${mount}${path}`).toBe(404);
+      }
+    }
+    expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_signing_keys").get()).toEqual({ n: 0 });
+    expect(h.db.query("SELECT COUNT(*) AS n FROM oidc_clients").get()).toEqual({ n: 0 });
+    expect(
+      h.db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'oidc.%'").get(),
+    ).toEqual({
+      n: 0,
+    });
+  });
+
   test("not with the provider off: no secret, or a short one, is 404 to the owner for every route", async () => {
     for (const secret of [undefined, "", "s".repeat(31)]) {
       for (const [method, path] of oidcRoutes()) {

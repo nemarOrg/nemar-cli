@@ -99,5 +99,9 @@ describe("ADR 0119 records the key and secret decisions", () => {
     expect(consequences).toContain("OIDC_SECRET");
     expect(consequences).toMatch(/every stored key unreadable/);
     expect(consequences).toMatch(/#2020/);
+    // Losing the secret leaves no way back through the CLI, and the ADR says what recovery is.
+    expect(consequences).toMatch(/no CLI way back/);
+    expect(consequences).toContain("key_unreadable");
+    expect(consequences).toMatch(/removing the unreadable key rows by hand/);
   });
 });

@@ -58,8 +58,9 @@ function issuerHostname(env: Pick<Bindings, "API_BASE_URL">): string | null {
 
 /**
  * Whether a request is on the OIDC surface: the provider is enabled, the request's own URL names
- * the issuer's host, and its path is not under the legacy `/nemar` mount, however that is spelled
- * (the path is tested as written and percent-decoded, because the router decodes before it matches).
+ * the issuer's host, and its path is not under the legacy `/nemar` mount, however that is spelled.
+ * The router's own decoded path (`routedPath`, Hono's `c.req.path`) is the primary test, because it is
+ * the path the handlers are chosen by; the decoded forms of the URL's own path are a second one.
  *
  * The host is read from the request URL, which the platform builds from the route that matched,
  * never from a `Host` header a caller could forge, and it is compared with the host of the issuer
@@ -71,6 +72,7 @@ function issuerHostname(env: Pick<Bindings, "API_BASE_URL">): string | null {
 export function onOidcSurface(
   env: Pick<Bindings, "API_BASE_URL" | "OIDC_SECRET">,
   requestUrl: string,
+  routedPath?: string,
 ): boolean {
   if (!oidcEnabled(env)) return false;
   const issuerHost = issuerHostname(env);
@@ -81,8 +83,9 @@ export function onOidcSurface(
   } catch {
     return false;
   }
-  // As written and as decoded: a router decodes the path before it matches, so `/%6eemar/...` reaches
-  // the `/nemar` mount's handlers. Whatever path the router matches is a decoding of this one.
+  // Check the router's decoded path first: it is the one that picks the handlers. The URL's own path,
+  // as written and percent-decoded, is tested as well.
+  if (routedPath !== undefined && isLegacyMount(routedPath)) return false;
   if (decodedForms(request.pathname).some(isLegacyMount)) return false;
   return request.hostname === issuerHost;
 }
@@ -92,9 +95,8 @@ const isLegacyMount = (path: string): boolean =>
 
 /**
  * A path as written and then percent-decoded, up to three times, so a mount spelled `%6eemar`,
- * `%6Eemar` or double or triple encoded is seen as the mount it is. Decoding stops at a path that
- * does not decode (a stray `%`). Refusing a path that only a decoder would read as `/nemar` costs
- * nothing: no OIDC route is ever under it.
+ * `%6Eemar` or double or triple encoded is seen as the mount it is. Refusing a path that only a
+ * decoder would read as `/nemar` costs nothing: no OIDC route is ever under it.
  */
 function decodedForms(path: string): string[] {
   const forms = [path];

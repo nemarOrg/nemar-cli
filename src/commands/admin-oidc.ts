@@ -81,7 +81,7 @@ function hintsFor(error: unknown, afterNetworkError?: string): Record<number, st
   const code = oidcErrorCode(error);
   if (code === "rotation_next_too_new") {
     hints[409] =
-      "In an emergency, `nemar admin oidc keys rotate --force --yes` overrides this; the audit trail records it.";
+      "In an emergency, `nemar admin oidc keys rotate --force --emergency` overrides this; the audit trail records it.";
   } else if (code === "key_unreadable") {
     hints[409] =
       "Check that the Worker's OIDC_SECRET is the one the keys were made under; nothing was changed.";
@@ -310,8 +310,8 @@ current only when it is ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old, so a client ha
 
 --force skips that wait, but refuses while the next key is under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old: a client whose
 cached key set predates the key can fail verification of tokens signed with it for up to about
-${CACHE_MINUTES} minutes (the key set is cached that long). --force --yes is the emergency override of that
-floor; the audit trail records it.
+${CACHE_MINUTES} minutes (the key set is cached that long). --force --emergency overrides that floor; the audit
+trail records it.
 
 Before it promotes a key, the Worker proves it can decrypt it. A key that was encrypted under a
 different OIDC_SECRET is refused and nothing changes: set OIDC_SECRET before the first rotation, and
@@ -320,7 +320,7 @@ do not change it afterwards (every stored key becomes unreadable).
 Exit codes:
   0  rotated, or the first keys were made.
   1  not signed in, not the owner, the next key is not ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old yet (nothing changed; --force
-     rotates now), --force on a key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old without --yes, a key that cannot be
+     rotates now), --force on a key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old without --emergency, a key that cannot be
      decrypted under OIDC_SECRET, another rotation won the race (read the keys again), a network
      failure (run \`keys list\` before rotating again), or a server on which the provider is off.`;
 
@@ -579,17 +579,17 @@ keysCommand
     `Rotate now even when the next key is under ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old`,
   )
   .option(
-    "-y, --yes",
-    `With --force: the emergency override, for a next key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old`,
+    "--emergency",
+    `With --force: override the floor, for a next key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old`,
   )
   .option("--json", "Print the answer as JSON")
   .addHelpText("after", KEYS_ROTATE_HELP)
-  .action(async (options: { force?: boolean; yes?: boolean; json?: boolean }) => {
+  .action(async (options: { force?: boolean; emergency?: boolean; json?: boolean }) => {
     const json = options.json === true;
     const result = await run(
       json,
       "rotate the signing keys",
-      () => rotateOidcKeys({ force: options.force, emergency: options.yes }),
+      () => rotateOidcKeys({ force: options.force, emergency: options.emergency }),
       "The request may have been carried out before it failed. Run `nemar admin oidc keys list` before rotating again.",
     );
     if (!result) return;

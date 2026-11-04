@@ -88,6 +88,18 @@ describe("a request is on the surface only on the issuer's host, off the legacy 
     expect(onOidcSurface(env, url)).toBe(false);
   });
 
+  test("the router's decoded path decides first, whatever the URL's own text is", () => {
+    const url = "https://api.nemar.org/%6eemar/admin/oidc/clients/oc_x%ff";
+    expect(onOidcSurface(env, url, "/nemar/admin/oidc/clients/oc_x%ff")).toBe(false);
+    expect(onOidcSurface(env, url, "/nemar")).toBe(false);
+    // A routed path that is not the legacy mount leaves the other test to decide.
+    expect(onOidcSurface(env, "https://api.nemar.org/oauth/jwks", "/oauth/jwks")).toBe(true);
+    expect(onOidcSurface(env, "https://api.nemar.org/oauth/jwks", "/nemarx/oauth/jwks")).toBe(true);
+    expect(onOidcSurface(env, "https://api.nemar.org/%6eemar/oauth/jwks", "/oauth/jwks")).toBe(
+      false,
+    );
+  });
+
   test("a path that only starts with the letters nemar is not the legacy mount", () => {
     expect(onOidcSurface(env, "https://api.nemar.org/nemarx/oauth/jwks")).toBe(true);
   });

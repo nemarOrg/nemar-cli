@@ -492,7 +492,7 @@ describe("nemar admin oidc keys", () => {
     expect(early.plain).toMatch(/24 hours/);
     expect(early.plain).toMatch(/--force/);
     expect(early.json).toMatch(/24 hours/);
-    // A key published seconds ago is not forced without --yes (an emergency); age it past the floor.
+    // A key published seconds ago is not forced without --emergency; age it past the floor.
     db.run(
       "UPDATE oidc_signing_keys SET created_at = datetime('now', '-10 minutes') WHERE state = 'next'",
     );
@@ -605,7 +605,7 @@ const ageNext = (minutes: number) =>
   );
 
 describe("nemar admin oidc keys rotate --force", () => {
-  test("is refused while the next key is under 6 minutes old, and says what --yes means", async () => {
+  test("is refused while the next key is under 6 minutes old, and says what --emergency means", async () => {
     signIn(OWNER_KEY);
     await runCli(["keys", "rotate"]);
     const before = JSON.stringify(
@@ -614,16 +614,18 @@ describe("nemar admin oidc keys rotate --force", () => {
     const refused = await failsBothWays(["keys", "rotate", "--force"]);
     expect(refused.plain).toMatch(/6 minutes/);
     expect(refused.plain).toMatch(/emergency/i);
-    expect(refused.plain).toMatch(/--yes/);
+    expect(refused.plain).toMatch(/--force --emergency/);
+    // --yes answers a question; it is not the emergency, and the hint does not suggest it.
+    expect(refused.plain).not.toMatch(/--yes/);
     expect(
       JSON.stringify(db.query("SELECT kid, state FROM oidc_signing_keys ORDER BY kid").all()),
     ).toBe(before);
   });
 
-  test("--force --yes is the emergency, and rotates a key published seconds ago", async () => {
+  test("--force --emergency overrides the floor, and rotates a key published seconds ago", async () => {
     signIn(OWNER_KEY);
     await runCli(["keys", "rotate"]);
-    const r = await runCli(["keys", "rotate", "--force", "--yes", "--json"]);
+    const r = await runCli(["keys", "rotate", "--force", "--emergency", "--json"]);
     expect(r.exitCode, r.stdout + r.stderr).toBe(0);
     expect((JSON.parse(r.stdout) as { action: string }).action).toBe("rotated");
     const audit = db
@@ -634,11 +636,23 @@ describe("nemar admin oidc keys rotate --force", () => {
     expect(JSON.parse(audit?.details as string)).toMatchObject({ forced: true, emergency: true });
   });
 
-  test("--yes without --force changes nothing about the 24-hour rule", async () => {
+  test("--emergency without --force changes nothing about the 24-hour rule", async () => {
     signIn(OWNER_KEY);
     await runCli(["keys", "rotate"]);
-    const early = await failsBothWays(["keys", "rotate", "--yes"]);
+    const early = await failsBothWays(["keys", "rotate", "--emergency"]);
     expect(early.plain).toMatch(/24 hours/);
+  });
+
+  test("--yes is not an emergency: a script that always passes it is refused like anyone", async () => {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    // `keys rotate` asks nothing, so it has no --yes to give; the option is not there to misuse.
+    const r = await runCli(["keys", "rotate", "--force", "--yes"]);
+    expect(r.exitCode).toBe(1);
+    expect(
+      JSON.stringify(db.query("SELECT state FROM oidc_signing_keys ORDER BY kid").all()),
+    ).not.toContain("retired");
+    expect(db.query("SELECT COUNT(*) AS n FROM oidc_signing_keys").get()).toEqual({ n: 2 });
   });
 
   test("a rotation under another OIDC_SECRET says which secret was wrong and changes nothing", async () => {
@@ -662,7 +676,7 @@ describe("nemar admin oidc keys revoke", () => {
     const first = (
       db.query("SELECT kid FROM oidc_signing_keys WHERE state = 'current'").get() as { kid: string }
     ).kid;
-    await runCli(["keys", "rotate", "--force", "--yes"]);
+    await runCli(["keys", "rotate", "--force", "--emergency"]);
     return first;
   }
   const stateOf = (kid: string) =>
@@ -775,7 +789,8 @@ describe("help says what the constants say", () => {
     expect(out).toContain(`${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes`);
     expect(out).toMatch(/fail verification/);
     expect(out).toContain(`${OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS / 60} minutes`);
-    expect(out).toMatch(/--yes/);
+    expect(out).toMatch(/--emergency/);
+    expect(out).not.toMatch(/--yes/);
     expect(out).toMatch(/OIDC_SECRET/);
   });
 

@@ -166,6 +166,19 @@ describe("and answered 404 everywhere else", () => {
     }
   });
 
+  test("the router's decoded path is the one that decides: spellings a plain string test misses", async () => {
+    for (const mount of ["%6eemar", "%6Eemar", "n%65mar"]) {
+      for (const path of [DISCOVERY, JWKS]) {
+        for (const tail of ["", "%ff", "/%ff"]) {
+          const res = await h.call("GET", `/${mount}${path}${tail}`);
+          expect(res.status, `/${mount}${path}${tail}`).toBe(404);
+          expect(res.text).not.toContain("issuer");
+          expect(res.text).not.toContain('"keys"');
+        }
+      }
+    }
+  });
+
   test("on another hostname", async () => {
     for (const base of [
       "https://api-test.nemar.org",
