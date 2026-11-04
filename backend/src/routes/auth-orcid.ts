@@ -120,7 +120,9 @@ import {
 import { profileRefusal } from "../services/profile";
 import { type UsernameAssignmentSource, autoAssignUsername } from "../services/username-assignment";
 import {
+  SESSION_COOKIE_NAME,
   clientIp,
+  hostPrefixedSessionCookie,
   isAllowedOrigin,
   issueSession,
   parseCookieHeader,
@@ -851,6 +853,14 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       }
       actingUserId = cliUser.id;
     } else if ((state.mode === "link" || state.mode === "relink") && c.var.webUser) {
+      // While sessions are issued under the `__Host-` name, only a session read
+      // under it may have an iD attached: the legacy name is one a sibling host
+      // can set, the same rule the authorization routes apply to a grant. With
+      // the flag off the legacy name is the only one there is, and the state
+      // cookie, which only this site sets, shows the link was started here.
+      if (hostPrefixedSessionCookie(c.env) && c.var.webSessionCookieName !== SESSION_COOKIE_NAME) {
+        return fail("session_required", `/login?next=${encodeURIComponent(state.next)}`);
+      }
       actingUserId = c.var.webUser.id;
     }
 

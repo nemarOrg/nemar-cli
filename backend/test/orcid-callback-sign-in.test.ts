@@ -210,6 +210,22 @@ describe("an explicit link attaches the iD to the session's account", () => {
     expect(orcidOf(person)).toBe(PERSON_ID);
   });
 
+  test("with only a legacy-name session while the flag is on, nothing is attached", async () => {
+    // The legacy name is one a sibling host can set, so it never decides whose account gains an iD
+    // while sessions are issued under the __Host- name: the person signs in again first.
+    const person = seedPerson();
+    for (const mode of ["link", "relink"] as const) {
+      const res = await callback(mode, "/settings", [await session(person, "nemar_session")]);
+      expect(errorOf(res)).toBe("session_required");
+      expect(new URL(res.headers.get("Location") as string).searchParams.get("next")).toBe(
+        "/settings",
+      );
+      expect(identitiesOf(person)).toEqual([]);
+      expect(orcidOf(person)).toBeNull();
+      expect(mintedSession(res)).toBeNull();
+    }
+  });
+
   test("with a legacy-name session while the flag is off, the link still works", async () => {
     flag = undefined;
     const person = seedPerson();
