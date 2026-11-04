@@ -48,6 +48,22 @@ const entry = {
 
 /** A valid document for each exported schema. */
 const VALID: Record<string, unknown> = {
+  ComputeStatusResponseSchema: {
+    switches: {
+      environment: "production",
+      compute_enabled: false,
+      pipelines_dispatch_enabled: false,
+    },
+    tapis: {
+      configured: false,
+      strategy: null,
+      problems: ["TAPIS_AUTH_STRATEGY:missing"],
+      token: "unconfigured",
+      health: "unconfigured",
+    },
+    storage: { records_binding: true, results_binding: true, signing_configured: false },
+    access: { key_configured: false },
+  },
   ComputePoolViewSchema: pool,
   ComputeLedgerEntryViewSchema: entry,
   ComputePoolsResponseSchema: { pools: [pool, pool], next_after: null },

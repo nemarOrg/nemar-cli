@@ -11,6 +11,7 @@
  *   POST /compute/pools/by-id/:accountId/adjust       admin     a correction of its grant (a charge: owner)
  *   POST /compute/pools/platform/:key/grant           owner     SU into a platform budget
  *   POST /compute/pools/platform/:key/adjust          owner     a correction of a platform budget
+ *   GET  /compute/status                              admin     the switches, Tapis, storage (phase A4)
  *
  * Admin-only through the router's middleware; the owner-only routes check the role here, before the
  * body is read, and say so (403, `owner_only`). A grant and an adjustment need an `Idempotency-Key`
@@ -73,6 +74,7 @@ import {
   issuesOf,
   putPolicy,
 } from "../../services/compute-policy";
+import { computeStatus } from "../../services/compute-status";
 import type { Bindings, Variables } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
@@ -363,6 +365,16 @@ async function adjustRoute(c: Ctx, holder: Holder) {
 // --- Registration ----------------------------------------------------------------------------
 
 export function registerComputeAdminRoutes(admin: AdminRouter): void {
+  // Booleans and fixed words: what the Worker reads of the switches, whether Tapis and the storage are
+  // configured, and one token mint and one health call. Read-only, and it never answers a secret.
+  admin.get("/compute/status", async (c) => {
+    try {
+      return c.json(await computeStatus(c.env));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
   admin.get("/compute/policy", requireOwner, async (c) => {
     try {
       return c.json(await getPolicy(c.env.DB));

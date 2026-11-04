@@ -10,6 +10,9 @@
  * and what the Worker WRITES; no response is parsed with it, and this file never imports it (a test
  * keeps every file under shared/contract but `compute.ts` and `compute-launch.ts` from doing so).
  *
+ * It also holds the status route's response (epic #2005 phase A4, #2009): booleans and fixed words
+ * only, never a secret value, an address or a name of the tenant.
+ *
  * Money is whole thousandths of a service unit (SU) throughout: `*_milli` is an integer, `12.5`
  * SU is 12500 (`parseSuToMilli` and `formatSu` in `./compute.ts`).
  */
@@ -211,3 +214,48 @@ export const ComputePolicyResponseSchema = z
   .passthrough();
 
 export type ComputePolicyResponse = z.infer<typeof ComputePolicyResponseSchema>;
+
+/**
+ * `GET /admin/compute/status` (epic #2005 phase A4, #2009): what the Worker reads of the two dark
+ * switches, whether Tapis, the two compute buckets with their signing secrets and the ACCESS key are
+ * configured, and the result of ONE token mint and ONE health call, as fixed words. Booleans and
+ * words only: no secret value, no address, no tenant name, no username.
+ *
+ *  - `switches.environment` is `production`, `development` or `other`, never the value;
+ *  - `tapis.strategy` is `password`, `service` or null (not usable); `tapis.problems` are the names
+ *    of what is wrong (`TAPIS_PASSWORD:missing`), empty when it is usable;
+ *  - `tapis.token` and `tapis.health` are `ok`, `unconfigured`, `skipped` (no username to probe
+ *    with under the service strategy) or the kind of the error the call failed with
+ *    (`unauthorized`, `not_found`, `rejected`, `unavailable`, `invalid_response`): a string here,
+ *    not an enum, so a word the Worker adds does not break a released CLI.
+ */
+export const ComputeStatusResponseSchema = z
+  .object({
+    switches: z
+      .object({
+        environment: z.string(),
+        compute_enabled: z.boolean(),
+        pipelines_dispatch_enabled: z.boolean(),
+      })
+      .passthrough(),
+    tapis: z
+      .object({
+        configured: z.boolean(),
+        strategy: z.string().nullable(),
+        problems: z.array(z.string()),
+        token: z.string(),
+        health: z.string(),
+      })
+      .passthrough(),
+    storage: z
+      .object({
+        records_binding: z.boolean(),
+        results_binding: z.boolean(),
+        signing_configured: z.boolean(),
+      })
+      .passthrough(),
+    access: z.object({ key_configured: z.boolean() }).passthrough(),
+  })
+  .passthrough();
+
+export type ComputeStatusResponse = z.infer<typeof ComputeStatusResponseSchema>;

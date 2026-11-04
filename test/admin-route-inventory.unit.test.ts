@@ -58,6 +58,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /compute/pools/by-id/:accountId/adjust": 1,
   "POST /compute/pools/platform/:key/grant": 2,
   "POST /compute/pools/platform/:key/adjust": 2,
+  // Epic #2005 phase A4 (ADR 0118): the status of the switches, Tapis and the storage. One handler:
+  // the router's admin middleware is the whole gate.
+  "GET /compute/status": 1,
 
   // Users / accounts
   "GET /users": 1,
@@ -320,7 +323,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(212);
+    expect(adminRoutes.routes.length).toBe(213);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
