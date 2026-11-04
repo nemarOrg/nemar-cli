@@ -48,6 +48,19 @@ review that nobody after you can find. Epic #1144 Phase 1 took three review
 rounds and its record lives in a gitignored file; Phases 2 and 2b posted theirs
 and are still readable.
 
+## Merge gates and the epic flow
+
+Multi-phase work is driven with the `/project:epic-dev` skill; do not hand-roll an epic.
+Keep the GitHub issues and PRs and `.claude/epic.local.md` in step.
+
+- **Phase PR -> epic branch:** squash merge once the targeted tests and quick gates pass and the review has converged (`.rules/code_review.md`).
+  A phase does not wait for the full suite (`.rules/testing.md`, "Test cost").
+- **Epic branch -> `dev`:** the one PR that waits for the full green CI run (the full `bun test`), plus one integration-scoped review, and for the owner's approval.
+  The compute program merges it with a merge commit, not a squash (`.context/compute-program/README.md`).
+- **Never admin-merge `dev` or `main`.**
+  `--admin` is for a phase PR into an epic branch, never for an integration branch.
+- **Confirm a merge by state**, not by the command's exit status (`.memory/squash-merge-502-may-have-merged.md`).
+
 ## Commit Messages
 - **Format:** `<type>: <description>`
 - **Length:** <50 characters
