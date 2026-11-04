@@ -134,10 +134,16 @@ export async function startOidcHarness(over: Partial<Bindings> = {}): Promise<Oi
   };
 }
 
-/** A body the create route accepts, with any field overridden. */
+let bodyCounter = 0;
+
+/**
+ * A body the create route accepts, with any field overridden. The name is different on every call,
+ * because two active clients may not share one.
+ */
 export function clientBody(over: Record<string, unknown> = {}): Record<string, unknown> {
+  bodyCounter += 1;
   return {
-    name: "Example client",
+    name: `Example client ${bodyCounter}`,
     redirect_uris: ["https://client.example.org/callback"],
     allowed_scopes: ["openid", "profile", "email"],
     allowed_grants: ["authorization_code", "refresh_token"],

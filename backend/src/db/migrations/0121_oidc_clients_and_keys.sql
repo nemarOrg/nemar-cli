@@ -20,7 +20,10 @@
 --   client_id                   `oc_` plus 24 lowercase hexadecimal characters (96 random bits).
 --                               Public, unique, never reused (a row is disabled, never deleted).
 --   name                        what the consent screen and the owner's listing call the client,
---                               1 to 100 characters.
+--                               1 to 100 characters. Unique among ACTIVE clients, ignoring case
+--                               (the partial index below), so a retried registration that did reach
+--                               the server is refused and not registered a second time with a
+--                               secret nobody holds; a disabled client frees its name.
 --   secret_hash                 the SHA-256 of the client secret, 64 lowercase hex characters. The
 --                               secret itself is shown once, in the response that creates or
 --                               rotates it, and is stored nowhere.
@@ -33,10 +36,12 @@
 --                               authorization, never by pattern. The service refuses wildcards,
 --                               fragments, user information and plain http (a loopback address
 --                               outside production excepted); the table keeps the shape.
---   allowed_scopes              a JSON array of 1 to 10 scope names. The table checks the shape and
+--   allowed_scopes              a JSON array of 1 to 20 scope names. The table checks the shape and
 --                               that nothing but lowercase letters, digits, `_` and `.` is in it;
 --                               that each is a scope of the catalogue is the service's rule
---                               (`shared/oidc.ts`), so a new scope needs no migration.
+--                               (`shared/oidc.ts`), so a new scope needs no migration while the
+--                               catalogue stays within 20 (`OIDC_MAX_ALLOWED_SCOPES`, and a test
+--                               holds the catalogue to it).
 --   allowed_grants              a JSON array: 1 to 3 of `authorization_code`, `refresh_token` and
 --                               `client_credentials`, checked here because the set is closed by the
 --                               ADR (no implicit grant, no password grant).
@@ -69,19 +74,27 @@
 --                           primary key that is not an INTEGER accepts NULL otherwise.
 --   alg                     `ES256` (ECDSA over P-256 with SHA-256), the only algorithm.
 --   state                   `next` (published, not yet signing: a client has time to fetch it
---                           before it is used), `current` (signs), or `retired` (published a while
---                           longer so a token signed just before the rotation still verifies).
+--                           before it is used), `current` (signs), `retired` (published a while
+--                           longer so a token signed just before the rotation still verifies), or
+--                           `revoked` (a retired key the owner withdrew: never published, so it can
+--                           verify nothing). Only a retired key is ever revoked. The state is here
+--                           from the first release because a CHECK cannot be changed in place: a new
+--                           state would be a rebuild of the table.
 --   public_jwk              the public half as a JSON object (kty, crv, x, y, kid, use, alg), the
 --                           member of the published key set.
 --   private_jwk_encrypted   the private half as a JSON Web Key, encrypted with AES-GCM under the
 --                           `OIDC_SECRET` binding (`services/encryption.ts`). Never returned by any
---                           route and never logged.
+--                           route and never logged. NULL only for a `retired` or `revoked` key, so
+--                           the private half of a key that no longer signs can be wiped later
+--                           without a migration; a `next` or `current` key always has one.
 --   created_at              when the key was made and, for a `next` key, when it was first
 --                           published: a `next` key becomes `current` only once it is 24 hours
 --                           old, unless the owner forces it.
 --   promoted_at             when the key became `current`. NULL exactly while it is `next` (CHECK).
---   retired_at              when the key stopped signing. Set exactly when `state` is `retired`
---                           (CHECK); a retired key is published for 7 days after it.
+--   retired_at              when the key stopped signing. Set exactly when `state` is `retired` or
+--                           `revoked` (CHECK); a retired key is published for 7 days after it, and
+--                           at most 5 retired keys are published.
+--   revoked_at              when the owner revoked the key. Set exactly when `state` is `revoked`.
 --
 -- ONE `next` AND ONE `current`, ANY NUMBER `retired`: the two partial unique indexes below. They
 -- are the guard against two rotations racing: the second one's insert of a new `next` key (or of a
@@ -106,7 +119,7 @@ CREATE TABLE oidc_clients (
     THEN json_type(redirect_uris) = 'array' AND json_array_length(redirect_uris) BETWEEN 1 AND 10
     ELSE 0 END),
   allowed_scopes TEXT NOT NULL CHECK (CASE WHEN json_valid(allowed_scopes)
-    THEN json_type(allowed_scopes) = 'array' AND json_array_length(allowed_scopes) BETWEEN 1 AND 10
+    THEN json_type(allowed_scopes) = 'array' AND json_array_length(allowed_scopes) BETWEEN 1 AND 20
       AND allowed_scopes NOT GLOB '*[^]0-9a-z_.",[]*'
     ELSE 0 END),
   allowed_grants TEXT NOT NULL CHECK (CASE WHEN json_valid(allowed_grants)
@@ -143,18 +156,25 @@ CREATE TABLE oidc_clients (
   CHECK ((status = 'disabled') = (disabled_at IS NOT NULL))
 );
 
+-- Two ACTIVE clients may not share a name, in any case; a disabled client does not hold one.
+CREATE UNIQUE INDEX oidc_clients_active_name ON oidc_clients (name COLLATE NOCASE)
+  WHERE status = 'active';
+
 CREATE TABLE oidc_signing_keys (
   kid TEXT NOT NULL PRIMARY KEY CHECK (length(kid) = 16 AND kid NOT GLOB '*[^0-9a-f]*'),
   alg TEXT NOT NULL CHECK (alg = 'ES256'),
-  state TEXT NOT NULL CHECK (state IN ('next', 'current', 'retired')),
+  state TEXT NOT NULL CHECK (state IN ('next', 'current', 'retired', 'revoked')),
   public_jwk TEXT NOT NULL CHECK (CASE WHEN json_valid(public_jwk)
     THEN json_type(public_jwk) = 'object' ELSE 0 END),
-  private_jwk_encrypted TEXT NOT NULL CHECK (length(private_jwk_encrypted) >= 1),
+  private_jwk_encrypted TEXT CHECK (CASE WHEN private_jwk_encrypted IS NULL
+    THEN state IN ('retired', 'revoked') ELSE length(private_jwk_encrypted) >= 1 END),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   promoted_at TEXT,
   retired_at TEXT,
+  revoked_at TEXT,
   CHECK ((state = 'next') = (promoted_at IS NULL)),
-  CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+  CHECK ((state IN ('retired', 'revoked')) = (retired_at IS NOT NULL)),
+  CHECK ((state = 'revoked') = (revoked_at IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX oidc_signing_keys_one_next ON oidc_signing_keys (state) WHERE state = 'next';

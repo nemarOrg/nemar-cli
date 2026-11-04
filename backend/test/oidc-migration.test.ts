@@ -20,6 +20,7 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
+import { OIDC_MAX_ALLOWED_SCOPES, OIDC_SCOPE_NAMES } from "../../shared/oidc";
 import { freshDb } from "./helpers/d1";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 
@@ -113,7 +114,7 @@ function clientRow(over: Record<string, unknown> = {}): Record<string, unknown> 
   const id = `oc_${clientCounter.toString(16).padStart(24, "0")}`;
   return {
     client_id: id,
-    name: "A client",
+    name: `A client ${clientCounter}`,
     secret_hash: HEX64,
     redirect_uris: '["https://example.org/cb"]',
     allowed_scopes: '["openid","profile"]',
@@ -244,7 +245,7 @@ describe("oidc_clients: the JSON columns", () => {
     await refuses(e, { redirect_uris: undefined }, "none");
   });
 
-  onEveryEngine("allowed_scopes is an array of 1 to 10 scope-shaped names", async (e) => {
+  onEveryEngine("allowed_scopes is an array of 1 to 20 scope-shaped names", async (e) => {
     expect(
       (
         await insertClient(e, {
@@ -258,9 +259,48 @@ describe("oidc_clients: the JSON columns", () => {
     await refuses(e, { allowed_scopes: '["OpenID"]' }, "an uppercase scope");
     await refuses(e, { allowed_scopes: '["open id"]' }, "a scope with a space");
     await refuses(e, { allowed_scopes: '["a;b"]' }, "a scope with punctuation");
-    const eleven = JSON.stringify(Array.from({ length: 11 }, (_, i) => `scope${i}`));
-    await refuses(e, { allowed_scopes: eleven }, "11 scopes");
+    const atCap = JSON.stringify(
+      Array.from({ length: OIDC_MAX_ALLOWED_SCOPES }, (_, i) => `scope${i}`),
+    );
+    const overCap = JSON.stringify(
+      Array.from({ length: OIDC_MAX_ALLOWED_SCOPES + 1 }, (_, i) => `scope${i}`),
+    );
+    expect((await insertClient(e, { allowed_scopes: atCap })).error).toBeNull();
+    await refuses(e, { allowed_scopes: overCap }, "one scope over the cap");
   });
+
+  onEveryEngine("the whole catalogue fits, so a new scope needs no migration", async (e) => {
+    expect(OIDC_SCOPE_NAMES.length).toBeLessThanOrEqual(OIDC_MAX_ALLOWED_SCOPES);
+    const all = JSON.stringify([...OIDC_SCOPE_NAMES]);
+    expect((await insertClient(e, { allowed_scopes: all })).error).toBeNull();
+  });
+
+  onEveryEngine(
+    "an active client's name is unique, ignoring case; a disabled one frees it",
+    async (e) => {
+      const first = await insertClient(e, { name: "Unique Portal" });
+      expect(first.error).toBeNull();
+      await refuses(e, { name: "Unique Portal" }, "the same active name");
+      await refuses(e, { name: "UNIQUE portal" }, "the same active name in another case");
+      // A disabled client does not hold the name, and two disabled clients may share one.
+      expect(
+        await e.run(
+          "UPDATE oidc_clients SET status = 'disabled', disabled_at = datetime('now') WHERE client_id = ?",
+          first.id,
+        ),
+      ).toBeNull();
+      expect((await insertClient(e, { name: "Unique Portal" })).error).toBeNull();
+      expect(
+        (
+          await insertClient(e, {
+            name: "Unique Portal",
+            status: "disabled",
+            disabled_at: "2030-01-01 00:00:00",
+          })
+        ).error,
+      ).toBeNull();
+    },
+  );
 
   onEveryEngine("allowed_grants is a subset of the three grants, 1 to 3 of them", async (e) => {
     for (const ok of [
@@ -380,6 +420,7 @@ async function insertKey(e: Engine, over: Record<string, unknown> = {}) {
 
 const NEXT = { state: "next", promoted_at: undefined, retired_at: undefined };
 const CURRENT = { state: "current", retired_at: undefined };
+const REVOKED = { state: "revoked", revoked_at: "2030-01-03 00:00:00" };
 
 async function clearKeys(e: Engine) {
   expect(await e.run("DELETE FROM oidc_signing_keys")).toBeNull();
@@ -426,10 +467,11 @@ describe("oidc_signing_keys: a row and its columns", () => {
     }
   });
 
-  onEveryEngine("the state is next, current or retired", async (e) => {
+  onEveryEngine("the state is next, current, retired or revoked", async (e) => {
     await clearKeys(e);
+    expect((await insertKey(e, REVOKED)).error).toBeNull();
     // Stamped like a current key, so the stamp CHECKs pass and only the vocabulary can refuse it.
-    await keyRefuses(e, { state: "revoked", retired_at: undefined }, "an unknown state");
+    await keyRefuses(e, { state: "burned", retired_at: undefined }, "an unknown state");
     await keyRefuses(e, { state: "", retired_at: undefined }, "an empty state");
   });
 
@@ -439,7 +481,33 @@ describe("oidc_signing_keys: a row and its columns", () => {
     await keyRefuses(e, { public_jwk: "[]" }, "a public key that is an array");
     await keyRefuses(e, { public_jwk: '"x"' }, "a public key that is a string");
     await keyRefuses(e, { private_jwk_encrypted: "" }, "an empty private key");
-    await keyRefuses(e, { private_jwk_encrypted: undefined }, "no private key");
+  });
+
+  onEveryEngine("only a retired or revoked key may have lost its private half", async (e) => {
+    await clearKeys(e);
+    expect((await insertKey(e, { private_jwk_encrypted: null })).error).toBeNull();
+    expect((await insertKey(e, { ...REVOKED, private_jwk_encrypted: null })).error).toBeNull();
+    await keyRefuses(
+      e,
+      { ...CURRENT, private_jwk_encrypted: null },
+      "a current key with no private half",
+    );
+    await keyRefuses(
+      e,
+      { ...NEXT, private_jwk_encrypted: null },
+      "a next key with no private half",
+    );
+    await keyRefuses(
+      e,
+      { ...CURRENT, private_jwk_encrypted: undefined },
+      "a current key with the column omitted",
+    );
+    // A key that still has one may not have it empty, whatever its state.
+    await keyRefuses(
+      e,
+      { ...REVOKED, private_jwk_encrypted: "" },
+      "a revoked key with an empty private half",
+    );
   });
 
   onEveryEngine("each state carries the stamps it requires and no others", async (e) => {
@@ -458,6 +526,19 @@ describe("oidc_signing_keys: a row and its columns", () => {
     await keyRefuses(e, { ...CURRENT, retired_at: "2030-01-02 00:00:00" }, "a current key retired");
     await keyRefuses(e, { retired_at: undefined }, "a retired key with no retired_at");
     await keyRefuses(e, { promoted_at: undefined }, "a retired key never promoted");
+    // A revoked key was retired first, and says when it was revoked.
+    await keyRefuses(e, { ...REVOKED, revoked_at: undefined }, "a revoked key with no revoked_at");
+    await keyRefuses(
+      e,
+      { ...REVOKED, retired_at: undefined },
+      "a revoked key that was never retired",
+    );
+    await keyRefuses(e, { revoked_at: "2030-01-03 00:00:00" }, "a retired key with a revoked_at");
+    await keyRefuses(
+      e,
+      { ...CURRENT, revoked_at: "2030-01-03 00:00:00" },
+      "a current key with a revoked_at",
+    );
   });
 });
 
