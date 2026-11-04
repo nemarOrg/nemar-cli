@@ -47,8 +47,24 @@ let ids: Record<ComputeWho, number>;
 let accountId: number;
 let configDir: string;
 let requests: Array<{ method: string; path: string; key: string | null }> = [];
-/** When set, `GET /admin/compute/policy` is answered as a newer Worker would: with keys added. */
-let augmentPolicy = false;
+/**
+ * When set, every answer of the compute routes is the real route's with keys added, as a newer
+ * Worker would add them: at the top level, inside the policy, and inside each pool and entry.
+ */
+let augment = false;
+
+function withFutureKeys(path: string, body: Record<string, any>): Record<string, any> {
+  body.future_top_level = { added: "by a newer worker" };
+  if (body.policy) {
+    body.policy.futureNested = 7;
+    body.policy.pipelines.futureDeeper = { x: 1 };
+  }
+  for (const pool of [...(body.pools ?? []), ...(body.pool ? [body.pool] : [])]) {
+    pool.future_pool_key = "p";
+  }
+  if (body.entry) body.entry.future_entry_key = ["e"];
+  return body;
+}
 
 const server = Bun.serve({
   port: 0,
@@ -61,11 +77,8 @@ const server = Bun.serve({
       key: req.headers.get("idempotency-key"),
     });
     const res = await handle(req, computeEnv(db));
-    if (augmentPolicy && req.method === "GET" && url.pathname === "/admin/compute/policy") {
-      const body = (await res.json()) as Record<string, any>;
-      body.future_top_level = { added: "by a newer worker" };
-      body.policy.futureNested = 7;
-      body.policy.pipelines.futureDeeper = { x: 1 };
+    if (augment && res.ok && url.pathname.startsWith("/admin/compute/")) {
+      const body = withFutureKeys(url.pathname, (await res.json()) as Record<string, any>);
       return Response.json(body, { status: res.status });
     }
     return res;
@@ -86,7 +99,7 @@ beforeEach(async () => {
     db.query("SELECT id FROM users WHERE username = 'cmp-holder'").get() as { id: number }
   ).id;
   requests = [];
-  augmentPolicy = false;
+  augment = false;
   configDir = mkdtempSync(join(tmpdir(), "nemar-compute-cli-"));
 });
 
@@ -250,7 +263,7 @@ describe("policy", () => {
 
   test("show parses the answer with an open schema: unknown keys, top level and nested, are shown", async () => {
     await runCli("owner", ["policy", "set", "--file", policyFile()]);
-    augmentPolicy = true;
+    augment = true;
     const json = await runCli("owner", ["policy", "show", "--json"]);
     expect(json.exitCode).toBe(0);
     const body = JSON.parse(json.stdout);
@@ -280,6 +293,32 @@ describe("policy", () => {
     expect(none.exitCode).toBe(1);
     expect(none.stdout + none.stderr).toMatch(/not authenticated/i);
     expect(rows("SELECT * FROM compute_policy")).toEqual([]);
+    // Signed out is answered before anything is sent, by every command.
+    requests = [];
+    for (const args of [
+      ["policy", "set", "--file", policyFile()],
+      ["pool", "show"],
+      ["pool", "show", "--account", String(accountId)],
+      ["pool", "grant", "1", "--account", String(accountId), "--pool", "cpu"],
+      [
+        "pool",
+        "adjust",
+        "1",
+        "--account",
+        String(accountId),
+        "--pool",
+        "cpu",
+        "--target",
+        "granted",
+        "--reason",
+        "correction",
+      ],
+    ]) {
+      const r = await runCli(null, args);
+      expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 1]);
+      expect(r.stdout + r.stderr).toMatch(/not authenticated/i);
+    }
+    expect(requests).toEqual([]);
   });
 
   test("--json keeps standard output pure JSON, and a failure goes to standard error", async () => {
@@ -392,6 +431,8 @@ describe("pool grant", () => {
       ["pool", "grant", "1", "--account", String(accountId)],
       ["pool", "grant", "1", "--account", String(accountId), "--pool", "tpu"],
       ["pool", "grant", "1", "--account", "abc", "--pool", "cpu"],
+      ["pool", "grant", "1", "--platform", "Bad Key", "--pool", "cpu"],
+      ["pool", "grant", "1", "--platform", "a/b", "--pool", "cpu"],
       ["pool", "grant", "1", "--account", "0", "--pool", "cpu"],
       [
         "pool",
@@ -509,6 +550,42 @@ describe("pool adjust", () => {
       expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 1]);
     }
     expect(requests.length).toBe(sent);
+  });
+});
+
+describe("the answers of the pool commands are read with open schemas too", () => {
+  test("pool show, pool show --account and pool grant show and keep keys the Worker added", async () => {
+    await runCli("admin", ["pool", "grant", "5", "--account", String(accountId), "--pool", "cpu"]);
+    augment = true;
+    const list = await runCli("admin", ["pool", "show", "--json"]);
+    expect(list.exitCode).toBe(0);
+    const listed = JSON.parse(list.stdout);
+    expect(listed.future_top_level).toEqual({ added: "by a newer worker" });
+    expect(listed.pools.every((p: Record<string, unknown>) => p.future_pool_key === "p")).toBe(
+      true,
+    );
+    const one = JSON.parse(
+      (await runCli("admin", ["pool", "show", "--account", String(accountId), "--json"])).stdout,
+    );
+    expect(one.pools[0].future_pool_key).toBe("p");
+    const human = await runCli("admin", ["pool", "show", "--account", String(accountId)]);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("5");
+    const granted = await runCli("admin", [
+      "pool",
+      "grant",
+      "1",
+      "--account",
+      String(accountId),
+      "--pool",
+      "cpu",
+      "--json",
+    ]);
+    expect(granted.exitCode).toBe(0);
+    const body = JSON.parse(granted.stdout);
+    expect(body.entry.future_entry_key).toEqual(["e"]);
+    expect(body.pool.future_pool_key).toBe("p");
+    expect(pool("cpu")?.granted_milli).toBe(6000);
   });
 });
 

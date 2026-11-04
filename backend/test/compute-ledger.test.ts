@@ -119,6 +119,13 @@ describe("availableMilli", () => {
     expect(() =>
       availableMilli({ granted_milli: Number.NaN, held_milli: 0, charged_milli: 0 }),
     ).toThrow(RangeError);
+    // Fractions that cancel are still not totals the table could have stored.
+    expect(() => availableMilli({ granted_milli: 1.5, held_milli: 0.5, charged_milli: 0 })).toThrow(
+      RangeError,
+    );
+    expect(() => availableMilli({ granted_milli: 0, held_milli: MAX, charged_milli: 2 })).toThrow(
+      RangeError,
+    );
     expect(() => availableMilli({ granted_milli: 0, held_milli: MAX, charged_milli: MAX })).toThrow(
       RangeError,
     );
@@ -516,6 +523,55 @@ describe("integer thousandths only", () => {
     expect(await count(w)).toBe(before);
   });
 
+  test("a pool id that is not a positive whole number is refused before anything is written", async () => {
+    const w = world();
+    const budget = await platform(w, "people", "cpu");
+    for (const poolId of [
+      1.5,
+      0,
+      -1,
+      Number.NaN,
+      "1" as unknown as number,
+      null as unknown as number,
+    ]) {
+      await expect(
+        placeHold(w.d1, {
+          poolId,
+          budgetPoolId: budget.id,
+          amountMilli: 1,
+          jobId: jobId(next()),
+          idempotencyKey: `hold-${next()}`,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+      await expect(
+        grantPool(w.d1, {
+          poolId,
+          amountMilli: 1,
+          actorUserId: 1,
+          idempotencyKey: `grant-${next()}`,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    }
+    await expect(
+      placeHold(w.d1, {
+        poolId: budget.id,
+        budgetPoolId: 1.5,
+        amountMilli: 1,
+        jobId: jobId(next()),
+        idempotencyKey: `hold-${next()}`,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    await expect(
+      grantPool(w.d1, {
+        poolId: budget.id,
+        amountMilli: 1,
+        actorUserId: 1.5,
+        idempotencyKey: `grant-${next()}`,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_argument" });
+    expect(await count(w)).toBe(0);
+  });
+
   test("a negative charge or final figure is refused, and 0 is a charge", async () => {
     const w = world();
     const { job } = await held(w, { budgetMilli: 10000 });
@@ -878,6 +934,79 @@ describe("a refund or a final figure after an administrator corrected the charge
   });
 });
 
+describe("a correction the platform budget could not follow", () => {
+  /** A settled job whose budget the owner then corrected down, so the budget holds less than the person. */
+  async function budgetCorrectedDown() {
+    const w = world();
+    const { person, budget, job } = await held(w, { budgetMilli: 50000, holdMilli: 5000 });
+    await settleProvisional(w.d1, { jobId: job, chargeMilli: 4000 });
+    // The owner takes 3500 of the budget's charge back, leaving 500: the person still holds 4000.
+    expect(
+      (
+        await adjustPool(w.d1, {
+          poolId: budget.id,
+          chargedDeltaMilli: -3500,
+          actorUserId: 9,
+          reason: "correction",
+          idempotencyKey: `adjust-${next()}`,
+        })
+      ).ok,
+    ).toBe(true);
+    return { w, person, budget, job };
+  }
+
+  test("a refund the budget cannot take is would_go_negative, though the person could", async () => {
+    const { w, person, budget, job } = await budgetCorrectedDown();
+    const entries = await count(w);
+    expect(await refundJob(w.d1, { jobId: job })).toEqual({ ok: false, code: "would_go_negative" });
+    expect(await count(w)).toBe(entries);
+    expect((await reread(w, person)).charged_milli).toBe(4000);
+    expect((await reread(w, budget)).charged_milli).toBe(500);
+  });
+
+  test("a final figure the budget cannot take is would_go_negative, though the person could", async () => {
+    const { w, person, job } = await budgetCorrectedDown();
+    const entries = await count(w);
+    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 2500 })).toEqual({
+      ok: false,
+      code: "would_go_negative",
+    });
+    expect(await count(w)).toBe(entries);
+    expect((await reread(w, person)).charged_milli).toBe(4000);
+    // A smaller correction the budget can take still settles.
+    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3600 })).toMatchObject({
+      ok: true,
+      deltaMilli: -400,
+    });
+    expect(await totalsDisagreements(w.d1)).toEqual([]);
+  });
+
+  test("an adjustment of a person's charge the budget cannot take is would_go_negative", async () => {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", "81", "cpu");
+    const budget = await platform(w, "people", "cpu");
+    // The person has 500 charged that the budget never counted (an overrun written without it).
+    await grant(w, person, 1000);
+    w.db.run(
+      "INSERT INTO compute_ledger (kind, pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, 500, ?, 'seed-81')",
+      [person.id, jobId(next())],
+    );
+    const before = await count(w);
+    expect(
+      await adjustPool(w.d1, {
+        poolId: person.id,
+        budgetPoolId: budget.id,
+        chargedDeltaMilli: -500,
+        actorUserId: 9,
+        reason: "correction",
+        idempotencyKey: `adjust-${next()}`,
+      }),
+    ).toEqual({ ok: false, code: "would_go_negative" });
+    expect(await count(w)).toBe(before);
+    expect((await reread(w, person)).charged_milli).toBe(500);
+  });
+});
+
 describe("an administrator's grant and adjustment", () => {
   test("a grant adds to granted, with who did it and why", async () => {
     const w = world();
@@ -953,6 +1082,10 @@ describe("an administrator's grant and adjustment", () => {
       code: "invalid_argument",
     });
     await expect(adjust({ grantedDeltaMilli: 1, chargedDeltaMilli: 1 })).rejects.toMatchObject({
+      code: "invalid_argument",
+    });
+    // An explicit 0 for the field that is not changing is a mistake, not a way to say nothing.
+    await expect(adjust({ grantedDeltaMilli: 0, chargedDeltaMilli: 5 })).rejects.toMatchObject({
       code: "invalid_argument",
     });
     await expect(adjust({ grantedDeltaMilli: 1, reason: undefined })).rejects.toMatchObject({
@@ -1096,6 +1229,25 @@ describe("expiry of unused SU", () => {
     expect(first).toMatchObject({ ok: true, replayed: false, expiredMilli: 500 });
     expect(again).toMatchObject({ ok: true, replayed: true, expiredMilli: 500 });
     expect((await reread(w, p)).granted_milli).toBe(0);
+  });
+
+  test("a repeated key is a replay even after the pool has been given more", async () => {
+    const w = world();
+    const p = await ensurePool(w.d1, "account", "74", "cpu");
+    await grant(w, p, 500);
+    const first = await expireUnused(w.d1, { poolId: p.id, idempotencyKey: "expire-74-a" });
+    await grant(w, p, 900);
+    const entries = await count(w);
+    const again = await expireUnused(w.d1, { poolId: p.id, idempotencyKey: "expire-74-a" });
+    expect(first).toMatchObject({ ok: true, replayed: false, expiredMilli: 500 });
+    expect(again).toMatchObject({ ok: true, replayed: true, expiredMilli: 500 });
+    expect(await count(w)).toBe(entries);
+    expect(availableMilli(await reread(w, p))).toBe(900);
+    // The same key for another pool is a conflict.
+    const other = await ensurePool(w.d1, "account", "75", "cpu");
+    await expect(
+      expireUnused(w.d1, { poolId: other.id, idempotencyKey: "expire-74-a" }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
   });
 
   test("never expires a negative balance", async () => {
@@ -1322,11 +1474,15 @@ describe("no path writes a pool's totals except a ledger entry", () => {
     );
   });
 
-  test("only migration 0114's trigger updates a pool's totals, and nothing deletes or replaces a pool or an entry", () => {
+  test("only migration 0114's trigger writes a pool's totals, and nothing deletes or replaces a pool or an entry", () => {
     const offences: string[] = [];
     for (const { path, text } of sources()) {
       for (const s of statements(text)) {
         const trigger = path.endsWith("0114_compute_ledger.sql");
+        // A pool made with a total in it is a write of the total that no entry accounts for.
+        if (/^INSERT[\s\S]*INTO\s+compute_pools/i.test(s) && TOTALS.test(s)) {
+          offences.push(`${path}: ${s.slice(0, 80)}`);
+        }
         if (/^UPDATE\s+compute_pools/i.test(s) && TOTALS.test(s) && !trigger) {
           offences.push(`${path}: ${s.slice(0, 80)}`);
         }

@@ -398,6 +398,12 @@ describe("compute_pools", () => {
       { holder_kind: "partner", holder_ref: "a/b" },
     ],
     ["an account that is not a number", "compute_pools_holder_ref", { holder_ref: "abc" }],
+    [
+      "an account that starts with a digit and goes on",
+      "compute_pools_holder_ref",
+      { holder_ref: "1a" },
+    ],
+    ["an account with a dot", "compute_pools_holder_ref", { holder_ref: "1.5" }],
     ["an account with a leading zero", "compute_pools_holder_ref", { holder_ref: "012" }],
     ["an account of 0", "compute_pools_holder_ref", { holder_ref: "0" }],
     ["a pool outside the two", "compute_pools_pool", { pool: "tpu" }],

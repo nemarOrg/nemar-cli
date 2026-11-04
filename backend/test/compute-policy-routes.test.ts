@@ -164,11 +164,25 @@ describe("putPolicy", () => {
 
   test("refuses anyone who is not an owner, by the service itself, and writes nothing", async () => {
     const d1 = realD1(db);
+    // An earlier version and its audit row are there, so a refused write that wrote an audit row
+    // about "the latest version" would be seen as one more.
+    expect(await putPolicy(d1, ids.owner, policy(), null)).toEqual({ ok: true, version: 1 });
     for (const who of [ids.admin, ids.member, 99999]) {
       expect(await putPolicy(d1, who, policy(), null)).toEqual({ ok: false, code: "not_owner" });
     }
-    expect(rows("compute_policy")).toBe(0);
-    expect(rows("audit_log")).toBe(0);
+    expect(rows("compute_policy")).toBe(1);
+    expect(audits("compute.policy.set")).toHaveLength(1);
+  });
+
+  test("an invalid policy leaves the audit rows alone too", async () => {
+    const d1 = realD1(db);
+    await putPolicy(d1, ids.owner, policy(), null);
+    expect(await putPolicy(d1, ids.owner, { nope: 1 }, null)).toMatchObject({
+      code: "invalid_policy",
+    });
+    expect(await putPolicy(d1, ids.owner, policy(), "")).toMatchObject({ code: "invalid_note" });
+    expect(rows("compute_policy")).toBe(1);
+    expect(audits("compute.policy.set")).toHaveLength(1);
   });
 
   test("refuses a policy the strict schema refuses, naming where and never what", async () => {

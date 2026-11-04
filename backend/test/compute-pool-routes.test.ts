@@ -291,23 +291,46 @@ describe("a grant", () => {
 
   test("a key an admin sends can never be one of the Worker's own", async () => {
     // The Worker's keys are `hold:<id>:charge` and `job:<id>:final`: an admin key is stored behind
-    // `grant:`, so it can neither collide with those nor pre-empt them.
-    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1 }, "hold.1.charge");
-    expect(
-      count("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'grant:%'"),
-    ).toBe(1);
+    // `grant:` or `adjust:`, so it can neither collide with those nor pre-empt them.
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 5 }, "hold.1.charge");
+    await adjust(
+      "admin",
+      ACCOUNT(),
+      { pool: "cpu", target: "granted", delta_milli: 1, reason: "correction" },
+      "job.1.final",
+    );
+    expect(db.query("SELECT idempotency_key FROM compute_ledger ORDER BY id").all()).toEqual([
+      { idempotency_key: "grant:hold.1.charge" },
+      { idempotency_key: "adjust:job.1.final" },
+    ]);
     expect(
       count("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'hold:%'"),
+    ).toBe(0);
+    expect(
+      count("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'job:%'"),
     ).toBe(0);
   });
 
   test("refuses an account that does not exist, and an id that is not one", async () => {
     const body = { pool: "cpu", amount_milli: 1000 };
-    for (const id of ["99999", "0", "abc", "012", "1.5"]) {
+    // `0005` is the number 5 and an account may exist at 5, but it is not that account's id.
+    for (const id of ["99999", "0", "abc", "012", "1.5", `0${accountId}`, `${accountId}.0`]) {
       const r = await grant("admin", `/by-id/${id}`, body);
       expect([id, r.status, r.body.code]).toEqual([id, 404, "account_not_found"]);
     }
     expect((await call("admin", "GET", "/by-id/99999")).body.code).toBe("account_not_found");
+    // The id must be the canonical one on every route that takes it, not only the grant.
+    for (const id of [`0${accountId}`, `${accountId}.0`, "abc"]) {
+      const adjusted = await adjust("admin", `/by-id/${id}`, {
+        pool: "cpu",
+        target: "granted",
+        delta_milli: 1,
+        reason: "correction",
+      });
+      expect([id, adjusted.status, adjusted.body.code]).toEqual([id, 404, "account_not_found"]);
+      const read = await call("admin", "GET", `/by-id/${id}`);
+      expect([id, read.status, read.body.code]).toEqual([id, 404, "account_not_found"]);
+    }
     expect(ledger()).toBe(0);
     expect(count("SELECT COUNT(*) AS n FROM compute_pools WHERE holder_kind = 'account'")).toBe(0);
   });
@@ -581,6 +604,16 @@ describe("reading pools", () => {
       ["cpu", 1500],
       ["gpu", 2500],
     ]);
+  });
+
+  test("shows a frozen pool as frozen", async () => {
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 1000 });
+    expect((await call("admin", "GET", ACCOUNT())).body.pools[0].frozen).toBe(false);
+    db.run("UPDATE compute_pools SET frozen = 1 WHERE holder_kind = 'account'");
+    expect((await call("admin", "GET", ACCOUNT())).body.pools[0].frozen).toBe(true);
+    expect(
+      (await call("admin", "GET", "")).body.pools.some((p: { frozen: boolean }) => p.frozen),
+    ).toBe(true);
   });
 
   test("reports a negative available as it is, never a negative total", async () => {
