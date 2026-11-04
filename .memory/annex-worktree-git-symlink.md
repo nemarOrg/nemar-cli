@@ -15,7 +15,7 @@ Removal then needs no manual step and no user involvement: after restoring the g
 
 An earlier version of this note claimed the user had to delete the directory by hand and then run `git worktree prune`. That was wrong, and only looked true because the repair step had not been tried before the removal.
 
-The guardrail (`deny-destructive-paths.py`) does still block a recursive delete of a live worktree root, so repair-then-remove is the path that works, not deleting the directory. See also [[verify-fix-against-known-broken]].
+A local guardrail does still block a recursive delete of a live worktree root, so repair-then-remove is the path that works, not deleting the directory. See also [[verify-fix-against-known-broken]].
 
 **Addendum 2026-09-06:** write the gitdir file with an absolute repo root (`<absolute repo root>/.git/worktrees/<name>`), never `$(pwd)`: the Bash tool's cwd can still be `backend/` from a previous call, which produced `.../nemar-cli/backend/.git/worktrees/<name>` and a `git worktree remove` failure with "error code 7" (target missing) instead of 10. Repair by rewriting the file with the absolute path, then `git -C <root> worktree remove --force <wt>` and `git worktree prune`.
 
