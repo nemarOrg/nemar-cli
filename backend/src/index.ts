@@ -255,7 +255,8 @@ api.route("/auth", authDocsRoutes);
 api.route("/auth", authPrivateRoutes);
 // The OpenID Connect authorization endpoint's check and consent (epic #2014 phase #2017, ADR 0119).
 // Same /auth prefix; paths /auth/oidc/authorize and /auth/oidc/consent, called by the website's
-// /oauth/authorize page server-side. 404 unless the provider is on (routes/auth-oidc.ts).
+// /oauth/authorize page server-side with its caller marker. 404 until OIDC_SECRET is set AND
+// HOST_PREFIXED_SESSION_COOKIE is "1" (routes/auth-oidc.ts).
 api.route("/auth", authOidcRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
