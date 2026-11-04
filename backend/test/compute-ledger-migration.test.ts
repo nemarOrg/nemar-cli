@@ -905,6 +905,23 @@ describe("compute_ledger: the budget an entry names", () => {
       });
     expect(await hold({ budget_pool_id: null })).toMatch(NAMES_BUDGET);
     expect(await hold({ budget_pool_id: await pipelinesOf(e, "cpu") })).toMatch(IS_PEOPLE);
+    // A partner pool that is merely CALLED people is not the platform's people budget.
+    expect(
+      await insertRow(e, "compute_pools", {
+        holder_kind: "partner",
+        holder_ref: "people",
+        pool: "cpu",
+      }),
+    ).toBeNull();
+    const namesake = (
+      await e.all<{ id: number }>(
+        "SELECT id FROM compute_pools WHERE holder_kind = 'partner' AND holder_ref = 'people' AND pool = 'cpu'",
+      )
+    )[0]?.id as number;
+    expect(
+      await entry(e, { kind: "grant", pool_id: namesake, granted_delta_milli: 1000 }),
+    ).toBeNull();
+    expect(await hold({ budget_pool_id: namesake })).toMatch(IS_PEOPLE);
     expect(await hold({})).toBeNull();
   });
 
@@ -1203,6 +1220,70 @@ describe("compute_ledger: the table refuses what the statement refuses", () => {
   );
 });
 
+describe("compute_ledger: a pool whose available is negative", () => {
+  onEveryEngine(
+    "takes an overrun, a refund, an adjustment and a closing, and refuses only a hold",
+    async (e) => {
+      const person = await accountPool(e, "cpu");
+      const budget = await budgetOf(e, "cpu");
+      expect(
+        await entry(e, { kind: "grant", pool_id: person, granted_delta_milli: 1000 }),
+      ).toBeNull();
+      const { job, hold } = await openHold(e, person, "cpu", 400);
+      // The job used more than it held: an overrun, and available is below zero (1000 - 400 - 5000).
+      const overrun = (n: number) =>
+        entry(e, {
+          kind: "overrun",
+          pool_id: person,
+          budget_pool_id: budget,
+          charged_delta_milli: n,
+          job_id: jobId(next()),
+        });
+      expect(await overrun(5000)).toBeNull();
+      expect((await totals(e, person)) as number[]).toEqual([1000, 400, 5000]);
+      // Only a hold is refused for it; everything else still happens.
+      expect(await overrun(7)).toBeNull();
+      expect(
+        await entry(e, {
+          kind: "hold",
+          pool_id: person,
+          budget_pool_id: budget,
+          held_delta_milli: 1,
+          job_id: jobId(next()),
+        }),
+      ).toMatch(/available below zero/);
+      expect(
+        await entry(e, {
+          kind: "adjust",
+          pool_id: person,
+          budget_pool_id: budget,
+          charged_delta_milli: -7,
+        }),
+      ).toBeNull();
+      expect(
+        await entry(e, {
+          kind: "release",
+          pool_id: person,
+          budget_pool_id: budget,
+          held_delta_milli: -400,
+          job_id: job,
+          hold_ref: hold,
+        }),
+      ).toBeNull();
+      expect(
+        await entry(e, {
+          kind: "refund",
+          pool_id: person,
+          budget_pool_id: budget,
+          charged_delta_milli: -100,
+          job_id: jobId(next()),
+        }),
+      ).toBeNull();
+      expect(await totalsDisagreements(e.d1)).toEqual([]);
+    },
+  );
+});
+
 describe("compute_ledger: a release or a charge closes the hold it names", () => {
   onEveryEngine("it must name a hold of the same job, pool, budget and held amount", async (e) => {
     const c = await ctxFor(e);
@@ -1236,6 +1317,31 @@ describe("compute_ledger: a release or a charge closes the hold it names", () =>
       )
     )[0]?.id as number;
     expect(await release({ hold_ref: grantId })).toMatch(CLOSES);
+    // Nor can any other entry of the same job, pool and budget whose held delta is 0 (a charge of
+    // nothing held names an overrun): only a hold is closed.
+    expect(
+      await entry(e, {
+        kind: "overrun",
+        pool_id: c.pool,
+        budget_pool_id: c.budget,
+        charged_delta_milli: 5,
+        job_id: c.job,
+      }),
+    ).toBeNull();
+    const overrunId = (
+      await e.all<{ id: number }>(
+        "SELECT id FROM compute_ledger WHERE job_id = ? AND kind = 'overrun'",
+        c.job,
+      )
+    )[0]?.id as number;
+    expect(
+      await release({
+        kind: "charge",
+        held_delta_milli: 0,
+        charged_delta_milli: 1,
+        hold_ref: overrunId,
+      }),
+    ).toMatch(CLOSES);
     expect(await release({})).toBeNull();
   });
 
@@ -1541,5 +1647,28 @@ describe("the tables and indexes", () => {
     expect(named).not.toContain("compute_ledger_budget_distinct");
     expect(named).toContain("compute_ledger_deltas");
     expect(named).toContain("compute_ledger_budget_kinds");
+  });
+});
+
+describe("compute_ledger: a hold of exactly what the budget has is a hold (last: it empties the cpu budget)", () => {
+  onEveryEngine("fits to the milli-SU, and one more does not", async (e) => {
+    const budget = await budgetOf(e, "cpu");
+    const [bg, bh, bc] = (await totals(e, budget)) as number[];
+    const available = (bg as number) - (bh as number) - (bc as number);
+    const person = await accountPool(e, "cpu");
+    expect(
+      await entry(e, { kind: "grant", pool_id: person, granted_delta_milli: available + 1 }),
+    ).toBeNull();
+    const hold = (n: number) =>
+      entry(e, {
+        kind: "hold",
+        pool_id: person,
+        budget_pool_id: budget,
+        held_delta_milli: n,
+        job_id: jobId(next()),
+      });
+    expect(await hold(available + 1)).toMatch(/available below zero/);
+    expect(await hold(available)).toBeNull();
+    expect(await hold(1)).toMatch(/available below zero/);
   });
 });
