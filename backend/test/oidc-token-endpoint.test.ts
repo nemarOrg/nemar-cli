@@ -556,6 +556,20 @@ describe("redeeming a code with PKCE", () => {
     expect(tokenRows()).toHaveLength(2);
   });
 
+  test("a second presentation by the code's own client revokes, whatever verifier or address it carries", async () => {
+    for (const over of [
+      { code_verifier: "b".repeat(43) },
+      { redirect_uri: "https://tools.nemar.org/x" },
+    ]) {
+      const f = await flow();
+      const first = await redeem(h, f.client, f.code);
+      expect(first.status).toBe(200);
+      expectOauthError(await redeem(h, f.client, f.code, over), 400, "invalid_grant");
+      const rows = tokenRows().filter((r) => r.user_id === f.userId);
+      expect(rows.map((r) => r.revoked_reason)).toEqual(["code_replay"]);
+    }
+  });
+
   test("a second redemption after a rotation revokes the rotated tokens too: they carry the code", async () => {
     const f = await flow({ scope: "openid offline_access" });
     const first = (await redeem(h, f.client, f.code)).json as { refresh_token: string };

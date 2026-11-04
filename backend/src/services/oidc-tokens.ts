@@ -13,8 +13,10 @@
  * client, the grant and the account and decide, and `meta.changes` of the statement that mints is the
  * winner. A refused mint writes nothing.
  *
- *   AUTHORIZATION CODE. The code is read once to check, in constant time, the PKCE verifier against
- *   its S256 challenge and, exactly, the redirect address; a mismatch writes nothing. Then one batch:
+ *   AUTHORIZATION CODE. The code is read once. Presented again by its own client it is a second
+ *   redemption at once (below), whatever verifier or address it carries; otherwise the PKCE verifier
+ *   is checked against its S256 challenge and the redirect address exactly, in constant time, and a
+ *   mismatch writes nothing. Then one batch:
  *   the access token is inserted only while the code is unused and live, is this client's, and its
  *   client, grant and account still pass (`CODE_CLAIM_PREDICATE`, the claim of the issue verbatim,
  *   plus the gates); the refresh token only beside that access token; and the code is marked used
@@ -106,7 +108,8 @@ export const TOKENS_PRUNE_SQL = `DELETE FROM oidc_tokens
 
 /** A code as the token endpoint checks it before the batch, with D1's clock. */
 export const CODE_READ_SQL = `SELECT k.id, k.client_id, k.redirect_uri, k.scopes, k.nonce,
-       k.code_challenge, CAST(strftime('%s', k.auth_time) AS INTEGER) AS auth_time_unix,
+       k.code_challenge, k.used_at IS NOT NULL AS used,
+       CAST(strftime('%s', k.auth_time) AS INTEGER) AS auth_time_unix,
        CAST(strftime('%s', 'now') AS INTEGER) AS now_unix
   FROM oidc_codes k WHERE k.code_hash = ?`;
 
@@ -419,8 +422,24 @@ interface CodeRow {
   scopes: string;
   nonce: string | null;
   code_challenge: string;
+  /** 1 when the code was redeemed already. */
+  used: number;
   auth_time_unix: number;
   now_unix: number;
+}
+
+/**
+ * A second redemption of a code (RFC 6749 section 4.1.2): revoke every token issued from it, and
+ * write nothing else. The statement re-checks that the code is this client's and used.
+ */
+async function secondRedemption(
+  db: D1Database,
+  codeHash: string,
+  clientRowId: number,
+  invalid: () => GrantOutcome,
+): Promise<GrantOutcome> {
+  await db.prepare(CODE_REPLAY_REVOKE_SQL).bind(codeHash, clientRowId).run();
+  return invalid();
 }
 
 /**
@@ -439,6 +458,9 @@ export async function redeemAuthorizationCode(
   const invalid = () => fail("invalid_grant", "The code is not valid for this request.");
   // Another client's code is not this one's to redeem, or to replay: nothing is written for it.
   if (!code || code.client_id !== client.id) return invalid();
+  // Presented again by its own client: a second redemption, whatever verifier or address it carries,
+  // because the code has left the client's hands either way. Everything it issued is revoked.
+  if (code.used === 1) return secondRedemption(db, codeHash, client.id, invalid);
   const verifierOk = await verifierMatches(form.verifier, code.code_challenge);
   const redirectOk = timingSafeEqual(form.redirectUri, code.redirect_uri);
   if (!verifierOk || !redirectOk) return invalid();
@@ -492,7 +514,7 @@ export async function redeemAuthorizationCode(
     // Lost: either the code is used by now (a second redemption, which revokes what the first
     // issued and writes nothing else) or something the gates read changed (nothing was written).
     const used = await db.prepare(CODE_USED_SQL).bind(codeHash, client.id).first();
-    if (used) await db.prepare(CODE_REPLAY_REVOKE_SQL).bind(codeHash, client.id).run();
+    if (used) return secondRedemption(db, codeHash, client.id, invalid);
     return invalid();
   }
   if ((results[3]?.meta?.changes ?? 0) !== 1) {

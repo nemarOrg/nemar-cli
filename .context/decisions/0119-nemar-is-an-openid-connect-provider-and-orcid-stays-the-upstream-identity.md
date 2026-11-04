@@ -182,11 +182,12 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
 13. **The token endpoint decides in the statement that writes, and a second use of a code or of a spent refresh token ends what it issued (phase #2018).**
     A client authenticates with HTTP Basic only: the identifier and the secret are form-decoded (RFC 6749 section 2.3.1) and the secret is compared as a hash in constant time, the previous secret is accepted until its grace ends, a disabled client is refused, and a credential in the body is refused even beside a valid header (`invalid_client`, with a Basic challenge).
     A code is checked before anything is written: the PKCE verifier, 43 to 128 unreserved characters, against its S256 challenge in constant time, and the redirect address exactly; a mismatch writes nothing.
+    Another client's code is refused and writes nothing, used or not, so one client can never end what another holds.
     One batch then mints and claims.
     The access token is inserted only while the code is unused, unexpired and this client's, and while its client, its grant and its account still pass, the account by the client's sign-in rule (rule 7) read at that moment; the refresh token only beside that access token; and the code is marked used only when that access token's row exists.
     So two redemptions in flight cannot both mint, and a redemption refused for any reason writes nothing.
-    A redemption that lost the claim of a code that is used by now is a second redemption: every token issued from the code, rotations included, is revoked (`code_replay`), and nothing else is written.
-    A second redemption is recognized until an hour past the code's expiry, when used codes are pruned; one that fails the verifier or the redirect check is refused like any other mismatch and revokes nothing.
+    A code its own client presents again once it is used, or a redemption that lost the claim of a code used by now, is a second redemption: every token issued from the code, rotations included, is revoked (`code_replay`), and nothing else is written.
+    That holds whatever verifier or redirect address the second presentation carries, because the code has left the client's hands either way; it is recognized until an hour past the code's expiry, when used codes are pruned.
     Tokens carry the code's scopes, never the grant's, which accumulate.
     The identity token carries `iss`, `sub`, `aud` (the client), `iat`, `exp` (5 minutes), `nonce` when the request had one, `auth_time` (the sign-in of the session behind the code) and `at_hash`, with the claims of the code's scopes (rule 14); a refresh returns no identity token.
     A refresh token is issued only when the code carries `offline_access` and the client is allowed the refresh token grant.
