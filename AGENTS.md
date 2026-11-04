@@ -241,7 +241,10 @@ whichever front door submitted it; the ledger is append-only integer thousandths
 hold before every submit, settled provisionally from the Tapis record and finally from Expanse's accounting; an
 unreserved partner job is cancelled and charged to the partner pool, never the person; webhooks are hints and NEMAR
 reads the job back; retention is a policy row and storage is two private R2 buckets with no storage credential outside
-the Worker; `COMPUTE_ENABLED` is a dark switch; every compute word is declared once in `shared/compute-state.ts`).
+the Worker; `COMPUTE_ENABLED` is a dark switch, with its test in phase A4; the job row's `spec_digest` and the
+launcher's `launch_spec_digest` are two digests; the two responses a launcher reads are open and every request and
+document is closed; every compute word is declared once in `shared/compute-state.ts`, `shared/contract/compute.ts` and
+`shared/contract/compute-launch.ts`).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
