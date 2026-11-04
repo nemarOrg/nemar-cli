@@ -9,7 +9,7 @@ The design is the gated docs page `admin/design/compute-gateway` in `nemarOrg/do
 Where the patterns live in this codebase is in [`implementation-notes.md`](implementation-notes.md).
 Each phase issue is the implementer's complete brief: goal, routing, scope, changes, tests, acceptance criteria, gates, rules, escalation triggers.
 
-Where this file, an issue and an ADR disagree, the ADR wins, then the issue, then this file.
+Where this file, an issue and an ADR disagree, the ADR wins, then the issue, then this file, except on the full-suite gate (section 3, step 6), where this file wins.
 When implementation shows the plan was wrong, change the issue and the design page in the same pull request that changes the behaviour; plans are expected to move.
 
 ## 1. Roadmap
@@ -64,6 +64,8 @@ Everything else is built and tested against local stand-ins first.
    A report is not a result; a gate you did not run did not pass.
    Read the implementer's "not run, would check: X because Y" lines and decide whether a long run is needed; you run it, the implementer does not wait for it.
    Watch CI-only checks yourself and resume the implementer only if something is red.
+   A bare or full `bun test` in an issue's Gates is the epic -> `dev` gate and is not run in a phase: report it as "not run, would check: full suite because it is the epic gate".
+   On this point this file wins over the issue.
 7. **Review.** Run the project plugin's `pr-review-toolkit` on the PR with Sonnet reviewers.
    Every finding is fixed (no debt carried forward) except a false positive or a deliberate design choice, each answered with a one-line reason on the PR.
    Send security, concurrency, authorization, data-integrity and architecture findings to the Opus advisor before the implementer fixes them.
@@ -98,6 +100,8 @@ Never mock NEMAR logic. Never hand-bump a version. Never set a secret or touch p
 Commit atomically with short messages (under 50 characters, no emojis, no AI or co-author attribution).
 Run every command in the issue's Gates section with targeted tests only, and paste their final lines in your report.
 Never wait on a long job (a full test run, a CI watch): push, and report what you did not run as "not run, would check: X because Y".
+A bare or full `bun test` in an issue's Gates is the epic -> `dev` gate and is not run in a phase: report it as "not run, would check: full suite because it is the epic gate".
+On this point this brief wins over the issue.
 Kill stray background test runs in your worktree before running gates, and give every scratch script a unique name in a private subfolder.
 Push and open a PR into <epic branch> titled "Phase <key>: <title>" whose body lists what changed, the gates you ran with results, and anything you could not do. GitHub bodies keep each paragraph on one line.
 Report: the PR URL, the gates and their results, and every deviation from the issue.
