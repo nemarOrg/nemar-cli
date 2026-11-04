@@ -235,7 +235,15 @@ dataset's own repository, from the record's release branch, at the head NEMAR's 
 `skipped` check titled "Waived: upstream re-pull" with no review row, dispatch or model call, decided before
 the administrator exemption or a block; the queue verdict is `waived` and the merge needs no `--force`, the
 Worker's own review of the App's re-pull pull request is retired, and what the rule cannot tell, such as a
-human-written `.nemar/` file on the branch, is listed in the ADR).
+human-written `.nemar/` file on the branch, is listed in the ADR),
+0119 (PROPOSED; NEMAR is an OpenID Connect provider and ORCID stays the upstream identity: the production
+issuer `https://api.nemar.org` and the token prefixes `nmo_at_` and `nmo_rt_` (API keys are `nm_`) can never change,
+an OIDC access token is refused by every existing route, `sub` is `nmu_` plus 32 lowercase hex in
+`users.oidc_subject` (set once, never changed, on no existing response, and `nmu_` is a reserved username prefix),
+sign-in is a per-client rule (`active_account` or `person_proven_orcid`, where an ADR 0106 attestation is not proof),
+a partner host (`shared/partner-hosts.ts`) is excluded from `isNemarWebOrigin` and `isAllowedOrigin`, the session cookie
+becomes `__Host-nemar_session` behind `HOST_PREFIXED_SESSION_COOKIE` and an invalid new cookie is never rescued by the
+legacy one, and its credential-ending table says what every path that ends a credential does to OIDC grants).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

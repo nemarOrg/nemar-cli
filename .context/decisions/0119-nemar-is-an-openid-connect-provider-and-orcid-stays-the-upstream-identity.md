@@ -1,0 +1,184 @@
+# ADR 0119: NEMAR is an OpenID Connect provider, and ORCID stays the upstream identity
+
+**Status:** proposed
+**Date:** 2026-11-03
+**Owner:** Seyed Yahya Shirazi
+
+Epic #2014, phase #2015.
+Follows [ADR 0056](0056-the-admin-docs-are-gated-by-nemars-own-session.md) and [ADR 0079](0079-the-private-site-holds-a-session-scope-of-its-own.md) (a host-scoped credential is handed over, never a widened cookie), [ADR 0043](0043-one-person-one-account.md) (one person, one account), [ADR 0048](0048-account-kinds-are-explicit.md) (account kinds) and [ADR 0106](0106-an-owner-attests-an-orcid-id-that-the-person-has-not-proven.md) (an attestation is not a proof).
+The design is the gated page `admin/design/compute-gateway`, section 3; where it and this ADR disagree, this ADR wins.
+
+## Context
+
+A partner-run site, `compute.nemar.org`, has to sign people in with their NEMAR account, and other services may follow.
+NEMAR has no way to say who someone is to another host.
+The app session cookie is scoped to `app.nemar.org` on purpose (ADR 0056), so it never reaches another host, and widening it would undo the reason for the scope.
+ORCID is the identity underneath every person's account (ADR 0047, ADR 0048), and NEMAR adds what it knows about the account.
+
+Three things about the platform as it stands make a partner subdomain dangerous.
+The API trusts any `*.nemar.org` origin, both in its cross-origin allow-list and in the origin check on every write that carries the session cookie.
+The partner site serves pages whose JavaScript people write themselves, so a page on it could call the API with a visitor's cookie, or plant a cookie named `nemar_session` for the whole `nemar.org` zone.
+And the session cookie has no `__Host-` prefix, so nothing stops a sibling host from planting one.
+
+A provider's issuer, token prefixes and subject format can never change once a client trusts them.
+They are therefore fixed here, before the first client registers, and before any `/oauth` route exists.
+This phase builds none of the provider: it records the decisions and lands the three changes that must precede any client (the partner-host exclusion, the `__Host-` cookie and the subject).
+
+## Decision
+
+**NEMAR is a general OpenID Connect provider whose first client is `compute.nemar.org`; ORCID stays the identity underneath, and an account is the only thing a token ever names.**
+Twelve rules inside that, each of which reopens a hole if reversed.
+
+1. **Authorization code with Proof Key for Code Exchange (PKCE), method S256 only, for every client.**
+   No implicit grant, no password grant, no `plain` challenge.
+   A confidential client authenticates at the token endpoint with a client secret (`client_secret_basic`).
+   A confidential client may also use the client credentials grant, for machine-only scopes such as `compute.stats`, and for nothing a person's consent covers.
+2. **The issuer is `https://api.nemar.org` in production, and every ID token carries exactly that `iss`.**
+   Discovery is `https://api.nemar.org/.well-known/openid-configuration` and the signing keys are `https://api.nemar.org/oauth/jwks`.
+   The token, userinfo, revocation (RFC 7009) and introspection (RFC 7662) endpoints are under `https://api.nemar.org/oauth/`.
+   The authorization endpoint is `https://app.nemar.org/oauth/authorize`, because the sign-in cookie lives only on the app host: the page that proves the session and asks for consent is there, it cannot be framed (`frame-ancestors 'none'`) and its consent form is protected against cross-site request forgery.
+   Introspection tells a caller only about tokens issued to itself or to a resource server registered for that token's audience.
+   NEMAR tells a client about a revoked, deleted or suspended account at the client's registered back-channel logout address.
+3. **Request handling.**
+   `state` is returned unchanged and `nonce` is copied into the ID token.
+   The authorization response carries `iss` (RFC 9207), so a client can tell which provider answered.
+   `prompt=none` without a NEMAR session answers `login_required` and shows no page; `max_age` older than the session forces a fresh sign-in.
+   A refresh token is issued only when the client asks for `offline_access` and is allowed it.
+   Redeeming an authorization code twice revokes every token already issued from it (RFC 6749, section 4.1.2).
+4. **Tokens.**
+
+   | Token | Form | Lifetime |
+   |---|---|---|
+   | Authorization code | random, stored hashed, single use | 60 seconds |
+   | ID token | JSON Web Token, ES256, with a key id; the next key is published before it signs | 5 minutes |
+   | Access token | opaque, prefix `nmo_at_`, bound to one client, its scopes and its audience | 15 minutes |
+   | Refresh token | opaque, prefix `nmo_rt_`, rotated on every use with a 30-second grace for a retried request; reusing a spent one after the grace revokes the whole family | 30 days idle, 90 days absolute |
+
+   API keys are `nm_`, and the OIDC prefixes are chosen so that neither can be read as the other: a prefix test for `nm_` does not match `nmo_at_`.
+   **An OIDC access token is accepted only by the routes that serve its scopes.**
+   Every existing API route, `/users/me` included, refuses it, just as the OIDC routes refuse a CLI key.
+   A NEMAR API key has no scopes and carries its user's full authority, so the two token kinds must never be interchangeable.
+5. **`sub` is `nmu_` plus 32 lowercase hexadecimal characters, 128 random bits, stored in `users.oidc_subject` (migration 0120).**
+   It is assigned when the row is created and never changes, never reused, and is neither the row number nor the email address.
+   The database enforces it: a format `CHECK`, a unique index, a trigger that fills a missing one on insert and a trigger that aborts any change to a value that is set.
+   The tombstone mask keeps it, so a deleted account's subject is never handed to a different person.
+   `nmu_` is a reserved username prefix (`validateUsernameFormat` refuses it with `username_reserved`), so no person, service or pipeline name can collide with a subject.
+   The subject is on no existing response: not `/users/me`, not `/auth/me`, not an admin user detail or list.
+   The only way to resolve one is the owner-only `GET /admin/users/by-oidc-subject/:sub`.
+6. **Scopes and claims.**
+
+   | Scope | Claims or access |
+   |---|---|
+   | `openid` | `sub` |
+   | `profile` | `name`, `given_name`, `family_name` |
+   | `email` | `email`, `email_verified` |
+   | `orcid` | `orcid` (the iD as a URL), `orcid_verified`, true only when the iD was proven by an ORCID sign-in |
+   | `nemar.account` | account kind, status and tier |
+   | `compute.read` | the person's compute access, balances, usage and jobs, through the API |
+   | `compute.reserve` | reserve time, report a job, release a reservation |
+   | `compute.submit` | submit a job that NEMAR itself sends to Tapis; not granted to compute.nemar.org |
+   | `compute.stats` | platform-wide aggregate usage; client credentials only |
+
+   **The provider is general: compute facts are never put in the ID token.**
+   They are read from the API with the access token, so they are current, and the provider stays usable by a client that has nothing to do with compute.
+7. **Who may sign in is a rule on each client, and there are two.**
+   `active_account`: the account is active (status `verified` or `approved`, ADR 0040), not revoked and not deleted.
+   `person_proven_orcid`: `active_account`, account kind `person` (ADR 0048), and an ORCID iD the person proved by signing in with ORCID.
+   "Proven" means an `oauth_identities` row for the ORCID provider whose iD matches `users.orcid`.
+   An iD an owner attested (ADR 0106), or one filled in from a publication record, does not count: `orcid_verified = 1` no longer implies a sign-in record, and this rule is why the difference matters.
+   `compute.nemar.org` uses `person_proven_orcid`, and does not require compute access to sign in, so a person can see why they cannot launch and follow a link to request access.
+8. **Clients are registered by the owner, and by no one else.**
+   A client carries a name, exact redirect addresses (no wildcards), allowed scopes and grants, its sign-in rule, its consent mode, its back-channel logout address, and caps on open reservations and on service units reserved per day.
+   A client the owner marks first-party skips the consent screen; any other client asks once per set of scopes.
+   **First-party is refused for a client with a partner-host redirect address**, at registration and again at every authorization, so a partner can never skip consent.
+   `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
+9. **A partner subdomain is not trusted as a NEMAR origin.**
+   `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
+   `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the MCP host all use) and `isAllowedOrigin` (the origin check on writes that carry the session cookie) return false for a partner host before they test anything else.
+   A partner reaches NEMAR only through OIDC and bearer tokens.
+   A future partner subdomain is added to the same list, in the same pull request that registers its client.
+10. **The session cookie moves to the name `__Host-nemar_session`, with a safe dual-read window.**
+    The `__Host-` prefix makes a browser refuse a cookie with a `Domain` attribute, so no sibling host can plant one for `app.nemar.org`.
+    The reader tries the new name first and the legacy `nemar_session` second, and an invalid new cookie is **not** rescued by a valid legacy one: a planted legacy cookie must never win over the real one.
+    The writer is behind `HOST_PREFIXED_SESSION_COOKIE`.
+    Unset, it sends today's header byte for byte.
+    Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by two clears of the legacy name, with and without its `Domain`.
+    The cookie stays host-only (ADR 0056); the new name never goes through `WEB_SESSION_COOKIE_DOMAIN`.
+    The order of release is fixed because a reader must exist before a writer: the website's reader first, then the API, then the flag in production, which is the owner's act.
+11. **The partner uses the `sub` as the username of a person's compute credential, and is never trusted to say who ran a job.**
+    It mints that credential only while `GET /compute/me` says the person is active.
+    Because whoever controls the partner site can mint a credential for any username, the owner of an unreserved job is never taken as proof of who ran it.
+    The compute design carries the consequences; they are recorded here only so that the subject's form and its use are read together.
+12. **The credential-ending table.**
+    Every path that ends or downgrades a credential says what it does to OIDC grants and tokens.
+    A new path that ends a credential adds a line here and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts`.
+
+    | Path | OIDC grants and tokens | Why |
+    |---|---|---|
+    | Admin revocation (`finalizeRevocation`) | Ends all, and sends back-channel logout | The account is cut off; a client must stop honoring it. In the same batch as the other cascades. |
+    | Owner soft delete (`tombstoneUserCascade`) | Ends all, and sends back-channel logout | Same, and the subject stays on the row. |
+    | Account merge (manual, ADR 0043), through an owner command | Ends all of the loser's, and sends back-channel logout | The loser stops being a person; the winner's grants are untouched. |
+    | Compute suspension | Ends only grants that carry a `compute.` scope, and tells only those clients | The person stays signed in elsewhere. |
+    | ORCID unlink or relink | Ends the grants of every client whose rule is `person_proven_orcid` | The proof they were granted on is gone. |
+    | Client disable | Revokes everything the client holds, and sends no logout | The owner has cut the client off; telling it is not owed. |
+    | Role demotion | Leaves them alone | A token carries no role and no OIDC scope confers admin authority (rule 4), so there is nothing to downgrade. `PRIVATE_REVOKE_ALL_SQL` says the same of private sessions. |
+    | API key revocation | Leaves them alone | A grant is not minted from a key and depends on none. |
+    | Sign-out of the app session | Leaves them alone | Signing out of NEMAR does not withdraw access a person delegated; `prompt=none` answers `login_required` until they sign in again. |
+
+### What this phase builds, and what it does not
+
+This phase lands the ADR, the partner-host exclusion (rule 9), the cookie reader and writer (rule 10), and the subject with its reserved prefix (rule 5).
+The client registry, the keys, discovery, authorization, tokens, the cascades and the logout are #2016 to #2019, and each builds against this text.
+
+### Not decided here, and so not to be assumed by the phases that follow
+
+- Public clients (PKCE with no secret).
+- `private_key_jwt` client authentication.
+- A connected-apps page where a person revokes a grant themselves.
+- The issuer of the staging Worker, which shares the shape of the production one and is for the discovery phase to fix.
+- When the legacy cookie name stops being read.
+- Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
+  If the answer makes the format unusable, it is superseded here before any client registers, and not worked around.
+
+## Consequences
+
+- **Easier:** another service can sign people in without a copy of anyone's identity, and revoking an account ends its grants in the transaction that revokes its keys.
+  A reader of an ID token learns an opaque subject, so a client that stores only `sub` stores nothing it could later regret.
+- **Harder:** the subject and the issuer are forever.
+  Every later phase builds against them, and a mistake in this ADR is not an amendment.
+- **The cookie rename is a three-step release.**
+  Until the website reads the new name, turning the flag on logs everyone out of the website: the API would set a cookie the website's middleware does not know.
+  The flag is on in the dev Worker only until the owner sets it in production.
+- **The dual-read window is a cost.**
+  For as long as the legacy name is read, a sibling host can still plant a legacy cookie; the defence is that it is never preferred.
+  The window ends by a later decision, not by this one.
+- **Account kinds matter more.**
+  `person_proven_orcid` makes ADR 0048's kinds a gate on a third party's sign-in.
+- **A username that starts `nmu_` is refused from now on.**
+  The owner checks that no live username already does before the release, because a migration cannot rename a person's handle.
+
+## Alternatives considered
+
+- **Use the app session cookie on `.nemar.org`.**
+  Attaches a credential to `data.nemar.org` and to the partner host, which is exactly what ADR 0056 refused.
+- **Widen the origin checks to an allow-list of NEMAR's own hosts instead of listing a partner.**
+  Safer by default, and it would need every first-party host (the website, its preview and staging hosts, the docs and private hosts) enumerated at once, so that one omission breaks a working surface.
+  A list of partners changes nothing else and fails open only for a host that is named; the list is short and in one file.
+- **Make the subject the row number, the email address or the ORCID iD.**
+  Each is guessable, reusable or a person's data, and an ORCID iD can change (ADR 0043 and the relink flow).
+- **JSON Web Token access tokens.**
+  Self-describing, but revocation would wait out the lifetime, which the revocation rule (ADR 0056, decision 5) forbids.
+  An opaque token is looked up, so ending a grant ends its tokens at once.
+- **An off-the-shelf provider.**
+  It would bring a second user table and a second revocation path to keep in step with NEMAR's, and none of NEMAR's rules (kinds, ORCID proof, cascades) would be expressible in it.
+- **Keep `nemar_session` and add a defensive check for a planted cookie.**
+  There is no signal in a request that distinguishes a planted cookie from a real one.
+  The `__Host-` prefix is enforced by the browser, which is the only party that can enforce it.
+
+## Receipts
+
+- Issue #2015 (this phase), epic #2014; design section 3 of `admin/design/compute-gateway`.
+- `shared/partner-hosts.ts`, `backend/src/services/cors-origins.ts`, `backend/src/services/web-session.ts`.
+- `shared/oidc-subject.ts`, `backend/src/services/oidc-subject.ts`, migration `0120_users_oidc_subject.sql`.
+- ADR 0056 and ADR 0079 (host-scoped credentials, `__Host-` names), ADR 0043 and ADR 0048 (identity and kinds), ADR 0106 (an attestation is not a proof), ADR 0040 (the active statuses).
+- OpenID Connect Core 1.0; RFC 6749 and 7636 (authorization code, PKCE), RFC 7009 (revocation), RFC 7662 (introspection), RFC 9207 (issuer in the authorization response).
