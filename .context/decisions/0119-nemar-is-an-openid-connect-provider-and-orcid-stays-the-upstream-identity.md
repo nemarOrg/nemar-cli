@@ -13,10 +13,10 @@ The design is the gated page `admin/design/compute-gateway`, section 3; where it
 A partner-run site, `compute.nemar.org`, has to sign people in with their NEMAR account, and other services may follow.
 NEMAR has no way to say who someone is to another host.
 The app session cookie is scoped to `app.nemar.org` on purpose (ADR 0056), so it never reaches another host, and widening it would undo the reason for the scope.
-ORCID is the identity underneath every person's account (ADR 0047, ADR 0048), and NEMAR adds what it knows about the account.
+ORCID (Open Researcher and Contributor ID) is the identity underneath every person's account (ADR 0047, ADR 0048), and NEMAR adds what it knows about the account.
 
 Three things about the platform as it stands make a partner subdomain dangerous.
-The API trusts any `*.nemar.org` origin, both in its cross-origin allow-list and in the origin check on every write that carries the session cookie.
+The application programming interface (API) trusts any `*.nemar.org` origin, both in its cross-origin allow-list and in the origin check on every write that carries the session cookie.
 The partner site serves pages whose JavaScript people write themselves, so a page on it could call the API with a visitor's cookie, or plant a cookie named `nemar_session` for the whole `nemar.org` zone.
 And the session cookie has no `__Host-` prefix, so nothing stops a sibling host from planting one.
 
@@ -26,16 +26,16 @@ This phase builds none of the provider: it records the decisions and lands the t
 
 ## Decision
 
-**NEMAR is a general OpenID Connect provider whose first client is `compute.nemar.org`; ORCID stays the identity underneath, and an account is the only thing a token ever names.**
+**NEMAR is a general OpenID Connect (OIDC) provider whose first client is `compute.nemar.org`; ORCID stays the identity underneath, and an account is the only thing a token ever names.**
 Twelve rules inside that, each of which reopens a hole if reversed.
 
 1. **Authorization code with Proof Key for Code Exchange (PKCE), method S256 only, for every client.**
    No implicit grant, no password grant, no `plain` challenge.
    A confidential client authenticates at the token endpoint with a client secret (`client_secret_basic`).
    A confidential client may also use the client credentials grant, for machine-only scopes such as `compute.stats`, and for nothing a person's consent covers.
-2. **The issuer is `https://api.nemar.org` in production, and every ID token carries exactly that `iss`.**
+2. **The issuer is `https://api.nemar.org` in production, and every identity (ID) token carries exactly that `iss`.**
    Discovery is `https://api.nemar.org/.well-known/openid-configuration` and the signing keys are `https://api.nemar.org/oauth/jwks`.
-   The token, userinfo, revocation (RFC 7009) and introspection (RFC 7662) endpoints are under `https://api.nemar.org/oauth/`.
+   The token, userinfo, revocation and introspection endpoints are under `https://api.nemar.org/oauth/`, following Request for Comments (RFC) 7009 for revocation and RFC 7662 for introspection.
    The authorization endpoint is `https://app.nemar.org/oauth/authorize`, because the sign-in cookie lives only on the app host: the page that proves the session and asks for consent is there, it cannot be framed (`frame-ancestors 'none'`) and its consent form is protected against cross-site request forgery.
    Introspection tells a caller only about tokens issued to itself or to a resource server registered for that token's audience.
    NEMAR tells a client about a revoked, deleted or suspended account at the client's registered back-channel logout address.
@@ -56,7 +56,7 @@ Twelve rules inside that, each of which reopens a hole if reversed.
 
    API keys are `nm_`, and the OIDC prefixes are chosen so that neither can be read as the other: a prefix test for `nm_` does not match `nmo_at_`.
    **An OIDC access token is accepted only by the routes that serve its scopes.**
-   Every existing API route, `/users/me` included, refuses it, just as the OIDC routes refuse a CLI key.
+   Every existing API route, `/users/me` included, refuses it, just as the OIDC routes refuse a command-line interface (CLI) key.
    A NEMAR API key has no scopes and carries its user's full authority, so the two token kinds must never be interchangeable.
 5. **`sub` is `nmu_` plus 32 lowercase hexadecimal characters, 128 random bits, stored in `users.oidc_subject` (migration 0120).**
    It is assigned when the row is created and never changes, never reused, and is neither the row number nor the email address.
@@ -94,17 +94,22 @@ Twelve rules inside that, each of which reopens a hole if reversed.
    `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
 9. **A partner subdomain is not trusted as a NEMAR origin.**
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
-   `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the MCP host all use) and `isAllowedOrigin` (the origin check on writes that carry the session cookie) return false for a partner host before they test anything else.
+   `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the Model Context Protocol (MCP) host all use) and `isAllowedOrigin` (the origin check on writes that carry the session cookie) return false for a partner host before they test anything else.
    A partner reaches NEMAR only through OIDC and bearer tokens.
    A future partner subdomain is added to the same list, in the same pull request that registers its client.
 10. **The session cookie moves to the name `__Host-nemar_session`, with a safe dual-read window.**
     The `__Host-` prefix makes a browser refuse a cookie with a `Domain` attribute, so no sibling host can plant one for `app.nemar.org`.
-    The reader tries the new name first and the legacy `nemar_session` second, and an invalid new cookie is **not** rescued by a valid legacy one: a planted legacy cookie must never win over the real one.
+    The reader tries the new name first and the legacy `nemar_session` second.
+    A legacy cookie therefore never outranks a `__Host-` one, and an invalid, empty or revoked `__Host-` cookie is **not** rescued by a valid legacy one.
+    That protects only a browser that already holds a `__Host-` cookie.
+    A request with no `__Host-nemar_session` still has its legacy cookie read: signed-out visitors, sessions not yet moved to the new name, and every session until the flag is on in production.
+    That is the exposure the window keeps open: a page on a partner host can plant a legacy cookie with `Domain=nemar.org`, which for those visitors is a login cross-site request forgery style session fixation on `app.nemar.org`, until the window closes.
     The writer is behind `HOST_PREFIXED_SESSION_COOKIE`.
     Unset, it sends today's header byte for byte.
     Set to exactly `"1"`, it sends the new name with `Secure; HttpOnly; SameSite=Lax; Path=/` and no `Domain`, followed by two clears of the legacy name, with and without its `Domain` (one when no `Domain` is configured, as on staging, where they are the same cookie).
     The cookie stays host-only (ADR 0056); the new name never goes through `WEB_SESSION_COOKIE_DOMAIN`.
     The order of release is fixed because a reader must exist before a writer: the website's reader first, then the API, then the flag in production, which is the owner's act.
+    The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys: the website's reader (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.
 11. **The partner uses the `sub` as the username of a person's compute credential, and is never trusted to say who ran a job.**
     It mints that credential only while `GET /compute/me` says the person is active.
     Because whoever controls the partner site can mint a credential for any username, the owner of an unreserved job is never taken as proof of who ran it.
@@ -136,7 +141,8 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - `private_key_jwt` client authentication.
 - A connected-apps page where a person revokes a grant themselves.
 - The issuer of the staging Worker, which shares the shape of the production one and is for the discovery phase to fix.
-- When the legacy cookie name stops being read.
+- When the legacy cookie name stops being read, which is when the exposure in rule 10 ends.
+- Whether the flag may be turned off again once people hold a `__Host-` cookie. It is effectively one-way (see Consequences), and a flag-off writer that also clears a `__Host-` cookie the request carried is a possible later change.
 - Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
   If the answer makes the format unusable, it is superseded here before any client registers, and not worked around.
 
@@ -148,10 +154,17 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   Every later phase builds against them, and a mistake in this ADR is not an amendment.
 - **The cookie rename is a three-step release.**
   Until the website reads the new name, turning the flag on logs everyone out of the website: the API would set a cookie the website's middleware does not know.
-  The flag is on in the dev Worker only until the owner sets it in production.
-- **The dual-read window is a cost.**
-  For as long as the legacy name is read, a sibling host can still plant a legacy cookie; the defence is that it is never preferred.
+  The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys, and the website pull request that reads it (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.
+  Production's flag is the owner's, after both releases.
+- **The dual-read window is a cost, and this is what it keeps open.**
+  A legacy cookie never outranks a `__Host-` one, but it is still read for any browser that holds no `__Host-` cookie: signed-out visitors, sessions not yet moved to the new name, and every session until the flag is on in production.
+  A page on a partner host can plant a legacy cookie with `Domain=nemar.org`, a login cross-site request forgery style session fixation on `app.nemar.org` for those visitors.
   The window ends by a later decision, not by this one.
+- **The flag is effectively one-way once people hold a `__Host-` cookie.**
+  Turned off again, the writers send only the legacy header, byte for byte, because the flag-off bytes are pinned, and they never clear a `__Host-nemar_session` the browser holds.
+  The reader prefers that stale cookie, so after a sign-out and a new sign-in the person is unauthenticated until it expires: a browser close, or up to 30 days for a remembered session.
+  Reverting therefore needs a clear of the `__Host-` cookie shipped first.
+  A flag-off writer that also clears a `__Host-` cookie the request carried is a possible later change, not made here.
 - **Account kinds matter more.**
   `person_proven_orcid` makes ADR 0048's kinds a gate on a third party's sign-in.
 - **A username that starts `nmu_` is refused from now on.**
