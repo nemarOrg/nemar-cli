@@ -316,7 +316,6 @@ export const COMPUTE_REFUSAL_CODES = [
   "platform_budget_exhausted",
   "client_cap_reached",
   "invalid_spec",
-  "over_ceiling",
   "partition_not_offered",
   "runtime_unavailable",
   "registry_not_allowed",
@@ -339,9 +338,12 @@ export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
 
 /**
  * The HTTP status each refusal is answered with, declared once so no route picks its own.
- * 403: the person may not. 409: the pool, the job or the stored results are in a state that
- * refuses it now and may clear. 413 and 422: the request itself is over a limit or outside what
- * is offered. 503: the platform is not configured or the switch is off.
+ * 400: the request body is not a valid specification (`invalid_spec`). 403: the person may not.
+ * 404: no such job for this caller (`job_not_found`, which never says whether it exists for
+ * someone else). 409: the pool, the job or the stored results are in a state that refuses it now
+ * and may clear. 410: the results existed and have expired (`results_expired`). 413 and 422: the
+ * request itself is over a limit or outside what is offered. 503: the platform is not configured
+ * or the switch is off.
  */
 export const COMPUTE_REFUSAL_STATUS = {
   no_compute_access: 403,
@@ -352,7 +354,6 @@ export const COMPUTE_REFUSAL_STATUS = {
   platform_budget_exhausted: 409,
   client_cap_reached: 409,
   invalid_spec: 400,
-  over_ceiling: 422,
   partition_not_offered: 422,
   runtime_unavailable: 422,
   registry_not_allowed: 422,

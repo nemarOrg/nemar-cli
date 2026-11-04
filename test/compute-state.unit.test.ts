@@ -17,6 +17,7 @@ import { join } from "node:path";
 import * as words from "../shared/compute-state";
 import {
   COMPUTE_CANCEL_REASONS,
+  COMPUTE_FAILURE_CODES,
   COMPUTE_JOB_FLAGS,
   COMPUTE_KINDS,
   COMPUTE_REFUSAL_CODES,
@@ -35,6 +36,7 @@ import {
   canTransitionCompute,
   failureCodeFromTapisCondition,
   isPlatformFailure,
+  isTerminalComputeState,
   launcherExitNumber,
   stateFromTapisStatus,
 } from "../shared/compute-state";
@@ -153,6 +155,25 @@ describe("the edges", () => {
     for (const s of TERMINAL_COMPUTE_STATES) {
       expect(COMPUTE_TRANSITIONS[s]).toEqual([]);
       expect(canTransitionCompute(s, s)).toBe(false);
+    }
+  });
+
+  test("isTerminalComputeState is true for finished, failed and cancelled and for no other state", () => {
+    const expected: Record<ComputeState, boolean> = {
+      created: false,
+      uploading: false,
+      submitted: false,
+      queued: false,
+      running: false,
+      archiving: false,
+      finished: true,
+      failed: true,
+      cancelled: true,
+      unreported: false,
+    };
+    expect(Object.keys(expected)).toHaveLength(10);
+    for (const state of COMPUTE_STATES) {
+      expect(isTerminalComputeState(state), state).toBe(expected[state]);
     }
   });
 
@@ -353,7 +374,6 @@ describe("refusal codes", () => {
     ["platform_budget_exhausted", 409],
     ["client_cap_reached", 409],
     ["invalid_spec", 400],
-    ["over_ceiling", 422],
     ["partition_not_offered", 422],
     ["runtime_unavailable", 422],
     ["registry_not_allowed", 422],
@@ -372,9 +392,11 @@ describe("refusal codes", () => {
     ["bad_state", 409],
   ];
 
-  test("the list is the seven of section 6 plus the eighteen the phase names", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(25);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(24);
+    // The per-job limit refusal is `over_job_limit`; there is no second word for it.
+    expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
 
   test("every code has a status and the table has no stray key", () => {
@@ -401,6 +423,34 @@ describe("refusal codes", () => {
 });
 
 describe("failure codes", () => {
+  test("COMPUTE_FAILURE_CODES is the launcher's seven then the platform's other eight, in order", () => {
+    // Phase A5 checks a failure code read from launcher/result.json against this list.
+    expect([...COMPUTE_FAILURE_CODES]).toEqual([
+      "code_fetch_failed",
+      "dataset_fetch_failed",
+      "entry_not_found",
+      "runtime_error",
+      "out_of_memory",
+      "time_limit",
+      "result_upload_failed",
+      "tapis_submit_failed",
+      "submit_timeout",
+      "staging_failed",
+      "launch_failed",
+      "archive_failed",
+      "tapis_error",
+      "result_verification_failed",
+      "records_unavailable",
+    ]);
+  });
+
+  test("an exit number is only ever asked for a launcher code", () => {
+    // Without the guard an unknown code gave 9 (index -1 plus 10) instead of failing.
+    expect(() => launcherExitNumber("tapis_error" as never)).toThrow(RangeError);
+    expect(() => launcherExitNumber("" as never)).toThrow(RangeError);
+    expect(() => launcherExitNumber("constructor" as never)).toThrow(RangeError);
+  });
+
   test("the launcher codes number seven, with exit numbers 10 to 16 in order", () => {
     expect([...LAUNCHER_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
@@ -513,7 +563,7 @@ describe("Tapis conditions", () => {
     ["SCHEDULER_TERMINATED", "tapis_error"],
   ];
 
-  test("each published condition maps as the design says", () => {
+  test("every condition of the Tapis enum, as transcribed above, maps to the code named beside it", () => {
     expect(EXPECTED).toHaveLength(26);
     for (const [condition, code] of EXPECTED) {
       expect(failureCodeFromTapisCondition(condition) as string, condition).toBe(code);
