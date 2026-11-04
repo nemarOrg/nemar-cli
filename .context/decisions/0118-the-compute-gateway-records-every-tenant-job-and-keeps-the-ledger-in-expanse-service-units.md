@@ -131,7 +131,7 @@ What the build settled, each a rule and not a description of today:
    A refused hold therefore leaves no job row, no ledger entry, no pseudonym and no object in either bucket, and the reason is read after the refusal and never decided by a second hold.
    A job id has one hold for ever, so a resubmission is a new job; a retried `(account, idempotency key)` returns the existing job, and the same key for another request is an error and never an answer with the first job.
 2. **Records are written after the commit, never before, and once.**
-   A bucket lock makes a record for a refused job permanent, so nothing is copied into `records/` before the job's row, and with it the hold, has been read back; a bundle waits in `incoming/`, which a lifecycle rule empties.
+   A bucket lock makes a record for a refused job permanent, so nothing is copied into `records/` before the job's row, which exists only if its hold does, has been read back; a bundle waits in `incoming/`, which a lifecycle rule empties.
    Every record write is create-only, and a record that exists is never rewritten.
    `records_written_at` says the job's records have landed, and phase A5 refuses to submit without it: `createJob` sets it for a job that uploads nothing, and `finalizeBundle` or `finalizeSubmittedFiles` (a partner batch job's own files) sets it after the copy.
    A failed write leaves the job and its hold, is logged by job id and a fixed word, and is finished by a replay of the same key.
@@ -140,7 +140,7 @@ What the build settled, each a rule and not a description of today:
    `identity.json` holds exactly the ORCID iD, name, email, country, affiliation, account id, a null subject and the capture time.
    The words that a later epic may add (a failure code, a detail, a cancel reason, a partition) are checked by shape, never by a list, so adding one never rebuilds the table.
 4. **The gateway pseudonym is random and stored.**
-   `gw_` and 20 lowercase base32 characters, made on an account's first job, stored in `compute_gateway_users`, copied to every job of that account, never rotated and never reused (triggers refuse a change and a removal until a later phase's narrowly scoped exception).
+   `gw_` and 20 lowercase base32 characters, made on an account's first job, stored in `compute_gateway_users`, copied to every job of that account, never rotated and never reused (triggers refuse a change and a removal until a later phase's narrowly scoped exception, and a third trigger ignores an insert whose account or pseudonym is already stored, because `INSERT OR REPLACE` deletes the conflicting row without firing the delete trigger, recursive triggers being off on D1).
    It is not derived from a key, because a derived value would change if the key were rotated; the issue's earlier wording, a derivation from `ENCRYPTION_KEY`, is superseded.
    NEMAR's own pipeline jobs carry the literal `nemar-pipelines`, which is not stored there.
 5. **`spec_digest` is the SHA-256 of the exact bytes of `records/<id>/spec.json`,** made once before the INSERT and written after the commit, and it is never the launch specification, which carries a token; the launcher's `launch_spec_digest` is a different column, added by phase A5.
@@ -157,4 +157,15 @@ What the build settled, each a rule and not a description of today:
 9. **The outputs request's body cap is derived from the owner's `maxFiles`.**
    The policy lets `maxFiles` reach 100,000 and the launcher caps its own request at 1 MiB, so the Worker neither bounds `maxFiles` nor reads less than 1 MiB: it reads at most `8 KiB + maxFiles x 1,700 bytes`, never above 64 MiB.
    The launcher's 1 MiB is the tighter bound today, and raising it is the launcher's change.
-10. **A partner's per-file upload is at most 500 files,** whatever the owner's bundle limit, because each file is one `CopyObject` and a Worker invocation may make at most 1,000 subrequests; the sizes of the uploaded files are read from one listing before any file is copied, so a file of the wrong size refuses the whole set and copies nothing.
+10. **A partner's per-file upload is at most 500 files,** whatever the owner's bundle limit (the cap shadows `bundleLimits.maxFiles` with the same refusal word, so the partner contract and the design's section 6 must say 500), because each file is one `CopyObject` and a Worker invocation may make at most 1,000 subrequests; the sizes of the uploaded files are read from one listing before any file is copied, so a file of the wrong size refuses the whole set and copies nothing.
+11. **A partner's job is its hold body, kept byte for byte.**
+    A partner's request is not a job specification, so `createJob` takes its hold body as the exact text that was sent, reads only the nine small fields a hold needs (a strict schema; the partition tables and the owner's ceilings are the ones every job meets), and skips the specification schema, `launchSpecFits` and the bundle checks.
+    `spec_digest` is the SHA-256 of those exact bytes, computed once before the INSERT, and the same text is written as `records/<id>/spec.json` after the commit, so the same fields with other whitespace are another request.
+12. **An idempotency key needs an account.**
+    The unique index treats NULL accounts as distinct, so a key on a job with no account could be stored and never found, and two calls would take two holds; `createJob` refuses it as a programming error.
+    A partner's replay is keyed by the partner contract's own table (#2024, #2025).
+13. **A name is judged by the path rule, and a key by the key rules, and both are asked before anything is signed.**
+    A submitted file's path is at most 512 characters and holds no traversal in any percent-encoding, however many stray `%` stand beside it; a path that becomes a key of the job (a partner's own files, and an owner's read of one) is also well-formed text and builds an `incoming/` and a `records/` key of at most 1,024 bytes each.
+    A manifest path inside an archive builds no key and keeps the 512-character rule.
+14. **One copy is at most 5 GiB, whatever the owner's limits say.**
+    The contract's bundle limits are not bounded above, and R2 copies (and one presigned PUT takes) at most 5 GiB, so a job, an upload address and a finalize refuse a larger archive or file as `bundle_too_large`.
