@@ -1782,10 +1782,10 @@ describe("a valid job specification always fits the launch specification", () =>
       return "x".repeat(bytes - used - 3);
     };
     const at = baseJob({ args: [...full, tailFor(LAUNCH_VARIABLE_BYTES_MAX)] });
-    expect(launchVariableBytes(at)).toBe(LAUNCH_VARIABLE_BYTES_MAX);
+    expect(launchVariableBytes(at as never)).toBe(LAUNCH_VARIABLE_BYTES_MAX);
     expect(JobSpecSchema.safeParse(at).success).toBe(true);
     const over = baseJob({ args: [...full, tailFor(LAUNCH_VARIABLE_BYTES_MAX + 1)] });
-    expect(launchVariableBytes(over)).toBe(LAUNCH_VARIABLE_BYTES_MAX + 1);
+    expect(launchVariableBytes(over as never)).toBe(LAUNCH_VARIABLE_BYTES_MAX + 1);
     const refused = JobSpecSchema.safeParse(over);
     expect(refused.success).toBe(false);
     if (!refused.success) {
