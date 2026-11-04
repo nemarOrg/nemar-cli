@@ -148,9 +148,23 @@ export const LaunchSpecSchema = z
 export type LaunchSpec = z.infer<typeof LaunchSpecSchema>;
 
 /**
- * The text for `NEMAR_LAUNCH_SPEC`: the specification validated, as JSON, within 64 KiB. Throws
- * TypeError (naming the failing keys, never a value, since the document holds a token) for a
- * document that is not valid and RangeError for one over the size the launcher reads.
+ * Every UTF-16 code unit at or above U+007F as a lowercase `\uXXXX` escape. JSON allows non-ASCII
+ * only inside strings, so the result is the same document in plain ASCII; a character outside the
+ * Basic Multilingual Plane becomes its two surrogate escapes.
+ */
+function asciiOnly(json: string): string {
+  return json.replace(/[\u007f-\uffff]/g, (c) => {
+    return `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`;
+  });
+}
+
+/**
+ * The text for `NEMAR_LAUNCH_SPEC`: the specification validated, as ASCII-only JSON (see
+ * `asciiOnly`), within 64 KiB. The size is checked AFTER escaping, because that is what the
+ * launcher reads and the digest covers; a non-ASCII character costs six bytes. Keys follow the
+ * schema's order and there is no whitespace, so one document is one text. Throws TypeError (naming
+ * the failing keys, never a value, since the document holds a token) for a document that is not
+ * valid and RangeError for one over the size the launcher reads.
  */
 export function encodeLaunchSpec(spec: unknown): string {
   const parsed = LaunchSpecSchema.safeParse(spec);
@@ -158,8 +172,8 @@ export function encodeLaunchSpec(spec: unknown): string {
     const keys = [...new Set(parsed.error.issues.map((i) => i.path.join(".") || "(document)"))];
     throw new TypeError(`not a valid launch specification: ${keys.join(", ")}`);
   }
-  const text = JSON.stringify(parsed.data);
-  if (new TextEncoder().encode(text).length > LAUNCH_SPEC_MAX_BYTES) {
+  const text = asciiOnly(JSON.stringify(parsed.data));
+  if (text.length > LAUNCH_SPEC_MAX_BYTES) {
     throw new RangeError("the launch specification is over 64 KiB");
   }
   return text;

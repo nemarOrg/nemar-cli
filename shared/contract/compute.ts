@@ -711,14 +711,19 @@ const stagingRecordSchema = z
   .strict();
 
 /**
- * `launcher/provenance.json`, written from outside the container: what ran and how. The
- * specification digest is the SHA-256 of the launch specification text the launcher received.
- * Nothing the container wrote is in it.
+ * `launcher/provenance.json`, written from outside the container: what ran and how. Nothing the
+ * container wrote is in it.
+ *
+ * `launch_spec_digest` is the SHA-256, in lowercase hex, of the exact raw bytes of the
+ * `NEMAR_LAUNCH_SPEC` environment value, hashed by the launcher BEFORE it parses them (the text is
+ * ASCII-only JSON, so the bytes are the same whatever the locale). It is the launcher's digest and
+ * phase A5 stores it on the job row. It is not the job row's `spec_digest`, which is the digest of
+ * `records/<id>/spec.json` (see {@link JobSpecSchema}).
  */
 export const LauncherProvenanceSchema = z
   .object({
     job_id: jobIdSchema,
-    spec_digest: sha256Schema,
+    launch_spec_digest: sha256Schema,
     bundle_digest: sha256Schema.nullable(),
     image: z
       .object({

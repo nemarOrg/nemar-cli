@@ -18,6 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020";
@@ -1210,7 +1211,7 @@ describe("the launcher contract", () => {
   test("provenance.json carries what the launcher recorded, from outside the container", () => {
     const doc = {
       job_id: JOB_ID,
-      spec_digest: HEX_A,
+      launch_spec_digest: HEX_A,
       bundle_digest: HEX_B,
       image: { uri: "docker://ghcr.io/example/runtime", digest: `sha256:${HEX_B}` },
       runtime_version: "3.12.3",
@@ -1229,7 +1230,7 @@ describe("the launcher contract", () => {
       }).success,
     ).toBe(true);
     for (const patch of [
-      { spec_digest: "short" },
+      { launch_spec_digest: "short" },
       { image: { uri: "x", digest: HEX_B } },
       { staging: [{ id: "nm000104", version: "1", mode: "magic", files: 1, bytes: 1 }] },
       { timings: { "Bad Phase": 1 } },
@@ -1508,6 +1509,61 @@ describe("the launch specification", () => {
     expect(message).not.toContain("matlab");
   });
 
+  test("encodeLaunchSpec writes ASCII-only JSON: every unit from U+007F up is a lowercase escape", () => {
+    const tricky = [
+      "caf\u00e9",
+      "\u007f",
+      "\u0080",
+      "\u00ff",
+      "\u2028\u2029",
+      "\uffff",
+      "\ud83d\ude00",
+      "\ud800",
+      'tab\there "quoted" back\\slash \u0001',
+      "plain ~ tilde",
+    ];
+    const text = encodeLaunchSpec(set(LAUNCH, "args", tricky));
+    expect(/^[\x20-\x7e]*$/.test(text)).toBe(true);
+    // Lowercase hex, four digits, a surrogate pair as two escapes, DEL as an escape too.
+    expect(text).toContain("caf\\u00e9");
+    expect(text).toContain("\\u007f");
+    expect(text).toContain("\\ud83d\\ude00");
+    expect(text).toContain("\\u2028\\u2029");
+    expect(text).toContain("\\uffff");
+    expect(/\\u[0-9a-f]{0,3}[A-F]/.test(text)).toBe(false);
+    // Nothing is lost: the text parses back to the same arguments.
+    expect(JSON.parse(text).args).toEqual(tricky);
+  });
+
+  test("the 64 KiB cap is checked after escaping, because a non-ASCII character costs six bytes", () => {
+    // 12 arguments of 1024 e-acute are about 12 K characters (24 KiB as UTF-8) and 72 KiB once
+    // escaped. A check on the raw text would let it through.
+    const wide = set(
+      LAUNCH,
+      "args",
+      Array.from({ length: 12 }, () => "\u00e9".repeat(1024)),
+    );
+    expect(LaunchSpecSchema.safeParse(wide).success).toBe(true);
+    expect(JSON.stringify(wide).length).toBeLessThan(LAUNCH_SPEC_MAX_BYTES);
+    expect(() => encodeLaunchSpec(wide)).toThrow(RangeError);
+    const plain = set(
+      LAUNCH,
+      "args",
+      Array.from({ length: 12 }, () => "e".repeat(1024)),
+    );
+    expect(encodeLaunchSpec(plain).length).toBeLessThan(LAUNCH_SPEC_MAX_BYTES);
+  });
+
+  test("a document of exactly 65536 bytes is accepted and one byte more is refused", () => {
+    const withTail = (m: number) =>
+      set(LAUNCH, "args", [...Array.from({ length: 63 }, () => "x".repeat(1024)), "x".repeat(m)]);
+    const m = LAUNCH_SPEC_MAX_BYTES - encodeLaunchSpec(withTail(0)).length;
+    expect(m).toBeGreaterThan(0);
+    expect(m).toBeLessThan(1024);
+    expect(encodeLaunchSpec(withTail(m)).length).toBe(LAUNCH_SPEC_MAX_BYTES);
+    expect(() => encodeLaunchSpec(withTail(m + 1))).toThrow(RangeError);
+  });
+
   test("encodeLaunchSpec refuses a document over 64 KiB", () => {
     // 64 arguments of 1024 characters are 64 KiB before any other key is counted.
     const big = set(
@@ -1517,6 +1573,49 @@ describe("the launch specification", () => {
     );
     expect(LaunchSpecSchema.safeParse(big).success).toBe(true);
     expect(() => encodeLaunchSpec(big)).toThrow(RangeError);
+  });
+});
+
+describe("the golden vector nemar-process checks its launcher against", () => {
+  // One fixed launch specification with a non-ASCII character, a double quote and a space in its
+  // arguments, the exact text encodeLaunchSpec writes for it and the SHA-256 of that text, all as
+  // literals. The launcher hashes the raw bytes of NEMAR_LAUNCH_SPEC before it parses them, so it
+  // must report GOLDEN_SHA256 for GOLDEN_TEXT and parse the text back to GOLDEN_SPEC.
+  const GOLDEN_SPEC = {
+    job_id: "job_0123456789abcdef01234567",
+    runtime: "python",
+    entry: "run.py",
+    args: ["--label", 'caf\u00e9 "q" \u{1F600}'],
+    bundle: { sha256: "a".repeat(64), size: 1234 },
+    datasets: [{ id: "nm000104", version: "1.0.2" }],
+    api_base: "https://api.example.test",
+    image: {
+      uri: `docker://ghcr.io/example/runtime@sha256:${"b".repeat(64)}`,
+      digest: `sha256:${"b".repeat(64)}`,
+      sif: "runtime.sif",
+    },
+    env: { OMP_NUM_THREADS: "4" },
+    resources: { gpus: 0 },
+    limits: { max_files: 38000, max_total_bytes: 1073741824 },
+    job_token: "t".repeat(43),
+  };
+  const GOLDEN_TEXT = String.raw`{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"runtime.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}`;
+  const GOLDEN_SHA256 = "68ef4653b8745eebf16427cd87a01e6d672b8062f8bfef819fcd1d745f0e346a";
+
+  test("encodeLaunchSpec writes exactly the golden text", () => {
+    expect(encodeLaunchSpec(GOLDEN_SPEC)).toBe(GOLDEN_TEXT);
+    expect(GOLDEN_TEXT.length).toBe(708);
+  });
+
+  test("the golden text hashes to the golden digest, and parses back to the specification", () => {
+    expect(createHash("sha256").update(GOLDEN_TEXT, "ascii").digest("hex")).toBe(GOLDEN_SHA256);
+    expect(JSON.parse(GOLDEN_TEXT)).toEqual(GOLDEN_SPEC);
+    expect(/^[\x20-\x7e]*$/.test(GOLDEN_TEXT)).toBe(true);
+    expect(validateRoot(JSON.parse(GOLDEN_TEXT))).toBe(true);
+  });
+
+  test("the text carries the three awkward characters as the schema says", () => {
+    expect(GOLDEN_TEXT).toContain(String.raw`caf\u00e9 \"q\" \ud83d\ude00`);
   });
 });
 
@@ -1801,7 +1900,7 @@ describe("the launcher's own documents in the schema's $defs", () => {
 
   const PROVENANCE = {
     job_id: JOB_ID,
-    spec_digest: HEX_A,
+    launch_spec_digest: HEX_A,
     bundle_digest: null,
     image: { uri: "docker://ghcr.io/example/runtime", digest: `sha256:${HEX_B}` },
     runtime_version: "3.12.3",
@@ -1814,8 +1913,8 @@ describe("the launcher's own documents in the schema's $defs", () => {
     ["provenance", PROVENANCE, true],
     ["a bundle digest", set(PROVENANCE, "bundle_digest", HEX_B), true],
     ["no slurm id", set(PROVENANCE, "slurm_job_id", null), true],
-    ["no spec digest", set(PROVENANCE, "spec_digest", undefined), false],
-    ["a short spec digest", set(PROVENANCE, "spec_digest", "abc"), false],
+    ["no launch spec digest", set(PROVENANCE, "launch_spec_digest", undefined), false],
+    ["a short launch spec digest", set(PROVENANCE, "launch_spec_digest", "abc"), false],
     ["an image digest with no algorithm", set(PROVENANCE, "image.digest", HEX_B), false],
     [
       "an unknown staging mode",
