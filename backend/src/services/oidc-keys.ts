@@ -267,9 +267,16 @@ export const JWKS_MEMO_TTL_MS = 30_000;
 /**
  * The key set is served without a rate limit (ADR 0119: a client that cannot fetch it cannot
  * validate a token), so the read it costs is kept for a short time per database object. A rotation
- * through this module clears the entry in the same isolate; another isolate may serve the previous
- * set for up to the window, which is harmless: a `next` key is published at least 24 hours before
- * it signs, and a retired key for seven days after.
+ * through this module (a rotation, a revocation) clears the entry in the same isolate; another
+ * isolate may serve the previous set for up to the window. That is harmless next to the five minutes
+ * a client caches the set for (`OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS`): a `next` key is published 24
+ * hours before it signs (6 minutes in a forced emergency), and a retired key for seven days after.
+ *
+ * The cache saves the read only if a Worker is handed the SAME `env.DB` object on every request of
+ * an isolate. Under workerd, the runtime of `wrangler dev` and of the dev Worker, it is, and
+ * `backend/test/oidc-jwks-memo-identity.test.ts` holds that against Miniflare. Whether the deployed edge
+ * does is unverified until the dev Worker has served traffic; if it does not, this is a no-op that
+ * costs one read per request and should move to a key the runtime keeps.
  */
 const jwksMemo = new WeakMap<object, { at: number; body: string }>();
 
