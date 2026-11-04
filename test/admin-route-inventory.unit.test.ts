@@ -93,6 +93,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // permission check lives in parseAdminUserEdit and not in a middleware.
   "GET /users/by-id/:id": 1,
   "PATCH /users/by-id/:id": 1,
+  // ADR 0119 (epic #2014 phase #2015): resolve an OpenID Connect subject to its account.
+  // ownerMiddleware plus the handler; the subject is in no other admin response.
+  "GET /users/by-oidc-subject/:sub": 2,
 
   // DOI / enrichment
   "POST /datasets/:id/doi/concept": 2,
@@ -309,7 +312,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(200);
+    expect(adminRoutes.routes.length).toBe(202);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

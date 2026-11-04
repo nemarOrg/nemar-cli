@@ -106,12 +106,14 @@ import {
   usernameClaimStatement,
 } from "../services/username-assignment";
 import {
-  buildClearedSessionCookie,
-  buildSessionCookie,
+  SESSION_COOKIE_NAME,
+  allSessionCookieValues,
+  hostPrefixedSessionCookie,
   isAllowedOrigin,
   maybeSlideExpiry,
   prepareSessionInsert,
   revokeSessionStatement,
+  sessionCookieHeaders,
   userIdForCookieId,
 } from "../services/web-session";
 import { type Bindings, type UserRole, type Variables, parseRole } from "../types/bindings";
@@ -713,11 +715,12 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       });
     }
 
-    const cookie = buildSessionCookie(prepared.cookieIdRaw, {
-      domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
+    for (const cookie of sessionCookieHeaders(c.env, prepared.cookieIdRaw, {
       maxAgeSeconds: prepared.maxAgeSeconds,
-    });
-    c.header("Set-Cookie", cookie);
+      cookieHeader: c.req.header("Cookie"),
+    })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
 
     return c.json({ user: publicUser(user) });
   } catch (err) {
@@ -738,11 +741,21 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     return c.json({ error: "Origin not allowed" }, 403);
   }
 
-  const cookieIdRaw = c.var.webSessionCookieId ?? null;
+  // The session behind EVERY session cookie the request carries, under either name, so signing
+  // out ends each session the browser could present (a request can hold a `__Host-` cookie and a
+  // legacy one for different sessions during the window).
+  const cookieIds = allSessionCookieValues(c.req.header("Cookie"));
 
-  // WHOSE ACCOUNT THIS IS, RESOLVED BEFORE ANYTHING IS REVOKED.
+  // WHOSE ACCOUNTS THESE ARE, RESOLVED BEFORE ANYTHING IS REVOKED, EVERY ONE OF THEM.
   //
-  // Not from `webUser`, because that exists only while the app session is live:
+  // Each carried cookie can belong to a different account, and the app session behind each is
+  // revoked below, so the docs and private-site sessions and grants of EACH account have to end
+  // with it. Following only one account (the first that resolved) leaves the others' app sessions
+  // revoked and the rest of their credentials live, the half-done state the rule that revocation
+  // cascades to every linked credential forbids. A value that names no account is skipped and the
+  // others still cascade; an account named twice is revoked once.
+  //
+  // Not from `webUser` alone, because that exists only while the app session is live:
   // a docs session runs eight hours from its mint and a non-remember app session
   // 24 hours from sign-in, so the windows do not nest, and review found sign-out
   // with a lapsed app cookie answering `ok`, clearing the cookie, and leaving
@@ -751,10 +764,12 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // And before the revoke, because `userIdForCookieId` keeps `revoked_at IS
   // NULL` -- so that a cookie value which has already been signed out confers
   // nothing, including the power to revoke somebody's later session.
-  let userId = c.var.webUser?.id ?? null;
-  if (!userId) {
+  const userIds = new Set<number>();
+  if (c.var.webUser?.id) userIds.add(c.var.webUser.id);
+  for (const id of cookieIds) {
     try {
-      userId = await userIdForCookieId(c.env, cookieIdRaw);
+      const resolved = await userIdForCookieId(c.env, id);
+      if (resolved) userIds.add(resolved);
     } catch (err) {
       console.error("[auth-web] /logout: could not resolve account for docs revoke", err);
     }
@@ -784,8 +799,8 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // cleared client-side either way.
   try {
     const statements = [];
-    if (cookieIdRaw) statements.push(await revokeSessionStatement(c.env, cookieIdRaw));
-    if (userId) {
+    for (const id of cookieIds) statements.push(await revokeSessionStatement(c.env, id));
+    for (const userId of userIds) {
       statements.push(c.env.DB.prepare(DOCS_REVOKE_ALL_SQL).bind(userId));
       // Outstanding GRANTS die too, not just live sessions. A grant is spendable
       // for 60 seconds by whoever holds the code, and the mint deliberately
@@ -806,14 +821,22 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     if (statements.length > 0) await c.env.DB.batch(statements);
   } catch (err) {
     // The account id is what an operator needs to finish the job by hand:
-    // the batch is all-or-nothing, so nothing of it landed.
-    console.error(
-      `[auth-web] /logout: revoke failed for user ${userId ?? "unresolved"}; clearing cookie anyway`,
-      err,
-    );
+    // the batch is all-or-nothing, so nothing of it landed. One account reads
+    // `user <id>`, as it always did; several read `users <id>, <id>`.
+    const ids = [...userIds];
+    const whose =
+      ids.length === 0
+        ? "user unresolved"
+        : `${ids.length === 1 ? "user" : "users"} ${ids.join(", ")}`;
+    console.error(`[auth-web] /logout: revoke failed for ${whose}; clearing cookie anyway`, err);
   }
 
-  c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));
+  for (const cookie of sessionCookieHeaders(c.env, "", {
+    maxAgeSeconds: 0,
+    cookieHeader: c.req.header("Cookie"),
+  })) {
+    c.header("Set-Cookie", cookie, { append: true });
+  }
   return c.json({ ok: true });
 });
 
@@ -832,14 +855,19 @@ authWebRoutes.get("/me", webSessionMiddleware, async (c) => {
   // dropped below the refresh threshold. Re-issues Set-Cookie only
   // when the wall-clock actually moves.
   const slid = await maybeSlideExpiry(c.env, session);
-  if (slid && c.var.webSessionCookieId) {
-    c.header(
-      "Set-Cookie",
-      buildSessionCookie(c.var.webSessionCookieId, {
-        domain: c.env.WEB_SESSION_COOKIE_DOMAIN || undefined,
-        maxAgeSeconds: slid.maxAgeSeconds,
-      }),
-    );
+  // A `__Host-` cookie is minted only by a sign-in. With the flag on, a session that was read
+  // under the LEGACY name gets no new cookie here: re-issuing it would turn a value that arrived
+  // on the cookie a sibling host can set into the cookie a sibling host cannot, and keep it.
+  // With the flag off the slide is what it always was, the legacy cookie re-issued unchanged.
+  const mayReissue =
+    !hostPrefixedSessionCookie(c.env) || c.var.webSessionCookieName === SESSION_COOKIE_NAME;
+  if (slid && c.var.webSessionCookieId && mayReissue) {
+    for (const cookie of sessionCookieHeaders(c.env, c.var.webSessionCookieId, {
+      maxAgeSeconds: slid.maxAgeSeconds,
+      cookieHeader: c.req.header("Cookie"),
+    })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
   }
 
   return c.json({ user: publicUser(webUser) });
@@ -885,7 +913,7 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
  * given_name / family_name — see profile.ts for the per-field rules.
  *
  * Two credentials, ONE handler (#1266, ADR 0044): the dashboard's
- * `nemar_session` cookie or the CLI's bearer token, resolved by
+ * session cookie or the CLI's bearer token, resolved by
  * `resolveActingAccount`. Every rule and every refusal below is reached
  * identically by both, which is the point — a forked CLI copy is how the two
  * surfaces drift on what "your username is locked" means.
@@ -1944,7 +1972,7 @@ authWebRoutes.post(
  * otherwise see, so it is logged as well as reported.
  *
  * Accepts either credential `resolveActingAccount` accepts (#1266, ADR 0044)
- * -- the dashboard's `nemar_session` cookie, or the CLI's bearer token, added
+ * -- the dashboard's session cookie, or the CLI's bearer token, added
  * in epic #1272 phase 3 so `nemar auth signup`'s guided completion can offer
  * the same default a brand-new ORCID account sees on the website. That
  * widens what was "no Origin check, same as GET /auth/me" to the family's

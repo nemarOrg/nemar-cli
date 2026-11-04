@@ -147,7 +147,8 @@ export const PRIVATE_REVOKE_ONE_SQL = `UPDATE web_sessions
  * Revoke every private session belonging to one account. Binds: userId.
  *
  * ONE CALLER: `/auth/logout`, in the same `db.batch` as the app-session revoke
- * and the docs cascade. Signing out of nemar.org signs the account out of the
+ * and the docs cascade, once for EACH distinct account behind every session
+ * cookie the request carries (under either name), so one caller still. Signing out of nemar.org signs the account out of the
  * private site too; that host's cookie cannot be cleared from here, so revoking
  * the rows is what makes its next request refuse.
  *
@@ -181,7 +182,8 @@ export const PRIVATE_REVOKE_ALL_SQL = `UPDATE web_sessions
  * create access, not only the sessions that exist.
  *
  * THREE CALLERS, and the count is the point: every path that ends this
- * account's credentials runs this statement -- `/auth/logout`,
+ * account's credentials runs this statement -- `/auth/logout` (once per distinct
+ * account behind every session cookie the request carries, still one caller),
  * `finalizeRevocation` (admin revoke, by username and by id) and the
  * tombstone cascade (`tombstoneUserCascade`, the one function both the
  * owner-only soft delete and the scheduled sweep of live-test accounts run, so

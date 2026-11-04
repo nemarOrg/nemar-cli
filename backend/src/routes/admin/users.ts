@@ -18,6 +18,7 @@ import {
   type AccountKind,
   accountKindSchema,
 } from "../../../../shared/contract/user.js";
+import { isOidcSubject } from "../../../../shared/oidc-subject.js";
 import { ownerMiddleware } from "../../middleware/auth";
 
 import { auditLogStatement } from "../../db/audit-log";
@@ -47,6 +48,7 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
+import { holderOfOidcSubject } from "../../services/oidc-subject";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
 import { mailReleaseStatements } from "../../services/ticket-assignment";
@@ -987,6 +989,36 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       ),
     );
     return c.json({ users: close, count: close.length });
+  });
+
+  /**
+   * GET /admin/users/by-oidc-subject/:sub - the account that holds an OpenID Connect subject.
+   * Owner only (ADR 0119, decision 5).
+   *
+   * The subject is the name a partner stores for an account, so the one thing an owner needs
+   * from it is the reverse: a partner reports a `sub`, the owner learns which account it is. It
+   * answers an id and whether the account is deleted, and nothing else about the person; the
+   * owner follows the id with `GET /admin/users/by-id/:id`. A deleted account still resolves,
+   * because its tombstone keeps the subject and a subject is never reused.
+   *
+   * Every other admin surface leaves the subject out (`USER_COLUMN_ROLES` classifies it `secret`),
+   * so this is the only place it is ever an input and no place it is an output. A value that is
+   * not the subject format is 400 and never reaches the database.
+   */
+  admin.get("/users/by-oidc-subject/:sub", ownerMiddleware, async (c) => {
+    const sub = c.req.param("sub");
+    if (!isOidcSubject(sub)) {
+      return c.json(
+        {
+          error: "invalid_subject",
+          message: "That is not an OpenID Connect subject (nmu_ and 32 lowercase hex characters).",
+        },
+        400,
+      );
+    }
+    const holder = await holderOfOidcSubject(c.env.DB, sub);
+    if (!holder) return c.json({ error: "subject_not_found" }, 404);
+    return c.json(holder);
   });
 
   /**

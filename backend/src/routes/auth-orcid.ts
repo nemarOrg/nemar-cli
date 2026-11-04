@@ -52,8 +52,17 @@
  *
  * Host/cookie model: these routes run on api.nemar.org but the browser reaches
  * them through the app.nemar.org same-origin proxy (like /auth/code/*), which
- * mirrors our Set-Cookie. Cookies therefore carry Domain=WEB_SESSION_COOKIE_DOMAIN
- * (app.nemar.org in prod) and the OAuth redirect_uri points at the app host.
+ * mirrors our Set-Cookie, and the OAuth redirect_uri points at the app host.
+ * Every cookie that can authenticate or link a session is host-only and
+ * `__Host-` prefixed, because a page on a sibling host can set a cookie for the
+ * parent domain and cannot set a `__Host-` one (ADR 0119 decision 10): the state
+ * cookie (`__Host-nemar_oauth_state`) and the pending-signup cookie
+ * (`__Host-nemar_orcid_pending`) carry NO Domain, and the two session issuances
+ * (the callback's sign-in and finalize's sign-up) go through `sessionCookieHeaders`.
+ * The old state and pending names are only CLEARED (with and without
+ * Domain=WEB_SESSION_COOKIE_DOMAIN, app.nemar.org in prod), never read. On a
+ * plain-http loopback request (local development) the old unprefixed names are
+ * kept, see `oauthCookies` in services/orcid-auth.ts.
  */
 
 import { zValidator } from "@hono/zod-validator";
@@ -83,11 +92,9 @@ import {
   type CliOauthState,
   type OauthMode,
   type OauthState,
-  PENDING_COOKIE_NAME,
   RELINK_DELETE_IDENTITY_SQL,
   RELINK_INSERT_IDENTITY_SQL,
   RELINK_UPDATE_USER_SQL,
-  STATE_COOKIE_NAME,
   buildAuthorizeUrl,
   decideLinkOutcome,
   decideSecondOrcidOutcome,
@@ -98,6 +105,7 @@ import {
   fetchOrcidName,
   generateCsrf,
   getOrcidConfig,
+  oauthCookies,
   orcidPubBase,
   relinkParams,
   safeNextPath,
@@ -109,11 +117,11 @@ import {
 import { profileRefusal } from "../services/profile";
 import { type UsernameAssignmentSource, autoAssignUsername } from "../services/username-assignment";
 import {
-  buildSessionCookie,
   clientIp,
   isAllowedOrigin,
   issueSession,
   parseCookieHeader,
+  sessionCookieHeaders,
 } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -140,22 +148,6 @@ const finalizeSchema = z.object({
 
 function cookieDomain(env: Bindings): string | undefined {
   return env.WEB_SESSION_COOKIE_DOMAIN || undefined;
-}
-
-interface CookieOpts {
-  domain?: string;
-  maxAgeSeconds?: number;
-}
-
-function buildCookie(name: string, value: string, opts: CookieOpts = {}): string {
-  const parts = [`${name}=${value}`, "HttpOnly", "Secure", "SameSite=Lax", "Path=/"];
-  if (opts.domain) parts.push(`Domain=${opts.domain}`);
-  if (typeof opts.maxAgeSeconds === "number") parts.push(`Max-Age=${opts.maxAgeSeconds}`);
-  return parts.join("; ");
-}
-
-function clearCookie(name: string, domain: string | undefined): string {
-  return buildCookie(name, "", { domain, maxAgeSeconds: 0 });
 }
 
 function redirect(location: string, cookies: string[] = []): Response {
@@ -337,7 +329,11 @@ function claimedByAnother(err: unknown): boolean {
 // ------------------------------- routes --------------------------------
 
 /** Shared start body: mint the CSRF state cookie, bounce to ORCID authorize. */
-function startOrcidFlow(c: { env: Bindings }, mode: OauthMode, next: string): Response {
+function startOrcidFlow(
+  c: { env: Bindings; req: { url: string } },
+  mode: OauthMode,
+  next: string,
+): Response {
   const frontend = appBase(c.env);
   const config = getOrcidConfig(c.env);
   if (!config) {
@@ -345,10 +341,10 @@ function startOrcidFlow(c: { env: Bindings }, mode: OauthMode, next: string): Re
   }
 
   const csrf = generateCsrf();
-  const stateCookie = buildCookie(STATE_COOKIE_NAME, encodeState({ csrf, mode, next }), {
-    domain: cookieDomain(c.env),
-    maxAgeSeconds: STATE_TTL_SECONDS,
-  });
+  const stateCookie = oauthCookies(c.req.url, cookieDomain(c.env)).state(
+    encodeState({ csrf, mode, next }),
+    STATE_TTL_SECONDS,
+  );
   const authorizeUrl = buildAuthorizeUrl({
     config,
     redirectUri: `${frontend}/auth/orcid/callback`,
@@ -746,10 +742,10 @@ authOrcidRoutes.post("/orcid/cli-handoff/continue", webSessionMiddleware, async 
   const config = getOrcidConfig(c.env);
   if (!config) return redirect(`${frontend}/login?error=orcid_unavailable`);
 
-  const stateCookie = buildCookie(STATE_COOKIE_NAME, token, {
-    domain: cookieDomain(c.env),
-    maxAgeSeconds: Math.floor(CLI_STATE_TTL_MS / 1000),
-  });
+  const stateCookie = oauthCookies(c.req.url, cookieDomain(c.env)).state(
+    token,
+    Math.floor(CLI_STATE_TTL_MS / 1000),
+  );
   const authorizeUrl = buildAuthorizeUrl({
     config,
     redirectUri: `${frontend}/auth/orcid/callback`,
@@ -760,13 +756,13 @@ authOrcidRoutes.post("/orcid/cli-handoff/continue", webSessionMiddleware, async 
 
 authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
   const frontend = appBase(c.env);
-  const domain = cookieDomain(c.env);
-  const clearState = clearCookie(STATE_COOKIE_NAME, domain);
+  const oauth = oauthCookies(c.req.url, cookieDomain(c.env));
+  const clearState = oauth.clearState();
   const url = new URL(c.req.url);
 
   const fail = (reason: string, next = "/login"): Response => {
     const sep = next.includes("?") ? "&" : "?";
-    return redirect(`${frontend}${next}${sep}error=${reason}`, [clearState]);
+    return redirect(`${frontend}${next}${sep}error=${reason}`, clearState);
   };
 
   if (url.searchParams.get("error")) return fail("orcid_denied");
@@ -778,7 +774,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
   // cookie from linking an iD to somebody else's row. Everything downstream —
   // the csrf compare, the mode, the landing path — reads the same three
   // fields either way.
-  const stateCookieRaw = parseCookieHeader(c.req.header("Cookie"), STATE_COOKIE_NAME);
+  const stateCookieRaw = parseCookieHeader(c.req.header("Cookie"), oauth.stateName);
   const cliState = c.env.ENCRYPTION_KEY
     ? await verifyCliState(stateCookieRaw, c.env.ENCRYPTION_KEY, Date.now())
     : null;
@@ -855,7 +851,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       if (outcome === "already_linked") {
         await touchIdentityLogin(c.env, orcid);
         afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
-        return redirect(`${frontend}${state.next}`, [clearState]);
+        return redirect(`${frontend}${state.next}`, clearState);
       }
       // link_new says only that no oauth_identities row claims the iD. That
       // is not the same as unclaimed (#1254, ADR 0043): a row whose identity
@@ -885,7 +881,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
           throw err;
         }
         afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
-        return redirect(`${frontend}${state.next}`, [clearState]);
+        return redirect(`${frontend}${state.next}`, clearState);
       }
       try {
         await linkIdentity(c.env, actingUserId, orcid, name);
@@ -894,7 +890,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
         throw err;
       }
       afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
-      return redirect(`${frontend}${state.next}`, [clearState]);
+      return redirect(`${frontend}${state.next}`, clearState);
     }
 
     // No session, but a relink intent in the state: the session that minted
@@ -921,9 +917,12 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       );
       await touchIdentityLogin(c.env, orcid);
       afterResponse(c, refreshNameThenAssignUsername(c.env, user.id, orcid, "orcid_signin"));
-      const session = buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds });
+      const session = sessionCookieHeaders(c.env, cookieIdRaw, {
+        maxAgeSeconds,
+        cookieHeader: c.req.header("Cookie"),
+      });
       const next = state.next !== "/" ? state.next : "/dashboard";
-      return redirect(`${frontend}${next}`, [clearState, session]);
+      return redirect(`${frontend}${next}`, [...clearState, ...session]);
     }
 
     if (!c.env.ENCRYPTION_KEY) {
@@ -934,10 +933,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       { orcid, name, exp: Date.now() + PENDING_TTL_MS },
       c.env.ENCRYPTION_KEY,
     );
-    const pendingCookie = buildCookie(PENDING_COOKIE_NAME, pending, {
-      domain,
-      maxAgeSeconds: Math.floor(PENDING_TTL_MS / 1000),
-    });
+    const pendingCookie = oauth.pending(pending, Math.floor(PENDING_TTL_MS / 1000));
     // Hand off to the email-collection page. It lives under /auth (an app-host
     // route) so the Domain=app.nemar.org pending cookie is actually sent to it;
     // the public /signup page is not app-scoped. See website#128.
@@ -955,7 +951,7 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
       state.next !== "/"
         ? `${frontend}/auth/orcid/complete?next=${encodeURIComponent(state.next)}`
         : `${frontend}/auth/orcid/complete`;
-    return redirect(completeUrl, [clearState, pendingCookie]);
+    return redirect(completeUrl, [...clearState, pendingCookie]);
   } catch (err) {
     console.error("[auth-orcid] callback failed after token exchange", err);
     // Carry state.next so an authenticated user who started from Settings
@@ -973,14 +969,16 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     return c.json({ error: "ORCID sign-up unavailable" }, 503);
   }
 
-  const domain = cookieDomain(c.env);
-  const clearPending = clearCookie(PENDING_COOKIE_NAME, domain);
+  const oauth = oauthCookies(c.req.url, cookieDomain(c.env));
+  const clearPending = () => {
+    for (const ck of oauth.clearPending()) c.header("Set-Cookie", ck, { append: true });
+  };
 
   try {
-    const pendingRaw = parseCookieHeader(c.req.header("Cookie"), PENDING_COOKIE_NAME);
+    const pendingRaw = parseCookieHeader(c.req.header("Cookie"), oauth.pendingName);
     const pending = await verifyPending(pendingRaw, c.env.ENCRYPTION_KEY, Date.now());
     if (!pending) {
-      c.header("Set-Cookie", clearPending);
+      clearPending();
       return c.json({ error: "orcid_pending_expired" }, 401);
     }
 
@@ -997,7 +995,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     const orcid = normalizeOrcid(pending.orcid);
     if (!orcid) {
       console.error(`[auth-orcid] finalize: pending token carried a malformed iD ${pending.orcid}`);
-      c.header("Set-Cookie", clearPending);
+      clearPending();
       return c.json({ error: "orcid_pending_expired" }, 401);
     }
 
@@ -1027,7 +1025,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
         .bind(orcid)
         .first<{ user_id: number }>();
       const code = identExists ? "orcid_already_linked" : "orcid_in_use";
-      c.header("Set-Cookie", clearPending);
+      clearPending();
       return c.json({ error: code, ...identityRefusal(code) }, 409);
     }
 
@@ -1060,11 +1058,11 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
         .run();
     } catch (insertErr) {
       if (isUniqueViolationOn(insertErr, "email")) {
-        c.header("Set-Cookie", clearPending);
+        clearPending();
         return c.json({ error: "email_in_use", ...identityRefusal("email_in_use") }, 409);
       }
       if (isUniqueViolationOn(insertErr, "orcid")) {
-        c.header("Set-Cookie", clearPending);
+        clearPending();
         return c.json({ error: "orcid_in_use", ...identityRefusal("orcid_in_use") }, 409);
       }
       throw insertErr;
@@ -1097,7 +1095,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
         .catch((delErr) =>
           console.error("[auth-orcid] finalize: failed to roll back orphan user", delErr),
         );
-      c.header("Set-Cookie", clearPending);
+      clearPending();
 
       // ONLY the identity UNIQUE means somebody else claimed the iD. Reporting
       // `orcid_already_linked` for any failure -- a D1 outage, a schema error
@@ -1127,10 +1125,13 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
       clientIp(c),
       "orcid",
     );
-    c.header("Set-Cookie", clearPending);
-    c.header("Set-Cookie", buildSessionCookie(cookieIdRaw, { domain, maxAgeSeconds }), {
-      append: true,
-    });
+    clearPending();
+    for (const cookie of sessionCookieHeaders(c.env, cookieIdRaw, {
+      maxAgeSeconds,
+      cookieHeader: c.req.header("Cookie"),
+    })) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
     // Canonical name from ORCID, after the response (best-effort; never blocks
     // signup), and then the username derived from it (#1268, ADR 0045): the
     // INSERT above leaves `username` NULL by design, and onboarding is where
@@ -1175,7 +1176,7 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
     return c.json(body);
   } catch (err) {
     console.error("[auth-orcid] finalize failed", err);
-    c.header("Set-Cookie", clearPending);
+    clearPending();
     return c.json({ error: "Sign-up failed" }, 500);
   }
 });

@@ -99,8 +99,9 @@ Those live in the gated docs page `admin/design/compute-gateway` and in secrets.
   A network call (a Tapis cancel) never runs inside the batch; record intent in the batch and let a retried sweep do the call, as the GitHub collaborator sweep does.
   `services/test-account-sweep.ts` has its own clear list.
 - **Keys have no scopes.** A NEMAR API key carries its user's full authority. OIDC access tokens must be refused by every existing route.
-- **CORS and cookie trust.** `isNemarWebOrigin` (`services/cors-origins.ts`) and `isAllowedOrigin` (`services/web-session.ts`, several call sites) both trust `*.nemar.org`.
-  The session cookie is `nemar_session`, `Domain=app.nemar.org`, `SameSite=Lax` (`routes/auth-orcid.ts`), without a `__Host-` prefix.
+- **CORS and cookie trust.** `isNemarWebOrigin` (`services/cors-origins.ts`) and `isAllowedOrigin` (`services/web-session.ts`, several call sites) trust `*.nemar.org` except a partner host (`shared/partner-hosts.ts`, ADR 0119): `compute.nemar.org` reaches NEMAR only through OIDC and bearer tokens.
+  The session cookie is written by `sessionCookieHeaders` and read by `readSessionCookie` (both in `services/web-session.ts`, the only readers and writers): `nemar_session` (with `Domain=app.nemar.org` where `WEB_SESSION_COOKIE_DOMAIN` is set, which staging leaves empty) until `HOST_PREFIXED_SESSION_COOKIE` is `"1"`, then `__Host-nemar_session` (host-only, no `Domain`) with the legacy name still read.
+  Every account has an opaque `users.oidc_subject` (`nmu_` plus 32 lowercase hex, migration 0120) that is on no existing response; `USER_COLUMN_ROLES` classifies it `secret` and `GET /admin/users/by-oidc-subject/:sub` (owner only) is the only way to resolve one.
 - **Handoff precedents.** Docs (ADR 0056) and private site (ADR 0079): a 60-second hashed code, single use by a DELETE gated on the row, a `state` cookie against login CSRF (ADR 0079 decision 3), RPC exchange for same-account Workers (ADR 0078).
 
 ## 4. Tests

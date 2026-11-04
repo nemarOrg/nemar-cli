@@ -4,8 +4,9 @@
  * Validates API keys from Authorization header and sets user context.
  *
  * The bearer-token path is the CLI's authentication mechanism and remains
- * unchanged. As of #572 the same middleware ALSO accepts the
- * `nemar_session` cookie issued by the passwordless flow (#569) so the
+ * unchanged. As of #572 the same middleware ALSO accepts the session
+ * cookie (`__Host-nemar_session`, or the legacy `nemar_session`: see
+ * `readSessionCookie`) issued by the passwordless flow (#569) so the
  * dashboard at app.nemar.org can call the user-scoped /datasets, /users
  * and /admin routes without a separate API token. Bearer wins when both
  * are present.
@@ -20,12 +21,7 @@ import {
   isActiveAccountStatus,
 } from "../services/account-tier";
 import { hashApiKey } from "../services/token";
-import {
-  COOKIE_NAME,
-  hashCookieId,
-  isAllowedOrigin,
-  parseCookieHeader,
-} from "../services/web-session";
+import { hashCookieId, isAllowedOrigin, readSessionCookie } from "../services/web-session";
 import {
   type AuthUser,
   type Bindings,
@@ -37,7 +33,7 @@ import {
 type AuthContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
 /**
- * The three things a `nemar_session` cookie can mean. A bare `null` used to
+ * The three things a session cookie can mean. A bare `null` used to
  * cover all of them, which made a signed-in user whose account is not active
  * indistinguishable from a browser carrying no cookie at all: `authMiddleware`
  * answered "Missing Authorization header", which is both untrue and
@@ -55,7 +51,7 @@ type CookieAuthResult =
   | { kind: "inactive"; status: string };
 
 /**
- * Resolve a `nemar_session` cookie to a full AuthUser row.
+ * Resolve the session cookie (either name, through `readSessionCookie`) to a full AuthUser row.
  *
  * The `user` shape mirrors the bearer-token lookup so downstream routes can
  * `c.get("user")` without caring which auth path succeeded.
@@ -70,14 +66,14 @@ type CookieAuthResult =
  */
 async function resolveCookieUser(c: AuthContext): Promise<CookieAuthResult> {
   const cookieHeader = c.req.header("Cookie");
-  const cookieIdRaw = parseCookieHeader(cookieHeader, COOKIE_NAME);
+  const cookieIdRaw = readSessionCookie(cookieHeader)?.value;
   if (!cookieIdRaw) return { kind: "unresolved" };
 
   // Wrap the D1 lookup in a try/catch so a transient backend failure
   // degrades to "no cookie auth" instead of bubbling a 500 through
   // `api.onError`. Without this, a brief D1 hiccup turns
   // `GET /datasets` into a 500 for every browser that happens to be
-  // carrying a `nemar_session` cookie — even though the route has a
+  // carrying a session cookie — even though the route has a
   // valid anonymous branch. Mirrors `webSessionMiddleware`.
   try {
     const cookieHash = await hashCookieId(cookieIdRaw);
@@ -375,11 +371,12 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
 
 /**
  * Middleware to require authentication via either a bearer API token or
- * the web-dashboard `nemar_session` cookie (#572).
+ * the web-dashboard session cookie (#572).
  *
  * Resolution order:
  *  1. `Authorization: Bearer <api_key>` — CLI path, unchanged.
- *  2. `Cookie: nemar_session=…` — dashboard path, added for #572.
+ *  2. `Cookie: __Host-nemar_session=…` (or the legacy `nemar_session=…`): the dashboard
+ *     path, added for #572.
  *  3. Neither resolves -> 401 with the same shape we returned before
  *     cookies existed.
  *
@@ -400,7 +397,7 @@ export async function authMiddleware(c: AuthContext, next: Next) {
   }
 
   // -------------------------------------------------------------------
-  // Path 2: nemar_session cookie (#572)
+  // Path 2: session cookie (#572)
   // -------------------------------------------------------------------
   const cookieAuth = await resolveCookieUser(c);
   if (cookieAuth.kind === "user") {
@@ -447,7 +444,7 @@ export type ActingAccountResolution =
 
 /**
  * Resolve the account acting on a route that accepts EITHER the CLI's bearer
- * token or the dashboard's `nemar_session` cookie (#1266, ADR 0044).
+ * token or the dashboard's session cookie (#1266, ADR 0044).
  *
  * Deliberately NOT `authMiddleware` mounted on these routes, for one reason
  * that only shows up on the cookie half: `authMiddleware`'s cookie path
@@ -602,7 +599,7 @@ export async function ownerMiddleware(c: AuthContext, next: Next) {
  * — which is indistinguishable from "no header sent" to a confused CLI user
  * who thinks they're logged in (see nemarOrg/nemar-cli#447).
  *
- * As of #572 this also resolves the `nemar_session` cookie when no
+ * As of #572 this also resolves the session cookie when no
  * bearer header is present. A failing cookie does NOT trip
  * `authAttempted` — the cookie is opaque to the dashboard user and
  * there's no actionable error to surface; routes simply fall back to
