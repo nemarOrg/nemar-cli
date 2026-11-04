@@ -255,9 +255,10 @@ function isPoolOf(pool: PoolRow, holder: Holder, word: ComputePool): boolean {
 /**
  * The pool a write is about, or the refusal: an account's is made on its first grant (`create`), a
  * platform's must exist. A deleted account is not granted to, but its pools are found to be
- * corrected. `prior` is the pool of an earlier entry that holds this request's key: when it is the
- * pool asked for, nothing is made; when it is not, the key is reused for another request, and
- * nothing is made either.
+ * corrected. `prior` is the pool of an earlier entry that holds this request's key: for an account,
+ * when it is the pool asked for nothing is made, and when it is not the key is reused for another
+ * request and nothing is made either (a platform pool is never made, so there the ledger's own
+ * comparison of the request answers).
  */
 async function targetPool(
   c: Ctx,
@@ -278,11 +279,7 @@ async function targetPool(
   }
   // Only the platform's own budgets are there to find; nothing here makes one.
   const pool = isComputePlatformKey(holder.key) ? await platformPool(db, holder.key, word) : null;
-  if (!pool) return refuse(c, "pool_not_found");
-  if (prior !== undefined && prior !== null && !isPoolOf(prior, holder, word)) {
-    return refuse(c, "idempotency_conflict");
-  }
-  return pool;
+  return pool ?? refuse(c, "pool_not_found");
 }
 
 async function grantRoute(c: Ctx, holder: Holder) {
