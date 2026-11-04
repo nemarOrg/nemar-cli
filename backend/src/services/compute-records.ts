@@ -46,6 +46,7 @@
  *    `CopyObject` each, so it is bounded at `PARTNER_FILES_MAX` files whatever the owner's limit.
  */
 
+import type { ComputeState } from "../../../shared/compute-state.js";
 import {
   COMPUTE_DOT_SEGMENT_RE,
   COMPUTE_JOB_ID_RE,
@@ -54,6 +55,7 @@ import {
   type JobSpec,
   JobSpecSchema,
   RECORDS_RESULT_MANIFEST_FILE,
+  computeIsWellFormed,
   isSafeComputePath,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
@@ -63,10 +65,12 @@ import {
   COMPUTE_BUNDLE_READ_SECONDS,
   COMPUTE_RECORD_READ_SECONDS,
   COMPUTE_UPLOAD_SECONDS,
+  COPY_OBJECT_MAX_BYTES,
   type ComputeS3,
   type ComputeS3Env,
   computeS3,
   copyObject,
+  objectKeyProblem,
   presignGet,
   presignPut,
 } from "./compute-s3.js";
@@ -116,23 +120,39 @@ const hasControlCharacter = (text: string): boolean => {
 };
 
 /**
+ * Percent-decode every run of valid `%XX` escapes in a text and leave everything else as it is, so a
+ * stray `%` (`100%.txt`, `%2e%2e/%`) never stops the escapes around it from being read. A run is
+ * decoded byte by byte (an invalid byte becomes U+FFFD, which is no path separator, dot or control
+ * character), so it cannot fail the way `decodeURIComponent` of the whole text does at its first
+ * malformed escape.
+ */
+function decodeEscapes(text: string): string {
+  return text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    const bytes = new Uint8Array(run.length / 3);
+    for (let i = 0; i < bytes.length; i++)
+      bytes[i] = Number.parseInt(run.slice(i * 3 + 1, i * 3 + 3), 16);
+    return new TextDecoder().decode(bytes);
+  });
+}
+
+/**
  * Why a submitted file's path may not be used, or null. The contract's own predicate first (no empty,
  * `.` or `..` segment, no backslash or control character, at most 512 characters), and then what a
  * single or double percent-decoding of it would be: a traversal in a form a later reader might decode
- * (`%2e%2e`, `%252e%252e`, `%2f..%2f`) is refused as a traversal, while a `%` that does not decode
- * (`100%.txt`) is just a name. The refusals are fixed words and hold no part of the path.
+ * (`%2e%2e`, `%252e%252e`, `%2f..%2f`) is refused as a traversal, even beside a stray `%`
+ * (`%2e%2e/%`), while a `%` that does not decode (`100%.txt`) is just a name. The refusals are fixed
+ * words and hold no part of the path.
+ *
+ * This is the rule for a name. It is NOT the rule for a key: 512 characters can be 1,536 bytes, and a
+ * lone surrogate cannot be encoded at all, so a caller that builds a key from the path also asks
+ * `filePathProblem`.
  */
 export function submittedPathProblem(path: unknown): string | null {
   if (typeof path !== "string" || path.length === 0) return "empty";
   if (!isSafeComputePath(path, PATH_MAX)) return "unsafe";
   let current = path;
   for (let layer = 0; layer < 2; layer++) {
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(current);
-    } catch {
-      break;
-    }
+    const decoded = decodeEscapes(current);
     if (decoded === current) break;
     if (
       decoded.startsWith("/") ||
@@ -144,6 +164,25 @@ export function submittedPathProblem(path: unknown): string | null {
     }
     current = decoded;
   }
+  return null;
+}
+
+/**
+ * Why a path that passes `submittedPathProblem` still cannot be the tail of this job's keys, or null:
+ * a lone surrogate (no text, and `encodeURIComponent` throws on it) or a key over the 1,024 bytes a
+ * key may be, checked for BOTH keys the path becomes, `incoming/<id>/<path>` and
+ * `records/<id>/submitted/<path>` (the second is 9 characters longer). The callers that build a key
+ * ask this before they sign anything and answer the path, not a signing error.
+ */
+export function filePathProblem(jobId: string, path: string): string | null {
+  const named = submittedPathProblem(path);
+  if (named !== null) return named;
+  if (!computeIsWellFormed(path)) return "not_text";
+  // `incoming/<id>/` is shorter than `records/<id>/submitted/`, so the second check implies the first
+  // for the length; both are asked because both are keys this path becomes, and so that a later change
+  // to either prefix cannot silently loosen the rule.
+  if (objectKeyProblem(incomingKey(jobId, path)) !== null) return "key_invalid";
+  if (objectKeyProblem(submittedKey(jobId, path)) !== null) return "key_invalid";
   return null;
 }
 
@@ -343,7 +382,7 @@ export const JOB_RECORDS_SQL = `SELECT id, source, state, account_id, records_wr
 interface JobRecordsRow {
   id: string;
   source: string;
-  state: string;
+  state: ComputeState;
   account_id: number | null;
   records_written_at: string | null;
 }
@@ -353,7 +392,7 @@ export const RECORDS_WRITTEN_SQL = `UPDATE compute_jobs SET records_written_at =
   WHERE id = ?1 AND records_written_at IS NULL`;
 
 /** The states in which a job's upload may still be asked for and finalized: it has not started. */
-const UPLOAD_STATES: readonly string[] = ["created", "uploading"];
+const UPLOAD_STATES: readonly ComputeState[] = ["created", "uploading"];
 
 async function jobRow(env: ComputeRecordsEnv, jobId: string): Promise<JobRecordsRow | null> {
   return env.DB.prepare(JOB_RECORDS_SQL).bind(jobId).first<JobRecordsRow>();
@@ -377,6 +416,25 @@ interface BundleLimits {
 type FilesCheck = { ok: true; files: DeclaredFile[] } | RecordsRefusal;
 
 /**
+ * The most files of a partner's own upload: the owner's bundle count or `PARTNER_FILES_MAX`, whichever
+ * is fewer. THE PARTNER CAP SHADOWS THE OWNER'S `bundleLimits.maxFiles` with the same refusal word
+ * (`bundle_too_many_files`), so the partner contract and the design's section 6 must say 500, not the
+ * owner's number.
+ */
+function partnerFileCap(limits: BundleLimits): number {
+  return Math.min(limits.maxFiles, PARTNER_FILES_MAX);
+}
+
+/**
+ * The most bytes of one archive or one submitted file: the owner's limit, and never more than R2 copies
+ * in one `CopyObject` request (5 GiB), which is also the most one presigned PUT takes. The contract's
+ * limits are not bounded above, so this is where the bound is.
+ */
+export function copyableLimit(limit: number): number {
+  return Math.min(limit, COPY_OBJECT_MAX_BYTES);
+}
+
+/**
  * A declared list of files, checked against the owner's limits and for traversal: a non-empty list of
  * at most `maxCount` entries, each exactly `{ path, size }` (and `sha256` when `digest` is allowed), a
  * safe unique path, a size that is a whole number within the file limit, and a total within the total
@@ -385,7 +443,7 @@ type FilesCheck = { ok: true; files: DeclaredFile[] } | RecordsRefusal;
 function checkFiles(
   files: unknown,
   limits: BundleLimits,
-  options: { maxCount: number; digest: boolean },
+  options: { maxCount: number; digest: boolean; keysOf?: string },
 ): FilesCheck {
   if (!Array.isArray(files) || files.length === 0) return refuse("invalid_spec", "files");
   if (files.length > options.maxCount) return refuse("bundle_too_many_files");
@@ -400,7 +458,14 @@ function checkFiles(
     const allowed = options.digest ? ["path", "size", "sha256"] : ["path", "size"];
     if (Object.keys(entry).some((k) => !allowed.includes(k)))
       return refuse("invalid_spec", `files.${i}`);
-    if (submittedPathProblem(entry.path) !== null) return refuse("invalid_spec", `files.${i}.path`);
+    // A name is judged by the path rule; a path that becomes a key of this job is judged by the keys too.
+    const problem =
+      options.keysOf === undefined
+        ? submittedPathProblem(entry.path)
+        : typeof entry.path === "string"
+          ? filePathProblem(options.keysOf, entry.path)
+          : "empty";
+    if (problem !== null) return refuse("invalid_spec", `files.${i}.path`);
     const path = entry.path as string;
     if (seen.has(path)) return refuse("invalid_spec", `files.${i}.path`);
     seen.add(path);
@@ -412,7 +477,7 @@ function checkFiles(
     if (digest !== undefined && (typeof digest !== "string" || !COMPUTE_SHA256_RE.test(digest))) {
       return refuse("invalid_spec", `files.${i}.sha256`);
     }
-    if (size > limits.maxFileBytes) return refuse("bundle_too_large");
+    if (size > copyableLimit(limits.maxFileBytes)) return refuse("bundle_too_large");
     total += size;
     if (total > limits.maxTotalBytes) return refuse("bundle_too_large");
     checked.push(digest === undefined ? { path, size } : { path, size, sha256: digest as string });
@@ -505,8 +570,9 @@ export async function presignIncomingUploads(
   let declared: DeclaredFile[];
   if (job.source === "partner") {
     const checked = checkFiles(files, limits, {
-      maxCount: Math.min(limits.maxFiles, PARTNER_FILES_MAX),
+      maxCount: partnerFileCap(limits),
       digest: true,
+      keysOf: jobId,
     });
     if (!checked.ok) return checked;
     declared = checked.files;
@@ -516,6 +582,7 @@ export async function presignIncomingUploads(
     if (file?.path !== BUNDLE_ARCHIVE_NAME) return refuse("invalid_spec", "files.0.path");
     const checked = checkFiles(
       files,
+      // The archive is the one file: its limit is the total (`checkFiles` holds it to the copy bound).
       { ...limits, maxFileBytes: limits.maxTotalBytes },
       { maxCount: 1, digest: true },
     );
@@ -603,8 +670,8 @@ async function completeRecords(
 /**
  * Finalize a code bundle: the declared manifest is validated (the owner's limits, traversal in any
  * encoding), the archive's digest and size must be those the job was made with, the uploaded object's
- * size must equal the declared one (a mismatch refuses and deletes nothing), and only then, the job and
- * its hold having been read back from D1, one `CopyObject` takes `incoming/<id>/bundle.tar.gz` into
+ * size must equal the declared one (a mismatch refuses and deletes nothing), and only then, the job's
+ * row (which exists only if its hold does) having been read back from D1, one `CopyObject` takes `incoming/<id>/bundle.tar.gz` into
  * `records/<id>/submitted/bundle.tar.gz`, whose size is read back; `bundle-manifest.json` is written
  * and `records_written_at` is set. It is idempotent: the same request again is `replayed` and copies
  * nothing, another manifest is `bad_state`, and a first attempt that died between the copy and the
@@ -638,7 +705,7 @@ export async function finalizeBundle(
   ) {
     return refuse("invalid_spec", "archive");
   }
-  if (archive.size > limits.maxTotalBytes) return refuse("bundle_too_large");
+  if (archive.size > copyableLimit(limits.maxTotalBytes)) return refuse("bundle_too_large");
   const checked = checkFiles(input.files, limits, { maxCount: limits.maxFiles, digest: false });
   if (!checked.ok) return checked;
   const text = manifestText(jobId, { sha256: archive.sha256, size: archive.size }, checked.files);
@@ -702,8 +769,9 @@ export async function finalizeSubmittedFiles(
 
   const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
   const checked = checkFiles(input?.files, limits, {
-    maxCount: Math.min(limits.maxFiles, PARTNER_FILES_MAX),
+    maxCount: partnerFileCap(limits),
     digest: false,
+    keysOf: jobId,
   });
   if (!checked.ok) return checked;
   const text = manifestText(jobId, null, checked.files);
@@ -818,7 +886,7 @@ function recordTarget(jobId: string, name: string): { key: string; presigned: bo
   }
   if (name.startsWith("submitted/")) {
     const path = name.slice("submitted/".length);
-    if (submittedPathProblem(path) !== null) return null;
+    if (filePathProblem(jobId, path) !== null) return null;
     return { key: submittedKey(jobId, path), presigned: true };
   }
   if (name.startsWith("logs/")) {
@@ -931,7 +999,7 @@ export const OUTPUTS_BODY_CEILING_BYTES = 64 * 1024 * 1024;
  * launcher's repository also holds); it derives the cap its route reads from `maxFiles`, so a body the
  * policy allows is never refused for its size: the base, plus `maxFiles` entries of the largest size one
  * entry can take, never less than the launcher's 1 MiB and never more than 64 MiB (what a Worker can
- * parse). Above about 38,000 outputs the worst-case entry no longer fits the ceiling, and a body over it
+ * parse). Above about 39,470 outputs (64 MiB less the base, over 1,700 bytes an entry) the worst-case entry no longer fits the ceiling, and a body over it
  * is refused `too_many_outputs`, a refusal the submitter caused and is charged for. The launcher's own
  * 1 MiB cap is the tighter bound today, and raising it is the launcher's change.
  */

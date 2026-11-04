@@ -40,7 +40,11 @@
  *    the route's.
  *  - `spec_digest` is the SHA-256 of the exact bytes of `records/<id>/spec.json`: the text is made once,
  *    before the INSERT, and the same text is written after the commit. It records what was ASKED FOR and
- *    never the launch specification, which carries a token.
+ *    never the launch specification, which carries a token. For a person's or a pipeline's job the text
+ *    is the validated specification; for a PARTNER's job it is the partner's own hold body, byte for
+ *    byte as it was sent (`holdBody`), so a respelled body is another request, and only the small fields
+ *    a hold needs (`PartnerHoldBodySchema`) are read from it. A hold body is not a job specification,
+ *    so none of the launch rules (the schema, `launchSpecFits`, the bundle) apply to it.
  *  - THE GATEWAY PSEUDONYM is `gw_` and 20 lowercase base32 characters, RANDOM, stored in
  *    `compute_gateway_users` on an account's first job and copied to every job of that account, never
  *    rotated and never reused. It is random and stored, not derived from a key: a derived value would
@@ -50,12 +54,14 @@
  *    no per-person guard.
  */
 
+import { z } from "zod";
 import {
   COMPUTE_KINDS,
   COMPUTE_SOURCES,
   type ComputeKind,
   type ComputeRefusalCode,
   type ComputeSource,
+  type ComputeState,
   LIVE_COMPUTE_STATES,
 } from "../../../shared/compute-state.js";
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
@@ -65,7 +71,10 @@ import {
   type JobSpec,
   JobSpecSchema,
   PARTITIONS,
+  PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
+  type PartitionName,
+  computeSafeInt,
   datasetVersionWithoutTag,
   estimateSuMilli,
 } from "../../../shared/contract/compute.js";
@@ -80,6 +89,8 @@ import {
 import { fieldPath, getPolicy } from "./compute-policy.js";
 import {
   type ComputeRecordsEnv,
+  RECORDS_WRITTEN_SQL,
+  copyableLimit,
   sha256Hex,
   writeIdentitySnapshot,
   writeSpec,
@@ -118,7 +129,7 @@ export interface ComputeJobRow {
   source: ComputeSource;
   client_id: string | null;
   kind: ComputeKind;
-  state: string;
+  state: ComputeState;
   failure_code: string | null;
   failure_detail: string | null;
   cancel_reason: string | null;
@@ -160,24 +171,88 @@ export interface ComputeJobRow {
 
 export type ComputeJobsEnv = ComputeRecordsEnv;
 
-export interface CreateJobInput {
-  source: ComputeSource;
-  /** Default `batch`. */
-  kind?: ComputeKind;
+interface JobInputBase {
   /** The person the job is attributed to; null for a partner's job that no NEMAR account owns (a partner pool pays). */
   accountId: number | null;
   /** The partner client, for a partner job. Required when there is no account. */
   clientId?: string | null;
   /** The Tapis owner of a partner job. */
   tapisOwner?: string | null;
-  /** The caller's key, 8 to 128 characters of letters, digits and `. _ : -`; unique per account. */
+  /**
+   * The caller's key, 8 to 128 characters of letters, digits and `. _ : -`; unique per account. A job
+   * with no account takes none: the unique index treats NULL accounts as distinct, so a key could be
+   * stored and never found. A partner's replay is keyed by the partner contract's own table
+   * (#2024, #2025).
+   */
   idempotencyKey?: string | null;
+}
+
+/** A person's or a pipeline's job: the job as every front door states it. */
+export interface SpecJobInput extends JobInputBase {
+  source: Exclude<ComputeSource, "partner">;
+  /** Default `batch`. */
+  kind?: ComputeKind;
   /** The Tapis application that runs it, and its version. */
   appId: string;
   appVersion: string;
-  /** The job as every front door states it; checked again here with the strict schema. */
+  /** Checked again here with the strict schema. */
   spec: JobSpec;
+  holdBody?: undefined;
 }
+
+/** A partner's job: its hold body, as the exact text that was sent. */
+export interface PartnerJobInput extends JobInputBase {
+  source: "partner";
+  /** The request body, byte for byte: its SHA-256 is the job's `spec_digest` and it is `spec.json`. */
+  holdBody: string;
+  spec?: undefined;
+  kind?: undefined;
+  appId?: undefined;
+  appVersion?: undefined;
+}
+
+export type CreateJobInput = SpecJobInput | PartnerJobInput;
+
+/** The most bytes of a hold body: it is nine small fields. */
+export const PARTNER_HOLD_BODY_MAX_BYTES = 8192;
+
+/**
+ * What a partner's hold says (`POST /compute/holds`, #2025): the application, its version, the kind and
+ * the resources, per node. Strict, like every request. The route (phase D4) may move this schema into
+ * its own contract module; the fields are the ones the partner contract names.
+ */
+export const PartnerHoldBodySchema = z
+  .object({
+    app_id: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/),
+    app_version: z.string().regex(/^[A-Za-z0-9._+-]{1,64}$/),
+    kind: z.enum(COMPUTE_KINDS),
+    partition: z.enum(PARTITION_NAMES),
+    nodes: computeSafeInt(1, 64),
+    cores: computeSafeInt(0, 256),
+    memory_mb: computeSafeInt(1, 16_777_216).nullish(),
+    gpus: computeSafeInt(0, 8),
+    minutes: computeSafeInt(1, 10080),
+  })
+  .strict()
+  .superRefine((body, ctx) => {
+    const gpuPool = PARTITIONS[body.partition].pool === "gpu";
+    if (gpuPool && body.gpus < 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["gpus"],
+        message: "a GPU partition needs a GPU",
+      });
+    }
+    if (!gpuPool && body.gpus !== 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["gpus"],
+        message: "a CPU partition takes no GPU",
+      });
+    }
+  });
+
+export type PartnerHoldBody = z.infer<typeof PartnerHoldBodySchema>;
 
 export type CreateJobRefusal = Extract<
   ComputeRefusalCode,
@@ -198,7 +273,12 @@ export type CreateJobResult =
       /** The job existed already under this key. */
       replayed: boolean;
       job: ComputeJobRow;
-      /** The job's records have landed. False after a store failure; a replay of the key retries it. */
+      /**
+       * `spec.json` and `identity.json` have landed. That is NOT "ready to submit": a job that uploads
+       * something (a code bundle, a partner's files) is ready only when `job.records_written_at` is set,
+       * which `finalizeBundle` or `finalizeSubmittedFiles` does after the copy. False after a store
+       * failure; a replay of the key retries it.
+       */
       recordsWritten: boolean;
     }
   | { ok: false; code: CreateJobRefusal; field?: string };
@@ -284,10 +364,6 @@ export const JOB_INSERT_SQL = `INSERT INTO compute_jobs
          ?20, ?21
    WHERE ${holdExists(1)}`;
 
-/** The records of a job have landed. Used by `createJob` for a job with no upload; `finalizeBundle` for the others. */
-const RECORDS_WRITTEN_SQL = `UPDATE compute_jobs SET records_written_at = datetime('now')
-  WHERE id = ?1 AND records_written_at IS NULL`;
-
 export async function getJob(db: D1Database, id: string): Promise<ComputeJobRow | null> {
   return db.prepare(JOB_BY_ID_SQL).bind(id).first<ComputeJobRow>();
 }
@@ -302,19 +378,30 @@ const APP_VERSION_RE = /^[A-Za-z0-9._+-]{1,64}$/;
 
 interface Args {
   source: ComputeSource;
-  kind: ComputeKind;
+  /** Null for a partner's job until its hold body has been read. */
+  kind: ComputeKind | null;
   accountId: number | null;
   clientId: string | null;
   tapisOwner: string | null;
   key: string | null;
-  appId: string;
-  appVersion: string;
+  appId: string | null;
+  appVersion: string | null;
 }
 
 function checkInput(input: CreateJobInput): Args {
   if (!(COMPUTE_SOURCES as readonly string[]).includes(input.source)) invalid("not a job source");
-  const kind = input.kind ?? "batch";
-  if (!(COMPUTE_KINDS as readonly string[]).includes(kind)) invalid("not a job kind");
+  const partner = input.source === "partner";
+  if (partner) {
+    if (typeof input.holdBody !== "string") invalid("a partner's job is its hold body, as text");
+    if (input.spec !== undefined || input.appId !== undefined || input.appVersion !== undefined) {
+      invalid("a partner's job names no specification, application or version of its own");
+    }
+  } else if (input.holdBody !== undefined) {
+    invalid("only a partner's job is a hold body");
+  }
+  const kind = input.kind ?? (partner ? null : "batch");
+  if (kind !== null && !(COMPUTE_KINDS as readonly string[]).includes(kind))
+    invalid("not a job kind");
   const accountId = input.accountId;
   if (accountId !== null && (!Number.isSafeInteger(accountId) || accountId < 1)) {
     invalid("an account is a positive whole number, or none");
@@ -332,21 +419,44 @@ function checkInput(input: CreateJobInput): Args {
   if (key !== null && !KEY_RE.test(key)) {
     invalid("an idempotency key is 8 to 128 letters, digits and . _ : -");
   }
-  if (typeof input.appId !== "string" || !APP_ID_RE.test(input.appId))
-    invalid("not an application id");
-  if (typeof input.appVersion !== "string" || !APP_VERSION_RE.test(input.appVersion)) {
-    invalid("not an application version");
+  if (key !== null && accountId === null) {
+    invalid("an idempotency key needs an account: a job with none could never be replayed");
+  }
+  if (!partner) {
+    if (typeof input.appId !== "string" || !APP_ID_RE.test(input.appId)) {
+      invalid("not an application id");
+    }
+    if (typeof input.appVersion !== "string" || !APP_VERSION_RE.test(input.appVersion)) {
+      invalid("not an application version");
+    }
   }
   return {
     source: input.source,
-    kind: kind as ComputeKind,
+    kind: kind as ComputeKind | null,
     accountId,
     clientId,
     tapisOwner,
     key,
-    appId: input.appId,
-    appVersion: input.appVersion,
+    appId: input.appId ?? null,
+    appVersion: input.appVersion ?? null,
   };
+}
+
+/** What a hold body is read as, or the field that is wrong (never a value). */
+type HoldBodyRead = { ok: true; body: PartnerHoldBody } | { ok: false; field?: string };
+
+function readHoldBody(text: string): HoldBodyRead {
+  if (new TextEncoder().encode(text).length > PARTNER_HOLD_BODY_MAX_BYTES) return { ok: false };
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false };
+  }
+  const parsed = PartnerHoldBodySchema.safeParse(value);
+  if (parsed.success) return { ok: true, body: parsed.data };
+  const path = parsed.error.issues[0]?.path ?? [];
+  return path.length > 0 ? { ok: false, field: fieldPath(path) } : { ok: false };
 }
 
 const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
@@ -405,6 +515,16 @@ async function replay(
 
 // --- createJob -------------------------------------------------------------------------------------
 
+/** What a hold prices and a job row records of the resources, per node. */
+interface HoldResources {
+  partition: PartitionName;
+  nodes: number;
+  cores: number;
+  memory_mb?: number;
+  gpus: number;
+  minutes: number;
+}
+
 const imageDigestOf = (image: string | undefined): string | null => {
   const digest = image === undefined ? null : (/@(sha256:[0-9a-f]{64})$/.exec(image)?.[1] ?? null);
   return digest !== null && COMPUTE_IMAGE_DIGEST_RE.test(digest) ? digest : null;
@@ -424,19 +544,49 @@ export async function createJob(
   const args = checkInput(input);
   if (!env.COMPUTE_RECORDS) return refusal("compute_disabled");
 
-  const parsed = JobSpecSchema.safeParse(input.spec);
-  if (!parsed.success) {
-    const path = parsed.error.issues[0]?.path ?? [];
-    return refusal("invalid_spec", path.length > 0 ? fieldPath(path) : undefined);
+  // What was asked for, as text and as the few fields a hold needs. A person's or a pipeline's job is
+  // the strict specification; a partner's is its hold body, kept byte for byte.
+  let specText: string;
+  let spec: JobSpec | null = null;
+  let resources: HoldResources;
+  let appId: string;
+  let appVersion: string;
+  let kind: ComputeKind;
+  if (input.source === "partner") {
+    const read = readHoldBody(input.holdBody);
+    if (!read.ok) return refusal("invalid_spec", read.field);
+    const body = read.body;
+    specText = input.holdBody;
+    resources = {
+      partition: body.partition,
+      nodes: body.nodes,
+      cores: body.cores,
+      memory_mb: body.memory_mb ?? undefined,
+      gpus: body.gpus,
+      minutes: body.minutes,
+    };
+    appId = body.app_id;
+    appVersion = body.app_version;
+    kind = body.kind;
+  } else {
+    const parsed = JobSpecSchema.safeParse(input.spec);
+    if (!parsed.success) {
+      const path = parsed.error.issues[0]?.path ?? [];
+      return refusal("invalid_spec", path.length > 0 ? fieldPath(path) : undefined);
+    }
+    spec = parsed.data;
+    specText = JSON.stringify(spec);
+    resources = spec;
+    appId = args.appId as string;
+    appVersion = args.appVersion as string;
+    kind = args.kind as ComputeKind;
   }
-  const spec = parsed.data;
   // The text is made ONCE; its digest is the job row's, and the same text is written after the commit.
-  const specText = JSON.stringify(spec);
   const specDigest = await sha256Hex(new TextEncoder().encode(specText));
   // A job that uploads something is complete only once its upload has been copied into the records
   // (`finalizeBundle`, or `finalizeSubmittedFiles` for a partner's own files): the bundle of a script,
   // and the files of a partner's batch job. An interactive session is its own record.
-  const uploads = spec.bundle !== undefined || (args.source === "partner" && args.kind === "batch");
+  const uploads = spec?.bundle !== undefined || (args.source === "partner" && kind === "batch");
   const db = env.DB;
 
   if (args.key !== null && args.accountId !== null) {
@@ -450,33 +600,39 @@ export async function createJob(
   // Before any hold exists: what the owner's policy and the launch itself allow.
   const policy = (await getPolicy(db)).policy;
   if (args.source !== "pipeline") {
-    const ceiling = policy.ceilings[spec.partition];
+    const ceiling = policy.ceilings[resources.partition];
     if (!ceiling) return refusal("partition_not_offered");
     if (
-      spec.nodes > ceiling.maxNodes ||
-      spec.cores > ceiling.maxCoresPerNode ||
-      spec.gpus > ceiling.maxGpusPerNode ||
-      spec.minutes > ceiling.maxMinutes
+      resources.nodes > ceiling.maxNodes ||
+      resources.cores > ceiling.maxCoresPerNode ||
+      resources.gpus > ceiling.maxGpusPerNode ||
+      resources.minutes > ceiling.maxMinutes
     ) {
       return refusal("over_job_limit");
     }
   }
-  const untagged = datasetVersionWithoutTag(spec.datasets);
-  if (untagged !== null) return refusal("invalid_spec", untagged);
-  if (!launchSpecFits(spec)) return refusal("invalid_spec");
-  if (spec.bundle !== undefined && spec.bundle.size > policy.bundleLimits.maxTotalBytes) {
-    return refusal("bundle_too_large");
+  if (spec !== null) {
+    const untagged = datasetVersionWithoutTag(spec.datasets);
+    if (untagged !== null) return refusal("invalid_spec", untagged);
+    if (!launchSpecFits(spec)) return refusal("invalid_spec");
+    // The owner's limit, and never more than R2 copies in one request.
+    if (
+      spec.bundle !== undefined &&
+      spec.bundle.size > copyableLimit(policy.bundleLimits.maxTotalBytes)
+    ) {
+      return refusal("bundle_too_large");
+    }
   }
   let amountMilli: number;
   try {
-    amountMilli = estimateSuMilli(spec);
+    amountMilli = estimateSuMilli(resources);
   } catch {
     return refusal("invalid_spec");
   }
 
   // The pools: the person's (or the partner's) and the platform budget their spend counts against, or
   // the pipelines' own with no budget. A person with no pool has nothing granted, and none is made.
-  const word = PARTITIONS[spec.partition].pool;
+  const word = PARTITIONS[resources.partition].pool;
   let poolId: number;
   let budgetPoolId: number | null = null;
   if (args.source === "pipeline") {
@@ -521,18 +677,18 @@ export async function createJob(
         args.key,
         args.source,
         args.clientId,
-        args.kind,
-        args.appId,
-        args.appVersion,
-        imageDigestOf(spec.image),
+        kind,
+        appId,
+        appVersion,
+        imageDigestOf(spec?.image),
         specDigest,
-        spec.partition,
+        resources.partition,
         word,
-        spec.nodes,
-        spec.cores,
-        spec.memory_mb ?? null,
-        spec.gpus,
-        spec.minutes,
+        resources.nodes,
+        resources.cores,
+        resources.memory_mb ?? null,
+        resources.gpus,
+        resources.minutes,
         amountMilli,
         crypto.randomUUID(),
       ),

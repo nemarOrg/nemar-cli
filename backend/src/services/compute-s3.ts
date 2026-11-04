@@ -51,6 +51,13 @@ export const COMPUTE_BUNDLE_READ_SECONDS = 600;
 /** What an owner's read of one submitted file or log lives: five minutes. */
 export const COMPUTE_RECORD_READ_SECONDS = 300;
 
+/**
+ * The most bytes R2 copies in one `CopyObject` request, and the most one presigned PUT takes: 5 GiB
+ * (a larger object needs a multipart copy or upload, which is not verified on R2). A caller's own limit
+ * above it does not lift it.
+ */
+export const COPY_OBJECT_MAX_BYTES = 5 * 1024 ** 3;
+
 /** The longest key R2 and S3 take, in bytes of UTF-8. */
 export const COMPUTE_KEY_MAX_BYTES = 1024;
 
@@ -291,7 +298,12 @@ export async function presignGet(
   return presign(s3, bucket, key, "GET", options, {});
 }
 
-/** How long a copy may take before it is given up on: a server-side copy of at most 100 MiB is quick. */
+/**
+ * How long a copy may take before it is given up on. A server-side copy inside R2 moves no bytes
+ * through the Worker; 30 seconds is for the largest object a single copy takes, which
+ * `COPY_OBJECT_MAX_BYTES` bounds at 5 GiB (the owner's limits are 100 MiB by default and, in the
+ * contract, unbounded, so the callers clamp them to that bound before they ask).
+ */
 const COPY_TIMEOUT_MS = 30_000;
 
 /**
