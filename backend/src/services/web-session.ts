@@ -19,6 +19,7 @@
  */
 
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
+import { isPartnerHost } from "../../../shared/partner-hosts.js";
 import { flag } from "../db/flag";
 import { type Bindings, type UserRole, parseRole } from "../types/bindings";
 
@@ -60,6 +61,10 @@ const SLIDING_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Origin allow-list for cookie-issuing/mutating routes.
  *
+ *  A host on the partner list (`shared/partner-hosts.ts`) is refused even though it ends in
+ *  `.nemar.org`: another party runs it, and a cookie-authenticated write from it would be a
+ *  write from someone else's page.
+ *
  *  Narrower than the CORS callback in `index.ts` on purpose: the
  *  CORS layer's `*.osc.earth` allowance was for the legacy api.osc.earth
  *  buffer; the web dashboard only lives on nemar.org / app.nemar.org,
@@ -75,6 +80,9 @@ export function isAllowedOrigin(origin: string | null | undefined): boolean {
     return false;
   }
   const h = url.hostname.toLowerCase();
+  // A partner host is not a NEMAR page (ADR 0119 decision 9), whatever its suffix says. Asked
+  // first, so no rule below can admit it.
+  if (isPartnerHost(h)) return false;
   if (h === "localhost" || h === "127.0.0.1") return true;
   if (h === "nemar.org" || h.endsWith(".nemar.org")) return true;
   return false;
