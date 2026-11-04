@@ -168,8 +168,8 @@ describe("POST /admin/datasets/signal-defaults-sweep (real route, zero real cand
 
   // #1162 review, I3: matches channel-montage-sweep / hed-sweep (both cited
   // as this sweep's model), which exclude is_sandbox for the same reason --
-  // prod sandbox (xx*) datasets churn continuously (AGENTS.md's 14-day
-  // cron), and unlike recording-stats-sweep's one cheap S3 GET, a candidate
+  // prod sandbox (xx*) datasets churn continuously (the 14-day cron in
+  // .rules/datasets-and-fixtures.md), and unlike recording-stats-sweep's one cheap S3 GET, a candidate
   // here costs a full GitHub tree walk against a tight 15/30 budget.
   test("a sandbox (is_sandbox=1) row is excluded", async () => {
     seedDataset("xx090903", { isSandbox: true });
