@@ -210,9 +210,10 @@ export function launcherExitNumber(code: LauncherFailureCode): number {
 
 /**
  * Failures NEMAR caused, which are refunded automatically (design section 5). Three of them are
- * also launcher codes: a fetch that failed on NEMAR's side, and an upload that failed. The
- * launcher's other four (`entry_not_found`, `runtime_error`, `out_of_memory`, `time_limit`) are the
- * submitter's and are charged.
+ * also launcher codes (a fetch and an upload, by default NEMAR's); the launcher's other four
+ * (`entry_not_found`, `runtime_error`, `out_of_memory`, `time_limit`) are by default the
+ * submitter's and are charged. A launcher code's `detail` can overrule the default either way: see
+ * {@link LAUNCHER_DETAILS} and {@link isPlatformFailure}.
  */
 export const PLATFORM_FAILURE_CODES = [
   "code_fetch_failed",
@@ -243,6 +244,117 @@ export const RESULT_REFUSAL_DETAILS = [
 
 export type ResultRefusalDetail = (typeof RESULT_REFUSAL_DETAILS)[number];
 
+/**
+ * Every fixed-word `detail` the launcher may write into `launcher/result.json` with each of its
+ * seven codes (a word, never text a person, a response or the container chose). Declared here so
+ * that who pays is a table and not a guess: see {@link PLATFORM_LAUNCHER_DETAILS}. A detail not
+ * declared for its code (a transport word such as `http_500`, say) is not in the table and the code
+ * alone decides.
+ *
+ * The three codes with an empty list carry no detail. The first three words of
+ * `result_upload_failed` are {@link RESULT_REFUSAL_DETAILS}.
+ */
+export const LAUNCHER_DETAILS = {
+  code_fetch_failed: [
+    "unsafe_archive",
+    "archive_too_large",
+    "bad_response",
+    "fetch_failed",
+    "checksum_mismatch",
+    "digest_mismatch",
+    "size_mismatch",
+    "content_missing",
+    "disk_error",
+  ],
+  dataset_fetch_failed: [
+    "bad_include",
+    "too_many_files",
+    "too_many_bytes",
+    "dataset_not_found",
+    "bad_manifest",
+    "manifest_too_large",
+    "unsafe_path",
+    "bad_response",
+    "fetch_failed",
+    "checksum_mismatch",
+    "size_mismatch",
+    "content_missing",
+    "file_not_found",
+    "disk_error",
+  ],
+  entry_not_found: [],
+  runtime_error: [
+    "entry_failed",
+    "terminated",
+    "outputs_unreadable",
+    "invalid_spec",
+    "unsupported_runtime",
+    "scratch_in_output",
+    "scratch_unavailable",
+    "no_container_runtime",
+    "image_missing",
+    "runtime_unusable",
+    "internal_error",
+    "output_dir_not_empty",
+    "bind_source_unsafe",
+    "pid_namespace_unavailable",
+  ],
+  out_of_memory: [],
+  time_limit: [],
+  result_upload_failed: [
+    ...RESULT_REFUSAL_DETAILS,
+    "outputs_unreadable",
+    "bad_response",
+    "fetch_failed",
+    "incomplete_plan",
+    "upload_failed",
+    "outputs_refused",
+    "complete_refused",
+    "internal_error",
+  ],
+} as const satisfies Record<LauncherFailureCode, readonly string[]>;
+
+export type LauncherDetail = (typeof LAUNCHER_DETAILS)[LauncherFailureCode][number];
+
+/**
+ * The launcher details that are a NEMAR, node, runtime or contract fault, so that the job is
+ * refunded, even under `runtime_error`. The rule: a detail is the platform's if and only if a
+ * submitter cannot cause it with a valid specification and bundle. Every other word of
+ * {@link LAUNCHER_DETAILS} is the submitter's and is charged, even under `code_fetch_failed` and
+ * `dataset_fetch_failed`: an archive that is unsafe or too large, a selection over the job's own
+ * limits or an include pattern that is not a glob, an entry that failed or was terminated, outputs
+ * that cannot be read, and the results NEMAR refused for their size or count.
+ */
+export const PLATFORM_LAUNCHER_DETAILS = [
+  "invalid_spec",
+  "unsupported_runtime",
+  "scratch_in_output",
+  "scratch_unavailable",
+  "no_container_runtime",
+  "image_missing",
+  "runtime_unusable",
+  "internal_error",
+  "output_dir_not_empty",
+  "bind_source_unsafe",
+  "pid_namespace_unavailable",
+  "content_missing",
+  "dataset_not_found",
+  "bad_response",
+  "checksum_mismatch",
+  "digest_mismatch",
+  "size_mismatch",
+  "disk_error",
+  "fetch_failed",
+  "bad_manifest",
+  "manifest_too_large",
+  "unsafe_path",
+  "file_not_found",
+  "incomplete_plan",
+  "upload_failed",
+  "outputs_refused",
+  "complete_refused",
+] as const;
+
 export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode;
 
 /** Every code a failed job may carry, each once: the launcher's seven, then the platform's rest. */
@@ -254,17 +366,22 @@ export const COMPUTE_FAILURE_CODES: readonly ComputeFailureCode[] = [
 ];
 
 /**
- * Whether NEMAR caused a failure, so that its charge is refunded. True for every platform code
- * except `result_upload_failed` with a detail in {@link RESULT_REFUSAL_DETAILS}, which the
- * submitter caused (too many files, too many bytes, over quota) and which is never refunded.
- * A code that is not a failure code is not a platform failure.
+ * Whether NEMAR caused a failure, so that its charge is refunded. For a launcher code with a detail
+ * that {@link LAUNCHER_DETAILS} declares for that code, the detail decides: a platform detail
+ * ({@link PLATFORM_LAUNCHER_DETAILS}) is a platform failure even under `runtime_error`, and any
+ * other declared detail is the submitter's even under `code_fetch_failed` or
+ * `dataset_fetch_failed`, and is charged. With no detail, or one not declared for its code, the
+ * code alone decides, as it always did: true for every platform code, false for the rest. A code
+ * that is not a failure code is not a platform failure.
  */
 export function isPlatformFailure(code: string, detail?: string | null): boolean {
-  if (!(PLATFORM_FAILURE_CODES as readonly string[]).includes(code)) return false;
-  if (code === "result_upload_failed" && detail != null) {
-    return !(RESULT_REFUSAL_DETAILS as readonly string[]).includes(detail);
+  if (detail != null && Object.hasOwn(LAUNCHER_DETAILS, code)) {
+    const declared: readonly string[] = LAUNCHER_DETAILS[code as LauncherFailureCode];
+    if (declared.includes(detail)) {
+      return (PLATFORM_LAUNCHER_DETAILS as readonly string[]).includes(detail);
+    }
   }
-  return true;
+  return (PLATFORM_FAILURE_CODES as readonly string[]).includes(code);
 }
 
 /**

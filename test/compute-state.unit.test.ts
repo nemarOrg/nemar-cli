@@ -27,10 +27,12 @@ import {
   COMPUTE_TRANSITIONS,
   COMPUTE_WORD_RE,
   type ComputeState,
+  LAUNCHER_DETAILS,
   LAUNCHER_FAILURE_CODES,
   LEDGER_ENTRY_KINDS,
   LIVE_COMPUTE_STATES,
   PLATFORM_FAILURE_CODES,
+  PLATFORM_LAUNCHER_DETAILS,
   RESULT_REFUSAL_DETAILS,
   TERMINAL_COMPUTE_STATES,
   canTransitionCompute,
@@ -528,6 +530,248 @@ describe("failure codes", () => {
   test("every RESULT_REFUSAL_DETAILS word is a valid word", () => {
     expect(RESULT_REFUSAL_DETAILS.length).toBe(3);
     for (const d of RESULT_REFUSAL_DETAILS) expect(COMPUTE_WORD_RE.test(d), d).toBe(true);
+  });
+});
+
+describe("launcher details and who pays", () => {
+  /**
+   * Every fixed-word detail the launcher may carry with each of its seven codes, sorted into the
+   * platform's (a NEMAR, node, runtime or contract fault, refunded) and the submitter's (charged),
+   * written out here once more so a change to the module's lists must also change this table. The
+   * rule behind the sorting: platform if and only if a submitter cannot cause it with a valid
+   * specification and bundle.
+   */
+  const TABLE: Record<string, { platform: string[]; submitter: string[] }> = {
+    code_fetch_failed: {
+      platform: [
+        "bad_response",
+        "fetch_failed",
+        "checksum_mismatch",
+        "digest_mismatch",
+        "size_mismatch",
+        "content_missing",
+        "disk_error",
+      ],
+      submitter: ["unsafe_archive", "archive_too_large"],
+    },
+    dataset_fetch_failed: {
+      platform: [
+        "dataset_not_found",
+        "bad_manifest",
+        "manifest_too_large",
+        "unsafe_path",
+        "bad_response",
+        "fetch_failed",
+        "checksum_mismatch",
+        "size_mismatch",
+        "content_missing",
+        "file_not_found",
+        "disk_error",
+      ],
+      submitter: ["bad_include", "too_many_files", "too_many_bytes"],
+    },
+    entry_not_found: { platform: [], submitter: [] },
+    runtime_error: {
+      platform: [
+        "invalid_spec",
+        "unsupported_runtime",
+        "scratch_in_output",
+        "scratch_unavailable",
+        "no_container_runtime",
+        "image_missing",
+        "runtime_unusable",
+        "internal_error",
+        "output_dir_not_empty",
+        "bind_source_unsafe",
+        "pid_namespace_unavailable",
+      ],
+      submitter: ["entry_failed", "terminated", "outputs_unreadable"],
+    },
+    out_of_memory: { platform: [], submitter: [] },
+    time_limit: { platform: [], submitter: [] },
+    result_upload_failed: {
+      platform: [
+        "bad_response",
+        "fetch_failed",
+        "incomplete_plan",
+        "upload_failed",
+        "outputs_refused",
+        "complete_refused",
+        "internal_error",
+      ],
+      submitter: [
+        "results_too_large",
+        "results_quota_exceeded",
+        "too_many_outputs",
+        "outputs_unreadable",
+      ],
+    },
+  };
+  const CODES = Object.keys(TABLE);
+  const sorted = (list: readonly string[]) => [...list].sort();
+  /** Every word the table names, once. */
+  const ALL_WORDS = [
+    ...new Set(CODES.flatMap((c) => [...TABLE[c].platform, ...TABLE[c].submitter])),
+  ].sort();
+  /** What a failure with no (or an undeclared) detail does: the code alone decides. */
+  const BY_CODE_ALONE = (code: string) =>
+    (PLATFORM_FAILURE_CODES as readonly string[]).includes(code);
+
+  test("LAUNCHER_DETAILS names the seven launcher codes in order, each with its details", () => {
+    expect(Object.keys(LAUNCHER_DETAILS)).toEqual([...LAUNCHER_FAILURE_CODES]);
+    expect(Object.keys(LAUNCHER_DETAILS)).toEqual(CODES);
+    for (const code of CODES) {
+      const declared = (LAUNCHER_DETAILS as Record<string, readonly string[]>)[code];
+      expect(sorted(declared), code).toEqual(
+        sorted([...TABLE[code].platform, ...TABLE[code].submitter]),
+      );
+      expect(new Set(declared).size, `${code}: no word twice`).toBe(declared.length);
+    }
+  });
+
+  test("three launcher codes carry no detail at all", () => {
+    expect(LAUNCHER_DETAILS.entry_not_found).toEqual([]);
+    expect(LAUNCHER_DETAILS.out_of_memory).toEqual([]);
+    expect(LAUNCHER_DETAILS.time_limit).toEqual([]);
+  });
+
+  test("every declared detail is a fixed word", () => {
+    for (const code of CODES) {
+      for (const word of (LAUNCHER_DETAILS as Record<string, readonly string[]>)[code]) {
+        expect(COMPUTE_WORD_RE.test(word), `${code}: ${word}`).toBe(true);
+      }
+    }
+  });
+
+  test("PLATFORM_LAUNCHER_DETAILS is exactly the platform words of the table", () => {
+    const platform = CODES.flatMap((c) => TABLE[c].platform);
+    expect(sorted(PLATFORM_LAUNCHER_DETAILS)).toEqual(sorted([...new Set(platform)]));
+    expect(new Set(PLATFORM_LAUNCHER_DETAILS).size).toBe(PLATFORM_LAUNCHER_DETAILS.length);
+  });
+
+  test("no word is both the platform's and the submitter's, under any code", () => {
+    const platform = new Set(CODES.flatMap((c) => TABLE[c].platform));
+    const submitter = new Set(CODES.flatMap((c) => TABLE[c].submitter));
+    for (const word of platform) expect(submitter.has(word), word).toBe(false);
+    for (const word of PLATFORM_LAUNCHER_DETAILS) expect(submitter.has(word), word).toBe(false);
+  });
+
+  test("the result refusal details are declared for result_upload_failed, and are not the platform's", () => {
+    for (const word of RESULT_REFUSAL_DETAILS) {
+      expect(LAUNCHER_DETAILS.result_upload_failed as readonly string[], word).toContain(word);
+      expect(PLATFORM_LAUNCHER_DETAILS as readonly string[], word).not.toContain(word);
+    }
+  });
+
+  test("every word the design and the launcher name as the platform's is declared as such", () => {
+    // The seven words and the rest of the list the driver settled for the launcher.
+    for (const word of [
+      "invalid_spec",
+      "unsupported_runtime",
+      "scratch_in_output",
+      "scratch_unavailable",
+      "no_container_runtime",
+      "image_missing",
+      "runtime_unusable",
+      "internal_error",
+      "output_dir_not_empty",
+      "bind_source_unsafe",
+      "pid_namespace_unavailable",
+      "content_missing",
+      "dataset_not_found",
+      "bad_response",
+      "checksum_mismatch",
+      "fetch_failed",
+    ]) {
+      expect(PLATFORM_LAUNCHER_DETAILS as readonly string[], word).toContain(word);
+    }
+    for (const word of [
+      "unsafe_archive",
+      "archive_too_large",
+      "too_many_files",
+      "too_many_bytes",
+      "bad_include",
+      "outputs_unreadable",
+      "terminated",
+      "entry_failed",
+    ]) {
+      expect(PLATFORM_LAUNCHER_DETAILS as readonly string[], word).not.toContain(word);
+      expect(ALL_WORDS, word).toContain(word);
+    }
+  });
+
+  test("a platform detail is a platform failure under the code that declares it, runtime_error included", () => {
+    for (const code of CODES) {
+      for (const word of TABLE[code].platform) {
+        expect(isPlatformFailure(code, word), `${code} ${word}`).toBe(true);
+      }
+    }
+  });
+
+  test("a submitter detail is not a platform failure, even under code_fetch_failed or dataset_fetch_failed", () => {
+    for (const code of CODES) {
+      for (const word of TABLE[code].submitter) {
+        expect(isPlatformFailure(code, word), `${code} ${word}`).toBe(false);
+      }
+    }
+    expect(isPlatformFailure("code_fetch_failed", "unsafe_archive")).toBe(false);
+    expect(isPlatformFailure("code_fetch_failed", "archive_too_large")).toBe(false);
+    expect(isPlatformFailure("dataset_fetch_failed", "bad_include")).toBe(false);
+    expect(isPlatformFailure("dataset_fetch_failed", "too_many_files")).toBe(false);
+    expect(isPlatformFailure("dataset_fetch_failed", "too_many_bytes")).toBe(false);
+    expect(isPlatformFailure("result_upload_failed", "outputs_unreadable")).toBe(false);
+  });
+
+  test("a missing or undeclared detail keeps the behaviour of the code alone", () => {
+    for (const code of [...CODES, "tapis_error", "launch_failed", "nope"]) {
+      for (const detail of [undefined, null, "", "made_up_word", "Not A Word", "http_500"]) {
+        expect(isPlatformFailure(code, detail), `${code} ${JSON.stringify(detail)}`).toBe(
+          BY_CODE_ALONE(code),
+        );
+      }
+    }
+    expect(isPlatformFailure("runtime_error")).toBe(false);
+    expect(isPlatformFailure("runtime_error", "made_up_word")).toBe(false);
+    expect(isPlatformFailure("code_fetch_failed", "http_500")).toBe(true);
+    expect(isPlatformFailure("dataset_fetch_failed")).toBe(true);
+    expect(isPlatformFailure("dataset_fetch_failed", "network_error")).toBe(true);
+  });
+
+  test("a detail declared under another code does not carry over: every (code, detail) pair", () => {
+    // The whole cross product of the seven codes and every word any of them declares.
+    for (const code of CODES) {
+      for (const word of ALL_WORDS) {
+        const isPlatform = TABLE[code].platform.includes(word);
+        const isSubmitter = TABLE[code].submitter.includes(word);
+        const expected = isPlatform ? true : isSubmitter ? false : BY_CODE_ALONE(code);
+        expect(isPlatformFailure(code, word), `${code} ${word}`).toBe(expected);
+      }
+    }
+    // A few of them, by name, so the reading is plain.
+    expect(isPlatformFailure("entry_not_found", "invalid_spec")).toBe(false);
+    expect(isPlatformFailure("out_of_memory", "image_missing")).toBe(false);
+    expect(isPlatformFailure("time_limit", "internal_error")).toBe(false);
+    expect(isPlatformFailure("runtime_error", "bad_response")).toBe(false);
+    expect(isPlatformFailure("runtime_error", "dataset_not_found")).toBe(false);
+    expect(isPlatformFailure("code_fetch_failed", "bad_include")).toBe(true);
+    expect(isPlatformFailure("dataset_fetch_failed", "unsafe_archive")).toBe(true);
+    expect(isPlatformFailure("code_fetch_failed", "results_too_large")).toBe(true);
+  });
+
+  test("the other platform codes are untouched by a launcher detail", () => {
+    for (const code of PLATFORM_FAILURE_CODES) {
+      if ((LAUNCHER_FAILURE_CODES as readonly string[]).includes(code)) continue;
+      for (const word of ALL_WORDS)
+        expect(isPlatformFailure(code, word), `${code} ${word}`).toBe(true);
+    }
+  });
+
+  test("a word that is not a launcher code is never looked up in the table", () => {
+    for (const code of ["constructor", "__proto__", "toString", "hasOwnProperty", "", "nope"]) {
+      expect(isPlatformFailure(code, "internal_error"), code).toBe(false);
+      expect(isPlatformFailure(code, "unsafe_archive"), code).toBe(false);
+      expect(isPlatformFailure(code), code).toBe(false);
+    }
   });
 });
 
