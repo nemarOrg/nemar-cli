@@ -6,12 +6,14 @@
  *   nemar admin compute policy set --file <json> [--note] the next version of it (owner)
  *   nemar admin compute pool show [--account <id>|--platform]   pools, in SU (admin)
  *   nemar admin compute pool grant <amount> ...           SU into one pool (admin; a platform budget: owner)
- *   nemar admin compute pool adjust <amount> ...          a correction of its grant or charge
+ *   nemar admin compute pool adjust <amount> ...          a correction of its grant (a charge: owner)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
- * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so a request the network
- * lost can never be applied twice by this command, and two invocations are two requests. Every
- * command exits 1 on any failure and keeps standard output pure JSON under `--json`.
+ * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so within one invocation the
+ * request is applied once; a second invocation is a NEW request and grants again. After an answer
+ * that was lost (a network failure, a timeout), run `pool show` first and look at what the pool
+ * holds before running the command again. Every command exits 1 on any failure and keeps standard
+ * output pure JSON under `--json`.
  *
  * `policy show` parses the answer with an open schema, so a Worker that adds a key does not break
  * this command; `policy set` checks the file with the strict schema first and sends nothing for a
@@ -24,11 +26,13 @@ import { Command } from "commander";
 import { COMPUTE_WORD_RE } from "../../shared/compute-state.js";
 import {
   COMPUTE_ADJUST_TARGETS,
+  COMPUTE_PLATFORM_KEYS,
   COMPUTE_POOLS_PAGE_MAX,
   type ComputeAdjustTarget,
   type ComputePolicyResponse,
   type ComputePoolView,
   type ComputePoolWriteResponse,
+  isComputePlatformKey,
 } from "../../shared/contract/compute-admin.js";
 import {
   COMPUTE_POOLS,
@@ -51,7 +55,6 @@ import {
 import { plain } from "../lib/terminal-text.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
-const PLATFORM_KEY_RE = /^[a-z0-9_.-]{1,64}$/;
 const POLICY_FILE_MAX_BYTES = 256 * 1024;
 const NOTE_MAX = 500;
 
@@ -118,8 +121,8 @@ function holderArg(o: { account?: string; platform?: string }, json: boolean): H
     return { kind: "account", id: Number(o.account) };
   }
   const key = o.platform as string;
-  if (!PLATFORM_KEY_RE.test(key)) {
-    failMessage(`"${key}" is not a platform budget key (pipelines or people).`, {
+  if (!isComputePlatformKey(key)) {
+    failMessage(`"${key}" is not a platform budget key (${COMPUTE_PLATFORM_KEYS.join(" or ")}).`, {
       json,
       answered: true,
     });
@@ -308,8 +311,10 @@ owner, --platform <key> (pipelines or people, NEMAR's two budgets). <amount> is 
 decimal with at most three places (12.5 is 12500 thousandths of an SU). --pool is cpu or gpu.
 --reason is a fixed word (default admin_grant).
 
-One fresh Idempotency-Key is sent for each invocation, so the grant is applied once. The write is
-audited.
+One fresh Idempotency-Key is sent for each invocation, so within one invocation the grant is
+applied once. Running the command again is a NEW request and grants again: after an answer that
+was lost (a network failure, a timeout), run \`pool show\` first to see whether it was applied.
+The write is audited.
 
 Examples:
   nemar admin compute pool grant 12.5 --account 4412 --pool cpu
@@ -327,7 +332,12 @@ adds <amount> SU, or takes it away with --decrease. --reason is required, a fixe
 correction that would make a stored total negative is refused and writes nothing; one that takes
 the grant below what is used is allowed, and available goes negative.
 
-One fresh Idempotency-Key is sent for each invocation. The write is audited.
+Correcting an account's charge is the owner's for now (an administrator corrects a grant); a
+platform budget is the owner's too.
+
+One fresh Idempotency-Key is sent for each invocation. Running the command again is a NEW request
+and adjusts again: after an answer that was lost, run \`pool show\` first to see whether it was
+applied. The write is audited.
 
 Examples:
   nemar admin compute pool adjust 2.5 --account 4412 --pool cpu --target charged --reason expanse_figure
@@ -336,8 +346,8 @@ Examples:
 Exit codes:
   0  adjusted.
   1  the amount, holder, pool, target or reason was not valid (nothing was sent), the Worker
-     refused (a platform budget is the owner's; there is no such pool; a total would go negative)
-     or the write failed.`;
+     refused (a platform budget, or an account's charge, is the owner's; there is no such pool; a
+     total would go negative or pass the largest NEMAR keeps) or the write failed.`;
 
 const poolCommand = new Command("pool").description(
   "Allocation pools in SU: show them, grant SU, correct a grant or a charge",

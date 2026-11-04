@@ -433,6 +433,9 @@ describe("pool grant", () => {
       ["pool", "grant", "1", "--account", "abc", "--pool", "cpu"],
       ["pool", "grant", "1", "--platform", "Bad Key", "--pool", "cpu"],
       ["pool", "grant", "1", "--platform", "a/b", "--pool", "cpu"],
+      // Charset-valid, and not one of the platform's two budgets: refused here, not at the Worker.
+      ["pool", "grant", "1", "--platform", "nonesuch", "--pool", "cpu"],
+      ["pool", "grant", "1", "--platform", "People", "--pool", "cpu"],
       ["pool", "grant", "1", "--account", "0", "--pool", "cpu"],
       [
         "pool",
@@ -502,7 +505,7 @@ describe("pool adjust", () => {
       (await runCli("admin", adjustArgs("2.5", ["--target", "granted", "--decrease"]))).exitCode,
     ).toBe(0);
     expect(pool("cpu")?.granted_milli).toBe(7500);
-    expect((await runCli("admin", adjustArgs("1", ["--target", "charged"]))).exitCode).toBe(0);
+    expect((await runCli("owner", adjustArgs("1", ["--target", "charged"]))).exitCode).toBe(0);
     expect(pool("cpu")).toMatchObject({ granted_milli: 7500, charged_milli: 1000 });
     expect(
       rows(
@@ -510,10 +513,21 @@ describe("pool adjust", () => {
       ),
     ).toEqual([{ charged_milli: 1000 }]);
     expect(
-      (await runCli("admin", adjustArgs("0.25", ["--target", "charged", "--decrease"]))).exitCode,
+      (await runCli("owner", adjustArgs("0.25", ["--target", "charged", "--decrease"]))).exitCode,
     ).toBe(0);
     expect(pool("cpu")?.charged_milli).toBe(750);
     expect(await totalsDisagreements(realD1(db))).toEqual([]);
+  });
+
+  test("correcting an account's charge is the owner's for now: an administrator exits 1 and changes nothing", async () => {
+    await runCli("owner", ["pool", "grant", "50", "--platform", "people", "--pool", "cpu"]);
+    await runCli("admin", ["pool", "grant", "10", "--account", String(accountId), "--pool", "cpu"]);
+    const before = rows("SELECT COUNT(*) AS n FROM compute_ledger")[0].n;
+    const refused = await runCli("admin", adjustArgs("1", ["--target", "charged"]));
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout + refused.stderr).toMatch(/owner/i);
+    expect(rows("SELECT COUNT(*) AS n FROM compute_ledger")[0].n).toBe(before);
+    expect(pool("cpu")?.charged_milli).toBe(0);
   });
 
   test("one that would make a total negative exits 1 and writes nothing", async () => {
@@ -629,7 +643,7 @@ describe("pool show", () => {
     expect(none.stdout).toMatch(/no pool/i);
     await runCli("admin", ["pool", "grant", "1", "--account", String(accountId), "--pool", "cpu"]);
     db.run(
-      "INSERT INTO compute_ledger (kind, pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, 2500, 'job_000000000000000000000003', 'seed-3')",
+      "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, idempotency_key) VALUES ('overrun', ?, (SELECT id FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = 'people' AND pool = 'cpu'), 2500, 'job_000000000000000000000003', 'seed-3')",
       [pool("cpu").id],
     );
     const r = await runCli("admin", ["pool", "show", "--account", String(accountId)]);
@@ -673,6 +687,22 @@ describe("pool show", () => {
     expect(
       (await runCli("member", ["pool", "show", "--account", String(accountId)])).exitCode,
     ).toBe(1);
+  });
+});
+
+describe("a lost answer", () => {
+  test("a re-run is a NEW request and grants again, so the help says to look first", async () => {
+    await runCli("admin", ["pool", "grant", "1", "--account", String(accountId), "--pool", "cpu"]);
+    await runCli("admin", ["pool", "grant", "1", "--account", String(accountId), "--pool", "cpu"]);
+    expect(pool("cpu")?.granted_milli).toBe(2000);
+    for (const group of [
+      ["pool", "grant"],
+      ["pool", "adjust"],
+    ]) {
+      const help = await runCli(null, [...group, "--help-all"]);
+      expect(help.stdout).toMatch(/new request/i);
+      expect(help.stdout).toContain("pool show");
+    }
   });
 });
 

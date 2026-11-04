@@ -6,8 +6,9 @@
  * adds a key, at the top level or nested, must not break a released CLI. The strict schema of the
  * owner policy is for what `policy set` sends, and `policy show` never parses a response with it.
  * A refusal answers `{ error: <sentence>, code: <word> }`: the sentence is `ApiError.message`, and
- * the word is read with {@link computeErrorCode}, never from `ApiError.code` (which is the body's
- * `error`, the sentence, under this convention).
+ * the word is in `ApiError.rawBody.code` (never `ApiError.code`, which is the body's `error`, the
+ * sentence, under this convention); nothing reads it yet, and the reader is added with the first
+ * caller that needs one.
  */
 
 import {
@@ -24,7 +25,6 @@ import {
   ComputePoolsResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
 import { request } from "./client.js";
-import { ApiError } from "./errors.js";
 
 /** `GET /admin/compute/policy` (owner): the policy in force, or the default while none is set. */
 export async function getComputePolicy(): Promise<ComputePolicyResponse> {
@@ -127,13 +127,4 @@ export async function adjustPlatformComputePool(
     body,
     idempotencyKey,
   );
-}
-
-/** The closed word of a `/admin/compute` refusal (`rawBody.code`), or undefined. */
-export function computeErrorCode(err: unknown): string | undefined {
-  if (!(err instanceof ApiError)) return undefined;
-  const body = err.rawBody;
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
-  const code = (body as Record<string, unknown>).code;
-  return typeof code === "string" ? code : undefined;
 }

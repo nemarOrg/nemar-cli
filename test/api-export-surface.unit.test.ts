@@ -239,7 +239,6 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   compute: [
     "adjustAccountComputePool",
     "adjustPlatformComputePool",
-    "computeErrorCode",
     "getAccountComputePools",
     "getComputePolicy",
     "grantAccountComputePool",
@@ -376,7 +375,6 @@ const POST_SPLIT_ADDITIONS = [
   "adjustAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/adjust
   "grantPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/grant
   "adjustPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/adjust
-  "computeErrorCode", // epic #2005 phase A2: the closed word of a /admin/compute refusal (rawBody.code)
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];
