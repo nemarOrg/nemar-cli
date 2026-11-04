@@ -26,6 +26,7 @@ import {
   OIDC_ID_TOKEN_TTL_SECONDS,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
   OIDC_MAX_ALLOWED_SCOPES,
+  OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS,
   OIDC_REFRESH_GRACE_SECONDS,
   OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS,
   OIDC_REFRESH_TOKEN_IDLE_SECONDS,
@@ -125,8 +126,10 @@ describe("the scope catalogue is the ADR's table", () => {
     for (const bad of ["implicit", "password", "", "Authorization_Code", 1, null, undefined]) {
       expect(isOidcGrant(bad)).toBe(false);
     }
-    for (const bad of ["anyone", "ACTIVE_ACCOUNT", "", 0, null]) expect(isOidcSignInRule(bad)).toBe(false);
-    for (const bad of ["never", "Always", "", false, null]) expect(isOidcConsentMode(bad)).toBe(false);
+    for (const bad of ["anyone", "ACTIVE_ACCOUNT", "", 0, null])
+      expect(isOidcSignInRule(bad)).toBe(false);
+    for (const bad of ["never", "Always", "", false, null])
+      expect(isOidcConsentMode(bad)).toBe(false);
   });
 
   test("the catalogue fits the table's cap on allowed scopes, with headroom for a new scope", () => {
@@ -173,6 +176,8 @@ describe("keys and identifiers", () => {
 
   test("at most five retired keys are published, and a forced rotation needs a next key 6 minutes old", () => {
     expect(OIDC_RETIRED_KEY_PUBLISH_MAX).toBe(5);
+    // Discovery and the key set are cached by clients for five minutes (Cache-Control: max-age).
+    expect(OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS).toBe(300);
     expect(OIDC_FORCE_MIN_NEXT_AGE_MINUTES).toBe(6);
   });
 

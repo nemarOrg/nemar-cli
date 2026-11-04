@@ -226,6 +226,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listOidcClients",
     "listOidcKeys",
     "oidcErrorCode",
+    "revokeOidcKey",
     "rotateOidcClientSecret",
     "rotateOidcKeys",
   ],
@@ -374,6 +375,7 @@ const POST_SPLIT_ADDITIONS = [
   "disableOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients/:client_id/disable
   "listOidcKeys", // epic #2014 phase #2016: GET /admin/oidc/keys
   "rotateOidcKeys", // epic #2014 phase #2016: POST /admin/oidc/keys/rotate
+  "revokeOidcKey", // epic #2014 phase #2016: POST /admin/oidc/keys/:kid/revoke
   "oidcErrorCode", // epic #2014 phase #2016: the closed word of an /admin/oidc refusal (rawBody.code)
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size

@@ -188,6 +188,12 @@ export const OIDC_RETIRED_KEY_PUBLISH_DAYS = 7;
 export const OIDC_RETIRED_KEY_PUBLISH_MAX = 5;
 
 /**
+ * How long a client may cache discovery and the key set: their `Cache-Control: max-age`. It bounds
+ * how long a client can go on using a key set that predates a rotation or a revocation.
+ */
+export const OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS = 300;
+
+/**
  * `keys rotate --force` refuses while the next key is younger than this many minutes, unless the
  * owner says it is an emergency: a key that has been published for a moment may not be in the key
  * set a client cached, so a token signed with it can fail verification there for about five minutes

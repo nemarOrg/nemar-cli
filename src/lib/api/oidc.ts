@@ -16,6 +16,7 @@ import {
   type OidcClientListResponse,
   type OidcClientRotateResponse,
   type OidcClientShowResponse,
+  type OidcKeyRevokeResponse,
   type OidcKeysResponse,
   type OidcKeysRotateResponse,
   oidcClientCreateResponseSchema,
@@ -23,6 +24,7 @@ import {
   oidcClientListResponseSchema,
   oidcClientRotateResponseSchema,
   oidcClientShowResponseSchema,
+  oidcKeyRevokeResponseSchema,
   oidcKeysResponseSchema,
   oidcKeysRotateResponseSchema,
 } from "../../../shared/contract/oidc-admin.js";
@@ -89,13 +91,32 @@ export async function listOidcKeys(): Promise<OidcKeysResponse> {
   return request(`${BASE}/keys`, {}, true, oidcKeysResponseSchema);
 }
 
-/** `POST /admin/oidc/keys/rotate`: make the first keys, or rotate them (`force` skips the 24 hours). */
-export async function rotateOidcKeys(force?: boolean): Promise<OidcKeysRotateResponse> {
+/**
+ * `POST /admin/oidc/keys/rotate`: make the first keys, or rotate them. `force` skips the 24 hours,
+ * and `emergency` skips the floor under which a just-published key is not promoted. The Worker reads
+ * `emergency` only together with `force`, so sending it alone does nothing.
+ */
+export async function rotateOidcKeys(
+  options: { force?: boolean; emergency?: boolean } = {},
+): Promise<OidcKeysRotateResponse> {
+  const body: { force?: true; emergency?: true } = {};
+  if (options.force) body.force = true;
+  if (options.emergency) body.emergency = true;
   return request(
     `${BASE}/keys/rotate`,
-    { method: "POST", body: JSON.stringify(force ? { force: true } : {}) },
+    { method: "POST", body: JSON.stringify(body) },
     true,
     oidcKeysRotateResponseSchema,
+  );
+}
+
+/** `POST /admin/oidc/keys/:kid/revoke`: withdraw a retired key; `changed` is false when it already was. */
+export async function revokeOidcKey(kid: string): Promise<OidcKeyRevokeResponse> {
+  return request(
+    `${BASE}/keys/${encodeURIComponent(kid)}/revoke`,
+    { method: "POST", body: "{}" },
+    true,
+    oidcKeyRevokeResponseSchema,
   );
 }
 

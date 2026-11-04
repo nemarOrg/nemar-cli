@@ -22,7 +22,11 @@
  */
 
 import { Hono, type MiddlewareHandler } from "hono";
-import { OIDC_DISCOVERY_PATH, OIDC_JWKS_PATH } from "../../../shared/oidc.js";
+import {
+  OIDC_DISCOVERY_PATH,
+  OIDC_JWKS_PATH,
+  OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS,
+} from "../../../shared/oidc.js";
 import { notFoundResponse } from "../lib/not-found.js";
 import { buildDiscoveryDocument, onOidcSurface } from "../services/oidc-config.js";
 import { jwksDocument } from "../services/oidc-keys.js";
@@ -52,7 +56,7 @@ const publicDocument: MiddlewareHandler<Env> = async (c, next) => {
   // not be read or built) must never be stored by a cache for five minutes as if it were the answer.
   if (c.res.status !== 200) return;
   c.res.headers.set("Access-Control-Allow-Origin", "*");
-  c.res.headers.set("Cache-Control", "public, max-age=300");
+  c.res.headers.set("Cache-Control", `public, max-age=${OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS}`);
   c.res.headers.delete("Access-Control-Allow-Credentials");
   c.res.headers.delete("Access-Control-Expose-Headers");
 };

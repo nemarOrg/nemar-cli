@@ -9,6 +9,7 @@
  *   nemar admin oidc clients disable        cut a client off
  *   nemar admin oidc keys list              the signing keys and their states
  *   nemar admin oidc keys rotate            make the first keys, or rotate them
+ *   nemar admin oidc keys revoke <kid>      withdraw a retired key from the key set
  *
  * A secret is printed on `add` and on `rotate-secret` and nowhere else, and no command prints a
  * hash or a private key, because the Worker returns none. Every command takes `--json`: standard
@@ -17,7 +18,8 @@
  *
  * The routes exist only on a Worker whose provider is on (`OIDC_SECRET`) and only on the issuer's
  * own host, so a 404 here is said plainly (`hintsFor`), and not as "this backend does not support
- * this command yet".
+ * this command yet". The numbers and lists the help and the messages state (the grace, the 24 hours,
+ * the scope catalogue) are interpolated from `shared/oidc.ts`, where they are declared once.
  */
 
 import chalk from "chalk";
@@ -25,6 +27,15 @@ import { Command, InvalidArgumentError, Option } from "commander";
 import type { OidcClientView, OidcKeyView } from "../../shared/contract/oidc-admin.js";
 import {
   OIDC_CONSENT_MODES,
+  OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
+  OIDC_GRANTS,
+  OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_MAX_REDIRECT_URIS,
+  OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS,
+  OIDC_RETIRED_KEY_PUBLISH_DAYS,
+  OIDC_RETIRED_KEY_PUBLISH_MAX,
+  OIDC_SCOPES,
+  OIDC_SCOPE_NAMES,
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
   OIDC_SIGN_IN_RULES,
@@ -39,18 +50,26 @@ import {
   getOidcClient,
   listOidcClients,
   listOidcKeys,
+  oidcErrorCode,
+  revokeOidcKey,
   rotateOidcClientSecret,
   rotateOidcKeys,
 } from "../lib/api/oidc.js";
 import { confirm } from "../lib/confirm.js";
 import { clip, plain } from "../lib/terminal-text.js";
 
+/** Whole minutes of a cache lifetime in seconds, as the help says it ("5 minutes"). */
+const CACHE_MINUTES = OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS / 60;
+
+/** The scopes only a machine may hold, for the help. */
+const MACHINE_SCOPES = OIDC_SCOPES.filter((s) => s.machineOnly).map((s) => s.name);
+
 // ---------------------------------------------------------------------------------------------
 // Plumbing
 // ---------------------------------------------------------------------------------------------
 
 /** What to tell the owner for a status, in place of the generic hint. */
-function hintsFor(error: unknown): Record<number, string> {
+function hintsFor(error: unknown, afterNetworkError?: string): Record<number, string> {
   const hints: Record<number, string> = {
     403: "These commands are for the owner role only.",
   };
@@ -58,16 +77,36 @@ function hintsFor(error: unknown): Record<number, string> {
     hints[404] =
       "The server does not serve this route: the OpenID Connect provider is off there (no OIDC_SECRET), or the API URL is not the issuer's own host, or the server is older than this command.";
   }
+  // A refusal of a rotation says what to do about it; 409 is the status of all of them.
+  const code = oidcErrorCode(error);
+  if (code === "rotation_next_too_new") {
+    hints[409] =
+      "In an emergency, `nemar admin oidc keys rotate --force --yes` overrides this; the audit trail records it.";
+  } else if (code === "key_unreadable") {
+    hints[409] =
+      "Check that the Worker's OIDC_SECRET is the one the keys were made under; nothing was changed.";
+  }
+  // Status 0 is a network failure: the request may or may not have reached the server.
+  if (afterNetworkError) hints[0] = afterNetworkError;
   return hints;
 }
 
-/** Sign-in check, then the call; a failure is reported once (exit 1) and the result is null. */
-async function run<T>(json: boolean, what: string, call: () => Promise<T>): Promise<T | null> {
+/**
+ * Sign-in check, then the call; a failure is reported once (exit 1) and the result is null.
+ * `afterNetworkError` is what to say when the request failed on the network: for a write, to look
+ * before trying again, because the request may have been carried out.
+ */
+async function run<T>(
+  json: boolean,
+  what: string,
+  call: () => Promise<T>,
+  afterNetworkError?: string,
+): Promise<T | null> {
   if (!requireSignedIn(json)) return null;
   try {
     return await call();
   } catch (err) {
-    failWith(err, null, `Could not ${what}.`, hintsFor(err), { json });
+    failWith(err, null, `Could not ${what}.`, hintsFor(err, afterNetworkError), { json });
     return null;
   }
 }
@@ -107,6 +146,19 @@ const utc = (s: string | null): string => (s ? `${plain(s)} UTC` : "never");
 // Rendering
 // ---------------------------------------------------------------------------------------------
 
+/** A table: the header in bold, then one line per row, each column as wide as its widest cell. */
+function renderTable(head: string[], rows: string[][]): string[] {
+  const widths = head.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => (r[i] as string).length)),
+  );
+  const fmt = (cells: string[]) =>
+    cells
+      .map((cell, i) => cell.padEnd(widths[i] as number))
+      .join("  ")
+      .trimEnd();
+  return [chalk.bold(fmt(head)), ...rows.map(fmt)];
+}
+
 function clientLines(c: OidcClientView): string[] {
   const caps =
     c.cap_open_reservations === null && c.cap_su_per_day === null
@@ -131,49 +183,36 @@ function clientLines(c: OidcClientView): string[] {
 }
 
 function clientTable(clients: OidcClientView[]): string[] {
-  const rows = clients.map((c) => [
-    plain(c.client_id),
-    clip(c.name, 32),
-    plain(c.status),
-    c.first_party ? "first-party" : "third-party",
-    plain(c.sign_in_rule),
-    String(c.allowed_scopes.length),
-  ]);
-  const head = ["CLIENT ID", "NAME", "STATUS", "KIND", "SIGN-IN RULE", "SCOPES"];
-  const widths = head.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] as string).length)),
+  return renderTable(
+    ["CLIENT ID", "NAME", "STATUS", "KIND", "SIGN-IN RULE", "SCOPES"],
+    clients.map((c) => [
+      plain(c.client_id),
+      clip(c.name, 32),
+      plain(c.status),
+      c.first_party ? "first-party" : "third-party",
+      plain(c.sign_in_rule),
+      String(c.allowed_scopes.length),
+    ]),
   );
-  const fmt = (cells: string[]) =>
-    cells
-      .map((cell, i) => cell.padEnd(widths[i] as number))
-      .join("  ")
-      .trimEnd();
-  return [chalk.bold(fmt(head)), ...rows.map(fmt)];
 }
 
 function keyTable(keys: OidcKeyView[]): string[] {
-  const rows = keys.map((k) => [
-    plain(k.kid),
-    plain(k.state),
-    plain(k.alg),
-    utc(k.created_at),
-    k.promoted_at
-      ? utc(k.promoted_at)
-      : k.promotable_at
-        ? `may be promoted ${utc(k.promotable_at)}`
-        : "-",
-    k.retired_at ? utc(k.retired_at) : "-",
-  ]);
-  const head = ["KEY ID", "STATE", "ALG", "CREATED", "PROMOTED", "RETIRED"];
-  const widths = head.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] as string).length)),
+  return renderTable(
+    ["KEY ID", "STATE", "ALG", "CREATED", "PROMOTED", "RETIRED", "REVOKED"],
+    keys.map((k) => [
+      plain(k.kid),
+      plain(k.state),
+      plain(k.alg),
+      utc(k.created_at),
+      k.promoted_at
+        ? utc(k.promoted_at)
+        : k.promotable_at
+          ? `may be promoted ${utc(k.promotable_at)}`
+          : "-",
+      k.retired_at ? utc(k.retired_at) : "-",
+      k.revoked_at ? utc(k.revoked_at) : "-",
+    ]),
   );
-  const fmt = (cells: string[]) =>
-    cells
-      .map((cell, i) => cell.padEnd(widths[i] as number))
-      .join("  ")
-      .trimEnd();
-  return [chalk.bold(fmt(head)), ...rows.map(fmt)];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -185,17 +224,24 @@ Registers an OpenID Connect client (owner only). The client's secret is printed 
 cannot be read again: store it now. Only its hash is kept. A refusal prints the Worker's reason,
 which names the field and never repeats what was typed.
 
-  --redirect-uri     One to ten exact addresses (repeat the flag). https only; a loopback address may
-                     use http outside production; no wildcard, no fragment, no user information.
-  --scopes           A comma-separated list from the catalogue: openid, profile, email, orcid,
-                     nemar.account, offline_access, compute.read, compute.reserve, compute.submit,
-                     compute.stats (compute.stats only with the client_credentials grant).
-  --grants           A comma-separated list: authorization_code, refresh_token, client_credentials.
-  --sign-in-rule     active_account, or person_proven_orcid (an account of kind person whose ORCID iD
-                     was proven by signing in with ORCID).
-  --first-party      Skips the consent screen. Allowed only when EVERY redirect address is on a NEMAR
-                     web origin; a client with a partner-host or any other redirect address is
-                     third-party and always shows consent.
+  --redirect-uri     Exact addresses, from one to ${OIDC_MAX_REDIRECT_URIS} (repeat the flag). https only; a loopback
+                     address may use http outside production; no wildcard, no fragment, no user
+                     information. Each must be written as a browser would navigate to it (lower-case,
+                     with a path, no dot segments, no default port): one that is not is refused.
+  --scopes           A comma-separated list from the catalogue: ${OIDC_SCOPE_NAMES.join(", ")}.
+                     A scope a person grants needs the authorization_code grant; ${MACHINE_SCOPES.join(", ")} is
+                     for a machine and needs client_credentials; offline_access and refresh_token
+                     come together.
+  --grants           A comma-separated list: ${OIDC_GRANTS.join(", ")}.
+  --sign-in-rule     ${OIDC_SIGN_IN_RULES.join(" or ")} (the second: an account of kind person whose ORCID
+                     iD was proven by signing in with ORCID).
+  --consent-mode     ${OIDC_CONSENT_MODES.join(" or ")} (default ${OIDC_CONSENT_MODES[0]}): how often a third-party client is asked.
+  --first-party      Skips the consent screen. Allowed only when EVERY redirect address is an https
+                     address on nemar.org or one of its subdomains (a loopback address or a website
+                     preview only outside production). A client with a partner-host redirect, or any
+                     other, is refused as first-party: register it without --first-party and it is a
+                     third-party client, which never skips the consent screen and follows its
+                     --consent-mode.
 
 Examples:
   nemar admin oidc clients add --name "Compute portal" --redirect-uri https://portal.example.org/cb \\
@@ -205,7 +251,9 @@ Examples:
 Exit codes:
   0  registered; the secret was printed.
   1  not signed in, not the owner, a missing or malformed flag, a refusal of the registry (nothing
-     was registered), or a server on which the provider is off.`;
+     was registered; a name already used by an active client is one), a network failure (the request
+     may have been carried out: run \`clients list\` before adding again), or a server on which the
+     provider is off.`;
 
 const LIST_HELP = `
 Lists every registered client: its id, name, status, whether it is first-party, its sign-in rule and
@@ -231,8 +279,9 @@ A disabled client's secret cannot be rotated.
 
 Exit codes:
   0  rotated; the new secret was printed.
-  1  not signed in, not the owner, no such client, a disabled client, a grace out of range, or a
-     server on which the provider is off.`;
+  1  not signed in, not the owner, no such client, a disabled client, a grace out of range, a
+     network failure (the secret may have been rotated: run \`clients show\`), or a server on which
+     the provider is off.`;
 
 const DISABLE_HELP = `
 Cuts a client off: it can no longer authenticate. There is no command to enable it again, so it asks
@@ -245,9 +294,9 @@ Exit codes:
      changed), or a server on which the provider is off.`;
 
 const KEYS_LIST_HELP = `
-Lists the signing keys: current (signs), next (published, not yet signing), and retired (still
-published for seven days). A next key shows when it may become current without --force. The private
-half is never returned.
+Lists the signing keys: current (signs), next (published, not yet signing), retired (still
+published for ${OIDC_RETIRED_KEY_PUBLISH_DAYS} days, at most ${OIDC_RETIRED_KEY_PUBLISH_MAX} of them) and revoked (withdrawn, never published). A next key
+shows when it may become current without --force. The private half is never returned.
 
 Exit codes:
   0  listed (no keys yet is not a failure).
@@ -255,17 +304,37 @@ Exit codes:
 
 const KEYS_ROTATE_HELP = `
 With no keys yet, makes the first current key and a next key. After that, the next key becomes
-current, the current key is retired (still published for seven days, so a token signed just before
-the rotation verifies), and a new next key is made. The next key becomes current only when it is
-24 hours old, so a client has time to fetch it; --force skips that wait.
+current, the current key is retired (still published for ${OIDC_RETIRED_KEY_PUBLISH_DAYS} days, at most ${OIDC_RETIRED_KEY_PUBLISH_MAX} retired keys, so a
+token signed just before the rotation verifies), and a new next key is made. The next key becomes
+current only when it is ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old, so a client has time to fetch it.
 
-Set OIDC_SECRET on the Worker before the first rotation: it encrypts the private keys, and changing
-it afterwards makes every stored key unreadable.
+--force skips that wait, but refuses while the next key is under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old: a client whose
+cached key set predates the key can fail verification of tokens signed with it for up to about
+${CACHE_MINUTES} minutes (the key set is cached that long). --force --yes is the emergency override of that
+floor; the audit trail records it.
+
+Before it promotes a key, the Worker proves it can decrypt it. A key that was encrypted under a
+different OIDC_SECRET is refused and nothing changes: set OIDC_SECRET before the first rotation, and
+do not change it afterwards (every stored key becomes unreadable).
 
 Exit codes:
   0  rotated, or the first keys were made.
-  1  not signed in, not the owner, the next key is not 24 hours old yet (nothing changed; --force
-     rotates now), another rotation won the race (read the keys again), or a server on which the
+  1  not signed in, not the owner, the next key is not ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old yet (nothing changed; --force
+     rotates now), --force on a key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old without --yes, a key that cannot be
+     decrypted under OIDC_SECRET, another rotation won the race (read the keys again), a network
+     failure (run \`keys list\` before rotating again), or a server on which the provider is off.`;
+
+const KEYS_REVOKE_HELP = `
+Withdraws a RETIRED key from the key set at once, for a key whose private half is thought to have
+leaked: tokens it signed stop verifying wherever the key set is read again (clients cache it for up
+to ${CACHE_MINUTES} minutes). The key that signs and the next key cannot be revoked: rotate first, then revoke the
+key once it is retired. It asks first (--yes answers); the CLI cannot undo it. Revoking a revoked key
+changes nothing.
+
+Exit codes:
+  0  revoked, or it already was (the answer says which).
+  1  not signed in, not the owner, not a key id, no such key, a key that is current or next (rotate
+     first), the question was not answered yes (nothing was changed), or a server on which the
      provider is off.`;
 
 // ---------------------------------------------------------------------------------------------
@@ -279,7 +348,7 @@ export const oidcCommand = new Command("oidc").description(
 const clientsCommand = new Command("clients").description(
   "Register and manage OpenID Connect clients",
 );
-const keysCommand = new Command("keys").description("List and rotate the signing keys");
+const keysCommand = new Command("keys").description("List, rotate and revoke the signing keys");
 
 interface AddOptions {
   name: string;
@@ -301,7 +370,12 @@ clientsCommand
   .command("add")
   .description("Register a client; its secret is printed once")
   .requiredOption("--name <name>", "What the consent screen and the listing call the client")
-  .option("--redirect-uri <uri>", "An exact redirect address (repeat for up to ten)", collect, [])
+  .option(
+    "--redirect-uri <uri>",
+    `An exact redirect address (repeat for up to ${OIDC_MAX_REDIRECT_URIS})`,
+    collect,
+    [],
+  )
   .requiredOption("--scopes <list>", "Comma-separated scopes the client may ask for")
   .requiredOption("--grants <list>", "Comma-separated grants the client may use")
   .addOption(
@@ -314,7 +388,10 @@ clientsCommand
       ...OIDC_CONSENT_MODES,
     ]),
   )
-  .option("--first-party", "Skip the consent screen (every redirect must be on a NEMAR web origin)")
+  .option(
+    "--first-party",
+    "Skip the consent screen (every redirect must be https on nemar.org or a subdomain)",
+  )
   .option("--logout-uri <uri>", "The https address NEMAR tells when an account is cut off")
   .requiredOption("--audience <audience>", "The resource the client's access tokens are bound to")
   .option(
@@ -331,25 +408,29 @@ clientsCommand
       failMessage("Give at least one --redirect-uri.", { json, answered: true });
       return;
     }
-    const result = await run(json, "register the client", () =>
-      createOidcClient({
-        name: options.name,
-        redirect_uris: options.redirectUri,
-        allowed_scopes: list(options.scopes),
-        allowed_grants: list(options.grants),
-        sign_in_rule: options.signInRule,
-        audience: options.audience,
-        ...(options.firstParty ? { first_party: true } : {}),
-        ...(options.consentMode ? { consent_mode: options.consentMode } : {}),
-        ...(options.logoutUri ? { backchannel_logout_uri: options.logoutUri } : {}),
-        ...(options.introspectionAudiences
-          ? { introspection_audiences: list(options.introspectionAudiences) }
-          : {}),
-        ...(options.capOpenReservations !== undefined
-          ? { cap_open_reservations: options.capOpenReservations }
-          : {}),
-        ...(options.capSuPerDay !== undefined ? { cap_su_per_day: options.capSuPerDay } : {}),
-      }),
+    const result = await run(
+      json,
+      "register the client",
+      () =>
+        createOidcClient({
+          name: options.name,
+          redirect_uris: options.redirectUri,
+          allowed_scopes: list(options.scopes),
+          allowed_grants: list(options.grants),
+          sign_in_rule: options.signInRule,
+          audience: options.audience,
+          ...(options.firstParty ? { first_party: true } : {}),
+          ...(options.consentMode ? { consent_mode: options.consentMode } : {}),
+          ...(options.logoutUri ? { backchannel_logout_uri: options.logoutUri } : {}),
+          ...(options.introspectionAudiences
+            ? { introspection_audiences: list(options.introspectionAudiences) }
+            : {}),
+          ...(options.capOpenReservations !== undefined
+            ? { cap_open_reservations: options.capOpenReservations }
+            : {}),
+          ...(options.capSuPerDay !== undefined ? { cap_su_per_day: options.capSuPerDay } : {}),
+        }),
+      "The request may have been carried out before it failed. Run `nemar admin oidc clients list` before adding again: a second add registers a second client, and its secret is the only one anybody sees.",
     );
     if (!result) return;
     if (json) {
@@ -406,15 +487,18 @@ clientsCommand
   .description("Make a new secret; the old one stays valid for a grace")
   .option(
     "--grace-hours <n>",
-    `Hours the old secret stays valid (default ${OIDC_SECRET_GRACE_HOURS_DEFAULT}, 0 to 168)`,
+    `Hours the old secret stays valid (default ${OIDC_SECRET_GRACE_HOURS_DEFAULT}, 0 to ${OIDC_SECRET_GRACE_HOURS_MAX})`,
     wholeNumber(OIDC_SECRET_GRACE_HOURS_MAX),
   )
   .option("--json", "Print the answer as JSON (the secret included)")
   .addHelpText("after", ROTATE_SECRET_HELP)
   .action(async (clientId: string, options: { graceHours?: number; json?: boolean }) => {
     const json = options.json === true;
-    const result = await run(json, "rotate the secret", () =>
-      rotateOidcClientSecret(clientId, options.graceHours),
+    const result = await run(
+      json,
+      "rotate the secret",
+      () => rotateOidcClientSecret(clientId, options.graceHours),
+      "The request may have been carried out before it failed. Run `nemar admin oidc clients show <client_id>` to see whether a previous secret is now in its grace; rotating again makes yet another secret.",
     );
     if (!result) return;
     if (json) {
@@ -490,12 +574,24 @@ keysCommand
 keysCommand
   .command("rotate")
   .description("Make the first signing keys, or rotate them")
-  .option("--force", "Rotate now even when the next key is under 24 hours old")
+  .option(
+    "--force",
+    `Rotate now even when the next key is under ${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old`,
+  )
+  .option(
+    "-y, --yes",
+    `With --force: the emergency override, for a next key under ${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes old`,
+  )
   .option("--json", "Print the answer as JSON")
   .addHelpText("after", KEYS_ROTATE_HELP)
-  .action(async (options: { force?: boolean; json?: boolean }) => {
+  .action(async (options: { force?: boolean; yes?: boolean; json?: boolean }) => {
     const json = options.json === true;
-    const result = await run(json, "rotate the signing keys", () => rotateOidcKeys(options.force));
+    const result = await run(
+      json,
+      "rotate the signing keys",
+      () => rotateOidcKeys({ force: options.force, emergency: options.yes }),
+      "The request may have been carried out before it failed. Run `nemar admin oidc keys list` before rotating again.",
+    );
     if (!result) return;
     if (json) {
       printJson(result);
@@ -504,12 +600,44 @@ keysCommand
     const out = say(false);
     const words: Record<string, string> = {
       bootstrapped: "Made the first signing keys: a current key and a next key.",
-      rotated:
-        "Rotated: the next key is now current, the old current key is retired (still published for seven days), and a new next key was made.",
+      rotated: `Rotated: the next key is now current, the old current key is retired (still published for ${OIDC_RETIRED_KEY_PUBLISH_DAYS} days), and a new next key was made.`,
       next_created: "Made a new next key; the current key is unchanged.",
     };
     out(plain(words[result.action] ?? `Done (${result.action}).`));
     for (const line of keyTable(result.keys)) console.log(line);
+  });
+
+keysCommand
+  .command("revoke <kid>")
+  .description("Withdraw a retired signing key from the key set")
+  .option("-y, --yes", "Do not ask first")
+  .option("--json", "Print the answer as JSON")
+  .addHelpText("after", KEYS_REVOKE_HELP)
+  .action(async (kid: string, options: { yes?: boolean; json?: boolean }) => {
+    const json = options.json === true;
+    if (!requireSignedIn(json)) return;
+    const answer = await confirm(
+      `Revoke signing key ${kid}? Tokens it signed stop verifying wherever the key set is read again (clients cache it for up to ${CACHE_MINUTES} minutes), and the CLI cannot undo it.`,
+      { yes: options.yes },
+    );
+    if (answer !== "confirmed") {
+      failMessage("Not revoked: the question was not answered yes (use --yes).", {
+        json,
+        answered: true,
+      });
+      return;
+    }
+    const result = await run(json, "revoke the signing key", () => revokeOidcKey(kid));
+    if (!result) return;
+    if (json) {
+      printJson(result);
+      return;
+    }
+    say(false)(
+      result.changed
+        ? `Revoked signing key ${plain(result.key.kid)}; it is no longer published.`
+        : `Signing key ${plain(result.key.kid)} was already revoked; nothing changed.`,
+    );
   });
 
 oidcCommand.addCommand(clientsCommand);

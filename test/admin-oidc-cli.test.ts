@@ -23,7 +23,15 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,7 +46,22 @@ import {
   OWNER_KEY,
   seedUser,
 } from "../backend/test/helpers/oidc-harness";
+import {
+  OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
+  OIDC_GRANTS,
+  OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_MAX_REDIRECT_URIS,
+  OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS,
+  OIDC_RETIRED_KEY_PUBLISH_DAYS,
+  OIDC_SCOPE_NAMES,
+  OIDC_SECRET_GRACE_HOURS_DEFAULT,
+  OIDC_SECRET_GRACE_HOURS_MAX,
+} from "../shared/oidc";
 import { help } from "./help-output";
+
+// Many of these tests spawn the CLI several times in one test (the "who may run it" walks make 28
+// spawns); Bun's default of five seconds is not enough, and the sibling CLI suites raise it the same way.
+setDefaultTimeout(30_000);
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -569,5 +592,198 @@ describe("help", () => {
     expect(group).toContain("keys");
     const admin = await help(["admin", "--help-all"]);
     expect(admin).toContain("oidc");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Round-1 additions (review of phase #2016)
+// ---------------------------------------------------------------------------------------------
+
+const ageNext = (minutes: number) =>
+  db.run(
+    `UPDATE oidc_signing_keys SET created_at = datetime('now', '-${minutes} minutes') WHERE state = 'next'`,
+  );
+
+describe("nemar admin oidc keys rotate --force", () => {
+  test("is refused while the next key is under 6 minutes old, and says what --yes means", async () => {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    const before = JSON.stringify(
+      db.query("SELECT kid, state FROM oidc_signing_keys ORDER BY kid").all(),
+    );
+    const refused = await failsBothWays(["keys", "rotate", "--force"]);
+    expect(refused.plain).toMatch(/6 minutes/);
+    expect(refused.plain).toMatch(/emergency/i);
+    expect(refused.plain).toMatch(/--yes/);
+    expect(
+      JSON.stringify(db.query("SELECT kid, state FROM oidc_signing_keys ORDER BY kid").all()),
+    ).toBe(before);
+  });
+
+  test("--force --yes is the emergency, and rotates a key published seconds ago", async () => {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    const r = await runCli(["keys", "rotate", "--force", "--yes", "--json"]);
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect((JSON.parse(r.stdout) as { action: string }).action).toBe("rotated");
+    const audit = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'oidc.keys.rotate' ORDER BY id DESC LIMIT 1",
+      )
+      .get();
+    expect(JSON.parse(audit?.details as string)).toMatchObject({ forced: true, emergency: true });
+  });
+
+  test("--yes without --force changes nothing about the 24-hour rule", async () => {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    const early = await failsBothWays(["keys", "rotate", "--yes"]);
+    expect(early.plain).toMatch(/24 hours/);
+  });
+
+  test("a rotation under another OIDC_SECRET says which secret was wrong and changes nothing", async () => {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    ageNext(25 * 60);
+    extraEnv = { OIDC_SECRET: "another-oidc-secret-0123456789abcdef0123456789" };
+    const refused = await failsBothWays(["keys", "rotate"]);
+    expect(refused.plain).toMatch(/different OIDC_SECRET/);
+    expect(refused.json).toMatch(/different OIDC_SECRET/);
+    extraEnv = {};
+    expect(db.query("SELECT COUNT(*) AS n FROM oidc_signing_keys").get()).toEqual({ n: 2 });
+  });
+});
+
+describe("nemar admin oidc keys revoke", () => {
+  /** Two rotations in, the first key is retired. Returns its id and the other states' ids. */
+  async function retiredKid(): Promise<string> {
+    signIn(OWNER_KEY);
+    await runCli(["keys", "rotate"]);
+    const first = (
+      db.query("SELECT kid FROM oidc_signing_keys WHERE state = 'current'").get() as { kid: string }
+    ).kid;
+    await runCli(["keys", "rotate", "--force", "--yes"]);
+    return first;
+  }
+  const stateOf = (kid: string) =>
+    (db.query("SELECT state FROM oidc_signing_keys WHERE kid = ?").get(kid) as { state: string })
+      .state;
+
+  test("revokes a retired key with --yes, and a second run says it already was", async () => {
+    const kid = await retiredKid();
+    const r = await runCli(["keys", "revoke", kid, "--yes"]);
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/revoked/i);
+    expect(stateOf(kid)).toBe("revoked");
+    const again = await runCli(["keys", "revoke", kid, "--yes", "--json"]);
+    expect(again.exitCode).toBe(0);
+    const parsed = JSON.parse(again.stdout) as { changed: boolean; key: { state: string } };
+    expect(parsed.changed).toBe(false);
+    expect(parsed.key.state).toBe("revoked");
+  });
+
+  test("keys list then shows the key as revoked, with when", async () => {
+    const kid = await retiredKid();
+    await runCli(["keys", "revoke", kid, "--yes"]);
+    const list = await runCli(["keys", "list"]);
+    const line = list.stdout.split("\n").find((l) => l.includes(kid)) ?? "";
+    expect(line).toMatch(/revoked/);
+    // The REVOKED column carries a time; the same line has its created, promoted and retired times too.
+    expect(line.match(/\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC/g)?.length).toBe(4);
+    expect(list.stdout).toMatch(/REVOKED/);
+  });
+
+  test("without --yes and with no terminal it asks, cannot, and revokes nothing", async () => {
+    const kid = await retiredKid();
+    const refused = await failsBothWays(["keys", "revoke", kid]);
+    expect(refused.plain).toMatch(/--yes/);
+    expect(stateOf(kid)).toBe("retired");
+  });
+
+  test("the current key, the next key, an unknown key and a malformed id are refused, with the reason", async () => {
+    await retiredKid();
+    for (const state of ["current", "next"]) {
+      const kid = (
+        db.query("SELECT kid FROM oidc_signing_keys WHERE state = ?").get(state) as { kid: string }
+      ).kid;
+      const refused = await failsBothWays(["keys", "revoke", kid, "--yes"]);
+      expect(refused.plain).toMatch(/rotate/i);
+      expect(stateOf(kid)).toBe(state);
+    }
+    const missing = await failsBothWays(["keys", "revoke", "00000000000000ff", "--yes"]);
+    expect(missing.plain).toMatch(/no signing key/i);
+    const malformed = await failsBothWays(["keys", "revoke", "nope", "--yes"]);
+    expect(malformed.plain).toMatch(/not a key id/i);
+  });
+
+  test("it is for the owner, and for a signed-in one", async () => {
+    const refused = await failsBothWays(["keys", "revoke", "0123456789abcdef", "--yes"]);
+    expect(refused.plain).toContain("Not authenticated");
+    signIn(ADMIN_KEY);
+    const admin = await failsBothWays(["keys", "revoke", "0123456789abcdef", "--yes"]);
+    expect(admin.plain).toMatch(/owner/i);
+  });
+});
+
+describe("a network failure on a write says to look before trying again", () => {
+  test("clients add suggests clients list, because the request may have been registered", async () => {
+    signIn(OWNER_KEY);
+    const dead = { TEST_API_URL: "http://127.0.0.1:1" };
+    const typed = await runCli(addArgs(), dead);
+    expect(typed.exitCode).toBe(1);
+    const text = typed.stdout + typed.stderr;
+    expect(text).toMatch(/clients list/);
+    expect(text).toMatch(/secret/i);
+    const asJson = await runCli([...addArgs(), "--json"], dead);
+    expect(asJson.exitCode).toBe(1);
+    expect(asJson.stdout).toBe("");
+    expect(asJson.stderr).toMatch(/clients list/);
+  });
+
+  test("rotate-secret and keys rotate say the same", async () => {
+    signIn(OWNER_KEY);
+    const dead = { TEST_API_URL: "http://127.0.0.1:1" };
+    const rotate = await runCli(["clients", "rotate-secret", "oc_000000000000000000000000"], dead);
+    expect(rotate.stdout + rotate.stderr).toMatch(/clients show/);
+    const keys = await runCli(["keys", "rotate"], dead);
+    expect(keys.stdout + keys.stderr).toMatch(/keys list/);
+  });
+});
+
+describe("help says what the constants say", () => {
+  test("clients add: the catalogue, the grants, the redirect limit, and what third-party means", async () => {
+    const out = await help(["admin", "oidc", "clients", "add", "--help-all"]);
+    for (const scope of OIDC_SCOPE_NAMES) expect(out).toContain(scope);
+    for (const grant of OIDC_GRANTS) expect(out).toContain(grant);
+    expect(out).toContain(`one to ${OIDC_MAX_REDIRECT_URIS}`);
+    // A third-party client never skips consent and follows its mode; it does not "always" show it.
+    expect(out).toMatch(/never skips/);
+    expect(out).not.toMatch(/always shows/i);
+    expect(out).toMatch(/offline_access/);
+  });
+
+  test("rotate-secret: the grace default and its maximum", async () => {
+    const out = await help(["admin", "oidc", "clients", "rotate-secret", "--help-all"]);
+    expect(out).toContain(`default ${OIDC_SECRET_GRACE_HOURS_DEFAULT}`);
+    expect(out).toContain(`at most ${OIDC_SECRET_GRACE_HOURS_MAX}`);
+  });
+
+  test("keys rotate: the 24-hour rule, the retired window, the force floor and what forcing risks", async () => {
+    const out = await help(["admin", "oidc", "keys", "rotate", "--help-all"]);
+    expect(out).toContain(`${OIDC_KEY_MIN_NEXT_AGE_HOURS} hours old`);
+    expect(out).toContain(`${OIDC_RETIRED_KEY_PUBLISH_DAYS} days`);
+    expect(out).toContain(`${OIDC_FORCE_MIN_NEXT_AGE_MINUTES} minutes`);
+    expect(out).toMatch(/fail verification/);
+    expect(out).toContain(`${OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS / 60} minutes`);
+    expect(out).toMatch(/--yes/);
+    expect(out).toMatch(/OIDC_SECRET/);
+  });
+
+  test("keys revoke: what it does and does not do", async () => {
+    const out = await help(["admin", "oidc", "keys", "revoke", "--help-all"]);
+    expect(out).toContain("Exit codes:");
+    expect(out).toMatch(/retired/);
+    expect(out).toMatch(/rotate first/i);
+    expect(out).toContain(`${OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS / 60} minutes`);
   });
 });
