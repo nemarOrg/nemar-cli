@@ -328,8 +328,6 @@ export const HOLD_INSERT_SQL = `INSERT INTO compute_ledger
                            FROM compute_pools b WHERE b.id = ?2) >= ?3)
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = ?5)`;
 
-const HOLD_FIXED_PARAMS = 5;
-
 /** A guard's `?` placeholders numbered after the statement's own, and how many it takes. */
 function numberedGuard(sql: string, from: number): { sql: string; count: number } {
   if (/\?\d|\?\?/.test(sql)) invalid("a hold guard uses plain ? placeholders");
