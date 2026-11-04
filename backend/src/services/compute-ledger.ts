@@ -14,10 +14,13 @@
  *    write of a total that is not the trigger's.
  *  - The table refuses what the statements here refuse. Its BEFORE INSERT triggers refuse an entry
  *    whose pool or budget totals would leave 0 to 2^53 - 1, a hold that would take available below 0,
- *    a spend on an account or partner pool that names no `people` budget (or names another), and a
- *    release or charge that does not close the hold it names, under every conflict clause. The
- *    statements below say the same as WHERE terms, so that a refusal writes nothing and raises
- *    nothing; a caller that skips them is refused by the table with an error.
+ *    a hold, release, charge, overrun or final settlement on an account or partner pool that names no
+ *    `people` budget, any entry whose budget is not the `people` budget of its pool's word, and a
+ *    release or charge that does not close the hold it names, under every conflict clause. A refund
+ *    and a correction of a charge may name the budget or none: crediting it back is this module's
+ *    choice (today it does, the owner's option B) and not the table's. The statements below say
+ *    the same as WHERE terms, so that a refusal writes nothing and raises nothing; a caller that
+ *    skips them is refused by the table with an error.
  *  - A hold is ONE conditional INSERT (`HOLD_INSERT_SQL`): the pool not frozen, the pool's
  *    available at least the amount, the budget pool's available at least the amount, the key unused
  *    and any guard the caller adds, all in its WHERE. D1 runs a statement whole, so two holds for the
@@ -915,8 +918,9 @@ export type AdjustResult =
  * Correct a pool's grant or its charge, up or down: one `adjust` entry whose delta is on exactly
  * one of them, with who and a fixed-word reason (required). A correction of the charge of an
  * account's or a partner's pool names the platform `people` budget of its word (`budgetPoolId`),
- * which follows it (the table refuses one that names none, or another); a correction of the grant
- * names none. One that would take a stored total below zero (the pool's granted or charged, or the
+ * which follows it (the table refuses another budget but not none: following it is the code's
+ * choice, the owner's option B, and the owner may choose that the budget stays as it was); a
+ * correction of the grant names none. One that would take a stored total below zero (the pool's granted or charged, or the
  * budget's charged) is `would_go_negative`, and one that would take it past 2^53 - 1 is
  * `would_exceed_limit`; both write nothing. A grant adjusted below what is used is allowed, and
  * available goes negative. A budget that is not there is `pool_not_found`.

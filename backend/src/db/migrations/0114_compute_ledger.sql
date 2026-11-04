@@ -37,12 +37,21 @@
 -- is the precedent). A job has one hold. A hold is closed once, by a release or a charge, and the
 -- unique index on `hold_ref` is what says so.
 --
--- THE BUDGET RULE IS THE TABLE'S, NOT THE CALLER'S. An entry on an account or a partner pool that
--- moves a budget (a hold, release, charge, refund, overrun, and an adjustment of a charge or a job's
--- final settlement) MUST name the platform `people` pool of the same cpu or gpu word, and an entry
--- on a platform pool names NO budget. `compute_ledger_budget_is_people` and
--- `compute_ledger_budget_required` enforce exactly that, and nothing else: they do not say which
--- budget a caller's correction should credit (that is a policy question of the owner's).
+-- THE BUDGET RULE THE TABLE ENFORCES, AND THE ONE IT LEAVES TO CODE. Two triggers, and only these:
+--   * `compute_ledger_budget_is_people`: a budget an entry names is the platform `people` pool of
+--     the same cpu or gpu word as its pool, and an entry on a platform pool names none. This holds
+--     for every kind, a refund and a correction of a charge included, whenever a budget is named.
+--   * `compute_ledger_budget_required`: a hold, a release, a charge, an overrun and a job's
+--     final-settlement adjustment on an account or partner pool MUST name that budget. These are
+--     the entries on which the owner's two options for the budget agree: the budget records what
+--     people consumed, so each of them moves it under either option.
+-- A refund, and an adjustment of a charge that names no job, may name the people budget or none,
+-- and the table does not say which. Whether they credit the budget back is still the owner's open
+-- decision (ADR 0118, amendment 2026-11-04, item 5): under option A the people budget records
+-- consumption only, and a refund or a correction moves the person's pool alone; under option B it
+-- also credits the budget back. That choice is made in the code of services/compute-ledger.ts,
+-- which today follows option B, and an owner who picks option A changes the code and not this
+-- table.
 --
 -- WHAT THE DATABASE CANNOT PREVENT, which only a reader and the source scan guard:
 --   * `INSERT OR REPLACE` and `REPLACE INTO` rewrite a conflicting row without firing the
@@ -299,12 +308,16 @@ BEGIN
   SELECT RAISE(ABORT, 'a ledger entry''s budget is the platform people pool of the same word as its account or partner pool, and a platform pool names none');
 END;
 
--- The other half: an account or partner pool's spend MUST name that budget, so a caller that
--- forgot it is refused and the budget's totals cannot fall behind the people's.
+-- The other half, for the entries on which both of the owner's budget options agree: a hold, a
+-- release, a charge, an overrun and a job's final-settlement adjustment on an account or partner
+-- pool MUST name that budget, so a caller that forgot it is refused and the budget's totals cannot
+-- fall behind the people's. A refund and an adjustment of a charge with no job are NOT listed: they
+-- may name the budget or none, because whether they credit it back is the owner's open decision and
+-- the code's choice, not the table's (the header says which).
 CREATE TRIGGER compute_ledger_budget_required BEFORE INSERT ON compute_ledger
 WHEN NEW.budget_pool_id IS NULL
-  AND (NEW.kind IN ('hold', 'release', 'charge', 'refund', 'overrun')
-       OR (NEW.kind = 'adjust' AND (NEW.charged_delta_milli <> 0 OR NEW.job_id IS NOT NULL)))
+  AND (NEW.kind IN ('hold', 'release', 'charge', 'overrun')
+       OR (NEW.kind = 'adjust' AND NEW.job_id IS NOT NULL))
   AND EXISTS (SELECT 1 FROM compute_pools p WHERE p.id = NEW.pool_id AND p.holder_kind <> 'platform')
 BEGIN
   SELECT RAISE(ABORT, 'a spend on an account or partner pool names the platform people budget');

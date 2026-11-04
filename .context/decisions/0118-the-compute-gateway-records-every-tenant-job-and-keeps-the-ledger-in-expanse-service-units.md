@@ -81,7 +81,7 @@ What the build settled, each a rule and not a description of today:
    D1 runs the trigger; if it ever stopped, the design stops with it, and the fallback is not application-side updates.
 2. **The table refuses what the statement refuses, under every conflict clause.**
    A conflict clause on the OUTER statement (`INSERT OR IGNORE`, `OR FAIL`, `OR REPLACE`) overrides the clause that applies inside a trigger, so an entry whose totals the pool's CHECKs refused would stay in the ledger while the totals did not move.
-   Three BEFORE INSERT triggers raise ABORT, which no conflict clause overrides: no total of the pool, or of the budget it names, leaves 0 to 2^53 - 1 (`compute_ledger_totals_in_range`); a hold does not take the pool's or the budget's available below 0 (`compute_ledger_hold_fits`); a release or a charge names a hold of the same job, pool, budget and held amount (`compute_ledger_closes_its_hold`).
+   Three BEFORE INSERT triggers raise ABORT, which no conflict clause overrides (the two budget triggers of item 5 are the other two of the five that the build added): no total of the pool, or of the budget it names, leaves 0 to 2^53 - 1 (`compute_ledger_totals_in_range`); a hold does not take the pool's or the budget's available below 0 (`compute_ledger_hold_fits`); a release or a charge names a hold of the same job, pool, budget and held amount (`compute_ledger_closes_its_hold`).
    The service's statements say the same as WHERE terms, so a refusal there writes nothing and raises nothing.
 3. **A hold is one conditional INSERT.**
    Its WHERE checks the pool not frozen, the pool's available, the budget pool's available, the key unused and any guard the caller adds, so two holds for the last SU cannot both be written and a refused hold writes nothing.
@@ -91,15 +91,21 @@ What the build settled, each a rule and not a description of today:
 4. **Available may be negative; a stored total may not.**
    An `overrun`, or an adjustment of the grant below what is used, makes available negative and refuses new holds until a grant brings it back.
    Every amount is a whole number of milli-SU up to 2^53 - 1, checked before a statement is built and again by `typeof` and range CHECKs; a grant or a positive adjustment that would take a total past it is `would_exceed_limit`, and one request moves at most 2^40 milli-SU.
-5. **The budget rule is the table's, and says only this.**
-   A spend on an account or partner pool (a hold, release, charge, refund, overrun, an adjustment of a charge and a job's final settlement) MUST name the platform `people` pool of the same cpu or gpu word as its budget, and an entry on a platform pool names none (`compute_ledger_budget_is_people`, `compute_ledger_budget_required`).
+5. **The table enforces the budget rule where both of the owner's options agree, and leaves the rest to code.**
+   Two BEFORE INSERT triggers, and only these.
+   `compute_ledger_budget_is_people`: a budget an entry names is the platform `people` pool of the same cpu or gpu word as its pool, and an entry on a platform pool names none; this holds for every kind, a refund and a correction of a charge included, whenever one is named.
+   `compute_ledger_budget_required`: a hold, a release, a charge, an overrun and a job's final-settlement adjustment on an account or partner pool MUST name that budget, because the budget records what people consumed and each of these moves it under either option below.
    NEMAR's own pipelines are their own pool, `pipelines`, and count against nothing else.
-   The triggers do not say what a caller's correction should credit: whether an administrator's charge correction, or a refund, credits the `people` budget back is the repository owner's to decide.
-   Today an adjustment of the charge of an account's pool moves the `people` budget with it, a refund of a job takes its whole charge back from the budget as well, and, as an interim rule that is easy to loosen, correcting an account's charge is the owner's (an administrator corrects a grant).
+   A refund, and an adjustment of a charge that names no job, may name the `people` budget or none, and the table does not choose: whether they credit the budget back is the repository owner's open decision, and a code choice, not a schema rule.
+   Option A: the `people` budget records consumption only (holds, settlements and overruns), and a refund or a correction moves the person's pool alone.
+   Option B: a refund and a correction also credit the budget back, so the budget and the people never disagree.
+   Today's code is option B, with an interim rule that is easy to loosen (correcting an account's charge is the owner's; an administrator corrects a grant): an adjustment of the charge of an account's pool moves the `people` budget with it, and a refund of a job takes its whole charge back from the budget as well.
+   If the owner chooses option A, the code changes (the refund and the adjustment name no budget) and the migration does not.
 6. **A key is never shared, and is compared on everything.**
    The keys the Worker writes are made of the job (`job:<id>:hold`, `:final`, `:refund`) or the hold (`hold:<id>:charge`), so no caller picks one, and a caller's key may not start with `job:` or `hold:`; an administrator's `Idempotency-Key` is stored behind the kind and the actor (`grant:<actor>:<key>`), so two administrators sending the same key each make their own entry.
    A key that finds its entry is a replay only if the request is the same on every field (kind, pool, budget, amounts, job and reason); anything else is a conflict, never a replay.
    A closing step replayed returns its closing entry with `replayed: true` when it is of the requested kind, and `hold_closed` says which kind closed the hold otherwise.
+   A hold replayed returns its entry with `replayed: true` only while the hold is open; the same hold asked for again after it was released or settled is `hold_closed` too (with the step that closed it), because a replay would tell the caller a hold is live that its pool no longer holds.
 7. **A job's final settlement happens once, even when it changes nothing, and never after a refund.**
    It is an `adjust` entry that carries the job and a charged delta that may be 0 (the only adjustment that may be), whose key `job:<id>:final` records that it happened; a job's charge is the sum of `charged_delta_milli` by `job_id` over its charge, overrun, refund and that adjustment.
    A refund ends a job's charge: a final settlement after one is refused (`refunded`), because it would charge the job again.

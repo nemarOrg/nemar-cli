@@ -925,45 +925,140 @@ describe("compute_ledger: the budget an entry names", () => {
     expect(await hold({})).toBeNull();
   });
 
-  onEveryEngine("every kind that moves a budget names it, and no other kind does", async (e) => {
-    const c = await ctxFor(e);
-    const without = { budget_pool_id: null };
-    const moving: Array<[string, Row, RegExp]> = [
-      ["refund", { kind: "refund", charged_delta_milli: -1, job_id: jobId(next()) }, NAMES_BUDGET],
-      ["overrun", { kind: "overrun", charged_delta_milli: 1, job_id: jobId(next()) }, NAMES_BUDGET],
-      ["adjust of the charge", { kind: "adjust", charged_delta_milli: 1 }, NAMES_BUDGET],
-      [
-        "a job's final settlement of nothing",
-        { kind: "adjust", charged_delta_milli: 0, job_id: c.job },
-        NAMES_BUDGET,
-      ],
-      [
-        "release",
-        { kind: "release", held_delta_milli: -2000, job_id: c.job, hold_ref: c.hold },
-        new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
-      ],
-      [
-        "charge",
-        {
-          kind: "charge",
-          held_delta_milli: -2000,
+  onEveryEngine(
+    "a hold, a release, a charge, an overrun and a job's final settlement name the budget",
+    async (e) => {
+      const c = await ctxFor(e);
+      const without = { budget_pool_id: null };
+      const spending: Array<[string, Row, RegExp]> = [
+        ["hold", { kind: "hold", held_delta_milli: 1, job_id: jobId(next()) }, NAMES_BUDGET],
+        [
+          "overrun",
+          { kind: "overrun", charged_delta_milli: 1, job_id: jobId(next()) },
+          NAMES_BUDGET,
+        ],
+        [
+          "a job's final settlement of nothing",
+          { kind: "adjust", charged_delta_milli: 0, job_id: c.job },
+          NAMES_BUDGET,
+        ],
+        [
+          "a job's final settlement upward",
+          { kind: "adjust", charged_delta_milli: 1, job_id: c.job },
+          NAMES_BUDGET,
+        ],
+        [
+          "a job's final settlement downward",
+          { kind: "adjust", charged_delta_milli: -1, job_id: c.job },
+          NAMES_BUDGET,
+        ],
+        [
+          "release",
+          { kind: "release", held_delta_milli: -2000, job_id: c.job, hold_ref: c.hold },
+          new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
+        ],
+        [
+          "charge",
+          {
+            kind: "charge",
+            held_delta_milli: -2000,
+            charged_delta_milli: 1,
+            job_id: c.job,
+            hold_ref: c.hold,
+          },
+          new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
+        ],
+      ];
+      const before = [await totals(e, c.pool), await totals(e, c.budget)];
+      for (const [name, row, expected] of spending) {
+        expect([name, await entry(e, { pool_id: c.pool, ...row, ...without })]).toEqual([
+          name,
+          expect.stringMatching(expected),
+        ]);
+      }
+      expect([await totals(e, c.pool), await totals(e, c.budget)]).toEqual(before);
+      // Every one of them is accepted when it names the budget (the two that close a hold are the
+      // ones a hold of another job is not needed for: the entry itself is the same shape).
+      expect(
+        await entry(e, {
+          pool_id: c.pool,
+          kind: "overrun",
           charged_delta_milli: 1,
-          job_id: c.job,
-          hold_ref: c.hold,
-        },
-        new RegExp(`${NAMES_BUDGET.source}|${CLOSES.source}`),
-      ],
-    ];
-    for (const [name, row, expected] of moving) {
-      expect([name, await entry(e, { pool_id: c.pool, ...row, ...without })]).toEqual([
-        name,
-        expect.stringMatching(expected),
-      ]);
-    }
-    // A grant, an expiry and an adjustment of the grant move no budget, and name none.
+          job_id: jobId(next()),
+          budget_pool_id: c.budget,
+        }),
+      ).toBeNull();
+      expect(
+        await entry(e, {
+          pool_id: c.pool,
+          kind: "adjust",
+          charged_delta_milli: 0,
+          job_id: jobId(next()),
+          budget_pool_id: c.budget,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  onEveryEngine(
+    "a refund and a correction of a charge may name the people budget or none, and the table does not choose",
+    async (e) => {
+      const c = await ctxFor(e);
+      const cases: Array<[string, () => Row]> = [
+        ["a refund", () => ({ kind: "refund", charged_delta_milli: -1, job_id: jobId(next()) })],
+        ["a correction downward", () => ({ kind: "adjust", charged_delta_milli: -1 })],
+        ["a correction upward", () => ({ kind: "adjust", charged_delta_milli: 1 })],
+      ];
+      for (const [name, row] of cases) {
+        const delta = Number(row().charged_delta_milli);
+        // Naming the people budget credits it (or charges it); naming none moves the pool alone.
+        const named = [await totals(e, c.pool), await totals(e, c.budget)];
+        expect(
+          [name, await entry(e, { pool_id: c.pool, ...row(), budget_pool_id: c.budget })],
+          `${name} naming the budget`,
+        ).toEqual([name, null]);
+        expect([await totals(e, c.pool), await totals(e, c.budget)]).toEqual([
+          [named[0]?.[0], named[0]?.[1], Number(named[0]?.[2]) + delta],
+          [named[1]?.[0], named[1]?.[1], Number(named[1]?.[2]) + delta],
+        ]);
+        const none = [await totals(e, c.pool), await totals(e, c.budget)];
+        expect(
+          [name, await entry(e, { pool_id: c.pool, ...row(), budget_pool_id: null })],
+          `${name} naming none`,
+        ).toEqual([name, null]);
+        expect([await totals(e, c.pool), await totals(e, c.budget)]).toEqual([
+          [none[0]?.[0], none[0]?.[1], Number(none[0]?.[2]) + delta],
+          none[1],
+        ]);
+        // A budget that is named is still the people budget of the same word, and no other. A
+        // credit to a budget that was never charged is also out of range, and which trigger answers
+        // first is SQLite's; the upward correction has no such second reason.
+        const refused = delta < 0 ? new RegExp(`${IS_PEOPLE.source}|${RANGE.source}`) : IS_PEOPLE;
+        for (const wrong of [c.pipelines, await budgetOf(e, "gpu"), 90000000 + next()]) {
+          expect(
+            [name, await entry(e, { pool_id: c.pool, ...row(), budget_pool_id: wrong })],
+            `${name} naming another budget`,
+          ).toEqual([name, expect.stringMatching(refused)]);
+        }
+      }
+    },
+  );
+
+  onEveryEngine("a grant, an expiry and an adjustment of the grant name no budget", async (e) => {
+    const c = await ctxFor(e);
     expect(await entry(e, { kind: "grant", pool_id: c.pool, granted_delta_milli: 1 })).toBeNull();
     expect(await entry(e, { kind: "expire", pool_id: c.pool, granted_delta_milli: -1 })).toBeNull();
     expect(await entry(e, { kind: "adjust", pool_id: c.pool, granted_delta_milli: 1 })).toBeNull();
+    for (const row of [
+      { kind: "grant", granted_delta_milli: 1 },
+      { kind: "expire", granted_delta_milli: -1 },
+      { kind: "adjust", granted_delta_milli: 1 },
+    ]) {
+      expect(
+        await entry(e, { pool_id: c.pool, ...row, budget_pool_id: c.budget }),
+        `${row.kind} naming a budget`,
+      ).toMatch(/CHECK constraint failed: compute_ledger_budget_kinds/);
+    }
   });
 
   onEveryEngine("an entry for a pool that does not exist is refused", async (e) => {

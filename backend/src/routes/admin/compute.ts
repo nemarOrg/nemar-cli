@@ -25,7 +25,8 @@
  * administrator may correct a grant), because whether a charge correction credits the platform
  * budget back is the owner's decision. What this does today: an adjustment of the charge of an
  * account's pool also moves the `people` budget of the same word, so the budget and the people
- * never disagree (the table refuses an account's spend that names no such budget). A grant to a
+ * never disagree (option B; the table does not require it, and refuses only a budget that is not
+ * the `people` budget of the pool's word). A grant to a
  * deleted account is refused; its pools are still read and its grant corrected, for the record.
  *
  * Nothing here mails anyone, calls GitHub, or is a cron.

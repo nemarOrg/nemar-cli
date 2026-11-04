@@ -1021,7 +1021,7 @@ describe("an administrator's grant and adjustment", () => {
     const p = await ensurePool(w.d1, "account", "64", "cpu");
     const people = await platform(w, "people", "cpu");
     await grant(w, p, 10000);
-    // The charge of an account's pool is counted against the people budget, which the table needs named.
+    // The charge of an account's pool follows the people budget: the code's choice, not the table's.
     const adjust = (over: Record<string, unknown>) =>
       adjustPool(w.d1, {
         poolId: p.id,
