@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as words from "../shared/compute-state";
 import {
@@ -764,6 +764,43 @@ describe("launcher details and who pays", () => {
       for (const word of ALL_WORDS)
         expect(isPlatformFailure(code, word), `${code} ${word}`).toBe(true);
     }
+  });
+
+  test("the records state the rules a charge decision rests on", () => {
+    const adrPath = readdirSync(join(import.meta.dir, "..", ".context", "decisions")).find((f) =>
+      f.startsWith("0118-"),
+    );
+    expect(adrPath).toBeDefined();
+    const adr = readFileSync(
+      join(import.meta.dir, "..", ".context", "decisions", adrPath as string),
+      "utf8",
+    );
+    const notes = readFileSync(
+      join(import.meta.dir, "..", ".context", "compute-program", "implementation-notes.md"),
+      "utf8",
+    );
+    for (const [name, text] of [
+      ["the ADR", adr],
+      ["the notes", notes],
+    ] as const) {
+      // Who pays: the Worker's refusal, the cancel record, the default, the pair of pull requests.
+      expect(text, name).toContain("dataset_not_eligible");
+      expect(text, name).toContain("any manifest over 38,000 entries");
+      expect(text, name).toContain("`dataset_not_found`");
+      expect(text, name).toContain("cancel record overrules the launcher's `terminated` detail");
+      expect(text, name).toContain("an undeclared `runtime_error` detail is deliberate");
+      expect(text, name).toContain("same pair of pull requests");
+      expect(text, name).toContain("drift test");
+    }
+    expect(adr).toContain("a dataset that was eligible when the job was submitted");
+    expect(notes).toContain("a dataset eligible at submit");
+    expect(notes).toContain("Known launcher limitations");
+    expect(notes).toContain("`disk_error`");
+    expect(adr).toContain("`includePatternProblem`");
+    expect(notes).toContain("`includePatternProblem(pattern)`");
+    expect(adr).toContain("`image.uri` ends with `@sha256:");
+    expect(adr).toContain("`datasetVersionWithoutTag`");
+    expect(notes).toContain("`datasetVersionWithoutTag(datasets)`");
   });
 
   test("a word that is not a launcher code is never looked up in the table", () => {
