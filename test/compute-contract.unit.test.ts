@@ -2190,6 +2190,22 @@ describe("the route shapes in the schema's $defs", () => {
       { ...OUTPUTS_REQUEST, launcher: [...LAUNCHER_LIST.slice(0, 3), LAUNCHER_LIST[0]] },
       false,
     ],
+    // Four entries that leave out exactly one of the four names, whichever it is.
+    ...LAUNCHER_LIST.map(
+      (left, i): Case => [
+        `four launcher entries that leave out ${left.name}`,
+        {
+          ...OUTPUTS_REQUEST,
+          launcher: LAUNCHER_LIST.filter((_, j) => j !== i).concat(LAUNCHER_LIST[(i + 1) % 4]),
+        },
+        false,
+      ],
+    ),
+    [
+      "the four launcher files in another order",
+      { ...OUTPUTS_REQUEST, launcher: [...LAUNCHER_LIST].reverse() },
+      true,
+    ],
     [
       "an unknown launcher file",
       {
