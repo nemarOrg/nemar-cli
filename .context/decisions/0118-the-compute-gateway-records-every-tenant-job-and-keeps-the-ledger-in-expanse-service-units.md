@@ -23,6 +23,7 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
 4. **A charge settles twice.**
    Provisionally from the Tapis record when the job ends, then finally from Expanse's own accounting, as an adjustment; a difference within the owner's policy tolerance is routine and a larger one is reported.
    A failure NEMAR caused is refunded; a user-caused one, including a result upload refused for size or quota, is not.
+   For a launcher failure, who caused it is decided by its code and its fixed-word detail together (decision 13).
 5. **An unreserved partner job is cancelled and charged to the partner's pool, never to a person**, because a Tapis `owner` is not proof of who ran a job.
 6. **Webhooks are hints.**
    NEMAR reads the job back from Tapis before it acts, polls as a backstop, and tags every job `nemar_job:<id>` so a retried submit finds the job instead of submitting twice.
@@ -34,6 +35,20 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
 10. **Every compute word is declared once**, in `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words), `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes) and `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte).
 11. **Two digests, named apart.** `spec_digest` is the job row's: the SHA-256 of the exact bytes of `records/<id>/spec.json`. `launch_spec_digest` is the launcher's: the SHA-256 of the exact raw bytes of the `NEMAR_LAUNCH_SPEC` value, which is ASCII-only JSON, hashed before parsing.
 12. **Responses are open, requests and documents are closed.** The two responses a launcher reads ignore unknown keys, so one that runs for 48 hours survives the Worker adding a key; the job specification, owner policy, launch specification and the launcher's own files refuse them.
+13. **Launcher details are declared and classified, in `shared/compute-state.ts`.**
+   `LAUNCHER_DETAILS` maps each of the seven launcher codes to the fixed-word details it may carry, and `PLATFORM_LAUNCHER_DETAILS` is the subset that is a NEMAR, node, runtime or contract fault.
+   The rule: a detail is the platform's if and only if a submitter cannot cause it with a valid specification and bundle.
+   `isPlatformFailure(code, detail)` follows it: a platform detail is refunded even under `runtime_error`, a submitter detail is charged even under `code_fetch_failed` or `dataset_fetch_failed`, and a missing or undeclared detail leaves the code alone to decide, as before.
+   The result refusal details stay as they were.
+14. **The launch specification carries the data-plane tag and a digest-named Singularity image file (SIF).**
+   `datasets[].version` is the data-plane tag, `latest` or `v<major>.<minor>.<patch>`, which the Worker makes from a job's version with `dataTagForVersion` (`1.0.2` becomes `v1.0.2`; a version with no tag is refused); the job specification keeps accepting what it accepted.
+   `image.sif` is exactly `<the 64 hex digits of image.digest>.sif`, a basename relative to `NEMAR_SIF_ROOT`, which is required: the launcher has no fallback and ends `image_missing` when it is unset.
+   The JSON Schema cannot compare two fields, so that rule is zod's and the encoder refuses a document that breaks it; the schema says so, and the differential tests list every rule only zod enforces.
+   The launcher does not verify the SIF's content hash: the name is all that ties the file to the digest.
+15. **The include glob dialect and the entry semantics are part of the contract.**
+   An include pattern is matched against manifest paths relative to the dataset root: `**` crosses `/`; `*` and `?` stay inside one path segment; `[abc]`, `[a-c]` and `[!abc]` are classes; matching is case-sensitive; there are no escapes; and a matcher must run in time linear in the pattern length times the path length, with no backtracking and no cap on wildcards.
+   A python job with an entry runs `python /code/<entry>` followed by `args`; a command runs as given with `args` appended; an image job with an entry runs `/code/<entry>` directly, which needs the executable bit the bundle packer must preserve; the runtime image must provide `python` on its PATH for the python runtime.
+   A bundle archive's member names may carry a leading `./`; absolute names, `..`, links, devices and named pipes (first in, first out, or FIFOs) are refused by the launcher.
 
 ## Consequences
 
