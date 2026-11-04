@@ -821,11 +821,14 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
     if (statements.length > 0) await c.env.DB.batch(statements);
   } catch (err) {
     // The account id is what an operator needs to finish the job by hand:
-    // the batch is all-or-nothing, so nothing of it landed.
-    console.error(
-      `[auth-web] /logout: revoke failed for user(s) ${[...userIds].join(", ") || "unresolved"}; clearing cookie anyway`,
-      err,
-    );
+    // the batch is all-or-nothing, so nothing of it landed. One account reads
+    // `user <id>`, as it always did; several read `users <id>, <id>`.
+    const ids = [...userIds];
+    const whose =
+      ids.length === 0
+        ? "user unresolved"
+        : `${ids.length === 1 ? "user" : "users"} ${ids.join(", ")}`;
+    console.error(`[auth-web] /logout: revoke failed for ${whose}; clearing cookie anyway`, err);
   }
 
   for (const cookie of sessionCookieHeaders(c.env, "", {

@@ -20,7 +20,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import { DOCS_SESSION_HEADER } from "../../shared/contract/docs-auth.js";
 import { authDocsRoutes } from "../src/routes/auth-docs";
@@ -299,6 +299,26 @@ describe("a request that carries a value that names no account", () => {
     const a = await signedInAccount("cascadea");
     expect((await signOut("nemar_session=not-a-session-anyone-holds")).status).toBe(200);
     expect(await liveCredentials(a)).toEqual(ALL);
+  });
+});
+
+describe("a sign-out whose batch fails", () => {
+  test("is still 200, and the log line names every account whose credentials were left live", async () => {
+    const a = await signedInAccount("cascadea");
+    const b = await signedInAccount("cascadeb");
+    db.run("ALTER TABLE private_grants RENAME TO private_grants_broken");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await signOut(`nemar_session=${b.app}; nemar_session=${a.app}`);
+      expect(res.status).toBe(200);
+      const lines = errors.mock.calls.map((args) => String(args[0]));
+      const line = lines.find((l) => l.includes("/logout: revoke failed for"));
+      expect(line).toBeDefined();
+      expect(line).toContain(`users ${[b.id, a.id].join(", ")}`);
+    } finally {
+      errors.mockRestore();
+      db.run("ALTER TABLE private_grants_broken RENAME TO private_grants");
+    }
   });
 });
 
