@@ -260,7 +260,8 @@ export const ACCOUNT_COPY = {
     "{client} needs an ORCID iD you proved by signing in to NEMAR with ORCID. Link your ORCID iD in Settings, then try again.",
   "oidc.rule.return": "Return to {client}",
   // The request could not go on and the person is sent nowhere. One sentence per
-  // error-page code the API gives, plus the two the page reaches on its own.
+  // error-page code the API gives, plus `rate_limited`, which the page reaches on
+  // its own when the API refuses the call.
   "oidc.error.title": "This sign-in can’t continue",
   "oidc.error.invalid_client": "The site that sent you here is not one NEMAR signs people in to.",
   "oidc.error.invalid_redirect_uri":
