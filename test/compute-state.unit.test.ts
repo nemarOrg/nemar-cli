@@ -796,6 +796,16 @@ describe("launcher details and who pays", () => {
     expect(notes).toContain("a dataset eligible at submit");
     expect(notes).toContain("Known launcher limitations");
     expect(notes).toContain("`disk_error`");
+    // A character class never matches /: the driver's settled answer, in both records.
+    for (const [name, text] of [
+      ["the ADR", adr],
+      ["the notes", notes],
+    ] as const) {
+      expect(text, name).toContain("a character class never matches `/`");
+      expect(text, name).toContain(
+        "a negated class `[!a]` matches any single character except `a` and `/`",
+      );
+    }
     expect(adr).toContain("`includePatternProblem`");
     expect(notes).toContain("`includePatternProblem(pattern)`");
     expect(adr).toContain("`image.uri` ends with `@sha256:");

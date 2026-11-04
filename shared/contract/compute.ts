@@ -537,7 +537,7 @@ export const COMPUTE_ARGS_DESCRIPTION =
  * matcher's, which must not backtrack.
  */
 export const COMPUTE_INCLUDE_DESCRIPTION =
-  "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: **/ matches zero or more directories (so a/**/b matches a/b); ** elsewhere matches any run of characters including /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; an unterminated [ is a literal [; an empty class [] and an inverted range such as [z-a] are refused, and bad_include is exactly the set of patterns this dialect refuses; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).";
+  "Patterns that select the dataset's files, matched against manifest paths relative to the dataset root; every file when there are none. The dialect: **/ matches zero or more directories (so a/**/b matches a/b); ** elsewhere matches any run of characters including /; * and ? stay inside one path segment; [abc], [a-c] and [!abc] are character classes; a character class never matches /, so like * and ? it stays inside one path segment, and a negated class [!a] matches any single character except a and /; an unterminated [ is a literal [; an empty class [] and an inverted range such as [z-a] are refused, and bad_include is exactly the set of patterns this dialect refuses; matching is case-sensitive; there are no escapes. A matcher MUST run in time linear in the pattern's length times the path's length (no backtracking).";
 
 /**
  * Why an `include` pattern is refused, or null if the dialect accepts it ({@link
@@ -723,7 +723,9 @@ export const LAUNCH_VARIABLE_BYTES_MAX = 49_152;
  * A dataset's `include` patterns are matched against manifest paths relative to the dataset root
  * ({@link COMPUTE_INCLUDE_DESCRIPTION}): `**` followed by `/` matches zero or more directories; `**`
  * elsewhere matches any run of characters including `/`; `*` and `?` stay inside one path segment;
- * `[abc]`, `[a-c]` and `[!abc]` are classes; an unterminated `[` is a literal `[`; an empty class
+ * `[abc]`, `[a-c]` and `[!abc]` are classes; a character class never matches `/`, so like `*` and `?`
+ * it stays inside one path segment, and a negated class `[!a]` matches any single character except
+ * `a` and `/`; an unterminated `[` is a literal `[`; an empty class
  * `[]` and an inverted range such as `[z-a]` are refused (`includePatternProblem`, which this
  * schema applies, so the launcher's `bad_include` is exactly the set of patterns the dialect
  * refuses); matching is case-sensitive; there are no escapes; and a matcher must run in time linear

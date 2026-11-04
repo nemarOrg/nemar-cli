@@ -3089,6 +3089,10 @@ describe("what an entry, a command, args and an include pattern mean is part of 
     expect(text).toContain("** elsewhere matches any run of characters including /");
     expect(text).toContain("* and ? stay inside one path segment");
     expect(text).toContain("[abc], [a-c] and [!abc]");
+    expect(text).toContain(
+      "a character class never matches /, so like * and ? it stays inside one path segment",
+    );
+    expect(text).toContain("a negated class [!a] matches any single character except a and /");
     expect(text).toContain("an unterminated [ is a literal [");
     expect(text).toContain("an empty class [] and an inverted range such as [z-a] are refused");
     expect(text).toContain("bad_include is exactly the set of patterns this dialect refuses");
@@ -3151,6 +3155,8 @@ describe("what an entry, a command, args and an include pattern mean is part of 
       "`**` elsewhere matches any run of characters including `/`",
       "`*` and `?` stay inside one path segment",
       "`[abc]`, `[a-c]` and `[!abc]`",
+      "a character class never matches `/`",
+      "a negated class `[!a]` matches any single character except `a` and `/`",
       "an unterminated `[` is a literal `[`",
       "an empty class `[]` and an inverted range such as `[z-a]` are refused",
       "`bad_include` is exactly the set of patterns the dialect refuses",
