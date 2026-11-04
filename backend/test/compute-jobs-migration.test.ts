@@ -17,8 +17,8 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 import {
   COMPUTE_CANCEL_REASONS,
   COMPUTE_FAILURE_CODES,
@@ -850,5 +850,60 @@ describe("the indexes", () => {
     expect(plan?.map((p) => p.detail).join(" | ")).toMatch(
       /USING (COVERING )?INDEX compute_jobs_live/,
     );
+  });
+});
+
+describe("the pseudonym table is written in one place", () => {
+  const ROOT = join(import.meta.dir, "../..");
+  // The table in any spelling: schema-qualified, quoted, bracketed.
+  const TABLE = "(?:[\\w\"'`\\[\\]]+\\s*\\.\\s*)?[\"'`\\[]*compute_gateway_users\\b";
+  /** Every statement of a text that writes the table: an insert (with any conflict clause), a replace, an update, a delete. */
+  const writes = (text: string): string[] =>
+    [
+      ...text.matchAll(
+        new RegExp(
+          `(?:INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO|REPLACE\\s+INTO|UPDATE(?:\\s+OR\\s+\\w+)?|DELETE\\s+FROM)\\s+${TABLE}`,
+          "gi",
+        ),
+      ),
+    ].map((m) => m[0].replace(/\s+/g, " "));
+
+  test("the scan sees every spelling of a write", () => {
+    for (const sql of [
+      "INSERT INTO compute_gateway_users (a) VALUES (1)",
+      "insert or replace into compute_gateway_users (a) VALUES (1)",
+      "INSERT OR IGNORE INTO main.compute_gateway_users (a) VALUES (1)",
+      'INSERT OR IGNORE INTO "compute_gateway_users" (a) VALUES (1)',
+      "REPLACE INTO compute_gateway_users (a) VALUES (1)",
+      "UPDATE compute_gateway_users SET gateway_user = 'x'",
+      "UPDATE OR REPLACE compute_gateway_users SET gateway_user = 'x'",
+      "DELETE FROM compute_gateway_users",
+    ]) {
+      expect([sql, writes(sql).length]).toEqual([sql, 1]);
+    }
+    expect(writes("SELECT gateway_user FROM compute_gateway_users WHERE account_id = 1")).toEqual(
+      [],
+    );
+  });
+
+  test("only the job service's INSERT OR IGNORE, gated on the hold, writes it", () => {
+    const found: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === ".wrangler") continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|js|mjs|sql)$/.test(entry.name) && !full.endsWith(FILE)) {
+          for (const w of writes(readFileSync(full, "utf8")))
+            found.push(`${relative(ROOT, full)}: ${w}`);
+        }
+      }
+    };
+    for (const dir of ["backend/src", "src", "shared", "scripts"]) {
+      if (existsSync(join(ROOT, dir))) walk(join(ROOT, dir));
+    }
+    expect(found).toEqual([
+      "backend/src/services/compute-jobs.ts: INSERT OR IGNORE INTO compute_gateway_users",
+    ]);
   });
 });
