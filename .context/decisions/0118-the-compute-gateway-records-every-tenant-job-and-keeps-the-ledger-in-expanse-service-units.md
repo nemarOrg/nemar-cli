@@ -68,3 +68,32 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
 - **Per-person Expanse accounts.** Cannot be asked of this audience, and ACCESS does not need them for a community account.
 - **The Tapis record as the system of record.** It has no allocation and no stable owner, and a partner can write both owner and tags.
 - **Fractional SU in floating point.** A ledger that cannot be summed exactly cannot be reconciled with Expanse's.
+
+## Amendment 2026-11-04 (#2007): the allocation ledger and the owner policy are built (phase A2)
+
+Migration `0114_compute_ledger.sql`, `backend/src/services/compute-ledger.ts`, `compute-policy.ts`, `backend/src/routes/admin/compute.ts` and `nemar admin compute policy|pool` build decision 3 and the policy of decision 7.
+What the build settled, each a rule and not a description of today:
+
+1. **The ledger is the only writer of a pool's totals, and the writer is a trigger.**
+   `compute_ledger_apply` (AFTER INSERT) adds an entry's granted, held and charged deltas to its pool's row, and its held and charged deltas to the row of its budget pool.
+   "Totals change only if the entry was written" holds by construction, because there is no second statement to forget, and an entry the totals refuse (a stored total may never be negative) is not written either: the entry and the totals are one statement.
+   No code path updates a total, and a test reads every source file and every migration for one.
+   D1 runs the trigger; if it ever stopped, the design stops with it, and the fallback is not application-side updates.
+2. **A hold is one conditional INSERT.**
+   Its WHERE checks the pool not frozen, the pool's available, the budget pool's available, the key unused and any guard the caller adds, so two holds for the last SU cannot both be written and a refused hold writes nothing.
+   A hold is closed once, by a release or a charge, in one INSERT taken from the hold row itself (the amounts are the hold's); a settlement's charge and its overrun are one statement.
+   A job has one hold.
+3. **Available may be negative; a stored total may not.**
+   An `overrun`, or an adjustment of the grant below what is used, makes available negative and refuses new holds until a grant brings it back; the pool CHECKs refuse a negative total.
+   Every amount is a whole number of milli-SU up to 2^53 - 1, checked before a statement is built and again by `typeof` and range CHECKs.
+4. **A budget is a platform pool of the same word.**
+   A person's or a partner's hold is also counted against the platform `people` pool of the same cpu or gpu word (NEMAR's own pipelines are their own pool, `pipelines`), and a trigger refuses any other budget.
+   A correction of a person's charge moves the budget with it.
+5. **A key is never shared.**
+   An administrator's `Idempotency-Key` is stored behind `grant:` or `adjust:`, and the keys the Worker writes for a job are made of the job or the hold (`hold:<id>:charge`, `job:<id>:final`), so none can collide with another and each step happens once.
+   A key reused for a different request is a conflict, never a replay.
+6. **The policy write is owner-only in the statement, validated strictly, and audited in the same batch; the read fails closed.**
+   `putPolicy` inserts a version only for an account that is an owner in that statement, checks the strict schema, and writes the audit row with it.
+   `getPolicy` parses a stored row with the same strict schema and answers 503 for one it cannot parse; the default applies only when there is no row.
+   A new policy key is therefore added as optional.
+   The CLI reads the route's answer with an open schema (`shared/contract/compute-admin.ts`) and checks only what `policy set` sends with the strict one.

@@ -161,3 +161,21 @@ A migration that has to spell a word in a `CHECK` copies it from here and a test
   The entry semantics: `runtime: python` with an `entry` runs `python /code/<entry>` followed by `args`; a `command` runs as given with `args` appended; `runtime: image` with an `entry` runs `/code/<entry>` directly (it needs the executable bit, which the bundle packer must preserve); the runtime image must provide `python` on its PATH for the python runtime; a bundle's member names may carry a leading `./`, and absolute names, `..`, links, devices and named pipes (first in, first out, or FIFOs) are refused by the launcher.
   Their texts are `COMPUTE_ENTRY_DESCRIPTION`, `COMPUTE_COMMAND_DESCRIPTION`, `COMPUTE_ARGS_DESCRIPTION` and `COMPUTE_INCLUDE_DESCRIPTION`, carried by zod and, word for word, by the schema.
 - **Header.** `shared/compute-header.ts`, import-free: `parseJobHeader` for a `# /// nemar` or `% /// nemar` block or a whole `nemar-job.toml` (a small TOML subset, every refusal a fixed code with its line), and `headerToSpecFields`, which maps `memory`, `time` and `id@version` onto specification fields.
+
+## 7. Ledger and owner policy shipped in phase A2 (ADR 0118, amendment of 2026-11-04)
+
+Call these; never write a second statement that moves a total.
+
+- **Tables** (migration `0114_compute_ledger.sql`): `compute_policy` (one immutable row per version), `compute_pools` (holder kind `account|platform|partner`, holder ref, pool `cpu|gpu`, three totals; the four platform pools `pipelines` and `people`, each cpu and gpu, are seeded) and `compute_ledger` (the eight entry kinds, append-only).
+  The trigger `compute_ledger_apply` is the one writer of a pool's totals; a test reads every source file and migration for another.
+  A budget (`budget_pool_id`) is a platform pool of the same word as the entry's pool, which a trigger checks.
+  A job has one hold; a hold is closed once.
+- **Service** (`backend/src/services/compute-ledger.ts`, every statement exported as `*_SQL`): `ensurePool`, `holdStatements` and `placeHold` (the one conditional INSERT, with `extraGuards` for phase A3's job-count guards: boolean SQL with plain `?` placeholders and its values, ANDed into the same WHERE), `releaseHold`, `settleProvisional` (a `charge` and any `overrun` in one statement), `settleFinal` (one `adjust`, once per job), `refundJob`, `grantPool`, `adjustPool`, `expireUnused` and `availableMilli` (may be negative).
+  Each answers `{ ok: false, code }` for a refusal and writes nothing; `ComputeLedgerError` (`invalid_argument`, `idempotency_conflict`, `pool_not_found`) is thrown for what is not a refusal.
+  The hold's refusals are `insufficient_balance`, `suspended`, `platform_budget_exhausted` (the words of `shared/compute-state.ts`), `guard_refused` (the caller's own guard) and `job_already_held`.
+  Keys the service writes are made of the hold or the job (`hold:<id>:charge`, `job:<id>:final`); a caller's hold key is its own, and an administrator's key is stored behind `grant:` or `adjust:`.
+- **Policy** (`compute-policy.ts`): `getPolicy` (strict, default only when there is no row, `ComputePolicyUnreadable` for a row it cannot parse, which a route answers 503) and `putPolicy` (owner checked in the statement, strict schema, audit in the same batch).
+  A new policy key is added as optional.
+- **Routes** (`routes/admin/compute.ts`) and **CLI** (`nemar admin compute policy|pool`): errors are `{ error, code }` with the words and statuses of `shared/contract/compute-admin.ts`, whose response schemas are open.
+  `frozen` has no writer yet: whoever suspends access (phase D) sets it, and a hold reads it.
+- **Not here**: the job table, the job-count guards on a hold (phase A3), the callers of settle (phases A5 and A7), automatic renewal and the default grant at approval (Epic D), mail.
