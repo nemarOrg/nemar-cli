@@ -347,8 +347,8 @@ function parseRest(
   const fail = (error: string) => done(errorRedirect(env, redirectUri, state, error));
 
   if (SINGLE_VALUED.some((name) => params.getAll(name).length > 1)) return fail("invalid_request");
-  if (params.has("request")) return fail("request_not_supported");
-  if (params.has("request_uri")) return fail("request_uri_not_supported");
+  if (single(params, "request") !== null) return fail("request_not_supported");
+  if (single(params, "request_uri") !== null) return fail("request_uri_not_supported");
   if (single(params, "response_type") !== "code") return fail("invalid_request");
   const responseMode = single(params, "response_mode");
   if (responseMode !== null && responseMode !== "query") return fail("invalid_request");

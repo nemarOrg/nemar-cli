@@ -384,6 +384,21 @@ describe("step 2: a bad request redirects with error, state and iss", () => {
     expect(answer.body.scopes).toEqual(["openid", "profile"]);
   });
 
+  test("a parameter sent with no value is treated as omitted (OpenID Connect Core 3.1.2.1)", async () => {
+    const clientId = await registerClient();
+    const answer = await check(
+      request(clientId, {}, [
+        ["request", ""],
+        ["request_uri", ""],
+        ["prompt", ""],
+        ["max_age", ""],
+        ["nonce", ""],
+      ]),
+      { cookie: await sessionCookie(seedAccount()) },
+    );
+    expect(answer.body.kind).toBe("consent");
+  });
+
   test("a registered address with a query keeps it, and the answer is appended after it", async () => {
     const withQuery = "https://client.example.org/callback?tenant=a%20b";
     const clientId = await registerClient({ redirect_uris: [withQuery] });
