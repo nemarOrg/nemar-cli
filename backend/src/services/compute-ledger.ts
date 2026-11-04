@@ -516,19 +516,33 @@ export async function placeHold(db: D1Database, input: HoldInput): Promise<HoldR
     return replay;
   }
 
+  return { ok: false, code: await holdRefusalReason(db, input) };
+}
+
+/**
+ * Why a hold that was not written was refused, read from the pool and the budget AFTER the refusal:
+ * a frozen pool is `suspended`, a pool without the amount is `insufficient_balance`, a budget without
+ * it is `platform_budget_exhausted`; a refusal none of those explains is the caller's own guard when
+ * one was passed, and otherwise `insufficient_balance` (the balance moved between the refusal and
+ * the read). `placeHold` uses it, and so does a caller that ran the hold's statements in a batch of
+ * its own (phase A3's job and hold, #2008) and saw `changes` of 0: it writes nothing and takes no
+ * hold, so it can be asked after a batch that has already refused.
+ */
+export async function holdRefusalReason(
+  db: D1Database,
+  input: Pick<HoldInput, "poolId" | "budgetPoolId" | "amountMilli" | "extraGuards">,
+): Promise<HoldRefusal> {
   const pool = await getPool(db, input.poolId);
   if (!pool) throw new ComputeLedgerError("pool_not_found", "no such pool");
-  if (pool.frozen !== 0) return { ok: false, code: "suspended" };
-  if (availableMilli(pool) < input.amountMilli) return { ok: false, code: "insufficient_balance" };
+  if (pool.frozen !== 0) return "suspended";
+  if (availableMilli(pool) < input.amountMilli) return "insufficient_balance";
   if (input.budgetPoolId !== null) {
     const budget = await getPool(db, input.budgetPoolId);
     if (!budget) throw new ComputeLedgerError("pool_not_found", "no such budget pool");
-    if (availableMilli(budget) < input.amountMilli) {
-      return { ok: false, code: "platform_budget_exhausted" };
-    }
+    if (availableMilli(budget) < input.amountMilli) return "platform_budget_exhausted";
   }
   const guarded = (input.extraGuards?.length ?? 0) > 0;
-  return { ok: false, code: guarded ? "guard_refused" : "insufficient_balance" };
+  return guarded ? "guard_refused" : "insufficient_balance";
 }
 
 // --- Closing a hold --------------------------------------------------------------------------
