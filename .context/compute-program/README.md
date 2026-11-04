@@ -60,8 +60,10 @@ Everything else is built and tested against local stand-ins first.
    `git -C <primary checkout> worktree add <worktrees dir>/<epic-slug>-<phase> -b feature/issue-<N>-<phase-slug> origin/<epic branch>`.
    Never edit the primary checkout.
 5. **Delegate** with the brief in section 4, verbatim, to the model the issue names.
-6. **Verify.** When the implementer reports, run the issue's Gates yourself in the worktree.
+6. **Verify.** When the implementer reports, run the issue's Gates yourself in the worktree: the targeted tests and the quick gates, not the full suite (`.rules/testing.md`, "Test cost").
    A report is not a result; a gate you did not run did not pass.
+   Read the implementer's "not run, would check: X because Y" lines and decide whether a long run is needed; you run it, the implementer does not wait for it.
+   Watch CI-only checks yourself and resume the implementer only if something is red.
 7. **Review.** Run the project plugin's `pr-review-toolkit` on the PR with Sonnet reviewers.
    Every finding is fixed (no debt carried forward) except a false positive or a deliberate design choice, each answered with a one-line reason on the PR.
    Send security, concurrency, authorization, data-integrity and architecture findings to the Opus advisor before the implementer fixes them.
@@ -94,7 +96,9 @@ Stay inside the issue's scope. If the issue is wrong or a decision is missing, s
 This repository is public: no tenant names, allocation ids, account names, host details, spend figures or real home paths anywhere.
 Never mock NEMAR logic. Never hand-bump a version. Never set a secret or touch production.
 Commit atomically with short messages (under 50 characters, no emojis, no AI or co-author attribution).
-Run every command in the issue's Gates section and paste their final lines in your report.
+Run every command in the issue's Gates section with targeted tests only, and paste their final lines in your report.
+Never wait on a long job (a full test run, a CI watch): push, and report what you did not run as "not run, would check: X because Y".
+Kill stray background test runs in your worktree before running gates, and give every scratch script a unique name in a private subfolder.
 Push and open a PR into <epic branch> titled "Phase <key>: <title>" whose body lists what changed, the gates you ran with results, and anything you could not do. GitHub bodies keep each paragraph on one line.
 Report: the PR URL, the gates and their results, and every deviation from the issue.
 ```
