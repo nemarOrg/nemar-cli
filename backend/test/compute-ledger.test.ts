@@ -1401,7 +1401,8 @@ describe("no path writes a pool's totals except a ledger entry", () => {
    * One table's name as SQL may write it: bare, quoted four ways (double, single, backtick,
    * bracket) and with a schema in front (`main.`, `"main".`, `main .`).
    */
-  const table = (name: string) => `(?:[\\w"'\`\\[\\]]+\\s*\\.\\s*)?["'\`\\[]?${name}\\b["'\`\\]]?`;
+  const table = (name: string) =>
+    `(?:[\\w"'\`\\[\\]\\\\]+\\s*\\.\\s*)?["'\`\\[\\\\]*${name}\\b["'\`\\]\\\\]*`;
   const POOLS = table("compute_pools");
   const LEDGER = table("compute_ledger");
   const BODY = "[^;`]{0,2000}";
@@ -1506,6 +1507,13 @@ describe("no path writes a pool's totals except a ledger entry", () => {
     "INSERT INTO compute_pools (holder_kind, holder_ref, pool, charged_milli) VALUES (1, 1, 1, 5)",
     "INSERT OR IGNORE INTO compute_pools (holder_kind, held_milli) VALUES (1, 5)",
     "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET granted_milli = 5",
+    // As they are written inside a JavaScript string, with the quotes escaped.
+    String.raw`UPDATE \"compute_pools\" SET held_milli = 1`,
+    String.raw`UPDATE OR IGNORE main.\"compute_pools\" SET held_milli = 0`,
+    String.raw`UPDATE \'compute_pools\' SET held_milli = 0`,
+    String.raw`REPLACE INTO \"compute_ledger\" (kind) VALUES (1)`,
+    String.raw`INSERT OR IGNORE INTO \"main\".\"compute_ledger\" (kind) VALUES (1)`,
+    String.raw`DELETE FROM \"compute_pools\"`,
   ];
 
   test("every planted spelling of a write is refused (the scan is not blind to a quoted name, a schema or a conflict clause)", () => {
