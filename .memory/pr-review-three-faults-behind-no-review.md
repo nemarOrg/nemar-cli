@@ -24,7 +24,7 @@ Created as organization secrets they arrive empty in `vars`, and the job stops w
 **3. The Anthropic federation rule did not accept the job's subject.**
 The rule must accept the subject that the review workflow's job presents from the `.github` repository's `main` branch.
 The console's audit event for the failed exchange names the condition that failed (for example `match_subject_prefix`).
-The exact subject, and what else the rule should pin, are on the gated documentation site, admin operations.
+The exact subject, and what else the rule should pin, are on the GitHub App setup page of the gated documentation site (under admin).
 The review reports `auth_failed` as a check that needs a person.
 
 **Why it matters:** a review that ended in an error for a setup reason is not repeated for the same commit, because its row exists (ADR 0092).

@@ -29,8 +29,8 @@ exactly that reason; do not remove the condition. See [[docs-are-the-retrieval-s
 **How to apply:** website to production first, verify `curl -o /dev/null -w '%{http_code}'
 https://app.nemar.org/auth/docs/authorize` is a redirect and not 404, and only then merge the docs
 gate. Immediately after the docs merge run `bun run probe:gate` against `docs.nemar.org`, never a
-preview, because preview deployments are protected by a different mechanism than production (see
-the gated documentation site, admin operations), so an anonymous probe of a preview reports on
-that mechanism rather than on the gate. The same ordering
+preview, because preview deployments are protected by a different mechanism than production (read
+the Pages project's access policy in the Cloudflare dashboard to see it), so an anonymous probe of a
+preview reports on that mechanism rather than on the gate. The same ordering
 applies to phase 3, which moves runbooks behind the gate. See [[verify-fix-against-known-broken]]:
 that probe accepted 404 as "refused" and so passed against a completely ungated site until fixed.

@@ -8,7 +8,7 @@ metadata:
 ---
 
 The `nemar` S3 bucket has a two-rule CORS configuration as of 2026-09-16.
-The exact origins and the rest of the configuration are on the gated documentation site, admin operations.
+This note records the rule order and the header lesson only; read the live configuration from the bucket itself with the AWS CLI (`aws s3api get-bucket-cors`, with credentials that may read it).
 Order is load-bearing: S3 applies the FIRST rule matching origin plus method plus headers.
 
 1. `browser-reads` -- GET/HEAD for browser readers.
