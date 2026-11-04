@@ -48,6 +48,17 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /mail/reprocess": 1,
   "PUT /mail/tickets/:id/summary": 1,
 
+  // Epic #2005 phase A2 (ADR 0118): the compute policy and the allocation pools. The owner-only
+  // ones are two handlers (the owner check, then the handler); an admin's are one.
+  "GET /compute/policy": 2,
+  "PUT /compute/policy": 2,
+  "GET /compute/pools": 1,
+  "GET /compute/pools/by-id/:accountId": 1,
+  "POST /compute/pools/by-id/:accountId/grant": 1,
+  "POST /compute/pools/by-id/:accountId/adjust": 1,
+  "POST /compute/pools/platform/:key/grant": 2,
+  "POST /compute/pools/platform/:key/adjust": 2,
+
   // Users / accounts
   "GET /users": 1,
   "GET /users/:username": 1,
@@ -309,7 +320,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(200);
+    expect(adminRoutes.routes.length).toBe(212);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

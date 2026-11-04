@@ -9,6 +9,7 @@
 
 import { Hono } from "hono";
 import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../../middleware/auth";
+import { registerComputeAdminRoutes } from "./compute";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerExemplarRoutes } from "./exemplar";
@@ -86,3 +87,4 @@ registerUpstreamBackfillRoutes(adminRoutes);
 registerUpstreamStatusRoutes(adminRoutes);
 registerUpstreamRepullRoutes(adminRoutes);
 registerMailRoutes(adminRoutes);
+registerComputeAdminRoutes(adminRoutes);
