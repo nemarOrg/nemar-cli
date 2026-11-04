@@ -28,6 +28,14 @@
 --
 -- A later migration that REBUILDS `users` (a table rebuild, as 0026 did) must carry the column,
 -- the CHECK, the index and both triggers across, or the invariant silently ends there.
+--
+-- TWO THINGS A READER OF THIS FILE WOULD OTHERWISE GET WRONG.
+-- A restore of the database to a point before this migration, followed by a replay of it,
+-- re-randomizes EVERY subject: the backfill cannot know what the rows held before, so every
+-- subject a client stored in the meantime would name a different account or none. A restore has to
+-- be to a point at or after this migration, or be followed by the partners being told.
+-- And `INSERT ... RETURNING oidc_subject` returns NULL for a new row, because the insert trigger
+-- fills the value after the row is returned: read it back with a SELECT.
 
 ALTER TABLE users ADD COLUMN oidc_subject TEXT
   CHECK (

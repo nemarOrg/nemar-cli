@@ -902,7 +902,7 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
  * given_name / family_name — see profile.ts for the per-field rules.
  *
  * Two credentials, ONE handler (#1266, ADR 0044): the dashboard's
- * `nemar_session` cookie or the CLI's bearer token, resolved by
+ * session cookie or the CLI's bearer token, resolved by
  * `resolveActingAccount`. Every rule and every refusal below is reached
  * identically by both, which is the point — a forked CLI copy is how the two
  * surfaces drift on what "your username is locked" means.
@@ -1961,7 +1961,7 @@ authWebRoutes.post(
  * otherwise see, so it is logged as well as reported.
  *
  * Accepts either credential `resolveActingAccount` accepts (#1266, ADR 0044)
- * -- the dashboard's `nemar_session` cookie, or the CLI's bearer token, added
+ * -- the dashboard's session cookie, or the CLI's bearer token, added
  * in epic #1272 phase 3 so `nemar auth signup`'s guided completion can offer
  * the same default a brand-new ORCID account sees on the website. That
  * widens what was "no Origin check, same as GET /auth/me" to the family's
