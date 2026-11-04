@@ -18,9 +18,13 @@
  *      (`HOST_PREFIXED_SESSION_COOKIE`). Only a `__Host-` session may approve a grant (ADR 0119
  *      rule 10); with the flag off none exists, and a person sent to sign in would come back to the
  *      same answer for ever.
- *   2. {@link originGuard}: 403 for a missing or foreign `Origin`, before the session is read, as
+ *   2. {@link callerGuard}: 403 unless the call carries `OIDC_AUTHORIZE_CALLER_HEADER`, which the
+ *      authorization page's server-side client sets and the website's general browser proxy never
+ *      forwards. An answer can carry a code or a consent token, and only the page's server code may
+ *      read one.
+ *   3. {@link originGuard}: 403 for a missing or foreign `Origin`, before the session is read, as
  *      every other cookie-authenticated write here does. A partner host is foreign (ADR 0119 rule 9).
- *   3. `webSessionMiddleware`, then the handler: a session read under the LEGACY cookie name is no
+ *   4. `webSessionMiddleware`, then the handler: a session read under the LEGACY cookie name is no
  *      session at all here, because a sibling host can set that cookie for the parent domain; then
  *      the per-account budget (thirty a minute, both routes together); then the body.
  *
@@ -29,6 +33,8 @@
 
 import { Hono, type MiddlewareHandler } from "hono";
 import {
+  OIDC_AUTHORIZE_CALLER_HEADER,
+  OIDC_AUTHORIZE_CALLER_VALUE,
   OIDC_AUTHORIZE_CHECK_PATH,
   OIDC_AUTHORIZE_CONSENT_PATH,
   OIDC_CONSENT_DECISIONS,
@@ -67,6 +73,17 @@ function routed(path: string): string {
 export const oidcAuthorizeSurface: MiddlewareHandler<Env> = async (c, next) => {
   if (!onOidcSurface(c.env, c.req.url, c.req.path) || !hostPrefixedSessionCookie(c.env)) {
     return notFoundResponse(c);
+  }
+  await next();
+};
+
+/**
+ * 403 unless the call is the authorization page's own (see the module comment). Fixed name and value,
+ * no secret: the website's browser proxy forwards a fixed list of headers that never includes it.
+ */
+export const callerGuard: MiddlewareHandler<Env> = async (c, next) => {
+  if (c.req.header(OIDC_AUTHORIZE_CALLER_HEADER) !== OIDC_AUTHORIZE_CALLER_VALUE) {
+    return c.json({ error: "Caller not allowed" }, 403, NO_STORE);
   }
   await next();
 };
@@ -132,6 +149,7 @@ export const authOidcRoutes = new Hono<Env>();
 authOidcRoutes.post(
   routed(OIDC_AUTHORIZE_CHECK_PATH),
   oidcAuthorizeSurface,
+  callerGuard,
   originGuard,
   webSessionMiddleware,
   async (c) => {
@@ -150,6 +168,7 @@ authOidcRoutes.post(
 authOidcRoutes.post(
   routed(OIDC_AUTHORIZE_CONSENT_PATH),
   oidcAuthorizeSurface,
+  callerGuard,
   originGuard,
   webSessionMiddleware,
   async (c) => {

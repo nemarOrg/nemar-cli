@@ -16,7 +16,7 @@
  * The rule is applied in two places that must agree, and both read this module: the authorization
  * routes ask {@link signInRuleRefusal} of a row read with {@link ORCID_PROVEN_SQL} so the person is
  * told why, and every statement that mints (a code here; tokens in the token phase, #2018) re-applies
- * {@link signInRuleSql} in its own WHERE clause, so a change between the read and the write mints
+ * {@link SIGN_IN_RULE_SQL} in its own WHERE clause, so a change between the read and the write mints
  * nothing. The token and revocation phases (#2018, #2019) re-check the same rule at every use.
  */
 
@@ -42,11 +42,9 @@ export const ACCOUNT_ACTIVE_SQL = `(u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST
  * a statement that mints. The rule names are the closed set of `oidc_clients.sign_in_rule` (migration
  * 0121's CHECK); an unknown one matches neither branch and so admits nobody.
  */
-export function signInRuleSql(): string {
-  return `(${ACCOUNT_ACTIVE_SQL}
+export const SIGN_IN_RULE_SQL = `(${ACCOUNT_ACTIVE_SQL}
     AND (c.sign_in_rule = 'active_account'
       OR (c.sign_in_rule = 'person_proven_orcid' AND u.account_kind = 'person' AND ${ORCID_PROVEN_SQL})))`;
-}
 
 /** What the rule needs to know about an account, as read with {@link ORCID_PROVEN_SQL}. */
 export interface SignInSubject {

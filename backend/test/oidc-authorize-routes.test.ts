@@ -16,14 +16,17 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  OIDC_AUTHORIZE_CALLER_HEADER,
+  OIDC_AUTHORIZE_CALLER_VALUE,
   OIDC_AUTHORIZE_CHECK_PATH,
   OIDC_AUTHORIZE_CONSENT_PATH,
   OIDC_AUTH_AFTER_PARAM,
+  OIDC_AUTH_AFTER_TTL_SECONDS,
   OIDC_CONSENT_TOKEN_TTL_SECONDS,
 } from "../../shared/contract/oidc-authorize";
 import { __limits, __selectBucket } from "../src/middleware/rateLimit";
 import { hashGrantCode } from "../src/services/docs-auth";
-import { mintConsentToken } from "../src/services/oidc-authorize";
+import { mintAuthAfterMarker, mintConsentToken } from "../src/services/oidc-authorize";
 import { signJwt } from "../src/services/oidc-keys";
 import { issueSession } from "../src/services/web-session";
 import { InMemoryCache } from "./helpers/cache";
@@ -149,13 +152,25 @@ interface Answer {
   body: Record<string, unknown>;
 }
 
-async function check(
-  req: string,
-  opts: { cookie?: string; origin?: string | null; env?: Record<string, unknown> } = {},
-): Promise<Answer> {
+/** The headers the website's page sends: its pinned Origin and the caller marker. */
+function pageHeaders(opts: { cookie?: string; origin?: string | null; caller?: boolean }) {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.Cookie = opts.cookie;
   if (opts.origin !== null) headers.Origin = opts.origin ?? APP;
+  if (opts.caller !== false) headers[OIDC_AUTHORIZE_CALLER_HEADER] = OIDC_AUTHORIZE_CALLER_VALUE;
+  return headers;
+}
+
+async function check(
+  req: string,
+  opts: {
+    cookie?: string;
+    origin?: string | null;
+    caller?: boolean;
+    env?: Record<string, unknown>;
+  } = {},
+): Promise<Answer> {
+  const headers = pageHeaders(opts);
   const res = await h.call("POST", OIDC_AUTHORIZE_CHECK_PATH, {
     body: { request: req },
     headers,
@@ -172,11 +187,9 @@ async function consent(
   req: string,
   token: string,
   decision: "allow" | "deny",
-  opts: { cookie?: string; origin?: string | null } = {},
+  opts: { cookie?: string; origin?: string | null; caller?: boolean } = {},
 ): Promise<Answer> {
-  const headers: Record<string, string> = {};
-  if (opts.cookie) headers.Cookie = opts.cookie;
-  if (opts.origin !== null) headers.Origin = opts.origin ?? APP;
+  const headers = pageHeaders(opts);
   const res = await h.call("POST", OIDC_AUTHORIZE_CONSENT_PATH, {
     body: { request: req, consent_token: token, decision },
     headers,
@@ -311,7 +324,7 @@ describe("step 1: an unknown client or an unregistered redirect address is an er
 
 describe("step 2: a bad request redirects with error, state and iss", () => {
   const cases: Array<[string, Record<string, string | null>, Array<[string, string]>, string]> = [
-    ["response_type token", { response_type: "token" }, [], "invalid_request"],
+    ["response_type token", { response_type: "token" }, [], "unsupported_response_type"],
     ["no response_type", { response_type: null }, [], "invalid_request"],
     ["response_mode fragment", {}, [["response_mode", "fragment"]], "invalid_request"],
     ["code_challenge_method plain", { code_challenge_method: "plain" }, [], "invalid_request"],
@@ -350,7 +363,7 @@ describe("step 2: a bad request redirects with error, state and iss", () => {
     const clientId = await registerClient();
     expectErrorRedirect(
       await check(request(clientId, { response_type: "token" })),
-      "invalid_request",
+      "unsupported_response_type",
     );
   });
 
@@ -407,7 +420,7 @@ describe("step 2: a bad request redirects with error, state and iss", () => {
     expect(location.startsWith(`${withQuery}&`)).toBe(true);
     const params = new URL(location).searchParams;
     expect(params.get("tenant")).toBe("a b");
-    expect(params.get("error")).toBe("invalid_request");
+    expect(params.get("error")).toBe("unsupported_response_type");
     expect(params.get("state")).toBe(STATE);
     expect(params.get("iss")).toBe(ISSUER);
   });
@@ -476,8 +489,10 @@ describe("steps 3 and 4: the session and its freshness", () => {
     expect(first.body.kind).toBe("reauth");
     const back = new URLSearchParams(first.body.request as string);
     expect(back.get("prompt")).toBe("consent");
-    const after = Number(back.get(OIDC_AUTH_AFTER_PARAM));
-    expect(Number.isInteger(after) && after > 0).toBe(true);
+    // The marker is the moment the person was sent, signed: `<unix seconds>.<mac>`.
+    const [after, mac] = (back.get(OIDC_AUTH_AFTER_PARAM) as string).split(".");
+    expect(Number.isInteger(Number(after)) && Number(after) > 0).toBe(true);
+    expect(mac).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(back.get("state")).toBe(STATE);
 
     // Back with the same session, made before the marker: still too old.
@@ -546,13 +561,78 @@ describe("steps 3 and 4: the session and its freshness", () => {
     expectErrorRedirect(answer, "login_required");
   });
 
-  test("a sign-in marker from the future is refused", async () => {
+  test("a sign-in marker the API did not sign is treated as absent, so freshness still bites", async () => {
     const clientId = await registerClient();
-    const cookie = await sessionCookie(seedAccount());
-    const future = String(Math.floor(Date.now() / 1000) + 3600);
-    expectErrorRedirect(
-      await check(request(clientId, {}, [[OIDC_AUTH_AFTER_PARAM, future]]), { cookie }),
-      "invalid_request",
+    const otherClient = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    h.db.run(
+      "UPDATE web_sessions SET created_at = datetime('now', '-10 minutes') WHERE user_id = ?",
+      [userId],
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const forged = [
+      "1",
+      "0",
+      String(now - 5),
+      `${now - 5}.${"A".repeat(43)}`,
+      await mintAuthAfterMarker(OIDC_TEST_SECRET, otherClient, now - 5),
+      await mintAuthAfterMarker(OIDC_TEST_SECRET, clientId, now - OIDC_AUTH_AFTER_TTL_SECONDS - 5),
+      await mintAuthAfterMarker("another-secret-0123456789abcdef0123456789", clientId, now - 5),
+      String(now + 3600),
+    ];
+    for (const marker of forged) {
+      for (const freshness of [
+        ["prompt", "login"],
+        ["max_age", "60"],
+      ] as Array<[string, string]>) {
+        const answer = await check(
+          request(clientId, {}, [freshness, [OIDC_AUTH_AFTER_PARAM, marker]]),
+          { cookie },
+        );
+        expect({ marker, freshness, kind: answer.body.kind }).toEqual({
+          marker,
+          freshness,
+          kind: "reauth",
+        });
+      }
+      // Absent, not an error: without a freshness demand the request goes on.
+      const plain = await check(request(clientId, {}, [[OIDC_AUTH_AFTER_PARAM, marker]]), {
+        cookie,
+      });
+      expect({ marker, kind: plain.body.kind }).toEqual({ marker, kind: "consent" });
+    }
+  });
+
+  test("the marker the API signed in a reauth answer satisfies it once a newer session exists", async () => {
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    const asked = await check(request(clientId, {}, [["prompt", "login"]]), { cookie });
+    const marker = new URLSearchParams(asked.body.request as string).get(OIDC_AUTH_AFTER_PARAM);
+    expect(marker).toMatch(/^\d+\.[A-Za-z0-9_-]{43}$/);
+    // Signed for this client: the same marker on another client's request is not honoured.
+    const otherClient = await registerClient();
+    h.db.run(
+      "UPDATE web_sessions SET created_at = datetime('now', '-10 minutes') WHERE user_id = ?",
+      [userId],
+    );
+    const fresh = await sessionCookie(userId);
+    expect(
+      (
+        await check(
+          request(otherClient, {}, [
+            ["prompt", "login"],
+            [OIDC_AUTH_AFTER_PARAM, marker as string],
+          ]),
+          {
+            cookie: fresh,
+          },
+        )
+      ).body.kind,
+    ).toBe("reauth");
+    expect((await check(asked.body.request as string, { cookie: fresh })).body.kind).toBe(
+      "consent",
     );
   });
 
@@ -1077,7 +1157,7 @@ describe("the routes", () => {
       [OIDC_AUTHORIZE_CONSENT_PATH, { request: "a=b", consent_token: "1.x", decision: "maybe" }],
       [OIDC_AUTHORIZE_CONSENT_PATH, { request: "a=b", decision: "allow" }],
     ] as const) {
-      const res = await h.call("POST", path, { body, headers: { Origin: APP, Cookie: cookie } });
+      const res = await h.call("POST", path, { body, headers: pageHeaders({ cookie }) });
       expect({ path, status: res.status }).toEqual({ path, status: 400 });
       expect(res.json?.error).toBe("invalid_body");
       expect(res.headers.get("Cache-Control")).toBe("no-store");
@@ -1099,7 +1179,7 @@ describe("the routes", () => {
       const res = await h.call("POST", v.path ?? OIDC_AUTHORIZE_CHECK_PATH, {
         base: v.base,
         body: { request: request(clientId) },
-        headers: { Origin: APP, Cookie: cookie },
+        headers: pageHeaders({ cookie }),
         env: v.env as never,
       });
       expect({ what, status: res.status }).toEqual({ what, status: 404 });
@@ -1128,8 +1208,7 @@ describe("the per-account budget", () => {
   });
 
   async function counted(req: string, cookie?: string): Promise<number> {
-    const headers: Record<string, string> = { Origin: APP, "CF-Connecting-IP": "203.0.113.9" };
-    if (cookie) headers.Cookie = cookie;
+    const headers = { ...pageHeaders({ cookie }), "CF-Connecting-IP": "203.0.113.9" };
     const res = await h.call("POST", OIDC_AUTHORIZE_CHECK_PATH, {
       body: { request: req },
       headers,
@@ -1149,7 +1228,7 @@ describe("the per-account budget", () => {
     // The consent route spends the same budget.
     const refused = await h.call("POST", OIDC_AUTHORIZE_CONSENT_PATH, {
       body: { request: request(clientId), consent_token: "1.x", decision: "allow" },
-      headers: { Origin: APP, Cookie: cookie, "CF-Connecting-IP": "203.0.113.9" },
+      headers: { ...pageHeaders({ cookie }), "CF-Connecting-IP": "203.0.113.9" },
       bypass: false,
     });
     expect(refused.status).toBe(429);
@@ -1164,5 +1243,263 @@ describe("the per-account budget", () => {
     const clientId = await registerClient();
     for (let i = 0; i < 40; i++) expect(await counted(request(clientId))).toBe(200);
     expect(await counted(request(clientId), await sessionCookie(seedAccount()))).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Round 1 of the phase review.
+// ---------------------------------------------------------------------------------------------
+
+describe("only the authorization page's server reaches the routes", () => {
+  test("a call without the caller marker is 403 on both routes, before anything is read", async () => {
+    const clientId = await registerClient({
+      first_party: true,
+      redirect_uris: ["https://app.nemar.org/cb"],
+    });
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    const req = request(clientId, { redirect_uri: "https://app.nemar.org/cb" });
+    for (const answer of [
+      await check(req, { cookie, caller: false }),
+      await consent(req, "1.x", "allow", { cookie, caller: false }),
+    ]) {
+      expect(answer.status).toBe(403);
+      expect(answer.headers.get("Cache-Control")).toBe("no-store");
+      expect(answer.body.kind).toBeUndefined();
+    }
+    const wrong = await h.call("POST", OIDC_AUTHORIZE_CHECK_PATH, {
+      body: { request: req },
+      headers: { ...pageHeaders({ cookie, caller: false }), [OIDC_AUTHORIZE_CALLER_HEADER]: "1" },
+    });
+    expect(wrong.status).toBe(403);
+    expect(codeCount()).toBe(0);
+    expect(grantsOf(userId)).toEqual([]);
+  });
+});
+
+describe("response_type", () => {
+  for (const value of ["token", "id_token", "code id_token", "code token"]) {
+    test(`a present type other than code (${value}) is unsupported_response_type`, async () => {
+      const clientId = await registerClient();
+      expectErrorRedirect(
+        await check(request(clientId, { response_type: value }), {
+          cookie: await sessionCookie(seedAccount()),
+        }),
+        "unsupported_response_type",
+      );
+    });
+  }
+
+  test("a missing or empty response_type is invalid_request", async () => {
+    const clientId = await registerClient();
+    for (const value of [null, ""]) {
+      expectErrorRedirect(
+        await check(request(clientId, { response_type: value })),
+        "invalid_request",
+      );
+    }
+  });
+});
+
+describe("what a grant and a code store about the client", () => {
+  test("both hold the client's row id, oidc_clients.id, never the public string", async () => {
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    const req = request(clientId);
+    const asked = await check(req, { cookie });
+    expect(
+      (await consent(req, asked.body.consent_token as string, "allow", { cookie })).body.kind,
+    ).toBe("redirect");
+    const row = h.db
+      .query<{ g: string; c: string; gt: string; ct: string }, [string]>(
+        `SELECT cg.client_id AS g, cc.client_id AS c, typeof(g.client_id) AS gt, typeof(oc.client_id) AS ct
+           FROM oidc_grants g
+           JOIN oidc_codes oc ON oc.grant_id = g.id
+           JOIN oidc_clients cg ON cg.id = g.client_id
+           JOIN oidc_clients cc ON cc.id = oc.client_id
+          WHERE cg.client_id = ?`,
+      )
+      .get(clientId);
+    expect(row).toEqual({ g: clientId, c: clientId, gt: "integer", ct: "integer" });
+  });
+});
+
+describe("consent belongs to one account", () => {
+  test("another account on the same client is asked, whatever the first allowed", async () => {
+    const clientId = await registerClient();
+    const a = await sessionCookie(seedAccount());
+    const b = await sessionCookie(seedAccount());
+    const req = request(clientId);
+    const asked = await check(req, { cookie: a });
+    await consent(req, asked.body.consent_token as string, "allow", { cookie: a });
+    expect((await check(req, { cookie: a })).body.kind).toBe("redirect");
+    expect((await check(req, { cookie: b })).body.kind).toBe("consent");
+  });
+});
+
+describe("the consent token is bound to every value it covers", () => {
+  const SECOND = "https://client.example.org/second";
+
+  test("one genuine token, against requests that differ in exactly one value", async () => {
+    const clientId = await registerClient({
+      redirect_uris: [REDIRECT, SECOND],
+      allowed_scopes: ["openid", "profile"],
+    });
+    const twin = await registerClient({
+      redirect_uris: [REDIRECT, SECOND],
+      allowed_scopes: ["openid", "profile"],
+    });
+    const cookie = await sessionCookie(seedAccount());
+    const genuine = request(clientId, {}, [["nonce", "nonce-one"]]);
+    const token = (await check(genuine, { cookie })).body.consent_token as string;
+    const otherChallenge = `${CHALLENGE.slice(0, 42)}${CHALLENGE.endsWith("A") ? "B" : "A"}`;
+    for (const [what, req] of [
+      ["scope", request(clientId, { scope: "openid" }, [["nonce", "nonce-one"]])],
+      ["redirect_uri", request(clientId, { redirect_uri: SECOND }, [["nonce", "nonce-one"]])],
+      ["client_id", request(twin, {}, [["nonce", "nonce-one"]])],
+      [
+        "code_challenge",
+        request(clientId, { code_challenge: otherChallenge }, [["nonce", "nonce-one"]]),
+      ],
+      ["nonce", request(clientId, {}, [["nonce", "nonce-two"]])],
+      ["no nonce", request(clientId)],
+    ] as const) {
+      const answer = await consent(req, token, "allow", { cookie });
+      expect({ what, body: answer.body }).toEqual({
+        what,
+        body: { kind: "error_page", code: "consent_invalid" },
+      });
+    }
+    expect(codeCount()).toBe(0);
+    expect((await consent(genuine, token, "allow", { cookie })).body.kind).toBe("redirect");
+  });
+
+  test("a genuinely signed token that claims a longer life, or has just expired, is refused", async () => {
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    const binding = {
+      sessionId: sessionIdOf(userId),
+      clientId,
+      redirectUri: REDIRECT,
+      scopes: ["openid", "profile"],
+      state: STATE,
+      codeChallenge: CHALLENGE,
+      nonce: null,
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const tooLong = await mintConsentToken(OIDC_TEST_SECRET, binding, now + 100);
+    const atExpiry = await mintConsentToken(
+      OIDC_TEST_SECRET,
+      binding,
+      now - OIDC_CONSENT_TOKEN_TTL_SECONDS,
+    );
+    for (const token of [tooLong, atExpiry]) {
+      expect((await consent(request(clientId), token, "allow", { cookie })).body).toEqual({
+        kind: "error_page",
+        code: "consent_invalid",
+      });
+    }
+    const live = await mintConsentToken(
+      OIDC_TEST_SECRET,
+      binding,
+      now - OIDC_CONSENT_TOKEN_TTL_SECONDS + 30,
+    );
+    expect((await consent(request(clientId), live, "allow", { cookie })).body.kind).toBe(
+      "redirect",
+    );
+  });
+
+  test("a token used under the legacy cookie name is answered as no session, and mints nothing", async () => {
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    const req = request(clientId);
+    const token = (await check(req, { cookie })).body.consent_token as string;
+    const legacy = cookie.replace("__Host-nemar_session=", "nemar_session=");
+    expect((await consent(req, token, "allow", { cookie: legacy })).body).toEqual({
+      kind: "login",
+      request: req,
+    });
+    expect(codeCount()).toBe(0);
+    expect(grantsOf(userId)).toEqual([]);
+  });
+});
+
+describe("the code, round 1", () => {
+  test("auth_time is the session's sign-in, not the moment of the code", async () => {
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    h.db.run(
+      "UPDATE web_sessions SET created_at = datetime('now', '-10 minutes') WHERE user_id = ?",
+      [userId],
+    );
+    const signedIn = h.db
+      .query<{ c: string }, [number]>("SELECT created_at AS c FROM web_sessions WHERE user_id = ?")
+      .get(userId)?.c;
+    const req = request(clientId);
+    const token = (await check(req, { cookie })).body.consent_token as string;
+    const code = redirectOf(await consent(req, token, "allow", { cookie })).params.get(
+      "code",
+    ) as string;
+    const row = h.db
+      .query<{ auth_time: string }, [string]>(
+        "SELECT auth_time FROM oidc_codes WHERE code_hash = ?",
+      )
+      .get(await hashGrantCode(code));
+    expect(row?.auth_time).toBe(signedIn as string);
+  });
+
+  test("a mint whose code insert wrote nothing answers an error page, never a redirect", async () => {
+    // A row three hours past expiry, so the prune at the head of the mint's batch deletes it, and a
+    // test-only trigger that disables the client when it does: everything after the prune in the
+    // same batch then meets a disabled client and writes nothing.
+    const clientId = await registerClient();
+    const userId = seedAccount();
+    const cookie = await sessionCookie(userId);
+    h.db.run(
+      `INSERT INTO oidc_codes (code_hash, client_id, user_id, grant_id, redirect_uri, scopes,
+                               code_challenge, auth_time, created_at, expires_at)
+       VALUES (?, 1, 1, 1, 'https://x.example/cb', '["openid"]', ?, datetime('now'),
+               datetime('now', '-3 hours', '-60 seconds'), datetime('now', '-3 hours'))`,
+      ["e".repeat(64), CHALLENGE],
+    );
+    h.db.run(
+      `CREATE TRIGGER test_disable_client_on_prune AFTER DELETE ON oidc_codes
+       BEGIN UPDATE oidc_clients SET status = 'disabled', disabled_at = datetime('now')
+             WHERE client_id = '${clientId}'; END`,
+    );
+    const req = request(clientId);
+    const token = (await check(req, { cookie })).body.consent_token as string;
+    const answer = await consent(req, token, "allow", { cookie });
+    expect(answer.body).toEqual({ kind: "error_page", code: "unavailable" });
+    expect(codeCount()).toBe(0);
+    expect(grantsOf(userId)).toEqual([]);
+  });
+});
+
+describe("what the consent screen is told", () => {
+  test("compute.submit alone says the client can spend compute time", async () => {
+    const clientId = await registerClient({ allowed_scopes: ["openid", "compute.submit"] });
+    const answer = await check(request(clientId, { scope: "openid compute.submit" }), {
+      cookie: await sessionCookie(seedAccount()),
+    });
+    expect(answer.body.compute_spend).toBe(true);
+  });
+
+  test("the redirect origin is the requested address's, among several registered", async () => {
+    const clientId = await registerClient({
+      redirect_uris: [REDIRECT, "https://other.example.net/cb"],
+    });
+    const cookie = await sessionCookie(seedAccount());
+    expect(
+      (await check(request(clientId, { redirect_uri: "https://other.example.net/cb" }), { cookie }))
+        .body.redirect_origin,
+    ).toBe("https://other.example.net");
+    expect((await check(request(clientId), { cookie })).body.redirect_origin).toBe(
+      "https://client.example.org",
+    );
   });
 });

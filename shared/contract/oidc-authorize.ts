@@ -8,9 +8,12 @@
  *   POST /auth/oidc/authorize   check: what should happen to this authorization request
  *   POST /auth/oidc/consent     decide: the person allowed or denied what the check showed them
  *
- * Both are called by the website's server, never by a browser, with the person's `Cookie` header and
- * an `Origin` the website pins to its own. Both answer 404, as an unrouted path does, while the
- * provider is off.
+ * Both are called by the website's server, never by a browser, with the person's `Cookie` header, an
+ * `Origin` the website pins to its own, and {@link OIDC_AUTHORIZE_CALLER_HEADER}, which the website's
+ * general browser proxy never forwards: an answer can carry a code or a consent token, and only the
+ * page's server-side code may read one. Both answer 404, as an unrouted path does, while the
+ * provider is off: until `OIDC_SECRET` is set AND `HOST_PREFIXED_SESSION_COOKIE` is `"1"` (only a
+ * `__Host-` session may approve a grant, and none exists while the flag is off).
  *
  * Read as TEXT by the website's drift test (`nemarOrg/website`, `test/oidc-authorize-contract-drift.test.ts`),
  * which cannot import this repository's modules: every constant below is one quoted string or one
@@ -25,12 +28,29 @@ export const OIDC_AUTHORIZE_CHECK_PATH = "/auth/oidc/authorize";
 export const OIDC_AUTHORIZE_CONSENT_PATH = "/auth/oidc/consent";
 
 /**
- * The query parameter that stands for "this person was sent to sign in again at this moment". When
- * the check answers `reauth` it returns the request to come back with: `prompt=login` removed and
- * this parameter set to D1's clock in Unix seconds. Back from signing in, the check requires the
- * session to be at least that new. A NEMAR parameter, not an OpenID Connect one.
+ * The request header that marks a call as the authorization page's own, server-side. The website's
+ * general proxy for browser calls forwards a fixed list of headers that never includes it, so a
+ * call without it did not come from the page's server code and is refused (403). A fixed name and
+ * value, not a secret: what it proves is the path the call took.
+ */
+export const OIDC_AUTHORIZE_CALLER_HEADER = "X-Nemar-Authorize-Caller";
+
+/** The value of {@link OIDC_AUTHORIZE_CALLER_HEADER}. */
+export const OIDC_AUTHORIZE_CALLER_VALUE = "authorize-page";
+
+/**
+ * The query parameter that stands for "this person was sent to sign in at this moment". When the
+ * check answers `login` or `reauth` for a request that asks for a fresh sign-in, it returns the
+ * request to come back with: `prompt=login` removed and this parameter set to a marker the API
+ * signed, `<unix seconds by D1's clock>.<mac>` (bound to the client and good for
+ * {@link OIDC_AUTH_AFTER_TTL_SECONDS}). Back from signing in, a session at least that new counts as
+ * the fresh sign-in the request asked for. A marker that is missing, malformed, unsigned, for
+ * another client or expired is treated as absent. A NEMAR parameter, not an OpenID Connect one.
  */
 export const OIDC_AUTH_AFTER_PARAM = "nemar_auth_after";
+
+/** How long a sign-in marker is honoured after the API signed it, in seconds. */
+export const OIDC_AUTH_AFTER_TTL_SECONDS = 600;
 
 /**
  * The longest authorization request the routes read, in characters of its query string. Longer is
@@ -52,6 +72,22 @@ export const OIDC_AUTHORIZE_KINDS = [
   "consent",
 ] as const;
 export type OidcAuthorizeKind = (typeof OIDC_AUTHORIZE_KINDS)[number];
+
+/**
+ * The `error` values a redirect to the client can carry (RFC 6749 section 4.1.2.1, OpenID Connect
+ * Core 3.1.2.6). Nothing here is shown on NEMAR's page: the client reads them.
+ */
+export const OIDC_AUTHORIZE_REDIRECT_ERRORS = [
+  "invalid_request",
+  "unsupported_response_type",
+  "invalid_scope",
+  "request_not_supported",
+  "request_uri_not_supported",
+  "login_required",
+  "consent_required",
+  "access_denied",
+] as const;
+export type OidcAuthorizeRedirectError = (typeof OIDC_AUTHORIZE_REDIRECT_ERRORS)[number];
 
 /**
  * Why an error page is shown instead of a redirect. An error page is the answer whenever the
@@ -98,9 +134,10 @@ export interface OidcAuthorizeConsentRequest {
 
 /**
  * What both routes answer, with HTTP 200. A refusal of the call itself is not one of these: a
- * missing or foreign `Origin` is 403, a body that is not this shape is 400 `invalid_body`, more than
- * thirty calls a minute for one account is 429 with the API's usual rate-limit body, and a provider
- * that is off is 404.
+ * missing {@link OIDC_AUTHORIZE_CALLER_HEADER} or a missing or foreign `Origin` is 403, a body that
+ * is not this shape is 400 `invalid_body`, more than thirty calls a minute for one account is 429
+ * with the API's usual rate-limit body, and a provider that is off (no `OIDC_SECRET`, or
+ * `HOST_PREFIXED_SESSION_COOKIE` not `"1"`) is 404.
  *
  *   - `redirect`: send the person to `location`, which is built from a redirect address the client
  *     registered, exactly, and carries `code` or `error`, `state` when the request had one, and `iss`.
@@ -134,3 +171,12 @@ export type OidcAuthorizeAnswer =
       readonly consent_token: string;
       readonly redirect_origin: string;
     };
+
+/** Two-way type equality, for the compile-time ties below. */
+type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Holds<T extends true> = T;
+
+/** The closed list of kinds and the answer union name the same kinds; `tsc` refuses a drift. */
+export type OidcAuthorizeKindsMatchAnswers = Holds<
+  Exactly<OidcAuthorizeAnswer["kind"], OidcAuthorizeKind>
+>;

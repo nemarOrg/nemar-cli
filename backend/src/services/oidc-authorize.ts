@@ -9,29 +9,33 @@
  *      `client_id` or `redirect_uri`, or a redirect address that is not, character for character, one
  *      the client registered, is an ERROR PAGE. Nothing before this step can be trusted to say where
  *      to send the person, so nothing before it ever redirects (RFC 6749 section 4.1.2.1).
- *   2. THE REQUEST. From here on an error is a REDIRECT to that registered address carrying `error`,
- *      the request's `state` and `iss` (RFC 9207): a repeated parameter, `request` or `request_uri`, a
- *      response type other than `code`, a response mode other than `query`, a PKCE method other than
- *      S256 or no challenge, an unreadable `prompt`, `max_age`, `nonce` or sign-in marker, and the
- *      scopes (`openid` missing, a catalogue scope the client may not have, or a machine-only scope:
- *      `invalid_scope`; a name outside the catalogue is dropped).
+ *   2. THE REQUEST. From here on an error OF THE REQUEST is a REDIRECT to that registered address
+ *      carrying `error`, the request's `state` and `iss` (RFC 9207): a repeated parameter, `request` or
+ *      `request_uri`, a missing response type (`invalid_request`) or one other than `code`
+ *      (`unsupported_response_type`: there is no implicit grant, ADR 0119 rule 1), a response mode
+ *      other than `query`, a PKCE method other than S256 or no challenge, an unreadable `prompt`,
+ *      `max_age` or `nonce`, and the scopes (`openid` missing, a catalogue scope the client may not
+ *      have, or a machine-only scope: `invalid_scope`; a name outside the catalogue is dropped).
  *   3. THE SESSION. Only an app session read under the `__Host-` cookie name may approve a grant
  *      (ADR 0119 rule 10); the route passes no session otherwise. None: sign in (`prompt=none`:
  *      `login_required`).
- *   4. FRESHNESS. `prompt=login`, a `max_age` the session is older than, a valid `id_token_hint` for
- *      another subject, or a sign-in marker the session is older than: sign in again
- *      (`prompt=none`: `login_required`). A sign-in this flow asked for satisfies all of them.
- *   5. THE CLIENT'S SIGN-IN RULE (`services/oidc-identity.ts`). Refused: tell the person why
- *      (`prompt=none`: `access_denied`).
+ *   4. FRESHNESS. `prompt=login`, a `max_age` the session is older than, or a valid `id_token_hint`
+ *      for another subject: sign in again (`prompt=none`: `login_required`). The sign-in the page sent
+ *      the person to satisfies all three, and is recognized by a SIGNED marker (below), never by a
+ *      value a caller can write. Front-channel freshness is a courtesy: a client relies on the
+ *      identity token's `auth_time`, which the code carries.
+ *   5. THE CLIENT'S SIGN-IN RULE (`services/oidc-identity.ts`). Refused: a page that says why and
+ *      links back to the client with `access_denied` (`prompt=none`: the `access_denied` redirect).
  *   6. CONSENT. A client is first-party only while EVERY redirect address it registered still passes
  *      `isFirstPartyRedirect`, re-asked now; a client registered first-party whose addresses no longer
  *      qualify is treated as third-party and asked, as any other client is. A third-party client is
  *      asked under its `consent_mode`: `ask_once` asks unless a grant the PERSON gave covers every
- *      scope asked for, `always` asks every time, and so does `prompt=consent`. (`prompt=none`:
- *      `consent_required`.)
+ *      scope asked for, `always` asks every time, and so does `prompt=consent` (which a first-party
+ *      client ignores). (`prompt=none`: `consent_required`.)
  *   7. THE CODE. 256 random bits, stored only as its hash, for 60 seconds by D1's clock. The
  *      statement that writes it re-reads the session, the account, the client, the sign-in rule, the
- *      redirect address and the grant in its own WHERE clause, so a change since step 1 mints nothing.
+ *      redirect address and the grant in its own WHERE clause, so a change since step 1 mints nothing,
+ *      and a mint that wrote nothing is an error page, never a redirect.
  *
  * THE CONSENT TOKEN is what proves the person's answer came from a screen this API showed to THIS
  * session for THIS request: an HMAC-SHA256 under `OIDC_SECRET`, over a domain tag and the session,
@@ -40,25 +44,35 @@
  * verifies the token against what it finds, so a token for another session, another request or a
  * past moment is refused, and an answer is never taken for a request the check did not show.
  *
+ * THE SIGN-IN MARKER is the same kind of proof for the other half of the flow: when the check sends a
+ * person to sign in for a request that asks for a fresh sign-in, the request it returns carries
+ * `nemar_auth_after=<unix>.<mac>`, an HMAC-SHA256 under `OIDC_SECRET` with its own domain tag over the
+ * moment (D1's clock) and the client, good for ten minutes. A marker that does not verify is treated
+ * as absent, so `prompt=login` and `max_age` still apply to a request a caller wrote by hand.
+ *
+ * `client_id` IN `oidc_grants` AND `oidc_codes` IS THE `oidc_clients.id` ROW ID, NOT THE PUBLIC
+ * `oc_...` STRING (migration 0122). The public identifier appears here only as `ClientRow.client_id`
+ * and in the statements' `c.client_id = ?` joins.
+ *
  * NOTHING HERE LOGS a `state`, a code, a nonce or the request.
  */
 
 import {
   OIDC_AUTHORIZE_REQUEST_MAX_LENGTH,
   OIDC_AUTH_AFTER_PARAM,
+  OIDC_AUTH_AFTER_TTL_SECONDS,
   OIDC_CONSENT_TOKEN_TTL_SECONDS,
   type OidcAuthorizeAnswer,
+  type OidcAuthorizeRedirectError,
   type OidcConsentDecision,
   type OidcErrorPageCode,
 } from "../../../shared/contract/oidc-authorize.js";
 import {
   OIDC_AUTHORIZATION_CODE_TTL_SECONDS,
   OIDC_SCOPE_NAMES,
-  OIDC_SIGNING_ALG,
   type OidcSignInRule,
   isMachineOnlyScope,
   isOidcClientId,
-  isOidcKid,
   isOidcScope,
   isOidcSignInRule,
 } from "../../../shared/oidc.js";
@@ -68,8 +82,8 @@ import { generateGrantCode, hashGrantCode } from "./docs-auth.js";
 import { isFirstPartyRedirect } from "./oidc-clients.js";
 import { oidcIssuer } from "./oidc-config.js";
 import { toBase64Url } from "./oidc-encoding.js";
-import { ORCID_PROVEN_SQL, signInRuleRefusal, signInRuleSql } from "./oidc-identity.js";
-import { jwksDocument } from "./oidc-keys.js";
+import { idTokenHintSubject } from "./oidc-id-token.js";
+import { ORCID_PROVEN_SQL, SIGN_IN_RULE_SQL, signInRuleRefusal } from "./oidc-identity.js";
 
 type AuthorizeEnv = Pick<Bindings, "DB" | "ENVIRONMENT" | "API_BASE_URL" | "OIDC_SECRET">;
 
@@ -105,7 +119,10 @@ export const AUTHORIZE_SESSION_SQL = `SELECT ws.id AS session_id,
 /** D1's clock in Unix seconds, for a request that has no session to read it with. */
 export const NOW_UNIX_SQL = "SELECT CAST(strftime('%s', 'now') AS INTEGER) AS now_unix";
 
-/** The one live grant of an account to a client, if any (migration 0122's partial unique index). */
+/**
+ * The one live grant of the session's account to a client, if any (migration 0122's partial unique
+ * index). Binds: the session id, the client's ROW id (`oidc_clients.id`).
+ */
 export const LIVE_GRANT_SQL = `SELECT id, scopes, consent_kind FROM oidc_grants
   WHERE user_id = (SELECT user_id FROM web_sessions WHERE id = ?)
     AND client_id = ? AND revoked_at IS NULL`;
@@ -119,20 +136,20 @@ const MINT_GATES = `ws.id = ?
    AND ws.revoked_at IS NULL
    AND ws.expires_at > datetime('now')
    AND c.status = 'active'
-   AND ${signInRuleSql()}`;
+   AND ${SIGN_IN_RULE_SQL}`;
 
 /**
  * Record what the account let the client have, or nothing when a gate fails.
- * Binds: scopes (sorted JSON), consent kind, the client's public id, the session id.
+ * Binds: scopes (sorted JSON), consent kind, the client's PUBLIC id (joined to its row), the session
+ * id. The row stores the client's ROW id, `oidc_clients.id`.
  *
  * One live grant per account and client, so this is an upsert on migration 0122's partial index.
  * The scopes on a conflict are computed by D1 from the row as it is at write time, never from a copy
- * read earlier: a grant the person gave (`user`) only ever widens by another of the person's answers;
- * a person's answer REPLACES a grant that was never theirs (`first_party`), because nobody consented
- * to what it held; and a first-party authorization widens whatever is there and marks it
- * `first_party`, so the scopes it added are never later taken for consent if the client stops being
- * first-party. The union is sorted, with no repeat (`json_group_array(... ORDER BY value)` over a
- * `UNION`).
+ * read earlier. A grant the person gave (`user`) widens only by the person's own answers, or by a
+ * first-party authorization, which re-marks it `first_party`, so the scopes it added are never later
+ * taken for consent if the client stops being first-party. A person's answer REPLACES a grant that
+ * was never theirs (`first_party`), because nobody consented to what it held. The union is sorted,
+ * with no repeat (`json_group_array(... ORDER BY value)` over a `UNION`).
  */
 export const GRANT_UPSERT_SQL = `INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind)
   SELECT u.id, c.id, ?, ?
@@ -152,16 +169,16 @@ export const GRANT_UPSERT_SQL = `INSERT INTO oidc_grants (user_id, client_id, sc
 
 /**
  * Mint an authorization code, or insert nothing. Binds: code hash, redirect address, scopes (sorted
- * JSON), nonce, PKCE challenge, lifetime in seconds, the client's public id, the session id, the
- * scopes again, the redirect address again.
+ * JSON), nonce, PKCE challenge, lifetime in seconds, the client's PUBLIC id (joined to its row), the
+ * session id, the scopes again, the redirect address again. The row stores the client's ROW id.
  *
  * The shape of `DOCS_MINT_INSERT_SQL`: an `INSERT ... SELECT` whose WHERE clause re-reads everything
  * the code depends on at the moment it is written. The session is live (and its `created_at` is the
  * code's `auth_time`), the account passes the client's sign-in rule, the client is active, the
- * redirect address is still one the client registered, and the account's live grant to the client
- * and the client's own allowed scopes both cover every scope the code carries. Zero rows written IS
- * the refusal. The expiry is D1's clock plus the lifetime, and migration 0122's CHECK refuses a row
- * that would outlive sixty seconds.
+ * redirect address is still one the client registered, and the account's OWN live grant to the
+ * client and the client's own allowed scopes both cover every scope the code carries. Zero rows
+ * written IS the refusal. The expiry is D1's clock plus the lifetime, and migration 0122's CHECK
+ * refuses a row that would outlive sixty seconds.
  */
 export const CODE_INSERT_SQL = `INSERT INTO oidc_codes
     (code_hash, client_id, user_id, grant_id, redirect_uri, scopes, nonce, code_challenge,
@@ -178,9 +195,9 @@ export const CODE_INSERT_SQL = `INSERT INTO oidc_codes
      AND EXISTS (SELECT 1 FROM json_each(c.redirect_uris) ru WHERE ru.value = ?)`;
 
 /**
- * Delete codes more than an hour past expiry, used or not. Run in the batch of every mint. A used
- * code is kept that hour so a second redemption is recognized as a replay (#2018) and not mistaken
- * for an unknown code.
+ * Delete codes more than an hour past expiry, used or not. Run at the head of every mint's batch,
+ * from either route. A used code is kept that hour so a second redemption is recognized as a replay
+ * (#2018) and not mistaken for an unknown code.
  */
 export const CODES_PRUNE_SQL =
   "DELETE FROM oidc_codes WHERE expires_at < datetime('now', '-1 hour')";
@@ -190,7 +207,9 @@ export const CODES_PRUNE_SQL =
 // ---------------------------------------------------------------------------------------------
 
 interface ClientRow {
+  /** The client's ROW id, `oidc_clients.id`: what grants and codes store as `client_id`. */
   id: number;
+  /** The PUBLIC client identifier, `oc_...`. */
   client_id: string;
   name: string;
   redirect_uris: string;
@@ -211,11 +230,15 @@ interface SessionRow {
   orcid_proven: number;
 }
 
-/** An authorization request after steps 1 and 2. */
-interface ParsedRequest {
+/** What step 1 established: the request read, and the client and redirect address it names. */
+interface ClientAndRedirect {
   params: URLSearchParams;
   clientId: string;
   redirectUri: string;
+}
+
+/** An authorization request after steps 1 and 2. */
+interface ParsedRequest extends ClientAndRedirect {
   state: string | null;
   nonce: string | null;
   codeChallenge: string;
@@ -224,7 +247,8 @@ interface ParsedRequest {
   prompt: Set<string>;
   maxAge: number | null;
   idTokenHint: string | null;
-  authAfter: number | null;
+  /** The sign-in marker as sent, verified in step 4; anything that does not verify is absent. */
+  authAfterRaw: string | null;
 }
 
 /** A request that walked steps 1 to 6 and may now be answered by consent or by a code. */
@@ -236,10 +260,13 @@ interface Ready {
   consentNeeded: boolean;
 }
 
-type Evaluation = { done: OidcAuthorizeAnswer } | { ready: Ready };
+/** An answer that ends the walk. */
+interface Done {
+  done: OidcAuthorizeAnswer;
+}
 
-const done = (answer: OidcAuthorizeAnswer): Evaluation => ({ done: answer });
-const errorPage = (code: OidcErrorPageCode): Evaluation => done({ kind: "error_page", code });
+const done = (answer: OidcAuthorizeAnswer): Done => ({ done: answer });
+const errorPage = (code: OidcErrorPageCode): Done => done({ kind: "error_page", code });
 
 // ---------------------------------------------------------------------------------------------
 // Redirects
@@ -248,7 +275,8 @@ const errorPage = (code: OidcErrorPageCode): Evaluation => done({ kind: "error_p
 /**
  * `redirectUri` with `params` added to its query. The registered address is kept exactly as it is,
  * its own query included (RFC 6749 section 3.1.2), and the new parameters are appended after it:
- * re-serializing the registered query through `URL` could change how it is encoded.
+ * re-serializing the registered query through `URL` could change how it is encoded. Registration
+ * refuses an address whose query already names a parameter the response adds.
  */
 export function appendToRedirect(redirectUri: string, params: Array<[string, string]>): string {
   const query = new URLSearchParams(params).toString();
@@ -272,12 +300,131 @@ function errorRedirect(
   env: AuthorizeEnv,
   redirectUri: string,
   state: string | null,
-  error: string,
+  error: OidcAuthorizeRedirectError,
 ): OidcAuthorizeAnswer {
   return {
     kind: "redirect",
     location: appendToRedirect(redirectUri, withStateAndIssuer(env, state, [["error", error]])),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The two HMACs: the consent token and the sign-in marker
+// ---------------------------------------------------------------------------------------------
+
+/** HMAC-SHA256 under `secret` of a JSON array, as unpadded base64url (43 characters). */
+async function macOf(secret: string, fields: unknown[]): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  // A JSON array, so no value can run into the next: a `state` holding a separator is one value.
+  const message = encoder.encode(JSON.stringify(fields));
+  return toBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", key, message)));
+}
+
+/** `<decimal>.<43 base64url characters>`: the shape of both tokens. */
+const SIGNED_VALUE_RE = /^(\d{1,12})\.([A-Za-z0-9_-]{43})$/;
+
+/** The first element of every consent token's signed message. Never shared with another token. */
+export const OIDC_CONSENT_TOKEN_DOMAIN = "oidc-consent-v1";
+
+/** The first element of every sign-in marker's signed message. Never shared with another token. */
+export const OIDC_AUTH_AFTER_DOMAIN = "oidc-reauth-v1";
+
+/** What a consent token is bound to. */
+export interface ConsentBinding {
+  sessionId: number;
+  clientId: string;
+  redirectUri: string;
+  /** Sorted, with no repeat. */
+  scopes: readonly string[];
+  state: string | null;
+  codeChallenge: string;
+  nonce: string | null;
+}
+
+function consentFields(binding: ConsentBinding, expiry: number): unknown[] {
+  return [
+    OIDC_CONSENT_TOKEN_DOMAIN,
+    binding.sessionId,
+    binding.clientId,
+    binding.redirectUri,
+    binding.scopes.join(" "),
+    binding.state,
+    binding.codeChallenge,
+    binding.nonce,
+    expiry,
+  ];
+}
+
+/** A consent token for `binding`, valid for ten minutes after `nowUnix` (D1's clock). */
+export async function mintConsentToken(
+  secret: string,
+  binding: ConsentBinding,
+  nowUnix: number,
+): Promise<string> {
+  const expiry = nowUnix + OIDC_CONSENT_TOKEN_TTL_SECONDS;
+  return `${expiry}.${await macOf(secret, consentFields(binding, expiry))}`;
+}
+
+/**
+ * Whether `token` was minted by {@link mintConsentToken} for exactly `binding` and has not expired at
+ * `nowUnix`. The comparison is constant time; a token whose expiry is further away than a token is
+ * ever minted for is refused without being checked, as is anything that is not of the token's shape.
+ */
+export async function verifyConsentToken(
+  secret: string,
+  token: unknown,
+  binding: ConsentBinding,
+  nowUnix: number,
+): Promise<boolean> {
+  if (typeof token !== "string") return false;
+  const match = SIGNED_VALUE_RE.exec(token);
+  if (!match) return false;
+  const expiry = Number(match[1]);
+  if (expiry <= nowUnix || expiry > nowUnix + OIDC_CONSENT_TOKEN_TTL_SECONDS) return false;
+  return timingSafeEqual(match[2], await macOf(secret, consentFields(binding, expiry)));
+}
+
+/** A sign-in marker: the moment `unix` (D1's clock) a person was sent to sign in for `clientId`. */
+export async function mintAuthAfterMarker(
+  secret: string,
+  clientId: string,
+  unix: number,
+): Promise<string> {
+  return `${unix}.${await macOf(secret, [OIDC_AUTH_AFTER_DOMAIN, unix, clientId])}`;
+}
+
+/**
+ * The moment a marker names, when {@link mintAuthAfterMarker} signed it for `clientId` within the
+ * last ten minutes of `nowUnix`; otherwise null, which the caller treats as no marker at all.
+ */
+export async function verifyAuthAfterMarker(
+  secret: string,
+  raw: string | null,
+  clientId: string,
+  nowUnix: number,
+): Promise<number | null> {
+  if (raw === null) return null;
+  const match = SIGNED_VALUE_RE.exec(raw);
+  if (!match) return null;
+  const unix = Number(match[1]);
+  if (unix > nowUnix || nowUnix - unix > OIDC_AUTH_AFTER_TTL_SECONDS) return null;
+  const expected = await macOf(secret, [OIDC_AUTH_AFTER_DOMAIN, unix, clientId]);
+  return timingSafeEqual(match[2], expected) ? unix : null;
+}
+
+function requireSecret(env: AuthorizeEnv): string {
+  // The routes are unreachable without it (`oidcEnabled`); this is the statement of that fact.
+  if (typeof env.OIDC_SECRET !== "string" || env.OIDC_SECRET === "") {
+    throw new Error("OIDC_SECRET is not set");
+  }
+  return env.OIDC_SECRET;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -308,9 +455,8 @@ const SINGLE_VALUED = [
 
 const PROMPT_VALUES = new Set(["none", "login", "consent", "select_account"]);
 const CODE_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/;
-const UNSIGNED_INTEGER_RE = /^\d{1,12}$/;
+const MAX_AGE_RE = /^\d{1,12}$/;
 const NONCE_MAX_LENGTH = 512;
-const ID_TOKEN_HINT_MAX_LENGTH = 4096;
 
 /** A parameter's one value, or null when it is absent or empty (OpenID Connect Core 3.1.2.1). */
 function single(params: URLSearchParams, name: string): string | null {
@@ -318,9 +464,7 @@ function single(params: URLSearchParams, name: string): string | null {
   return values.length === 1 && values[0] !== "" ? values[0] : null;
 }
 
-function parseClientAndRedirect(
-  raw: unknown,
-): { params: URLSearchParams; clientId: string; redirectUri: string } | Evaluation {
+function parseClientAndRedirect(raw: unknown): ClientAndRedirect | Done {
   if (typeof raw !== "string" || raw.length > OIDC_AUTHORIZE_REQUEST_MAX_LENGTH) {
     return errorPage("invalid_request");
   }
@@ -339,17 +483,20 @@ function parseClientAndRedirect(
 function parseRest(
   env: AuthorizeEnv,
   client: ClientRow,
-  base: { params: URLSearchParams; clientId: string; redirectUri: string },
-): ParsedRequest | Evaluation {
+  base: ClientAndRedirect,
+): ParsedRequest | Done {
   const { params, redirectUri } = base;
   const state = single(params, "state");
   // A repeated `state` is not echoed: which of its values the client meant is unknowable.
-  const fail = (error: string) => done(errorRedirect(env, redirectUri, state, error));
+  const fail = (error: OidcAuthorizeRedirectError) =>
+    done(errorRedirect(env, redirectUri, state, error));
 
   if (SINGLE_VALUED.some((name) => params.getAll(name).length > 1)) return fail("invalid_request");
   if (single(params, "request") !== null) return fail("request_not_supported");
   if (single(params, "request_uri") !== null) return fail("request_uri_not_supported");
-  if (single(params, "response_type") !== "code") return fail("invalid_request");
+  const responseType = single(params, "response_type");
+  if (responseType === null) return fail("invalid_request");
+  if (responseType !== "code") return fail("unsupported_response_type");
   const responseMode = single(params, "response_mode");
   if (responseMode !== null && responseMode !== "query") return fail("invalid_request");
   if (single(params, "code_challenge_method") !== "S256") return fail("invalid_request");
@@ -363,11 +510,7 @@ function parseRest(
   if (prompt.has("none") && prompt.size > 1) return fail("invalid_request");
 
   const maxAgeRaw = single(params, "max_age");
-  if (maxAgeRaw !== null && !UNSIGNED_INTEGER_RE.test(maxAgeRaw)) return fail("invalid_request");
-  const authAfterRaw = single(params, OIDC_AUTH_AFTER_PARAM);
-  if (authAfterRaw !== null && !UNSIGNED_INTEGER_RE.test(authAfterRaw)) {
-    return fail("invalid_request");
-  }
+  if (maxAgeRaw !== null && !MAX_AGE_RE.test(maxAgeRaw)) return fail("invalid_request");
   const nonce = single(params, "nonce");
   if (nonce !== null && nonce.length > NONCE_MAX_LENGTH) return fail("invalid_request");
 
@@ -394,18 +537,23 @@ function parseRest(
     prompt,
     maxAge: maxAgeRaw === null ? null : Number(maxAgeRaw),
     idTokenHint: single(params, "id_token_hint"),
-    authAfter: authAfterRaw === null ? null : Number(authAfterRaw),
+    authAfterRaw: single(params, OIDC_AUTH_AFTER_PARAM),
   };
 }
 
 /**
  * The request to come back with after signing in: `prompt=login` taken out (the sign-in is the
- * fresh one it asked for) and the sign-in marker set to now, by D1's clock, so the check that follows
- * requires a session at least that new. Every other parameter, in its order.
+ * fresh one it asked for) and a signed sign-in marker for now, by D1's clock, so the check that
+ * follows counts a session at least that new as the fresh sign-in. Every other parameter, in its
+ * order.
  */
-function returnRequest(params: URLSearchParams, nowUnix: number): string {
+async function returnRequest(
+  env: AuthorizeEnv,
+  request: ParsedRequest,
+  nowUnix: number,
+): Promise<string> {
   const out = new URLSearchParams();
-  for (const [name, value] of params) {
+  for (const [name, value] of request.params) {
     if (name === OIDC_AUTH_AFTER_PARAM) continue;
     if (name === "prompt") {
       const rest = value.split(" ").filter((p) => p !== "" && p !== "login");
@@ -414,142 +562,11 @@ function returnRequest(params: URLSearchParams, nowUnix: number): string {
     }
     out.append(name, value);
   }
-  out.append(OIDC_AUTH_AFTER_PARAM, String(nowUnix));
+  out.append(
+    OIDC_AUTH_AFTER_PARAM,
+    await mintAuthAfterMarker(requireSecret(env), request.clientId, nowUnix),
+  );
   return out.toString();
-}
-
-// ---------------------------------------------------------------------------------------------
-// Step 4: an identity token offered as a hint
-// ---------------------------------------------------------------------------------------------
-
-function base64UrlBytes(value: string): Uint8Array {
-  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
-}
-
-/**
- * The `sub` of an `id_token_hint`, when it is an identity token this provider signed: ES256, a key
- * of the published set, and this issuer. Null for anything else, which is then ignored as a hint
- * should be (OpenID Connect Core 3.1.2.1); an expired token is still a valid hint.
- */
-export async function idTokenHintSubject(env: AuthorizeEnv, hint: string): Promise<string | null> {
-  if (hint.length > ID_TOKEN_HINT_MAX_LENGTH) return null;
-  const parts = hint.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const header = JSON.parse(new TextDecoder().decode(base64UrlBytes(parts[0]))) as {
-      alg?: unknown;
-      kid?: unknown;
-    };
-    if (header.alg !== OIDC_SIGNING_ALG || !isOidcKid(header.kid)) return null;
-    const keys = (JSON.parse(await jwksDocument(env.DB)) as { keys: Array<Record<string, string>> })
-      .keys;
-    const jwk = keys.find((k) => k.kid === header.kid);
-    if (!jwk) return null;
-    const key = await crypto.subtle.importKey(
-      "jwk",
-      { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["verify"],
-    );
-    const verified = await crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" },
-      key,
-      base64UrlBytes(parts[2]),
-      new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
-    );
-    if (!verified) return null;
-    const claims = JSON.parse(new TextDecoder().decode(base64UrlBytes(parts[1]))) as {
-      iss?: unknown;
-      sub?: unknown;
-    };
-    if (claims.iss !== oidcIssuer(env) || typeof claims.sub !== "string") return null;
-    return claims.sub;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The consent token
-// ---------------------------------------------------------------------------------------------
-
-/** The first element of every consent token's signed message. Never shared with another token. */
-export const OIDC_CONSENT_TOKEN_DOMAIN = "oidc-consent-v1";
-
-/** What a consent token is bound to. */
-export interface ConsentBinding {
-  sessionId: number;
-  clientId: string;
-  redirectUri: string;
-  /** Sorted, with no repeat. */
-  scopes: readonly string[];
-  state: string | null;
-  codeChallenge: string;
-  nonce: string | null;
-}
-
-const CONSENT_TOKEN_RE = /^(\d{1,12})\.([A-Za-z0-9_-]{43})$/;
-
-async function consentMac(
-  secret: string,
-  binding: ConsentBinding,
-  expiry: number,
-): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  // A JSON array, so no value can run into the next: a `state` holding a separator is still one value.
-  const message = JSON.stringify([
-    OIDC_CONSENT_TOKEN_DOMAIN,
-    binding.sessionId,
-    binding.clientId,
-    binding.redirectUri,
-    binding.scopes.join(" "),
-    binding.state,
-    binding.codeChallenge,
-    binding.nonce,
-    expiry,
-  ]);
-  return toBase64Url(
-    new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(message))),
-  );
-}
-
-/** A consent token for `binding`, valid for ten minutes after `nowUnix` (D1's clock). */
-export async function mintConsentToken(
-  secret: string,
-  binding: ConsentBinding,
-  nowUnix: number,
-): Promise<string> {
-  const expiry = nowUnix + OIDC_CONSENT_TOKEN_TTL_SECONDS;
-  return `${expiry}.${await consentMac(secret, binding, expiry)}`;
-}
-
-/**
- * Whether `token` was minted by {@link mintConsentToken} for exactly `binding` and has not expired at
- * `nowUnix`. The comparison is constant time; a token whose expiry is further away than a token is
- * ever minted for is refused without being checked, as is anything that is not of the token's shape.
- */
-export async function verifyConsentToken(
-  secret: string,
-  token: unknown,
-  binding: ConsentBinding,
-  nowUnix: number,
-): Promise<boolean> {
-  if (typeof token !== "string") return false;
-  const match = CONSENT_TOKEN_RE.exec(token);
-  if (!match) return false;
-  const expiry = Number(match[1]);
-  if (expiry <= nowUnix || expiry > nowUnix + OIDC_CONSENT_TOKEN_TTL_SECONDS) return false;
-  return timingSafeEqual(match[2], await consentMac(secret, binding, expiry));
 }
 
 function bindingOf(ready: Ready): ConsentBinding {
@@ -578,10 +595,10 @@ async function evaluate(
   raw: unknown,
   sessionId: number | null,
   mode: "check" | "consent",
-): Promise<Evaluation> {
+): Promise<Done | { ready: Ready }> {
   // Step 1.
   const base = parseClientAndRedirect(raw);
-  if ("done" in base || "ready" in base) return base;
+  if ("done" in base) return base;
   const client = await env.DB.prepare(AUTHORIZE_CLIENT_SQL).bind(base.clientId).first<ClientRow>();
   if (!client || !isOidcSignInRule(client.sign_in_rule)) return errorPage("invalid_client");
   const registered = JSON.parse(client.redirect_uris) as string[];
@@ -589,10 +606,10 @@ async function evaluate(
 
   // Step 2.
   const parsed = parseRest(env, client, base);
-  if ("done" in parsed || "ready" in parsed) return parsed;
+  if ("done" in parsed) return parsed;
   const request = parsed;
   const none = request.prompt.has("none");
-  const refuse = (error: string) =>
+  const refuse = (error: OidcAuthorizeRedirectError) =>
     done(errorRedirect(env, request.redirectUri, request.state, error));
   const asksFreshness = request.prompt.has("login") || request.maxAge !== null;
 
@@ -606,19 +623,21 @@ async function evaluate(
     if (!asksFreshness) return done({ kind: "login", request: request.params.toString() });
     const clock = await env.DB.prepare(NOW_UNIX_SQL).first<{ now_unix: number }>();
     if (!clock) throw new Error("D1 returned no clock");
-    return done({ kind: "login", request: returnRequest(request.params, clock.now_unix) });
+    return done({ kind: "login", request: await returnRequest(env, request, clock.now_unix) });
   }
 
-  // Step 4. A sign-in marker from the future was not written by this API.
-  if (request.authAfter !== null && request.authAfter > session.now_unix) {
-    return refuse("invalid_request");
-  }
-  const signedInForThisFlow =
-    request.authAfter !== null && session.created_unix >= request.authAfter;
+  // Step 4. Only a marker this API signed for this client, inside its window, counts.
+  const authAfter = await verifyAuthAfterMarker(
+    requireSecret(env),
+    request.authAfterRaw,
+    request.clientId,
+    session.now_unix,
+  );
+  const signedInForThisFlow = authAfter !== null && session.created_unix >= authAfter;
   let stale = false;
   if (!signedInForThisFlow) {
     stale =
-      request.authAfter !== null ||
+      authAfter !== null ||
       request.prompt.has("login") ||
       (request.maxAge !== null && session.now_unix - session.created_unix > request.maxAge);
     if (!stale && request.idTokenHint !== null) {
@@ -628,7 +647,7 @@ async function evaluate(
   }
   if (stale) {
     if (none) return refuse("login_required");
-    return done({ kind: "reauth", request: returnRequest(request.params, session.now_unix) });
+    return done({ kind: "reauth", request: await returnRequest(env, request, session.now_unix) });
   }
 
   // Step 5.
@@ -720,14 +739,6 @@ async function mint(
       withStateAndIssuer(env, request.state, [["code", code]]),
     ),
   };
-}
-
-function requireSecret(env: AuthorizeEnv): string {
-  // The routes are unreachable without it (`oidcEnabled`); this is the statement of that fact.
-  if (typeof env.OIDC_SECRET !== "string" || env.OIDC_SECRET === "") {
-    throw new Error("OIDC_SECRET is not set");
-  }
-  return env.OIDC_SECRET;
 }
 
 /**
