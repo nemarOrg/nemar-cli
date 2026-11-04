@@ -1355,12 +1355,22 @@ describe("a seeded random sequence of every operation", () => {
       }
     }
 
-    // Replaying every hold of the run: the same key finds the same entry and moves nothing.
+    // Replaying every hold of the run moves nothing: the same key finds the same entry while the
+    // hold is open, and a hold the run released or settled is refused as closed, with the step.
     const holds = w.db
       .query("SELECT * FROM compute_ledger WHERE kind = 'hold'")
       .all() as LedgerRow[];
     const before = await count(w);
+    let openHolds = 0;
+    let closedHolds = 0;
     for (const h of holds) {
+      const closedBy = (
+        w.db
+          .query(
+            "SELECT kind FROM compute_ledger WHERE hold_ref = ? AND kind IN ('release', 'charge')",
+          )
+          .get(h.id) as { kind: "release" | "charge" } | null
+      )?.kind;
       const replay = await placeHold(w.d1, {
         poolId: h.pool_id,
         budgetPoolId: h.budget_pool_id,
@@ -1368,8 +1378,20 @@ describe("a seeded random sequence of every operation", () => {
         jobId: h.job_id as string,
         idempotencyKey: h.idempotency_key,
       });
-      expect(replay).toEqual({ ok: true, replayed: true, entry: h });
+      if (closedBy) {
+        closedHolds++;
+        expect(replay).toEqual({
+          ok: false,
+          code: "hold_closed",
+          closedBy: closedBy === "release" ? "released" : "settled",
+        });
+      } else {
+        openHolds++;
+        expect(replay).toEqual({ ok: true, replayed: true, entry: h });
+      }
     }
+    expect(openHolds + closedHolds).toBe(holds.length);
+    expect(closedHolds).toBeGreaterThan(0);
     expect(await count(w)).toBe(before);
     expect(await totalsDisagreements(w.d1)).toEqual([]);
     if (process.env.COMPUTE_TALLY) console.log(seed, JSON.stringify(tally));

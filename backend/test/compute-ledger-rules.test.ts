@@ -440,6 +440,115 @@ describe("a hold is replayed by its job, and a request for it is compared on eve
     }
     expect(await count(w, "kind = 'hold'")).toBe(1);
   });
+
+  test("a hold that is open when it is replayed is still a replay, and its pool holds it once", async () => {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", "43", "cpu");
+    const budget = await platform(w, "people", "cpu");
+    await grant(w, person, 90000);
+    await grant(w, budget, 90000);
+    const same = {
+      poolId: person.id,
+      budgetPoolId: budget.id,
+      amountMilli: 5000,
+      jobId: jobId(next()),
+    };
+    const first = await placeHold(w.d1, same);
+    expect(first).toMatchObject({ ok: true, replayed: false });
+    const entries = await count(w);
+    for (let again = 0; again < 3; again++) {
+      expect(await placeHold(w.d1, same)).toEqual({
+        ok: true,
+        replayed: true,
+        entry: (first as { entry: object }).entry,
+      });
+    }
+    expect(await count(w)).toBe(entries);
+    expect((await reread(w, person)).held_milli).toBe(5000);
+  });
+
+  test("a hold that was released is hold_closed when it is asked for again, and nothing is written", async () => {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", "44", "cpu");
+    const budget = await platform(w, "people", "cpu");
+    await grant(w, person, 90000);
+    await grant(w, budget, 90000);
+    const same = {
+      poolId: person.id,
+      budgetPoolId: budget.id,
+      amountMilli: 5000,
+      jobId: jobId(next()),
+    };
+    expect(await placeHold(w.d1, same)).toMatchObject({ ok: true, replayed: false });
+    expect(await releaseHold(w.d1, { jobId: same.jobId })).toMatchObject({ ok: true });
+    expect((await reread(w, person)).held_milli).toBe(0);
+    const entries = await count(w);
+    expect(await placeHold(w.d1, same)).toEqual({
+      ok: false,
+      code: "hold_closed",
+      closedBy: "released",
+    });
+    expect(await count(w)).toBe(entries);
+    expect((await reread(w, person)).held_milli).toBe(0);
+    // The settlement the caller would then try agrees: the hold is closed, and the refusal says by what.
+    expect(await settleProvisional(w.d1, { jobId: same.jobId, chargeMilli: 1 })).toEqual({
+      ok: false,
+      code: "hold_closed",
+      closedBy: "released",
+    });
+    expect(await totalsDisagreements(w.d1)).toEqual([]);
+  });
+
+  test("a hold that was settled is hold_closed when it is asked for again, overrun or not", async () => {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", "45", "cpu");
+    const budget = await platform(w, "people", "cpu");
+    await grant(w, person, 90000);
+    await grant(w, budget, 90000);
+    for (const used of [3200, 5000, 8000]) {
+      const same = {
+        poolId: person.id,
+        budgetPoolId: budget.id,
+        amountMilli: 5000,
+        jobId: jobId(next()),
+      };
+      expect(await placeHold(w.d1, same)).toMatchObject({ ok: true, replayed: false });
+      expect(await settleProvisional(w.d1, { jobId: same.jobId, chargeMilli: used })).toMatchObject(
+        {
+          ok: true,
+        },
+      );
+      const entries = await count(w);
+      const before = await reread(w, person);
+      expect(await placeHold(w.d1, same), `settled with ${used}`).toEqual({
+        ok: false,
+        code: "hold_closed",
+        closedBy: "settled",
+      });
+      expect(await count(w)).toBe(entries);
+      expect(await reread(w, person)).toEqual(before);
+    }
+    expect(await totalsDisagreements(w.d1)).toEqual([]);
+  });
+
+  test("a closed hold asked for with another request is still idempotency_conflict, not hold_closed", async () => {
+    const w = world();
+    const person = await ensurePool(w.d1, "account", "46", "cpu");
+    const budget = await platform(w, "people", "cpu");
+    await grant(w, person, 90000);
+    await grant(w, budget, 90000);
+    const same = {
+      poolId: person.id,
+      budgetPoolId: budget.id,
+      amountMilli: 5000,
+      jobId: jobId(next()),
+    };
+    await placeHold(w.d1, same);
+    await releaseHold(w.d1, { jobId: same.jobId });
+    await expect(placeHold(w.d1, { ...same, amountMilli: 5001 })).rejects.toMatchObject({
+      code: "idempotency_conflict",
+    });
+  });
 });
 
 describe("an idempotency key is compared on every field of the request", () => {

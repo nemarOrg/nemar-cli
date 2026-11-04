@@ -51,7 +51,10 @@
  *    EVERY field (kind, pool, budget, amounts, job and reason), and a key reused for anything else is
  *    a conflict.
  *  - A closing step is replayed: the closing entry comes back with `replayed: true` when it is of the
- *    requested kind, and `hold_closed` says which kind closed the hold otherwise.
+ *    requested kind, and `hold_closed` says which kind closed the hold otherwise. A hold is replayed
+ *    only while it is open: the same hold asked for again after it was released or settled is
+ *    `hold_closed` too, because a replay would tell the caller a hold is live that its pool no
+ *    longer holds.
  *  - Nothing here mails, calls GitHub or Tapis, or is a cron. The job table and the job-count
  *    guards on a hold are phase A3's: `placeHold` takes a caller's own guards and writes nothing.
  */
@@ -465,7 +468,9 @@ export type HoldRefusal = Extract<
 
 export type HoldResult =
   | { ok: true; replayed: boolean; entry: LedgerRow }
-  | { ok: false; code: HoldRefusal };
+  | { ok: false; code: HoldRefusal }
+  /** The job's hold was taken and has since been closed: its pool no longer holds it. */
+  | Extract<CloseRefusal, { code: "hold_closed" }>;
 
 /**
  * Take a hold, or say why not. One INSERT decides (`HOLD_INSERT_SQL`), and a refusal writes
@@ -474,7 +479,9 @@ export type HoldResult =
  * it is `platform_budget_exhausted`; a refusal none of those explains is the caller's own guard when
  * one was passed, and otherwise `insufficient_balance` (the balance moved between the refusal and
  * the read). The hold's key is the job's, so a hold of the same job again is a replay of the first
- * when it is the same request on every field, and `idempotency_conflict` when it is not.
+ * while the hold is open and the request is the same on every field, `idempotency_conflict` when
+ * the request is not, and `hold_closed` (`closedBy` says which step) once the hold was released
+ * or settled: that replay would say a hold is live that the pool no longer holds.
  */
 export async function placeHold(db: D1Database, input: HoldInput): Promise<HoldResult> {
   const [insert] = holdStatements(db, input);
@@ -485,13 +492,25 @@ export async function placeHold(db: D1Database, input: HoldInput): Promise<HoldR
     return { ok: true, replayed: false, entry };
   }
   if (entry) {
-    return replayOrConflict(entry, {
+    const replay = replayOrConflict(entry, {
       kind: "hold",
       pool_id: input.poolId,
       budget_pool_id: input.budgetPoolId,
       held_delta_milli: input.amountMilli,
       job_id: input.jobId,
     });
+    // A replay says the hold is live, so a hold that was released or settled is refused instead:
+    // its pool no longer holds it, and a caller that took the replay for a hold would run a job
+    // nothing is held for.
+    const hold = await db.prepare(HOLD_OF_JOB_SQL).bind(input.jobId).first<HoldOfJob>();
+    if (hold?.closed_by) {
+      return {
+        ok: false,
+        code: "hold_closed",
+        closedBy: hold.closed_by === "release" ? "released" : "settled",
+      };
+    }
+    return replay;
   }
 
   const pool = await getPool(db, input.poolId);
