@@ -7,9 +7,9 @@
  * stand-in answers with the request and response examples of Tapis's published OpenAPI
  * specifications and documentation, so these tests prove the client does what NEMAR means against
  * what Tapis SAYS it does, and nothing about what a real tenant does. The pull request lists what is
- * unverified: which credential strategy the operator grants, whether `listType=ALL_JOBS` returns every
- * person's jobs, the POST search body, the permission to mint service tokens, the webhook retry
- * policy, and the scheduler option for GPUs.
+ * unverified: which credential strategy the operator grants, whether `listType=ALL_JOBS` lists more
+ * than the caller's own and shared jobs, the POST search body, the permission to mint service tokens,
+ * the webhook retry policy, and the scheduler option for GPUs.
  *
  * What is pinned, each by a test of its own:
  *  - both credential strategies (a password grant, and a service credential that mints a token per
@@ -28,7 +28,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { PARTITION_NAMES } from "../../shared/contract/compute";
+import { TAPIS_JOB_STATUSES } from "../../shared/compute-state";
+import { LAUNCHER_ENV, PARTITION_NAMES } from "../../shared/contract/compute";
 import {
   __resetTapisTokenCacheForTests,
   getTapisToken,
@@ -53,9 +54,11 @@ import {
   subscribeWebhook,
   tapisHealth,
 } from "../src/services/tapis/client";
+import * as clientModule from "../src/services/tapis/client";
 import { TAPIS_BASE, tapisConfig } from "../src/services/tapis/config";
 import { TAPIS_ERROR_KINDS, TapisError } from "../src/services/tapis/errors";
-import { type TapisStandin, startTapisStandin } from "./helpers/tapis-standin";
+import { SubmitJobRequestSchema } from "../src/services/tapis/schemas";
+import { SPEC_JOB_STATUSES, type TapisStandin, startTapisStandin } from "./helpers/tapis-standin";
 
 const OWNER = "someone-owner";
 const OTHER_OWNER = "another-owner";
@@ -68,7 +71,8 @@ let standin: TapisStandin;
 let previousOverride: string | undefined;
 
 beforeAll(() => {
-  standin = startTapisStandin();
+  // The password strategy's configured account IS the owner NEMAR passes (one NEMAR identity).
+  standin = startTapisStandin({ username: OWNER });
   previousOverride = (globalThis as { NEMAR_TAPIS_API_URL?: string }).NEMAR_TAPIS_API_URL;
   (globalThis as { NEMAR_TAPIS_API_URL?: string }).NEMAR_TAPIS_API_URL = standin.url;
 });
@@ -321,19 +325,24 @@ describe("the password strategy", () => {
     expect(jobCalls("POST /v3/tokens")).toHaveLength(0);
   });
 
-  test("one token serves every owner (the account is the configured one)", async () => {
+  test("a submit for an owner other than the configured account is refused, and sends nothing", async () => {
     const env = passwordEnv();
-    await getJob(
-      ctx(env, { owner: OWNER }),
-      (await submitJob(ctx(env, { owner: OWNER }), SUBMIT)).uuid,
+    // The token is always the configured account's, so a request that says another owner is a
+    // configuration error, said with a fixed sentence that names no username.
+    const err = await failure(() =>
+      submitJob(ctx(env, { owner: OTHER_OWNER }), {
+        ...SUBMIT,
+        jobId: "job_aaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
     );
-    const second = await submitJob(ctx(env, { owner: OTHER_OWNER }), {
-      ...SUBMIT,
-      jobId: "job_aaaaaaaaaaaaaaaaaaaaaaaa",
-    });
+    expect(err.kind).toBe("unconfigured");
+    expect(err.message).toContain("owner is not the configured account");
+    expect(err.message).not.toContain(OTHER_OWNER);
+    expect(err.message).not.toContain(OWNER);
+    expect(standin.log).toHaveLength(0);
+    // The configured account itself is fine, and one token serves every call.
+    await getJob(ctx(env), (await submitJob(ctx(env), SUBMIT)).uuid);
     expect(standin.mints()).toEqual({ password: 1, service: 0 });
-    expect(JSON.parse(jobCalls("POST /v3/jobs/submit")[1]?.body ?? "").owner).toBe(OTHER_OWNER);
-    expect(second.owner).toBe(OTHER_OWNER);
   });
 
   test("a wrong password is `unauthorized` and is not retried", async () => {
@@ -714,14 +723,41 @@ describe.each(STRATEGIES)("the same client under the %s strategy", (_name, makeE
     expect(typeof (await getTapisToken(env, { owner: OWNER }))).toBe("string");
   });
 
-  test("invalidateTapisToken drops the cached token, so the next call mints again", async () => {
+  test("invalidateTapisToken drops the refused token, so the next call mints again", async () => {
     const env = makeEnv();
     const first = await getTapisToken(env, { owner: OWNER });
     expect(await getTapisToken(env, { owner: OWNER })).toBe(first);
-    invalidateTapisToken(env, OWNER);
+    invalidateTapisToken(env, OWNER, first);
     const second = await getTapisToken(env, { owner: OWNER });
     expect(second).not.toBe(first);
     expect(standin.mints().password + standin.mints().service).toBe(2);
+  });
+
+  test("invalidateTapisToken keeps a token that is not the refused one (compare, then delete)", async () => {
+    const env = makeEnv();
+    const current = await getTapisToken(env, { owner: OWNER });
+    // A caller whose 401 came from an OLDER token must not delete the fresh one another caller minted.
+    invalidateTapisToken(env, OWNER, "an-older-token");
+    expect(await getTapisToken(env, { owner: OWNER })).toBe(current);
+    expect(standin.mints().password + standin.mints().service).toBe(1);
+  });
+
+  test("after the tokens expire, many concurrent calls add exactly ONE mint", async () => {
+    const env = makeEnv();
+    const submitted = await submitJob(ctx(env), SUBMIT);
+    const before = standin.mints().password + standin.mints().service;
+    standin.expireTokens();
+    // Eight callers hold the same stale token, all get a 401, and each used to delete the others'
+    // fresh or in-flight mint. They must share one.
+    const jobs = await Promise.all(
+      Array.from({ length: 8 }, () => getJob(ctx(env), submitted.uuid)),
+    );
+    expect(jobs.every((j) => j.uuid === submitted.uuid)).toBe(true);
+    expect(standin.mints().password + standin.mints().service - before).toBe(1);
+    // Eight 401s, and the eight retries that followed.
+    const gets = jobCalls("GET /v3/jobs/:uuid").map((r) => r.status);
+    expect(gets.filter((c) => c === 401)).toHaveLength(8);
+    expect(gets.filter((c) => c === 200)).toHaveLength(8);
   });
 
   test("a token is refreshed inside its lead and used before it", async () => {
@@ -764,7 +800,11 @@ describe("submitJob", () => {
       coresPerNode: 8,
       memoryMB: 16384,
       maxMinutes: 120,
-      parameterSet: { envVariables: [{ key: "NEMAR_LAUNCH_SPEC", value: LAUNCH_SPEC }] },
+      parameterSet: {
+        envVariables: [{ key: LAUNCHER_ENV.SPEC, value: LAUNCH_SPEC }],
+        // Tapis archives the launch files (`tapisjob.env` holds the launch specification) unless told not to.
+        archiveFilter: { includeLaunchFiles: false },
+      },
       tags: [`nemar_job:${JOB_ID}`],
     });
   });
@@ -786,7 +826,8 @@ describe("submitJob", () => {
       coresPerNode: 8,
       maxMinutes: 120,
       parameterSet: {
-        envVariables: [{ key: "NEMAR_LAUNCH_SPEC", value: LAUNCH_SPEC }],
+        envVariables: [{ key: LAUNCHER_ENV.SPEC, value: LAUNCH_SPEC }],
+        archiveFilter: { includeLaunchFiles: false },
         schedulerOptions: [{ arg: "--gpus=2" }],
       },
       tags: [`nemar_job:${JOB_ID}`],
@@ -1358,4 +1399,605 @@ test("every partition word of the contract is accepted and sent as the logical q
 
 afterEach(() => {
   standin.rejectAllTokens(false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Round 1 review of phase A4: the launch specification's copies, response validation, caps
+// ---------------------------------------------------------------------------------------------
+
+const totalMints = () => standin.mints().password + standin.mints().service;
+
+/** What `AbortSignal.timeout` was asked for while a test ran; the real one still does the timing. */
+function recordAbortTimeouts(): { values: number[]; restore: () => void } {
+  const original = AbortSignal.timeout;
+  const values: number[] = [];
+  AbortSignal.timeout = ((ms: number) => {
+    values.push(ms);
+    return original.call(AbortSignal, ms);
+  }) as typeof AbortSignal.timeout;
+  return {
+    values,
+    restore: () => {
+      AbortSignal.timeout = original;
+    },
+  };
+}
+
+/** The waits `withRetry` asked for, which are cut to 1 ms so the test does not sit through them. */
+function recordRetryDelays(): { values: number[]; restore: () => void } {
+  const original = globalThis.setTimeout;
+  const values: number[] = [];
+  globalThis.setTimeout = ((fn: () => void, ms?: number, ...args: unknown[]) => {
+    values.push(ms ?? 0);
+    return (original as (...a: unknown[]) => unknown)(fn, 1, ...args);
+  }) as unknown as typeof setTimeout;
+  return {
+    values,
+    restore: () => {
+      globalThis.setTimeout = original;
+    },
+  };
+}
+
+/** A stream of `bytes` bytes in chunks of 400, with no Content-Length: a new one for each request. */
+const chunked = (bytes: number) => () =>
+  new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let at = 0; at < bytes; at += 400) {
+        controller.enqueue(new Uint8Array(Math.min(400, bytes - at)).fill(7));
+      }
+      controller.close();
+    },
+  });
+
+describe("the launch specification's other copies (what Tapis archives, and what the client reads)", () => {
+  test("the env key is the contract's, not a second copy of the word", async () => {
+    const { LAUNCH_SPEC_ENV_KEY } = await import("../src/services/tapis/schemas");
+    expect(LAUNCH_SPEC_ENV_KEY).toBe(LAUNCHER_ENV.SPEC);
+    await submitJob(ctx(passwordEnv()), SUBMIT);
+    const sent = JSON.parse(jobCalls("POST /v3/jobs/submit")[0]?.body ?? "");
+    expect(sent.parameterSet.envVariables.map((e: { key: string }) => e.key)).toEqual([
+      LAUNCHER_ENV.SPEC,
+    ]);
+  });
+
+  test("every submit tells Tapis not to archive the launch files, and Tapis's record says so", async () => {
+    for (const make of [passwordEnv, serviceEnv]) {
+      standin.reset();
+      __resetTapisTokenCacheForTests();
+      const job = await submitJob(ctx(make()), SUBMIT);
+      const sent = JSON.parse(jobCalls("POST /v3/jobs/submit")[0]?.body ?? "");
+      expect(sent.parameterSet.archiveFilter).toEqual({ includeLaunchFiles: false });
+      const record = standin.jobs.get(job.uuid)?.record.parameterSet as {
+        archiveFilter: { includeLaunchFiles: boolean };
+      };
+      expect(record.archiveFilter.includeLaunchFiles).toBe(false);
+    }
+  });
+
+  test("the request schema allows EXACTLY that archive key, with that value", async () => {
+    const { buildSubmitRequest } = clientModule;
+    const built = buildSubmitRequest(OWNER, SUBMIT);
+    expect(SubmitJobRequestSchema.safeParse(built).success).toBe(true);
+    const withFilter = (archiveFilter: unknown) => ({
+      ...built,
+      parameterSet: { ...built.parameterSet, archiveFilter },
+    });
+    expect(SubmitJobRequestSchema.safeParse(withFilter({ includeLaunchFiles: true })).success).toBe(
+      false,
+    );
+    expect(SubmitJobRequestSchema.safeParse(withFilter({})).success).toBe(false);
+    expect(
+      SubmitJobRequestSchema.safeParse(withFilter({ includeLaunchFiles: false, includes: ["x"] }))
+        .success,
+    ).toBe(false);
+    expect(
+      SubmitJobRequestSchema.safeParse(withFilter({ includeLaunchFiles: false, excludes: [] }))
+        .success,
+    ).toBe(false);
+    const { archiveFilter: _dropped, ...withoutFilter } = built.parameterSet;
+    expect(
+      SubmitJobRequestSchema.safeParse({ ...built, parameterSet: withoutFilter }).success,
+    ).toBe(false);
+  });
+
+  test("the files that hold the launch specification are never downloaded or listed", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.setOutput(job.uuid, "tapisjob.env", `export ${LAUNCHER_ENV.SPEC}='${LAUNCH_SPEC}'`);
+    standin.setOutput(job.uuid, "tapisjob.out", "log line");
+    standin.setOutput(job.uuid, "work/outputs/mytapisjob.env.csv", "a");
+    standin.advance(job.uuid, "FINISHED");
+    standin.log.length = 0;
+    for (const path of [
+      "tapisjob.env",
+      "tapisjob.sh",
+      "work/tapisjob.env",
+      "work/tapisjob.sh",
+      "TAPISJOB.ENV",
+      "Tapisjob.Sh",
+    ]) {
+      await expect(downloadOutput(ctx(env), job.uuid, path, 1000)).rejects.toThrow(RangeError);
+      await expect(listOutputs(ctx(env), job.uuid, path)).rejects.toThrow(RangeError);
+      await expect(listOutputs(ctx(env), job.uuid, `${path}/`)).rejects.toThrow(RangeError);
+    }
+    expect(standin.log).toHaveLength(0);
+    // The names that are only like them are ordinary files.
+    expect(
+      new TextDecoder().decode(await downloadOutput(ctx(env), job.uuid, "tapisjob.out", 1000)),
+    ).toBe("log line");
+    expect(
+      (await downloadOutput(ctx(env), job.uuid, "work/outputs/mytapisjob.env.csv", 1000)).length,
+    ).toBe(1);
+  });
+});
+
+describe.each(STRATEGIES)(
+  "the client never returns a launch specification (%s strategy)",
+  (_name, makeEnv) => {
+    const ADDRESS_MARK = "TOKEN-IN-THE-ADDRESS-9921";
+
+    test("a tenant that ignores the field list cannot make search or list return parameterSet or subscriptions", async () => {
+      const env = makeEnv();
+      const job = await submitJob(ctx(env), SUBMIT);
+      const record = standin.jobs.get(job.uuid)?.record as Record<string, unknown>;
+      record.subscriptions = [
+        {
+          deliveryTargets: [
+            { deliveryMethod: "WEBHOOK", deliveryAddress: `https://hooks.example/${ADDRESS_MARK}` },
+          ],
+        },
+      ];
+      standin.fullRecords(true);
+      const found = await searchJobsByTag(ctx(env), nemarJobTag(JOB_ID));
+      const listed = await listJobs(ctx(env), { listType: "ALL_JOBS", limit: 10, skip: 0 });
+      // The fixture really did serve the whole record, token and address included, for both calls.
+      expect(standin.fullRecordsServed).toEqual([job.uuid, job.uuid]);
+      for (const answer of [found, listed]) {
+        expect(answer.map((j) => j.uuid)).toEqual([job.uuid]);
+        for (const j of answer) {
+          expect(j).not.toHaveProperty("parameterSet");
+          expect(j).not.toHaveProperty("subscriptions");
+        }
+        expect(JSON.stringify(answer)).not.toContain(TOKEN_MARK);
+        expect(JSON.stringify(answer)).not.toContain(ADDRESS_MARK);
+      }
+    });
+
+    test("a get and a submit answered with a whole record are cleaned too", async () => {
+      const env = makeEnv();
+      const job = await submitJob(ctx(env), SUBMIT);
+      const record = standin.jobs.get(job.uuid)?.record as Record<string, unknown>;
+      record.subscriptions = [
+        { deliveryTargets: [{ deliveryAddress: `https://h.example/${ADDRESS_MARK}` }] },
+      ];
+      const read = await getJob(ctx(env), job.uuid);
+      expect(read).not.toHaveProperty("subscriptions");
+      expect(JSON.stringify(read)).not.toContain(ADDRESS_MARK);
+      const again = await submitJob(ctx(env), { ...SUBMIT, jobId: "job_bbbbbbbbbbbbbbbbbbbbbbbb" });
+      expect(JSON.stringify(again)).not.toContain(TOKEN_MARK);
+    });
+  },
+);
+
+/** Valid JSON of the wrong shape for a token answer, each one a different way to be wrong. */
+const BAD_TOKEN_BODIES: Array<[string, unknown]> = [
+  ["no result", { status: "success", message: "x", version: "1" }],
+  ["no access_token", { status: "success", result: {} }],
+  [
+    "an empty token",
+    { status: "success", result: { access_token: { access_token: "", expires_in: 3600 } } },
+  ],
+  [
+    "expires_in 0",
+    { status: "success", result: { access_token: { access_token: "tok-x", expires_in: 0 } } },
+  ],
+  ["no expires_in", { status: "success", result: { access_token: { access_token: "tok-x" } } }],
+  [
+    "a fractional expires_in",
+    { status: "success", result: { access_token: { access_token: "tok-x", expires_in: 1.5 } } },
+  ],
+  [
+    "a token that is a number",
+    { status: "success", result: { access_token: { access_token: 7, expires_in: 60 } } },
+  ],
+  ["an array", []],
+  ["null", null],
+];
+
+describe.each(STRATEGIES)("a token answer of the wrong shape (%s strategy)", (_name, makeEnv) => {
+  test.each(BAD_TOKEN_BODIES)(
+    "%s is `invalid_response`, sends no empty token, and caches nothing",
+    async (_what, body) => {
+      const env = makeEnv();
+      standin.respond(mintRouteOf(env), 201, body);
+      const err = await failure(() => getTapisToken(env, { owner: OWNER, timeoutMs: 400 }));
+      expect(err.kind).toBe("invalid_response");
+      expect(err.message).not.toContain("tok-x");
+      // Nothing was cached: the next call asks again, and gets a real token.
+      const token = await getTapisToken(env, { owner: OWNER, timeoutMs: 400 });
+      expect(token).toMatch(/^standin-token-/);
+      expect(standin.log.filter((r) => r.route === mintRouteOf(env))).toHaveLength(2);
+      expect(totalMints()).toBe(1);
+      // No request ever carried an empty X-Tapis-Token.
+      expect(standin.log.filter((r) => r.headers["x-tapis-token"] === "")).toEqual([]);
+    },
+  );
+
+  test("a call whose token cannot be minted never reaches Tapis's job routes", async () => {
+    const env = makeEnv();
+    standin.respond(mintRouteOf(env), 201, BAD_TOKEN_BODIES[2]?.[1]);
+    const err = await failure(() => getJob(ctx(env), "abc-007"));
+    expect(err.kind).toBe("invalid_response");
+    expect(jobCalls("GET /v3/jobs/:uuid")).toHaveLength(0);
+    expect(standin.log.filter((r) => r.headers["x-tapis-token"] === "")).toEqual([]);
+    // A mint that failed this way is not retried as a read: the answer was not a transient fault.
+    expect(standin.log.filter((r) => r.route === mintRouteOf(env))).toHaveLength(1);
+  });
+});
+
+describe("a health answer of the wrong shape", () => {
+  test.each([
+    ["an empty object", {}],
+    ["an array", []],
+    ["null", null],
+    ["a status that is a number", { status: 7 }],
+    ["a string", "ok"],
+  ])("%s is `invalid_response` and is not retried", async (_what, body) => {
+    standin.respond("GET /v3/jobs/healthcheck", 200, body);
+    const err = await failure(() =>
+      tapisHealth(passwordEnv(), { timeoutMs: 400, retryDelayMs: 1 }),
+    );
+    expect(err.kind).toBe("invalid_response");
+    expect(err.status).toBe(200);
+    expect(jobCalls("GET /v3/jobs/healthcheck")).toHaveLength(1);
+  });
+
+  test("a body that is not JSON at all is `invalid_response` as well", async () => {
+    standin.nonJson("GET /v3/jobs/healthcheck");
+    expect((await failure(() => tapisHealth(passwordEnv(), { timeoutMs: 400 }))).kind).toBe(
+      "invalid_response",
+    );
+  });
+});
+
+describe("a call that changes something and fails without a clear answer", () => {
+  test("`unavailable` and `invalid_response` of a submit mean the OUTCOME IS UNKNOWN, and the error says so", async () => {
+    const env = passwordEnv();
+    standin.fail("POST /v3/jobs/submit", 503);
+    const down = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([down.kind, down.status, down.outcomeUnknown]).toEqual(["unavailable", 503, true]);
+    expect(down.message).toContain("outcome is unknown");
+
+    standin.hang("POST /v3/jobs/submit");
+    const hung = await failure(() => submitJob(ctx(env, { timeoutMs: 150 }), SUBMIT));
+    expect([hung.kind, hung.outcomeUnknown]).toEqual(["unavailable", true]);
+
+    // A 2xx that fails its schema: the job may exist. The status is carried, not lost.
+    standin.respond("POST /v3/jobs/submit", 200, { status: "success", result: { foo: 1 } });
+    const shapeless = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([shapeless.kind, shapeless.status, shapeless.outcomeUnknown]).toEqual([
+      "invalid_response",
+      200,
+      true,
+    ]);
+    expect(shapeless.message).toContain("HTTP 200");
+    expect(shapeless.message).toContain("outcome is unknown");
+
+    standin.nonJson("POST /v3/jobs/submit");
+    const html = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([html.kind, html.outcomeUnknown]).toEqual(["invalid_response", true]);
+  });
+
+  test("an answer that says no, or a mint that failed before anything was sent, is NOT unknown", async () => {
+    const env = passwordEnv();
+    standin.fail("POST /v3/jobs/submit", 400);
+    const bad = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([bad.kind, bad.outcomeUnknown]).toEqual(["rejected", false]);
+    expect(bad.message).not.toContain("outcome is unknown");
+
+    standin.rejectAllTokens(true);
+    const refused = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([refused.kind, refused.outcomeUnknown]).toEqual(["unauthorized", false]);
+    standin.rejectAllTokens(false);
+
+    // The token could not be had, so no submit was sent: the job cannot exist.
+    __resetTapisTokenCacheForTests();
+    standin.fail("POST /v3/oauth2/tokens", 503);
+    const before = jobCalls("POST /v3/jobs/submit").length;
+    const noMint = await failure(() => submitJob(ctx(env), SUBMIT));
+    expect([noMint.kind, noMint.outcomeUnknown]).toEqual(["unavailable", false]);
+    expect(jobCalls("POST /v3/jobs/submit")).toHaveLength(before);
+  });
+
+  test("a read never says so, and cancel and subscribe do", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.fail("GET /v3/jobs/:uuid", 503, 9);
+    const read = await failure(() => getJob(ctx(env), job.uuid));
+    expect([read.kind, read.outcomeUnknown]).toEqual(["unavailable", false]);
+    standin.fail("POST /v3/jobs/:uuid/cancel", 503);
+    const cancel = await failure(() => cancelJob(ctx(env), job.uuid));
+    expect([cancel.kind, cancel.outcomeUnknown]).toEqual(["unavailable", true]);
+    standin.fail("POST /v3/jobs/subscribe/:uuid", 503);
+    const subscribe = await failure(() =>
+      subscribeWebhook(ctx(env), job.uuid, "https://hooks.example/x", 60),
+    );
+    expect([subscribe.kind, subscribe.outcomeUnknown]).toEqual(["unavailable", true]);
+    standin.respond("POST /v3/jobs/subscribe/:uuid", 200, { status: "success", result: {} });
+    const shapeless = await failure(() =>
+      subscribeWebhook(ctx(env), job.uuid, "https://hooks.example/x", 60),
+    );
+    expect([shapeless.kind, shapeless.outcomeUnknown]).toEqual(["invalid_response", true]);
+  });
+});
+
+describe("what a caller's knobs can and cannot do", () => {
+  test("a download is capped at 16 MiB: more is refused before anything is sent, exactly 16 MiB is not", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.setOutput(job.uuid, "work/outputs/a.bin", "x");
+    standin.advance(job.uuid, "FINISHED");
+    const cap = (clientModule as unknown as { TAPIS_MAX_DOWNLOAD_BYTES: number })
+      .TAPIS_MAX_DOWNLOAD_BYTES;
+    expect(cap).toBe(16 * 1024 * 1024);
+    standin.log.length = 0;
+    for (const bytes of [cap + 1, 2 ** 40, Number.MAX_SAFE_INTEGER]) {
+      await expect(downloadOutput(ctx(env), job.uuid, "work/outputs/a.bin", bytes)).rejects.toThrow(
+        RangeError,
+      );
+    }
+    expect(standin.log).toHaveLength(0);
+    expect(await downloadOutput(ctx(env), job.uuid, "work/outputs/a.bin", cap)).toHaveLength(1);
+  });
+
+  test.each([
+    [undefined, 3],
+    [Number.NaN, 3],
+    [Number.POSITIVE_INFINITY, 3],
+    [0, 1],
+    [-4, 1],
+    [1, 1],
+    [1.9, 1],
+    [2, 2],
+    [3, 3],
+    [99, 3],
+  ])("maxAttempts %p tries a read %p times", async (requested, tries) => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.fail("GET /v3/jobs/:uuid", 503, 20);
+    standin.log.length = 0;
+    const err = await failure(() => getJob(ctx(env, { maxAttempts: requested }), job.uuid));
+    expect(err.kind).toBe("unavailable");
+    expect(jobCalls("GET /v3/jobs/:uuid")).toHaveLength(tries);
+  });
+
+  test("the health call guards its attempts the same way", async () => {
+    standin.fail("GET /v3/jobs/healthcheck", 503, 20);
+    await failure(() =>
+      tapisHealth(passwordEnv(), { timeoutMs: 400, retryDelayMs: 1, maxAttempts: Number.NaN }),
+    );
+    expect(jobCalls("GET /v3/jobs/healthcheck")).toHaveLength(3);
+    standin.log.length = 0;
+    await failure(() =>
+      tapisHealth(passwordEnv(), { timeoutMs: 400, retryDelayMs: 1, maxAttempts: -2 }),
+    );
+    expect(jobCalls("GET /v3/jobs/healthcheck")).toHaveLength(1);
+  });
+
+  test.each([
+    [undefined, 500],
+    [Number.NaN, 500],
+    [Number.POSITIVE_INFINITY, 500],
+    [-50, 0],
+    [0, 0],
+    [25, 25],
+    [1e9, 5000],
+  ])(
+    "retryDelayMs %p waits %p ms between attempts, and never more than 5 seconds",
+    async (requested, waited) => {
+      const env = passwordEnv();
+      const job = await submitJob(ctx(env), SUBMIT);
+      standin.fail("GET /v3/jobs/:uuid", 503, 20);
+      const timers = recordRetryDelays();
+      try {
+        await failure(() =>
+          getJob(ctx(env, { retryDelayMs: requested, maxAttempts: 2 }), job.uuid),
+        );
+      } finally {
+        timers.restore();
+      }
+      // One wait between two attempts.
+      expect(timers.values).toEqual([waited]);
+    },
+  );
+
+  test("the health call caps its wait as well", async () => {
+    standin.fail("GET /v3/jobs/healthcheck", 503, 20);
+    const timers = recordRetryDelays();
+    try {
+      await failure(() =>
+        tapisHealth(passwordEnv(), { timeoutMs: 400, retryDelayMs: 1e9, maxAttempts: 2 }),
+      );
+    } finally {
+      timers.restore();
+    }
+    expect(timers.values).toEqual([5000]);
+  });
+});
+
+describe("a webhook address carries a token, so it is https", () => {
+  test("with no test override, only https is accepted (http is refused before sending)", async () => {
+    // A closed port: an address that passes the check fails at the connection, as a TapisError.
+    const env = passwordEnv({ TAPIS_BASE_URL: "https://127.0.0.1:1" });
+    await withoutOverride(async () => {
+      for (const address of [
+        "http://hooks.example/compute/TOKEN",
+        "http://127.0.0.1:8080/x",
+        "HTTP://hooks.example/x",
+      ]) {
+        await expect(subscribeWebhook(ctx(env), "abc-007", address, 60)).rejects.toThrow(
+          RangeError,
+        );
+      }
+      const err = await failure(() =>
+        subscribeWebhook(ctx(env), "abc-007", "https://hooks.example/compute/TOKEN", 60),
+      );
+      expect(err.kind).toBe("unavailable");
+    });
+    expect(standin.log).toHaveLength(0);
+  });
+
+  test("with the test override installed, a loopback http receiver is accepted", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    const made = await subscribeWebhook(ctx(env), job.uuid, "http://127.0.0.1:9/hook", 60);
+    expect(made.url).toEqual(expect.any(String));
+  });
+});
+
+describe("bounds that the transport itself enforces", () => {
+  test("send takes the 15-second ceiling, whatever a caller asked for", async () => {
+    const env = passwordEnv();
+    const timeouts = recordAbortTimeouts();
+    try {
+      const job = await submitJob(ctx(env, { timeoutMs: 60_000 }), SUBMIT);
+      await getJob(ctx(env, { timeoutMs: 60_000 }), job.uuid);
+      await tapisHealth(env, { timeoutMs: 60_000 });
+      await mintTapisToken(env, { owner: OWNER, timeoutMs: 60_000 });
+    } finally {
+      timeouts.restore();
+    }
+    // The mint, the submit, the get, the health call and a second mint, each asked for 15 s at most.
+    expect(timeouts.values.length).toBeGreaterThanOrEqual(5);
+    expect(timeouts.values.every((ms) => ms === TAPIS_TIMEOUT_MS)).toBe(true);
+    // And with no timeout asked for, the ceiling is the default.
+    const defaults = recordAbortTimeouts();
+    try {
+      await tapisHealth(env);
+    } finally {
+      defaults.restore();
+    }
+    expect(defaults.values).toEqual([TAPIS_TIMEOUT_MS]);
+  });
+
+  test("a chunked body is accepted at exactly the bound and refused one byte over", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    standin.advance(job.uuid, "FINISHED");
+    standin.respond("GET /v3/jobs/:uuid/output/download/*", 200, chunked(1000));
+    const exact = await downloadOutput(ctx(env), job.uuid, "work/outputs/x.bin", 1000);
+    expect(exact).toHaveLength(1000);
+    standin.respond("GET /v3/jobs/:uuid/output/download/*", 200, chunked(1001));
+    const over = await failure(() =>
+      downloadOutput(ctx(env), job.uuid, "work/outputs/x.bin", 1000),
+    );
+    expect(over.kind).toBe("invalid_response");
+    standin.respond("GET /v3/jobs/:uuid/output/download/*", 200, chunked(1));
+    expect(await downloadOutput(ctx(env), job.uuid, "work/outputs/x.bin", 1)).toHaveLength(1);
+  });
+
+  test("headers followed by a body that never arrives are `unavailable`, and a read tries three times", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    // One byte, then silence, for each of the three attempts.
+    standin.respond(
+      "GET /v3/jobs/:uuid",
+      200,
+      () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array([0x20]));
+          },
+        }),
+      3,
+      { "Content-Type": "application/json" },
+    );
+    const err = await failure(() => getJob(ctx(env, { timeoutMs: 200 }), job.uuid));
+    expect(err.kind).toBe("unavailable");
+    expect(jobCalls("GET /v3/jobs/:uuid")).toHaveLength(3);
+  });
+
+  test("a connection that closes in the middle of a body is `unavailable`, and a read tries again", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    // The headers and one byte are sent, and a moment later the stream breaks: the client has an
+    // answer in hand and loses it while reading. (Breaking before the first byte is a reset that the
+    // runtime retries by itself, which is not what is tested here.)
+    const breaksMidBody = () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0x7b]));
+          setTimeout(() => controller.error(new Error("the server went away")), 40);
+        },
+      });
+    standin.respond("GET /v3/jobs/:uuid", 200, breaksMidBody, 3, {
+      "Content-Type": "application/json",
+    });
+    const err = await failure(() => getJob(ctx(env, { timeoutMs: 2000 }), job.uuid));
+    expect(err.kind).toBe("unavailable");
+    expect(jobCalls("GET /v3/jobs/:uuid")).toHaveLength(3);
+    // The same break on a submit is not retried, and its outcome is unknown.
+    standin.respond("POST /v3/jobs/submit", 200, breaksMidBody, 3, {
+      "Content-Type": "application/json",
+    });
+    const before = jobCalls("POST /v3/jobs/submit").length;
+    const submit = await failure(() => submitJob(ctx(env, { timeoutMs: 2000 }), SUBMIT));
+    expect([submit.kind, submit.outcomeUnknown]).toEqual(["unavailable", true]);
+    expect(jobCalls("POST /v3/jobs/submit").length - before).toBe(1);
+  });
+
+  test("a body that is not valid UTF-8 is `invalid_response`, not repaired into something that parses", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    const head = new TextEncoder().encode(
+      `{"status":"success","result":{"uuid":"${job.uuid}","status":"PENDING","lastMessage":"`,
+    );
+    const tail = new TextEncoder().encode('"}}');
+    // A lone 0xFF byte inside a string: a lenient decoder turns it into U+FFFD and the JSON parses.
+    const bytes = new Uint8Array([...head, 0xff, ...tail]);
+    standin.respond("GET /v3/jobs/:uuid", 200, bytes);
+    const err = await failure(() => getJob(ctx(env), job.uuid));
+    expect(err.kind).toBe("invalid_response");
+  });
+});
+
+describe("the stand-in is faithful to what the documentation says", () => {
+  test("it knows the specification's thirteen job statuses, and NEMAR's list is the same", () => {
+    expect([...SPEC_JOB_STATUSES]).toEqual([...TAPIS_JOB_STATUSES]);
+  });
+
+  test("ALL_JOBS is the caller's own jobs plus the jobs shared with the caller, never the whole tenant", async () => {
+    const env = serviceEnv();
+    const mine = await submitJob(ctx(env, { owner: OWNER }), SUBMIT);
+    const theirs = await submitJob(ctx(env, { owner: OTHER_OWNER }), {
+      ...SUBMIT,
+      jobId: "job_cccccccccccccccccccccccc",
+    });
+    const page = { limit: 10, skip: 0 };
+    const ids = async (listType: "MY_JOBS" | "SHARED_JOBS" | "ALL_JOBS") =>
+      (await listJobs(ctx(env, { owner: OWNER }), { listType, ...page })).map((j) => j.uuid);
+    expect(await ids("MY_JOBS")).toEqual([mine.uuid]);
+    expect(await ids("SHARED_JOBS")).toEqual([]);
+    expect(await ids("ALL_JOBS")).toEqual([mine.uuid]);
+    // A job the other identity owns is found by tag only after it is shared with this one.
+    expect(
+      await searchJobsByTag(
+        ctx(env, { owner: OWNER }),
+        nemarJobTag("job_cccccccccccccccccccccccc"),
+      ),
+    ).toEqual([]);
+    standin.shareJob(theirs.uuid, OWNER);
+    expect((await ids("ALL_JOBS")).sort()).toEqual([mine.uuid, theirs.uuid].sort());
+    expect(await ids("SHARED_JOBS")).toEqual([theirs.uuid]);
+    expect(await ids("MY_JOBS")).toEqual([mine.uuid]);
+    expect(
+      (
+        await searchJobsByTag(
+          ctx(env, { owner: OWNER }),
+          nemarJobTag("job_cccccccccccccccccccccccc"),
+        )
+      ).map((j) => j.uuid),
+    ).toEqual([theirs.uuid]);
+  });
 });

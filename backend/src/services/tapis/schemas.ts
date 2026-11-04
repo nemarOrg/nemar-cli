@@ -14,23 +14,33 @@
  * `parameterSet` is a string in the specification and an object in the examples; a history event's
  * detail is `eventDetail` in one and `jobStatus` in the other; a file's address is `url` or `uri`).
  *
- * SECURITY, from the Jobs specification and documentation: the launch specification, which holds a
- * job's `job_token`, travels in the environment variable `NEMAR_LAUNCH_SPEC`, so it is part of the job
- * record's `parameterSet.envVariables`. Tapis returns `parameterSet` (and `subscriptions`, whose
- * webhook address carries a token) in a job record to whoever may read the record: the job's owner,
- * its creator and a tenant administrator (`GET /v3/jobs/{uuid}`, and the search with every attribute),
- * and to a user a resource has been shared with (`JOB_RESUBMIT_REQUEST` serves the whole submission
- * request, `JOB_OUTPUT` the archived `tapisjob.env`, which Tapis archives by default). `JobListDTO`
+ * SECURITY, from the Jobs specification and documentation (all of it UNVERIFIED against a real
+ * tenant): the launch specification, which holds a job's `job_token`, travels in the environment
+ * variable `NEMAR_LAUNCH_SPEC`, so it is part of the job record's `parameterSet.envVariables`. Tapis
+ * returns `parameterSet` (and `subscriptions`, whose webhook address carries a token) in a job record
+ * to whoever may read the record: the job's owner, its creator and a tenant administrator
+ * (`GET /v3/jobs/{uuid}`, and the search with every attribute); a user the job's `JOB_HISTORY`
+ * resource was shared with (the documentation says that grantee can get the job's history, status and
+ * "job's detail information", and search the jobs shared with them); a user its
+ * `JOB_RESUBMIT_REQUEST` resource was shared with (`.../resubmit_request` serves the whole submission
+ * request); and a user its `JOB_OUTPUT` resource was shared with, through the launch files Tapis
+ * archives with the output (`tapisjob.env`, and `tapisjob.sh`, which sit in the exec directory) unless
+ * `parameterSet.archiveFilter.includeLaunchFiles` is false, which every submit says. `JobListDTO`
  * (`GET /v3/jobs/list`) has no such field. This client therefore drops both fields from every record
- * it returns (`withoutSecretFields`), so a caller that stores or logs a record never holds the token.
+ * it returns (`withoutSecretFields`), so a caller that stores or logs a record never holds the token,
+ * and it refuses to download or list the two launch files (client.ts).
  */
 
 import { z } from "zod";
-import { COMPUTE_JOB_ID_RE, PARTITION_NAMES } from "../../../../shared/contract/compute";
+import {
+  COMPUTE_JOB_ID_RE,
+  LAUNCHER_ENV,
+  PARTITION_NAMES,
+} from "../../../../shared/contract/compute";
 import { LAUNCH_SPEC_MAX_BYTES } from "../../../../shared/contract/compute-launch";
 
-/** The environment variable that carries the launch specification (`LAUNCHER_ENV.SPEC`). */
-export const LAUNCH_SPEC_ENV_KEY = "NEMAR_LAUNCH_SPEC";
+/** The environment variable that carries the launch specification: the contract's own word. */
+export const LAUNCH_SPEC_ENV_KEY = LAUNCHER_ENV.SPEC;
 
 /** A Tapis username as NEMAR will put it in a request: the characters of a handle, up to 128. */
 export const TAPIS_OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9._~@+-]{0,127}$/;
@@ -89,14 +99,36 @@ export const TapisJobSchema = z
   })
   .passthrough();
 
-/** A job as the client returns it: a record without the two fields that can hold a secret. */
-export type TapisJob = Omit<z.infer<typeof TapisJobSchema>, "parameterSet" | "subscriptions">;
+/**
+ * The record without the two fields that can hold a secret, as a schema and as the type the client
+ * returns. It is derived from the schema (not `Omit` of an inferred passthrough type, which collapses
+ * to a bare index signature and leaves every field `unknown`): the named fields keep their types, and
+ * a key Tapis adds is `unknown`.
+ */
+const TapisJobPublicSchema = TapisJobSchema.omit({ parameterSet: true, subscriptions: true });
+export type TapisJob = z.infer<typeof TapisJobPublicSchema>;
 
 /** Drop the fields of a job record that can hold the launch specification or a webhook address. */
 export function withoutSecretFields(job: z.infer<typeof TapisJobSchema>): TapisJob {
   const { parameterSet: _parameterSet, subscriptions: _subscriptions, ...rest } = job;
   return rest;
 }
+
+// Compile-time checks, in a file `tsc -p backend` covers (the tests are outside that project): they
+// fail the typecheck if `TapisJob` ever collapses again, or if a secret field becomes a named key.
+type Assert<T extends true> = T;
+type NamedKeys<T> = keyof {
+  [K in keyof T as string extends K ? never : number extends K ? never : K]: T[K];
+};
+export type TapisJobTypeChecks = [
+  Assert<TapisJob["uuid"] extends string ? true : false>,
+  Assert<TapisJob["status"] extends string ? true : false>,
+  Assert<string extends TapisJob["status"] ? true : false>,
+  Assert<"uuid" extends NamedKeys<TapisJob> ? true : false>,
+  Assert<"status" extends NamedKeys<TapisJob> ? true : false>,
+  Assert<"parameterSet" extends NamedKeys<TapisJob> ? false : true>,
+  Assert<"subscriptions" extends NamedKeys<TapisJob> ? false : true>,
+];
 
 export const TapisJobResponseSchema = envelope(TapisJobSchema);
 export const TapisJobsResponseSchema = envelope(z.array(TapisJobSchema));
@@ -189,6 +221,9 @@ export const SubmitJobRequestSchema = z
               .strict(),
           )
           .length(1),
+        // Tapis archives the launch files (`tapisjob.env`, which holds the launch specification, and
+        // `tapisjob.sh`) with the job's output unless told not to. Exactly this one key and value.
+        archiveFilter: z.object({ includeLaunchFiles: z.literal(false) }).strict(),
         schedulerOptions: z
           .array(z.object({ arg: z.string().min(1) }).strict())
           .min(1)

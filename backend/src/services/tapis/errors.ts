@@ -8,14 +8,22 @@
  * log line or a stored `failure_detail` must not hold a token. So no body is read into a message,
  * and `bodySnippet` of the wrapped `HttpError` is never set.
  *
- *   unconfigured      the Worker has no (or an unusable) Tapis configuration; nothing was sent
+ *   unconfigured      the Worker has no (or an unusable) Tapis configuration, or a request does not
+ *                     fit it (a password-strategy submit for another owner); nothing was sent
  *   unauthorized      Tapis refused the credential: 401 (after the one refresh) and 403
  *   not_found         404
  *   rejected          another 4xx: Tapis understood the request and said no (400, 409, ...)
- *   unavailable       a timeout, a network failure, 429 or 5xx: it may work later, and says nothing
- *                     about whether the call took effect
+ *   unavailable       a timeout, a network failure, 429 or 5xx: it may work later
  *   invalid_response  Tapis answered something that is not what its specification says (not JSON, a
  *                     body that fails its schema, one over the size bound): never partly trusted
+ *
+ * THE OUTCOME MAY BE UNKNOWN. For a call that changes something (`submitJob`, `cancelJob`,
+ * `subscribeWebhook`), `unavailable` and `invalid_response` say nothing about whether it took effect:
+ * the request may have been sent and acted on, and a 2xx answer that fails its schema means the job
+ * MAY EXIST. Such an error has `outcomeUnknown` true and says so in its message, and the caller must
+ * look the job up (by its tag) before it repeats the call. A refusal (`rejected`, `unauthorized`,
+ * `not_found`) and a failure before anything was sent (no token could be had) are not unknown, and
+ * neither is any failed read.
  *
  * `cause` is an `HttpError` for an HTTP status, so `isRetryable` classifies it as the rest of the
  * Worker does (5xx and 429), and a plain `Error` whose message says `timeout` or `network` for a
@@ -35,31 +43,63 @@ export const TAPIS_ERROR_KINDS = [
 
 export type TapisErrorKind = (typeof TAPIS_ERROR_KINDS)[number];
 
+/** The sentence a message ends with when the outcome of a call that changes something is unknown. */
+const OUTCOME_UNKNOWN_SENTENCE =
+  "the outcome is unknown: look the job up by its tag before repeating this call";
+
+export interface TapisErrorOptions {
+  status?: number | null;
+  cause?: HttpError | Error;
+  /** The call may have taken effect (see the header). Only meaningful for a call that changes something. */
+  outcomeUnknown?: boolean;
+  /** A fixed sentence of the code's own, never a value from a request, a response or a binding. */
+  detail?: string;
+}
+
 export class TapisError extends Error {
   readonly kind: TapisErrorKind;
   /** The HTTP status Tapis answered with, or null when there was none (a timeout, no connection). */
   readonly status: number | null;
+  readonly outcomeUnknown: boolean;
   override readonly cause: HttpError | Error | undefined;
+  private readonly what: string;
+  private readonly detail: string | undefined;
 
-  constructor(
-    kind: TapisErrorKind,
-    what: string,
-    options: { status?: number | null; cause?: HttpError | Error } = {},
-  ) {
-    super(
-      options.status === undefined || options.status === null
-        ? `Tapis ${what}: ${kind}`
-        : `Tapis ${what}: ${kind} (HTTP ${options.status})`,
-    );
+  constructor(kind: TapisErrorKind, what: string, options: TapisErrorOptions = {}) {
+    const status = options.status ?? null;
+    const outcomeUnknown = options.outcomeUnknown === true;
+    const notes = [
+      status === null ? undefined : `HTTP ${status}`,
+      options.detail,
+      outcomeUnknown ? OUTCOME_UNKNOWN_SENTENCE : undefined,
+    ].filter((note): note is string => note !== undefined);
+    super(`Tapis ${what}: ${kind}${notes.map((note) => ` (${note})`).join("")}`);
     this.name = "TapisError";
     this.kind = kind;
-    this.status = options.status ?? null;
+    this.status = status;
+    this.outcomeUnknown = outcomeUnknown;
     this.cause = options.cause;
+    this.what = what;
+    this.detail = options.detail;
   }
 
   /** Whether a retry may help, by the Worker's one classifier (`isRetryable`). */
   get retryable(): boolean {
     return this.cause !== undefined && isRetryable(this.cause);
+  }
+
+  /**
+   * The same error, marked as one whose outcome is unknown, when it is a kind that says nothing about
+   * whether the call took effect (`unavailable`, `invalid_response`); any other kind comes back as it is.
+   */
+  withOutcomeUnknown(): TapisError {
+    if (this.kind !== "unavailable" && this.kind !== "invalid_response") return this;
+    return new TapisError(this.kind, this.what, {
+      status: this.status,
+      cause: this.cause,
+      detail: this.detail,
+      outcomeUnknown: true,
+    });
   }
 }
 
@@ -84,7 +124,7 @@ export function transportError(what: string, timedOut: boolean): TapisError {
   });
 }
 
-/** An answer that is not what Tapis's specification says. Not retryable. */
+/** An answer that is not what Tapis's specification says, with the status it came with. Not retryable. */
 export function invalidResponse(what: string, status: number | null): TapisError {
   return new TapisError("invalid_response", what, { status });
 }

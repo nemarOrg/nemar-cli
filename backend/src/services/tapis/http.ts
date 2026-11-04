@@ -71,12 +71,18 @@ async function readBounded(res: Response, maxBytes: number): Promise<Uint8Array 
   return out;
 }
 
+export interface SendResult {
+  /** The 2xx status of the answer. */
+  status: number;
+  bytes: Uint8Array;
+}
+
 /**
- * One request. Returns the bytes of a 2xx answer; throws a `TapisError` otherwise: `unavailable` for
- * a timeout or a failed connection, the status's own kind for a non-2xx answer, `invalid_response` for
- * a body over the bound.
+ * One request. Returns the status and bytes of a 2xx answer; throws a `TapisError` otherwise:
+ * `unavailable` for a timeout, a failed connection or a body that broke off, the status's own kind for
+ * a non-2xx answer, `invalid_response` for a body over the bound.
  */
-export async function send(options: SendOptions): Promise<Uint8Array> {
+export async function send(options: SendOptions): Promise<SendResult> {
   const signal = AbortSignal.timeout(effectiveTimeoutMs(options.timeoutMs));
   let res: Response;
   try {
@@ -98,17 +104,49 @@ export async function send(options: SendOptions): Promise<Uint8Array> {
   try {
     bytes = await readBounded(res, options.maxBytes);
   } catch {
+    // A timeout while the body was coming, or a connection that closed in the middle of it.
     throw transportError(options.what, signal.aborted);
   }
   if (bytes === null) throw invalidResponse(options.what, res.status);
-  return bytes;
+  return { status: res.status, bytes };
 }
 
-/** The text of a body as JSON, or `invalid_response`. */
-export function parseJsonBody(bytes: Uint8Array, what: string): unknown {
+/** The text of a body as JSON (UTF-8 that is not valid is refused, not repaired), or `invalid_response`. */
+export function parseJsonBody(bytes: Uint8Array, what: string, status: number | null): unknown {
   try {
     return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
   } catch {
-    throw invalidResponse(what, null);
+    throw invalidResponse(what, status);
   }
+}
+
+// --- What a caller may ask for -----------------------------------------------------------------
+
+/** The most times a read is tried. */
+export const TAPIS_MAX_ATTEMPTS = 3;
+
+/** The wait between the attempts of a read when none is asked for, and the longest one allowed. */
+export const TAPIS_RETRY_DELAY_DEFAULT_MS = 500;
+export const TAPIS_RETRY_DELAY_MAX_MS = 5000;
+
+/**
+ * How many times a read is tried: a whole number from 1 to 3. A value that is not a finite number is
+ * the default (3); anything else is rounded down and kept within 1 and 3, so a caller's knob can
+ * neither stop a read from running at all nor make it run more than the design says.
+ */
+export function attemptsFor(requested: number | undefined): number {
+  if (typeof requested !== "number" || !Number.isFinite(requested)) return TAPIS_MAX_ATTEMPTS;
+  return Math.min(Math.max(Math.floor(requested), 1), TAPIS_MAX_ATTEMPTS);
+}
+
+/**
+ * The wait between the attempts of a read, in milliseconds: the default when the value is not a
+ * finite number, otherwise kept within 0 and 5 seconds, so a caller's knob cannot make a Worker request
+ * sit and wait.
+ */
+export function retryDelayFor(requested: number | undefined): number {
+  if (typeof requested !== "number" || !Number.isFinite(requested)) {
+    return TAPIS_RETRY_DELAY_DEFAULT_MS;
+  }
+  return Math.min(Math.max(Math.floor(requested), 0), TAPIS_RETRY_DELAY_MAX_MS);
 }

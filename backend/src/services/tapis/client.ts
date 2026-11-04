@@ -10,23 +10,31 @@
  * decision, 2026-11-04), so a caller passes a NEMAR service identity from configuration, never a
  * constant of this module and never a person.
  *
- * WHO CAN READ A JOB'S `parameterSet`, and with it the job's token. The launch specification, which
- * holds `job_token`, travels in the environment variable `NEMAR_LAUNCH_SPEC`, which Tapis keeps in the
- * job record's `parameterSet.envVariables`. From the Jobs specification and documentation, the roles
- * that can read it are: the job's owner, its creator (`createdby`) and a tenant administrator, through
- * `GET /v3/jobs/{uuid}` and the search with every attribute; a user the job's `JOB_RESUBMIT_REQUEST`
- * resource was shared with, through `GET /v3/jobs/{uuid}/resubmit_request`, which is the whole
- * submission request; and a user its `JOB_OUTPUT` resource was shared with, through the archived
- * `tapisjob.env`, which Tapis archives unless `archiveFilter.includeLaunchFiles` is false. The list
- * endpoint (`JobListDTO`) has no such field, and the status and history calls do not either. The
- * client never returns `parameterSet` or `subscriptions` (their addresses carry a token): see
- * `withoutSecretFields`. Which roles a real tenant grants is part of what is unverified.
+ * WHO CAN READ A JOB'S `parameterSet`, and with it the job's token (from the Jobs specification and
+ * documentation; ALL OF IT UNVERIFIED against a real tenant). The launch specification, which holds
+ * `job_token`, travels in the environment variable `NEMAR_LAUNCH_SPEC`, which Tapis keeps in the job
+ * record's `parameterSet.envVariables`. The roles that can read it are: the job's owner, its creator
+ * (`createdby`) and a tenant administrator, through `GET /v3/jobs/{uuid}` and the search with every
+ * attribute; a user the job's `JOB_HISTORY` resource was shared with (the documentation says that
+ * grantee can get the job's history, status and "job's detail information", and search the jobs
+ * shared with them); a user its `JOB_RESUBMIT_REQUEST` resource was shared with, through
+ * `GET /v3/jobs/{uuid}/resubmit_request`, which is the whole submission request; and a user its
+ * `JOB_OUTPUT` resource was shared with, through the launch files Tapis archives with the output,
+ * `tapisjob.env` and `tapisjob.sh`, which sit in the exec directory, unless
+ * `parameterSet.archiveFilter.includeLaunchFiles` is false (every submit says so, and the Tapis
+ * application definition is the second layer). The list endpoint (`JobListDTO`) has no such field,
+ * and the status and history calls do not either. The client never returns `parameterSet` or
+ * `subscriptions` (their addresses carry a token): see `withoutSecretFields`; and it refuses to
+ * download or list `tapisjob.env` and `tapisjob.sh` (`assertOutputPath`).
  *
  * RULES, each pinned by a test:
  *  - every call has a 15-second timeout and a bounded body read (http.ts);
  *  - reads retry through `isRetryable` (up to three attempts); `submitJob`, `cancelJob` and
  *    `subscribeWebhook` NEVER retry inside the client, because a lost answer says nothing about
- *    whether the call took effect (the caller searches by tag first, or its sweep decides);
+ *    whether the call took effect. For those three, `unavailable` and `invalid_response` mean THE
+ *    OUTCOME IS UNKNOWN (`TapisError.outcomeUnknown`, and the message says so): a 2xx answer that fails
+ *    its schema means the job MAY EXIST, so the caller searches by tag (`searchJobsByTag`) before any
+ *    re-submit, or its sweep decides;
  *  - a 401 refreshes the token once and retries once, for every call: a refused credential did
  *    nothing, so repeating it is safe; a second 401 is `unauthorized`;
  *  - a response that fails its schema is `invalid_response`, never partly trusted;
@@ -40,13 +48,16 @@ import {
 } from "../../../../shared/contract/compute";
 import { withRetry } from "../retry";
 import { getTapisToken, invalidateTapisToken, requireTapisConfig } from "./auth";
-import { type TapisEnv, tapisBaseOrProblem } from "./config";
+import { type TapisEnv, overrideActive, tapisBaseOrProblem } from "./config";
 import { TapisError, invalidResponse } from "./errors";
 import {
+  type SendResult,
   TAPIS_MAX_JSON_BYTES,
   TAPIS_TIMEOUT_MS,
+  attemptsFor,
   effectiveTimeoutMs,
   parseJsonBody,
+  retryDelayFor,
   send,
 } from "./http";
 import {
@@ -70,7 +81,7 @@ import {
   withoutSecretFields,
 } from "./schemas";
 
-export { TAPIS_MAX_JSON_BYTES, TAPIS_TIMEOUT_MS, effectiveTimeoutMs };
+export { TAPIS_MAX_JSON_BYTES, TAPIS_TIMEOUT_MS, attemptsFor, effectiveTimeoutMs, retryDelayFor };
 export type { TapisFileInfo, TapisHistoryEvent, TapisJob, TapisSubscription };
 
 /** What every call is made with. */
@@ -80,9 +91,9 @@ export interface TapisContext {
   owner: string;
   /** At most 15 seconds, which is also the default. */
   timeoutMs?: number;
-  /** The wait between the attempts of a read. Default 500 ms. */
+  /** The wait between the attempts of a read, 0 to 5000 ms; a value that is not a number is the default, 500. */
   retryDelayMs?: number;
-  /** How many times a read is tried, 1 to 3. Default 3. */
+  /** How many times a read is tried, 1 to 3; a value that is not a number is the default, 3. */
   maxAttempts?: number;
   /** The clock, for the token cache: a test moves it. */
   now?: () => number;
@@ -92,9 +103,13 @@ export interface TapisContext {
 export const TAPIS_LIST_TYPES = ["MY_JOBS", "SHARED_JOBS", "ALL_JOBS"] as const;
 export type TapisListType = (typeof TAPIS_LIST_TYPES)[number];
 
-const DEFAULT_RETRY_DELAY_MS = 500;
-const MAX_ATTEMPTS = 3;
 const LIST_LIMIT_MAX = 1000;
+
+/** The most bytes one download may ask for: 16 MiB (a larger request is refused, not clamped). */
+export const TAPIS_MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
+
+/** The files Tapis writes in the exec directory that hold the launch specification. */
+const LAUNCH_FILES: ReadonlySet<string> = new Set(["tapisjob.env", "tapisjob.sh"]);
 
 /** The tag every NEMAR job carries, so a retried submission finds its job instead of making two. */
 export const TAPIS_JOB_TAG_PREFIX = "nemar_job:";
@@ -195,6 +210,8 @@ interface Call {
   body?: string;
   /** Whether a failure that may clear is tried again. Never for a call that changes something. */
   retry: boolean;
+  /** Whether the call changes something at Tapis, so that a failure with no clear answer is of unknown outcome. */
+  mutates: boolean;
   maxBytes: number;
   /** The `Accept` header: JSON for a record, anything for a file's bytes. */
   accept: "application/json" | "*/*";
@@ -202,45 +219,49 @@ interface Call {
 
 /**
  * Send one call with a token, refresh the token once on a 401 and retry once, and try a read again
- * when its failure may clear. Returns the bytes of the 2xx answer.
+ * when its failure may clear. Returns the status and bytes of the 2xx answer.
  */
-async function perform(ctx: TapisContext, call: Call): Promise<Uint8Array> {
+async function perform(ctx: TapisContext, call: Call): Promise<SendResult> {
   assertOwner(ctx.owner);
   const config = requireTapisConfig(ctx.env);
   const authOptions = { owner: ctx.owner, timeoutMs: ctx.timeoutMs, now: ctx.now };
-  const sendWith = (token: string) =>
-    send({
-      url: `${config.baseUrl}/v3${call.path}`,
-      method: call.method,
-      headers: {
-        "X-Tapis-Token": token,
-        Accept: call.accept,
-        ...(call.body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      body: call.body,
-      what: call.what,
-      timeoutMs: ctx.timeoutMs,
-      maxBytes: call.maxBytes,
-    });
+  const sendWith = async (token: string): Promise<SendResult> => {
+    try {
+      return await send({
+        url: `${config.baseUrl}/v3${call.path}`,
+        method: call.method,
+        headers: {
+          "X-Tapis-Token": token,
+          Accept: call.accept,
+          ...(call.body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        body: call.body,
+        what: call.what,
+        timeoutMs: ctx.timeoutMs,
+        maxBytes: call.maxBytes,
+      });
+    } catch (err) {
+      // The request may have been sent and acted on: say so, for a call that changes something.
+      throw call.mutates && err instanceof TapisError ? err.withOutcomeUnknown() : err;
+    }
+  };
 
-  const attempt = async (): Promise<Uint8Array> => {
+  const attempt = async (): Promise<SendResult> => {
     const token = await getTapisToken(ctx.env, authOptions);
     try {
       return await sendWith(token);
     } catch (err) {
       // Only a 401 is a token that stopped working; a 403 is a permission a new token would not change.
       if (!(err instanceof TapisError) || err.status !== 401) throw err;
-      invalidateTapisToken(ctx.env, ctx.owner);
+      // Drop the token that was refused, and only that one: callers that held it share one new mint.
+      invalidateTapisToken(ctx.env, ctx.owner, token);
       return await sendWith(await getTapisToken(ctx.env, authOptions));
     }
   };
 
-  const maxAttempts = call.retry
-    ? Math.min(Math.max(Math.floor(ctx.maxAttempts ?? MAX_ATTEMPTS), 1), MAX_ATTEMPTS)
-    : 1;
   const { result } = await withRetry(attempt, `tapis ${call.what}`, {
-    maxAttempts,
-    delayMs: ctx.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+    maxAttempts: call.retry ? attemptsFor(ctx.maxAttempts) : 1,
+    delayMs: retryDelayFor(ctx.retryDelayMs),
     isRetryable: (err) => err instanceof TapisError && err.retryable,
   });
   return result;
@@ -252,13 +273,22 @@ async function performJson<T>(
   call: Omit<Call, "maxBytes" | "accept">,
   schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } },
 ): Promise<T> {
-  const bytes = await perform(ctx, {
+  const { status, bytes } = await perform(ctx, {
     ...call,
     maxBytes: TAPIS_MAX_JSON_BYTES,
     accept: "application/json",
   });
-  const parsed = schema.safeParse(parseJsonBody(bytes, call.what));
-  if (!parsed.success) throw invalidResponse(call.what, null);
+  // A 2xx answer that is not what the specification says: for a call that changes something the job
+  // MAY EXIST, so the error carries that, and the status the answer came with.
+  const failed = (error: TapisError) => (call.mutates ? error.withOutcomeUnknown() : error);
+  let body: unknown;
+  try {
+    body = parseJsonBody(bytes, call.what, status);
+  } catch (err) {
+    throw err instanceof TapisError ? failed(err) : err;
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) throw failed(invalidResponse(call.what, status));
   return parsed.data;
 }
 
@@ -297,6 +327,10 @@ export function buildSubmitRequest(owner: string, input: SubmitJobInput) {
     maxMinutes: input.minutes,
     parameterSet: {
       envVariables: [{ key: LAUNCH_SPEC_ENV_KEY, value: input.launchSpec }],
+      // Tapis archives `tapisjob.env` (which holds the launch specification, so the job's token) and
+      // `tapisjob.sh` with the job's output unless told not to. The application definition says the
+      // same, as a second layer. Whether Tapis takes this from the request is UNVERIFIED.
+      archiveFilter: { includeLaunchFiles: false },
       // `ReqSubmitJob` has no field for GPUs, so they are a scheduler option, and the SPELLING
       // (`--gpus=N`, as Expanse's user guide writes it) is UNVERIFIED against a real tenant: a
       // system's scheduler profile may hide or rename it.
@@ -325,6 +359,14 @@ export function buildSubmitRequest(owner: string, input: SubmitJobInput) {
 export async function submitJob(ctx: TapisContext, input: SubmitJobInput): Promise<TapisJob> {
   assertOwner(ctx.owner);
   const request = buildSubmitRequest(ctx.owner, input);
+  // Under the password strategy the token is always the configured account's, so a request that says
+  // another owner would be a job the account does not own: refuse it, with a sentence that names no one.
+  const config = requireTapisConfig(ctx.env);
+  if (config.strategy === "password" && ctx.owner !== config.username) {
+    throw new TapisError("unconfigured", "submit job", {
+      detail: "the owner is not the configured account",
+    });
+  }
   const answer = await performJson(
     ctx,
     {
@@ -333,6 +375,7 @@ export async function submitJob(ctx: TapisContext, input: SubmitJobInput): Promi
       path: "/jobs/submit",
       body: JSON.stringify(request),
       retry: false,
+      mutates: true,
     },
     TapisJobResponseSchema,
   );
@@ -344,7 +387,13 @@ export async function getJob(ctx: TapisContext, uuid: string): Promise<TapisJob>
   assertUuid(uuid);
   const answer = await performJson(
     ctx,
-    { what: "get job", method: "GET", path: `/jobs/${encodeURIComponent(uuid)}`, retry: true },
+    {
+      what: "get job",
+      method: "GET",
+      path: `/jobs/${encodeURIComponent(uuid)}`,
+      retry: true,
+      mutates: false,
+    },
     TapisJobResponseSchema,
   );
   return withoutSecretFields(answer.result);
@@ -365,6 +414,7 @@ export async function getJobHistory(
       method: "GET",
       path: `/jobs/${encodeURIComponent(uuid)}/history${query({ limit: page.limit, skip: page.skip })}`,
       retry: true,
+      mutates: false,
     },
     TapisHistoryResponseSchema,
   );
@@ -387,6 +437,7 @@ export async function cancelJob(
       method: "POST",
       path: `/jobs/${encodeURIComponent(uuid)}/cancel`,
       retry: false,
+      mutates: true,
     },
     TapisCancelResponseSchema,
   );
@@ -396,8 +447,10 @@ export async function cancelJob(
 /**
  * `POST /v3/jobs/search` with the documented body, `{ "search": ["tags IN ('<tag>')"] }`. The shape
  * of that body is the Jobs documentation's example and UNVERIFIED against a real tenant. `listType`
- * defaults to `ALL_JOBS`, because the job being looked for may belong to anyone; whether a tenant
- * returns every person's jobs for it is also unverified.
+ * defaults to `ALL_JOBS`, which the documentation says lists the caller's own jobs PLUS the jobs shared
+ * with the caller, not every job in the tenant. A retried submission finds its job this way only
+ * because NEMAR submits and searches under ONE identity (the owner's decision of 2026-11-04); if more
+ * than one identity ever submits, the search must be made as the one that submitted.
  */
 export async function searchJobsByTag(
   ctx: TapisContext,
@@ -418,6 +471,7 @@ export async function searchJobsByTag(
       path: `/jobs/search${query({ listType, limit: options.limit, skip: options.skip, select: SEARCH_SELECT })}`,
       body: JSON.stringify({ search: [`tags IN ('${tag}')`] }),
       retry: true,
+      mutates: false,
     },
     TapisJobsResponseSchema,
   );
@@ -438,6 +492,7 @@ export async function listJobs(
       method: "GET",
       path: `/jobs/list${query({ listType: options.listType, limit: options.limit, skip: options.skip })}`,
       retry: true,
+      mutates: false,
     },
     TapisJobsResponseSchema,
   );
@@ -466,8 +521,11 @@ export async function subscribeWebhook(
   } catch {
     throw new RangeError("a webhook address is an absolute URL");
   }
-  if ((protocol !== "https:" && protocol !== "http:") || address.length > 2048) {
-    throw new RangeError("a webhook address is an http(s) URL of at most 2048 characters");
+  // The address carries a token, so it is https; plain http only where the test override of the
+  // tenant's address is installed (a loopback receiver), as for the tenant's own address.
+  const allowed = protocol === "https:" || (protocol === "http:" && overrideActive());
+  if (!allowed || address.length > 2048) {
+    throw new RangeError("a webhook address is an https URL of at most 2048 characters");
   }
   const body = SubscribeRequestSchema.parse({
     description: "NEMAR status hint",
@@ -484,6 +542,7 @@ export async function subscribeWebhook(
       path: `/jobs/subscribe/${encodeURIComponent(uuid)}`,
       body: JSON.stringify(body),
       retry: false,
+      mutates: true,
     },
     TapisSubscriptionResponseSchema,
   );
@@ -497,6 +556,10 @@ function assertOutputPath(path: string, allowRoot: boolean): void {
   if (typeof path !== "string") throw new RangeError("not an output path");
   if (allowRoot && path === "") return;
   if (!isSafeComputePath(path, 512)) throw new RangeError("not a path below the output directory");
+  // The two files Tapis writes in the exec directory, which is the output root, hold the launch
+  // specification (and so the job's token). Never read through this client, whatever their case.
+  const basename = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+  if (LAUNCH_FILES.has(basename)) throw new RangeError("not a file this client reads");
 }
 
 /**
@@ -518,6 +581,7 @@ export async function listOutputs(
       method: "GET",
       path: `/jobs/${encodeURIComponent(uuid)}/output/list/${directory === "" ? "" : `${encodePath(directory)}/`}`,
       retry: true,
+      mutates: false,
     },
     TapisOutputListResponseSchema,
   );
@@ -526,7 +590,8 @@ export async function listOutputs(
 
 /**
  * `GET /v3/jobs/{uuid}/output/download/{path}`: one file's bytes, at most `maxBytes` (a larger one is
- * `invalid_response` and is not read to its end).
+ * `invalid_response` and is not read to its end). `maxBytes` itself is at most 16 MiB: a larger request
+ * is a `RangeError`, because the body is held in memory twice while it is read.
  */
 export async function downloadOutput(
   ctx: TapisContext,
@@ -536,17 +601,19 @@ export async function downloadOutput(
 ): Promise<Uint8Array> {
   assertUuid(uuid);
   assertOutputPath(path, false);
-  if (!Number.isInteger(maxBytes) || maxBytes < 1) {
-    throw new RangeError("maxBytes is a whole number from 1");
+  if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > TAPIS_MAX_DOWNLOAD_BYTES) {
+    throw new RangeError(`maxBytes is a whole number from 1 to ${TAPIS_MAX_DOWNLOAD_BYTES}`);
   }
-  return perform(ctx, {
+  const { bytes } = await perform(ctx, {
     what: "download output",
     method: "GET",
     path: `/jobs/${encodeURIComponent(uuid)}/output/download/${encodePath(path)}`,
     retry: true,
+    mutates: false,
     maxBytes,
     accept: "*/*",
   });
+  return bytes;
 }
 
 // --- Health ------------------------------------------------------------------------------------
@@ -575,15 +642,14 @@ export async function tapisHealth(
       }),
     `tapis ${what}`,
     {
-      maxAttempts: Math.min(
-        Math.max(Math.floor(options.maxAttempts ?? MAX_ATTEMPTS), 1),
-        MAX_ATTEMPTS,
-      ),
-      delayMs: options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS,
+      maxAttempts: attemptsFor(options.maxAttempts),
+      delayMs: retryDelayFor(options.retryDelayMs),
       isRetryable: (err) => err instanceof TapisError && err.retryable,
     },
   );
-  if (!TapisHealthResponseSchema.safeParse(parseJsonBody(result, what)).success) {
-    throw invalidResponse(what, null);
+  if (
+    !TapisHealthResponseSchema.safeParse(parseJsonBody(result.bytes, what, result.status)).success
+  ) {
+    throw invalidResponse(what, result.status);
   }
 }

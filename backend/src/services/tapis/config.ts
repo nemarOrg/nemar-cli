@@ -87,8 +87,12 @@ export function TAPIS_BASE(env: TapisEnv): string | undefined {
   return present(raw) ? raw.trim().replace(/\/+$/, "") : undefined;
 }
 
-/** Whether the address came from the test override, which may be plain `http` on a loopback port. */
-function overrideActive(): boolean {
+/**
+ * Whether the test override of the address is installed. It is, only in a test (a deployed Worker
+ * cannot set a global), and then plain `http` on a loopback port is allowed where production allows
+ * only `https`: the tenant's address and a webhook address alike.
+ */
+export function overrideActive(): boolean {
   return present((globalThis as { NEMAR_TAPIS_API_URL?: string }).NEMAR_TAPIS_API_URL);
 }
 

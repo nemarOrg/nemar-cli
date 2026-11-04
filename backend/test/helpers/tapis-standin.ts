@@ -32,9 +32,11 @@
  *  - Every other call needs `X-Tapis-Token` to be a token this server minted and has not expired.
  *
  * WHAT IT DOES NOT DO: the real service decides who may see a job (the owner, the creator or a tenant
- * administrator) and whether `listType=ALL_JOBS` returns every person's jobs; this server returns
- * every job for `ALL_JOBS`, and for `MY_JOBS` the jobs whose owner or creator is the token's user. It
- * does not run Slurm, stage a file or retry a webhook.
+ * administrator). This server follows the documentation's `listType`: `MY_JOBS` is the jobs whose
+ * owner or creator is the token's user, `SHARED_JOBS` the jobs shared with that user (`shareJob`), and
+ * `ALL_JOBS` both, NOT every job in the tenant (the documentation says "all jobs including both shared
+ * and owned"; whether a tenant's administrator sees more is UNVERIFIED). It does not run Slurm, stage a
+ * file or retry a webhook.
  *
  * SIMULATING A JOB: `advance(uuid, status, condition?)` moves a job along, records the history event
  * and the notification event, and sets the timestamps the way the documentation says Tapis does.
@@ -47,10 +49,14 @@
  *  - `hang(route)`: never answers until the client gives up;
  *  - `nonJson(route)`: a 200 whose body is HTML, as a proxy's error page is;
  *  - `respond(route, status, body, times, headers)`: that status, body and headers, as JSON text unless
- *    the body is a string or a `ReadableStream` (sent chunked, with no Content-Length);
+ *    the body is a string, a `Uint8Array` (sent as bytes), a `ReadableStream` (sent chunked, with no
+ *    Content-Length) or a function returning a stream (a new one for each request it answers);
  *  - `expireTokens()`: every token issued so far now answers 401, and a token minted afterwards works
  *    (a lifetime that ended, or a revocation);
  *  - `rejectAllTokens(true)`: every call that needs a token answers 401 even with a fresh one;
+ *  - `fullRecords(true)`: the search ignores `select` and the list serves the FULL job record, the
+ *    `parameterSet` with the launch specification and the `subscriptions` included, as a tenant that
+ *    ignored the request's field list would; `fullRecordsServed` says which jobs it did that for;
  *  - `down()` and `up()`: the server stops listening, and starts again on the same port.
  *
  * Every request is logged with its method, path and query, headers (names lower case), body text and
@@ -62,7 +68,6 @@
 
 import { randomUUID } from "node:crypto";
 import type { Server } from "bun";
-import { TAPIS_JOB_STATUSES } from "../../../shared/compute-state";
 
 /** A route as a test names it; `*` stands for any path below it. */
 export type StandinRoute =
@@ -153,6 +158,12 @@ export interface TapisStandin {
   ): void;
   expireTokens(): void;
   rejectAllTokens(on: boolean): void;
+  /** Search ignores `select` and list serves whole records (see the header). */
+  fullRecords(on: boolean): void;
+  /** The uuids of the jobs `fullRecords` served whole, in order. */
+  fullRecordsServed: string[];
+  /** Share a job with a user, so `SHARED_JOBS` and `ALL_JOBS` list it for them. */
+  shareJob(uuid: string, user: string): void;
   down(): void;
   up(): void;
   /** How many tokens it has minted, by route. */
@@ -175,7 +186,28 @@ type Behaviour =
       headers: Record<string, string>;
     };
 
-const STATUS_SET: ReadonlySet<string> = new Set(TAPIS_JOB_STATUSES);
+/**
+ * The thirteen statuses of the Jobs specification's `Job.status` enum (`JobsAPI.yaml`), written out
+ * here and not imported, so a drift of NEMAR's own list (`TAPIS_JOB_STATUSES`) from the specification is
+ * a test failure and not an agreement of two copies of one mistake.
+ */
+export const SPEC_JOB_STATUSES = [
+  "PENDING",
+  "PROCESSING_INPUTS",
+  "STAGING_INPUTS",
+  "STAGING_JOB",
+  "SUBMITTING_JOB",
+  "QUEUED",
+  "RUNNING",
+  "ARCHIVING",
+  "BLOCKED",
+  "PAUSED",
+  "FINISHED",
+  "CANCELLED",
+  "FAILED",
+] as const;
+
+const STATUS_SET: ReadonlySet<string> = new Set(SPEC_JOB_STATUSES);
 const TERMINAL = new Set(["FINISHED", "FAILED", "CANCELLED"]);
 const DEFAULT_CONDITION: Record<string, string> = {
   FINISHED: "NORMAL_COMPLETION",
@@ -266,6 +298,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
   const tokens = new Map<string, { username: string; expired: boolean }>();
   let behaviours: Behaviour[] = [];
   let rejectAll = false;
+  let fullRecordsOn = false;
+  const fullRecordsServed: string[] = [];
+  const shares = new Map<string, Set<string>>();
   let mintCounts = { password: 0, service: 0 };
   let tokenSeq = 0;
   let eventSeq = 0;
@@ -347,11 +382,19 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     };
   }
 
+  function sharedWith(user: string): StandinJob[] {
+    return [...jobs.values()].filter((j) => shares.get(j.uuid)?.has(user));
+  }
+
+  /** The documentation's `listType`: own, shared, or both (not every job in the tenant). */
   function visibleTo(user: string, listType: string): StandinJob[] {
-    const all = [...jobs.values()];
-    if (listType === "ALL_JOBS") return all;
-    if (listType === "SHARED_JOBS") return [];
-    return all.filter((j) => j.record.owner === user || j.record.createdby === user);
+    const own = [...jobs.values()].filter(
+      (j) => j.record.owner === user || j.record.createdby === user,
+    );
+    if (listType === "SHARED_JOBS") return sharedWith(user);
+    if (listType === "ALL_JOBS")
+      return [...own, ...sharedWith(user).filter((j) => !own.includes(j))];
+    return own;
   }
 
   function submit(body: Record<string, unknown> | null, caller: string): Response {
@@ -412,7 +455,13 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
         appArgs: [],
         logConfig: { stderrFilename: "tapisjob.out", stdoutFilename: "tapisjob.out" },
         envVariables,
-        archiveFilter: { excludes: [], includes: [], includeLaunchFiles: true },
+        // Tapis's default is to archive the launch files; a request's `archiveFilter` replaces it.
+        archiveFilter: {
+          excludes: [],
+          includes: [],
+          includeLaunchFiles: true,
+          ...((requestSet.archiveFilter as Record<string, unknown> | undefined) ?? {}),
+        },
         containerArgs: [],
         schedulerOptions: Array.isArray(requestSet.schedulerOptions)
           ? requestSet.schedulerOptions
@@ -562,12 +611,16 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
         }
         if (forced.kind === "respond") {
           // A stream is sent chunked, with no Content-Length, as a server that never says how long it is.
-          return typeof forced.body === "string" || forced.body instanceof ReadableStream
-            ? new Response(forced.body as BodyInit, {
+          const body =
+            typeof forced.body === "function" ? (forced.body as () => unknown)() : forced.body;
+          return typeof body === "string" ||
+            body instanceof ReadableStream ||
+            body instanceof Uint8Array
+            ? new Response(body as BodyInit, {
                 status: forced.status,
                 headers: forced.headers,
               })
-            : new Response(JSON.stringify(forced.body), {
+            : new Response(JSON.stringify(body), {
                 status: forced.status,
                 headers: { "Content-Type": "application/json", ...forced.headers },
               });
@@ -617,7 +670,11 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
 
       if (route === "GET /v3/jobs/list") {
         const listType = url.searchParams.get("listType") ?? "MY_JOBS";
-        const all = visibleTo(who.username, listType).map(listDto);
+        const all = visibleTo(who.username, listType).map((j) => {
+          if (!fullRecordsOn) return listDto(j);
+          fullRecordsServed.push(j.uuid);
+          return j.record;
+        });
         const { page, limit, skip } = pageOf(all, url);
         return json(
           envelope("JOBS_LIST_RETRIEVED Jobs list retrieved.", page, {
@@ -644,13 +701,17 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
         const tag = match[1] as string;
         const listType = url.searchParams.get("listType") ?? "MY_JOBS";
         const select = url.searchParams.get("select");
-        const fields = select ? select.split(",").map((s) => s.trim()) : null;
+        // `fullRecords` makes this ignore the field list, as a tenant that did not honour it would.
+        const fields = select && !fullRecordsOn ? select.split(",").map((s) => s.trim()) : null;
         const found = visibleTo(who.username, listType).filter((j) => j.tags.includes(tag));
         const { page, limit, skip } = pageOf(found, url);
         return json(
           envelope(
             "JOBS_SEARCH_RESULT_LIST_RETRIEVED Jobs search list retrieved.",
-            page.map((j) => jobSummary(j, fields)),
+            page.map((j) => {
+              if (fullRecordsOn) fullRecordsServed.push(j.uuid);
+              return jobSummary(j, fields);
+            }),
             {
               recordCount: page.length,
               recordLimit: limit,
@@ -878,6 +939,15 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
     rejectAllTokens(on) {
       rejectAll = on;
     },
+    fullRecords(on) {
+      fullRecordsOn = on;
+    },
+    fullRecordsServed,
+    shareJob(uuid, user) {
+      const set = shares.get(uuid) ?? new Set<string>();
+      set.add(user);
+      shares.set(uuid, set);
+    },
     down() {
       server.stop(true);
     },
@@ -893,6 +963,9 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
       tokens.clear();
       behaviours = [];
       rejectAll = false;
+      fullRecordsOn = false;
+      fullRecordsServed.length = 0;
+      shares.clear();
       mintCounts = { password: 0, service: 0 };
     },
     stop() {

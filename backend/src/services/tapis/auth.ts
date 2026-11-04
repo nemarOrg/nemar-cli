@@ -118,15 +118,17 @@ export async function mintTapisToken(
             access_token_ttl: SERVICE_TOKEN_TTL_SECONDS,
           }),
         };
-  const bytes = await send({
+  const { status, bytes } = await send({
     ...request,
     method: "POST",
     what,
     timeoutMs: options.timeoutMs,
     maxBytes: MAX_TOKEN_RESPONSE_BYTES,
   });
-  const parsed = TapisTokenResponseSchema.safeParse(parseJsonBody(bytes, what));
-  if (!parsed.success) throw invalidResponse(what, null);
+  const parsed = TapisTokenResponseSchema.safeParse(parseJsonBody(bytes, what, status));
+  // A token answer of the wrong shape is never turned into a token: an empty or missing one would be
+  // sent, and cached, as the credential of every call that follows.
+  if (!parsed.success) throw invalidResponse(what, status);
   const { access_token, expires_in } = parsed.data.result.access_token;
   return { token: access_token, expiresInSeconds: expires_in };
 }
@@ -163,9 +165,16 @@ export async function getTapisToken(env: TapisEnv, options: TapisAuthOptions): P
   }
 }
 
-/** Drop the cached token for `owner`, so the next `getTapisToken` mints one. Use after a 401. */
-export function invalidateTapisToken(env: TapisEnv, owner: string): void {
+/**
+ * Drop the cached token for `owner`, so the next `getTapisToken` mints one, but ONLY when the cache
+ * still holds the `refused` token (compare, then delete). Many callers can hold the same stale token
+ * and each get a 401; the first drops it and starts a mint, and the others must find that mint (whose
+ * entry has no token yet) or its fresh token, not delete them: otherwise every caller mints its own.
+ */
+export function invalidateTapisToken(env: TapisEnv, owner: string, refused: string): void {
   const config = tapisConfig(env);
   if (config.unconfigured) return;
-  tokenCache.delete(cacheKey(config, owner));
+  const key = cacheKey(config, owner);
+  // An in-flight mint has no token yet (""), and no caller ever holds "": that is never a match.
+  if (refused !== "" && tokenCache.get(key)?.token === refused) tokenCache.delete(key);
 }
