@@ -377,6 +377,61 @@ describe("the token step and the health step", () => {
     expect(STATUS_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
   });
 
+  test("a token answer of the wrong shape is `invalid_response`, under either strategy", async () => {
+    useStandin();
+    const bodies: unknown[] = [
+      { status: "success", message: "x" },
+      { status: "success", result: {} },
+      { status: "success", result: { access_token: { access_token: "", expires_in: 3600 } } },
+      { status: "success", result: { access_token: { access_token: "t", expires_in: 0 } } },
+      { status: "success", result: { access_token: { access_token: "t" } } },
+      [],
+      null,
+    ];
+    for (const strategy of ["password", "service"] as const) {
+      for (const body of bodies) {
+        __resetTapisTokenCacheForTests();
+        standin.respond(
+          strategy === "password" ? "POST /v3/oauth2/tokens" : "POST /v3/tokens",
+          201,
+          body,
+        );
+        const res = await status("admin", configured(strategy));
+        expect(res.status).toBe(200);
+        expect(res.body.tapis).toMatchObject({ token: "invalid_response", health: "ok" });
+      }
+    }
+    // Nothing was ever sent with an empty token.
+    expect(standin.log.filter((r) => r.headers["x-tapis-token"] === "")).toEqual([]);
+  });
+
+  test("a health answer of the wrong shape is `invalid_response`", async () => {
+    useStandin();
+    for (const body of [{}, [], null, { status: 7 }, "ok"]) {
+      standin.respond("GET /v3/jobs/healthcheck", 200, body);
+      const res = await status("admin", configured("password"));
+      expect(res.body.tapis).toMatchObject({ token: "ok", health: "invalid_response" });
+    }
+  });
+
+  test("the route's own default timeout is the status ceiling, for the mint and for the health call", async () => {
+    useStandin();
+    const original = AbortSignal.timeout;
+    const asked: number[] = [];
+    AbortSignal.timeout = ((ms: number) => {
+      asked.push(ms);
+      return original.call(AbortSignal, ms);
+    }) as typeof AbortSignal.timeout;
+    try {
+      await status("admin", configured("password"));
+    } finally {
+      AbortSignal.timeout = original;
+    }
+    // One mint and one health call, each held to the route's 8 seconds, and not to the client's 15.
+    expect(STATUS_TIMEOUT_MS).toBe(8000);
+    expect(asked).toEqual([STATUS_TIMEOUT_MS, STATUS_TIMEOUT_MS]);
+  });
+
   test("a body that is not JSON is `invalid_response`, and a refusal is `rejected`", async () => {
     useStandin();
     standin.nonJson("POST /v3/oauth2/tokens");
