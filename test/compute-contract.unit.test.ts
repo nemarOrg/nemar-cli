@@ -2110,57 +2110,129 @@ describe("a valid job specification always fits the launch specification", () =>
     expect(launchSpecFits({ ...parsed, entry: "../x" })).toBe(false);
   });
 
-  test("launchSpecFits takes every Worker field at its worst case, and counts every job field", () => {
-    // A specification that carries something in every field launchSpecFits has to read.
-    const job = JobSpecSchema.parse({
-      ...SPEC,
-      entry: "analysis/main_pipeline_with_a_long_name.py",
-      env: { OMP_NUM_THREADS: "4" },
-      datasets: [{ id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set", "sub-02/*"] }],
-    });
-    /** The same document with small Worker fields, as LAUNCH has them. */
-    const smallDoc = (j: JobSpec): Record<string, unknown> => ({
-      job_id: JOB_ID,
-      runtime: "python",
-      entry: j.entry,
-      args: j.args,
-      bundle: { sha256: HEX_A, size: 1234 },
-      datasets: j.datasets.map((d) => ({ ...d })),
-      api_base: "https://api.example.test",
-      image: {
-        uri: `docker://ghcr.io/example/runtime@sha256:${HEX_B}`,
-        digest: `sha256:${HEX_B}`,
-        sif: "runtime.sif",
-      },
-      env: j.env,
-      resources: { gpus: j.gpus },
-      limits: { max_files: 38000, max_total_bytes: 1073741824 },
-      job_token: "t".repeat(43),
-    });
-    // What the Worker's own fields add when they are at their worst: the 512-character api_base and
-    // image reference, the 256-character sif and token, the largest bundle and limits.
-    const plainLength = (doc: Record<string, unknown>) => JSON.stringify(doc).length; // ASCII only
-    const smallWorker = (j: JobSpec) => ({ length: plainLength(smallDoc(j)) });
-    const extra = workerWorstCase(job).length - smallWorker(job).length;
-    expect(extra).toBeGreaterThan(1000);
-    // Arguments no valid specification may carry, sized so the small document is 20 bytes inside
-    // the cap and the worst-case one 20 bytes over it. Dropping ANY one field of the Worker's, or
-    // of the job's, from launchSpecFits' document would make it fit, so each must be there.
-    const target = LAUNCH_SPEC_MAX_BYTES - extra + 20;
-    let args: string[] | null = null;
-    for (let n = 0; n <= 63 && args === null; n++) {
-      const full = Array.from({ length: n }, () => "x".repeat(1024));
-      const tail = target - smallWorker({ ...job, args: [...full, ""] }).length;
-      if (tail >= 0 && tail <= 1024) args = [...full, "x".repeat(tail)];
+  describe("launchSpecFits takes every Worker field at its worst case and counts every job field, to the byte", () => {
+    // A job that carries something in every field launchSpecFits reads, of each of the three shapes
+    // a launch specification has: an entry, a command, and neither (a recipe, which gets a one-word
+    // command).
+    const jobs: Array<[label: string, job: JobSpec, bytes: number]> = [
+      [
+        "a python job with an entry, an environment and include patterns",
+        JobSpecSchema.parse({
+          ...SPEC,
+          entry: "analysis/main_pipeline_with_a_long_name.py",
+          env: { OMP_NUM_THREADS: "4" },
+          datasets: [
+            { id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set", "sub-02/*"] },
+          ],
+        }),
+        2119,
+      ],
+      [
+        "an image job with a command and a GPU",
+        JobSpecSchema.parse({
+          name: "tool",
+          runtime: "image",
+          image: `ghcr.io/e/t@sha256:${HEX_B}`,
+          command: ["tool", "--fast", "--out=outputs"],
+          partition: "gpu-shared",
+          gpus: 2,
+          minutes: 30,
+        }),
+        2012,
+      ],
+      [
+        "a recipe job, which names neither an entry nor a command",
+        JobSpecSchema.parse({
+          name: "r",
+          runtime: "python",
+          recipe: "nemar-floor",
+          datasets: [{ id: "nm000104", version: "1" }],
+          partition: "shared",
+          minutes: 5,
+        }),
+        2016,
+      ],
+    ];
+
+    /** The worst-case document's size in bytes; every character in it is ASCII, so this is its length. */
+    const worstBytes = (job: JobSpec) => JSON.stringify(workerWorstDoc(job)).length;
+
+    /** Arguments of plain characters that bring the worst-case document to exactly `target` bytes. */
+    function argsReaching(job: JobSpec, target: number): string[] {
+      const empty = worstBytes({ ...job, args: [] });
+      // k arguments of C characters in all add C + 3k - 1 bytes to the empty array's two.
+      for (let k = 1; k <= 64; k++) {
+        const chars = target - empty - 3 * k + 1;
+        if (chars > (k - 1) * 1024 && chars <= k * 1024) {
+          const args = Array.from({ length: k }, (_, i) =>
+            "x".repeat(i < k - 1 ? 1024 : chars - (k - 1) * 1024),
+          );
+          expect(worstBytes({ ...job, args })).toBe(target);
+          return args;
+        }
+      }
+      throw new Error(`no arguments reach ${target}`);
     }
-    if (args === null) throw new Error("no arguments reach the target");
-    expect(smallWorker({ ...job, args }).length).toBe(target);
-    expect(plainLength(workerWorstDoc({ ...job, args }))).toBe(LAUNCH_SPEC_MAX_BYTES + 20);
-    expect(launchSpecFits({ ...job, args })).toBe(false);
-    // And 21 bytes fewer, it fits.
-    const lessTail = args.slice(0, -1).concat("x".repeat(args[args.length - 1].length - 21));
-    expect(workerWorstCase({ ...job, args: lessTail }).length).toBe(LAUNCH_SPEC_MAX_BYTES - 1);
-    expect(launchSpecFits({ ...job, args: lessTail })).toBe(true);
+
+    for (const [label, job, bytes] of jobs) {
+      test(`${label}: the worst-case document is ${bytes} bytes with no arguments`, () => {
+        // The literal pins every field of the worst case, the Worker's and the job's: shrinking or
+        // dropping any one of them changes it. launchSpecFits is held to the same document below.
+        expect(workerWorstCase({ ...job, args: [] }).length).toBe(bytes);
+        expect(launchSpecFits({ ...job, args: [] })).toBe(true);
+      });
+
+      test(`${label}: launchSpecFits flips at exactly ${LAUNCH_SPEC_MAX_BYTES} bytes`, () => {
+        // To the byte, so a Worker field that launchSpecFits shrinks by even one byte, or drops,
+        // makes the document one over the cap fit, and one it grows makes the one at the cap not.
+        expect(launchSpecFits({ ...job, args: argsReaching(job, LAUNCH_SPEC_MAX_BYTES) })).toBe(
+          true,
+        );
+        expect(launchSpecFits({ ...job, args: argsReaching(job, LAUNCH_SPEC_MAX_BYTES - 1) })).toBe(
+          true,
+        );
+        expect(launchSpecFits({ ...job, args: argsReaching(job, LAUNCH_SPEC_MAX_BYTES + 1) })).toBe(
+          false,
+        );
+      });
+    }
+
+    test("each Worker field of the worst case is the largest the launch specification allows", () => {
+      const [, job] = jobs[0];
+      const worst = workerWorstDoc({ ...job, args: [] }) as Record<string, unknown> & {
+        bundle: Record<string, unknown>;
+        image: Record<string, unknown>;
+        limits: Record<string, unknown>;
+      };
+      expect(LaunchSpecSchema.safeParse(worst).success).toBe(true);
+      const hex = "f".repeat(64);
+      const bigger: Array<[string, Record<string, unknown>]> = [
+        ["api_base", { ...worst, api_base: `https://${"a".repeat(505)}` }],
+        [
+          "image.uri",
+          {
+            ...worst,
+            image: { ...worst.image, uri: `docker://ghcr.io/${"a".repeat(424)}@sha256:${hex}` },
+          },
+        ],
+        ["image.sif", { ...worst, image: { ...worst.image, sif: "s".repeat(257) } }],
+        ["job_token", { ...worst, job_token: "t".repeat(257) }],
+        [
+          "bundle.size",
+          { ...worst, bundle: { ...worst.bundle, size: Number.MAX_SAFE_INTEGER + 1 } },
+        ],
+        ["limits.max_files", { ...worst, limits: { ...worst.limits, max_files: 1_000_001 } }],
+        [
+          "limits.max_total_bytes",
+          { ...worst, limits: { ...worst.limits, max_total_bytes: Number.MAX_SAFE_INTEGER + 1 } },
+        ],
+      ];
+      for (const [field, doc] of bigger) {
+        expect(LaunchSpecSchema.safeParse(doc).success, `${field} one past its largest`).toBe(
+          false,
+        );
+      }
+    });
   });
 
   test("launchSpecFits copes with every shape of job: entry, command, recipe, matlab and image", () => {
