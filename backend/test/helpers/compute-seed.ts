@@ -192,3 +192,55 @@ export async function trace(d1: D1Database): Promise<Record<string, number>> {
     audit: await count("SELECT COUNT(*) AS n FROM audit_log"),
   };
 }
+
+const macrotask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/**
+ * A D1 whose every statement takes a round trip: it waits a macrotask before it runs AND before its
+ * result comes back. `yieldingD1` waits only before, so a read-then-write that is not atomic still runs
+ * in one piece (the read's result is back before any other request's statement starts); real D1's
+ * latency is on both sides, and with both, two requests that each read a count before either writes
+ * both see the old count. A batch is passed through whole, as D1 runs it: one transaction.
+ */
+export function roundTripD1(d1: D1Database): D1Database {
+  return {
+    prepare(sql: string) {
+      const inner = d1.prepare(sql) as unknown as {
+        bind(...p: unknown[]): unknown;
+        run(): Promise<unknown>;
+        first(): Promise<unknown>;
+        all(): Promise<unknown>;
+        __execForBatch(): unknown;
+      };
+      const api = {
+        bind(...p: unknown[]) {
+          inner.bind(...p);
+          return api;
+        },
+        async run() {
+          await macrotask();
+          const result = await inner.run();
+          await macrotask();
+          return result;
+        },
+        async first() {
+          await macrotask();
+          const result = await inner.first();
+          await macrotask();
+          return result;
+        },
+        async all() {
+          await macrotask();
+          const result = await inner.all();
+          await macrotask();
+          return result;
+        },
+        __execForBatch() {
+          return inner.__execForBatch();
+        },
+      };
+      return api;
+    },
+    batch: (stmts: unknown[]) => (d1 as unknown as { batch(s: unknown[]): unknown }).batch(stmts),
+  } as unknown as D1Database;
+}

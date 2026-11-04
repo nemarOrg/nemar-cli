@@ -803,6 +803,15 @@ describe("presignIncomingUploads", () => {
       ok: false,
       code: "invalid_spec",
     });
+    // The archive is the one the job was made with: another size or another digest gets no address.
+    expect(await ask([{ path: BUNDLE_ARCHIVE_NAME, size: made.archive.length + 1 }])).toEqual({
+      ok: false,
+      code: "invalid_spec",
+      field: "files.0.size",
+    });
+    expect(
+      await ask([{ path: BUNDLE_ARCHIVE_NAME, size: made.archive.length, sha256: "0".repeat(64) }]),
+    ).toEqual({ ok: false, code: "invalid_spec", field: "files.0.sha256" });
     expect(h.standin.log.length).toBe(0);
   });
 

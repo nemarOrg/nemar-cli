@@ -48,12 +48,12 @@ import {
   fundPlatform,
   hex,
   jobSpec,
+  roundTripD1,
   seedUser,
   setPolicy,
   sha256Hex,
   trace,
 } from "./helpers/compute-seed";
-import { yieldingD1 } from "./helpers/d1";
 
 let h: ComputeHarness;
 /** An owner of the Miniflare D1, which is never reset: the policy is restored to the default before each case. */
@@ -94,10 +94,10 @@ function onBoth(name: string, body: (w: World) => Promise<void>) {
   }
 }
 
-/** The environment for requests that overlap. bun:sqlite answers a statement before the next one starts, so
- *  each statement waits a macrotask, as D1's network round trip does; Miniflare's D1 is asynchronous already. */
+/** The environment for requests that overlap. bun:sqlite answers a statement at once, so each statement takes
+ *  a round trip, as D1's network does, on both sides of it; Miniflare's D1 is asynchronous already. */
 const racing = (w: World): Bindings =>
-  w.name === "bun:sqlite" ? w.env({ DB: yieldingD1(w.d1) }) : w.env();
+  w.name === "bun:sqlite" ? w.env({ DB: roundTripD1(w.d1) }) : w.env();
 
 const rowOf = async (d1: D1Database, id: string) =>
   (await d1
@@ -475,6 +475,19 @@ describe("a refused hold leaves no trace", () => {
   );
 
   onBoth(
+    "when the code bundle is larger than the owner's limit, before any hold exists",
+    async (w) => {
+      const { accountId } = await person(w);
+      const limit = DEFAULT_COMPUTE_POLICY.bundleLimits.maxTotalBytes;
+      const spec = (size: number) =>
+        jobSpec({ recipe: undefined, entry: "run.py", bundle: { size, sha256: hex(5) } });
+      await refused(w, accountId, "bundle_too_large", { spec: spec(limit + 1) });
+      // At the limit is not over it.
+      expect((await createJob(w.env(), input(accountId, { spec: spec(limit) }))).ok).toBe(true);
+    },
+  );
+
+  onBoth(
     "when a dataset version has no data-plane tag, naming the field, before the hold",
     async (w) => {
       const { accountId } = await person(w);
@@ -628,12 +641,14 @@ describe("the other sources", () => {
       await setPolicy(w.d1, owner, { maxLiveJobsPerPerson: 1 });
       await fundPlatform(w.d1, "pipelines", 1_000_000);
       const before = await trace(w.d1);
+      // NEMAR's pipelines run as a service account (or as none): either way no person's limit is theirs.
+      const service = await seedUser(w.d1, { role: "admin" });
       const results = [];
-      for (let i = 0; i < 3; i++) {
+      for (const accountId of [null, service, service, service]) {
         results.push(
           await createJob(w.env(), {
             source: "pipeline",
-            accountId: null,
+            accountId,
             appId: "nemar-launch",
             appVersion: "1.0.0",
             // A pipelines-only partition: nothing offered to people.
@@ -648,6 +663,12 @@ describe("the other sources", () => {
         account_id: null,
         gateway_user: PIPELINES_TAPIS_OWNER,
         state: "created",
+      });
+      const serviceJob = results[3]?.ok ? results[3].job : null;
+      expect(serviceJob).toMatchObject({
+        source: "pipeline",
+        account_id: service,
+        gateway_user: PIPELINES_TAPIS_OWNER,
       });
       const hold = await w.d1
         .prepare(
