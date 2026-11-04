@@ -24,6 +24,8 @@ import { join } from "node:path";
 import { Ajv2020 } from "ajv/dist/2020";
 import { LAUNCHER_FAILURE_CODES } from "../shared/compute-state";
 import {
+  COMPUTE_DATA_TAG_MAX,
+  COMPUTE_DATA_TAG_RE,
   COMPUTE_JOB_ID_RE,
   COMPUTE_MAX_OUTPUT_FILES,
   COMPUTE_PATH_SEGMENT,
@@ -54,6 +56,7 @@ import {
   RESULT_MAX_FILE_BYTES,
   ResultManifestSchema,
   computeIsWellFormed,
+  dataTagForVersion,
   estimateSuMilli,
   formatSu,
   isSafeComputePath,
@@ -1184,6 +1187,167 @@ describe("the job specification", () => {
   });
 });
 
+describe("the data-plane tag of a dataset version", () => {
+  test("a bare version gains a v, a tag and latest stay as they are", () => {
+    expect(dataTagForVersion("1.0.2")).toBe("v1.0.2");
+    expect(dataTagForVersion("v1.0.2")).toBe("v1.0.2");
+    expect(dataTagForVersion("latest")).toBe("latest");
+    expect(dataTagForVersion("0.0.0")).toBe("v0.0.0");
+    expect(dataTagForVersion("10.200.3000")).toBe("v10.200.3000");
+    expect(dataTagForVersion("v10.200.3000")).toBe("v10.200.3000");
+    expect(dataTagForVersion("01.02.03")).toBe("v01.02.03");
+    expect(dataTagForVersion("v01.02.03")).toBe("v01.02.03");
+  });
+
+  test("anything else has no tag", () => {
+    for (const bad of [
+      "",
+      "1",
+      "1.0",
+      "v1",
+      "v1.0",
+      "1.0.2.3",
+      "v1.0.2.3",
+      "V1.0.2",
+      "Latest",
+      "LATEST",
+      "latest ",
+      " latest",
+      "latest\n",
+      "latest1",
+      "vlatest",
+      "1.0.2\n",
+      "v1.0.2\n",
+      " 1.0.2",
+      "1.0.2 ",
+      "1.0.2-rc1",
+      "v1.0.2-rc1",
+      "1.0.2+b",
+      "vv1.0.2",
+      "1.0.a",
+      "1x0.2",
+      "1.0x2",
+      "v1x0.2",
+      "v1.0x2",
+      "1..2",
+      "1.0.",
+      ".1.2",
+      "v",
+      "main",
+      "abc",
+      "../1.0.2",
+      "1.0.2/x",
+      "١.٠.٢",
+      "v١.٠.٢",
+    ]) {
+      expect(dataTagForVersion(bad), JSON.stringify(bad)).toBeNull();
+    }
+    for (const bad of [5, null, undefined, {}, ["1.0.2"], { toString: () => "1.0.2" }]) {
+      expect(dataTagForVersion(bad as never), String(bad)).toBeNull();
+    }
+  });
+
+  test("the longest tag is 65 characters, and one more is no tag", () => {
+    const sixtyFive = `v${"9".repeat(60)}.0.0`;
+    expect(sixtyFive.length).toBe(65);
+    expect(dataTagForVersion(sixtyFive)).toBe(sixtyFive);
+    // A bare version of 64 characters (the longest a job may name) gains the v and is 65.
+    const bare = `${"9".repeat(60)}.0.0`;
+    expect(bare.length).toBe(64);
+    expect(dataTagForVersion(bare)).toBe(sixtyFive);
+    expect(dataTagForVersion(`${sixtyFive}0`)).toBeNull();
+    expect(dataTagForVersion(`v${"9".repeat(61)}.0.0`)).toBeNull();
+    expect(dataTagForVersion(`${"9".repeat(61)}.0.0`)).toBeNull();
+  });
+
+  test("it is idempotent: the tag of a tag is the tag", () => {
+    for (const v of ["1.0.2", "v1.0.2", "latest", "0.0.0", "12.0.1"]) {
+      const tag = dataTagForVersion(v);
+      expect(tag, v).not.toBeNull();
+      expect(dataTagForVersion(tag as string), v).toBe(tag);
+    }
+  });
+
+  test("a tag is exactly what the launch specification accepts, in both engines", () => {
+    const versions = [
+      "1.0.2",
+      "v1.0.2",
+      "latest",
+      "0.0.0",
+      "1",
+      "1.0",
+      "v1",
+      "V1.0.2",
+      "1.0.2-rc1",
+      "latest1",
+      "",
+      "abc",
+      `${"9".repeat(60)}.0.0`,
+      `${"9".repeat(61)}.0.0`,
+      `v${"9".repeat(60)}.0.0`,
+      "1.0.2\n",
+    ];
+    const withVersion = (version: string) => set(LAUNCH, "datasets", [{ id: "nm000104", version }]);
+    for (const version of versions) {
+      const tag = dataTagForVersion(version);
+      if (tag !== null) {
+        expect(validateRoot(withVersion(tag)), `JSON Schema: ${version}`).toBe(true);
+        expect(LaunchSpecSchema.safeParse(withVersion(tag)).success, `zod: ${version}`).toBe(true);
+      } else {
+        // No tag: the version as it stands is no launch version either.
+        expect(validateRoot(withVersion(version)), `JSON Schema: ${version}`).toBe(false);
+        expect(LaunchSpecSchema.safeParse(withVersion(version)).success, `zod: ${version}`).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  test("the tag grammar is the data plane's own: latest, or what VERSION_TAG_RE accepts", () => {
+    // Read from the data plane's source, so a change there fails here. `\\d` is ASCII digits only.
+    const source = readFileSync(
+      join(import.meta.dir, "..", "backend", "src", "services", "data-router.ts"),
+      "utf8",
+    );
+    const found = /export const VERSION_TAG_RE = \/(.+)\/;/.exec(source);
+    expect(found, "VERSION_TAG_RE is still declared in data-router.ts").not.toBeNull();
+    const dataPlane = new RegExp((found as RegExpExecArray)[1]);
+    const corpus = [
+      "v1.0.2",
+      "v0.0.0",
+      "v10.200.3000",
+      "v01.02.03",
+      "latest",
+      "1.0.2",
+      "v1",
+      "v1.0",
+      "v1.0.2.3",
+      "V1.0.2",
+      "v1.0.2\n",
+      "v1.0.2-rc1",
+      " v1.0.2",
+      "v\u0661.\u0660.\u0662",
+      "",
+      "main",
+      `v${"9".repeat(60)}.0.0`,
+    ];
+    for (const version of corpus) {
+      // The data plane resolves `latest` before it applies the pattern, so it is the one extra word.
+      const dataPlaneAccepts = version === "latest" || dataPlane.test(version);
+      expect(COMPUTE_DATA_TAG_RE.test(version), JSON.stringify(version)).toBe(dataPlaneAccepts);
+    }
+    expect(COMPUTE_DATA_TAG_MAX).toBe(65);
+  });
+
+  test("a job keeps accepting every version form it accepted before", () => {
+    for (const version of ["1.0.2", "v1.0.2", "latest", "1", "1.0", "2.0.0-rc.1", "abc", "V1"]) {
+      expect(specRefused(specWith({ datasets: [{ id: "nm000104", version }] })), version).toBe(
+        false,
+      );
+    }
+  });
+});
+
 describe("isSafeComputePath", () => {
   test("accepts ordinary relative paths and refuses every escape", () => {
     for (const ok of ["a", "a/b", "a b/c.d", "sub-01/eeg/x.set", "..a", "a..b", ".hidden"]) {
@@ -1413,7 +1577,7 @@ const LAUNCH = {
   entry: "run.py",
   args: ["--fast"],
   bundle: { sha256: HEX_A, size: 1234 },
-  datasets: [{ id: "nm000104", version: "1.0.2" }],
+  datasets: [{ id: "nm000104", version: "v1.0.2" }],
   api_base: "https://api.example.test",
   image: {
     uri: `docker://ghcr.io/example/runtime@sha256:${HEX_B}`,
@@ -1488,7 +1652,7 @@ const LAUNCH_CASES: readonly Case[] = [
   ["no env", set(LAUNCH, "env", {}), true],
   [
     "an include pattern",
-    set(LAUNCH, "datasets", [{ id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set"] }]),
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: ["sub-01/**/*.set"] }]),
     true,
   ],
   ["gpus 4", set(LAUNCH, "resources.gpus", 4), true],
@@ -1513,7 +1677,7 @@ const LAUNCH_CASES: readonly Case[] = [
   ],
   [
     "a dataset id with a trailing newline",
-    set(LAUNCH, "datasets", [{ id: "nm000104\n", version: "1" }]),
+    set(LAUNCH, "datasets", [{ id: "nm000104\n", version: "v1.0.2" }]),
     false,
   ],
   ["a bundle url", set(LAUNCH, "bundle.url", "https://x.test/b.tar.gz"), false],
@@ -1522,7 +1686,7 @@ const LAUNCH_CASES: readonly Case[] = [
   ["an unknown resources key", set(LAUNCH, "resources.cores", 4), false],
   [
     "an unknown dataset key",
-    set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", x: 1 }]),
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", x: 1 }]),
     false,
   ],
   ["runtime matlab", set(LAUNCH, "runtime", "matlab"), false],
@@ -1742,16 +1906,118 @@ const LAUNCH_CASES: readonly Case[] = [
   ["no datasets key", set(LAUNCH, "datasets", undefined), false],
   ["no env key", set(LAUNCH, "env", undefined), false],
   ["no resources key", set(LAUNCH, "resources", undefined), false],
-  ["a dataset id in capitals", set(LAUNCH, "datasets", [{ id: "NM000104", version: "1" }]), false],
+  [
+    "a dataset id in capitals",
+    set(LAUNCH, "datasets", [{ id: "NM000104", version: "v1.0.2" }]),
+    false,
+  ],
+  // The data-plane tag: `latest` or `v<major>.<minor>.<patch>`, exactly what the data plane accepts.
+  ["the version latest", set(LAUNCH, "datasets", [{ id: "nm000104", version: "latest" }]), true],
+  [
+    "a version with large numbers",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v10.200.3000" }]),
+    true,
+  ],
+  ["a version of zeros", set(LAUNCH, "datasets", [{ id: "nm000104", version: "v0.0.0" }]), true],
+  [
+    "a version with leading zeros",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v01.02.03" }]),
+    true,
+  ],
+  [
+    "a bare version with no v",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "1.0.2" }]),
+    false,
+  ],
+  ["a one-number version", set(LAUNCH, "datasets", [{ id: "nm000104", version: "1" }]), false],
+  ["a v and one number", set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1" }]), false],
+  ["a v and two numbers", set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0" }]), false],
+  [
+    "a v and four numbers",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2.3" }]),
+    false,
+  ],
+  ["a capital V", set(LAUNCH, "datasets", [{ id: "nm000104", version: "V1.0.2" }]), false],
+  ["Latest in capitals", set(LAUNCH, "datasets", [{ id: "nm000104", version: "Latest" }]), false],
+  [
+    "latest with a suffix",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "latest1" }]),
+    false,
+  ],
+  [
+    "latest with a trailing newline",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "latest\n" }]),
+    false,
+  ],
+  [
+    "a tag with a trailing newline",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2\n" }]),
+    false,
+  ],
+  [
+    "a tag with a leading space",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: " v1.0.2" }]),
+    false,
+  ],
+  [
+    "a tag with a prerelease",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2-rc1" }]),
+    false,
+  ],
+  [
+    "a tag with build metadata",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2+b" }]),
+    false,
+  ],
+  ["a doubled v", set(LAUNCH, "datasets", [{ id: "nm000104", version: "vv1.0.2" }]), false],
+  [
+    "a tag with a letter in a number",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.a" }]),
+    false,
+  ],
+  [
+    "a tag with an empty number",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1..2" }]),
+    false,
+  ],
+  [
+    "a tag with a trailing dot",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0." }]),
+    false,
+  ],
+  [
+    "a tag with a leading dot",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v.1.2" }]),
+    false,
+  ],
+  ["only a v", set(LAUNCH, "datasets", [{ id: "nm000104", version: "v" }]), false],
+  [
+    "a tag with a letter for the first dot",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1x0.2" }]),
+    false,
+  ],
+  [
+    "a tag with a letter for the second dot",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0x2" }]),
+    false,
+  ],
+  ["an empty version", set(LAUNCH, "datasets", [{ id: "nm000104", version: "" }]), false],
+  ["a branch name", set(LAUNCH, "datasets", [{ id: "nm000104", version: "main" }]), false],
+  ["a version that is a number", set(LAUNCH, "datasets", [{ id: "nm000104", version: 1 }]), false],
+  [
+    "a tag in non-ASCII digits",
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v١.٠.٢" }]),
+    false,
+  ],
   ["a dataset with no version", set(LAUNCH, "datasets", [{ id: "nm000104" }]), false],
   [
     "an include that climbs",
-    set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["../x"] }]),
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: ["../x"] }]),
     false,
   ],
   [
     "an absolute include",
-    set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["/x"] }]),
+    set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: ["/x"] }]),
     false,
   ],
   [
@@ -1759,7 +2025,7 @@ const LAUNCH_CASES: readonly Case[] = [
     set(
       LAUNCH,
       "datasets",
-      Array.from({ length: 21 }, () => ({ id: "nm000104", version: "1" })),
+      Array.from({ length: 21 }, () => ({ id: "nm000104", version: "v1.0.2" })),
     ),
     false,
   ],
@@ -2139,7 +2405,11 @@ describe("a valid job specification always fits the launch specification", () =>
       ...(job.entry !== undefined ? { entry: job.entry } : { command: job.command ?? ["x"] }),
       args: job.args,
       bundle: { sha256: hex, size: Number.MAX_SAFE_INTEGER },
-      datasets: job.datasets.map((d) => ({ ...d })),
+      datasets: job.datasets.map((d) => ({
+        ...d,
+        // The Worker writes the data-plane tag: v<version> unless it already is one.
+        version: d.version === "latest" || d.version.startsWith("v") ? d.version : `v${d.version}`,
+      })),
       api_base: `https://${"a".repeat(504)}`,
       image: { uri: ref, digest: `sha256:${hex}`, sif: `${hex}.sif` },
       env: job.env,
@@ -2152,7 +2422,7 @@ describe("a valid job specification always fits the launch specification", () =>
 
   const twentyDatasets = Array.from({ length: 20 }, (_, i) => ({
     id: `nm0001${String(i).padStart(2, "0")}`,
-    version: `v${"9".repeat(63)}`,
+    version: `${"9".repeat(60)}.0.0`,
   }));
   const imageRef = `docker://ghcr.io/${"a".repeat(423)}@sha256:${"b".repeat(64)}`;
 
@@ -2261,6 +2531,17 @@ describe("a valid job specification always fits the launch specification", () =>
     expect(launchSpecFits(big)).toBe(false);
     const wide = { ...parsed, args: Array.from({ length: 12 }, () => E.repeat(1024)) };
     expect(launchSpecFits(wide)).toBe(false);
+    // A dataset version with no data-plane tag cannot be launched, whatever its size.
+    const withVersion = (version: string) => ({
+      ...parsed,
+      datasets: [{ id: "nm000104", version }],
+    });
+    for (const ok of ["1.0.2", "v1.0.2", "latest"]) {
+      expect(launchSpecFits(withVersion(ok)), ok).toBe(true);
+    }
+    for (const bad of ["1", "1.0", "abc", "", "v1", "1.0.2-rc1"]) {
+      expect(launchSpecFits(withVersion(bad)), bad).toBe(false);
+    }
     // Anything the launch specification would refuse is also a no.
     expect(launchSpecFits({ ...parsed, gpus: 99 })).toBe(false);
     expect(launchSpecFits({ ...parsed, entry: "../x" })).toBe(false);
@@ -2281,7 +2562,7 @@ describe("a valid job specification always fits the launch specification", () =>
             { id: "nm000104", version: "1.0.2", include: ["sub-01/**/*.set", "sub-02/*"] },
           ],
         }),
-        1931,
+        1932,
       ],
       [
         "an image job with a command and a GPU",
@@ -2302,11 +2583,11 @@ describe("a valid job specification always fits the launch specification", () =>
           name: "r",
           runtime: "python",
           recipe: "nemar-floor",
-          datasets: [{ id: "nm000104", version: "1" }],
+          datasets: [{ id: "nm000104", version: "1.0.0" }],
           partition: "shared",
           minutes: 5,
         }),
-        1828,
+        1833,
       ],
     ];
 
@@ -2407,7 +2688,7 @@ describe("a valid job specification always fits the launch specification", () =>
         name: "r",
         runtime: "python",
         recipe: "nemar-floor",
-        datasets: [{ id: "nm000104", version: "1" }],
+        datasets: [{ id: "nm000104", version: "1.0.0" }],
         partition: "shared",
         minutes: 5,
       },
@@ -2429,7 +2710,7 @@ describe("the golden vector nemar-process checks its launcher against", () => {
     entry: "run.py",
     args: ["--label", 'caf\u00e9 "q" \u{1F600}'],
     bundle: { sha256: "a".repeat(64), size: 1234 },
-    datasets: [{ id: "nm000104", version: "1.0.2" }],
+    datasets: [{ id: "nm000104", version: "v1.0.2" }],
     api_base: "https://api.example.test",
     image: {
       uri: `docker://ghcr.io/example/runtime@sha256:${"b".repeat(64)}`,
@@ -2441,12 +2722,12 @@ describe("the golden vector nemar-process checks its launcher against", () => {
     limits: { max_files: 38000, max_total_bytes: 1073741824 },
     job_token: "t".repeat(43),
   };
-  const GOLDEN_TEXT = String.raw`{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}`;
-  const GOLDEN_SHA256 = "95bc545d3012b4cc91136cd36aab77d8a0eaac67b9d25002e18c84f703eef927";
+  const GOLDEN_TEXT = String.raw`{"job_id":"job_0123456789abcdef01234567","runtime":"python","entry":"run.py","args":["--label","caf\u00e9 \"q\" \ud83d\ude00"],"bundle":{"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1234},"datasets":[{"id":"nm000104","version":"v1.0.2"}],"api_base":"https://api.example.test","image":{"uri":"docker://ghcr.io/example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sif":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.sif"},"env":{"OMP_NUM_THREADS":"4"},"resources":{"gpus":0},"limits":{"max_files":38000,"max_total_bytes":1073741824},"job_token":"ttttttttttttttttttttttttttttttttttttttttttt"}`;
+  const GOLDEN_SHA256 = "88fcf9a4d6e63ae7bbedc9be536989fd7f2c263bb2b1c2fb6cfd706f49efe857";
 
   test("encodeLaunchSpec writes exactly the golden text", () => {
     expect(encodeLaunchSpec(GOLDEN_SPEC)).toBe(GOLDEN_TEXT);
-    expect(GOLDEN_TEXT.length).toBe(765);
+    expect(GOLDEN_TEXT.length).toBe(766);
   });
 
   test("the golden text hashes to the golden digest, and parses back to the specification", () => {
@@ -3017,7 +3298,7 @@ const MAIN_BOUNDS: readonly Bound[] = [
     target: "root",
     kind: "max",
     at: 20,
-    build: (n) => set(LAUNCH, "datasets", Array(n).fill({ id: "nm000104", version: "1" })),
+    build: (n) => set(LAUNCH, "datasets", Array(n).fill({ id: "nm000104", version: "v1.0.2" })),
   },
   {
     label: "include patterns",
@@ -3025,7 +3306,7 @@ const MAIN_BOUNDS: readonly Bound[] = [
     kind: "max",
     at: 64,
     build: (n) =>
-      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: Array(n).fill("a") }]),
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: Array(n).fill("a") }]),
   },
   {
     label: "include pattern length",
@@ -3033,7 +3314,7 @@ const MAIN_BOUNDS: readonly Bound[] = [
     kind: "max",
     at: 256,
     build: (n) =>
-      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["a".repeat(n)] }]),
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: ["a".repeat(n)] }]),
   },
   {
     label: "include pattern length, at least",
@@ -3041,21 +3322,16 @@ const MAIN_BOUNDS: readonly Bound[] = [
     kind: "min",
     at: 1,
     build: (n) =>
-      set(LAUNCH, "datasets", [{ id: "nm000104", version: "1", include: ["a".repeat(n)] }]),
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: "v1.0.2", include: ["a".repeat(n)] }]),
   },
   {
     label: "dataset version length",
     target: "root",
     kind: "max",
-    at: 64,
-    build: (n) => set(LAUNCH, "datasets", [{ id: "nm000104", version: "1".repeat(n) }]),
-  },
-  {
-    label: "dataset version length, at least",
-    target: "root",
-    kind: "min",
-    at: 1,
-    build: (n) => set(LAUNCH, "datasets", [{ id: "nm000104", version: "1".repeat(n) }]),
+    at: 65,
+    // v<digits>.0.0: the tag grows by one digit at a time.
+    build: (n) =>
+      set(LAUNCH, "datasets", [{ id: "nm000104", version: `v${"9".repeat(n - 5)}.0.0` }]),
   },
   {
     label: "api_base length",

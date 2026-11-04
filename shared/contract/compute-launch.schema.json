@@ -83,8 +83,10 @@
             "pattern": "^[a-z]{2}[0-9]{6}(?![\\s\\S])"
           },
           "version": {
+            "description": "The data-plane tag of the dataset version: latest, or v<major>.<minor>.<patch>, exactly what the data plane accepts. A job names a version more loosely (1.0.2); NEMAR's Worker writes the tag (1.0.2 becomes v1.0.2).",
             "type": "string",
-            "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}(?![\\s\\S])"
+            "maxLength": 65,
+            "pattern": "^(latest|v[0-9]+\\.[0-9]+\\.[0-9]+)(?![\\s\\S])"
           },
           "include": {
             "type": "array",

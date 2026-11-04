@@ -40,7 +40,8 @@
 import { z } from "zod";
 import {
   COMPUTE_DATASET_ID_RE,
-  COMPUTE_DATASET_VERSION_RE,
+  COMPUTE_DATA_TAG_MAX,
+  COMPUTE_DATA_TAG_RE,
   COMPUTE_DOT_SEGMENT_RE,
   COMPUTE_IMAGE_DIGEST_RE,
   COMPUTE_IMAGE_REF_RE,
@@ -56,6 +57,7 @@ import {
   computeGlobSchema,
   computePathSchema,
   computeSafeInt,
+  dataTagForVersion,
   isSafeComputePath,
 } from "./compute.js";
 
@@ -130,7 +132,8 @@ export const LaunchSpecSchema = z
         z
           .object({
             id: z.string().regex(COMPUTE_DATASET_ID_RE),
-            version: z.string().regex(COMPUTE_DATASET_VERSION_RE),
+            /** The data-plane tag: `latest` or `v<major>.<minor>.<patch>`, as `dataTagForVersion` makes it. */
+            version: z.string().max(COMPUTE_DATA_TAG_MAX).regex(COMPUTE_DATA_TAG_RE),
             include: z.array(computeGlobSchema).max(64).optional(),
           })
           .strict(),
@@ -227,7 +230,9 @@ export function encodeLaunchSpec(spec: unknown): string {
 
 /**
  * Whether a job specification, once a Worker has added everything it supplies, encodes within the
- * 64 KiB the launcher reads. The Worker's fields are taken at their worst case (a 512-character
+ * 64 KiB the launcher reads, with each dataset version written as its data-plane tag
+ * ({@link dataTagForVersion}); a job whose dataset version has no tag is false. The Worker's fields
+ * are taken at their worst case (a 512-character
  * `api_base` and image reference, a 256-character token, the 68-character image file name, the
  * largest bundle and limits),
  * so a true answer holds whatever the Worker puts there. A specification that passes
@@ -242,7 +247,12 @@ export function launchSpecFits(job: JobSpec): boolean {
     runtime: job.runtime === "image" ? "image" : "python",
     args: job.args,
     bundle: { sha256: hex, size: Number.MAX_SAFE_INTEGER },
-    datasets: job.datasets.map((d) => ({ id: d.id, version: d.version, include: d.include })),
+    // A version with no data-plane tag is null here, which the document refuses: not launchable.
+    datasets: job.datasets.map((d) => ({
+      id: d.id,
+      version: dataTagForVersion(d.version),
+      include: d.include,
+    })),
     api_base: `https://${"a".repeat(504)}`,
     image: { uri, digest: `sha256:${hex}`, sif: `${hex}.sif` },
     env: job.env,

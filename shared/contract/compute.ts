@@ -82,7 +82,35 @@ export const COMPUTE_IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** Two lowercase letters and six digits: `nm000104`, `on000001`, `xx099900`, `ds002718`. */
 export const COMPUTE_DATASET_ID_RE = /^[a-z]{2}[0-9]{6}$/;
+/**
+ * A dataset version as a JOB names it: loose, so `1.0.2`, `v1.0.2` and `latest` all pass. The launch
+ * specification carries the data-plane tag instead: see {@link dataTagForVersion}.
+ */
 export const COMPUTE_DATASET_VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
+
+/**
+ * The data plane's name for a dataset version: `latest`, or `v<major>.<minor>.<patch>` (the data
+ * plane accepts exactly these; see `VERSION_TAG_RE` in `backend/src/services/data-router.ts`, which
+ * a test holds this to). It is the form the launch specification carries, where the user-facing job
+ * specification (which keeps accepting `1.0.2`) names a version more loosely.
+ */
+export const COMPUTE_DATA_TAG_RE = /^(?:latest|v[0-9]+\.[0-9]+\.[0-9]+)$/;
+
+/** The longest data-plane tag: `v` and a job version of 64 characters. */
+export const COMPUTE_DATA_TAG_MAX = 65;
+
+/**
+ * The data-plane tag for a dataset version as a job names it: `1.0.2` gives `v1.0.2`; `v1.0.2` and
+ * `latest` are already tags and come back unchanged; anything else has no tag and is null, as is a
+ * tag longer than {@link COMPUTE_DATA_TAG_MAX}. The Worker's launch-specification builder uses it
+ * and refuses a job whose dataset version has none. Pure.
+ */
+export function dataTagForVersion(version: string): string | null {
+  if (typeof version !== "string") return null;
+  // A version that starts with a digit is bare; the whole is checked once it has its v.
+  const tag = /^[0-9]/.test(version) ? `v${version}` : version;
+  return tag.length <= COMPUTE_DATA_TAG_MAX && COMPUTE_DATA_TAG_RE.test(tag) ? tag : null;
+}
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
