@@ -143,7 +143,7 @@ describe("the copy table's own rules", () => {
   });
 
   test("every placeholder comes from the declared vocabulary", () => {
-    const allowed = new Set(["label", "blocks", "web", "cli", "date", "reason"]);
+    const allowed = new Set(["label", "blocks", "web", "cli", "date", "client", "reason"]);
     for (const [key, value] of Object.entries(ACCOUNT_COPY)) {
       for (const [, name] of value.matchAll(/\{(\w+)\}/g)) {
         expect({ key, name, allowed: [...allowed] }).toEqual({
