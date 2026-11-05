@@ -336,6 +336,14 @@ function isPrintable(text: string): boolean {
   return true;
 }
 
+/**
+ * The value of `NEMAR_LAUNCH_SPEC`: what {@link encodeLaunchSpecEnv} returns and the only thing the Tapis
+ * client is given to send. A branded string, so the launch specification's TEXT (which is hashed and
+ * recorded, and holds the token in the clear) cannot be passed where the value belongs, or the other
+ * way round, without the compiler saying so.
+ */
+export type LaunchSpecEnvValue = string & { readonly __brand: "LaunchSpecEnv" };
+
 /** The base64url text, without padding, of a string of bytes (one per UTF-16 unit, each below 0x100). */
 function toBase64Url(bytes: string): string {
   return btoa(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -355,7 +363,7 @@ function toBase64Url(bytes: string): string {
  * byte, DEL, or anything from 0x80 up), and RangeError for text over the 64 KiB cap. The inverse of
  * {@link decodeLaunchSpecEnv}.
  */
-export function encodeLaunchSpecEnv(text: string): string {
+export function encodeLaunchSpecEnv(text: string): LaunchSpecEnvValue {
   if (typeof text !== "string" || text.length === 0) {
     throw new TypeError("the launch specification text is not a non-empty string");
   }
@@ -366,7 +374,7 @@ export function encodeLaunchSpecEnv(text: string): string {
     throw new TypeError("the launch specification text is not printable ASCII");
   }
   // No second check of the length: `ceil(n * 4 / 3)` of a text within the cap is within the bound.
-  return toBase64Url(text);
+  return toBase64Url(text) as LaunchSpecEnvValue;
 }
 
 /** Why {@link decodeLaunchSpecEnv} refused a value: a fixed word, never a part of the value. */

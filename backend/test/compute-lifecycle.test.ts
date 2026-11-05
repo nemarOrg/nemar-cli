@@ -520,7 +520,7 @@ describe("submit", () => {
       coresPerNode: 1,
       gpus: 0,
       minutes: 5,
-      launchSpec: encodeLaunchSpecEnv("x"),
+      launchSpecEnv: encodeLaunchSpecEnv("x"),
     };
     await submitJob(ctx, input);
     await submitJob(ctx, input);
@@ -549,7 +549,7 @@ describe("submit", () => {
       coresPerNode: 4,
       gpus: 0,
       minutes: 60,
-      launchSpec: encodeLaunchSpecEnv("x"),
+      launchSpecEnv: encodeLaunchSpecEnv("x"),
     });
     fx.tapis.advance(rec.uuid, "RUNNING");
     expect(await submitComputeJob(made.env, made.job.id)).toEqual({ ok: true, outcome: "bound" });

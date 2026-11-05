@@ -47,6 +47,7 @@ import {
   type PartitionName,
   isSafeComputePath,
 } from "../../../../shared/contract/compute";
+import type { LaunchSpecEnvValue } from "../../../../shared/contract/compute-launch";
 import { withRetry } from "../retry";
 import { getTapisToken, invalidateTapisToken, requireTapisConfig } from "./auth";
 import { type TapisEnv, overrideActive, tapisBaseOrProblem } from "./config";
@@ -314,12 +315,12 @@ export interface SubmitJobInput {
   gpus: number;
   minutes: number;
   /**
-   * The VALUE of `NEMAR_LAUNCH_SPEC`: the launch specification's text in base64url
-   * (`encodeLaunchSpecEnv`), shell-inert characters only and within 87,382 of them. Raw JSON, or
-   * anything else, is refused before a request is built. It holds the job's token, so it is never
-   * logged or returned.
+   * The VALUE of `NEMAR_LAUNCH_SPEC`, as `encodeLaunchSpecEnv` returns it: the launch specification's
+   * text in base64url, shell-inert characters only and within 87,382 of them. The type is branded, so
+   * the text cannot be passed in its place; raw JSON, or anything else that is not such a value, is
+   * refused before a request is built. It holds the job's token, so it is never logged or returned.
    */
-  launchSpec: string;
+  launchSpecEnv: LaunchSpecEnvValue;
 }
 
 /** The request `submitJob` sends, so a test and a reader see exactly what it is. */
@@ -335,7 +336,7 @@ export function buildSubmitRequest(owner: string, input: SubmitJobInput) {
     ...(input.memoryMb === undefined ? {} : { memoryMB: input.memoryMb }),
     maxMinutes: input.minutes,
     parameterSet: {
-      envVariables: [{ key: LAUNCH_SPEC_ENV_KEY, value: input.launchSpec }],
+      envVariables: [{ key: LAUNCH_SPEC_ENV_KEY, value: input.launchSpecEnv }],
       // Tapis archives `tapisjob.env` (which holds the launch specification, so the job's token) and
       // `tapisjob.sh` with the job's output unless told not to. The application definition says the
       // same, as a second layer. Whether Tapis takes this from the request is UNVERIFIED.

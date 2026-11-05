@@ -64,6 +64,7 @@ import {
   stateFromTapisStatus,
 } from "../../../shared/compute-state.js";
 import {
+  type LaunchSpecEnvValue,
   encodeLaunchSpec,
   encodeLaunchSpecEnv,
   resultsLauncherKey,
@@ -996,11 +997,11 @@ const refused = (outcome: Exclude<SubmitOutcome, "submitted" | "bound" | "alread
 
 /**
  * The launch specification as it is sent and what the row records of it. Never logged, never returned.
- * `env` is the `NEMAR_LAUNCH_SPEC` value (the specification's text in base64url, A1c); `digest` is the
- * SHA-256 of the TEXT the launcher decodes it to, never of `env`.
+ * `launchSpecEnv` is the `NEMAR_LAUNCH_SPEC` value (the specification's text in base64url, A1c);
+ * `digest` is the SHA-256 of the TEXT the launcher decodes it to, never of the value.
  */
 interface BuiltLaunch {
-  env: string;
+  launchSpecEnv: LaunchSpecEnvValue;
   digest: string;
   imageDigest: string;
 }
@@ -1076,7 +1077,7 @@ async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResu
     return {
       ok: true,
       launch: {
-        env: encodeLaunchSpecEnv(text),
+        launchSpecEnv: encodeLaunchSpecEnv(text),
         digest: await sha256Hex(new TextEncoder().encode(text)),
         imageDigest: digest,
       },
@@ -1389,7 +1390,7 @@ async function submitLeased(
         memoryMb,
         gpus: row.gpus,
         minutes: row.minutes,
-        launchSpec: built.launch.env,
+        launchSpecEnv: built.launch.launchSpecEnv,
       },
     );
   } catch (err) {

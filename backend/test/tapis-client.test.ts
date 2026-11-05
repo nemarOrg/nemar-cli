@@ -38,6 +38,7 @@ import { LAUNCHER_ENV, PARTITION_NAMES } from "../../shared/contract/compute";
 import {
   LAUNCH_SPEC_ENV_MAX_CHARS,
   LAUNCH_SPEC_MAX_BYTES,
+  type LaunchSpecEnvValue,
   SHELL_INERT_ENV_ALPHABET,
   encodeLaunchSpecEnv,
 } from "../../shared/contract/compute-launch";
@@ -88,6 +89,11 @@ const LAUNCH_SPEC_TEXT = `{"schema":"nemar.launch-spec.v1","job_id":"${JOB_ID}",
 const LAUNCH_SPEC = encodeLaunchSpecEnv(LAUNCH_SPEC_TEXT);
 /** What must never be echoed: the token, and the encoded value that carries it. */
 const SPEC_SECRETS = [TOKEN_MARK, LAUNCH_SPEC] as const;
+/**
+ * A value the client must refuse. The type is branded and only `encodeLaunchSpecEnv` returns the brand,
+ * so a value that is meant to be invalid is cast to it, here, in the one place that says so.
+ */
+const notAValue = (value: string) => value as LaunchSpecEnvValue;
 
 let standin: TapisStandin;
 let previousOverride: string | undefined;
@@ -169,7 +175,7 @@ const SUBMIT: SubmitJobInput = {
   memoryMb: 16384,
   gpus: 0,
   minutes: 120,
-  launchSpec: LAUNCH_SPEC,
+  launchSpecEnv: LAUNCH_SPEC,
 };
 
 async function failure(run: () => Promise<unknown>): Promise<TapisError> {
@@ -911,12 +917,12 @@ describe("submitJob", () => {
       { gpus: -1 },
       { minutes: 0 },
       { memoryMb: 0 },
-      { launchSpec: "" },
-      { launchSpec: "café" },
+      { launchSpecEnv: notAValue("") },
+      { launchSpecEnv: notAValue("café") },
       // One over the ENCODED bound (87,382), though every character is in the alphabet.
-      { launchSpec: "x".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1) },
+      { launchSpecEnv: notAValue("x".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1)) },
       // The raw JSON text: what the value was before A1c, and what the client now refuses.
-      { launchSpec: LAUNCH_SPEC_TEXT },
+      { launchSpecEnv: notAValue(LAUNCH_SPEC_TEXT) },
     ];
     for (const over of bad) {
       await expect(submitJob(ctx(env), { ...SUBMIT, ...over })).rejects.toThrow(RangeError);
@@ -1623,10 +1629,11 @@ describe("the launch specification's other copies (what Tapis archives, and what
   );
   test("a value that is not shell-inert base64url is refused before anything is sent (A1c)", async () => {
     const env = passwordEnv();
-    for (const [label, launchSpec] of REFUSED_VALUES) {
-      await expect(submitJob(ctx(env), { ...SUBMIT, launchSpec }), label).rejects.toThrow(
-        RangeError,
-      );
+    for (const [label, value] of REFUSED_VALUES) {
+      await expect(
+        submitJob(ctx(env), { ...SUBMIT, launchSpecEnv: notAValue(value) }),
+        label,
+      ).rejects.toThrow(RangeError);
     }
     expect(standin.log).toHaveLength(0);
   });
@@ -1636,7 +1643,7 @@ describe("the launch specification's other copies (what Tapis archives, and what
     for (const bad of [LAUNCH_SPEC_TEXT, `${LAUNCH_SPEC}==`]) {
       let message = "";
       try {
-        await submitJob(ctx(env), { ...SUBMIT, launchSpec: bad });
+        await submitJob(ctx(env), { ...SUBMIT, launchSpecEnv: notAValue(bad) });
       } catch (error) {
         message = (error as Error).message;
       }
@@ -1651,7 +1658,7 @@ describe("the launch specification's other copies (what Tapis archives, and what
     const env = passwordEnv();
     // The encoding of the largest text there is: 64 KiB of printable ASCII.
     const longest = encodeLaunchSpecEnv("a".repeat(LAUNCH_SPEC_MAX_BYTES));
-    const job = await submitJob(ctx(env), { ...SUBMIT, launchSpec: longest });
+    const job = await submitJob(ctx(env), { ...SUBMIT, launchSpecEnv: longest });
     const sent = JSON.parse(jobCalls("POST /v3/jobs/submit")[0]?.body ?? "");
     expect(sent.parameterSet.envVariables).toEqual([{ key: LAUNCHER_ENV.SPEC, value: longest }]);
     expect(longest.length).toBe(87_382);
