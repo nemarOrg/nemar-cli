@@ -10,6 +10,8 @@
  *   GET  /admin/oidc/keys                             the signing keys, never their private half
  *   POST /admin/oidc/keys/rotate                      make the first keys, or rotate them
  *   POST /admin/oidc/keys/:kid/revoke                 withdraw a retired key from the key set
+ *   POST /admin/oidc/accounts/:id/end                 end an account's grants at every client (#2019)
+ *   GET  /admin/oidc/logout-deliveries                the back-channel logouts owed to clients (#2019)
  *
  * Owner role, on the issuer's host only. A refusal is `{ error: <sentence>, code: <word> }`; the
  * words are {@link OIDC_ADMIN_ERROR_CODES} and are the API.
@@ -27,10 +29,12 @@
 
 import { z } from "zod";
 import {
+  OIDC_ACCOUNT_END_NAMES,
   OIDC_AUDIENCE_MAX_LENGTH,
   OIDC_CLIENT_NAME_MAX_LENGTH,
   OIDC_CONSENT_MODES,
   OIDC_GRANTS,
+  OIDC_LOGOUT_STATUSES,
   OIDC_MAX_INTROSPECTION_AUDIENCES,
   OIDC_MAX_REDIRECT_URIS,
   OIDC_SCOPE_NAMES,
@@ -64,6 +68,9 @@ export const OIDC_ADMIN_ERROR_CODES = [
   "invalid_kid",
   "key_not_found",
   "key_not_revocable",
+  "invalid_user_id",
+  "user_not_found",
+  "invalid_status",
 ] as const;
 
 export type OidcAdminErrorCode = (typeof OIDC_ADMIN_ERROR_CODES)[number];
@@ -185,9 +192,21 @@ export const oidcClientRotateResponseSchema = z
   .passthrough();
 export type OidcClientRotateResponse = z.infer<typeof oidcClientRotateResponseSchema>;
 
-/** `POST /admin/oidc/clients/:client_id/disable`: `changed` is false when it already was. */
+/**
+ * `POST /admin/oidc/clients/:client_id/disable`: `changed` is false when it already was. `revoked`
+ * counts what the same batch took from the client (its tokens, its grants and its unused codes); it
+ * is optional, so a command line from before the revocation reads the answer of a Worker after it,
+ * and the reverse.
+ */
 export const oidcClientDisableResponseSchema = z
-  .object({ client: oidcClientViewSchema, changed: z.boolean() })
+  .object({
+    client: oidcClientViewSchema,
+    changed: z.boolean(),
+    revoked: z
+      .object({ tokens: z.number(), grants: z.number(), codes: z.number() })
+      .passthrough()
+      .optional(),
+  })
   .passthrough();
 export type OidcClientDisableResponse = z.infer<typeof oidcClientDisableResponseSchema>;
 
@@ -222,3 +241,68 @@ export const oidcKeyRevokeResponseSchema = z
   .object({ key: oidcKeyViewSchema, changed: z.boolean() })
   .passthrough();
 export type OidcKeyRevokeResponse = z.infer<typeof oidcKeyRevokeResponseSchema>;
+
+/** The body of `POST /admin/oidc/accounts/:id/end`: why, as the owner names it. */
+export const oidcAccountEndRequestSchema = z.object({
+  // The message names the words and never the value sent: an unknown reason is not echoed back.
+  reason: z.enum(OIDC_ACCOUNT_END_NAMES, {
+    errorMap: () => ({ message: `reason must be one of: ${OIDC_ACCOUNT_END_NAMES.join(", ")}` }),
+  }),
+});
+export const OIDC_ACCOUNT_END_FIELDS: readonly string[] = Object.keys(
+  oidcAccountEndRequestSchema.shape,
+);
+
+/**
+ * `POST /admin/oidc/accounts/:id/end`: what the one batch ended. `reason` is the word recorded on the
+ * revoked tokens and the queued deliveries (`account_merged` or `account_revoked`), and `logouts_queued`
+ * is the number of clients that will be told: the call to each is made after the batch commits, so
+ * what became of it is in the delivery listing and not here.
+ */
+export const oidcAccountEndResponseSchema = z
+  .object({
+    user_id: z.number(),
+    reason: z.string(),
+    grants_ended: z.number(),
+    tokens_ended: z.number(),
+    codes_deleted: z.number(),
+    logouts_queued: z.number(),
+  })
+  .passthrough();
+export type OidcAccountEndResponse = z.infer<typeof oidcAccountEndResponseSchema>;
+
+/**
+ * One back-channel logout owed to a client, as the owner reads it. `client_id` is the PUBLIC `oc_...`
+ * id, `sub` the account's opaque subject, and `last_error_class` a fixed word, never the text of an
+ * error or of the partner's answer. No token and no address: the address is on the client.
+ */
+export const oidcLogoutDeliveryViewSchema = z
+  .object({
+    id: z.number(),
+    client_id: z.string().nullable(),
+    sub: z.string(),
+    reason: z.string(),
+    status: z.string(),
+    attempts: z.number(),
+    next_attempt_at: z.string().nullable(),
+    last_status: z.number().nullable(),
+    last_error_class: z.string().nullable(),
+    jti: z.string().nullable(),
+    created_at: z.string(),
+    sent_at: z.string().nullable(),
+  })
+  .passthrough();
+export type OidcLogoutDeliveryView = z.infer<typeof oidcLogoutDeliveryViewSchema>;
+
+/** `GET /admin/oidc/logout-deliveries?status=&limit=`: newest first. */
+export const oidcLogoutDeliveriesResponseSchema = z
+  .object({
+    deliveries: z.array(oidcLogoutDeliveryViewSchema),
+    /** How many deliveries of each status exist, whatever the filter and the limit. */
+    counts: z.record(z.number()),
+  })
+  .passthrough();
+export type OidcLogoutDeliveriesResponse = z.infer<typeof oidcLogoutDeliveriesResponseSchema>;
+
+/** The statuses `?status=` accepts, for a command line that offers them as choices. */
+export const OIDC_LOGOUT_DELIVERY_STATUS_FILTERS: readonly string[] = OIDC_LOGOUT_STATUSES;

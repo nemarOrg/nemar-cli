@@ -57,6 +57,7 @@ import {
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
 } from "../shared/oidc";
+import { endAccountQuestion } from "../src/commands/admin-oidc";
 import { help } from "./help-output";
 
 // Many of these tests spawn the CLI several times in one test (the "who may run it" walks make 28
@@ -530,6 +531,8 @@ describe("who may run it", () => {
     ["clients", "disable", "oc_000000000000000000000000", "--yes"],
     ["keys", "list"],
     ["keys", "rotate"],
+    ["end-account", "1", "--reason", "merged", "--yes"],
+    ["logout-deliveries"],
     addArgs(),
   ];
 
@@ -579,6 +582,8 @@ describe("help", () => {
       ["admin", "oidc", "clients", "disable"],
       ["admin", "oidc", "keys", "list"],
       ["admin", "oidc", "keys", "rotate"],
+      ["admin", "oidc", "end-account"],
+      ["admin", "oidc", "logout-deliveries"],
     ]) {
       const out = await help([...path, "--help-all"]);
       expect(out, path.join(" ")).toContain("Exit codes:");
@@ -592,6 +597,270 @@ describe("help", () => {
     expect(group).toContain("keys");
     const admin = await help(["admin", "--help-all"]);
     expect(admin).toContain("oidc");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Phase #2019: revocation cascades and back-channel logout
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * What an account holds at a client, written straight into the tables: this suite is about what the
+ * COMMAND prints and asks of the Worker, and the flow that makes these rows is proven through the real
+ * routes in `backend/test/oidc-cascade.test.ts`. The columns are the ones migrations 0122 and 0123 name.
+ */
+function giveHoldings(clientId: string, userId: number): void {
+  const client = db
+    .query<{ id: number }, [string]>("SELECT id FROM oidc_clients WHERE client_id = ?")
+    .get(clientId);
+  if (!client) throw new Error("no such client");
+  db.run(
+    "INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind) VALUES (?, ?, '[\"openid\"]', 'user')",
+    [userId, client.id],
+  );
+  const grant = db
+    .query<{ id: number }, [number]>("SELECT id FROM oidc_grants WHERE user_id = ?")
+    .get(userId);
+  db.run(
+    `INSERT INTO oidc_codes (code_hash, client_id, user_id, grant_id, redirect_uri, scopes, code_challenge,
+       auth_time, expires_at) VALUES (?, ?, ?, ?, 'https://client.example.org/callback', '["openid"]', ?,
+       datetime('now'), datetime('now', '+60 seconds'))`,
+    [
+      "c".repeat(64),
+      client.id,
+      userId,
+      grant?.id as number,
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    ],
+  );
+  for (const [i, kind] of (["access", "refresh"] as const).entries()) {
+    db.run(
+      `INSERT INTO oidc_tokens (token_hash, kind, client_id, user_id, grant_id, code_id, family_id, audience,
+         scopes, expires_at, absolute_expires_at) VALUES (?, ?, ?, ?, ?, 1, ?, 'https://api.example.org',
+         '["openid"]', datetime('now', '+10 minutes'),
+         CASE WHEN ? = 'refresh' THEN datetime('now', '+90 days') END)`,
+      [String(i).repeat(64), kind, client.id, userId, grant?.id as number, "f".repeat(32), kind],
+    );
+  }
+}
+
+const memberId = () =>
+  (
+    db.query<{ id: number }, []>("SELECT id FROM users WHERE username = 'oidcmember'").get() as {
+      id: number;
+    }
+  ).id;
+
+describe("nemar admin oidc end-account", () => {
+  test("with --yes it ends the account's grants, counts what it did, and a second run finds nothing", async () => {
+    signIn(OWNER_KEY);
+    const a = await addClient(["--logout-uri", "https://partner.example.org/logout"]);
+    giveHoldings(a.client.client_id, memberId());
+
+    const r = await runCli(["end-account", String(memberId()), "--reason", "merged", "--yes"]);
+
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "Tokens revoked 2, grants ended 1, unused codes deleted 1, logouts queued 1.",
+    );
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM oidc_grants WHERE revoked_at IS NULL").get(),
+    ).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM oidc_logout_deliveries").get()).toEqual({ n: 1 });
+    const again = await runCli([
+      "end-account",
+      String(memberId()),
+      "--reason",
+      "merged",
+      "--yes",
+      "--json",
+    ]);
+    expect(again.exitCode).toBe(0);
+    expect(JSON.parse(again.stdout)).toMatchObject({
+      reason: "account_merged",
+      tokens_ended: 0,
+      grants_ended: 0,
+      codes_deleted: 0,
+      logouts_queued: 0,
+    });
+  });
+
+  test("--reason revoked is the other word, and --json writes only the answer to standard output", async () => {
+    signIn(OWNER_KEY);
+    const r = await runCli([
+      "end-account",
+      String(memberId()),
+      "--reason",
+      "revoked",
+      "--yes",
+      "--json",
+    ]);
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ user_id: memberId(), reason: "account_revoked" });
+    expect(r.stderr).toBe("");
+  });
+
+  test("without --yes and with no terminal it asks, cannot, and ends nothing", async () => {
+    signIn(OWNER_KEY);
+    const a = await addClient();
+    giveHoldings(a.client.client_id, memberId());
+    const r = await runCli(["end-account", String(memberId()), "--reason", "merged"]);
+    expect(r.exitCode).toBe(1);
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM oidc_grants WHERE revoked_at IS NULL").get(),
+    ).toEqual({ n: 1 });
+    expect(requests.filter((q) => q.path.includes("/accounts/"))).toHaveLength(0);
+  });
+
+  test("the question is true of every kind of client, and the help says what to pair the command with", async () => {
+    const question = endAccountQuestion(7);
+    // A first-party client skips the consent screen, so only a third-party client "asks again".
+    expect(question).toContain("a third-party client asks the person for consent again");
+    expect(question).toContain("(a first-party client does not ask)");
+    expect(question).not.toMatch(/the person is asked again/);
+    expect(question).toContain("account 7");
+    // The help is read as a person reads it: whitespace and line breaks are one space.
+    const out = (await help(["admin", "oidc", "end-account", "--help-all"])).replace(/\s+/g, " ");
+    expect(out).toMatch(/a first-party client does not ask/);
+    expect(out).toMatch(/does not stop the account signing in again/);
+    expect(out).not.toMatch(/asks the person again\)/);
+    // A merge loser is ended with this command and then revoked or deleted, in that order and for that
+    // reason; a change of its kind is NOT a way to cut it off (it ends the person_proven_orcid grants only).
+    expect(out).toContain("run this command and then revoke or delete that account");
+    expect(out).toContain(
+      "revoking and deleting end every grant the account holds and leave it unable to sign in",
+    );
+    expect(out).toContain(
+      "running this command first is what makes the revoked tokens and the queued logouts record the merge",
+    );
+    expect(out).toContain("Changing the account's kind away from person is no substitute");
+    expect(out).toContain(
+      "it ends only the grants of the clients that sign people in by person_proven_orcid",
+    );
+    expect(out).toContain("a non-person account still meets the active_account rule");
+    expect(out).not.toMatch(/changing its kind away from person/);
+    expect(out).not.toMatch(/those paths end the grants themselves/);
+  });
+
+  test("a bad id, a missing reason, an unknown reason and an unknown account exit 1", async () => {
+    signIn(OWNER_KEY);
+    for (const args of [
+      ["end-account", "abc", "--reason", "merged", "--yes"],
+      ["end-account", "0", "--reason", "merged", "--yes"],
+      ["end-account", "1", "--yes"],
+      ["end-account", "1", "--reason", "account_merged", "--yes"],
+    ]) {
+      const refused = await failsBothWays(args);
+      expect(refused.plain.length, args.join(" ")).toBeGreaterThan(0);
+    }
+    const missing = await failsBothWays(["end-account", "987654", "--reason", "merged", "--yes"]);
+    expect(missing.plain).toMatch(/no account/i);
+    expect(requests.filter((q) => q.path.includes("/accounts/987654"))).toHaveLength(2);
+    expect(requests.filter((q) => /\/accounts\/(abc|0|1)\//.test(q.path))).toHaveLength(0);
+  });
+});
+
+describe("nemar admin oidc logout-deliveries", () => {
+  function put(status: "pending" | "sent" | "failed", n = 1): void {
+    const client = db.query<{ id: number }, []>("SELECT id FROM oidc_clients LIMIT 1").get();
+    for (let i = 0; i < n; i++) {
+      db.run(
+        `INSERT INTO oidc_logout_deliveries (client_id, sub, reason, status, attempts, next_attempt_at, sent_at,
+           last_status, last_error_class)
+         VALUES (?, ?, 'account_revoked', ?, 1, ${status === "pending" ? "datetime('now', '+1 hour')" : "NULL"},
+           ${status === "sent" ? "datetime('now')" : "NULL"}, ?, ?)`,
+        [
+          client?.id as number,
+          `nmu_${"a".repeat(32)}`,
+          status,
+          status === "pending" ? 503 : status === "failed" ? 400 : 200,
+          status === "pending" ? "http_5xx" : status === "failed" ? "http_4xx" : null,
+        ],
+      );
+    }
+  }
+
+  test("prints the counts of every status and a table, and --status narrows only the table", async () => {
+    signIn(OWNER_KEY);
+    await addClient();
+    put("sent", 2);
+    put("failed");
+    put("pending");
+
+    const all = await runCli(["logout-deliveries"]);
+    expect(all.exitCode, all.stderr).toBe(0);
+    expect(all.stdout).toContain("All deliveries: pending 1, sent 2, failed 1, fenced 0.");
+    expect(all.stdout).toMatch(/http_4xx/);
+    expect(all.stdout).toMatch(/http_5xx/);
+
+    const failed = await runCli(["logout-deliveries", "--status", "failed"]);
+    expect(failed.stdout).toContain("All deliveries: pending 1, sent 2, failed 1, fenced 0.");
+    expect(failed.stdout).toMatch(/http_4xx/);
+    expect(failed.stdout).not.toMatch(/http_5xx/);
+  });
+
+  test("--json is the answer and nothing else, and an empty list is not a failure", async () => {
+    signIn(OWNER_KEY);
+    const empty = await runCli(["logout-deliveries", "--json"]);
+    expect(empty.exitCode, empty.stderr).toBe(0);
+    expect(JSON.parse(empty.stdout)).toEqual({
+      deliveries: [],
+      counts: { pending: 0, sent: 0, failed: 0, fenced: 0 },
+    });
+    const text = await runCli(["logout-deliveries"]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toMatch(/no deliveries/i);
+  });
+
+  test("the help says which answers are final and which are retried, as the sender does", async () => {
+    // The facts are pinned in `backend/test/oidc-logout-sender.test.ts` ("which answers are retried...").
+    const out = (await help(["admin", "oidc", "logout-deliveries", "--help-all"])).replace(
+      /\s+/g,
+      " ",
+    );
+    expect(out).toContain(
+      "failed not to be tried again: the client answered with a redirect, a 4xx other than 408 and 429, or any answer that is not a 200, a 204, a 408, a 429 or a 5xx",
+    );
+    expect(out).toContain(
+      "or all 6 attempts were used on answers that are retried (a 5xx, a 408, a 429, no answer in time, a connection that failed, a token NEMAR could not sign)",
+    );
+    expect(out).toContain(
+      "or it was never sent because its client was disabled or its address is no longer one NEMAR sends to",
+    );
+    // The line it replaces called every 4xx final and left out what is retried.
+    expect(out).not.toContain("the client refused it (a 4xx, a redirect, any other answer)");
+  });
+
+  test("--limit bounds the list; a limit the server refuses and an unknown status exit 1", async () => {
+    signIn(OWNER_KEY);
+    await addClient();
+    put("sent", 3);
+    const one = await runCli(["logout-deliveries", "--limit", "1", "--json"]);
+    expect((JSON.parse(one.stdout) as { deliveries: unknown[] }).deliveries).toHaveLength(1);
+    await failsBothWays(["logout-deliveries", "--limit", "501"]);
+    await failsBothWays(["logout-deliveries", "--status", "queued"]);
+  });
+});
+
+describe("nemar admin oidc clients disable, and what the client holds", () => {
+  test("says how many tokens, grants and codes went, and that no logout was sent", async () => {
+    signIn(OWNER_KEY);
+    const a = await addClient(["--logout-uri", "https://partner.example.org/logout"]);
+    giveHoldings(a.client.client_id, memberId());
+
+    const r = await runCli(["clients", "disable", a.client.client_id, "--yes"]);
+
+    expect(r.exitCode, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "Revoked 2 tokens, 1 grant and deleted 1 unused code. No logout was sent.",
+    );
+    expect(
+      db.query("SELECT COUNT(*) AS n FROM oidc_tokens WHERE revoked_at IS NULL").get(),
+    ).toEqual({ n: 0 });
+    expect(db.query("SELECT COUNT(*) AS n FROM oidc_logout_deliveries").get()).toEqual({ n: 0 });
+    const again = await runCli(["clients", "disable", a.client.client_id, "--yes"]);
+    expect(again.stdout).toContain("already disabled");
+    expect(again.stdout).toContain("Revoked 0 tokens, 0 grants and deleted 0 unused codes.");
   });
 });
 

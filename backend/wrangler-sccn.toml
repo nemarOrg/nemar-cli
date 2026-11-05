@@ -431,6 +431,11 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                           stored key becomes unreadable, and no re-encryption path exists yet. Separate values for production and dev.
 #                           It MUST differ from ENCRYPTION_KEY and should be random, for example `openssl rand -base64 48`.
 #                           The owner sets it; an agent never does. Never a [vars] entry.)
+#   OIDC_LOGOUT_DEV_HOSTS (a VAR, optional, absent here; epic #2014 phase #2019, ADR 0119 rule 15): the hostnames a dev or
+#                           staging Worker may send a back-channel logout to besides a loopback address. Unset, a delivery to any
+#                           other host is recorded `fenced` and never sent, because the dev Worker shares real accounts. The
+#                           production Worker ignores it, and backend/test/oidc-logout-dev-hosts-var.test.ts refuses it in every
+#                           table but [env.dev.vars]. Setting it is the owner's act, for a test against a partner's staging host.
 # - CLOUDFLARE_API_TOKEN   (epic #684; scoped token with Zone.Cache Purge on the SCCN zone, used by
 #                           /webhooks/zarr-ready cache purge. WARNING: same name as wrangler's own
 #                           deploy-auth env var -- unset it from the shell before `secret put`, e.g.

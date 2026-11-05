@@ -797,6 +797,12 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
   // Still best-effort at the response layer, deliberately: the person asked to
   // sign out, so a D1 blip must not turn that into an error, and the cookie is
   // cleared client-side either way.
+  //
+  // OpenID Connect grants and tokens are not ended here (ADR 0119 rule 12): signing out of
+  // NEMAR is not withdrawing a third party's delegated access, and ending every partner session
+  // whenever someone closes a NEMAR tab would make the partner unusable. That is a DEPARTURE from
+  // the cascade the docs and private-site grants above follow, and the owner's decision (the ADR
+  // says so); `oidc-cascade-nonmembership.test.ts` holds that the rows survive a sign-out.
   try {
     const statements = [];
     for (const id of cookieIds) statements.push(await revokeSessionStatement(c.env, id));

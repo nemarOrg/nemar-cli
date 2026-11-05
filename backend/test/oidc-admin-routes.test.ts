@@ -33,6 +33,7 @@ beforeEach(async () => {
 
 const CLIENT_ID = "oc_0123456789abcdef01234567";
 const KID = "0123456789abcdef";
+const USER_ID = "7";
 
 /** Every OIDC owner route the admin router has, as `[method, path with params filled in]`. */
 function oidcRoutes(): Array<[string, string]> {
@@ -40,16 +41,16 @@ function oidcRoutes(): Array<[string, string]> {
     .filter((r) => r.path.startsWith("/oidc/") && r.method !== "ALL")
     .map(
       (r) =>
-        [r.method, `/admin${r.path.replace(":client_id", CLIENT_ID).replace(":kid", KID)}`] as [
-          string,
-          string,
-        ],
+        [
+          r.method,
+          `/admin${r.path.replace(":client_id", CLIENT_ID).replace(":kid", KID).replace(":id", USER_ID)}`,
+        ] as [string, string],
     )
     .filter(([m, p], i, all) => all.findIndex(([m2, p2]) => m2 === m && p2 === p) === i);
 }
 
 describe("the owner routes the admin router has", () => {
-  test("are exactly the eight this phase adds", () => {
+  test("are exactly the ten of phases #2016 and #2019", () => {
     expect(oidcRoutes().sort()).toEqual(
       [
         ["GET", "/admin/oidc/clients"],
@@ -60,6 +61,8 @@ describe("the owner routes the admin router has", () => {
         ["GET", "/admin/oidc/keys"],
         ["POST", "/admin/oidc/keys/rotate"],
         ["POST", `/admin/oidc/keys/${KID}/revoke`],
+        ["POST", `/admin/oidc/accounts/${USER_ID}/end`],
+        ["GET", "/admin/oidc/logout-deliveries"],
       ].sort(),
     );
   });

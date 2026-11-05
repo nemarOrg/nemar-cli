@@ -219,6 +219,15 @@ export interface Bindings {
    *  The authorization routes (`/auth/oidc/*`) and the `/oauth` token, userinfo, revocation and
    *  introspection endpoints also answer 404 until `HOST_PREFIXED_SESSION_COOKIE` is "1": set both. */
   OIDC_SECRET?: string;
+  /** A VAR, optional, and read only outside production (epic #2014 phase #2019; ADR 0119 rule 15):
+   *  the comma-separated hostnames, exact and case-insensitive, that a dev or staging Worker may send
+   *  a back-channel logout to besides a loopback address (`localhost`, `127.0.0.1`, `[::1]`). The dev
+   *  Worker shares real accounts and a partner's registered address may be a real host, so by default
+   *  a delivery to anything else is recorded `fenced` and never sent. The production Worker ignores it
+   *  and sends to the https hosts the registry validated; it is absent from `wrangler-sccn.toml`, and
+   *  setting it on a dev Worker is the owner's act, for a deliberate test against a partner's staging
+   *  host. */
+  OIDC_LOGOUT_DEV_HOSTS?: string;
   /** Prod-only mirror target for dev-OWNED GitHub deliveries (epic #923;
    *  widened from dev-range to dev-owned by #1440, so it now also carries the
    *  reserved `nm` fixtures). When set on the PRODUCTION worker, a push to a

@@ -28,7 +28,7 @@ This phase builds none of the provider: it records the decisions and lands the t
 ## Decision
 
 **NEMAR is a general OpenID Connect (OIDC) provider whose first client is `compute.nemar.org`; ORCID stays the identity underneath, and an account is the only thing a token ever names.**
-Fourteen rules inside that, each of which reopens a hole if reversed.
+Fifteen rules inside that, each of which reopens a hole if reversed.
 
 1. **Authorization code with Proof Key for Code Exchange (PKCE), method S256 only, for every client.**
    No implicit grant, no password grant, no `plain` challenge.
@@ -158,7 +158,7 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     The compute design carries the consequences; they are recorded here only so that the subject's form and its use are read together.
 12. **The credential-ending table.**
     Every path that ends or downgrades a credential says what it does to OIDC grants and tokens.
-    A new path that ends a credential adds a line here and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts`.
+    A new path that ends a credential adds a line here and to `OIDC_END_CALLERS`, and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts` only when it also runs their statements.
     Because a path can be missed, every token use also re-checks the account's status, kind and proof against the client's sign-in rule (rule 7), so a path not listed here still takes effect at the next use of a token, even if it did not end the grant.
 
     | Path | OIDC grants and tokens | Why |
@@ -173,6 +173,24 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     | Role demotion | Leaves them alone | A token carries no role and no OIDC scope confers admin authority (rule 4), so there is nothing to downgrade. `PRIVATE_REVOKE_ALL_SQL` says the same of private sessions. |
     | API key revocation | Leaves them alone | A grant is not minted from a key and depends on none. |
     | Sign-out of the app session | Leaves them alone | See the departure below. |
+
+    **What an ending is, in code (phase #2019).**
+    One function, `oidcEndStatements` in `services/oidc-cascade.ts`, returns the four statements of an ending, in this order, and every path above adds them to the batch that ends its credential: queue a logout for each client the account has a live grant at that is active and has a back-channel logout address (read from the grants BEFORE they are revoked), revoke the account's live access and refresh tokens, revoke the grants, and delete the unused codes.
+    A used code stays, because a second redemption is recognized by it and everything it issued is already revoked.
+    Every table names a client by its `oidc_clients.id` row, never the public `oc_` string, so a statement written against the public string ends nothing.
+    A revoked grant stays for the record, and a later sign-in is a NEW grant, so an account that is put back (an approval, a status written by hand) comes back with nothing.
+    The reason of an ending is a closed word, recorded on the revoked tokens and the queued logouts and never sent to a client: `account_revoked`, `account_deleted`, `account_merged`, `compute_suspended`, `orcid_changed` and `kind_changed`.
+    A filter narrows an ending to some of the account's grants, and what it selects is GRANTS: everything under a selected grant goes with it, its tokens whatever scopes they carry (a grant accumulates the scopes of every sign-in, and a token carries only those of its own code), its unused codes and its logout.
+    `{rule}` selects the grants of the clients that sign people in by that rule (the ORCID unlink and relink and the kind change, with `person_proven_orcid`); `{scopePrefix}` selects the grants that carry a scope with that prefix (the compute suspension, with `compute.`).
+    The compute suspension has no caller yet, because its state does not exist; the compute access phase adds the caller, and the filter is shipped and tested directly.
+    The paths that call it, and their number, are `OIDC_END_CALLERS`, held to the code in both directions by a test that reads the syntax tree, as the docs and private-site counts are held: `finalizeRevocation` (revoke by username and by id), `tombstoneUserCascade` (the owner's soft delete, which runs the statements as they stand, and the sweep of the live tests' accounts, which runs each one conditional on the mask having applied to the row it chose), the ORCID unlink, the ORCID relink, the change of kind away from `person`, and the owner's `nemar admin oidc end-account`.
+    That last command is how a manual merge ends the loser (`--reason merged`) and the tool for an incident (`--reason revoked`); it ends only the OIDC holdings and does not revoke the account.
+    Ending the grants does not stop the account signing in again, because its app sessions and keys survive, so it can get a new first-party grant at once (a third-party client asks for consent again).
+    For the loser of a merge the owner runs `end-account` and then revokes or deletes that account, which end every grant it holds and leave it unable to sign in; running `end-account` first is what makes the revoked tokens and the queued logouts record the merge and not the revocation, because the revocation or the deletion then finds nothing live to end.
+    A change of the account's kind away from `person` is no substitute: it ends only the grants of the clients that sign people in by `person_proven_orcid`, and a non-person account still satisfies `active_account`, so it keeps its other grants and can sign in again at once.
+    The owner uses `end-account` alone only for an incident that is about the grants and not the account.
+    A client's disabling is a separate function keyed by the client, `oidcClientEndStatements`, in the batch that disables it: every token it holds (an account's and its own), every grant and every unused code, and no logout.
+    It is not conditional on the status having changed, so disabling a client that was disabled before the revocation existed finishes the job.
 
     **Leaving grants alone on sign-out is a departure from the cascade the earlier ADRs describe.**
     ADR 0021, ADR 0056 decision 5 and ADR 0079 end whatever was minted from a credential when that credential ends, and an OIDC grant is minted from an app session.
@@ -220,6 +238,42 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     In the `read-only` maintenance mode, `POST /oauth/userinfo` and `POST /oauth/introspect` are served (exact paths, POST only; both only read; a GET is served as every read is, and PUT, DELETE and PATCH on them answer 503), and the token endpoint and revocation answer 503; in `full` all four answer 503.
     The three client endpoints have a rate-limit bucket of their own, keyed by address and generous, because a partner's server answers for every person signed in to it from one address.
 
+15. **An ending queues its logouts in its own batch, and a sender tells the clients afterwards (phase #2019).**
+    The batch writes the INTENT, one `oidc_logout_deliveries` row per client, and never touches the network: a partner's server must not be able to slow, fail or block a revocation, and a delivery that fails never undoes one.
+    The call is made afterwards, once from `waitUntil` right after the commit (so the request that revoked is answered without waiting for any partner), and again from a retry tick every 30 minutes, in production only, which takes at most 20 deliveries a tick, each in its own try and catch.
+    The tick is absent from the dev cron allowlist, returns before it reads anything outside exactly `production`, and its name avoids the word sweep because it is not one.
+    The first attempt of the sweep of the live tests' accounts is made by the sweep itself, because no tick runs outside production.
+    **The token** is a JSON Web Token signed ES256 with the current key, header `typ: logout+jwt`, and exactly these claims: `iss`, `aud` (the client's public id), `iat`, `exp` two minutes later, `jti`, `sub` and `events` holding `http://schemas.openid.net/event/backchannel-logout` with an empty object.
+    It carries no `nonce` (OpenID Connect Back-Channel Logout 1.0 forbids one), no `sid` (NEMAR keeps no session id for a client to correlate) and no reason.
+    The `jti` is new for every attempt, so a retry is a new token and never a replay of the old, and the row holds the `jti` of the last one so that a partner's complaint can be matched to it.
+    **The request** is a `POST` of one form field, `logout_token`, to the registered address, with nothing else: no `Authorization`, no cookie, no client secret, no API key.
+    It waits 5 seconds, never follows a redirect, and never reads the answer's body (it is cancelled), so a partner cannot make NEMAR wait or read without bound.
+    A `200` or `204` is `sent`.
+    A redirect, any other `4xx` (a `408` and a `429` are the exceptions, next) and any other answer that is not a `5xx` are `failed` at once, because repeating a refusal does not change it.
+    A `5xx`, a `408`, a `429`, no answer in time and a connection that could not be made are retried at 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours (the first attempt and five retries), then `failed`.
+    A `408` or a `429` is recorded `http_throttled`, and the `Retry-After` it may carry (a number of seconds, of any length, or an HTTP date; the header is read and the body still never is) is a LOWER bound for the next wait: the longer of it and the schedule's, at most 12 hours, so a partner can slow a delivery and can never add an attempt; a run of digits too long to be a finite number is the 12 hours, and is never read as no header at all.
+    A `Retry-After` on any other answer is not read.
+    A token that NEMAR could not sign (no key, a database fault) is retried too: it is NEMAR's fault and not the partner's.
+    The wait is the EARLIEST time of the next attempt, and the tick runs every half hour, so a short wait is taken up at the next half hour; a faster cron for the short waits is not built, because the six attempts of the schedule alone span fifteen to eighteen hours and do not need one.
+    A row records a status, an attempt count, a time and a fixed word for what went wrong (`timeout`, `network`, `redirect`, `http_4xx`, `http_5xx`, `http_throttled`, `http_other`, `sign_failed`, `address_refused`, `client_disabled`, `fenced`, `unreported`), and never the text of an error or of an answer.
+    An attempt is claimed before it is made, in one conditional statement that counts it, holds the row for two minutes and stamps the `jti`, and its answer is recorded only by the attempt that holds the claim, so the first attempt and the tick, or two ticks, can never send one delivery twice at once, and an attempt that never records (the isolate was evicted) is taken up again when its claim lapses, with the retries still bounded.
+    Once all six attempts are claimed, a delivery whose last attempt never recorded is not tried again: it is `failed` with `unreported`, because a seventh request would break the six-request bound while the partner may already hold the token.
+    **The fence.**
+    This is the Worker making an outbound request to an address somebody else chose, so the address is checked again at send time and not only at registration.
+    Never, whatever the environment: an address that is not `https`, that carries user information or that does not parse.
+    In production, which means `ENVIRONMENT` exactly `production`: a named `https` host, and not a loopback, `localhost`-named or IP-literal one.
+    Anywhere else, an unset or mistyped value included: a loopback address (`localhost`, `127.0.0.1`, `[::1]`) or a host the owner listed in the optional var `OIDC_LOGOUT_DEV_HOSTS` (exact, case-insensitive; a listed host does not admit its subdomains), and every other address is recorded `fenced` and never sent.
+    It fails closed the other way from `isNonProductionEnv`, because the harm here is a real call to a real partner from a Worker that shares real accounts.
+    The var is absent from `wrangler-sccn.toml`, is ignored in production, and setting it is the owner's act; a test refuses it in the production tables of the file.
+    The Worker has no route to a private network, and the sender refuses a literal address in production, but it does not resolve a name itself: a name a partner points at an address of its own is still requested, and that is the partner's own server by definition, receiving only a token that names it as its audience.
+    A client disabled before its attempt is not told: the row is `failed` with `client_disabled` and nothing is sent.
+    **The owner's view** is `GET /admin/oidc/logout-deliveries?status=&limit=` and `nemar admin oidc logout-deliveries`: the deliveries newest first, naming the client by its public id, with a count of every status, and no token, no address and no partner text.
+    The owner routes (this one and `end-account`) take the owner role and the OIDC surface (`OIDC_SECRET` set and the issuer's own host), and deliberately NOT `HOST_PREFIXED_SESSION_COOKIE`: that flag guards who may approve a grant, and these routes act on the owner's own credential, which a cookie planted from a sibling host cannot stand in for (a planted cookie is the attacker's own non-owner session and fails the owner check), while requiring the flag would switch the incident tool off exactly when the flag is off.
+    **Retention.**
+    The production tick prunes finished deliveries after its delivery work, at most 500 a tick, oldest first: `sent` and `fenced` rows older than 30 days (by `sent_at` and by `created_at`) and `failed` rows older than 180 days (by `created_at`; the table has no last-update column, and a failed row's last attempt comes within three days of its creation, which does not matter against the window: the first attempt, at the next tick if the one after the commit did not run, and five waits of at most 12 hours, each taken up at the next half-hour tick, are 63 hours at the most), and never a `pending` row, which includes an attempt in flight.
+    The windows are named constants in `shared/oidc.ts` and are DEFAULTS pending the owner, who sets them before the first client registers: a row holds the pseudonymous `sub` of possibly deleted accounts, so pruning is also data minimisation.
+    A dev or staging Worker has no tick, so its table is not pruned and grows with the number of endings there, which is few.
+
 ### What this phase builds, and what it does not
 
 This phase lands the ADR, the partner-host exclusion (rule 9), the cookie reader and writer (rule 10), and the subject with its reserved prefix (rule 5).
@@ -231,6 +285,10 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - `private_key_jwt` client authentication.
 - A connected-apps page where a person revokes a grant themselves, which is also what the sign-out departure in rule 12 waits for.
 - The date the legacy session cookie name stops being read, which is when the exposure in rule 10 ends. Rule 10 sets only the earliest: 31 days after the production flag is turned on.
+- The retention windows of finished deliveries (30, 30 and 180 days, rule 15) are defaults: the owner sets them before the first client registers.
+- An owner command that re-sends a `failed` or `unreported` delivery as a NEW row, so that the six-request bound still holds for each row, is not built.
+- A `backchannel_logout_session_required` setting and a `sid` claim, which would need a session id NEMAR keeps per client.
+- Whether the sign-out of a session that has no grant should still tell a client; today it tells nobody (rule 12).
 - Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
   If the answer makes the format unusable, it is superseded here before any client registers, and not worked around.
 
@@ -270,6 +328,15 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   A database or signing-key fault is a server error, never `invalid_grant`, `invalid_token` or `{active: false}`.
   A matching second redemption whose signing-key read fails answers 5xx and revokes nothing yet; the next presentation when the database answers revokes, so a 4xx for a matching second redemption is never given without its revocation (except for a code whose account row no longer exists, whose tokens are inactive already).
   The tests prove an unreachable database and a failed key read; a batch that fails halfway relies on D1 running a batch as one transaction, which no test here can break.
+- **A logout is a best effort, and the revocation is not (rules 12 and 15).**
+  A client that was down for all six attempts is never told, and the row says so (`failed`, with the last answer and a fixed word); what ended its person's tokens at NEMAR is already done and is not undone.
+  A partner that wants to be sure checks introspection or userinfo, which refuse an ended grant at once.
+  A delivery is attempted at most six times, over roughly fifteen to eighteen hours on the schedule alone (the tick runs every half hour, so each wait can run up to half an hour longer), and over 63 hours at the most when a throttling partner asks for the longest wait every time, and is then left for the owner to read.
+- **Outside production nothing retries.**
+  The tick runs only in production, so a dev delivery to a listed host that fails stays `pending`, and the owner reads the row and tries again with a fresh ending.
+  The first attempt after each ending, and the sweep's, are the only attempts a dev Worker makes.
+- **Every ending is one batch with the other cascades, and a long batch is a cost.**
+  An ending adds four statements, none of which loops over a client, so it grows with the number of the account's grants and not with the number of clients that exist.
 - **In read-only maintenance no partner can refresh (rule 14).**
   The token endpoint writes, so it answers 503; userinfo and introspection keep answering, but every partner session lapses within the access token's 15 minutes and the person signs in again once the mode is off.
   A maintenance window that has to keep partners signed in is a `full` decision the owner makes knowing that.
@@ -310,4 +377,5 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - `shared/oidc-subject.ts`, `backend/src/services/oidc-subject.ts`, migration `0120_users_oidc_subject.sql`.
 - ADR 0056 and ADR 0079 (host-scoped credentials, `__Host-` names), ADR 0043 and ADR 0048 (identity and kinds), ADR 0106 (an attestation is not a proof), ADR 0040 (the active statuses).
 - OpenID Connect Core 1.0; RFC 6749 and 7636 (authorization code, PKCE), RFC 7009 (revocation), RFC 7662 (introspection), RFC 9207 (issuer in the authorization response).
+- Rule 12's code and rule 15: issue #2019; migration `0124_oidc_logout_deliveries.sql`, `backend/src/services/oidc-cascade.ts`, `backend/src/services/oidc-logout.ts`, `backend/src/services/oidc-logout-store.ts`, `OIDC_END_CALLERS` and its test `backend/test/oidc-cascade-callers.test.ts`, the retry tick in `scheduled()` (`backend/src/index.ts`); OpenID Connect Back-Channel Logout 1.0; RFC 8725 (JWT best current practices, explicit typing).
 - Rules 13 and 14: issue #2018; migration `0123_oidc_tokens.sql`, `backend/src/services/oidc-tokens.ts`, `backend/src/services/oidc-claims.ts`, `backend/src/routes/oauth.ts`, `backend/src/middleware/oidc-bearer.ts`, `resolveApiKeyUser` in `backend/src/middleware/auth.ts`, the `oauth-ip` bucket in `backend/src/middleware/rateLimit.ts`; RFC 6750 (bearer tokens).

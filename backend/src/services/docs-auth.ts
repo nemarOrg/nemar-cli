@@ -266,7 +266,9 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  * deletes the `users` row. A sixth path that ends a credential needs this line
  * too.
  * The private site's grants have their own table and their own count
- * (`PRIVATE_GRANTS_PURGE_SQL` in `services/private-auth.ts`).
+ * (`PRIVATE_GRANTS_PURGE_SQL` in `services/private-auth.ts`), and the OpenID Connect grants have
+ * theirs (`OIDC_END_CALLERS` in `services/oidc-cascade.ts`): a path that ends a credential for good
+ * counts in each list it belongs to, and a test holds each list to the code.
  */
 export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?";
 
@@ -308,6 +310,11 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * The private site's sessions are deliberately NOT ended here: one is never
  * minted from a key, so a key's end has nothing of that scope to reach (ADR
  * 0079, `PRIVATE_REVOKE_ALL_SQL`).
+ *
+ * Nor are an account's OpenID Connect grants and tokens: a grant is not minted from a key and
+ * depends on none, so they are not ended here (ADR 0119 rule 12). The paths that DO end them have
+ * their own list and count, `OIDC_END_CALLERS` in `services/oidc-cascade.ts`; the two paths that end
+ * every credential, `finalizeRevocation` and the tombstone cascade, run both sets in their one batch.
  *
  * BEST EFFORT, DELIBERATELY. The key is already revoked by the time this runs;
  * a failure here must not turn a successful revocation into an error, which

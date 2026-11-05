@@ -190,6 +190,9 @@ export const PRIVATE_REVOKE_ALL_SQL = `UPDATE web_sessions
  * it counts once). The foreign key's `ON DELETE CASCADE` covers none of them,
  * because none of them deletes the `users` row. A fourth path that ends a
  * credential needs this line too. Role demotion and API key revocation are
- * outside the set on purpose; see {@link PRIVATE_REVOKE_ALL_SQL}.
+ * outside the set on purpose; see {@link PRIVATE_REVOKE_ALL_SQL}. The OpenID Connect grants are a
+ * third set with a list of their own (`OIDC_END_CALLERS` in `services/oidc-cascade.ts`): of THIS
+ * set's three, `finalizeRevocation` and the tombstone cascade are in it too, and sign-out is not, on
+ * purpose (ADR 0119 rule 12).
  */
 export const PRIVATE_GRANTS_PURGE_SQL = "DELETE FROM private_grants WHERE user_id = ?";

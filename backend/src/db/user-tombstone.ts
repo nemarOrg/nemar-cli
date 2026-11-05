@@ -1,4 +1,5 @@
 import { DOCS_GRANTS_PURGE_SQL } from "../services/docs-auth";
+import { oidcEndStatements } from "../services/oidc-cascade";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
 import { mailReleaseStatements, mailTombstoneStatements } from "../services/ticket-assignment";
 
@@ -171,6 +172,14 @@ export async function tombstoneUserCascade(
     ),
     step(DOCS_GRANTS_PURGE_SQL, id),
     step(PRIVATE_GRANTS_PURGE_SQL, id),
+    // What the account holds at every OpenID Connect client (ADR 0119 rule 12): the grants, the
+    // tokens and the unused codes end, and each client with a back-channel logout address is queued
+    // to be told. Through `step`, so a guarded call keeps every one of them conditional on the mask
+    // having applied (each statement ends in a predicate a caller may extend, and a test pins it).
+    // After the indexes read by position above, so the results the caller reports are not shifted.
+    // The subject stays on the row (`USER_TOMBSTONE_MASK_SQL` never names it): a deleted account's
+    // clients were told its subject, and it is never handed to anyone else.
+    ...oidcEndStatements(id, "account_deleted").map((s) => step(s.sql, ...s.binds)),
     step("DELETE FROM dataset_collaborators WHERE user_id = ?", id),
     step("DELETE FROM user_s3_permissions WHERE user_id = ?", id),
     // Support tickets, queue references and the away window (phase 3). Each statement is

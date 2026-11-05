@@ -50,6 +50,7 @@
 import {
   OIDC_ACCESS_TOKEN_PREFIX,
   OIDC_ACCESS_TOKEN_TTL_SECONDS,
+  OIDC_END_REASONS,
   OIDC_ID_TOKEN_TTL_SECONDS,
   OIDC_REFRESH_GRACE_SECONDS,
   OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS,
@@ -99,20 +100,27 @@ async function atHash(accessToken: string): Promise<string> {
 }
 
 /**
- * The fixed words a token's `revoked_reason` holds, declared once; every statement here writes one of
- * them, and the revocation cascades (#2019) add theirs to this list. The table checks only the
- * shape, so a new word needs no migration.
+ * The fixed words a token's `revoked_reason` holds, declared once; every statement that revokes a
+ * token writes one of them, here and in `services/oidc-cascade.ts`. The table checks only the shape,
+ * so a new word needs no migration.
  *
  *   code_replay         its code was redeemed a second time
  *   refresh_reuse       a spent, revoked or already retried refresh token of its family was presented
  *   refresh_superseded  a sibling (another child of the same parent) was rotated first
  *   client_revoked      its client revoked it (RFC 7009)
+ *   client_disabled     the owner disabled its client, which revokes everything the client holds
+ *
+ * and the words of the paths that end an account's grants (phase #2019), `OIDC_END_REASONS` in
+ * `shared/oidc.ts`: `account_revoked`, `account_deleted`, `account_merged`, `compute_suspended`,
+ * `orcid_changed` and `kind_changed`.
  */
 export const OIDC_TOKEN_REVOKE_REASONS = [
   "code_replay",
   "refresh_reuse",
   "refresh_superseded",
   "client_revoked",
+  "client_disabled",
+  ...OIDC_END_REASONS,
 ] as const;
 export type OidcTokenRevokeReason = (typeof OIDC_TOKEN_REVOKE_REASONS)[number];
 

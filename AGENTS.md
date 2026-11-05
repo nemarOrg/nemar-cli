@@ -347,6 +347,14 @@ credential needs the lines too; those counts are load-bearing, so add yourself t
 than assuming someone else did. A role demotion and an API key revocation deliberately leave
 `private` sessions alone; `PRIVATE_REVOKE_ALL_SQL` says why.
 
+A third set hangs off the account itself: the grants, tokens and codes of NEMAR's OpenID Connect
+provider (ADR 0119). `oidcEndStatements` in `services/oidc-cascade.ts` is added to the batch of
+every path that ends a credential for good, `OIDC_END_CALLERS` lists them, and a test holds that
+list to the code. A role demotion, an API key revocation and the app session's sign-out leave
+those grants alone on purpose (rule 12). A back-channel logout is queued in that batch and sent
+afterwards, never inside it: a request to a partner's server must not be able to fail a
+revocation, and no dev or staging Worker may reach a real partner host (rule 15).
+
 ### Never hand-bump the version
 
 `package.json` version is owned by CI. Do not edit it, and do **not** run

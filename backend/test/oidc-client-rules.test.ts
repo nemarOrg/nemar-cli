@@ -66,6 +66,10 @@ describe("the first-party predicate, in production and outside it", () => {
     ["https://localhost/cb", false, true],
     ["https://127.0.0.1:9443/cb", false, true],
     ["https://[::1]/cb", false, true],
+    // a fully qualified name is the same host: the trailing dot changes nothing
+    ["http://localhost.:3000/cb", false, true],
+    ["https://localhost./cb", false, true],
+    ["http://localhost..:3000/cb", false, false],
     ["http://localhost.evil.example/cb", false, false],
     ["http://127.0.0.1.evil.example/cb", false, false],
     // website previews: a Pages project NEMAR deploys, outside production only
@@ -399,6 +403,9 @@ describe("a back-channel logout address in production is a named host", () => {
     "https://[2001:db8::1]/logout",
     "https://192.168.0.1/logout",
     "https://app.localhost/logout",
+    // The same hosts as fully qualified names: `URL` keeps the dot, and the registry must not.
+    "https://localhost./logout",
+    "https://app.localhost./logout",
   ];
 
   test.each(HOSTS)("%s is refused in production", async (uri) => {
@@ -426,6 +433,34 @@ describe("a back-channel logout address in production is a named host", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+
+describe("the host tests fold a trailing dot, so registration and the sender agree", () => {
+  test("a loopback or literal host is one with or without its dot", async () => {
+    const { isLocalOrLiteral, isLoopbackHost } = await import("../src/services/oidc-clients");
+    for (const host of ["localhost", "localhost.", "127.0.0.1", "127.0.0.1.", "[::1]"]) {
+      expect(isLoopbackHost(host), host).toBe(true);
+      expect(isLocalOrLiteral(host), host).toBe(true);
+    }
+    for (const host of [
+      "app.localhost",
+      "app.localhost.",
+      "app.localhost..",
+      "localhost..",
+      "10.0.0.5",
+      "[2001:db8::1]",
+      "[2001:db8::1].",
+    ]) {
+      expect(isLocalOrLiteral(host), host).toBe(true);
+    }
+    // The refusing side folds every dot; the loopback test (a first-party address outside production)
+    // folds one, the way a fully qualified name is written.
+    expect(isLoopbackHost("localhost..")).toBe(false);
+    for (const host of ["example.org", "example.org.", "localhost.example.org", "notlocalhost"]) {
+      expect(isLocalOrLiteral(host), host).toBe(false);
+      expect(isLoopbackHost(host), host).toBe(false);
+    }
+  });
+});
 
 describe("the sign-in rule and the consent mode are checked in the registry too", () => {
   test("a direct caller of the registry gets a typed refusal, not a 500 from the table's CHECK", async () => {
