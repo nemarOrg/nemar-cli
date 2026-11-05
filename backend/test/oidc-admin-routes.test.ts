@@ -50,7 +50,7 @@ function oidcRoutes(): Array<[string, string]> {
 }
 
 describe("the owner routes the admin router has", () => {
-  test("are exactly the nine of phases #2016 and #2019", () => {
+  test("are exactly the ten of phases #2016 and #2019", () => {
     expect(oidcRoutes().sort()).toEqual(
       [
         ["GET", "/admin/oidc/clients"],
@@ -62,6 +62,7 @@ describe("the owner routes the admin router has", () => {
         ["POST", "/admin/oidc/keys/rotate"],
         ["POST", `/admin/oidc/keys/${KID}/revoke`],
         ["POST", `/admin/oidc/accounts/${USER_ID}/end`],
+        ["GET", "/admin/oidc/logout-deliveries"],
       ].sort(),
     );
   });

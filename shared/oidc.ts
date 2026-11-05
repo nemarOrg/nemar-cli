@@ -338,6 +338,8 @@ export function isOidcLogoutStatus(value: unknown): value is OidcLogoutStatus {
  *                    production a loopback or an IP literal)
  *   client_disabled  the client was disabled before the token was sent: telling it is not owed
  *   fenced           outside production, an address that is neither loopback nor listed
+ *   unreported       the last attempt was claimed and never recorded (the Worker was evicted) and
+ *                    none is left to make
  */
 export const OIDC_LOGOUT_ERROR_CLASSES = [
   "timeout",
@@ -350,6 +352,7 @@ export const OIDC_LOGOUT_ERROR_CLASSES = [
   "address_refused",
   "client_disabled",
   "fenced",
+  "unreported",
 ] as const;
 export type OidcLogoutErrorClass = (typeof OIDC_LOGOUT_ERROR_CLASSES)[number];
 

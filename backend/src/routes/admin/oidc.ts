@@ -15,6 +15,8 @@
  *   POST /admin/oidc/accounts/:id/end                  end an account's grants at every client and queue
  *                                                      the logouts (the manual merge of ADR 0043, and the
  *                                                      incident tool)
+ *   GET  /admin/oidc/logout-deliveries                 the back-channel logouts owed to clients and what
+ *                                                      became of each; `?status=` and `?limit=`
  *
  * WHO AND WHERE. `ownerMiddleware` first, so a caller is told what they are (401, 403) whether or not
  * the surface exists; then `oidcSurface`, which makes every route 404 unless the provider is on
@@ -53,10 +55,12 @@ import {
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
   OIDC_KID_HEX_LENGTH,
+  OIDC_LOGOUT_STATUSES,
   type OidcAccountEndReason,
   type OidcEndReason,
   isOidcClientId,
   isOidcKid,
+  isOidcLogoutStatus,
 } from "../../../../shared/oidc";
 import { auditLogStatement } from "../../db/audit-log";
 import { ownerMiddleware } from "../../middleware/auth";
@@ -69,6 +73,8 @@ import {
   rotateClientSecret,
 } from "../../services/oidc-clients";
 import { listSigningKeys, revokeSigningKey, rotateSigningKeys } from "../../services/oidc-keys";
+import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
+import { COUNT_DELIVERIES_SQL, LIST_DELIVERIES_SQL } from "../../services/oidc-logout-store";
 import type { Bindings, Variables } from "../../types/bindings";
 import { oidcSurface } from "../oidc-discovery";
 import type { AdminRouter } from "./shared";
@@ -176,6 +182,7 @@ async function endAccount(c: Ctx, userId: number, reason: OidcEndReason): Promis
       details: JSON.stringify({ reason }),
     }),
   ]);
+  deferLogoutDelivery(c.env, userId, backgroundOf(c));
   return c.json({
     user_id: userId,
     reason,
@@ -253,6 +260,40 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
     const result = await disableClient(c.env, id.id, c.get("user").id);
     if (!result.ok) return refusal(c, 404, "client_not_found", "There is no client with that id.");
     return c.json({ client: result.client, changed: result.changed, revoked: result.revoked });
+  });
+
+  admin.get("/oidc/logout-deliveries", async (c) => {
+    const status = c.req.query("status");
+    if (status !== undefined && !isOidcLogoutStatus(status)) {
+      return refusal(
+        c,
+        400,
+        "invalid_status",
+        `status must be one of: ${OIDC_LOGOUT_STATUSES.join(", ")}.`,
+      );
+    }
+    const limitText = c.req.query("limit");
+    if (limitText !== undefined && !/^[1-9][0-9]{0,2}$/.test(limitText)) {
+      return refusal(c, 400, "invalid_body", "limit must be a whole number from 1 to 500.");
+    }
+    const limit = limitText === undefined ? 100 : Number(limitText);
+    if (limit > 500) {
+      return refusal(c, 400, "invalid_body", "limit must be a whole number from 1 to 500.");
+    }
+    const db = c.env.DB;
+    const [rows, tallies] = await Promise.all([
+      db
+        .prepare(LIST_DELIVERIES_SQL)
+        .bind(status ?? null, status ?? null, limit)
+        .all(),
+      db.prepare(COUNT_DELIVERIES_SQL).all<{ status: string; n: number }>(),
+    ]);
+    // Every status is present, so a reader never has to tell "none" from "not reported".
+    const counts: Record<string, number> = Object.fromEntries(
+      OIDC_LOGOUT_STATUSES.map((s) => [s, 0]),
+    );
+    for (const t of tallies.results ?? []) counts[t.status] = t.n;
+    return c.json({ deliveries: rows.results ?? [], counts });
   });
 
   admin.post("/oidc/accounts/:id/end", async (c) => {

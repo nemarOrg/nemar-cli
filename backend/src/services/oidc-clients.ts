@@ -185,7 +185,7 @@ const FORBIDDEN_IN_ADDRESS = /[\s\\*\p{Cc}]/u;
 /** Characters that never belong in a name or an audience. */
 const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
-function isLoopbackHost(hostname: string): boolean {
+export function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
@@ -195,7 +195,7 @@ function isIpLiteral(hostname: string): boolean {
 }
 
 /** A host that names the machine itself or no name at all: loopback, `localhost` or any IP literal. */
-function isLocalOrLiteral(hostname: string): boolean {
+export function isLocalOrLiteral(hostname: string): boolean {
   return isLoopbackHost(hostname) || hostname.endsWith(".localhost") || isIpLiteral(hostname);
 }
 

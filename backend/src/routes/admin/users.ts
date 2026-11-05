@@ -49,6 +49,7 @@ import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
 import { oidcEndStatements } from "../../services/oidc-cascade";
+import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
 import { holderOfOidcSubject } from "../../services/oidc-subject";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
@@ -534,6 +535,9 @@ async function finalizeRevocation(
     // come back with nothing, and a cascade outside the batch could fail alone.
     ...oidcEndStatements(user.id, "account_revoked").map((s) => db.prepare(s.sql).bind(...s.binds)),
   ]);
+  // The logouts are queued; the first attempt is made after the response, so no partner can slow or
+  // fail this revocation, and a partner that fails leaves the account revoked (the tick retries).
+  deferLogoutDelivery(c.env, user.id, backgroundOf(c));
 
   // Update user status
   // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
@@ -1327,6 +1331,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       }
 
       const applied = await applyKindChange(db, target, newKind);
+      // A change away from person queued logouts in the same batch (a change that ended nothing queued
+      // none, and this finds nothing due).
+      deferLogoutDelivery(c.env, target.id, backgroundOf(c));
 
       if (!applied) {
         return c.json(
@@ -1767,6 +1774,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         500,
       );
     }
+
+    // The clients that registered a logout address were queued inside the tombstone's batch; the first
+    // attempt is made after the response, and the tick retries what it leaves.
+    deferLogoutDelivery(c.env, id, backgroundOf(c));
 
     // Audit log (audit_log.user_id has no cascade, so the row survives). resource_id
     // is the non-PII integer id and details carries NO original username/email —

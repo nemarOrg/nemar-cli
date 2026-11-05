@@ -93,6 +93,7 @@ import {
   normalizeOrcid,
 } from "../services/identity";
 import { oidcEndStatements } from "../services/oidc-cascade";
+import { deferLogoutDelivery } from "../services/oidc-logout";
 import {
   CLI_STATE_TTL_MS,
   type CliOauthState,
@@ -918,6 +919,8 @@ authOrcidRoutes.get("/orcid/callback", webSessionMiddleware, async (c) => {
           if (claimedByAnother(err)) return fail("orcid_in_use", state.next);
           throw err;
         }
+        // The grants that rested on the old iD were ended in the swap's batch; tell their clients.
+        deferLogoutDelivery(c.env, actingUserId, (work) => afterResponse(c, work));
         afterResponse(c, refreshUserName(c.env, actingUserId, orcid));
         return redirect(`${frontend}${state.next}`, clearState);
       }
@@ -1276,5 +1279,7 @@ authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
     console.error("[auth-orcid] unlink failed", err);
     return c.json({ error: "Unlink failed" }, 500);
   }
+  // The `person_proven_orcid` clients were queued in the batch; the first attempt follows the response.
+  deferLogoutDelivery(c.env, actor.id, (work) => afterResponse(c, work));
   return c.json({ ok: true });
 });

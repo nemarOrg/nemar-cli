@@ -99,6 +99,7 @@ import {
   verificationLogLine,
 } from "./services/neurobagel-verify";
 import { getActiveNotices } from "./services/notices";
+import { logoutTickLogLine, runOidcLogoutRetryTick } from "./services/oidc-logout";
 import { sweepStalePrReviews } from "./services/pr-review";
 import { sweepPublicationReviews } from "./services/publication-review";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
@@ -1179,6 +1180,30 @@ export default {
             .catch((err) =>
               console.error(
                 "[repull-advance] tick failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // Epic #2014 phase #2019 (ADR 0119 rule 15): the back-channel logout retry tick. A client that
+        // registered a logout address is told when an account's grants end, from `waitUntil` right after
+        // the commit; a delivery that did not go through (a 5xx, a timeout, no connection) is retried
+        // here on its own schedule (1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours, so a short
+        // wait is taken up at the next half hour), at most 20 a tick, each in its own try and catch.
+        // PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it makes OUTBOUND requests to
+        // addresses partners registered, and the dev Worker shares real accounts. It also refuses outside
+        // exact production on its own, and a delivery is sent only to an https host the registry
+        // validated. It mails nobody, calls no GitHub and touches no DOI or bucket. One log line, only
+        // when it found a delivery or failed, with counts and a fixed word and nothing else.
+        ctx.waitUntil(
+          runOidcLogoutRetryTick(env)
+            .then((r) => {
+              const log = r ? logoutTickLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[oidc-logout] tick failed:",
                 err instanceof Error ? (err.stack ?? err.message) : err,
               ),
             ),

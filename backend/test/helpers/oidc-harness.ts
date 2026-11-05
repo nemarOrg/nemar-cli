@@ -24,12 +24,26 @@ export const ADMIN_KEY = "oidc-admin-key-0123456789abcdef0123456789abcdef";
 export const MEMBER_KEY = "oidc-member-key-0123456789abcdef0123456789abcd";
 const BYPASS = "oidc-harness-bypass-token";
 
-const ctx = {
-  waitUntil: (p: Promise<unknown>) => {
-    p.catch(() => {});
-  },
-  passThroughOnException: () => {},
-} as unknown as ExecutionContext;
+/**
+ * The platform's `ExecutionContext`, per harness: `waitUntil` keeps the promise it is given, so a
+ * suite can wait for the work a request handed to it (`settle`), as a Worker's runtime would let it
+ * finish after the response. A rejection is swallowed here and nowhere else.
+ */
+function executionContext(): { ctx: ExecutionContext; settle(): Promise<void> } {
+  const pending: Promise<unknown>[] = [];
+  return {
+    ctx: {
+      waitUntil: (p: Promise<unknown>) => {
+        pending.push(p.catch(() => {}));
+      },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext,
+    async settle() {
+      // The work may hand more work to `waitUntil` (a retry), so drain until none is left.
+      while (pending.length > 0) await Promise.all(pending.splice(0, pending.length));
+    },
+  };
+}
 
 export interface Answer {
   status: number;
@@ -44,6 +58,8 @@ export interface OidcHarness {
   /** The bindings every call uses; `over` of the harness is already applied. */
   env: Bindings;
   ids: { owner: number; admin: number; member: number };
+  /** Wait for everything the requests so far handed to `waitUntil` (a logout's first attempt). */
+  settle(): Promise<void>;
   /** One request to the Worker. `base` defaults to the issuer's origin. */
   call(
     method: string,
@@ -104,10 +120,12 @@ export async function startOidcHarness(over: Partial<Bindings> = {}): Promise<Oi
     ...over,
   } as unknown as Bindings;
 
+  const { ctx, settle } = executionContext();
   return {
     db,
     env,
     ids,
+    settle,
     async call(method, path, opts = {}) {
       const headers: Record<string, string> = { ...(opts.headers ?? {}) };
       if (opts.bypass !== false) headers["X-Test-Bypass"] = BYPASS;
