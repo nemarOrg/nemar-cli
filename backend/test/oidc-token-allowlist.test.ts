@@ -21,6 +21,7 @@ import { COMPOSED_HANDLER } from "hono/utils/constants";
 import { __workerRouteTable } from "../src/index";
 import { isOidcBearerMiddleware } from "../src/middleware/oidc-bearer";
 import { resolvePrincipal } from "../src/rpc/principal";
+import { hashApiKey } from "../src/services/token";
 import {
   authorize,
   redeem,
@@ -38,9 +39,22 @@ const OIDC_ROUTE_RE =
 /** Where `oidcBearer` may sit: the resource routes that serve a scope. Today, userinfo only. */
 const OIDC_BEARER_ROUTE_RE = /^(\/nemar)?\/oauth\/userinfo$/;
 
-/** A value for every path parameter the table uses; an absent dataset, client, key or account. */
+/** A dataset the token's account owns and nobody else may read: what an accepted token would reveal. */
+const PRIVATE_DATASET = "nm000901";
+
+/** The account's own API key, so a test can show what an authenticated answer looks like. */
+const OWN_KEY = `nm_${"K".repeat(43)}`;
+
+/** An admin-only notice: what the notices route would show an owner it authenticated. */
+const ADMIN_NOTICE = "admin-only notice for the allowlist test";
+
+/**
+ * A value for every path parameter the table uses: the account's PRIVATE dataset for `:id` (so a
+ * dataset route that honoured the token would answer differently), and an absent data-plane dataset,
+ * client, key or account for the rest.
+ */
 const PARAM_VALUES: Record<string, string> = {
-  id: "nm099900",
+  id: PRIVATE_DATASET,
   datasetId: "nm099900",
   dataset: "nm099900",
   version: "1.0.0",
@@ -138,6 +152,21 @@ beforeAll(async () => {
   });
   // An administrator, so a route that would honour the token would have every reason to.
   h.db.query("UPDATE users SET role = 'owner' WHERE id = ?").run(userId);
+  // What only this account may see: its private dataset, an admin-only notice, and its own API key.
+  h.db
+    .query(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox)
+       VALUES (?, 'A private dataset only its owner may read', ?, 'active', 'private', 0)`,
+    )
+    .run(PRIVATE_DATASET, userId);
+  h.db
+    .query(
+      "INSERT INTO notices (message, level, scope, created_by) VALUES (?, 'warning', 'admins', ?)",
+    )
+    .run(ADMIN_NOTICE, userId);
+  h.db
+    .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+    .run(userId, await hashApiKey(OWN_KEY), OWN_KEY.slice(0, 8));
   const cookie = await sessionCookie(h, userId);
   const code = await authorize(h, client, cookie, {
     scope: "openid profile email orcid nemar.account offline_access",
@@ -229,6 +258,40 @@ describe("an OIDC access token is refused by every route that is not an OIDC rou
     },
     { timeout: 120_000 },
   );
+
+  test("an optional-auth route answers the token as a credential it cannot use, and the owner's key differently", async () => {
+    // The table-wide comparison above sees a regression in `optionalAuthMiddleware` only where the
+    // owner's view differs from an anonymous one; these routes are seeded so that it does, and the
+    // owner's own key proves each comparison can fail. The reference is an unknown key's answer: a
+    // rejected bearer sets `authAttempted`, so a private dataset tells it "your key was rejected"
+    // rather than "not found". Where that flag plays no part (`/notices`), the token's answer is also
+    // exactly the answer to no credential at all.
+    for (const path of [
+      "/notices",
+      `/datasets/${PRIVATE_DATASET}`,
+      `/datasets/${PRIVATE_DATASET}/manifest`,
+    ]) {
+      const unknown = await h.call("GET", path, { key: UNKNOWN_KEY });
+      const token = await h.call("GET", path, { key: accessToken });
+      const owner = await h.call("GET", path, { key: OWN_KEY });
+      expect({ path, status: token.status, body: stable(token.text) }).toEqual({
+        path,
+        status: unknown.status,
+        body: stable(unknown.text),
+      });
+      expect({
+        path,
+        sameAsUnknown:
+          owner.status === unknown.status && stable(owner.text) === stable(unknown.text),
+      }).toEqual({ path, sameAsUnknown: false });
+    }
+    const anonymous = await h.call("GET", "/notices");
+    const token = await h.call("GET", "/notices", { key: accessToken });
+    expect(stable(token.text)).toBe(stable(anonymous.text));
+    // The notice itself, to be plain about what the difference is.
+    expect((await h.call("GET", "/notices", { key: OWN_KEY })).text).toContain(ADMIN_NOTICE);
+    expect(token.text).not.toContain(ADMIN_NOTICE);
+  });
 
   test("the refresh token and the client secret are refused the same way", async () => {
     for (const token of [refreshToken, clientSecret]) {
