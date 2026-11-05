@@ -1587,43 +1587,185 @@ describe("no path writes a pool's totals except a ledger entry", () => {
   });
 
   /**
-   * Every statement of a text that inserts an entry of kind `refund`: the kind has no writer. The
-   * kind is the value written (`VALUES ('refund'` or `SELECT 'refund'`), not a word in a WHERE.
+   * Paren depth and quote state at each character of a statement, so a comma or a keyword can be
+   * judged TOP-LEVEL (outside any parenthesis or quoted text).
    */
-  function refundWrites(text: string): string[] {
-    return [...text.matchAll(statement("INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO", LEDGER))]
-      .map((m) => m[0])
-      .filter((sql) =>
-        /(?:VALUES\s*\(\s*|SELECT\s+|UNION\s+ALL\s+SELECT\s+)['"]refund['"]/i.test(sql),
-      )
-      .map((sql) => sql.replace(/\s+/g, " ").slice(0, 90));
+  function topLevelMap(sql: string): { depth: number[]; quoted: boolean[] } {
+    const depth: number[] = [];
+    const quoted: boolean[] = [];
+    let d = 0;
+    let q: string | null = null;
+    for (const c of sql) {
+      if (q) {
+        depth.push(d);
+        quoted.push(true);
+        if (c === q) q = null;
+      } else if (c === "'" || c === '"') {
+        q = c;
+        depth.push(d);
+        quoted.push(true);
+      } else if (c === "(") {
+        depth.push(d++);
+        quoted.push(false);
+      } else if (c === ")") {
+        depth.push(--d);
+        quoted.push(false);
+      } else {
+        depth.push(d);
+        quoted.push(false);
+      }
+    }
+    return { depth, quoted };
   }
 
-  test("no statement the product ships writes an entry of kind refund (the owner decided that none is automatic)", () => {
-    // The scan sees one in every spelling a statement takes, and none of the ones that are fine.
+  /** The pieces of a list, split on its top-level commas. */
+  function splitTop(list: string): string[] {
+    const { depth, quoted } = topLevelMap(list);
+    const out: string[] = [];
+    let from = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i] === "," && depth[i] === 0 && !quoted[i]) {
+        out.push(list.slice(from, i).trim());
+        from = i + 1;
+      }
+    }
+    out.push(list.slice(from).trim());
+    return out;
+  }
+
+  /** A string literal, bare or with its quotes escaped as inside a JavaScript string. */
+  const LITERAL = /^\\?['"][a-z_]+\\?['"]$/i;
+  const REFUND = /\\?['"]refund\\?['"]/i;
+
+  /**
+   * What is wrong with one statement that inserts into the ledger, as sentences (empty when
+   * nothing is). The kind `refund` has no writer (the owner decided on 2026-11-04 that none is
+   * automatic), so: a `'refund'` literal anywhere in the statement that is not the right side of a
+   * comparison or inside an `IN (...)` list (those are reads, such as the final settlement's
+   * `r.kind = 'refund'` guard) is refused wherever it stands, and so is a kind that is not a plain
+   * literal in the kind column's position of every VALUES row and every top-level SELECT list (a
+   * bound `?`, a column, an expression), because the scan could not say what it writes. A statement
+   * that a template interpolation cuts short (`settleInsertSql` starts from `${SETTLE_INSERT_HEAD}`) is
+   * seen only as far as the interpolation, and its head names columns and no values, so the kind
+   * position of its SELECTs is out of this scan's reach; the behavioural test of
+   * compute-ledger-budget.test.ts, which runs every operation and finds no `refund` row, covers it.
+   */
+  function ledgerInsertProblems(sql: string): string[] {
+    const flat = sql.replace(/\s+/g, " ");
+    const problems: string[] = [];
+    const written = flat
+      .replace(/(?:=|<>|!=)\s*\\?['"]refund\\?['"]/gi, "")
+      .replace(/\bIN\s*\([^)]*\)/gi, "");
+    if (REFUND.test(written)) problems.push("a refund literal that is not a comparison");
+
+    const whole = topLevelMap(flat);
+    const open = flat.indexOf("(");
+    if (open < 0) return [...problems, "no column list"];
+    let close = open + 1;
+    while (
+      close < flat.length &&
+      !(flat[close] === ")" && !whole.quoted[close] && whole.depth[close] === 0)
+    ) {
+      close++;
+    }
+    const kind = splitTop(flat.slice(open + 1, close)).indexOf("kind");
+    if (kind < 0) return [...problems, "no kind column"];
+    const rest = flat.slice(close + 1);
+    const map = topLevelMap(rest);
+    const atTop = (i: number) => map.depth[i] === 0 && !map.quoted[i];
+    const exprs: Array<string | undefined> = [];
+    const values = [...rest.matchAll(/\bVALUES\b/gi)].find((m) => atTop(m.index as number));
+    if (values) {
+      const after = rest.slice((values.index as number) + 6);
+      const inner = topLevelMap(after);
+      let from = -1;
+      for (let i = 0; i < after.length; i++) {
+        if (after[i] === "(" && inner.depth[i] === 0 && !inner.quoted[i]) from = i + 1;
+        if (after[i] === ")" && inner.depth[i] === 0 && !inner.quoted[i] && from >= 0) {
+          exprs.push(splitTop(after.slice(from, i))[kind]);
+          from = -1;
+        }
+      }
+    }
+    for (const m of rest.matchAll(/\bSELECT\b/gi)) {
+      if (!atTop(m.index as number)) continue;
+      const start = (m.index as number) + 6;
+      const end = [...rest.slice(start).matchAll(/\b(?:FROM|WHERE|UNION)\b/gi)].find((e) =>
+        atTop(start + (e.index as number)),
+      );
+      exprs.push(
+        splitTop(rest.slice(start, end ? start + (end.index as number) : undefined))[kind],
+      );
+    }
+    for (const expr of exprs) {
+      if (expr === undefined || !LITERAL.test(expr)) {
+        problems.push(`the kind is not a plain literal: ${expr ?? "missing"}`);
+      }
+    }
+    return problems;
+  }
+
+  /** Every statement of a text that inserts into the ledger and has a problem, as one line each. */
+  function ledgerKindOffences(text: string): string[] {
+    return [...text.matchAll(statement("INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO", LEDGER))].flatMap((m) =>
+      ledgerInsertProblems(m[0]).map(
+        (problem) => `${problem}: ${m[0].replace(/\s+/g, " ").slice(0, 100)}`,
+      ),
+    );
+  }
+
+  test("no statement the product ships writes a refund entry, or a kind the scan cannot read", () => {
+    // Every spelling of a write the scan must see: the first shape each was found to survive the
+    // old scan in is listed last.
     for (const planted of [
       "INSERT INTO compute_ledger (kind, pool_id) VALUES ('refund', 1)",
       "insert into main.compute_ledger (kind) values ('refund')",
       "INSERT INTO compute_ledger (kind, pool_id) SELECT 'refund', d.pool_id FROM t d",
       "INSERT INTO compute_ledger (kind) SELECT 'grant' UNION ALL SELECT 'refund'",
       'INSERT INTO "compute_ledger" (kind) VALUES ("refund")',
+      // The kind is not the first column or the first value.
+      "INSERT INTO compute_ledger (pool_id, kind, charged_delta_milli) VALUES (?1, 'refund', -1)",
+      "INSERT INTO compute_ledger (pool_id, kind) SELECT d.pool_id, 'refund' FROM t d",
+      'INSERT INTO compute_ledger (pool_id, kind) VALUES (1, "refund"), (2, "refund")',
+      // The kind is bound, read from a column or computed, so the scan cannot say what it is.
+      "INSERT INTO compute_ledger (kind, pool_id) VALUES (?1, ?2)",
+      "INSERT INTO compute_ledger (pool_id, kind) VALUES (?1, ?2)",
+      "INSERT INTO compute_ledger (pool_id, kind) SELECT d.pool_id, ?1 FROM t d",
+      "INSERT INTO compute_ledger (pool_id, kind) SELECT d.pool_id, d.kind FROM t d",
+      "INSERT INTO compute_ledger (kind) SELECT 'grant' UNION ALL SELECT ?1",
+      "INSERT INTO compute_ledger (kind, pool_id) VALUES ('grant' || ?1, 1)",
+      "INSERT INTO compute_ledger (kind, pool_id) VALUES ('grant', 1), (?1, 2)",
+      // The literal escaped as it is inside a JavaScript string.
+      String.raw`INSERT INTO compute_ledger (pool_id, kind) VALUES (1, \'refund\')`,
     ]) {
-      expect([planted, refundWrites(`const q = \`${planted}\`;`).length > 0]).toEqual([
+      expect([planted, ledgerKindOffences(`const q = \`${planted}\`;`).length > 0]).toEqual([
         planted,
         true,
       ]);
     }
     for (const fine of [
       "INSERT INTO compute_ledger (kind, pool_id) VALUES ('grant', 1)",
+      "INSERT INTO compute_ledger (pool_id, kind) VALUES (?1, 'grant'), (?2, 'expire')",
+      "INSERT INTO compute_ledger (pool_id, kind) SELECT (SELECT 1 FROM t), 'hold' FROM t",
+      "INSERT INTO compute_ledger (kind) SELECT 'charge' FROM t UNION ALL SELECT 'overrun' FROM t",
       "INSERT INTO other_table (kind) VALUES ('refund')",
+      "INSERT INTO other_table (kind) VALUES (?1)",
       "SELECT kind FROM compute_ledger WHERE kind = 'refund'",
       // The final settlement's statement READS refund entries (a guard), which is not writing one.
       "INSERT INTO compute_ledger (kind) SELECT 'adjust' FROM t d WHERE NOT EXISTS (SELECT 1 FROM compute_ledger r WHERE r.kind = 'refund')",
+      "INSERT INTO compute_ledger (kind) SELECT 'adjust' FROM t d WHERE d.kind IN ('x', 'refund') AND d.kind <> 'refund'",
+      // A head cut short by an interpolation names columns and no values: nothing to judge.
+      "INSERT INTO compute_ledger\n  (kind, pool_id, held_delta_milli)",
     ]) {
-      expect([fine, refundWrites(`const q = \`${fine}\`;`)]).toEqual([fine, []]);
+      expect([fine, ledgerKindOffences(`const q = \`${fine}\`;`)]).toEqual([fine, []]);
     }
+    // The scan reads the statements it is meant to: the seven the ledger service ships.
+    const inserts = sources().flatMap(({ text }) => [
+      ...text.matchAll(statement("INSERT(?:\\s+OR\\s+\\w+)?\\s+INTO", LEDGER)),
+    ]);
+    expect(inserts.length).toBeGreaterThanOrEqual(7);
     const offences = sources().flatMap(({ path, text }) =>
-      refundWrites(text).map((sql) => `${path}: ${sql}`),
+      ledgerKindOffences(text).map((problem) => `${path}: ${problem}`),
     );
     expect(offences).toEqual([]);
   });
