@@ -42,16 +42,17 @@
 --     the same cpu or gpu word as its pool, and an entry on a platform pool names none. This holds
 --     for every kind, a refund and a correction of a charge included, whenever a budget is named.
 --   * `compute_ledger_budget_required`: a hold, a release, a charge, an overrun and a job's
---     final-settlement adjustment on an account or partner pool MUST name that budget. These are
---     the entries on which the owner's two options for the budget agree: the budget records what
---     people consumed, so each of them moves it under either option.
+--     final-settlement adjustment on an account or partner pool MUST name that budget, because the
+--     budget records what people consumed and each of them moves it.
 -- A refund, and an adjustment of a charge that names no job, may name the people budget or none,
--- and the table does not say which. Whether they credit the budget back is still the owner's open
--- decision (ADR 0118, amendment 2026-11-04, item 5): under option A the people budget records
--- consumption only, and a refund or a correction moves the person's pool alone; under option B it
--- also credits the budget back. That choice is made in the code of services/compute-ledger.ts,
--- which today follows option B, and an owner who picks option A changes the code and not this
--- table.
+-- and the table does not say which: that is a rule of the code and not of the table. The owner
+-- decided on 2026-11-04 (ADR 0118, amendment 2026-11-04, item 5: option A) that the people budget
+-- records consumption only, so nothing a person or an administrator does to a person's pool credits
+-- it back. services/compute-ledger.ts follows it: it writes no refund, it names NO budget for a
+-- correction that lowers a charge (a person's pool falls and the budget stays), and a job's final
+-- settlement is the only entry that names the budget and lowers it, because it corrects a figure
+-- that was recorded as consumption. The table would take the other choice, which is why the code's
+-- tests, and not a trigger, hold the rule.
 --
 -- WHAT THE DATABASE CANNOT PREVENT, which only a reader and the source scan guard:
 --   * `INSERT OR REPLACE` and `REPLACE INTO` rewrite a conflicting row without firing the
@@ -186,7 +187,8 @@ INSERT INTO compute_pools (holder_kind, holder_ref, pool) VALUES ('platform', 'p
 --     release held-                         a hold given back in full (a job that never started)
 --     charge held <= 0, charged >= 0        a hold settled: the hold leaves `held`, what the job
 --                                           used (never more than the hold) enters `charged`
---     refund charged-                       a charge returned (a failure NEMAR caused)
+--     refund charged-                       a charge returned; no code writes one (nothing is refunded
+--                                           automatically), and the kind stays in this vocabulary
 --     adjust exactly one of granted/charged, with no job: an admin's correction, either way
 --            granted 0 and any charged, with a job: that job's FINAL SETTLEMENT (Expanse's own
 --            figure), which may be of nothing, because its key `job:<id>:final` is what records
@@ -308,12 +310,12 @@ BEGIN
   SELECT RAISE(ABORT, 'a ledger entry''s budget is the platform people pool of the same word as its account or partner pool, and a platform pool names none');
 END;
 
--- The other half, for the entries on which both of the owner's budget options agree: a hold, a
--- release, a charge, an overrun and a job's final-settlement adjustment on an account or partner
--- pool MUST name that budget, so a caller that forgot it is refused and the budget's totals cannot
--- fall behind the people's. A refund and an adjustment of a charge with no job are NOT listed: they
--- may name the budget or none, because whether they credit it back is the owner's open decision and
--- the code's choice, not the table's (the header says which).
+-- The other half, for the entries that always move the budget: a hold, a release, a charge, an
+-- overrun and a job's final-settlement adjustment on an account or partner pool MUST name that
+-- budget, so a caller that forgot it is refused and the budget's totals cannot fall behind the
+-- people's. A refund and an adjustment of a charge with no job are NOT listed: they may name the
+-- budget or none, because never crediting the budget back is the code's rule (the owner's option
+-- A), not the table's (the header says which).
 CREATE TRIGGER compute_ledger_budget_required BEFORE INSERT ON compute_ledger
 WHEN NEW.budget_pool_id IS NULL
   AND (NEW.kind IN ('hold', 'release', 'charge', 'overrun')
