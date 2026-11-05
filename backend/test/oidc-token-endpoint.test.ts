@@ -293,6 +293,19 @@ describe("a malformed token request is refused before anything is read", () => {
       headers: { Authorization: auth },
     });
     expectOauthError(json, 400, "invalid_request");
+    // A body that IS a valid form, sent under another type (or none), is refused as well: the type
+    // is checked, not only the shape the body happens to have.
+    for (const type of ["application/json", "text/plain", "multipart/form-data; boundary=x", ""]) {
+      const res = await h.call("POST", "/oauth/token", {
+        rawBody: good,
+        headers: { Authorization: auth, "Content-Type": type },
+      });
+      expect({ type, status: res.status, error: res.json?.error }).toEqual({
+        type,
+        status: 400,
+        error: "invalid_request",
+      });
+    }
     expectOauthError(
       await formPost(h, "/oauth/token", `${good}&code=${f.code}`, { authorization: auth }),
       400,
@@ -332,6 +345,15 @@ describe("a malformed token request is refused before anything is read", () => {
     );
     // None of these spent the code.
     expect(codeRow(f.code)?.used_at).toBeNull();
+    // The same form under the right type with a charset parameter is read, and redeems the code.
+    const charset = await h.call("POST", "/oauth/token", {
+      rawBody: good,
+      headers: {
+        Authorization: auth,
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      },
+    });
+    expect(charset.status).toBe(200);
   });
 
   test("a missing code, redirect_uri or code_verifier is invalid_request and spends nothing", async () => {

@@ -273,6 +273,19 @@ describe("rotation", () => {
     expect((await rowOf(f.first.refresh_token)).used_at).toBe(spentAt);
   });
 
+  test("a spent refresh token presented after its own expiry is still reuse: the family ends", async () => {
+    const f = await family();
+    const one = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    // The spent parent's own 30 days are over; its family's 90 are not.
+    await age(f.first.refresh_token, 30 * 24 * 3600 + 1);
+    expectInvalidGrant(await refresh(f.client, f.first.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    const rows = allRows().filter((r) => r.family_id === familyId);
+    expect(rows.length).toBe(4);
+    expect(rows.every((r) => r.revoked_reason === "refresh_reuse")).toBe(true);
+    expect(await userinfoStatus(one.access_token)).toBe(401);
+  });
+
   test("a revoked refresh token presented again revokes its family", async () => {
     const f = await family();
     const one = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
