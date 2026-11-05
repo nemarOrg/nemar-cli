@@ -1356,6 +1356,25 @@ describe("verification: a Tapis FINISHED stands only after the upload is verifie
     expect(sizeOnly.job.state).toBe("finished");
   });
 
+  // A listing is one page per 1,000 objects: a verification that read the first page only would call
+  // every output past it missing (or, worse, never look at it). The sizes are the boundaries.
+  for (const count of [999, 1000, 1001, 2500]) {
+    test(`${count} declared outputs are all checked: all present passes, and the LAST one missing fails as \`output_missing\``, async () => {
+      const outputs = Array.from({ length: count }, (_, i) => ({
+        path: `o${String(i).padStart(5, "0")}.txt`,
+        content: "x",
+      }));
+      const present = await verifyAfter(async () => {}, { outputs });
+      expect([count, present.job.state]).toEqual([count, "finished"]);
+      const missing = await verifyAfter(async () => {}, { outputs, skipUpload: count - 1 });
+      expect([count, missing.job.state, missing.job.failure_detail]).toEqual([
+        count,
+        "failed",
+        "output_missing",
+      ]);
+    }, 120_000);
+  }
+
   test("a launcher file replaced after `complete` by an object of another size fails as `launcher_file_missing`", async () => {
     const { job } = await verifyAfter(async (s) => {
       await fx.harness.results.put(
