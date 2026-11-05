@@ -165,22 +165,80 @@ describe("rotation", () => {
     const a = one.json as unknown as Issued;
     const b = retry.json as unknown as Issued;
     expect(b.refresh_token).not.toBe(a.refresh_token);
-    // Both children are live: the retry does not take the first one away.
+    // Until one of them is rotated, both answers work: a session that sent its refresh twice keeps
+    // whichever answer it stored.
     expect(await userinfoStatus(a.access_token)).toBe(200);
     expect(await userinfoStatus(b.access_token)).toBe(200);
     const parent = await rowOf(f.first.refresh_token);
     const children = allRows().filter((r) => r.parent_id === parent.id && r.kind === "refresh");
     expect(children).toHaveLength(2);
+    expect(children.every((r) => r.revoked_at === null)).toBe(true);
     // The grace is measured from the first rotation, which the retry did not move.
     expect((await rowOf(f.first.refresh_token)).used_at).toBe(parent.used_at);
+  });
 
-    // A third presentation inside the grace is no retry: the family is revoked.
+  test("a third presentation inside the grace is no retry: the family is revoked", async () => {
+    const f = await family();
+    const a = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    const b = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
     const third = await refresh(f.client, f.first.refresh_token);
     expectInvalidGrant(third);
     expect(liveCount()).toBe(0);
     for (const row of allRows()) expect(row.revoked_at).not.toBeNull();
     expect(await userinfoStatus(a.access_token)).toBe(401);
     expect(await userinfoStatus(b.access_token)).toBe(401);
+  });
+
+  test("the retry's two children are mutually exclusive: two holders end with the family revoked", async () => {
+    for (const firstToRotate of ["retried", "original"] as const) {
+      const f = await family();
+      // One holder rotates; a second holder of the same token presents it inside the grace.
+      const original = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+      const retried = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+      const [winner, loser] =
+        firstToRotate === "retried" ? [retried, original] : [original, retried];
+      // The winner's branch rotates on; doing so revokes the loser's unspent refresh token.
+      const next = await refresh(f.client, winner.refresh_token);
+      expect(next.status).toBe(200);
+      const loserRow = await rowOf(loser.refresh_token);
+      expect(loserRow).toMatchObject({ revoked_reason: "refresh_superseded" });
+      // The loser comes back: a revoked token, so the whole family ends, the winner's branch included.
+      expectInvalidGrant(await refresh(f.client, loser.refresh_token));
+      const familyRows = allRows().filter((r) => r.family_id === loserRow.family_id);
+      expect({
+        firstToRotate,
+        live: familyRows.filter((r) => r.revoked_at === null).length,
+      }).toEqual({
+        firstToRotate,
+        live: 0,
+      });
+      const later = next.json as unknown as Issued;
+      expect(await userinfoStatus(later.access_token)).toBe(401);
+      expectInvalidGrant(await refresh(f.client, later.refresh_token));
+    }
+  });
+
+  test("a single session that refreshed twice at once keeps working with either token it stored", async () => {
+    for (const stored of [0, 1]) {
+      const f = await family();
+      const answers = [
+        (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued,
+        (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued,
+      ];
+      let token = (answers[stored] as Issued).refresh_token;
+      for (let round = 0; round < 3; round++) {
+        const res = await refresh(f.client, token);
+        expect({ stored, round, status: res.status }).toEqual({ stored, round, status: 200 });
+        token = (res.json as unknown as Issued).refresh_token;
+      }
+      // Only the unstored sibling ended, and nothing was revoked for reuse.
+      const familyId = (await rowOf(f.first.refresh_token)).family_id;
+      const reasons = allRows()
+        .filter((r) => r.family_id === familyId)
+        .map((r) => r.revoked_reason)
+        .filter((r) => r !== null);
+      expect({ stored, reasons }).toEqual({ stored, reasons: ["refresh_superseded"] });
+    }
   });
 
   test("a spent parent presented after the grace revokes the whole family, access tokens included", async () => {
@@ -203,10 +261,12 @@ describe("rotation", () => {
     expectInvalidGrant(await refresh(f.client, two.refresh_token));
   });
 
-  test("inside the grace, at 29 seconds, the retry is still honoured, and moves nothing", async () => {
+  test("inside the grace, at 25 seconds, the retry is still honoured, and moves nothing", async () => {
+    // 25 and not 29: `datetime('now')` has one-second resolution, so a margin of a few seconds keeps
+    // the test inside the grace whatever second the request lands in.
     const f = await family();
     expect((await refresh(f.client, f.first.refresh_token)).status).toBe(200);
-    await age(f.first.refresh_token, 29);
+    await age(f.first.refresh_token, 25);
     const spentAt = (await rowOf(f.first.refresh_token)).used_at;
     expect((await refresh(f.client, f.first.refresh_token)).status).toBe(200);
     // The retry left the first rotation's time where it was: the grace never stretches.

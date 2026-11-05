@@ -30,8 +30,12 @@
  *   unspent with no child yet, OR it was spent under 30 seconds ago and has exactly one child (the
  *   retried request: one more child, never two); the access token is inserted beside that child; and
  *   the parent is marked spent if it was not already, so the grace is measured from the first
- *   rotation. A parent that is revoked, or spent and past the grace, or already retried, revokes its
- *   whole family (`refresh_reuse`), in a statement that re-checks that very condition. A refresh
+ *   rotation. THE CHILDREN OF ONE PARENT ARE MUTUALLY EXCLUSIVE: rotating one of them revokes its
+ *   unspent siblings (`refresh_superseded`) in the same batch, so the retry's second child and the
+ *   first can never both go on rotating; whichever is presented first wins, and the other one,
+ *   presented later, is a revoked token. A parent that is revoked, or spent and past the grace, or
+ *   already retried, revokes its whole family (`refresh_reuse`), in a statement that re-checks that
+ *   very condition. A refresh
  *   token keeps its scopes; the access token gets the scopes asked for, which may only narrow. The
  *   child expires 30 days after it is minted and never after the family's absolute expiry, which
  *   every rotation copies from the family's first token (90 days after the code was redeemed).
@@ -92,6 +96,27 @@ async function atHash(accessToken: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(accessToken));
   return toBase64Url(new Uint8Array(digest).slice(0, 16));
 }
+
+/**
+ * The fixed words a token's `revoked_reason` holds, declared once; every statement here writes one of
+ * them, and the revocation cascades (#2019) add theirs to this list. The table checks only the
+ * shape, so a new word needs no migration.
+ *
+ *   code_replay         its code was redeemed a second time
+ *   refresh_reuse       a spent, revoked or already retried refresh token of its family was presented
+ *   refresh_superseded  a sibling (another child of the same parent) was rotated first
+ *   client_revoked      its client revoked it (RFC 7009)
+ */
+export const OIDC_TOKEN_REVOKE_REASONS = [
+  "code_replay",
+  "refresh_reuse",
+  "refresh_superseded",
+  "client_revoked",
+] as const;
+export type OidcTokenRevokeReason = (typeof OIDC_TOKEN_REVOKE_REASONS)[number];
+
+/** A reason as a SQL literal; the words are this module's constants, never input. */
+const reason = (word: OidcTokenRevokeReason): string => `'${word}'`;
 
 // ---------------------------------------------------------------------------------------------
 // Statements
@@ -191,7 +216,7 @@ export const CODE_USED_SQL = `SELECT 1 AS used FROM oidc_codes
  * client's and used, so the statement itself re-checks why it runs. Binds: code hash, client row id.
  */
 export const CODE_REPLAY_REVOKE_SQL = `UPDATE oidc_tokens
-   SET revoked_at = datetime('now'), revoked_reason = 'code_replay'
+   SET revoked_at = datetime('now'), revoked_reason = ${reason("code_replay")}
  WHERE revoked_at IS NULL
    AND code_id = (SELECT id FROM oidc_codes
                    WHERE code_hash = ? AND client_id = ? AND used_at IS NOT NULL)`;
@@ -259,13 +284,29 @@ export const REFRESH_SPEND_SQL = `UPDATE oidc_tokens SET used_at = datetime('now
    AND EXISTS (SELECT 1 FROM oidc_tokens k WHERE k.token_hash = ? AND k.parent_id = oidc_tokens.id)`;
 
 /**
+ * Siblings: revoke the unspent refresh tokens that share the presented token's parent, other than
+ * the presented token, only when this request's child of the presented token exists. The retry of
+ * rule 13 gives a parent two children; this makes them mutually exclusive, so whichever is rotated
+ * first wins and the other, presented later, is a revoked token whose presentation revokes the
+ * family. Their access tokens are left to expire (15 minutes): one of them may be the one the session
+ * that rotated is still using. A family's first token has no parent and no sibling. Binds: presented
+ * token id (three times), the child's hash.
+ */
+export const REFRESH_SIBLINGS_REVOKE_SQL = `UPDATE oidc_tokens
+   SET revoked_at = datetime('now'), revoked_reason = ${reason("refresh_superseded")}
+ WHERE kind = 'refresh' AND revoked_at IS NULL AND used_at IS NULL
+   AND parent_id = (SELECT parent_id FROM oidc_tokens WHERE id = ?)
+   AND id <> ?
+   AND EXISTS (SELECT 1 FROM oidc_tokens k WHERE k.token_hash = ? AND k.parent_id = ?)`;
+
+/**
  * Reuse: revoke the presented token's whole family, access tokens included, when that token is
  * revoked, or spent and past the grace, or already retried once. The condition is re-checked here,
  * so a rotation that failed for another reason (an inactive account, a revoked grant) revokes
  * nothing. Binds: the token's id, client row id, grace seconds.
  */
 export const REFRESH_REUSE_REVOKE_SQL = `UPDATE oidc_tokens
-   SET revoked_at = datetime('now'), revoked_reason = 'refresh_reuse'
+   SET revoked_at = datetime('now'), revoked_reason = ${reason("refresh_reuse")}
  WHERE revoked_at IS NULL
    AND family_id = (SELECT p.family_id FROM oidc_tokens p
                      WHERE p.id = ? AND p.kind = 'refresh' AND p.client_id = ?
@@ -315,7 +356,7 @@ export const TOKEN_LOOKUP_SQL = `SELECT t.id, t.kind, t.client_id AS client_row_
 
 /** Revoke one access token of this client (RFC 7009). Binds: token hash, client row id. */
 export const REVOKE_ACCESS_SQL = `UPDATE oidc_tokens
-   SET revoked_at = datetime('now'), revoked_reason = 'client_revoked'
+   SET revoked_at = datetime('now'), revoked_reason = ${reason("client_revoked")}
  WHERE token_hash = ? AND client_id = ? AND kind = 'access' AND revoked_at IS NULL`;
 
 /**
@@ -323,7 +364,7 @@ export const REVOKE_ACCESS_SQL = `UPDATE oidc_tokens
  * 2.1). Binds: token hash, client row id.
  */
 export const REVOKE_FAMILY_SQL = `UPDATE oidc_tokens
-   SET revoked_at = datetime('now'), revoked_reason = 'client_revoked'
+   SET revoked_at = datetime('now'), revoked_reason = ${reason("client_revoked")}
  WHERE revoked_at IS NULL
    AND family_id = (SELECT family_id FROM oidc_tokens
                      WHERE token_hash = ? AND client_id = ? AND kind = 'refresh')`;
@@ -594,6 +635,7 @@ export async function refreshTokens(
         childHash,
       ),
     db.prepare(REFRESH_SPEND_SQL).bind(parent.id, childHash),
+    db.prepare(REFRESH_SIBLINGS_REVOKE_SQL).bind(parent.id, parent.id, childHash, parent.id),
   ]);
   if ((results[1]?.meta?.changes ?? 0) !== 1) {
     await db

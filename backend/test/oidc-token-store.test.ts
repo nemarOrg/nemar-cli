@@ -26,10 +26,12 @@ import {
   REFRESH_CHILD_SQL,
   REFRESH_FROM_CODE_SQL,
   REFRESH_REUSE_REVOKE_SQL,
+  REFRESH_SIBLINGS_REVOKE_SQL,
   REFRESH_SPEND_SQL,
   TOKENS_PRUNE_SQL,
   TOKEN_LOOKUP_SQL,
 } from "../src/services/oidc-tokens";
+import * as tokenStore from "../src/services/oidc-tokens";
 import { freshDb } from "./helpers/d1";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 
@@ -848,5 +850,74 @@ describe("the prune reads only what it may delete", () => {
     expect(plan.some((d) => /USING INDEX oidc_tokens_expires_at\b/.test(d))).toBe(true);
     expect(plan.some((d) => /USING INDEX oidc_tokens_absolute_expires_at\b/.test(d))).toBe(true);
     expect(plan.some((d) => /^SCAN oidc_tokens\b/.test(d))).toBe(false);
+  });
+});
+
+describe("REFRESH_SIBLINGS_REVOKE_SQL: the children of one parent are mutually exclusive", () => {
+  onEveryEngine(
+    "rotating one child revokes its unspent refresh siblings, and nothing else",
+    async (e) => {
+      const w = await world(e);
+      const root = await refreshRow(e, w, { usedAgo: 5 });
+      const presented = await refreshRow(e, w, { family: root.family, parent: root.id });
+      const sibling = await refreshRow(e, w, { family: root.family, parent: root.id });
+      const spentSibling = await refreshRow(e, w, {
+        family: root.family,
+        parent: root.id,
+        usedAgo: 2,
+      });
+      const accessHash = HASH();
+      await ok(
+        e,
+        `INSERT INTO oidc_tokens (token_hash, kind, client_id, user_id, grant_id, code_id, family_id,
+         parent_id, audience, scopes, expires_at)
+       VALUES (?, 'access', ?, ?, ?, ?, ?, ?, 'https://api.example.org', '["openid"]',
+               datetime('now', '+900 seconds'))`,
+        accessHash,
+        w.clientRow,
+        w.userId,
+        w.grantId,
+        w.codeId,
+        root.family,
+        root.id,
+      );
+      const revokeSiblings = (childHash: string) =>
+        ok(e, REFRESH_SIBLINGS_REVOKE_SQL, presented.id, presented.id, childHash, presented.id);
+      // Not before this request's child of the presented token exists.
+      expect(await revokeSiblings(HASH())).toBe(0);
+      const child = await refreshRow(e, w, { family: root.family, parent: presented.id });
+      expect(await revokeSiblings(child.hash)).toBe(1);
+      const rows = await e.all<{ token_hash: string; revoked_reason: string | null }>(
+        "SELECT token_hash, revoked_reason FROM oidc_tokens WHERE family_id = ?",
+        root.family,
+      );
+      const reasonOf = (hash: string) => rows.find((r) => r.token_hash === hash)?.revoked_reason;
+      expect(reasonOf(sibling.hash)).toBe("refresh_superseded");
+      for (const hash of [presented.hash, spentSibling.hash, root.hash, child.hash, accessHash]) {
+        expect(reasonOf(hash)).toBeNull();
+      }
+    },
+  );
+
+  onEveryEngine("a family's first token has no parent, so no sibling", async (e) => {
+    const w = await world(e);
+    const first = await refreshRow(e, w);
+    const other = await refreshRow(e, w);
+    const child = await refreshRow(e, w, { family: first.family, parent: first.id });
+    expect(await ok(e, REFRESH_SIBLINGS_REVOKE_SQL, first.id, first.id, child.hash, first.id)).toBe(
+      0,
+    );
+    expect(other.hash.length).toBe(64);
+  });
+});
+
+describe("the revoke reasons are one closed list", () => {
+  test("every reason a statement writes is in OIDC_TOKEN_REVOKE_REASONS, and every word is written", () => {
+    const written = new Set<string>();
+    for (const [name, value] of Object.entries(tokenStore)) {
+      if (!name.endsWith("_SQL") || typeof value !== "string") continue;
+      for (const m of value.matchAll(/revoked_reason = '([a-z_]+)'/g)) written.add(m[1] as string);
+    }
+    expect([...written].sort()).toEqual([...tokenStore.OIDC_TOKEN_REVOKE_REASONS].sort());
   });
 });
