@@ -78,7 +78,7 @@ function configured(strategy: "password" | "service", over: Record<string, unkno
     ...(strategy === "password"
       ? { TAPIS_USERNAME: standin.username, TAPIS_PASSWORD: standin.password }
       : { TAPIS_SERVICE_TOKEN: standin.serviceToken, TAPIS_USERNAME: standin.username }),
-    ACCESS_GATEWAY_API_KEY: ACCESS_KEY_MARK,
+    ACCESS_GATEWAY_ATTRIBUTES_KEY: ACCESS_KEY_MARK,
     ...over,
   } as never);
 }
@@ -286,8 +286,8 @@ describe("each piece is its own flag", () => {
       [{ COMPUTE_R2_ACCESS_KEY_ID: undefined }, (b) => b.storage.signing_configured],
       [{ COMPUTE_R2_SECRET_ACCESS_KEY: "" }, (b) => b.storage.signing_configured],
       [{ COMPUTE_RECORDS_BUCKET_NAME: undefined }, (b) => b.storage.signing_configured],
-      [{ ACCESS_GATEWAY_API_KEY: undefined }, (b) => b.access.key_configured],
-      [{ ACCESS_GATEWAY_API_KEY: "  " }, (b) => b.access.key_configured],
+      [{ ACCESS_GATEWAY_ATTRIBUTES_KEY: undefined }, (b) => b.access.key_configured],
+      [{ ACCESS_GATEWAY_ATTRIBUTES_KEY: "  " }, (b) => b.access.key_configured],
     ];
     for (const [over, flag] of cases) {
       const res = await status("admin", configured("password", over));

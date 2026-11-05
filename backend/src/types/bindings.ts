@@ -102,7 +102,7 @@ export interface Bindings {
   TAPIS_SERVICE_TOKEN?: string;
   /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym);
    *  only `GET /admin/compute/status` reads its presence in this phase. */
-  ACCESS_GATEWAY_API_KEY?: string;
+  ACCESS_GATEWAY_ATTRIBUTES_KEY?: string;
   /** NEMAR's own runtime image for a `python` job (epic #2005 phase A5, services/compute-lifecycle.ts):
    *  a digest-pinned reference, `[docker://]registry/path@sha256:<64 hex>`. Owner-set, like the Tapis
    *  names, and absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that). Unset, a

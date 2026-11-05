@@ -126,7 +126,7 @@ export async function computeStatus(
       results_binding: Boolean(env.COMPUTE_RESULTS),
       signing_configured: computeS3(env) !== null,
     },
-    access: { key_configured: present(env.ACCESS_GATEWAY_API_KEY) },
+    access: { key_configured: present(env.ACCESS_GATEWAY_ATTRIBUTES_KEY) },
     runtime_image: runtimeImageStatus(env),
   };
 }

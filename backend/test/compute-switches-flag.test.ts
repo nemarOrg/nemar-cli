@@ -44,7 +44,10 @@ const SECRET_NAMES = [
   "TAPIS_USERNAME",
   "TAPIS_PASSWORD",
   "TAPIS_SERVICE_TOKEN",
-  "ACCESS_GATEWAY_API_KEY",
+  "ACCESS_GATEWAY_ATTRIBUTES_KEY",
+  // Epic #2005 phase A8 (#2013): the resource name the ACCESS gateway-attributes interface knows the
+  // cluster by, an owner-set value and never a line of the file.
+  "ACCESS_RESOURCE_NAME",
   // Epic #2005 phase A5 (#2010): NEMAR's own runtime image for a `python` job, a digest-pinned
   // reference the owner sets, like the Tapis names, and never a line of the file.
   "COMPUTE_RUNTIME_IMAGE",
@@ -85,7 +88,7 @@ describe("backend/wrangler-sccn.toml and the compute switches", () => {
     expect(pathsOfNames(SWITCH_NAMES, config)).toEqual([]);
   });
 
-  test("no Tapis credential, tenant address, ACCESS key or runtime image is set in any table of the file", () => {
+  test("no Tapis credential, tenant address, ACCESS key, ACCESS resource name or runtime image is set in any table of the file", () => {
     expect(pathsOfNames(SECRET_NAMES, config)).toEqual([]);
   });
 

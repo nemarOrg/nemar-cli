@@ -111,7 +111,7 @@ function configuredWorker(over: Record<string, unknown> = {}) {
     TAPIS_TENANT_ID: SECRETS.tenant,
     TAPIS_USERNAME: SECRETS.username,
     TAPIS_PASSWORD: SECRETS.password,
-    ACCESS_GATEWAY_API_KEY: SECRETS.access,
+    ACCESS_GATEWAY_ATTRIBUTES_KEY: SECRETS.access,
     ...over,
   };
 }

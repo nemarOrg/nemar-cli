@@ -471,7 +471,8 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 # - TAPIS_USERNAME
 # - TAPIS_PASSWORD
 # - TAPIS_SERVICE_TOKEN
-# - ACCESS_GATEWAY_API_KEY  (the ACCESS gateway-attributes API key; only its presence is read so far)
+# - ACCESS_GATEWAY_ATTRIBUTES_KEY
+# - ACCESS_RESOURCE_NAME
 # - COMPUTE_RUNTIME_IMAGE   (epic #2005 phase A5: NEMAR's runtime image for a `python` job, a digest-pinned
 #                           reference; owner-set, and not a line of this file, like the names above)
 # The compute switches COMPUTE_ENABLED and COMPUTE_PIPELINES_DISPATCH_ENABLED are dark: exactly "1" and
