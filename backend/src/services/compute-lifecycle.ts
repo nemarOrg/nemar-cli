@@ -236,17 +236,30 @@ export const BIND_ORPHAN_UUID_SQL = `UPDATE compute_jobs SET tapis_uuid = ?2
 export const SUBMIT_LEASE_MINUTES = 5;
 
 /**
- * The submitter's lease, taken BEFORE the tag search: `?1` the job. One conditional UPDATE, so two
- * submitters cannot both reach Tapis: only the one that changes a row goes on, and an expired lease (a
- * submitter that died) may be taken again. Released when the attempt ends, whatever it ended in.
+ * The submitter's lease, taken BEFORE the tag search: `?1` the job, `?2` the claim stamp (the
+ * submitter's own time, to the millisecond, which is also how it knows the lease is its own). One
+ * conditional UPDATE, so two submitters cannot both reach Tapis: only the one that changes a row goes
+ * on, and an expired lease (a submitter that died or stalled) may be taken again. Released when the
+ * attempt ends, whatever it ended in, and only by the submitter whose stamp it still is.
  */
-export const CLAIM_SUBMIT_SQL = `UPDATE compute_jobs SET submit_claimed_at = datetime('now')
+export const CLAIM_SUBMIT_SQL = `UPDATE compute_jobs SET submit_claimed_at = ?2
   WHERE id = ?1 AND state IN ('created', 'uploading') AND tapis_uuid IS NULL
     AND cancel_requested_at IS NULL
     AND (submit_claimed_at IS NULL
          OR submit_claimed_at < datetime('now', '-${SUBMIT_LEASE_MINUTES} minutes'))`;
 
-export const RELEASE_SUBMIT_SQL = "UPDATE compute_jobs SET submit_claimed_at = NULL WHERE id = ?1";
+/**
+ * The release of a lease: `?1` the job, `?2` the stamp the submitter claimed with. It clears only a
+ * lease that is STILL that submitter's: an attempt that outlived its lease (a stall past the five
+ * minutes) must not clear the lease of the submitter that took the job over (round 2 of #2041).
+ */
+export const RELEASE_SUBMIT_SQL =
+  "UPDATE compute_jobs SET submit_claimed_at = NULL WHERE id = ?1 AND submit_claimed_at = ?2";
+
+/** A claim stamp: a UTC time as the row writes its own, with milliseconds (`YYYY-MM-DD HH:MM:SS.mmm`). */
+export function claimStamp(nowMs: number): string {
+  return new Date(nowMs).toISOString().replace("T", " ").replace("Z", "");
+}
 
 /**
  * A Tapis job NEMAR made that no row owns (the row ended, or is bound to another Tapis job): its uuid
@@ -1287,13 +1300,14 @@ export async function submitComputeJob(
   const ctx = tapisAccess(env, TICK_READ);
   if (ctx === null) return refused("unconfigured");
 
-  const leased = await env.DB.prepare(CLAIM_SUBMIT_SQL).bind(row.id).run();
+  const stamp = claimStamp(Date.now());
+  const leased = await env.DB.prepare(CLAIM_SUBMIT_SQL).bind(row.id, stamp).run();
   if ((leased.meta?.changes ?? 0) !== 1) return refused("in_progress");
   try {
     return await submitLeased(env, ctx, row, overdue, nowMs);
   } finally {
     await env.DB.prepare(RELEASE_SUBMIT_SQL)
-      .bind(row.id)
+      .bind(row.id, stamp)
       .run()
       .catch(() => undefined);
   }
@@ -1483,6 +1497,14 @@ export async function driveCancel(
   if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null) return;
   if (job.tapis_uuid === null) {
     if (job.state !== "created" && job.state !== "uploading") return;
+    // A submitter holds the lease: a Tapis job may be in flight that no search can see yet (Tapis has
+    // not persisted it, or the answer has not come back). Ending the row now could release the hold for a
+    // job that then appears, and if the submitter's answer is also lost nothing would ever search for it
+    // again. So the intent stays recorded and the sweep carries it out: the submitter's bind turns a
+    // pending cancel into an orphan cancel, and once the lease ends the sweep's tag search is the
+    // authority (round 2 of #2041).
+    const claimedMs = parseMs(job.submit_claimed_at);
+    if (claimedMs !== null && Date.now() - claimedMs < SUBMIT_LEASE_MINUTES * 60_000) return;
     // A job that never reached Tapis is ended here, and a submit in flight meets a row it cannot bind
     // and cancels the Tapis job it made. But a job whose launch specification was written has been
     // SUBMITTED at least once, and a submit whose answer was lost may have made a Tapis job: ending the

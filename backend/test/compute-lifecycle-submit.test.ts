@@ -27,6 +27,7 @@ import { PARTITIONS, type PartitionName } from "../../shared/contract/compute";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import {
   CLAIM_SUBMIT_SQL,
+  RELEASE_SUBMIT_SQL,
   SUBMIT_LEASE_MINUTES,
   advanceComputeJob,
   applyTapisJob,
@@ -344,6 +345,103 @@ describe("cancel of a job whose submit may have reached Tapis", () => {
     await requestComputeCancel(made.env, made.job.id, "user");
     expect((await reread(made.env, made.job.id)).state).toBe("cancelled");
     expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+  });
+});
+
+// Round 2 of #2041: a cancel that ends the row while a submit is in flight could release the hold for a
+// Tapis job that no record knows.
+describe("a cancel that meets a submitter's lease", () => {
+  test("the cancel's tag search runs before Tapis shows the job and the submit's answer is then lost: the Tapis job still ends CANCELLED and the hold is released once (MUTATION: drop the lease-age condition from driveCancel)", async () => {
+    const made = await makeJob(fx);
+    let cancelAnswer: Awaited<ReturnType<typeof requestComputeCancel>> | null = null;
+    fx.proxy.loseSubmitAnswers(1);
+    fx.proxy.afterNextSubmit(async () => {
+      // Tapis has made the job but a search cannot find it yet (it has not been persisted): hide it for
+      // the length of the cancel, as the race would.
+      const created = [...fx.tapis.jobs.values()][0];
+      const tags = created?.tags ?? [];
+      if (created) created.tags = [];
+      try {
+        cancelAnswer = await requestComputeCancel(made.env, made.job.id, "user");
+      } finally {
+        if (created) created.tags = tags;
+      }
+    });
+    expect((await submitComputeJob(made.env, made.job.id)).ok).toBe(false);
+    // The cancel recorded its intent and ended nothing: the row is not cancelled and no hold was released.
+    expect(cancelAnswer).toMatchObject({ ok: true, outcome: "cancel_requested", state: "created" });
+    const mid = await reread(made.env, made.job.id);
+    expect([mid.state, mid.cancel_requested_at !== null]).toEqual(["created", true]);
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold"]);
+    // The lease is gone (the attempt ended), so the sweep's tag search is the authority: it finds the Tapis
+    // job, binds it and cancels it.
+    await sweepComputeCancellations(made.env);
+    await sweepComputeCancellations(made.env);
+    const [only] = [...fx.tapis.jobs.values()];
+    expect(only?.status).toBe("CANCELLED");
+    const done = await reread(made.env, made.job.id);
+    expect([done.state, done.tapis_uuid]).toEqual(["cancelled", only?.uuid ?? ""]);
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+  });
+
+  test("a lease that has EXPIRED (a submitter that stalled or died) does not hold a cancel back: with nothing at Tapis the row ends at once", async () => {
+    const made = await makeJob(fx);
+    await made.env.DB.prepare(
+      "UPDATE compute_jobs SET submit_claimed_at = ?1, launch_spec_digest = ?2 WHERE id = ?3",
+    )
+      .bind(
+        // Six minutes ago, in the stamp's own form.
+        new Date(Date.now() - (SUBMIT_LEASE_MINUTES + 1) * 60_000)
+          .toISOString()
+          .replace("T", " ")
+          .replace("Z", ""),
+        "a".repeat(64),
+        made.job.id,
+      )
+      .run();
+    const answer = await requestComputeCancel(made.env, made.job.id, "user");
+    expect(answer).toMatchObject({ ok: true, state: "cancelled" });
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+  });
+
+  test("a lease that is live holds a cancel back even before the launch digest is written", async () => {
+    const made = await makeJob(fx);
+    await made.env.DB.prepare("UPDATE compute_jobs SET submit_claimed_at = ?1 WHERE id = ?2")
+      .bind(new Date().toISOString().replace("T", " ").replace("Z", ""), made.job.id)
+      .run();
+    const answer = await requestComputeCancel(made.env, made.job.id, "user");
+    expect(answer).toMatchObject({ ok: true, outcome: "cancel_requested", state: "created" });
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold"]);
+  });
+});
+
+describe("a submitter releases only its own lease", () => {
+  test("an attempt that outlived its lease does not clear the lease of the submitter that took the job over (MUTATION: drop the holder check from the release)", async () => {
+    const made = await makeJob(fx);
+    const other = "2030-01-01 00:00:00.000";
+    // While the first attempt is in flight (the stand-in has acted, the answer has not gone back), its
+    // lease expires and another submitter takes the job over.
+    fx.proxy.afterNextSubmit(async () => {
+      await made.env.DB.prepare("UPDATE compute_jobs SET submit_claimed_at = ?1 WHERE id = ?2")
+        .bind(other, made.job.id)
+        .run();
+    });
+    expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+      ok: true,
+      outcome: "submitted",
+    });
+    // The first attempt finished and released: the other submitter's lease is untouched.
+    expect((await reread(made.env, made.job.id)).submit_claimed_at).toBe(other);
+  });
+
+  test("the release statement clears a lease only for the stamp that claimed it", async () => {
+    const made = await makeJob(fx);
+    const db = made.env.DB;
+    await db.prepare(CLAIM_SUBMIT_SQL).bind(made.job.id, "2026-11-05 10:00:00.000").run();
+    await db.prepare(RELEASE_SUBMIT_SQL).bind(made.job.id, "2026-11-05 10:00:00.001").run();
+    expect((await reread(made.env, made.job.id)).submit_claimed_at).toBe("2026-11-05 10:00:00.000");
+    await db.prepare(RELEASE_SUBMIT_SQL).bind(made.job.id, "2026-11-05 10:00:00.000").run();
+    expect((await reread(made.env, made.job.id)).submit_claimed_at).toBeNull();
   });
 });
 

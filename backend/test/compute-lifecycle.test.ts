@@ -1687,6 +1687,10 @@ describe("cancel", () => {
       await requestComputeCancel(made.env, made.job.id, "user");
     });
     expect((await submitComputeJob(made.env, made.job.id)).ok).toBe(false);
+    // The cancel met a lease and left its intent for the sweep (round 2 of #2041): the submit's own bind
+    // turned the pending cancel into an orphan cancel, and the sweep ends the row.
+    expect((await reread(made.env, made.job.id)).state).toBe("created");
+    await sweepComputeCancellations(made.env);
     const job = await reread(made.env, made.job.id);
     expect(job.state).toBe("cancelled");
     expect(kinds(await ledgerOf(made.env, job.id))).toEqual(["hold", "release"]);
