@@ -1679,6 +1679,47 @@ describe("cancel", () => {
     expect(await sweepComputeCancellations(s.env)).toMatchObject({ examined: 0 });
   });
 
+  test("a partner's reservation with no Tapis job is not ended by a cancel: the partner launches its own Tapis job, so the row's records prove nothing (MUTATION: drop the partner term of driveCancel, or of the sweep's list)", async () => {
+    // NEMAR never takes a submit lease and never writes a launch specification for a partner job, so
+    // "no Tapis job, no launch specification, no live lease" is TRUE of a reservation whose partner has
+    // already launched, and ending the row would release a hold for a job that runs. The partner
+    // contract (phase D4) decides what happens to a reservation; the row is left as it is.
+    const made = await makeJob(fx);
+    await made.env.DB.prepare(
+      "UPDATE compute_jobs SET source = 'partner', client_id = 'c1' WHERE id = ?1",
+    )
+      .bind(made.job.id)
+      .run();
+    expect(await requestComputeCancel(made.env, made.job.id, "user")).toEqual({
+      ok: true,
+      outcome: "cancel_requested",
+      state: "created",
+    });
+    let job = await reread(made.env, made.job.id);
+    expect(job.state).toBe("created");
+    expect(kinds(await ledgerOf(made.env, job.id))).toEqual(["hold"]);
+    expect(job.cancel_requested_at).not.toBeNull();
+    // The sweep does not take it either (it would hold one of its ten slots for ever).
+    expect(await sweepComputeCancellations(made.env)).toMatchObject({ examined: 0, errors: [] });
+    job = await reread(made.env, made.job.id);
+    expect(job.state).toBe("created");
+    expect(kinds(await ledgerOf(made.env, job.id))).toEqual(["hold"]);
+    expect(fx.tapis.log).toHaveLength(0);
+  });
+
+  test("a partner job that has a Tapis job IS cancelled there: NEMAR owns every Tapis job", async () => {
+    const s = await submittedJob();
+    await drive(s.env, s.made.job.id, s.uuid, "RUNNING");
+    await s.env.DB.prepare(
+      "UPDATE compute_jobs SET source = 'partner', client_id = 'c1' WHERE id = ?1",
+    )
+      .bind(s.made.job.id)
+      .run();
+    await requestComputeCancel(s.env, s.made.job.id, "admin");
+    expect((await reread(s.env, s.made.job.id)).state).toBe("cancelled");
+    expect(fx.tapis.log.some((r) => r.route === "POST /v3/jobs/:uuid/cancel")).toBe(true);
+  });
+
   test("a terminal job cannot be cancelled, and an unknown one is not found", async () => {
     const s = await submittedJob();
     await finishJob(s);

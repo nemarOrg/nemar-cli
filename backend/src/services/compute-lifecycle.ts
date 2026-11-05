@@ -1485,6 +1485,14 @@ export async function driveCancel(
   if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null) return;
   if (job.tapis_uuid === null) {
     if (job.state !== "created" && job.state !== "uploading") return;
+    // A PARTNER'S RESERVATION is the partner contract's (phase D4), never ended here. NEMAR does not take
+    // a submit lease or write a launch specification for a partner job (the partner launches its own
+    // Tapis job under the reservation), so every test below, which proves that NEMAR's own submit never
+    // reached Tapis, is true of such a row whether or not the partner has launched; ending it would
+    // release a hold for a job that may be running. The intent stays recorded and the sweep's list leaves
+    // the row out (`CANCEL_ROWS_SQL`), like `CREATED_ROWS_SQL`. Once it HAS a Tapis job it is cancelled
+    // there like any other: NEMAR owns every Tapis job.
+    if (job.source === "partner") return;
     // A submitter holds the lease: a Tapis job may be in flight that no search can see yet (Tapis has
     // not persisted it, or the answer has not come back). Ending the row now could release the hold for a
     // job that then appears, and if the submitter's answer is also lost nothing would ever search for it

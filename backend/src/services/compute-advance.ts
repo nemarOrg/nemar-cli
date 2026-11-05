@@ -93,9 +93,14 @@ export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
 export const ORPHAN_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE orphan_tapis_uuid IS NOT NULL ORDER BY examined_at ASC LIMIT ?1`;
 
-/** Live rows with a cancel recorded, oldest request first. */
+/**
+ * Live rows with a cancel recorded, oldest request first. A partner's reservation with no Tapis job yet
+ * is the partner contract's and `driveCancel` leaves it alone, so it is not listed either: it would hold
+ * one of the ten slots for ever (the same exclusion as `CREATED_ROWS_SQL`).
+ */
 export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
+    AND NOT (source = 'partner' AND tapis_uuid IS NULL)
   ORDER BY cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {
