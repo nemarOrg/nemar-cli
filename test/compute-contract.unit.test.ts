@@ -3639,6 +3639,47 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       expect(decodeLaunchSpecEnv("QR")).toEqual({ ok: true, text: "A" });
     });
   });
+
+  describe("the JSON Schema, shared byte for byte with nemar-process, says the same", () => {
+    // These read the file's own words, because the file is the one thing both repositories hold.
+    const root = launchSchema.description;
+    const provenance = launchSchema.$defs.provenance.description;
+
+    test("the root description says the document is JSON text that travels as base64url, at the bound", () => {
+      expect(root).toContain("NEMAR_LAUNCH_SPEC");
+      expect(root).toContain("base64url");
+      expect(root).toContain("RFC 4648 section 5");
+      expect(root).toContain("A-Za-z0-9-_");
+      expect(root).toContain("no padding");
+      // The two numbers are the constants', not a second copy that can drift.
+      expect(root).toContain(`at most ${LAUNCH_SPEC_MAX_BYTES} bytes`);
+      expect(root).toContain(`at most ${LAUNCH_SPEC_ENV_MAX_CHARS} characters`);
+      expect(root).toContain("never over the encoded value");
+    });
+
+    test("it claims nothing about the scheduler, the shell or the locale: the old sentence did", () => {
+      // The previous wording promised "the bytes survive Tapis, the shell and the locale", which is a
+      // claim about systems this contract does not own and the review showed to be false.
+      for (const claim of [/survive/i, /Tapis/i, /schedul/i, /\bshell\b/i, /locale/i]) {
+        expect(root, String(claim)).not.toMatch(claim);
+      }
+    });
+
+    test("the provenance description puts launch_spec_digest over the decoded text, not the encoded value", () => {
+      expect(provenance).toContain("launch_spec_digest");
+      expect(provenance).toContain("JSON text");
+      expect(provenance).toContain("decodes to");
+      expect(provenance).toContain("not the digest of the encoded value");
+      // It no longer says the digest is of the environment value's own bytes.
+      expect(provenance).not.toContain("raw bytes of the NEMAR_LAUNCH_SPEC environment value");
+    });
+
+    test("no description in the file still calls the environment value ASCII-only JSON", () => {
+      const everything = JSON.stringify(launchSchema);
+      expect(everything).not.toMatch(/NEMAR_LAUNCH_SPEC \(ASCII/);
+      expect(everything).not.toMatch(/exact raw bytes/);
+    });
+  });
 });
 
 describe("the results bucket layout", () => {
