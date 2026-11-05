@@ -89,10 +89,15 @@ const NEW_COLUMNS = [
   "results_bytes",
   "result_records_at",
   "platform_failure",
+  // Round 1 of the review (concurrency and starvation): the rotation's key, the submitter's lease and
+  // the record of a Tapis job no row owns.
+  "examined_at",
+  "submit_claimed_at",
+  "orphan_tapis_uuid",
 ] as const;
 
 describe("the columns", () => {
-  onEveryEngine("the six columns exist, and `failure_detail` was never added twice", async (e) => {
+  onEveryEngine("the nine columns exist, and `failure_detail` was never added twice", async (e) => {
     const cols = (
       await e.all<{ name: string }>("SELECT name FROM pragma_table_info('compute_jobs')")
     ).map((c) => c.name);
@@ -134,6 +139,18 @@ describe("the columns", () => {
       expect([bad, await insertJob(e, { results_bytes: bad })]).toEqual([
         bad,
         expect.stringMatching(NAMED("compute_jobs_results_bytes")),
+      ]);
+    }
+  });
+
+  onEveryEngine("an orphaned Tapis job's uuid is the shape of a uuid, or NULL", async (e) => {
+    for (const ok of ["abc-007", "0f8fad5b-d9cb-469f-a165-70867728950e-007", null]) {
+      expect([ok, await insertJob(e, { orphan_tapis_uuid: ok })]).toEqual([ok, null]);
+    }
+    for (const bad of ["", "a b", "x;y", "a".repeat(65), "naïve"]) {
+      expect([bad, await insertJob(e, { orphan_tapis_uuid: bad })]).toEqual([
+        bad,
+        expect.stringMatching(NAMED("compute_jobs_orphan_tapis_uuid")),
       ]);
     }
   });
@@ -191,12 +208,13 @@ describe("the index and the file", () => {
     for (const p of patterns) expect([p, p.length <= 50]).toEqual([p, true]);
   });
 
-  test("the file adds only what it says: six columns and one index, and touches nothing else", () => {
+  test("the file adds only what it says: nine columns and two indexes, and touches nothing else", () => {
     expect(
       [...SQL.matchAll(/ALTER TABLE compute_jobs ADD COLUMN (\w+)/g)].map((m) => m[1]),
     ).toEqual([...NEW_COLUMNS]);
     expect([...SQL.matchAll(/CREATE (?:UNIQUE )?INDEX (\w+)/g)].map((m) => m[1])).toEqual([
       "compute_jobs_results",
+      "compute_jobs_examined",
     ]);
     const code = SQL.split("\n")
       .filter((line) => !line.trim().startsWith("--"))

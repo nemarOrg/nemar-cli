@@ -281,8 +281,11 @@ describe("submit", () => {
         outcome: "compute_disabled",
       });
     }
-    // Nothing reached Tapis, not even a token mint, and the row is as it was.
-    expect(fx.tapis.log).toHaveLength(0);
+    // The switch guards the call that CREATES something at Tapis: the tag search (which is how a job
+    // whose answer was lost is found, and how a `created` row reaches `submit_timeout`) is made, and
+    // nothing was submitted. The row is as it was.
+    expect(fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/submit")).toHaveLength(0);
+    expect(fx.tapis.jobs.size).toBe(0);
     expect((await reread(made.env, made.job.id)).state).toBe("created");
     // Development is allowed.
     expect(
@@ -806,6 +809,8 @@ describe("settlement", () => {
       memory_mb: null,
       gpus: 0,
       held_milli: 4000,
+      results_bytes: null,
+      outputs_completed_at: null,
     };
     const rec = (start: string | null, end: string | null) =>
       ({
@@ -816,7 +821,12 @@ describe("settlement", () => {
         nodeCount: 1,
         coresPerNode: 4,
       }) as never;
-    expect(provisionalCharge(row, rec(null, null))).toEqual({ kind: "release" });
+    // FINISHED with no start time is a run Tapis forgot to time, not a job that never started.
+    expect(
+      provisionalCharge(row, { ...(rec(null, null) as object), status: "QUEUED" } as never),
+    ).toEqual({
+      kind: "release",
+    });
     expect(
       provisionalCharge(row, rec("2026-11-04T10:00:00.000Z", "2026-11-04T10:30:00.000Z")),
     ).toMatchObject({
@@ -948,21 +958,24 @@ describe("one final state and one charge under concurrency", () => {
     const running = { ...base, status: "RUNNING" } as never;
     // Both writers read the job while it was QUEUED; the later status arrives first.
     expect((await applyTapisJob(s.env, queued, archiving)).outcome).toBe("advanced");
+    // The second write loses, reads the row again (ARCHIVING) and finds its RUNNING record is now stale.
     expect(await applyTapisJob(s.env, queued, running)).toMatchObject({
       changed: false,
-      outcome: "lost",
+      outcome: "stale",
     });
     expect((await reread(s.env, id)).state).toBe("archiving");
     expect((await reread(s.env, id)).tapis_status).toBe("ARCHIVING");
   });
 
-  test("a transition and its settlement are one batch: a settlement the ledger refuses leaves the job where it was", async () => {
+  test("a hold closed behind the Worker's back: the transition commits, the ledger writes nothing more, and the row is stamped settled", async () => {
     const s = await submittedJob();
     const id = s.made.job.id;
     await drive(s.env, id, s.uuid, "RUNNING");
     setTapisTimes(fx, s.uuid, 30 * MINUTE, null);
-    // Close the hold behind the Worker's back, so the ledger's own guard refuses its settlement: the
-    // job row must not be left terminal without a settlement that the batch was to make.
+    // Close the hold behind the Worker's back: the ledger's guard DECLINES the settlement (it writes
+    // nothing and does not throw), so the state change still commits, and the row is stamped settled
+    // because the ledger does hold an entry that closed the hold. (A settlement that THROWS rolls the
+    // state change back: compute-lifecycle-money.test.ts.)
     await s.env.DB.prepare(
       `INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, hold_ref, reason, idempotency_key)
        SELECT 'release', h.pool_id, h.budget_pool_id, -h.held_delta_milli, h.job_id, h.id, 'by_hand', 'hold:' || h.id || ':release'
@@ -1652,9 +1665,9 @@ describe("the 30-minute tick", () => {
     for (let i = 0; i < ADVANCE_ROWS_PER_TICK + 2; i++) {
       const s = await submittedJob();
       jobs.push({ id: s.made.job.id, uuid: s.uuid });
-      // Each job was last read a different time ago (the first the longest ago), as real jobs are.
+      // Each job was last examined a different time ago (the first the longest ago), as real jobs are.
       await s.env.DB.prepare(
-        "UPDATE compute_jobs SET tapis_synced_at = datetime('now', ?1) WHERE id = ?2",
+        "UPDATE compute_jobs SET examined_at = datetime('now', ?1) WHERE id = ?2",
       )
         .bind(`-${200 - i} minutes`, s.made.job.id)
         .run();

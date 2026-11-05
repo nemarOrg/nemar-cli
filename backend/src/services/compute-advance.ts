@@ -22,23 +22,37 @@
  * A database read of the live rows comes first: a Worker with no Tapis configuration and no jobs does
  * nothing at all.
  *
- * TEN ROWS A TICK in each list, ordered by the last good read (`tapis_synced_at`, never-read first)
- * so every live job is read in rotation whatever the number of jobs, each in its own try and catch
- * that records only a fixed word and the error's class, and one log line a tick (counts and fixed
- * words: no job output, token, name or path). The tick shares the Worker's subrequest allowance with
- * every other job on it, so the reads are one attempt of at most ten seconds.
+ * TEN ROWS A TICK in each of four lists (the live rows Tapis has accepted, the `created` rows still to
+ * be submitted, the terminal rows owed a settlement, and those owed a copy of their files), each in
+ * its own try and catch that records only a fixed word and the error's class, and one log line a tick
+ * (counts and fixed words: no job output, token, name or path).
+ *
+ * THE ROTATION IS BY EXAMINATION, NOT BY SUCCESS. The two live lists are ordered by `examined_at`
+ * (never-examined first), and every row a tick takes is stamped BEFORE its step runs, so a row that
+ * cannot make progress (a job Tapis cannot be read for, a `created` job that cannot be submitted while
+ * compute is off) goes to the back of the line like any other and never holds a slot for good. Ordered
+ * by the last good read (`tapis_synced_at`), as the first version was, such rows kept the ten slots
+ * and a healthy running job was never read. The two live lists do not share their quota, for the same
+ * reason the terminal lists do not: no kind of row can starve another.
+ *
+ * COST. Each row costs about one Tapis read (a `created` row, a tag search and at most one submit)
+ * with at most two attempts of at most ten seconds each (`TICK_READ`), plus bucket and database calls;
+ * four lists of ten rows are well within the subrequest allowance this tick shares with the other jobs
+ * on it. The Worker's reads on behalf of a request are one attempt of at most eight seconds.
  */
 
 import { LIVE_COMPUTE_STATES } from "../../../shared/compute-state.js";
 import type { Bindings } from "../types/bindings.js";
 import {
   CLEAR_NONCES_SQL,
+  STAMP_EXAMINED_SQL,
   TICK_READ,
   UNCOPIED_TERMINAL_SQL,
   UNSETTLED_TERMINAL_SQL,
   advanceComputeJob,
   driveCancel,
   errorClassName,
+  retryOrphanCancel,
 } from "./compute-lifecycle.js";
 import { isExactProduction } from "./repull-switches.js";
 
@@ -48,13 +62,25 @@ export const ADVANCE_ROWS_PER_TICK = 10;
 const LIVE_SQL = LIVE_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
 
 /**
- * The live rows to read, least recently read first (a row never read comes first): NEMAR's own jobs,
- * and a partner's once Tapis has accepted it (a partner's reservation that has no Tapis job yet is the
- * partner contract's, not this tick's).
+ * The live rows Tapis has accepted (a `tapis_uuid`), least recently EXAMINED first (a row never
+ * examined comes first): NEMAR's own jobs, and a partner's once Tapis has accepted it.
  */
-export const LIVE_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE state IN (${LIVE_SQL}) AND (source <> 'partner' OR tapis_uuid IS NOT NULL)
-  ORDER BY COALESCE(tapis_synced_at, '') ASC, created_at ASC LIMIT ?1`;
+export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
+  WHERE state IN (${LIVE_SQL}) AND tapis_uuid IS NOT NULL
+  ORDER BY COALESCE(examined_at, '') ASC, created_at ASC LIMIT ?1`;
+
+/**
+ * The `created` and `uploading` rows with no Tapis job, least recently examined first: the ones to be
+ * submitted. A partner's reservation that has no Tapis job yet is the partner contract's, not this
+ * tick's.
+ */
+export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
+  WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
+  ORDER BY COALESCE(examined_at, '') ASC, created_at ASC LIMIT ?1`;
+
+/** Rows with a Tapis job NEMAR made that no row owns, whose cancel is still owed. */
+export const ORPHAN_ROWS_SQL = `SELECT id FROM compute_jobs
+  WHERE orphan_tapis_uuid IS NOT NULL ORDER BY COALESCE(examined_at, '') ASC LIMIT ?1`;
 
 /** Live rows with a cancel recorded, oldest request first. */
 export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
@@ -62,7 +88,7 @@ export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   ORDER BY cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {
-  /** Live rows examined. */
+  /** Live rows examined: the bound ones and the `created` ones. */
   examined: number;
   submitted: number;
   /** Rows that moved, were refreshed or ended. */
@@ -125,8 +151,11 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
   if (!isExactProduction(env)) return null;
   const r = emptyResult();
   try {
-    const live = (
-      await env.DB.prepare(LIVE_ROWS_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
+    const bound = (
+      await env.DB.prepare(BOUND_ROWS_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
+    ).results;
+    const created = (
+      await env.DB.prepare(CREATED_ROWS_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
     ).results;
     const unsettled = (
       await env.DB.prepare(UNSETTLED_TERMINAL_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
@@ -137,7 +166,13 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
     const cleared = await env.DB.prepare(CLEAR_NONCES_SQL).run();
     r.cleared = cleared.meta?.changes ?? 0;
 
+    // Every live row taken is stamped BEFORE its step: whatever the step does (a read that fails, a
+    // submit that cannot go, an exception) the row has had its turn and goes to the back of the line.
+    const live = [...bound, ...created];
     r.examined = live.length;
+    if (live.length > 0) {
+      await env.DB.batch(live.map((row) => env.DB.prepare(STAMP_EXAMINED_SQL).bind(row.id)));
+    }
     const ids = [...new Set([...live, ...unsettled, ...uncopied].map((row) => row.id))];
     for (const id of ids) {
       try {
@@ -185,6 +220,7 @@ export function computeAdvanceLogLine(
 }
 
 export interface CancelSweepResult {
+  /** Rows with a recorded cancel, and rows with an orphaned Tapis job, taken this tick. */
   examined: number;
   errors: string[];
   errorClass: string | null;
@@ -210,6 +246,20 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
         r.errors.push("row_failed");
         r.errorClass = errorClassName(err);
         console.error(`[compute-cancel] job ${id}: its cancel failed (${r.errorClass})`);
+      }
+    }
+    // A Tapis job NEMAR made that no row owns, whose cancel failed when it was made: asked again.
+    const orphans = (
+      await env.DB.prepare(ORPHAN_ROWS_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
+    ).results;
+    r.examined += orphans.length;
+    for (const { id } of orphans) {
+      try {
+        await retryOrphanCancel(env, id, TICK_READ);
+      } catch (err) {
+        r.errors.push("orphan_failed");
+        r.errorClass = errorClassName(err);
+        console.error(`[compute-cancel] job ${id}: its orphan cancel failed (${r.errorClass})`);
       }
     }
   } catch (err) {

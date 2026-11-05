@@ -28,6 +28,20 @@
 --     administrator compensates a NEMAR-caused failure by a manual grant. Nothing writes the ledger
 --     from this column.
 --
+-- Three columns keep the lifecycle honest under concurrency and under failure:
+--   * `examined_at`: the last time the 30-minute tick EXAMINED the row, successfully or not. The tick's
+--     rotation orders by it, so a row Tapis cannot be read for, or that cannot be submitted, goes to the
+--     back of the line like any other and never holds a slot for good (`tapis_synced_at` moves only on a
+--     good read, and ordering by it let unreadable rows starve a healthy job).
+--   * `submit_claimed_at`: the submitter's lease, taken in one conditional UPDATE before the tag search.
+--     A submitter proceeds to Tapis only if it changed the row, so two submitters cannot both reach
+--     Tapis; a lease older than five minutes (a submitter that died) may be taken again, and an attempt
+--     releases its lease when it ends.
+--   * `orphan_tapis_uuid`: a Tapis job NEMAR made that no row owns (the row ended while Tapis was
+--     creating it, or is bound to another Tapis job). Its uuid is recorded before it is cancelled and
+--     cleared when the cancel is known to have worked, so a cancel that failed is retried by the next
+--     tick and never silently forgotten.
+--
 -- `failure_detail` and `webhook_nonce` already exist (0115): the detail is the launcher's fixed word
 -- (or the result refusal the outputs route recorded, or the reason a result verification failed),
 -- checked by shape, and the nonce is the secret half of both per-job tokens, cleared one day after the
@@ -37,7 +51,7 @@
 -- `typeof(...) = 'integer'`. Every GLOB is at most 50 characters (D1 refuses longer). No column here is
 -- named for a person.
 --
--- The index serves the two sums the outputs route's claim reads (a person's rows, and every row), and
+-- The first index serves the two sums the outputs route's claim reads (a person's rows, and every row), and
 -- nothing else: a query uses it only if it says `results_bytes IS NOT NULL`.
 
 ALTER TABLE compute_jobs ADD COLUMN launch_spec_digest TEXT
@@ -59,5 +73,19 @@ ALTER TABLE compute_jobs ADD COLUMN result_records_at TEXT;
 ALTER TABLE compute_jobs ADD COLUMN platform_failure INTEGER NOT NULL DEFAULT 0
   CONSTRAINT compute_jobs_platform_failure CHECK (platform_failure IN (0, 1));
 
+ALTER TABLE compute_jobs ADD COLUMN examined_at TEXT;
+
+ALTER TABLE compute_jobs ADD COLUMN submit_claimed_at TEXT;
+
+ALTER TABLE compute_jobs ADD COLUMN orphan_tapis_uuid TEXT
+  CONSTRAINT compute_jobs_orphan_tapis_uuid CHECK (
+    orphan_tapis_uuid IS NULL OR (length(orphan_tapis_uuid) BETWEEN 1 AND 64
+      AND orphan_tapis_uuid NOT GLOB '*[^A-Za-z0-9-]*'));
+
 CREATE INDEX compute_jobs_results ON compute_jobs (account_id, ended_at)
   WHERE results_bytes IS NOT NULL;
+
+-- The tick's rotation: the live rows, least recently examined first.
+CREATE INDEX compute_jobs_examined ON compute_jobs (examined_at)
+  WHERE state IN ('created', 'uploading', 'submitted', 'queued', 'running', 'archiving',
+                  'unreported');

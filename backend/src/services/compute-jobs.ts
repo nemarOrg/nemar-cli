@@ -176,6 +176,12 @@ export interface ComputeJobRow {
   result_records_at: string | null;
   /** 1 when `isPlatformFailure` says NEMAR caused the failure: an information flag, never a ledger write. */
   platform_failure: number;
+  /** The last time the 30-minute tick examined the row, successfully or not: the rotation's key. */
+  examined_at: string | null;
+  /** The submitter's lease: a submitter that holds it is the only one that may reach Tapis. */
+  submit_claimed_at: string | null;
+  /** A Tapis job NEMAR made that no row owns, whose cancel is still owed. */
+  orphan_tapis_uuid: string | null;
 }
 
 export type ComputeJobsEnv = ComputeRecordsEnv;
@@ -324,7 +330,8 @@ const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key,
   ended_at, tapis_synced_at, records_written_at, hold_ledger_id, held_milli, charged_milli,
   settled_provisional_at, settled_final_at, flag_unreserved, flag_unattributed, flag_mismatch,
   flag_overrun, retention_until, legal_hold, webhook_nonce, launch_spec_digest, results_verified_at,
-  outputs_completed_at, results_bytes, result_records_at, platform_failure`;
+  outputs_completed_at, results_bytes, result_records_at, platform_failure, examined_at,
+  submit_claimed_at, orphan_tapis_uuid`;
 
 export const JOB_BY_ID_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs WHERE id = ?1`;
 

@@ -30,8 +30,12 @@
  *    what it finds. A tag search that finds two jobs submits nothing and flags the job.
  *  - A TRANSITION AND ITS SETTLEMENT ARE ONE BATCH. The state UPDATE, the ledger entry (gated on the job
  *    row having just taken the new state) and the stamp of what was settled run in one D1 batch, which
- *    is one transaction: either the job is terminal and its hold is closed, or neither happened. A retry
- *    repairs a terminal row whose `settled_provisional_at` is still NULL.
+ *    is one transaction: if a statement THROWS (the ledger's own triggers refuse an entry), the state
+ *    change is rolled back with it. A conditional INSERT that merely DECLINES (the hold is already
+ *    closed, the gate is false) writes nothing and does not undo the state UPDATE before it, so "terminal
+ *    and closed, or neither" holds for a thrown error only; what the gate adds is that a writer that
+ *    LOST its UPDATE settles nothing. A retry repairs a terminal row whose `settled_provisional_at` is
+ *    still NULL.
  *  - NOTHING THE JOB WRITES IS TRUSTED. Resources and times come from the Tapis record, the failure code
  *    from the launcher's `result.json` only after its job id, its exit number and (through the
  *    provenance) its launch specification digest agree with what NEMAR knows, and `tapisjob.out` is
@@ -66,6 +70,7 @@ import {
   LAUNCHER_FILES,
   type LauncherFileName,
   type PartitionName,
+  RATE_TABLE_V1,
   RECORDS_RESULT_MANIFEST_FILE,
   dataTagForVersion,
   suMilliFor,
@@ -222,6 +227,38 @@ export const BIND_TAPIS_JOB_SQL = `UPDATE compute_jobs SET
 export const BIND_ORPHAN_UUID_SQL = `UPDATE compute_jobs SET tapis_uuid = ?2
   WHERE id = ?1 AND tapis_uuid IS NULL`;
 
+/** How long a submitter's lease lasts: longer than one attempt (a tag search, a submit and a subscribe). */
+export const SUBMIT_LEASE_MINUTES = 5;
+
+/**
+ * The submitter's lease, taken BEFORE the tag search: `?1` the job. One conditional UPDATE, so two
+ * submitters cannot both reach Tapis: only the one that changes a row goes on, and an expired lease (a
+ * submitter that died) may be taken again. Released when the attempt ends, whatever it ended in.
+ */
+export const CLAIM_SUBMIT_SQL = `UPDATE compute_jobs SET submit_claimed_at = datetime('now')
+  WHERE id = ?1 AND state IN ('created', 'uploading') AND tapis_uuid IS NULL
+    AND cancel_requested_at IS NULL
+    AND (submit_claimed_at IS NULL
+         OR submit_claimed_at < datetime('now', '-${SUBMIT_LEASE_MINUTES} minutes'))`;
+
+export const RELEASE_SUBMIT_SQL = "UPDATE compute_jobs SET submit_claimed_at = NULL WHERE id = ?1";
+
+/**
+ * A Tapis job NEMAR made that no row owns (the row ended, or is bound to another Tapis job): its uuid
+ * is recorded so a cancel that failed is never forgotten: the next tick retries it. `?1` the job, `?2`
+ * the uuid.
+ */
+export const SET_ORPHAN_SQL = `UPDATE compute_jobs SET orphan_tapis_uuid = ?2
+  WHERE id = ?1 AND orphan_tapis_uuid IS NULL`;
+
+/** The orphan is cancelled (or is gone, or is already over): the record of it is cleared. */
+export const CLEAR_ORPHAN_SQL = `UPDATE compute_jobs SET orphan_tapis_uuid = NULL
+  WHERE id = ?1 AND orphan_tapis_uuid = ?2`;
+
+/** Every examination of a live row, successful or not, moves it to the back of the rotation. */
+export const STAMP_EXAMINED_SQL =
+  "UPDATE compute_jobs SET examined_at = datetime('now') WHERE id = ?1";
+
 /**
  * The digest of the launch specification, written BEFORE the submit: `?1` the job, `?2` the digest, `?3`
  * the digest of the image the launch specification names (the runtime image can change between two
@@ -315,36 +352,70 @@ export function tapisAccess(
 // --- Settlement: what a job used -----------------------------------------------------------------
 
 export type Provisional =
-  /** The job never started on the scheduler: its whole hold is released, nothing is charged. */
+  /** Nothing shows the job ran: its whole hold is released, nothing is charged. */
   | { kind: "release" }
   | {
       kind: "charge";
       /** What the Tapis record says the job used, in milli-SU (never above the hold when written). */
       milli: number;
       seconds: number;
-      /** The rate could not be priced, so the hold itself is the charge and the job is flagged. */
+      /**
+       * The figure is not what the record's own times and resources price (a run with no start time, a
+       * start time that is not a time, a rate that cannot be priced): the job is flagged `mismatch`.
+       */
       fallback: boolean;
     };
 
+/** What shows that a job RAN even when its Tapis record gives no start time. */
+export function runEvidenced(
+  job: Pick<ComputeJobRow, "results_bytes" | "outputs_completed_at">,
+  rec: TapisJob | null,
+): boolean {
+  return (
+    rec?.status === "FINISHED" || job.results_bytes !== null || job.outputs_completed_at !== null
+  );
+}
+
 /**
- * What a job's provisional settlement is, from the Tapis record (design section 5): nothing if it
- * never started (`remoteStarted` is null), else `suMilliFor` over the record's resources and the
- * seconds from `remoteStarted` to `remoteEnded` (the record's `ended`, then now, when the end is
- * missing), rounded up. The record's resources are used when they are whole numbers and the row's
- * otherwise; the partition and the GPUs are the row's (the record names neither). A rate that cannot
- * be priced charges the hold and says so (`fallback`), because a failure of the arithmetic must not
- * give compute away. Pure.
+ * What a job's provisional settlement is, from the Tapis record (design section 5). ONLY A JOB THAT
+ * NEVER STARTED IS RELEASED (the owner's rule), and a job that ran can never be released: a release
+ * closes the hold, and the ledger then refuses a charge, so a wrong release is permanent.
+ *  - the record has a start time that parses: `suMilliFor` over the record's resources and the seconds
+ *    from `remoteStarted` to `remoteEnded` (the record's `ended`, then now, when the end is missing),
+ *    rounded up, never negative. The record's resources are used when they are whole numbers and the
+ *    row's otherwise; the partition and the GPUs are the row's (the record names neither);
+ *  - the record has a start time that is NOT a time (a non-empty string that does not parse): the
+ *    record cannot be read, so the hold is charged and the job is flagged (fail closed);
+ *  - the record has NO start time: release, unless something shows the job ran (Tapis says FINISHED, or
+ *    the launcher reached the Worker: it claimed bytes or completed an upload), and then the contract's
+ *    minimum is charged and the job is flagged `mismatch`;
+ *  - a rate that cannot be priced charges the hold and flags the job, because a failure of the
+ *    arithmetic must not give compute away. Pure.
  */
 export function provisionalCharge(
   job: Pick<
     ComputeJobRow,
-    "partition" | "nodes" | "cores_per_node" | "memory_mb" | "gpus" | "held_milli"
+    | "partition"
+    | "nodes"
+    | "cores_per_node"
+    | "memory_mb"
+    | "gpus"
+    | "held_milli"
+    | "results_bytes"
+    | "outputs_completed_at"
   >,
   rec: TapisJob | null,
   nowMs: number = Date.now(),
 ): Provisional {
-  const started = rec === null ? null : parseMs(rec.remoteStarted);
-  if (rec === null || started === null) return { kind: "release" };
+  const startedRaw = rec?.remoteStarted;
+  const started = parseMs(startedRaw);
+  if (rec !== null && typeof startedRaw === "string" && startedRaw !== "" && started === null) {
+    return { kind: "charge", milli: job.held_milli, seconds: 0, fallback: true };
+  }
+  if (rec === null || started === null) {
+    if (!runEvidenced(job, rec)) return { kind: "release" };
+    return { kind: "charge", milli: RATE_TABLE_V1.minChargeMilli, seconds: 0, fallback: true };
+  }
   const ended = parseMs(rec.remoteEnded) ?? parseMs(rec.ended) ?? nowMs;
   const seconds = Math.max(0, Math.ceil((ended - started) / 1000));
   const memory = wholeOrNull(rec.memoryMB, 1) ?? job.memory_mb ?? undefined;
@@ -657,6 +728,29 @@ export async function applyTapisJob(
   rec: TapisJob,
   nowMs: number = Date.now(),
 ): Promise<ApplyResult> {
+  // A write that lost to a concurrent LIVE write (a poll moved the job from `queued` to `running` while
+  // a terminal hint held the `queued` row) must not drop the hint for 30 minutes or more: the row is
+  // read again and the same record applied while the job is still not terminal. A concurrent write that
+  // made the job terminal is the end of it: that writer settled it.
+  let current = job;
+  for (let attempt = 0; ; attempt++) {
+    const result = await applyOnce(env, current, rec, nowMs);
+    if (result.outcome !== "lost" || attempt >= LOST_WRITE_RETRIES) return result;
+    const fresh = await getJob(env.DB, job.id);
+    if (!fresh || isTerminalComputeState(fresh.state)) return result;
+    current = fresh;
+  }
+}
+
+/** How many times a write that lost to a concurrent live write is tried again. */
+export const LOST_WRITE_RETRIES = 2;
+
+async function applyOnce(
+  env: Bindings,
+  job: ComputeJobRow,
+  rec: TapisJob,
+  nowMs: number,
+): Promise<ApplyResult> {
   const unchanged = (outcome: ApplyOutcome, state = job.state): ApplyResult => ({
     changed: false,
     state,
@@ -868,6 +962,7 @@ export type SubmitOutcome =
   | "unconfigured"
   | "unavailable"
   | "ambiguous"
+  | "in_progress"
   | "failed";
 
 export interface SubmitResult {
@@ -1052,17 +1147,65 @@ async function subscribe(
 }
 
 /**
- * Bind a Tapis job to a row that has none: `tapis_uuid`, its status, `submitted`. When the row has
- * moved on in the meantime (a cancel or a timeout won the race while Tapis was creating the job), the
- * row still learns the uuid and the Tapis job is cancelled, so none is left running for a job NEMAR
- * has ended. A job found by tag that is already further along is caught up by the caller.
+ * Cancel a Tapis job NEMAR made that no row owns, and clear the record of it once that is known to have
+ * worked: the cancel was accepted, Tapis says the job is already over (409) or says there is no such job.
+ * Any other failure leaves `orphan_tapis_uuid` set, and the next tick tries again. True when cleared.
+ */
+async function cancelOrphan(
+  env: Bindings,
+  ctx: TapisContext,
+  jobId: string,
+  uuid: string,
+): Promise<boolean> {
+  try {
+    await cancelJob(ctx, uuid);
+  } catch (err) {
+    const settled =
+      err instanceof TapisError && (err.kind === "rejected" || err.kind === "not_found");
+    if (!settled) {
+      console.warn(`[compute-lifecycle] orphan_cancel_failed job=${jobId} kind=${tapisWord(err)}`);
+      return false;
+    }
+  }
+  await env.DB.prepare(CLEAR_ORPHAN_SQL).bind(jobId, uuid).run();
+  return true;
+}
+
+/**
+ * The retry of a recorded orphan: the tick calls it for every row with `orphan_tapis_uuid` set. Never
+ * throws for what Tapis does; true when the orphan is cleared.
+ */
+export async function retryOrphanCancel(
+  env: Bindings,
+  jobId: string,
+  mode: { maxAttempts: number; timeoutMs: number },
+): Promise<boolean> {
+  const row = await getJob(env.DB, jobId);
+  if (!row || row.orphan_tapis_uuid === null) return false;
+  const ctx = tapisAccess(env, mode);
+  if (ctx === null) return false;
+  return cancelOrphan(env, ctx, row.id, row.orphan_tapis_uuid);
+}
+
+/**
+ * Bind a Tapis job to a row that has none: `tapis_uuid`, its status, `submitted`. A bind that changes
+ * no row means the row is not the one it was read as, and the answer depends on WHAT it now holds:
+ *  - the SAME uuid: another path (an adoption by tag, a webhook's read-back) bound this very Tapis job
+ *    first. Nothing is wrong and nothing is cancelled (`already`);
+ *  - ANOTHER uuid: this Tapis job is a duplicate of the one the row owns. It is recorded as an orphan and
+ *    cancelled, and the job is flagged `mismatch`;
+ *  - NO uuid, and the row has ended or has a cancel pending (a cancel or a timeout won while Tapis was
+ *    creating the job): the row learns the uuid, which is recorded as an orphan and cancelled, so none
+ *    is left running for a job NEMAR has ended.
+ * The orphan is written to the row BEFORE the cancel is asked, so a cancel that fails is retried by the
+ * tick and never forgotten.
  */
 async function bindTapisJob(
   env: Bindings,
   ctx: TapisContext,
   job: ComputeJobRow,
   rec: TapisJob,
-): Promise<"bound" | "raced" | "ambiguous"> {
+): Promise<"bound" | "already" | "orphaned" | "ambiguous"> {
   if (!TAPIS_JOB_UUID_RE.test(rec.uuid)) return "ambiguous";
   try {
     const bound = await env.DB.prepare(BIND_TAPIS_JOB_SQL)
@@ -1076,39 +1219,44 @@ async function bindTapisJob(
     if (looksUnique(err)) return "ambiguous";
     throw err;
   }
-  await env.DB.prepare(BIND_ORPHAN_UUID_SQL).bind(job.id, rec.uuid).run();
-  try {
-    await cancelJob(ctx, rec.uuid);
-  } catch (err) {
-    console.warn(`[compute-lifecycle] orphan_cancel_failed job=${job.id} kind=${tapisWord(err)}`);
-  }
-  return "raced";
+  const now = await getJob(env.DB, job.id);
+  if (now?.tapis_uuid === rec.uuid) return "already";
+  if (now?.tapis_uuid != null) await env.DB.prepare(FLAG_MISMATCH_SQL).bind(job.id).run();
+  else await env.DB.prepare(BIND_ORPHAN_UUID_SQL).bind(job.id, rec.uuid).run();
+  await env.DB.prepare(SET_ORPHAN_SQL).bind(job.id, rec.uuid).run();
+  await cancelOrphan(env, ctx, job.id, rec.uuid);
+  return "orphaned";
 }
 
 /**
  * Submit a job to Tapis, idempotently. In order:
- *  1. the switch (the one place it is read), the row, and that the job may be submitted: it exists, is
- *     `created` (or `uploading`), is NEMAR's to submit (a partner submits its own), has no Tapis job,
- *     has no cancel pending, and has its records written (`records_written_at`);
- *  2. a SEARCH BY TAG (`nemar_job:<id>`) before anything is sent: one hit is bound instead of a
+ *  1. the row, and that the job may be submitted: it exists, is `created` (or `uploading`), is NEMAR's
+ *     to submit (a partner submits its own), has no Tapis job, has no cancel pending, and has its
+ *     records written (`records_written_at`);
+ *  2. the SUBMITTER'S LEASE (`CLAIM_SUBMIT_SQL`), one conditional UPDATE: only the submitter that
+ *     changed the row goes on, so two submitters cannot both reach Tapis;
+ *  3. a SEARCH BY TAG (`nemar_job:<id>`) before anything is sent: one hit is bound instead of a
  *     submit, two are a duplicate (nothing is submitted and the job is flagged), none goes on;
- *  3. a `created` row older than the policy's reservation wait, with no Tapis job, fails
- *     `submit_timeout` and its hold is released;
- *  4. the launch specification is built and its SHA-256 written to the row in a conditional UPDATE
+ *  4. a `created` row older than the policy's reservation wait, with no Tapis job, fails
+ *     `submit_timeout` and its hold is released: this needs no switch, so a job does not wait for ever
+ *     because compute is off;
+ *  5. THE SWITCH, read here and nowhere else in the lifecycle, and only now: it guards the call that
+ *     creates something at Tapis, not the search, the bind of a job that exists or the timeout;
+ *  6. the launch specification is built and its SHA-256 written to the row in a conditional UPDATE
  *     BEFORE the call to Tapis (a retry that finds nothing overwrites it: the policy's limits can have
  *     changed), then the job is submitted with no archive fields, owned by the NEMAR service identity;
- *  5. a 4xx rejection fails the job `tapis_submit_failed` and releases the hold; an unavailable or
+ *  7. a 4xx rejection fails the job `tapis_submit_failed` and releases the hold; an unavailable or
  *     unclear Tapis leaves the row `created` for the next tick, which searches by tag first (a 2xx
  *     answer that fails its schema means the job may exist);
- *  6. one conditional UPDATE binds `tapis_uuid` and moves `created` to `submitted`, and a webhook is
+ *  8. one conditional UPDATE binds `tapis_uuid` and moves `created` to `submitted`, and a webhook is
  *     subscribed (a hint, never retried).
+ * The lease is released when the attempt ends, whatever it ended in.
  */
 export async function submitComputeJob(
   env: Bindings,
   jobId: string,
   nowMs: number = Date.now(),
 ): Promise<SubmitResult> {
-  if (!computeEnabled(env)) return refused("compute_disabled");
   const row = await getJob(env.DB, jobId);
   if (!row) return refused("job_not_found");
   if (row.tapis_uuid !== null) return submitted("already_submitted");
@@ -1129,7 +1277,26 @@ export async function submitComputeJob(
   const ctx = tapisAccess(env, TICK_READ);
   if (ctx === null) return refused("unconfigured");
 
-  // 2. A search by tag, before any submit: the outcome of an earlier submit may be unknown.
+  const leased = await env.DB.prepare(CLAIM_SUBMIT_SQL).bind(row.id).run();
+  if ((leased.meta?.changes ?? 0) !== 1) return refused("in_progress");
+  try {
+    return await submitLeased(env, ctx, row, overdue, nowMs);
+  } finally {
+    await env.DB.prepare(RELEASE_SUBMIT_SQL)
+      .bind(row.id)
+      .run()
+      .catch(() => undefined);
+  }
+}
+
+async function submitLeased(
+  env: Bindings,
+  ctx: TapisContext,
+  row: ComputeJobRow,
+  overdue: boolean,
+  nowMs: number,
+): Promise<SubmitResult> {
+  // 3. A search by tag, before any submit: the outcome of an earlier submit may be unknown.
   let found: TapisJob[];
   try {
     found = await searchJobsByTag(ctx, nemarJobTag(row.id));
@@ -1145,14 +1312,17 @@ export async function submitComputeJob(
   const existing = found[0];
   if (existing !== undefined) return adopt(env, ctx, row, existing, nowMs);
 
-  // 3. Nothing at Tapis and past the deadline: end the job and release the hold.
+  // 4. Nothing at Tapis and past the deadline: end the job and release the hold.
   if (overdue) {
     return (await endUnsubmitted(env, row, "failed", "submit_timeout", null))
       ? refused("failed")
       : refused("bad_state");
   }
 
-  // 4. Build, record the digest, submit.
+  // 5. The switch: the one place it is read.
+  if (!computeEnabled(env)) return refused("compute_disabled");
+
+  // 6. Build, record the digest, submit.
   const built = await buildLaunch(env, row);
   if (!built.ok) {
     if (built.why === "unconfigured") return refused("unconfigured");
@@ -1200,7 +1370,12 @@ export async function submitComputeJob(
   return adopt(env, ctx, row, rec, nowMs, "submitted");
 }
 
-/** Bind a Tapis job to the row, catch up a job found already further along, and answer. */
+/**
+ * Bind a Tapis job to the row and answer. A job found by tag may already be running or over, and the
+ * SEARCH record is a summary (it has no exit code), so what is applied is the FULL record, read with
+ * `getJob` after the bind: the exit-number cross-check and the times come from the record a poll would
+ * read. A failed read is left to the tick.
+ */
 async function adopt(
   env: Bindings,
   ctx: TapisContext,
@@ -1214,11 +1389,23 @@ async function adopt(
     await env.DB.prepare(FLAG_MISMATCH_SQL).bind(row.id).run();
     return refused("ambiguous");
   }
-  if (result === "raced") return refused("bad_state");
+  if (result === "orphaned") return refused("bad_state");
+  if (result === "already") {
+    const now = await getJob(env.DB, row.id);
+    return now && isTerminalComputeState(now.state)
+      ? refused("bad_state")
+      : submitted("already_submitted");
+  }
   if (how === "bound") {
-    // A job found by tag may already be running or over: apply what Tapis says now.
-    const fresh = await getJob(env.DB, row.id);
-    if (fresh) await applyTapisJob(env, fresh, rec, nowMs);
+    try {
+      const full = await getTapisJob(ctx, rec.uuid);
+      const fresh = await getJob(env.DB, row.id);
+      if (fresh) await applyTapisJob(env, fresh, full, nowMs);
+    } catch (err) {
+      console.warn(
+        `[compute-lifecycle] adopt_readback_failed job=${row.id} kind=${tapisWord(err)}`,
+      );
+    }
   }
   return submitted(how);
 }
@@ -1266,20 +1453,54 @@ export async function driveCancel(
   jobId: string,
   mode: { maxAttempts: number; timeoutMs: number },
 ): Promise<void> {
-  const job = await getJob(env.DB, jobId);
+  let job = await getJob(env.DB, jobId);
   if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null) return;
   if (job.tapis_uuid === null) {
-    // Never reached Tapis: end it here. A submit that is in flight meets this row cancelled when it
-    // comes to bind, and cancels the Tapis job it made.
-    if (job.state === "created" || job.state === "uploading") {
+    if (job.state !== "created" && job.state !== "uploading") return;
+    // A job that never reached Tapis is ended here, and a submit in flight meets a row it cannot bind
+    // and cancels the Tapis job it made. But a job whose launch specification was written has been
+    // SUBMITTED at least once, and a submit whose answer was lost may have made a Tapis job: ending the
+    // row now would release the hold for a job that runs, charged to nobody. So Tapis is asked first,
+    // by tag. If it cannot be asked, the cancel stays recorded for the sweep and nothing is released.
+    if (job.launch_spec_digest !== null) {
+      const ctx = tapisAccess(env, mode);
+      if (ctx === null) return;
+      let found: TapisJob[];
+      try {
+        found = await searchJobsByTag(ctx, nemarJobTag(job.id));
+      } catch (err) {
+        console.warn(
+          `[compute-lifecycle] cancel_search_failed job=${job.id} kind=${tapisWord(err)}`,
+        );
+        return;
+      }
+      const first = found[0];
+      if (first !== undefined && TAPIS_JOB_UUID_RE.test(first.uuid)) {
+        await env.DB.prepare(BIND_ORPHAN_UUID_SQL).bind(job.id, first.uuid).run();
+        for (const extra of found.slice(1)) {
+          // A duplicate under one tag: every one of them is cancelled, and the job is flagged.
+          await env.DB.prepare(FLAG_MISMATCH_SQL).bind(job.id).run();
+          if (TAPIS_JOB_UUID_RE.test(extra.uuid)) {
+            await env.DB.prepare(SET_ORPHAN_SQL).bind(job.id, extra.uuid).run();
+            await cancelOrphan(env, ctx, job.id, extra.uuid);
+          }
+        }
+        job = await getJob(env.DB, jobId);
+        if (!job || job.tapis_uuid === null || isTerminalComputeState(job.state)) return;
+      } else {
+        await endUnsubmitted(env, job, "cancelled", null, null);
+        return;
+      }
+    } else {
       await endUnsubmitted(env, job, "cancelled", null, null);
+      return;
     }
-    return;
   }
+  const uuid = job.tapis_uuid as string;
   const ctx = tapisAccess(env, mode);
   if (ctx === null) return;
   try {
-    await cancelJob(ctx, job.tapis_uuid);
+    await cancelJob(ctx, uuid);
   } catch (err) {
     // 409: Tapis says the job is already over, which the read-back below shows. Anything else is left
     // for the sweep (a lost answer may have cancelled it; the read-back shows that too).
@@ -1288,7 +1509,7 @@ export async function driveCancel(
     }
   }
   try {
-    const rec = await getTapisJob(ctx, job.tapis_uuid);
+    const rec = await getTapisJob(ctx, uuid);
     const fresh = (await getJob(env.DB, job.id)) ?? job;
     await applyTapisJob(env, fresh, rec);
   } catch (err) {
