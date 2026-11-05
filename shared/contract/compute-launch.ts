@@ -343,8 +343,14 @@ function isPrintable(text: string): boolean {
 /**
  * The value of `NEMAR_LAUNCH_SPEC`: what {@link encodeLaunchSpecEnv} returns and the only thing the Tapis
  * client is given to send. A branded string, so the launch specification's TEXT (which is hashed and
- * recorded, and holds the token in the clear) cannot be passed where the value belongs, or the other
- * way round, without the compiler saying so.
+ * recorded, and holds the token in the clear) cannot be SENT AS THE VALUE: a plain string is not
+ * assignable to this type, and the compiler says so.
+ *
+ * The brand works in ONE direction. The value is still a string, so the reverse mistake compiles: it
+ * can be passed where the text belongs, encoded again or hashed in place of the text. The compiler
+ * does not catch that; verification does. A digest over the value is not the launcher's digest of the
+ * decoded text, so the job fails closed at verification, and the digest and verify tests fail. No
+ * production code mixes them, and a second brand for the text was weighed and not added.
  */
 export type LaunchSpecEnvValue = string & { readonly __brand: "LaunchSpecEnv" };
 

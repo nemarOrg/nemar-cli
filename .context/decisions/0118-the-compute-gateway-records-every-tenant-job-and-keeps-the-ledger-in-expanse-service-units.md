@@ -334,7 +334,11 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
    The variable name is unchanged.
    A value made only of that alphabet holds none of the characters a conditional quoter would quote for and none that a shell, a glob or a quoting rule acts on, so how the scheduler quotes is no longer something the launch specification depends on.
    `encodeLaunchSpecEnv(text)` is the wire step, beside `encodeLaunchSpec`, which still returns the JSON text because the text is what is hashed and recorded.
-   It returns a branded type, `LaunchSpecEnvValue`, and the Tapis client's input is that type (`SubmitJobInput.launchSpecEnv`), so the text that is digested and the value that is sent stay two named things that the compiler keeps apart; at run time the client's schema refuses a text where a value belongs (item 5).
+   It returns a branded type, `LaunchSpecEnvValue`, and the Tapis client's input is that type (`SubmitJobInput.launchSpecEnv`), so the compiler stops the text being sent as the value (a plain string is not assignable to it); at run time the client's schema also refuses a text where a value belongs (item 5).
+   The brand works in one direction only.
+   The value is still a string, so the reverse mistake compiles: passing the value where the text belongs, encoded again or hashed in place of the text.
+   The compiler does not catch that; verification does, because a digest over the value is not the launcher's digest of the decoded text, so the job fails closed and the digest and verify tests fail.
+   No production code mixes them, and a second brand for the text was weighed and not added: it would touch many test call sites for a mistake that verification already catches.
    A5's builder (`buildLaunch`) calls both, records the digest of the text and sends only the encoded value in `parameterSet.envVariables`.
 2. **The JSON text, its 64 KiB cap and both digests are unchanged.**
    `spec_digest` is the SHA-256 of `records/<id>/spec.json`, and `launch_spec_digest` is the SHA-256 of the launch specification's JSON text, which is what the value decodes to; neither is over the encoded value.
