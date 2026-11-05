@@ -129,6 +129,13 @@ async function runCli(who: ComputeWho | null, args: string[]): Promise<Ran> {
 }
 
 describe("advance", () => {
+  test("its help says the submit is refused while compute is switched off, and what stays", async () => {
+    const r = await runCli("admin", ["advance", "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("The submit is refused while compute is switched off");
+    expect(r.stdout).toContain("compute_disabled");
+  });
+
   test("it submits a created job and prints the job as the Worker shows it", async () => {
     const made = await makeJob(fx);
     const r = await runCli("admin", ["advance", made.job.id]);

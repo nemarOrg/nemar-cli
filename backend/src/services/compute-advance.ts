@@ -35,10 +35,19 @@
  * and a healthy running job was never read. The two live lists do not share their quota, for the same
  * reason the terminal lists do not: no kind of row can starve another.
  *
- * COST. Each row costs about one Tapis read (a `created` row, a tag search and at most one submit)
- * with at most two attempts of at most ten seconds each (`TICK_READ`), plus bucket and database calls;
- * four lists of ten rows are well within the subrequest allowance this tick shares with the other jobs
- * on it. The Worker's reads on behalf of a request are one attempt of at most eight seconds.
+ * COST, counted as subrequests (every fetch and, assumed, every D1 and R2 binding call; whether a binding
+ * call counts toward the allowance is UNVERIFIED, so it is counted as if it does). A live row is one
+ * Tapis read, at most two attempts of at most ten seconds each (`TICK_READ`), and a few database
+ * statements: about 6, or up to about 25 for the row whose read says FINISHED, which is VERIFIED
+ * before it may stand: three launcher documents, the recorded specification, the outputs listed once
+ * per 1,000 declared (up to five pages at the default `maxFiles` of 5,000) and the launcher's files
+ * listed once. A `created` row adds a tag search and at most one submit: about 12. A terminal row
+ * owed a settlement is verified the same way (about 25); one owed a copy of its files writes at most
+ * five objects, reads as many and downloads one log (two attempts at most): about 15. The worst tick
+ * is ten rows of each list at its worst, about 800, against the 1,000 a paid Worker invocation may
+ * make, and that allowance is shared with the rest of the 30-minute block: which is why each list is
+ * capped at ten and the lists do not share a quota. A request's own reads are one attempt of at most
+ * eight seconds (`REQUEST_READ`).
  */
 
 import type { Bindings } from "../types/bindings.js";

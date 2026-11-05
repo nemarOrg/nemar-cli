@@ -1,6 +1,6 @@
 /**
  * Tapis job status webhook: POST /tapis/:jobId/:token (epic #2005 phase A5, #2010; ADR 0118,
- * decision 6; design section 7, "Status updates").
+ * decision 6 of its Decision section, "Webhooks are hints"; design section 7, "Status updates").
  *
  * TAPIS DOES NOT SIGN WEBHOOKS, so a webhook is only a HINT. The address NEMAR subscribed carries a
  * token that is an HMAC (domain tag `compute-webhook`) over the job's id and its `webhook_nonce`;

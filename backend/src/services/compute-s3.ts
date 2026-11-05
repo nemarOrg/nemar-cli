@@ -23,8 +23,8 @@
  * is refused if it could escape (an empty, `.` or `..` segment, a backslash or a control character:
  * the contract's own predicate, `COMPUTE_PATH_RE`, so the Worker and the launcher judge one thing)
  * or if it is longer than the 1,024 bytes a key may be. `assertValidS3Key` is NOT used: it refuses
- * any `..` inside a name and throws on a stray `%`, which would fail an upload with a code that
- * refunds the job.
+ * any `..` inside a name and throws on a stray `%`, which would fail an upload for a name the
+ * launcher was entitled to use.
  *
  * AN EXPIRY is a whole number of seconds from 1 to 604,800 (seven days, the limit of S3 and of R2),
  * and anything else is refused before anything is signed.

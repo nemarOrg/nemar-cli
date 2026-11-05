@@ -88,6 +88,10 @@ lost answer did), a submitted one is read back from Tapis and brought to the sta
 finished one gets what it is still owed (its settlement, the copy of its files). The way a job moves in
 development, where no compute cron runs. It does what the webhook and the 30-minute tick do, and no more.
 
+The submit is refused while compute is switched off: a created job stays created (the answer is
+"waiting", with submit compute_disabled), and everything else, a read-back, a settlement, a copy, still
+happens, because a job that is already on a cluster is never stranded by the switch.
+
 Admin or owner. --json prints the Worker's answer as it is.
 
 Exit codes:

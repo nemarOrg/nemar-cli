@@ -586,7 +586,7 @@ async function resolveFailure(
     }
   }
   // The Worker's own cancel record overrules the launcher's `terminated` detail: the launcher cannot
-  // tell a cancel by the person from a Slurm preemption (ADR 0118, decision 13).
+  // tell a cancel by the person from a Slurm preemption (ADR 0118, decision 13 of its Decision section).
   const cancelledByUs =
     job.cancel_requested_at !== null && code === "runtime_error" && detail === "terminated";
   if (refusal !== null)
