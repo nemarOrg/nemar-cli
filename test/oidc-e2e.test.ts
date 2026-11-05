@@ -124,6 +124,10 @@ describe("the logout token verifier rejects what it must", () => {
     typ?: string;
     nonce?: string;
     iss?: string;
+    /** `null` leaves the member out; an object replaces it. */
+    events?: Record<string, unknown> | null;
+    /** Seconds from now the token expires: negative for an expired one. */
+    expiresIn?: number;
   }) => Promise<string>;
 
   beforeAll(async () => {
@@ -135,7 +139,11 @@ describe("the logout token verifier rejects what it must", () => {
         sub: "nmu_00000000000000000000000000000001",
         events: { [OIDC_BACKCHANNEL_LOGOUT_EVENT]: {} },
       };
+      if (over.events === null) claims.events = undefined;
+      else if (over.events !== undefined) claims.events = over.events;
       if (over.nonce !== undefined) claims.nonce = over.nonce;
+      const now = Math.floor(Date.now() / 1000);
+      const expiresIn = over.expiresIn ?? OIDC_LOGOUT_TOKEN_TTL_SECONDS;
       return new SignJWT(claims)
         .setProtectedHeader({
           alg: OIDC_SIGNING_ALG,
@@ -144,8 +152,8 @@ describe("the logout token verifier rejects what it must", () => {
         })
         .setIssuer(over.iss ?? CONTROL_ISSUER)
         .setAudience(over.aud ?? CONTROL_CLIENT)
-        .setIssuedAt()
-        .setExpirationTime(`${OIDC_LOGOUT_TOKEN_TTL_SECONDS}s`)
+        .setIssuedAt(Math.min(now, now + expiresIn - 1))
+        .setExpirationTime(now + expiresIn)
         .setJti(crypto.randomUUID())
         .sign(privateKey);
     };
@@ -216,6 +224,28 @@ describe("the logout token verifier rejects what it must", () => {
     });
   });
 
+  test("rejects a token with no events member", async () => {
+    await expect(verify(await sign({ events: null }))).rejects.toMatchObject({
+      code: "ERR_JWT_CLAIM_VALIDATION_FAILED",
+      claim: "events",
+    });
+  });
+
+  test("rejects a token whose events lack the back-channel logout event", async () => {
+    await expect(
+      verify(await sign({ events: { "http://schemas.openid.net/event/other": {} } })),
+    ).rejects.toThrow(/no back-channel logout event/);
+    await expect(verify(await sign({ events: {} }))).rejects.toThrow(
+      /no back-channel logout event/,
+    );
+  });
+
+  test("rejects an expired token", async () => {
+    await expect(verify(await sign({ expiresIn: -60 }))).rejects.toMatchObject({
+      code: "ERR_JWT_EXPIRED",
+    });
+  });
+
   test("rejects a token that carries a nonce", async () => {
     await expect(verify(await sign({ nonce: "n-0S6_WzA2Mj" }))).rejects.toThrow(
       /must not carry a nonce/,
@@ -228,9 +258,16 @@ describe("the logout token verifier rejects what it must", () => {
 // ---------------------------------------------------------------------------------------------
 
 const pending: Promise<unknown>[] = [];
+/** What the work handed to `waitUntil` threw: a logout failure shows its cause instead of vanishing. */
+const waitUntilFailures: unknown[] = [];
 const ctx = {
   waitUntil: (p: Promise<unknown>) => {
-    pending.push(p.catch(() => {}));
+    pending.push(
+      p.catch((err) => {
+        waitUntilFailures.push(err);
+        console.error("[oidc-e2e] background work failed:", err);
+      }),
+    );
   },
   passThroughOnException: () => {},
 } as unknown as ExecutionContext;
@@ -303,7 +340,9 @@ async function authorizeAsPage(
     body: { request },
     headers: pageHeaders(cookie),
   });
-  expect(check.status).toBe(200);
+  if (check.status !== 200) {
+    throw new Error(`the authorization check answered ${check.status}: ${check.text}`);
+  }
   let answer = check.json as Record<string, unknown>;
   let consented = false;
   if (answer.kind === "consent") {
@@ -312,10 +351,14 @@ async function authorizeAsPage(
       body: { request, consent_token: answer.consent_token, decision: "allow" },
       headers: pageHeaders(cookie),
     });
-    expect(consent.status).toBe(200);
+    if (consent.status !== 200) {
+      throw new Error(`the consent decision answered ${consent.status}: ${consent.text}`);
+    }
     answer = consent.json as Record<string, unknown>;
   }
-  expect(answer.kind).toBe("redirect");
+  if (answer.kind !== "redirect") {
+    throw new Error(`the authorization did not end in a redirect: ${JSON.stringify(answer)}`);
+  }
   return { location: new URL(answer.location as string), consented };
 }
 
@@ -327,22 +370,22 @@ function atHash(accessToken: string): string {
 
 let partner: LogoutStandin;
 
-beforeEach(async () => {
-  h = await startOidcHarness({
-    ENVIRONMENT: "development",
-    API_BASE_URL: API,
-    HOST_PREFIXED_SESSION_COOKIE: "1",
-  });
-  env = h.env;
-  partner = startLogoutStandin();
-});
-
-afterEach(async () => {
-  await settle();
-  await partner.stop();
-});
-
 describe("a relying-party library signs a person in, end to end", () => {
+  beforeEach(async () => {
+    h = await startOidcHarness({
+      ENVIRONMENT: "development",
+      API_BASE_URL: API,
+      HOST_PREFIXED_SESSION_COOKIE: "1",
+    });
+    env = h.env;
+    partner = startLogoutStandin();
+  });
+
+  afterEach(async () => {
+    await settle();
+    await partner.stop();
+  });
+
   test("keys, client, authorize and consent, redeem, verify, userinfo, refresh, introspect, refusal, replay, revoke, logout", async () => {
     // 1. The owner makes the signing keys and registers the client, through the real admin routes.
     const rotated = await api("POST", "/admin/oidc/keys/rotate", { key: OWNER_KEY, body: {} });
@@ -488,6 +531,7 @@ describe("a relying-party library signs a person in, end to end", () => {
     const revoked = await api("POST", `/admin/revoke/by-id/${userId}`, { key: OWNER_KEY });
     expect(revoked.status).toBe(200);
     await settle();
+    expect(waitUntilFailures).toEqual([]);
 
     expect((await client.tokenIntrospection(config, refreshed.access_token)).active).toBe(false);
     expect((await client.tokenIntrospection(config, access)).active).toBe(false);
