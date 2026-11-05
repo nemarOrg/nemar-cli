@@ -330,7 +330,7 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
 "Item N" means the numbered item of THIS amendment.
 
 1. **The `NEMAR_LAUNCH_SPEC` value is the launch specification's JSON text in base64url, with no padding.**
-   Request for Comments (RFC) 4648 section 5, alphabet `A-Za-z0-9-_` (`SHELL_INERT_ENV_ALPHABET`), no padding and no line break, applied to the bytes of the printable-ASCII JSON text that `encodeLaunchSpec` writes (every byte 0x20 to 0x7e: JSON escapes the control bytes, and the encoder escapes DEL and everything from 0x80 up).
+   Request for Comments (RFC) 4648 section 5, alphabet `A-Za-z0-9-_` (`SHELL_INERT_ENV_ALPHABET`), no padding and no line break, applied to the bytes of the printable-ASCII JSON text that `encodeLaunchSpec` writes (every byte 0x20 to 0x7e: JSON escapes the control bytes, and `encodeLaunchSpec` escapes DEL and everything from 0x80 up).
    The variable name is unchanged.
    A value made only of that alphabet holds none of the characters a conditional quoter would quote for and none that a shell, a glob or a quoting rule acts on, so how the scheduler quotes is no longer something the launch specification depends on.
    `encodeLaunchSpecEnv(text)` is the wire step, beside `encodeLaunchSpec`, which still returns the JSON text because the text is what is hashed and recorded.
