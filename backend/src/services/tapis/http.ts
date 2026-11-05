@@ -39,27 +39,46 @@ export interface SendOptions {
   what: string;
   timeoutMs?: number;
   maxBytes: number;
+  /**
+   * Keep the FIRST `maxBytes` of a body that is longer and say so (`SendResult.truncated`), instead of
+   * refusing it as `invalid_response`. The stream is read up to the bound and then cancelled: no
+   * `Range` header is sent, because no tenant has been shown to honour one (UNVERIFIED), and a
+   * server that ignored it would send the whole file. Only for a download a caller wants a prefix of.
+   */
+  truncate?: boolean;
 }
 
-/** Read a body to its end or to `maxBytes`, whichever comes first; null when it is longer. */
-async function readBounded(res: Response, maxBytes: number): Promise<Uint8Array | null> {
+/**
+ * Read a body to its end or to `maxBytes`, whichever comes first; null when it is longer, or, with
+ * `truncate`, its first `maxBytes` and `truncated: true`.
+ */
+async function readBounded(
+  res: Response,
+  maxBytes: number,
+  truncate: boolean,
+): Promise<{ bytes: Uint8Array; truncated: boolean } | null> {
   const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) {
+  if (!truncate && Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
     return null;
   }
-  if (!res.body) return new Uint8Array(0);
+  if (!res.body) return { bytes: new Uint8Array(0), truncated: false };
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let truncated = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
+    if (total + value.byteLength > maxBytes) {
       await reader.cancel().catch(() => {});
-      return null;
+      if (!truncate) return null;
+      chunks.push(value.subarray(0, maxBytes - total));
+      total = maxBytes;
+      truncated = true;
+      break;
     }
+    total += value.byteLength;
     chunks.push(value);
   }
   const out = new Uint8Array(total);
@@ -68,13 +87,15 @@ async function readBounded(res: Response, maxBytes: number): Promise<Uint8Array 
     out.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return out;
+  return { bytes: out, truncated };
 }
 
 export interface SendResult {
   /** The 2xx status of the answer. */
   status: number;
   bytes: Uint8Array;
+  /** Only with `truncate`: the body was longer than `maxBytes` and `bytes` is its first `maxBytes`. */
+  truncated?: boolean;
 }
 
 /**
@@ -100,15 +121,17 @@ export async function send(options: SendOptions): Promise<SendResult> {
     await res.body?.cancel().catch(() => {});
     throw errorForStatus(res.status, options.what);
   }
-  let bytes: Uint8Array | null;
+  let read: { bytes: Uint8Array; truncated: boolean } | null;
   try {
-    bytes = await readBounded(res, options.maxBytes);
+    read = await readBounded(res, options.maxBytes, options.truncate === true);
   } catch {
     // A timeout while the body was coming, or a connection that closed in the middle of it.
     throw transportError(options.what, signal.aborted);
   }
-  if (bytes === null) throw invalidResponse(options.what, res.status);
-  return { status: res.status, bytes };
+  if (read === null) throw invalidResponse(options.what, res.status);
+  return options.truncate === true
+    ? { status: res.status, bytes: read.bytes, truncated: read.truncated }
+    : { status: res.status, bytes: read.bytes };
 }
 
 /** The text of a body as JSON (UTF-8 that is not valid is refused, not repaired), or `invalid_response`. */

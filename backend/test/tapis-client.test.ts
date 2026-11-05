@@ -38,11 +38,13 @@ import {
 } from "../src/services/tapis/auth";
 import {
   type SubmitJobInput,
+  TAPIS_MAX_DOWNLOAD_BYTES,
   TAPIS_MAX_JSON_BYTES,
   TAPIS_TIMEOUT_MS,
   type TapisContext,
   cancelJob,
   downloadOutput,
+  downloadOutputPrefix,
   effectiveTimeoutMs,
   getJob,
   getJobHistory,
@@ -1197,6 +1199,44 @@ describe("the calls and what they send", () => {
       downloadOutput(ctx(env), job.uuid, "work/outputs/none.bin", 10),
     );
     expect(missing.kind).toBe("not_found");
+  });
+
+  test("downloadOutputPrefix keeps the first bytes of a file over the bound and says so; a file within it is whole (round 1 of #2041)", async () => {
+    const env = passwordEnv();
+    const job = await submitJob(ctx(env), SUBMIT);
+    const body = new Uint8Array(1001).map((_, i) => i % 251);
+    standin.setOutput(job.uuid, "tapisjob.out", body);
+    standin.setOutput(job.uuid, "small.out", "short");
+    standin.advance(job.uuid, "FINISHED");
+    const cut = await downloadOutputPrefix(ctx(env), job.uuid, "tapisjob.out", 1000);
+    expect(cut.truncated).toBe(true);
+    expect(cut.bytes).toHaveLength(1000);
+    expect(cut.bytes).toEqual(body.subarray(0, 1000));
+    // At the bound exactly: whole, not truncated. One under: truncated by one byte.
+    const exact = await downloadOutputPrefix(ctx(env), job.uuid, "tapisjob.out", 1001);
+    expect([exact.truncated, exact.bytes.length]).toEqual([false, 1001]);
+    const under = await downloadOutputPrefix(ctx(env), job.uuid, "tapisjob.out", 1);
+    expect([under.truncated, under.bytes.length]).toEqual([true, 1]);
+    const whole = await downloadOutputPrefix(ctx(env), job.uuid, "small.out", 1000);
+    expect([whole.truncated, new TextDecoder().decode(whole.bytes)]).toEqual([false, "short"]);
+    // No `Range` header is sent: the stream is read to the bound and cancelled.
+    for (const r of standin.log.filter((q) => q.route === "GET /v3/jobs/:uuid/output/download/*")) {
+      expect(r.headers.range).toBeUndefined();
+    }
+    // The existing call is unchanged: over the bound is still `invalid_response`.
+    expect(
+      (await failure(() => downloadOutput(ctx(env), job.uuid, "tapisjob.out", 1000))).kind,
+    ).toBe("invalid_response");
+    // The same refusals as the plain download: a missing file, a launch file, a bound past the maximum.
+    expect(
+      (await failure(() => downloadOutputPrefix(ctx(env), job.uuid, "none.out", 10))).kind,
+    ).toBe("not_found");
+    await expect(downloadOutputPrefix(ctx(env), job.uuid, "tapisjob.env", 10)).rejects.toThrow(
+      RangeError,
+    );
+    await expect(
+      downloadOutputPrefix(ctx(env), job.uuid, "tapisjob.out", TAPIS_MAX_DOWNLOAD_BYTES + 1),
+    ).rejects.toThrow(RangeError);
   });
 
   test("a path that could escape the job's output directory is refused before sending", async () => {

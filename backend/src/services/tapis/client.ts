@@ -215,6 +215,8 @@ interface Call {
   maxBytes: number;
   /** The `Accept` header: JSON for a record, anything for a file's bytes. */
   accept: "application/json" | "*/*";
+  /** Keep a prefix of a body over `maxBytes` and say so, rather than refuse it (a download only). */
+  truncate?: boolean;
 }
 
 /**
@@ -239,6 +241,7 @@ async function perform(ctx: TapisContext, call: Call): Promise<SendResult> {
         what: call.what,
         timeoutMs: ctx.timeoutMs,
         maxBytes: call.maxBytes,
+        ...(call.truncate === true ? { truncate: true } : {}),
       });
     } catch (err) {
       // The request may have been sent and acted on: say so, for a call that changes something.
@@ -588,6 +591,32 @@ export async function listOutputs(
   return answer.result;
 }
 
+/** The one download: `truncate` keeps a prefix of a file over `maxBytes` instead of refusing it. */
+async function fetchOutput(
+  ctx: TapisContext,
+  uuid: string,
+  path: string,
+  maxBytes: number,
+  truncate: boolean,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  assertUuid(uuid);
+  assertOutputPath(path, false);
+  if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > TAPIS_MAX_DOWNLOAD_BYTES) {
+    throw new RangeError(`maxBytes is a whole number from 1 to ${TAPIS_MAX_DOWNLOAD_BYTES}`);
+  }
+  const result = await perform(ctx, {
+    what: "download output",
+    method: "GET",
+    path: `/jobs/${encodeURIComponent(uuid)}/output/download/${encodePath(path)}`,
+    retry: true,
+    mutates: false,
+    maxBytes,
+    accept: "*/*",
+    ...(truncate ? { truncate: true } : {}),
+  });
+  return { bytes: result.bytes, truncated: result.truncated === true };
+}
+
 /**
  * `GET /v3/jobs/{uuid}/output/download/{path}`: one file's bytes, at most `maxBytes` (a larger one is
  * `invalid_response` and is not read to its end). `maxBytes` itself is at most 16 MiB: a larger request
@@ -599,21 +628,22 @@ export async function downloadOutput(
   path: string,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  assertUuid(uuid);
-  assertOutputPath(path, false);
-  if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > TAPIS_MAX_DOWNLOAD_BYTES) {
-    throw new RangeError(`maxBytes is a whole number from 1 to ${TAPIS_MAX_DOWNLOAD_BYTES}`);
-  }
-  const { bytes } = await perform(ctx, {
-    what: "download output",
-    method: "GET",
-    path: `/jobs/${encodeURIComponent(uuid)}/output/download/${encodePath(path)}`,
-    retry: true,
-    mutates: false,
-    maxBytes,
-    accept: "*/*",
-  });
-  return bytes;
+  return (await fetchOutput(ctx, uuid, path, maxBytes, false)).bytes;
+}
+
+/**
+ * The same download, for a file a caller wants a PREFIX of (a log): the first `maxBytes` and whether
+ * there was more, never `invalid_response` for a file that is merely long. The stream is read to the
+ * bound and cancelled; no `Range` header is sent (no tenant has been shown to honour one, UNVERIFIED).
+ * Additive: `downloadOutput` is unchanged.
+ */
+export async function downloadOutputPrefix(
+  ctx: TapisContext,
+  uuid: string,
+  path: string,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  return fetchOutput(ctx, uuid, path, maxBytes, true);
 }
 
 // --- Health ------------------------------------------------------------------------------------
