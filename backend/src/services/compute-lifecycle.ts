@@ -72,7 +72,6 @@ import {
   RECORDS_RESULT_MANIFEST_FILE,
   dataTagForVersion,
   suMilliFor,
-  submitMemoryMb,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import {
@@ -84,6 +83,7 @@ import {
 } from "./compute-jobs.js";
 import { releaseStatements, settleStatements } from "./compute-ledger.js";
 import { getPolicy } from "./compute-policy.js";
+import { submitMemoryForQueue } from "./compute-queues.js";
 import {
   OUTPUTS_BODY_CEILING_BYTES,
   logKey,
@@ -1357,10 +1357,12 @@ async function submitLeased(
   }
   // ALWAYS sent: Tapis passes a memory to the scheduler whatever it is given (its own default is 100 MB),
   // so a job that names none would be limited to that however much the hold charged it for. The figure
-  // is the memory the charge pays for (`submitMemoryMb`); a row that has none to ask for cannot launch.
+  // is the memory the charge pays for (`submitMemoryMb`), clamped to what the queue can schedule
+  // (`QUEUE_MAX_MEMORY_MB`: a whole node's nominal memory is more than Slurm will ever hand out); a row
+  // that has none to ask for cannot launch.
   let memoryMb: number;
   try {
-    memoryMb = submitMemoryMb(row.partition as PartitionName, {
+    memoryMb = submitMemoryForQueue(row.partition as PartitionName, {
       cores: row.cores_per_node,
       memory_mb: row.memory_mb,
       gpus: row.gpus,

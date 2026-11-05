@@ -534,7 +534,8 @@ describe("every partition's submit carries memory, minutes, nodes and cores", ()
   /** Per partition: [row cores, row GPUs, row memory in MB or null, memory the submit must carry]. */
   const WRITTEN_OUT: Record<PartitionName, [number, number, number | null, number]> = {
     shared: [4, 0, null, 8192],
-    compute: [128, 0, null, 262144],
+    // A whole node is charged as 262,144 MB and the queue schedules at most 249,208: the submit is clamped.
+    compute: [128, 0, null, 249208],
     debug: [4, 0, null, 8192],
     "large-shared": [4, 0, null, 8192],
     preempt: [4, 0, null, 8192],
@@ -575,6 +576,36 @@ describe("every partition's submit carries memory, minutes, nodes and cores", ()
     });
   }
 
+  // Round 2 of #2041: the memory the charge pays for is not always what a queue can schedule. A whole
+  // `compute` node's 262,144 MB (its nominal memory) is over the queue's 249,208 MB, and so is a 128-core
+  // `debug` job that names no memory (128 x 2,048 MB); either would be refused at submit.
+  test("a 128-core compute job, a 128-core debug job and a whole GPU node all submit within their queue's maximum", async () => {
+    const shapes: Array<[PartitionName, number, number, number]> = [
+      ["compute", 128, 0, 249208],
+      ["debug", 128, 0, 249208],
+      ["preempt", 128, 0, 249208],
+      ["gpu", 40, 4, 376832],
+    ];
+    for (const [partition, cores, gpus, expected] of shapes) {
+      const made = await makeJob(fx);
+      await made.env.DB.prepare(
+        `UPDATE compute_jobs SET partition = ?1, pool = ?2, nodes = 1, cores_per_node = ?3,
+                gpus = ?4, memory_mb = NULL, minutes = 30 WHERE id = ?5`,
+      )
+        .bind(partition, PARTITIONS[partition].pool, cores, gpus, made.job.id)
+        .run();
+      fx.tapis.log.length = 0;
+      expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+        ok: true,
+        outcome: "submitted",
+      });
+      const body = JSON.parse(
+        fx.tapis.log.find((r) => r.route === "POST /v3/jobs/submit")?.body ?? "{}",
+      );
+      expect([partition, body.memoryMB]).toEqual([partition, expected]);
+    }
+  });
+
   test("a per-resource job's own memory is what is asked for; a whole node's own is not (the node is charged and given whole)", async () => {
     const own = await makeJob(fx);
     await own.env.DB.prepare("UPDATE compute_jobs SET memory_mb = 20000 WHERE id = ?")
@@ -591,7 +622,7 @@ describe("every partition's submit carries memory, minutes, nodes and cores", ()
     const sent = fx.tapis.log
       .filter((r) => r.route === "POST /v3/jobs/submit")
       .map((r) => JSON.parse(r.body ?? "{}").memoryMB);
-    expect(sent).toEqual([20000, 262144]);
+    expect(sent).toEqual([20000, 249208]);
   });
 
   test("a row with nothing to ask memory for cannot launch: it ends failed with the hold released, and Tapis is never reached", async () => {
