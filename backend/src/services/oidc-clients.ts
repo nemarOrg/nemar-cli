@@ -186,7 +186,21 @@ const FORBIDDEN_IN_ADDRESS = /[\s\\*\p{Cc}]/u;
 const CONTROL_OR_FORMAT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 export function isLoopbackHost(hostname: string): boolean {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+  // One dot: a canonical fully qualified name has exactly one, and a first-party loopback address (a
+  // developer's machine, outside production) is exactly the name and no stranger spelling.
+  const host = hostname.replace(/\.$/, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+/**
+ * Every trailing dot, for the REFUSING side. A fully qualified name ends in a dot and names the same host
+ * (`localhost.` is `localhost`), and `URL` keeps the dot, so a test of the host that did not fold it would
+ * call `https://localhost./x` a named host. Registration of a logout address and the sender's check at send
+ * time both read the host through {@link isLocalOrLiteral}, which folds all of them, so a refusal cannot be
+ * walked around by writing more dots, and the two cannot disagree.
+ */
+function withoutTrailingDots(hostname: string): string {
+  return hostname.replace(/\.+$/, "");
 }
 
 /** A dotted IPv4 address or a bracketed IPv6 one, as `URL` writes a host that is a literal address. */
@@ -196,7 +210,8 @@ function isIpLiteral(hostname: string): boolean {
 
 /** A host that names the machine itself or no name at all: loopback, `localhost` or any IP literal. */
 export function isLocalOrLiteral(hostname: string): boolean {
-  return isLoopbackHost(hostname) || hostname.endsWith(".localhost") || isIpLiteral(hostname);
+  const host = withoutTrailingDots(hostname);
+  return isLoopbackHost(host) || host.endsWith(".localhost") || isIpLiteral(host);
 }
 
 /**

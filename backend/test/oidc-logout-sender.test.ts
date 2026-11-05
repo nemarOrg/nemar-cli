@@ -630,12 +630,11 @@ describe("the fence", () => {
     expect(only(lookalike.userId).status).toBe("fenced");
   });
 
-  test("in production the list is ignored and a named https host is sent to", async () => {
+  test("in production a named https host is sent to", async () => {
     const asked: string[] = [];
     const env = {
       ...h.env,
       ENVIRONMENT: "production",
-      OIDC_LOGOUT_DEV_HOSTS: "127.0.0.1",
     } as never;
     const { userId } = await signedIn("https://partner.example.org/oidc/logout");
     h.db.query("DELETE FROM oidc_logout_deliveries").run();
@@ -646,6 +645,66 @@ describe("the fence", () => {
 
     expect(asked).toEqual(["https://partner.example.org/oidc/logout"]);
     expect(only(userId).status).toBe("sent");
+  });
+
+  /** Point a client's stored address at `uri`, as a row that was read at send time and not at registration. */
+  function restore(userId: number, uri: string | null): void {
+    h.db
+      .query(
+        "UPDATE oidc_clients SET backchannel_logout_uri = ? WHERE id IN (SELECT client_id FROM oidc_grants WHERE user_id = ?)",
+      )
+      .run(uri, userId);
+  }
+
+  test("in production the list is IGNORED: a loopback or literal host it names is still refused, and nothing is requested", async () => {
+    // Both local-or-literal AND listed: the case the list could wrongly admit. A named host would be sent
+    // to either way, so it would prove nothing; this one is sent to only if production honours the list.
+    const listed = "127.0.0.1,localhost,[::1],10.0.0.5,app.localhost";
+    const env = { ...h.env, ENVIRONMENT: "production", OIDC_LOGOUT_DEV_HOSTS: listed } as never;
+    for (const uri of [
+      "https://127.0.0.1/oidc/logout",
+      "https://localhost/oidc/logout",
+      "https://[::1]/oidc/logout",
+      "https://10.0.0.5/oidc/logout",
+      "https://app.localhost/oidc/logout",
+    ]) {
+      const asked: string[] = [];
+      h.db.query("DELETE FROM oidc_logout_deliveries").run();
+      const { userId } = await signedIn();
+      restore(userId, uri);
+      queue(userId);
+
+      const tally = await attemptDueLogouts(env, { fetchImpl: recordingFetch(asked) });
+
+      expect(asked, uri).toEqual([]);
+      expect(tally.failed, uri).toBe(1);
+      expect(only(userId), uri).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        last_error_class: "address_refused",
+        next_attempt_at: null,
+      });
+    }
+    expect(partner.requests.length).toBe(0);
+  });
+
+  test("a stored address that is no longer one NEMAR will send to is recorded address_refused, with no request", async () => {
+    // Through `attemptDueLogouts`, not the pure verdict: the record of a refusal is what the owner reads.
+    const env = { ...h.env, ENVIRONMENT: "production" } as never;
+    for (const uri of ["https://localhost/oidc/logout", "https://127.0.0.1:8443/x", null]) {
+      const asked: string[] = [];
+      h.db.query("DELETE FROM oidc_logout_deliveries").run();
+      const { userId } = await signedIn();
+      restore(userId, uri);
+      queue(userId);
+      await attemptDueLogouts(env, { fetchImpl: recordingFetch(asked) });
+      expect(asked, String(uri)).toEqual([]);
+      expect(only(userId), String(uri)).toMatchObject({
+        status: "failed",
+        attempts: 0,
+        last_error_class: "address_refused",
+      });
+    }
   });
 
   test("an environment that is not exactly production is fenced, whatever it is called", async () => {
@@ -699,6 +758,53 @@ describe("the address", () => {
     ]) {
       expect({ uri, verdict: logoutAddressVerdict(prod, uri) }).toEqual({ uri, verdict: refused });
     }
+  });
+
+  test("production ignores OIDC_LOGOUT_DEV_HOSTS: it can neither admit a local host nor refuse a named one", () => {
+    const listed = "127.0.0.1,localhost,[::1],10.0.0.5,app.localhost,partner.example.org";
+    const env = { ENVIRONMENT: "production", OIDC_LOGOUT_DEV_HOSTS: listed } as never;
+    for (const uri of [
+      "https://127.0.0.1/logout",
+      "https://localhost/logout",
+      "https://[::1]/logout",
+      "https://10.0.0.5/logout",
+      "https://app.localhost/logout",
+    ]) {
+      expect(logoutAddressVerdict(env, uri), uri).toEqual({
+        send: false,
+        status: "failed",
+        errorClass: "address_refused",
+      });
+    }
+    expect(logoutAddressVerdict(env, "https://partner.example.org/logout")).toEqual({ send: true });
+    expect(logoutAddressVerdict(env, "https://other.example.org/logout")).toEqual({ send: true });
+  });
+
+  test("a trailing dot names the same host, in production and in dev", () => {
+    const prod = { ENVIRONMENT: "production" } as never;
+    const refused = { send: false, status: "failed", errorClass: "address_refused" };
+    for (const uri of [
+      "https://localhost./logout",
+      "https://localhost../logout",
+      "https://app.localhost./logout",
+      "https://127.0.0.1./logout",
+    ]) {
+      expect({ uri, verdict: logoutAddressVerdict(prod, uri) }).toEqual({ uri, verdict: refused });
+    }
+    const dev = {
+      ENVIRONMENT: "development",
+      OIDC_LOGOUT_DEV_HOSTS: "partner.example.org",
+    } as never;
+    // A loopback host, and a listed one, are the same host with their dot.
+    expect(logoutAddressVerdict(dev, "https://localhost.:9443/logout")).toEqual({ send: true });
+    expect(logoutAddressVerdict(dev, "https://partner.example.org./logout")).toEqual({
+      send: true,
+    });
+    expect(logoutAddressVerdict(dev, "https://other.example.org./logout")).toEqual({
+      send: false,
+      status: "fenced",
+      errorClass: "fenced",
+    });
   });
 
   test("a dev worker's loopback is localhost, 127.0.0.1 and [::1] and nothing like them", () => {
