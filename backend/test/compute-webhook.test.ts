@@ -19,6 +19,7 @@ import { runComputeAdvanceCron } from "../src/services/compute-advance";
 import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
 import { signComputeToken } from "../src/services/compute-tokens";
 import type { Bindings } from "../src/types/bindings";
+import { recordAbortTimeouts } from "./helpers/abort-timeouts";
 import {
   CALLBACK_SECRET,
   type LifecycleFixture,
@@ -327,6 +328,80 @@ describe("logs", () => {
     for (const line of hookLines) {
       expect(line).toMatch(/\/webhooks\/tapis\/(job_[0-9a-f]{24}|\[redacted\])\/\[redacted\]/);
     }
+  });
+});
+
+// Round 1 of #2041: the switch is read at submit and nowhere else. A job that is already on a cluster
+// must settle when compute is turned off, or its hold stays open for good. The scan twin is
+// `compute-source-scan.test.ts`; this is the behaviour.
+describe("a job that ends while compute is switched OFF is still settled", () => {
+  const ways = ["a webhook", "the tick"] as const;
+  const endings = ["FAILED", "FINISHED"] as const;
+  for (const way of ways) {
+    for (const ending of endings) {
+      test(`${ending} through ${way}`, async () => {
+        const s = await submitted();
+        fx.tapis.advance(s.uuid, "RUNNING");
+        if (ending === "FINISHED") {
+          await playLauncher(fx, workerEnv, await reread(workerEnv, s.job.id), s.uuid, {});
+          fx.tapis.advance(s.uuid, "FINISHED");
+        } else {
+          fx.tapis.advance(s.uuid, "FAILED", "JOB_LAUNCH_FAILURE");
+        }
+        setTapisTimes(fx, s.uuid, 30 * MINUTE, 0);
+        const off = { ...workerEnv, COMPUTE_ENABLED: undefined } as Bindings;
+        if (way === "a webhook") {
+          const saved = workerEnv;
+          workerEnv = off;
+          try {
+            expect((await post(hookUrl(s.job.id, await webhookToken(s.job.id)))).status).toBe(200);
+          } finally {
+            workerEnv = saved;
+          }
+        } else {
+          expect(await runComputeAdvanceCron(off)).not.toBeNull();
+        }
+        const job = await reread(workerEnv, s.job.id);
+        expect([way, ending, job.state]).toEqual([way, ending, ending.toLowerCase()]);
+        expect(job.settled_provisional_at).not.toBeNull();
+        expect(await ledgerKinds(s.job.id)).toEqual(["hold", "charge"]);
+        if (ending === "FINISHED") expect(job.results_verified_at).not.toBeNull();
+      });
+    }
+  }
+});
+
+// Round 1 of #2041: the read-back a webhook makes has a short ceiling, and the tick a longer one. A
+// constant changed from 8,000 to 40,000 milliseconds passed every test, so the time the client is
+// ASKED for is asserted: what `AbortSignal.timeout` receives, written out here.
+describe("the time a read-back may take", () => {
+  test("a webhook's read of the job is asked to finish in 8 seconds, on one attempt", async () => {
+    const s = await submitted();
+    fx.tapis.advance(s.uuid, "RUNNING");
+    const token = await webhookToken(s.job.id);
+    const asked = recordAbortTimeouts();
+    try {
+      expect((await post(hookUrl(s.job.id, token))).status).toBe(200);
+    } finally {
+      asked.restore();
+    }
+    expect(asked.values.length).toBeGreaterThan(0);
+    expect([...new Set(asked.values)]).toEqual([8000]);
+    expect((await reread(workerEnv, s.job.id)).state).toBe("running");
+  });
+
+  test("the tick's read of a live job is asked to finish in 10 seconds", async () => {
+    const s = await submitted();
+    fx.tapis.advance(s.uuid, "RUNNING");
+    const asked = recordAbortTimeouts();
+    try {
+      expect(await runComputeAdvanceCron(workerEnv)).not.toBeNull();
+    } finally {
+      asked.restore();
+    }
+    expect(asked.values.length).toBeGreaterThan(0);
+    expect([...new Set(asked.values)]).toEqual([10000]);
+    expect((await reread(workerEnv, s.job.id)).state).toBe("running");
   });
 });
 
