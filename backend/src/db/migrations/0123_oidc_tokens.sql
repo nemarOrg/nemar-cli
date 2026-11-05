@@ -119,11 +119,14 @@ CREATE TABLE oidc_tokens (
 );
 
 -- A family is revoked as one; a code's replay finds what it issued; the cascades (#2019) find an
--- account's tokens; a parent's children decide the retry. The prune deletes by expiry.
+-- account's tokens; a parent's children decide the retry. The prune deletes by expiry, and runs at
+-- the head of every batch that mints, so each of its two branches reads an index that holds only
+-- its own kind: the access branch's index is PARTIAL on `kind = 'access'`, because one over every
+-- row would make each prune walk every retained refresh row (a test pins the definition).
 CREATE INDEX oidc_tokens_family ON oidc_tokens (family_id) WHERE family_id IS NOT NULL;
 CREATE INDEX oidc_tokens_user ON oidc_tokens (user_id) WHERE user_id IS NOT NULL;
 CREATE INDEX oidc_tokens_code ON oidc_tokens (code_id) WHERE code_id IS NOT NULL;
 CREATE INDEX oidc_tokens_parent ON oidc_tokens (parent_id) WHERE parent_id IS NOT NULL;
-CREATE INDEX oidc_tokens_expires_at ON oidc_tokens (expires_at);
+CREATE INDEX oidc_tokens_expires_at ON oidc_tokens (expires_at) WHERE kind = 'access';
 CREATE INDEX oidc_tokens_absolute_expires_at ON oidc_tokens (absolute_expires_at)
   WHERE absolute_expires_at IS NOT NULL;

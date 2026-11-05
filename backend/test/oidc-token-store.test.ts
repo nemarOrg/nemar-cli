@@ -821,3 +821,32 @@ describe("TOKENS_PRUNE_SQL", () => {
     },
   );
 });
+
+describe("the prune reads only what it may delete", () => {
+  // The prune runs at the head of every batch that mints. Its access branch is answered from the
+  // expiry index; were that index over every row, each prune would also walk every retained refresh
+  // row (measured in review: 43 ms with 200,000 of them, 0.06 ms with the partial index). Pinned by
+  // the index's own definition, since the plan names the same index either way.
+  onEveryEngine("the access expiry index is partial on kind = 'access'", async (e) => {
+    const index = await one<{ sql: string }>(
+      e,
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'oidc_tokens_expires_at'",
+    );
+    expect(index.sql.replace(/\s+/g, " ")).toMatch(/\(expires_at\) WHERE kind = 'access'$/);
+    const absolute = await one<{ sql: string }>(
+      e,
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'oidc_tokens_absolute_expires_at'",
+    );
+    expect(absolute.sql.replace(/\s+/g, " ")).toMatch(/WHERE absolute_expires_at IS NOT NULL$/);
+  });
+
+  test("the prune's plan searches both expiry indexes and scans no table", () => {
+    const plan = sqlite
+      .query<{ detail: string }, []>(`EXPLAIN QUERY PLAN ${TOKENS_PRUNE_SQL}`)
+      .all()
+      .map((r) => r.detail);
+    expect(plan.some((d) => /USING INDEX oidc_tokens_expires_at\b/.test(d))).toBe(true);
+    expect(plan.some((d) => /USING INDEX oidc_tokens_absolute_expires_at\b/.test(d))).toBe(true);
+    expect(plan.some((d) => /^SCAN oidc_tokens\b/.test(d))).toBe(false);
+  });
+});
