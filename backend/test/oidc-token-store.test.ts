@@ -18,7 +18,6 @@
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Miniflare } from "miniflare";
-import { OIDC_END_REASONS } from "../../shared/oidc";
 import { oidcClientEndStatements, oidcEndStatements } from "../src/services/oidc-cascade";
 import {
   ACCESS_FROM_CODE_SQL,
@@ -988,24 +987,47 @@ describe("REFRESH_SIBLINGS_REVOKE_SQL: the children of one parent are mutually e
 });
 
 describe("the revoke reasons are one closed list", () => {
-  test("every reason a statement writes is in OIDC_TOKEN_REVOKE_REASONS, and every word is written", () => {
+  /** The words, as literals: a word added, renamed or dropped is a change to this test. */
+  const WORDS = [
+    "account_deleted",
+    "account_merged",
+    "account_revoked",
+    "client_disabled",
+    "client_revoked",
+    "code_replay",
+    "compute_suspended",
+    "kind_changed",
+    "orcid_changed",
+    "refresh_reuse",
+    "refresh_superseded",
+  ];
+
+  test("OIDC_TOKEN_REVOKE_REASONS is exactly these words, and each token-store statement writes one of them", () => {
+    expect([...tokenStore.OIDC_TOKEN_REVOKE_REASONS].sort()).toEqual(WORDS);
     const written = new Set<string>();
-    // The token store's own statements write theirs as literals...
+    // The token store's own statements write theirs as literals.
     for (const [name, value] of Object.entries(tokenStore)) {
       if (!name.endsWith("_SQL") || typeof value !== "string") continue;
       for (const m of value.matchAll(/revoked_reason = '([a-z_]+)'/g)) written.add(m[1] as string);
     }
-    // ...and the cascades (phase #2019) bind theirs: the first bind of the statement that revokes
-    // tokens is the reason, for an account's ending (one word of OIDC_END_REASONS each) and for a
-    // client's disabling.
-    for (const reason of OIDC_END_REASONS) {
-      const tokens = oidcEndStatements(1, reason)[1];
-      expect(tokens?.sql).toMatch(/revoked_reason = \?/);
-      written.add(tokens?.binds[0] as string);
-    }
-    const clientTokens = oidcClientEndStatements("oc_000000000000000000000000")[0];
-    expect(clientTokens?.sql).toMatch(/revoked_reason = \?/);
-    written.add(clientTokens?.binds[0] as string);
-    expect([...written].sort()).toEqual([...tokenStore.OIDC_TOKEN_REVOKE_REASONS].sort());
+    expect([...written].sort()).toEqual([
+      "client_revoked",
+      "code_replay",
+      "refresh_reuse",
+      "refresh_superseded",
+    ]);
+  });
+
+  test("the cascades bind a reason of the list: the second statement of an ending, and a client's first", () => {
+    // Statement 1 is the token revoke (0 queues the logouts, 2 revokes the grants): its first bind is
+    // the reason, and a client's disabling binds `client_disabled`.
+    const ending = oidcEndStatements(1, "account_revoked")[1];
+    expect(ending?.sql).toMatch(/^UPDATE oidc_tokens/);
+    expect(ending?.sql).toMatch(/revoked_reason = \?/);
+    expect(ending?.binds).toEqual(["account_revoked", 1]);
+    const client = oidcClientEndStatements("oc_000000000000000000000000")[0];
+    expect(client?.sql).toMatch(/^UPDATE oidc_tokens/);
+    expect(client?.sql).toMatch(/revoked_reason = \?/);
+    expect(client?.binds).toEqual(["client_disabled", "oc_000000000000000000000000"]);
   });
 });

@@ -19,10 +19,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   OIDC_BACKCHANNEL_LOGOUT_EVENT,
   OIDC_LOGOUT_ERROR_CLASSES,
+  OIDC_LOGOUT_LEASE_SECONDS,
   OIDC_LOGOUT_MAX_ATTEMPTS,
   OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
+  OIDC_LOGOUT_TIMEOUT_MS,
 } from "../../shared/oidc";
 import { attemptDueLogouts, logoutAddressVerdict } from "../src/services/oidc-logout";
+import { claimDelivery } from "../src/services/oidc-logout-store";
 import {
   type DeliveryRow,
   deliveries,
@@ -382,11 +385,13 @@ describe("what the partner answers", () => {
     const { userId } = await signedIn();
     await endAccount(userId);
     // The shipped timeout is 5 seconds; this test waits for it, which is what proves the constant.
+    expect(OIDC_LOGOUT_TIMEOUT_MS).toBe(5000);
     const started = Date.now();
     await h.settle();
     const waited = Date.now() - started;
+    // Five seconds, with the slack of a loaded machine and no more: a constant moved to six fails.
     expect(waited).toBeGreaterThanOrEqual(4800);
-    expect(waited).toBeLessThan(8000);
+    expect(waited).toBeLessThan(6500);
     const row = only(userId);
     expect(row).toMatchObject({
       status: "pending",
@@ -554,17 +559,83 @@ describe("the claim of an attempt", () => {
     expect(only(userId)).toMatchObject({ status: "sent", attempts: 1 });
   });
 
-  test("an attempt in flight is not taken up again until its claim lapses", async () => {
+  test("the claim holds the row for two minutes, by the database's clock, and a run in the meantime finds nothing due", async () => {
+    // Deterministic: the claim is made directly and nothing is sent, so what is read is the lease the
+    // claim statement wrote, not how long an attempt happened to take.
     const { userId } = await signedIn();
     queue(userId);
-    partner.respond(() => new Promise<Response>(() => {}));
-    const first = attemptDueLogouts(h.env, { timeoutMs: 800 });
-    await new Promise((r) => setTimeout(r, 200));
-    // While the first is waiting for the partner, the row is claimed: a second run finds it not due.
+    const row = only(userId);
+    expect(await claimDelivery(h.env.DB, row.id, 0, "1".repeat(32))).toBe(true);
+
+    expect(OIDC_LOGOUT_LEASE_SECONDS).toBe(120);
+    within(secondsUntilNext(row.id), 120);
+    // A lease shorter than the timeout would let a second runner send while the first still waits.
+    expect(OIDC_LOGOUT_LEASE_SECONDS * 1000).toBeGreaterThan(OIDC_LOGOUT_TIMEOUT_MS);
+
     const second = await attemptDueLogouts(h.env, {});
     expect(second.examined).toBe(0);
-    await first;
+    expect(partner.requests.length).toBe(0);
+    expect(only(userId)).toMatchObject({ status: "pending", attempts: 1, jti: "1".repeat(32) });
+  });
+
+  test("an attempt that was claimed and never recorded is taken up again when its claim lapses", async () => {
+    // The isolate was evicted between the claim and the record: nothing was sent, nothing was recorded,
+    // and the row is due again when the lease ends (here, the lease moved into the past in SQL).
+    const { userId } = await signedIn();
+    queue(userId);
+    const row = only(userId);
+    expect(await claimDelivery(h.env.DB, row.id, 0, "2".repeat(32))).toBe(true);
+    makeDue();
+
+    const tally = await attemptDueLogouts(h.env, {});
+
+    expect(tally).toMatchObject({ examined: 1, sent: 1 });
     expect(partner.requests.length).toBe(1);
+    // It counted: the lapsed claim was attempt 1 and this one is attempt 2, so the bound still holds.
+    expect(only(userId)).toMatchObject({ status: "sent", attempts: 2 });
+    expect(only(userId).jti).not.toBe("2".repeat(32));
+  });
+
+  test("the sixth attempt is still made after five claims that never recorded", async () => {
+    const { userId } = await signedIn();
+    queue(userId);
+    const id = only(userId).id;
+    for (let attempt = 0; attempt < OIDC_LOGOUT_MAX_ATTEMPTS - 1; attempt++) {
+      expect(await claimDelivery(h.env.DB, id, attempt, `${attempt}`.repeat(32))).toBe(true);
+      makeDue();
+    }
+    expect(only(userId).attempts).toBe(OIDC_LOGOUT_MAX_ATTEMPTS - 1);
+
+    await attemptDueLogouts(h.env, {});
+
+    expect(partner.requests.length).toBe(1);
+    expect(only(userId)).toMatchObject({ status: "sent", attempts: OIDC_LOGOUT_MAX_ATTEMPTS });
+  });
+
+  test("with every attempt claimed and none recorded the delivery is failed as unreported, and nothing is sent", async () => {
+    const { userId } = await signedIn();
+    queue(userId);
+    const id = only(userId).id;
+    for (let attempt = 0; attempt < OIDC_LOGOUT_MAX_ATTEMPTS; attempt++) {
+      expect(await claimDelivery(h.env.DB, id, attempt, `${attempt}`.repeat(32))).toBe(true);
+      makeDue();
+    }
+    expect(only(userId)).toMatchObject({ status: "pending", attempts: OIDC_LOGOUT_MAX_ATTEMPTS });
+
+    const tally = await attemptDueLogouts(h.env, {});
+
+    // Retrying would break the six-request bound, and the partner may already hold a token.
+    expect(partner.requests.length).toBe(0);
+    expect(tally).toMatchObject({ examined: 1, failed: 1 });
+    expect(only(userId)).toMatchObject({
+      status: "failed",
+      attempts: OIDC_LOGOUT_MAX_ATTEMPTS,
+      last_error_class: "unreported",
+      next_attempt_at: null,
+    });
+    // And it is never taken up again.
+    makeDue();
+    expect((await attemptDueLogouts(h.env, {})).examined).toBe(0);
   });
 });
 
