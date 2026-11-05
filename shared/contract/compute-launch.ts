@@ -20,6 +20,18 @@
  * strict schema, and never build a response schema from one (`.extend()`, `.pick()`); the
  * classification test in `test/contract-schemas.test.ts` checks both by behaviour.
  *
+ * ON THE WIRE THE DOCUMENT IS BASE64URL (A1c, #2043; ADR 0118). The document is canonical, compact,
+ * ASCII-only JSON text (`encodeLaunchSpec`); it travels as the environment value
+ * `NEMAR_LAUNCH_SPEC` in the shell-inert alphabet `A-Za-z0-9-_`: the text's UTF-8 bytes in base64url
+ * (RFC 4648 section 5), no padding, no line break (`encodeLaunchSpecEnv`, and
+ * `decodeLaunchSpecEnv`, which the launcher's decoder mirrors strictly). Compact JSON is not
+ * shell-inert (its quotes, braces and any `$`, backtick, `;` or `&` in a user string are special to a
+ * shell that sources an environment file), and the scheduler quotes a value only conditionally, so the
+ * value carries no character a shell treats as special. The JSON text, its 64 KiB cap and both digests
+ * (`spec_digest`, `launch_spec_digest`) are over the TEXT and are unchanged: a digest is never over
+ * the encoded value. What a scheduler does with a value is not part of this contract and is not
+ * claimed here; the alphabet is what makes the answer irrelevant.
+ *
  * What the launch specification does NOT carry, on purpose: a URL for the code bundle (the
  * launcher asks the Worker for a presigned address with `job_token`), any storage credential, and
  * the user's identity. The token travels in a header, never a URL.
@@ -68,8 +80,38 @@ import {
 /** The name of the schema, and of the document's contract. */
 export const LAUNCH_SPEC_VERSION = "nemar.launch-spec.v1";
 
-/** The launcher reads at most this many bytes of the specification. */
+/** The launcher reads at most this many bytes of the specification (the JSON text, decoded). */
 export const LAUNCH_SPEC_MAX_BYTES = 64 * 1024;
+
+/**
+ * The longest `NEMAR_LAUNCH_SPEC` value: base64url without padding spends `ceil(n * 4 / 3)`
+ * characters on `n` bytes, so the JSON cap above becomes 87,382 (65,536 bytes is 21,845 groups of
+ * three plus one byte, which is 87,380 characters plus two). Declared once; it is also the longest
+ * value `decodeLaunchSpecEnv` reads, and the decoded text of such a value is exactly
+ * {@link LAUNCH_SPEC_MAX_BYTES}.
+ */
+export const LAUNCH_SPEC_ENV_MAX_CHARS = Math.ceil((LAUNCH_SPEC_MAX_BYTES * 4) / 3);
+
+/**
+ * The shell-inert alphabet of an environment value, in RFC 4648 section 5 order: the 64 base64url
+ * characters. A value made only of these is left unquoted by a scheduler that quotes conditionally
+ * and is untouched by a shell: none is special to a shell, to a glob or to a quoting rule. A
+ * WIRE CONTRACT with the launcher in nemar-process: both repositories' tests pin this string.
+ */
+export const SHELL_INERT_ENV_ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/** A non-empty value of the {@link SHELL_INERT_ENV_ALPHABET} and nothing else. */
+const SHELL_INERT_ENV_VALUE_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Whether an environment value is made only of the shell-inert alphabet and is not empty (so an
+ * empty value, padding, a newline and every character of a JSON document but letters, digits, `-`
+ * and `_` are false). Pure; never throws.
+ */
+export function isShellInertEnvValue(value: unknown): value is string {
+  return typeof value === "string" && SHELL_INERT_ENV_VALUE_RE.test(value);
+}
 
 /**
  * `python` runs NEMAR's runtime image and `image` runs the submitter's own. MATLAB is refused
@@ -275,9 +317,86 @@ export function encodeLaunchSpec(spec: unknown): string {
   return text;
 }
 
+/** Every UTF-16 unit of the text is below 0x80, so each is one ASCII byte. */
+function isAscii(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) > 0x7f) return false;
+  }
+  return true;
+}
+
+/**
+ * The `NEMAR_LAUNCH_SPEC` value for a launch specification's text (the string
+ * {@link encodeLaunchSpec} returns): its bytes in base64url without padding, nothing but the
+ * {@link SHELL_INERT_ENV_ALPHABET}, at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters. This is
+ * what the Worker puts in the scheduler request; the text, not this value, is what is hashed and
+ * recorded. The text is taken as the one thing the digests are over, rather than the specification
+ * again, so the Worker validates and escapes once and the bytes it hashes are the bytes it encodes.
+ *
+ * Checks what it can see of the text (non-empty, ASCII only, within 64 KiB, the cap
+ * `encodeLaunchSpec` already enforced) and then the length of what it wrote. Throws TypeError for
+ * text that is not ASCII and RangeError for text over the cap or an encoding over the bound; neither
+ * message holds a value, since the text holds a token. The inverse of {@link decodeLaunchSpecEnv}.
+ */
+export function encodeLaunchSpecEnv(text: string): string {
+  if (typeof text !== "string" || text.length === 0) {
+    throw new TypeError("the launch specification text is empty");
+  }
+  if (!isAscii(text)) throw new TypeError("the launch specification text is not ASCII");
+  if (text.length > LAUNCH_SPEC_MAX_BYTES) {
+    throw new RangeError("the launch specification is over 64 KiB");
+  }
+  // `btoa` reads each UTF-16 unit as one byte, which for ASCII is the byte itself.
+  const value = btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (value.length > LAUNCH_SPEC_ENV_MAX_CHARS) {
+    throw new RangeError("the encoded launch specification is over its bound");
+  }
+  return value;
+}
+
+/** Why {@link decodeLaunchSpecEnv} refused a value: a fixed word, never a part of the value. */
+export const LAUNCH_SPEC_ENV_REFUSALS = [
+  "empty",
+  "too_long",
+  "not_base64url",
+  "bad_length",
+  "not_ascii",
+] as const;
+export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
+
+/**
+ * The text a `NEMAR_LAUNCH_SPEC` value carries, or the reason it is not one. STRICT: the value is a
+ * non-empty string of at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, only the
+ * {@link SHELL_INERT_ENV_ALPHABET} (so no padding, no `+` or `/`, no whitespace or line break, and
+ * a raw JSON document, which starts with `{`, is refused: nothing is registered with a tenant, so
+ * no earlier format is accepted), whose length is not 1 modulo 4, and whose bytes are all ASCII
+ * (below 0x80). The caller then parses the text as JSON; a launcher hashes the TEXT before it does.
+ *
+ * A value that breaks more than one rule is refused with the word of one of them; which one is not
+ * part of the contract. The last character's unused trailing bits are not checked (RFC 4648
+ * section 3.5 leaves it to the decoder): the encoder always writes them as zero, and a value that
+ * differs only there decodes to the same text and so to the same digest. Pure; never throws, and a
+ * refusal is a word that holds no part of the value.
+ */
+export function decodeLaunchSpecEnv(
+  value: string,
+): { ok: true; text: string } | { ok: false; reason: LaunchSpecEnvRefusal } {
+  const refuse = (reason: LaunchSpecEnvRefusal) => ({ ok: false as const, reason });
+  if (typeof value !== "string") return refuse("not_base64url");
+  if (value.length === 0) return refuse("empty");
+  if (value.length > LAUNCH_SPEC_ENV_MAX_CHARS) return refuse("too_long");
+  if (!SHELL_INERT_ENV_VALUE_RE.test(value)) return refuse("not_base64url");
+  if (value.length % 4 === 1) return refuse("bad_length");
+  const standard = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "="));
+  if (!isAscii(binary)) return refuse("not_ascii");
+  return { ok: true, text: binary };
+}
+
 /**
  * Whether a job specification, once a Worker has added everything it supplies, encodes within the
- * 64 KiB the launcher reads, with each dataset version written as its data-plane tag
+ * 64 KiB the launcher reads (and so within {@link LAUNCH_SPEC_ENV_MAX_CHARS} once it is the
+ * environment value), with each dataset version written as its data-plane tag
  * ({@link dataTagForVersion}); a job whose dataset version has no tag is false. The Worker's fields
  * are taken at their worst case (a 512-character `api_base` and image reference, a 256-character
  * token, the 68-character image file name, the largest bundle and limits), so a true answer holds
@@ -312,7 +431,8 @@ export function launchSpecFits(job: JobSpec): boolean {
   if (job.entry !== undefined) worst.entry = job.entry;
   else worst.command = job.command ?? ["x"];
   try {
-    encodeLaunchSpec(worst);
+    // The text, and then the value the scheduler is sent, each within its own bound.
+    encodeLaunchSpecEnv(encodeLaunchSpec(worst));
     return true;
   } catch {
     return false;
