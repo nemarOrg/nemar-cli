@@ -232,6 +232,46 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     expect(readmeLine).toContain("OIDC_LOGOUT_DEV_HOSTS");
   });
 
+  test("rule 15: throttling, unreported, the owner routes and retention are decided", () => {
+    const fifteen = rule(15);
+    expect(fifteen).toMatch(/A `408` or a `429` is recorded `http_throttled`/);
+    expect(fifteen).toMatch(/LOWER bound for the next wait/);
+    expect(fifteen).toMatch(/at most 12 hours/);
+    expect(fifteen).toMatch(/can never add an attempt/);
+    expect(fifteen).toMatch(/A `Retry-After` on any other answer is not read/);
+    expect(fifteen).toMatch(/failed` with `unreported`/);
+    expect(fifteen).toMatch(/would break the six-request bound/);
+    expect(fifteen).toMatch(/a faster cron for the short waits is not built/);
+    expect(fifteen).toMatch(/deliberately NOT `HOST_PREFIXED_SESSION_COOKIE`/);
+    expect(fifteen).toMatch(/a planted cookie is the attacker's own non-owner session/);
+    expect(fifteen).toMatch(/at most 500 a tick/);
+    expect(fifteen).toMatch(/older than 30 days/);
+    expect(fifteen).toMatch(/older than 180 days/);
+    expect(fifteen).toMatch(/never a `pending` row/);
+    expect(fifteen).toMatch(/DEFAULTS pending the owner/);
+    expect(fifteen).toMatch(/data minimisation/);
+    expect(fifteen).toMatch(/grows with the number of endings there/);
+    expect(readmeLine).toContain("http_throttled");
+    expect(readmeLine).toMatch(/prunes finished ones/);
+  });
+
+  test("rule 12: a new path adds to OIDC_END_CALLERS, the sweep alone is guarded, a merge pairs end-account", () => {
+    const twelve = rule(12);
+    expect(twelve).toMatch(/adds a line here and to `OIDC_END_CALLERS`/);
+    expect(twelve).toMatch(/only when it also runs their statements/);
+    expect(twelve).toMatch(/the owner's soft delete, which runs the statements as they stand/);
+    expect(twelve).toMatch(
+      /the sweep of the live tests' accounts, which runs each one conditional on the mask/,
+    );
+    expect(twelve).not.toMatch(
+      /soft delete and the sweep of the live tests' accounts, which run it with every statement/,
+    );
+    expect(twelve).toMatch(
+      /pairs `end-account` with that account's revocation, deletion or kind change/,
+    );
+    expect(twelve).toMatch(/can get a new first-party grant at once/);
+  });
+
   test("the consequences and the not-decided list say what a logout cannot promise", () => {
     const consequences = adr.slice(adr.indexOf("## Consequences"), adr.indexOf("## Alternatives"));
     expect(consequences).toMatch(/A logout is a best effort, and the revocation is not/);
@@ -240,8 +280,10 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
       adr.indexOf("### Not decided here"),
       adr.indexOf("## Consequences"),
     );
-    expect(notDecided).toMatch(/`408` or a `429`/);
-    expect(notDecided).toMatch(/How long a delivery row is kept/);
+    // Decided since round 1: a 408 or 429 is retried, and finished rows are pruned.
+    expect(notDecided).not.toMatch(/`408` or a `429`/);
+    expect(notDecided).toMatch(/retention windows of finished deliveries/);
+    expect(notDecided).toMatch(/re-sends a `failed` or `unreported` delivery as a NEW row/);
     expect(notDecided).toMatch(/`sid` claim/);
   });
 });

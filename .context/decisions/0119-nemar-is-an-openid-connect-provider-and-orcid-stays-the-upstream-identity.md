@@ -158,7 +158,7 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     The compute design carries the consequences; they are recorded here only so that the subject's form and its use are read together.
 12. **The credential-ending table.**
     Every path that ends or downgrades a credential says what it does to OIDC grants and tokens.
-    A new path that ends a credential adds a line here and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts`.
+    A new path that ends a credential adds a line here and to `OIDC_END_CALLERS`, and a line to the callers named in `services/docs-auth.ts` and `services/private-auth.ts` only when it also runs their statements.
     Because a path can be missed, every token use also re-checks the account's status, kind and proof against the client's sign-in rule (rule 7), so a path not listed here still takes effect at the next use of a token, even if it did not end the grant.
 
     | Path | OIDC grants and tokens | Why |
@@ -183,8 +183,9 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     A filter narrows an ending to some of the account's grants, and what it selects is GRANTS: everything under a selected grant goes with it, its tokens whatever scopes they carry (a grant accumulates the scopes of every sign-in, and a token carries only those of its own code), its unused codes and its logout.
     `{rule}` selects the grants of the clients that sign people in by that rule (the ORCID unlink and relink and the kind change, with `person_proven_orcid`); `{scopePrefix}` selects the grants that carry a scope with that prefix (the compute suspension, with `compute.`).
     The compute suspension has no caller yet, because its state does not exist; the compute access phase adds the caller, and the filter is shipped and tested directly.
-    The paths that call it, and their number, are `OIDC_END_CALLERS`, held to the code in both directions by a test that reads the syntax tree, as the docs and private-site counts are held: `finalizeRevocation` (revoke by username and by id), `tombstoneUserCascade` (the owner's soft delete and the sweep of the live tests' accounts, which run it with every statement conditional on the mask having applied), the ORCID unlink, the ORCID relink, the change of kind away from `person`, and the owner's `nemar admin oidc end-account`.
+    The paths that call it, and their number, are `OIDC_END_CALLERS`, held to the code in both directions by a test that reads the syntax tree, as the docs and private-site counts are held: `finalizeRevocation` (revoke by username and by id), `tombstoneUserCascade` (the owner's soft delete, which runs the statements as they stand, and the sweep of the live tests' accounts, which runs each one conditional on the mask having applied to the row it chose), the ORCID unlink, the ORCID relink, the change of kind away from `person`, and the owner's `nemar admin oidc end-account`.
     That last command is how a manual merge ends the loser (`--reason merged`) and the tool for an incident (`--reason revoked`); it ends only the OIDC holdings and does not revoke the account.
+    Ending the grants does not stop the account signing in again, because its app sessions and keys survive, so it can get a new first-party grant at once (a third-party client asks for consent again): for the loser of a merge the owner pairs `end-account` with that account's revocation, deletion or kind change, which end the grants themselves, and uses it alone only for an incident that is about the grants and not the account.
     A client's disabling is a separate function keyed by the client, `oidcClientEndStatements`, in the batch that disables it: every token it holds (an account's and its own), every grant and every unused code, and no logout.
     It is not conditional on the status having changed, so disabling a client that was disabled before the revocation existed finishes the job.
 
@@ -245,12 +246,15 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     **The request** is a `POST` of one form field, `logout_token`, to the registered address, with nothing else: no `Authorization`, no cookie, no client secret, no API key.
     It waits 5 seconds, never follows a redirect, and never reads the answer's body (it is cancelled), so a partner cannot make NEMAR wait or read without bound.
     A `200` or `204` is `sent`.
-    A redirect, any other `4xx` and any other answer that is not a `5xx` are `failed` at once, because repeating a refusal does not change it.
-    A `5xx`, no answer in time and a connection that could not be made are retried at 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours (the first attempt and five retries), then `failed`.
+    A redirect, any other `4xx` (a `408` and a `429` are the exceptions, next) and any other answer that is not a `5xx` are `failed` at once, because repeating a refusal does not change it.
+    A `5xx`, a `408`, a `429`, no answer in time and a connection that could not be made are retried at 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours (the first attempt and five retries), then `failed`.
+    A `408` or a `429` is recorded `http_throttled`, and the `Retry-After` it may carry (a number of seconds or an HTTP date; the header is read and the body still never is) is a LOWER bound for the next wait: the longer of it and the schedule's, at most 12 hours, so a partner can slow a delivery and can never add an attempt.
+    A `Retry-After` on any other answer is not read.
     A token that NEMAR could not sign (no key, a database fault) is retried too: it is NEMAR's fault and not the partner's.
-    The wait is the EARLIEST time of the next attempt, and the tick runs every half hour, so a short wait is taken up at the next half hour.
-    A row records a status, an attempt count, a time and a fixed word for what went wrong (`timeout`, `network`, `redirect`, `http_4xx`, `http_5xx`, `http_other`, `sign_failed`, `address_refused`, `client_disabled`, `fenced`, `unreported`), and never the text of an error or of an answer.
+    The wait is the EARLIEST time of the next attempt, and the tick runs every half hour, so a short wait is taken up at the next half hour; a faster cron for the short waits is not built, because six attempts over fifteen to eighteen hours do not need one.
+    A row records a status, an attempt count, a time and a fixed word for what went wrong (`timeout`, `network`, `redirect`, `http_4xx`, `http_5xx`, `http_throttled`, `http_other`, `sign_failed`, `address_refused`, `client_disabled`, `fenced`, `unreported`), and never the text of an error or of an answer.
     An attempt is claimed before it is made, in one conditional statement that counts it, holds the row for two minutes and stamps the `jti`, and its answer is recorded only by the attempt that holds the claim, so the first attempt and the tick, or two ticks, can never send one delivery twice at once, and an attempt that never records (the isolate was evicted) is taken up again when its claim lapses, with the retries still bounded.
+    Once all six attempts are claimed, a delivery whose last attempt never recorded is not tried again: it is `failed` with `unreported`, because a seventh request would break the six-request bound while the partner may already hold the token.
     **The fence.**
     This is the Worker making an outbound request to an address somebody else chose, so the address is checked again at send time and not only at registration.
     Never, whatever the environment: an address that is not `https`, that carries user information or that does not parse.
@@ -261,6 +265,11 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     The Worker has no route to a private network, and the sender refuses a literal address in production, but it does not resolve a name itself: a name a partner points at an address of its own is still requested, and that is the partner's own server by definition, receiving only a token that names it as its audience.
     A client disabled before its attempt is not told: the row is `failed` with `client_disabled` and nothing is sent.
     **The owner's view** is `GET /admin/oidc/logout-deliveries?status=&limit=` and `nemar admin oidc logout-deliveries`: the deliveries newest first, naming the client by its public id, with a count of every status, and no token, no address and no partner text.
+    The owner routes (this one and `end-account`) take the owner role and the OIDC surface (`OIDC_SECRET` set and the issuer's own host), and deliberately NOT `HOST_PREFIXED_SESSION_COOKIE`: that flag guards who may approve a grant, and these routes act on the owner's own credential, which a cookie planted from a sibling host cannot stand in for (a planted cookie is the attacker's own non-owner session and fails the owner check), while requiring the flag would switch the incident tool off exactly when the flag is off.
+    **Retention.**
+    The production tick prunes finished deliveries after its delivery work, at most 500 a tick, oldest first: `sent` and `fenced` rows older than 30 days (by `sent_at` and by `created_at`) and `failed` rows older than 180 days (by `created_at`; the table has no last-update column, and a failed row's last attempt is under a day after its creation), and never a `pending` row, which includes an attempt in flight.
+    The windows are named constants in `shared/oidc.ts` and are DEFAULTS pending the owner, who sets them before the first client registers: a row holds the pseudonymous `sub` of possibly deleted accounts, so pruning is also data minimisation.
+    A dev or staging Worker has no tick, so its table is not pruned and grows with the number of endings there, which is few.
 
 ### What this phase builds, and what it does not
 
@@ -273,8 +282,8 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - `private_key_jwt` client authentication.
 - A connected-apps page where a person revokes a grant themselves, which is also what the sign-out departure in rule 12 waits for.
 - The date the legacy session cookie name stops being read, which is when the exposure in rule 10 ends. Rule 10 sets only the earliest: 31 days after the production flag is turned on.
-- Whether a `408` or a `429` from a partner is retried: the first version fails every `4xx` but a `5xx` at once.
-- How long a delivery row is kept. Rows are written once per ending and per client and are not pruned, so the table grows with the number of endings and not with the number of people; a retention rule waits for a partner to be live.
+- The retention windows of finished deliveries (30, 30 and 180 days, rule 15) are defaults: the owner sets them before the first client registers.
+- An owner command that re-sends a `failed` or `unreported` delivery as a NEW row, so that the six-request bound still holds for each row, is not built.
 - A `backchannel_logout_session_required` setting and a `sid` claim, which would need a session id NEMAR keeps per client.
 - Whether the sign-out of a session that has no grant should still tell a client; today it tells nobody (rule 12).
 - Whether the `sub` format satisfies the username rules of the partner's job platform, which only the platform's operator can answer (design question 13).
