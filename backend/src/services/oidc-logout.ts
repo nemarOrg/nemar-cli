@@ -34,11 +34,10 @@
  *     recorded is a status and a fixed word (`OIDC_LOGOUT_ERROR_CLASSES`), never the text of an error
  *     or of an answer.
  *
- * WHAT NEMAR CANNOT GUARANTEE, said plainly: a Worker has no route to a private network, and the
- * address is a literal-free name in production, but this file does not resolve the name itself, so a
- * name that a partner points at an address of its own choosing is still requested. That is the
- * partner's own server by definition, and the request carries nothing but a token that names that
- * partner as its audience.
+ * WHAT THIS DOES NOT GUARANTEE, said plainly: the sender does not resolve a name itself, so a registered
+ * name that a partner points at an address of its own choosing is still requested. That is the partner's
+ * own server by definition, and the request carries nothing but a token that names that partner as its
+ * audience. A Worker has no route to a private network, and an IP literal is refused in production.
  *
  * THE TOKEN is a JWT, ES256 under the current key (the one the identity tokens use), header `typ:
  * logout+jwt` (RFC 8725 explicit typing), claims `iss`, `aud` (the client's public id), `iat`, `exp` (two
@@ -133,7 +132,8 @@ export function logoutAddressVerdict(
   ) {
     return REFUSED;
   }
-  const host = url.hostname.toLowerCase();
+  // A trailing dot names the same host (`localhost.` is `localhost`), so it must not slip past the tests.
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
   if (isExactProduction(env)) return isLocalOrLiteral(host) ? REFUSED : SEND;
   if (isLoopbackHost(host)) return SEND;
   return devHosts(env).includes(host) ? SEND : FENCED;
