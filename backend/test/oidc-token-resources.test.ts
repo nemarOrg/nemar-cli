@@ -555,10 +555,10 @@ describe("introspection", () => {
       active: false,
     });
     const next = rotated.json as { refresh_token: string; access_token: string };
-    expect((await introspect(client, next.refresh_token)).json).toMatchObject({
-      active: true,
-      token_type: "refresh_token",
-    });
+    const live = (await introspect(client, next.refresh_token)).json as Record<string, unknown>;
+    expect(live).toMatchObject({ active: true, client_id: client.clientId });
+    // RFC 7662's token_type names an access token's type; a refresh token gets none.
+    expect("token_type" in live).toBe(false);
     for (const token of [MEMBER_KEY, "garbage", `nmo_rt_${"C".repeat(43)}`]) {
       expect((await introspect(client, token)).json).toEqual({ active: false });
     }

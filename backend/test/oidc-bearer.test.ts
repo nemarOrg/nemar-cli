@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { oidcBearer } from "../src/middleware/oidc-bearer";
+import { lookupToken } from "../src/services/oidc-tokens";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import {
@@ -199,6 +200,10 @@ describe("oidcBearer on a compute-scope route", () => {
     const stats = await call("/compute/stats", `Bearer ${token}`);
     expect(stats.status).toBe(200);
     expect(stats.json).toEqual({ client: machine.clientId, user: null });
+    // The lookup names no account for a machine token, rather than an account of NULL columns.
+    const looked = await lookupToken(h.env.DB, token);
+    expect(looked?.user).toBeNull();
+    expect(looked?.active).toBe(1);
     // And it does not reach a route serving a person's scope.
     expect((await call("/compute/me", `Bearer ${token}`)).status).toBe(403);
   });

@@ -392,8 +392,8 @@ const fail = (error: OAuthErrorCode, description: string): GrantOutcome => ({
   description,
 });
 
-/** A token as {@link TOKEN_LOOKUP_SQL} reads it. */
-export interface TokenRow extends ClaimAccount {
+/** The token's own columns, as {@link TOKEN_LOOKUP_SQL} reads them. */
+interface TokenColumns {
   id: number;
   kind: "access" | "refresh";
   client_row_id: number;
@@ -406,12 +406,51 @@ export interface TokenRow extends ClaimAccount {
   active: number;
 }
 
+/**
+ * A token as every reader sees it: its own columns, and the account it names with that account's
+ * claim columns, or `user: null` for a client credentials token. The statement LEFT JOINs `users`,
+ * so a machine token's account columns are all NULL; they are never typed as an account's.
+ */
+export interface TokenRow extends TokenColumns {
+  user: (ClaimAccount & { id: number }) | null;
+}
+
 /** The token row of a value, or null. Any string: an unknown or malformed one is simply not found. */
 export async function lookupToken(db: D1Database, token: string): Promise<TokenRow | null> {
-  return db
+  const row = await db
     .prepare(TOKEN_LOOKUP_SQL)
     .bind(await hashOidcToken(token))
-    .first<TokenRow>();
+    .first<TokenColumns & Partial<ClaimAccount>>();
+  if (!row) return null;
+  const columns: TokenColumns = {
+    id: row.id,
+    kind: row.kind,
+    client_row_id: row.client_row_id,
+    client_public_id: row.client_public_id,
+    user_id: row.user_id,
+    scopes: row.scopes,
+    audience: row.audience,
+    iat: row.iat,
+    exp: row.exp,
+    active: row.active,
+  };
+  if (row.user_id === null) return { ...columns, user: null };
+  return {
+    ...columns,
+    user: {
+      id: row.user_id,
+      oidc_subject: row.oidc_subject as string,
+      given_name: row.given_name ?? null,
+      family_name: row.family_name ?? null,
+      email: row.email as string,
+      email_verified: row.email_verified as number,
+      orcid: row.orcid ?? null,
+      orcid_proven: row.orcid_proven as number,
+      account_kind: row.account_kind as string,
+      status: row.status as string,
+      service_access: row.service_access as number,
+    },
+  };
 }
 
 /**
@@ -740,10 +779,11 @@ export async function introspectToken(
     active: true,
     scope: (JSON.parse(row.scopes) as string[]).join(" "),
     client_id: row.client_public_id,
-    token_type: row.kind === "access" ? "Bearer" : "refresh_token",
+    // RFC 7662's token_type is an access token's type (RFC 6749 section 7.1); a refresh token has none.
+    ...(row.kind === "access" ? { token_type: "Bearer" } : {}),
     exp: row.exp,
     iat: row.iat,
-    ...(row.user_id !== null ? { sub: row.oidc_subject } : {}),
+    ...(row.user !== null ? { sub: row.user.oidc_subject } : {}),
     aud: row.audience,
     iss: oidcIssuer(env),
   };

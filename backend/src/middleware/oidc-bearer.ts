@@ -103,22 +103,7 @@ export function oidcBearer(requiredScopes: readonly string[]): MiddlewareHandler
     c.set("oidcToken", {
       tokenId: row.id,
       client: { id: row.client_row_id, clientId: row.client_public_id },
-      user:
-        row.user_id === null
-          ? null
-          : {
-              id: row.user_id,
-              oidc_subject: row.oidc_subject,
-              given_name: row.given_name,
-              family_name: row.family_name,
-              email: row.email,
-              email_verified: row.email_verified,
-              orcid: row.orcid,
-              orcid_proven: row.orcid_proven,
-              account_kind: row.account_kind,
-              status: row.status,
-              service_access: row.service_access,
-            },
+      user: row.user,
       scopes,
       audience: row.audience,
     });
