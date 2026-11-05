@@ -1,7 +1,8 @@
 /**
  * The OpenID Connect endpoints under the maintenance mode (epic #2014 phase #2018; ADR 0119 rule 14),
- * through the REAL Worker. In `read-only`, the two endpoints that only read are served whatever their
- * method, `POST /oauth/userinfo` and `POST /oauth/introspect` (exact paths), and the two that write,
+ * through the REAL Worker. In `read-only`, the two endpoints that only read are served by GET (as every
+ * read is) and by POST, `POST /oauth/userinfo` and `POST /oauth/introspect` (exact paths, and POST
+ * only: PUT, DELETE and PATCH on them are refused like any other write), and the two that write,
  * `POST /oauth/token` and `POST /oauth/revoke`, are refused with 503 (RFC 7009 names 503 for a
  * revocation the server cannot take now). In `full` all four are refused; only discovery and the key
  * set stay readable, as before.
@@ -78,6 +79,18 @@ describe("read-only: the endpoints that only read are served, the ones that writ
       )
       .get()?.n;
     expect(written).toBe(0);
+  });
+
+  test("the exemption is POST only: PUT, DELETE and PATCH on the two paths are 503", async () => {
+    for (const path of ["/oauth/userinfo", "/oauth/introspect"]) {
+      for (const method of ["PUT", "DELETE", "PATCH"]) {
+        const res = await h.call(method, path, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          env: { MAINTENANCE_MODE: "read-only" },
+        });
+        expect({ path, method, status: res.status }).toEqual({ path, method, status: 503 });
+      }
+    }
   });
 
   test("the exemption is the exact path: the legacy mount and a longer path are refused", async () => {
