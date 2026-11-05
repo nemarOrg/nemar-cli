@@ -41,7 +41,7 @@ import {
 } from "../../../../shared/contract/compute";
 import {
   LAUNCH_SPEC_ENV_MAX_CHARS,
-  isShellInertEnvValue,
+  decodeLaunchSpecEnv,
 } from "../../../../shared/contract/compute-launch";
 
 /** The environment variable that carries the launch specification: the contract's own word. */
@@ -215,13 +215,15 @@ export const SubmitJobRequestSchema = z
             z
               .object({
                 key: z.literal(LAUNCH_SPEC_ENV_KEY),
-                // The launch specification's text in base64url (`encodeLaunchSpecEnv`): ONLY the
-                // shell-inert alphabet `A-Za-z0-9-_`, within the encoded bound. A raw JSON value is
-                // refused here, before anything is sent: a scheduler that quotes an environment value
-                // conditionally and writes it into a file a shell sources would not carry it intact
-                // (A1c, #2043). The rule is the contract's own `isShellInertEnvValue`, not a copy, and
-                // "not empty" is part of it.
-                value: z.string().max(LAUNCH_SPEC_ENV_MAX_CHARS).refine(isShellInertEnvValue),
+                // The launch specification's text in base64url (`encodeLaunchSpecEnv`), and nothing
+                // else: the value must be one the contract's own strict decoder accepts (only the
+                // shell-inert alphabet `A-Za-z0-9-_`, within the encoded bound, a good length, printable
+                // ASCII once decoded, and canonical). Raw JSON is refused here, before anything is sent
+                // (A1c, #2043). One rule, shared with the launcher's decoder, and not a copy of it.
+                value: z
+                  .string()
+                  .max(LAUNCH_SPEC_ENV_MAX_CHARS)
+                  .refine((value) => decodeLaunchSpecEnv(value).ok),
               })
               .strict(),
           )

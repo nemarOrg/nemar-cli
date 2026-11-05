@@ -37,6 +37,8 @@ import { TAPIS_JOB_STATUSES } from "../../shared/compute-state";
 import { LAUNCHER_ENV, PARTITION_NAMES } from "../../shared/contract/compute";
 import {
   LAUNCH_SPEC_ENV_MAX_CHARS,
+  LAUNCH_SPEC_MAX_BYTES,
+  SHELL_INERT_ENV_ALPHABET,
   encodeLaunchSpecEnv,
 } from "../../shared/contract/compute-launch";
 import {
@@ -1576,8 +1578,12 @@ describe("the launch specification's other copies (what Tapis archives, and what
     ).toBe(false);
   });
 
-  /** Each is a value the scheduler's launch file could not carry, or one the contract never writes. */
-  const NOT_SHELL_INERT: Array<[string, string]> = [
+  /**
+   * Each is a value the client must not send: one the scheduler's launch file could not carry, or one
+   * made only of the alphabet that is still not what `encodeLaunchSpecEnv` writes (the schema's rule is
+   * the strict decoder's, not a check of the characters alone).
+   */
+  const REFUSED_VALUES: Array<[string, string]> = [
     ["the raw JSON text, the value before A1c", LAUNCH_SPEC_TEXT],
     ["raw JSON with no space in it, which a conditional quoter leaves bare", '{"a":"b"}'],
     ["a base64 value with its padding", `${LAUNCH_SPEC}==`],
@@ -1598,11 +1604,26 @@ describe("the launch specification's other copies (what Tapis archives, and what
     ["non-ASCII", "caf\u00e9"],
     ["the empty value", ""],
     ["one over the encoded bound", "x".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1)],
+    ["the alphabet only, but not canonical (spare bits set)", "QR"],
+    ["the alphabet only, but a length of 1 modulo 4", "QUJDR"],
+    ["the alphabet only, but it decodes to a control byte", "AA"],
+    ["the alphabet only, but it decodes to DEL", "fw"],
+    ["the alphabet only, but it decodes to bytes from 0x80 up", "w6k"],
+    ["the alphabet only, and long, but not text", "x".repeat(100)],
   ];
 
+  /**
+   * A real encoded value that uses all 64 characters of the alphabet: 64 groups of two spaces and a
+   * printable byte whose low six bits run through 0 to 63, which is the group's last character.
+   */
+  const EVERY_CHARACTER_VALUE = encodeLaunchSpecEnv(
+    Array.from({ length: 64 }, (_, v) => `  ${String.fromCharCode(v < 32 ? 0x40 + v : v)}`).join(
+      "",
+    ),
+  );
   test("a value that is not shell-inert base64url is refused before anything is sent (A1c)", async () => {
     const env = passwordEnv();
-    for (const [label, launchSpec] of NOT_SHELL_INERT) {
+    for (const [label, launchSpec] of REFUSED_VALUES) {
       await expect(submitJob(ctx(env), { ...SUBMIT, launchSpec }), label).rejects.toThrow(
         RangeError,
       );
@@ -1628,7 +1649,8 @@ describe("the launch specification's other copies (what Tapis archives, and what
 
   test("a value of exactly the encoded bound is sent, and is the one the stand-in holds", async () => {
     const env = passwordEnv();
-    const longest = "x".repeat(LAUNCH_SPEC_ENV_MAX_CHARS);
+    // The encoding of the largest text there is: 64 KiB of printable ASCII.
+    const longest = encodeLaunchSpecEnv("a".repeat(LAUNCH_SPEC_MAX_BYTES));
     const job = await submitJob(ctx(env), { ...SUBMIT, launchSpec: longest });
     const sent = JSON.parse(jobCalls("POST /v3/jobs/submit")[0]?.body ?? "");
     expect(sent.parameterSet.envVariables).toEqual([{ key: LAUNCHER_ENV.SPEC, value: longest }]);
@@ -1648,8 +1670,10 @@ describe("the launch specification's other copies (what Tapis archives, and what
       },
     });
     expect(SubmitJobRequestSchema.safeParse(withValue(LAUNCH_SPEC)).success).toBe(true);
-    expect(SubmitJobRequestSchema.safeParse(withValue("A-Za_z0-9".repeat(100))).success).toBe(true);
-    for (const [label, value] of NOT_SHELL_INERT) {
+    // The whole alphabet is accepted, in a value that really is one: all 64 characters, `-` and `_` too.
+    expect(new Set(EVERY_CHARACTER_VALUE)).toEqual(new Set(SHELL_INERT_ENV_ALPHABET));
+    expect(SubmitJobRequestSchema.safeParse(withValue(EVERY_CHARACTER_VALUE)).success).toBe(true);
+    for (const [label, value] of REFUSED_VALUES) {
       expect(SubmitJobRequestSchema.safeParse(withValue(value)).success, label).toBe(false);
     }
     for (const notText of [undefined, null, 7, ["a"], {}]) {
