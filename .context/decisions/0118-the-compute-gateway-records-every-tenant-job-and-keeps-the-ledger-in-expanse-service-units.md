@@ -246,3 +246,47 @@ What the build settled, each a rule and not a description of today:
     This covers what THIS Worker prints; Cloudflare's own request logs record the URL before any of this code runs and are outside it.
 
 Not verified against a real tenant or a real R2, and listed so nobody reads them as facts: whether Tapis takes `archiveFilter.includeLaunchFiles` from the request, what `remoteResultInfo` carries for a failed job, the webhook retry policy, presigned multipart `UploadPart` (the 5 GB per-file cap stands), R2's error on a locked delete, a signed checksum header on a presigned PUT (deferred), the `--gpus` spelling, whether R2 returns a SHA-256 on a listing for an object the launcher uploaded through a presigned PUT (it does only for an object stored with one; where it does not, verification of an output is by size alone), whether Tapis passes a JSON launch specification, quotes and braces included, through an environment variable value to the launcher unaltered, and whether the memory and the other request fields a job asks for are taken from the request as written.
+
+## Amendment 2026-11-04 (#2013): the revocation cascade and the ACCESS attribution are built (phase A8)
+
+Migration `0119_compute_access_reports.sql`, `backend/src/services/compute-release.ts`, `access-attributes.ts`, the two callers named below and the reporter's place on the 30-minute tick build decision 9 ("NEMAR reports ACCESS gateway attributes for every tenant job, once") and the revocation rules of design section 7.
+"Item N" means the numbered item of THIS amendment.
+
+1. **Ending an account ends its compute in the same batch as its other credentials, through two callers.**
+   `computeReleaseStatements(userId)` is run by `finalizeRevocation` (admin revoke, by username and by id) and by `tombstoneUserCascade` (the owner-only soft delete and the scheduled sweep of the live tests' accounts, which run the same function, so it counts once).
+   It is not run by a role demotion, because compute is not an admin's standing and a demoted person keeps an account, a grant and jobs; nor by a key revocation (self-service, the owner's, the emailed regeneration), because a job's identity is the account's and not a key's; nor by logout.
+   The caller-count sentences of `services/docs-auth.ts` and `services/ticket-assignment.ts` say so, and a third path that ends a whole account needs these statements too.
+   `backend/test/compute-release-cascade.test.ts` and `admin-credential-cascade.test.ts` fail when either caller drops them.
+2. **A job ends in SQL only when it provably never reached Tapis; every other live job records the intent.**
+   The statements, in order and each keyed by the account: every live job records `cancel_requested_at` and the reason `account_ended`, keeping a reason and a time that were already recorded (the first cause stands, so a person's earlier cancel stays `user`); a job with no Tapis job, no launch specification written and no live submit lease is cancelled, its hold released and the release stamped as its settlement, which is `commitTerminal`'s terminal transition and settlement for a job that never started, in the one batch; every pool of the account is frozen.
+   "Provably" is exactly the rule `driveCancel` applies before it ends a row itself (item 4 of the A5 amendment): a submit whose answer was lost writes the launch specification before the call and a Tapis job may exist that no search can see, and a submitter holding the lease may be in flight, so ending such a job in SQL would release a hold for a job that then runs, charged to nobody.
+   The Tapis cancel of those jobs is never made in the batch: the retried `sweepComputeCancellations` makes it, and charges what the job used, so the account's pools stay held until Tapis says it is over.
+   Every statement ends in a WHERE clause and uses plain `?` placeholders, because `tombstoneUserCascade` called with `onlyIfEmail` appends its mask guard to each statement's text; a test runs each statement alone under a false guard and finds nothing changed.
+3. **A frozen pool stays frozen until something unfreezes it, and nothing in this phase does.**
+   A hold on a frozen pool is refused `suspended`.
+   A re-approval of an account for compute (the compute access phase, Epic D) has to unfreeze its pools; so does an administrator's lifting of a suspension.
+   An account that was revoked and then restored by the status column alone stays refused for compute, which is the safe direction.
+4. **The report ACCESS is owed is a row made in the batch in which a job's record first shows a Slurm id.**
+   `compute_access_reports` has one row per job (the primary key), made by `INSERT OR IGNORE` from the job row in the batch of each of the two writers of `slurm_job_id`: the live transition and the terminal transition of `applyTapisJob`.
+   So a replayed read adds no second row and never resets a row that has moved on, and a job the scheduler never saw owes nothing.
+   This replaces the empty hook `noteSlurmJobId` of the A5 amendment, which ran after the write and could not be one batch with it.
+5. **A report is sent at most once towards ACCESS for every outcome the sender cannot judge, and retried only when ACCESS visibly recorded nothing.**
+   The claim is one conditional UPDATE (`pending` to `attempting`, a lease stamp, the attempt counted) made before the POST, so two overlapping ticks or Workers cannot both send; the POST is made between two statements and never inside a batch; the outcome is written only under the sender's own stamp.
+   A 2xx is `sent`.
+   Any other HTTP answer (a refusal, a deferral, a server error; a redirect is never followed) means ACCESS answered and recorded nothing, so the row is `pending` again with an hour's delay doubling to a day, and `failed` after eight attempts.
+   No answer (a timeout, a lost or refused connection) may mean the request was recorded, and a sender that died holding its ten-minute lease may have died before or after the POST: both end the row `failed` with `outcome_unknown`, which nothing in code sends again.
+   `sent` and `failed` are final.
+   The guarantee is therefore that a report may be LOST and is never doubled; it is not that every job is reported.
+   The choice follows the design page, where a second report double-counts a person, and the interface's behaviour on a duplicate is unverified; if ACCESS is found to ignore a duplicate for one job id and resource, the one function `classifyAnswer` changes an unknown outcome into a retry and nothing else moves.
+6. **ACCESS is told the pseudonym and nothing else about a person.**
+   The body is the Slurm job id, the scheduler's submission time, the resource name and the job row's `gateway_user` (the stored `gw_` pseudonym, or `nemar-pipelines`), checked against that shape before it is sent; it never carries a name, an email, an ORCID iD or the sign-in subject.
+   A job with no pseudonym (a partner job that maps to no account) ends `failed` with `no_gateway_user` and nothing is sent; a record with no submission time waits, costs no attempt and is looked at again in an hour.
+   Outside production the body carries `debug`, which the design says the interface offers for tests.
+7. **The key, the resource name and the spelling are the owner's and unverified.**
+   The key is the Worker secret `ACCESS_GATEWAY_ATTRIBUTES_KEY` and the resource name `ACCESS_RESOURCE_NAME`, both optional, both absent from every table of `wrangler-sccn.toml` and pinned absent by test; unset, a row stays `pending` with `unconfigured`.
+   The key is sent in a header and never logged, stored or put in a job.
+   The header name (`ACCESS_KEY_HEADER`), the body field names and the time format (`ACCESS_BODY_FIELDS`, `accessSubmitTime`) and the `debug` field are each one constant, taken from the design page and the phase issue, and none has been seen against the real interface.
+8. **The reporter is a production-only cron.**
+   `runAccessReportCron` (ten due rows a tick, oldest first, one log line of counts and fixed words only) rides the 30-minute tick's production block, is absent from `DEV_CRON_ALLOWLIST`, refuses outside exact production on its own and reads no switch, because a job that ran is owed its report whether or not compute is on.
+
+Not verified, and listed so nobody reads it as fact: which header carries the key, the body's spelling and time format, whether `debug` is a body field, what the interface answers for a duplicate, and whether it accepts the pseudonymous gateway user.
