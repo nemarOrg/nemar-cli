@@ -323,8 +323,34 @@ export interface SubmitJobInput {
   launchSpecEnv: LaunchSpecEnvValue;
 }
 
+/** Which part of a submit request NEMAR refused to send: the launch value, or another field of the job. */
+export type SubmitRefusalReason = "launch_spec_env" | "job_field";
+
+/**
+ * A submit request NEMAR will not send because of the job's own data: the launch value, or a field that
+ * comes from the job's row. Such a request is wrong the same way on every attempt, so a caller ends the
+ * job instead of retrying it; `reason` is a fixed word saying which part. It is a RangeError, as a
+ * refused request always was. The OWNER is not such a field: it is NEMAR's configuration, a bad one is
+ * fixed there, and it stays a plain RangeError, so the job waits for the fix. The message names the
+ * fields and never a value, because the launch value holds the job's token.
+ */
+export class SubmitRequestRefused extends RangeError {
+  readonly reason: SubmitRefusalReason;
+
+  constructor(reason: SubmitRefusalReason, fields: string[]) {
+    super(`the job request is not one NEMAR sends: ${fields.join(", ")}`);
+    this.name = "SubmitRequestRefused";
+    this.reason = reason;
+  }
+}
+
 /** The request `submitJob` sends, so a test and a reader see exactly what it is. */
 export function buildSubmitRequest(owner: string, input: SubmitJobInput) {
+  // The tag below is made from the job id, and refuses one that is not a job id by a plain RangeError:
+  // refuse it first, as the job's own data.
+  if (typeof input.jobId !== "string" || !COMPUTE_JOB_ID_RE.test(input.jobId)) {
+    throw new SubmitRequestRefused("job_field", ["name"]);
+  }
   const candidate = {
     name: input.jobId,
     appId: input.appId,
@@ -349,15 +375,18 @@ export function buildSubmitRequest(owner: string, input: SubmitJobInput) {
     tags: [nemarJobTag(input.jobId)],
   };
   if (!Number.isInteger(input.gpus) || input.gpus < 0) {
-    throw new RangeError("gpus is a whole number from 0");
+    throw new SubmitRequestRefused("job_field", ["gpus"]);
   }
   const checked = SubmitJobRequestSchema.safeParse(candidate);
   if (!checked.success) {
     // The fields, never the values: a launch specification holds a token.
-    const fields = checked.error.issues.map((i) => i.path.join(".") || "request");
-    throw new RangeError(
-      `the job request is not one NEMAR sends: ${[...new Set(fields)].join(", ")}`,
-    );
+    const fields = [...new Set(checked.error.issues.map((i) => i.path.join(".") || "request"))];
+    // The owner is configuration, not the job's data: a plain RangeError, and the job waits.
+    if (fields.includes("owner")) {
+      throw new RangeError(`the job request is not one NEMAR sends: ${fields.join(", ")}`);
+    }
+    const launchValue = fields.some((field) => field.startsWith("parameterSet.envVariables"));
+    throw new SubmitRequestRefused(launchValue ? "launch_spec_env" : "job_field", fields);
   }
   return checked.data;
 }

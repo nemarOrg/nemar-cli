@@ -110,6 +110,7 @@ import {
   verifyResults,
 } from "./compute-verify.js";
 import {
+  SubmitRequestRefused,
   type TapisContext,
   type TapisJob,
   cancelJob,
@@ -1394,6 +1395,17 @@ async function submitLeased(
       },
     );
   } catch (err) {
+    if (err instanceof SubmitRequestRefused) {
+      // The job's own data (a field of its row, or the launch value) makes a request NEMAR will not send,
+      // and it is wrong the same way on every attempt. Nothing reached Tapis, so the job is over and the
+      // whole hold is released (it never started: released, not refunded), by the path that ends a row
+      // with no memory to ask for, with the code a refused launch specification already carries. Not
+      // retried every tick until the reservation wait runs out. The digest was written before the call.
+      console.error(`[compute-lifecycle] launch_unbuildable job=${row.id} reason=${err.reason}`);
+      return (await endUnsubmitted(env, row, "failed", "tapis_submit_failed", "invalid_spec"))
+        ? refused("failed")
+        : refused("bad_state");
+    }
     if (err instanceof TapisError && (err.kind === "rejected" || err.kind === "not_found")) {
       console.error(`[compute-lifecycle] submit_rejected job=${row.id} kind=${err.kind}`);
       return (await endUnsubmitted(env, row, "failed", "tapis_submit_failed", null))

@@ -667,4 +667,42 @@ describe("every partition's submit carries memory, minutes, nodes and cores", ()
     expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
     expect(submitsAtTapis()).toBe(0);
   });
+
+  // A5 follow-up of A1c (#2043): a request NEMAR will not send because of the job's own data is wrong
+  // the same way on every attempt. It used to fall into the generic "unclear" catch and be tried again
+  // on every tick until the reservation wait ran out.
+  test("a request the builder refuses for the job's own data ends the job: failed, the hold released, Tapis never reached, and no retry", async () => {
+    const made = await makeJob(fx);
+    // Zero cores a node with a memory of its own: the memory to ask for is known (so the row gets as far
+    // as the request), and `coresPerNode` is not a positive number, which the request builder refuses.
+    await made.env.DB.prepare(
+      "UPDATE compute_jobs SET cores_per_node = 0, memory_mb = 20000 WHERE id = ?",
+    )
+      .bind(made.job.id)
+      .run();
+    const logs = await logged(async () => {
+      expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+        ok: false,
+        outcome: "failed",
+      });
+    });
+    const job = await reread(made.env, made.job.id);
+    expect([job.state, job.failure_code, job.failure_detail]).toEqual([
+      "failed",
+      "tapis_submit_failed",
+      "invalid_spec",
+    ]);
+    expect(job.tapis_uuid).toBeNull();
+    // Released, not refunded, and not charged: the whole hold goes back.
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+    expect(submitsAtTapis()).toBe(0);
+    // The log line names a job id and two fixed words, and nothing the request held.
+    const line = logs.find((l) => l.includes("launch_unbuildable"));
+    expect(line).toContain(`job=${made.job.id}`);
+    expect(line).toContain("reason=job_field");
+    // A later tick finds a finished row and does nothing: no second release, still no submit.
+    expect((await submitComputeJob(made.env, made.job.id)).ok).toBe(false);
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+    expect(submitsAtTapis()).toBe(0);
+  });
 });

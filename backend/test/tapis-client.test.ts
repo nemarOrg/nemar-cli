@@ -50,6 +50,7 @@ import {
 } from "../src/services/tapis/auth";
 import {
   type SubmitJobInput,
+  SubmitRequestRefused,
   TAPIS_MAX_DOWNLOAD_BYTES,
   TAPIS_MAX_JSON_BYTES,
   TAPIS_TIMEOUT_MS,
@@ -1652,6 +1653,55 @@ describe("the launch specification's other copies (what Tapis archives, and what
         expect(message).not.toContain(secret);
       }
     }
+  });
+
+  test("a refusal because of the job's own data is the typed SubmitRequestRefused, with a reason word; the owner's is not", async () => {
+    const env = passwordEnv();
+    const rows: Array<[string, Partial<SubmitJobInput>, "launch_spec_env" | "job_field"]> = [
+      [
+        "the launch value is raw JSON",
+        { launchSpecEnv: notAValue(LAUNCH_SPEC_TEXT) },
+        "launch_spec_env",
+      ],
+      ["the launch value is not canonical", { launchSpecEnv: notAValue("QR") }, "launch_spec_env"],
+      ["the launch value is empty", { launchSpecEnv: notAValue("") }, "launch_spec_env"],
+      ["a count is not a positive number", { coresPerNode: 0 }, "job_field"],
+      ["the job id is not one", { jobId: "job_nothex" }, "job_field"],
+      ["the partition is not one", { partition: "not-a-partition" as never }, "job_field"],
+      ["the GPUs are negative", { gpus: -1 }, "job_field"],
+    ];
+    for (const [label, over, reason] of rows) {
+      let error: unknown;
+      try {
+        await submitJob(ctx(env), { ...SUBMIT, ...over });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, label).toBeInstanceOf(SubmitRequestRefused);
+      // Still a RangeError, as a refused request always was.
+      expect(error, label).toBeInstanceOf(RangeError);
+      expect((error as SubmitRequestRefused).reason, label).toBe(reason);
+      expect((error as Error).name, label).toBe("SubmitRequestRefused");
+      // It names the fields and no value: the launch value holds the job's token.
+      for (const secret of [...SPEC_SECRETS, "nemar.launch-spec"]) {
+        expect((error as Error).message, label).not.toContain(secret);
+      }
+    }
+    // The owner is NEMAR's configuration, not the job's data: it is a plain RangeError, so a caller that
+    // ends a job on the typed error leaves a job waiting for a configuration fix.
+    for (const run of [
+      () => clientModule.buildSubmitRequest("a b", SUBMIT),
+      () => clientModule.buildSubmitRequest("", SUBMIT),
+    ]) {
+      expect(run).toThrow(RangeError);
+      expect(run).not.toThrow(SubmitRequestRefused);
+    }
+    await expect(submitJob(ctx(env, { owner: "a b" }), SUBMIT)).rejects.toThrow(RangeError);
+    await expect(submitJob(ctx(env, { owner: "a b" }), SUBMIT)).rejects.not.toBeInstanceOf(
+      SubmitRequestRefused,
+    );
+    // Nothing was sent for any of them.
+    expect(standin.log).toHaveLength(0);
   });
 
   test("a value of exactly the encoded bound is sent, and is the one the stand-in holds", async () => {
