@@ -3601,6 +3601,43 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       expect(decodeLaunchSpecEnv(longest)).toEqual({ ok: true, text });
     });
 
+    test("the unit of the length bound: an over-length ASCII value is too_long, and an over-length value with a non-ASCII character is refused with too_long or not_base64url", () => {
+      const max = LAUNCH_SPEC_ENV_MAX_CHARS;
+      // ASCII: one answer, whatever the unit, so the word is pinned. A character the alphabet lacks
+      // does not change it, because the length is checked first (it bounds the work).
+      for (const value of ["A".repeat(max + 1), "{".repeat(max + 1), `${"A".repeat(max)}=`]) {
+        expect(refusal(value), `${value.length} ASCII characters`).toBe("too_long");
+      }
+      // Non-ASCII: neither word can be told apart as the right one, because languages count a length
+      // in different units. The reference counts UTF-16 code units; a launcher may count code points
+      // or bytes. What must hold is that the value is refused, with one of the two words. Each row is
+      // over the bound in one unit and not in another, so the pair of units a launcher might use is
+      // covered: code units over and code points not (an astral character), code units not over and
+      // bytes over (a two-byte character), and over in all three.
+      const rows: Array<[string, string]> = [
+        [
+          "over in code units, not in code points (an astral character)",
+          `${"A".repeat(max - 1)}\u{1F600}`,
+        ],
+        [
+          "not over in code units, over in bytes (an e with an acute accent)",
+          `${"A".repeat(max - 1)}\u00e9`,
+        ],
+        ["over in every unit, with one accented character", `${"A".repeat(max)}\u00e9`],
+        ["over in every unit, all non-ASCII", "\u00e9".repeat(max + 1)],
+        ["all astral characters", "\u{1F600}".repeat(max)],
+        ["a non-ASCII character first", `\u00e9${"A".repeat(max)}`],
+      ];
+      for (const [label, value] of rows) {
+        const out = decodeLaunchSpecEnv(value);
+        expect(out.ok, label).toBe(false);
+        expect(["too_long", "not_base64url"], label).toContain(out.ok ? "ok" : out.reason);
+      }
+      // And a non-ASCII value that is within the bound in every unit can only be not_base64url.
+      expect(refusal("QQ\u00e9")).toBe("not_base64url");
+      expect(refusal("\u00e9".repeat(1000))).toBe("not_base64url");
+    });
+
     test("a character outside the alphabet: padding, the standard alphabet's two, whitespace, a line break, non-ASCII", () => {
       const cases = [
         "QQ==",

@@ -403,7 +403,9 @@ export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
  *
  *  1. the value is a string, else `not_base64url`;
  *  2. it is not empty, else `empty`;
- *  3. it is at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, else `too_long`;
+ *  3. it is at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, else `too_long` (the unit is
+ *     characters of the value, UTF-16 code units in this reference; for every ACCEPTED value that is
+ *     also its length in bytes, because an accepted value is ASCII);
  *  4. it is made only of the {@link SHELL_INERT_ENV_ALPHABET}, else `not_base64url` (so no padding,
  *     no `+` or `/`, no whitespace or line break; a raw JSON document, which starts with `{`, is
  *     refused here: nothing is registered with a tenant, so no earlier format is accepted);
@@ -412,6 +414,11 @@ export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
  *     nothing from 0x80 up), else `not_printable`;
  *  7. it is CANONICAL, else `not_base64url`: encoding the decoded text again gives the value back,
  *     so the unused trailing bits of its last character are zero and there is one value per text.
+ *
+ * A value with a character outside ASCII can never be accepted, and languages count a length in
+ * different units (UTF-16 code units, code points, bytes), so for such a value `too_long` and
+ * `not_base64url` are BOTH conforming answers. A conformance comparison with the launcher checks
+ * accept or refuse for every value, and the word only for ASCII values.
  *
  * The caller then parses the text as JSON; a launcher hashes the TEXT before it does. Pure; never
  * throws, and a refusal is a word that holds no part of the value.

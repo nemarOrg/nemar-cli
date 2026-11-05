@@ -351,13 +351,16 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
    The decoder and the Tapis client's request schema bound the value by the same constant.
 4. **The decoder is strict and canonical, and there is no earlier format.**
    `decodeLaunchSpecEnv(value)` returns the text or one of five fixed refusal words (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_printable`) that never holds a part of the value.
-   The checks run in this order, and the first to fail names the refusal: the value is a string; it is not empty; it is at most the bound; it is made only of the alphabet (so no padding, no `+` or `/`, no whitespace and no line break); its length is not 1 modulo 4; it decodes to printable ASCII only, every byte 0x20 to 0x7e; and it is canonical.
+   The checks run in this order, and the first to fail names the refusal: the value is a string; it is not empty; it is at most the bound, counted in characters of the value (UTF-16 code units in the reference; for every accepted value that is also its length in bytes, because an accepted value is ASCII); it is made only of the alphabet (so no padding, no `+` or `/`, no whitespace and no line break); its length is not 1 modulo 4; it decodes to printable ASCII only, every byte 0x20 to 0x7e; and it is canonical.
    A value is canonical when encoding the decoded text again gives the value back, so the unused trailing bits of its last character are zero and there is one value per text: `QQ` is accepted, and `QR`, which decodes to the same byte, is refused with `not_base64url`.
    The caller then parses the JSON.
    The encoder refuses a text with a byte outside 0x20 to 0x7e (a control byte, DEL or anything from 0x80 up) with a TypeError, and a text over the cap with a RangeError, and no message holds any part of the text.
    The printable rule is one rule for both sides: the launcher drops its separate NUL check (`has_nul`) and uses `not_printable`.
    A raw JSON value, which starts with `{`, is refused: nothing is registered with a tenant, so no earlier format is accepted anywhere.
-   The launcher's decoder is required to follow the same rules, with the same words, in the same order.
+   The launcher's decoder is required to follow the same rules, with the same words for ASCII values, in the same order.
+   For a value that contains a non-ASCII character, `too_long` and `not_base64url` are both conforming answers: neither can be accepted, and a length is counted in different units by different languages (UTF-16 code units, code points, bytes), so the first word can differ.
+   The conformance comparison checks accept or refuse for every value, and the word only for ASCII values.
+   The length check stays first because it keeps the work bounded.
 5. **The Tapis client refuses anything else before a request is built, and a refusal of the job's own data ends the job.**
    The request schema's value passes only when `decodeLaunchSpecEnv` accepts it (one rule, shared with the decoder, and not a second check of the characters), so a raw JSON text, padding, a quote, a space, a newline, a value over the bound, a value that is not canonical and one that does not decode to printable text are each refused with the field's name and never the value.
    The closed one-variable array and `archiveFilter.includeLaunchFiles: false` are unchanged.
