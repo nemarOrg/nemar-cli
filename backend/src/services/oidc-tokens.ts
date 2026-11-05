@@ -15,8 +15,7 @@
  *
  *   AUTHORIZATION CODE. The code is read once. The PKCE verifier is checked against its S256
  *   challenge and the redirect address exactly, in constant time, and a mismatch writes nothing,
- *   whether or not the code is used. A used code that matches is a second redemption at once
- *   (below). Otherwise one batch:
+ *   whether or not the code is used. Then one batch (which a used code loses, see below):
  *   the access token is inserted only while the code is unused and live, is this client's, and its
  *   client, grant and account still pass (`CODE_CLAIM_PREDICATE`, the claim of the issue verbatim,
  *   plus the gates); the refresh token only beside that access token; and the code is marked used
@@ -133,7 +132,7 @@ export const TOKENS_PRUNE_SQL = `DELETE FROM oidc_tokens
 
 /** A code as the token endpoint checks it before the batch, with D1's clock. */
 export const CODE_READ_SQL = `SELECT k.id, k.client_id, k.redirect_uri, k.scopes, k.nonce,
-       k.code_challenge, k.used_at IS NOT NULL AS used,
+       k.code_challenge,
        CAST(strftime('%s', k.auth_time) AS INTEGER) AS auth_time_unix,
        CAST(strftime('%s', 'now') AS INTEGER) AS now_unix
   FROM oidc_codes k WHERE k.code_hash = ?`;
@@ -509,8 +508,6 @@ interface CodeRow {
   scopes: string;
   nonce: string | null;
   code_challenge: string;
-  /** 1 when the code was redeemed already. */
-  used: number;
   auth_time_unix: number;
   now_unix: number;
 }
@@ -551,10 +548,9 @@ export async function redeemAuthorizationCode(
   const verifierOk = await verifierMatches(form.verifier, code.code_challenge);
   const redirectOk = timingSafeEqual(form.redirectUri, code.redirect_uri);
   if (!verifierOk || !redirectOk) return invalid();
-  // Presented again by its own client with the right verifier and address: a second redemption.
-  // Whoever redeemed first held that verifier, so this is the legitimate client's own replay (or a
-  // leak of everything it holds): everything the code issued is revoked.
-  if (code.used === 1) return secondRedemption(db, codeHash, client.id, invalid);
+  // A used code that matched goes on to the batch, whose claim it loses; that loss is a second
+  // redemption (below). Whoever redeemed first held this verifier, so it is the legitimate client's
+  // own replay, or a leak of everything it holds: everything the code issued is revoked.
 
   const account = await db.prepare(CODE_ACCOUNT_SQL).bind(code.id).first<ClaimAccount>();
   if (!account || !account.oidc_subject) return invalid();
