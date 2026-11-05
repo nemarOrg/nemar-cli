@@ -19,8 +19,12 @@
  */
 
 import {
+  OIDC_LOGOUT_FAILED_RETENTION_DAYS,
+  OIDC_LOGOUT_FENCED_RETENTION_DAYS,
   OIDC_LOGOUT_LEASE_SECONDS,
   OIDC_LOGOUT_MAX_ATTEMPTS,
+  OIDC_LOGOUT_PRUNE_PER_TICK,
+  OIDC_LOGOUT_SENT_RETENTION_DAYS,
   type OidcLogoutErrorClass,
   type OidcLogoutStatus,
 } from "../../../shared/oidc.js";
@@ -169,6 +173,40 @@ export async function dueDeliveries(
       : db.prepare(DUE_DELIVERIES_FOR_USER_SQL).bind(userId, limit);
   const { results } = await statement.all<DueDelivery>();
   return results ?? [];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Delete finished deliveries past their window, oldest first, at most a tick's worth. Binds: sentDays,
+ * fencedDays, failedDays, limit. A `sent` row is aged by `sent_at`, a `fenced` or `failed` row by
+ * `created_at` (the table has no last-update column; see `OIDC_LOGOUT_SENT_RETENTION_DAYS`). A `pending` row,
+ * which is also what an attempt in flight is, matches none of the three branches and is NEVER deleted,
+ * whatever its age. The windows are the owner's to set and are bound, so they live in one place.
+ */
+export const PRUNE_DELIVERIES_SQL = `DELETE FROM oidc_logout_deliveries
+ WHERE id IN (
+   SELECT id FROM oidc_logout_deliveries
+    WHERE (status = 'sent' AND sent_at < datetime('now', '-' || ? || ' days'))
+       OR (status = 'fenced' AND created_at < datetime('now', '-' || ? || ' days'))
+       OR (status = 'failed' AND created_at < datetime('now', '-' || ? || ' days'))
+    ORDER BY id
+    LIMIT ?)`;
+
+/** Prune once, with the windows of `shared/oidc.ts`; returns how many rows went. */
+export async function pruneDeliveries(db: D1Database): Promise<number> {
+  const result = await db
+    .prepare(PRUNE_DELIVERIES_SQL)
+    .bind(
+      OIDC_LOGOUT_SENT_RETENTION_DAYS,
+      OIDC_LOGOUT_FENCED_RETENTION_DAYS,
+      OIDC_LOGOUT_FAILED_RETENTION_DAYS,
+      OIDC_LOGOUT_PRUNE_PER_TICK,
+    )
+    .run();
+  return result.meta?.changes ?? 0;
 }
 
 // ---------------------------------------------------------------------------------------------

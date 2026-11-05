@@ -139,7 +139,7 @@ describe("a production tick", () => {
     expect(count("pending")).toBe(1);
     expect(logoutTickLogLine(tally as never)).toEqual({
       level: "info",
-      line: "[oidc-logout] examined=2 sent=2 retried=0 failed=0 fenced=0 lost=0 errors=0",
+      line: "[oidc-logout] examined=2 sent=2 retried=0 failed=0 fenced=0 lost=0 errors=0 pruned=0",
     });
   });
 

@@ -28,6 +28,7 @@ import {
   claimDelivery,
   dueDeliveries,
   finishWithoutSend,
+  pruneDeliveries,
   recordAttempt,
 } from "../src/services/oidc-logout-store";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -373,6 +374,24 @@ describe("the delivery store on D1", () => {
     expect(CLAIM_DELIVERY_SQL).toContain("attempts = attempts + 1");
     expect(RECORD_ATTEMPT_SQL).toContain("jti = ?");
     expect(FINISH_WITHOUT_SEND_SQL).toContain("next_attempt_at <= datetime('now')");
+  });
+
+  test("the prune deletes finished rows past their window and never a pending one, on D1", async () => {
+    const old = await queueOne("datetime('now', '-1 minutes')");
+    await run(
+      "UPDATE oidc_logout_deliveries SET status = 'sent', next_attempt_at = NULL, sent_at = datetime('now', '-40 days') WHERE id = ?",
+      old.id,
+    );
+    const waiting = await queueOne("datetime('now', '+1 hour')");
+    await run(
+      "UPDATE oidc_logout_deliveries SET created_at = datetime('now', '-400 days') WHERE id = ?",
+      waiting.id,
+    );
+    expect(await pruneDeliveries(d1)).toBeGreaterThanOrEqual(1);
+    expect(await all("SELECT id FROM oidc_logout_deliveries WHERE id = ?", old.id)).toEqual([]);
+    expect(await all("SELECT id FROM oidc_logout_deliveries WHERE id = ?", waiting.id)).toEqual([
+      { id: waiting.id },
+    ]);
   });
 
   test("the owner's view lists newest first with the public client id, and counts every status", async () => {

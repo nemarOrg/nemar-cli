@@ -70,6 +70,7 @@ import {
   claimDelivery,
   dueDeliveries,
   finishWithoutSend,
+  pruneDeliveries,
   recordAttempt,
 } from "./oidc-logout-store.js";
 import { isExactProduction } from "./repull-switches.js";
@@ -322,7 +323,9 @@ export interface LogoutTally {
   fenced: number;
   /** Another runner claimed it first, or it changed meanwhile. */
   lost: number;
-  /** Deliveries whose attempt threw (a database fault): left as they were. */
+  /** Finished deliveries deleted past their retention window (the production tick only; else 0). */
+  pruned: number;
+  /** Deliveries whose attempt threw (a database fault), and a prune that threw: left as they were. */
   errors: number;
   /** The class of the last error, a fixed word, or null. */
   errorClass: string | null;
@@ -351,6 +354,7 @@ export async function attemptDueLogouts(
     failed: 0,
     fenced: 0,
     lost: 0,
+    pruned: 0,
     errors: 0,
     errorClass: null,
   };
@@ -413,28 +417,38 @@ export function backgroundOf(c: {
 
 /**
  * The retry tick (every 30 minutes, production only; template `runRepullAdvanceCron`): attempt the deliveries that
- * are due. Returns null, having read and written nothing, outside ENVIRONMENT exactly `production` (a dev
- * Worker shares real accounts, and the job is absent from `DEV_CRON_ALLOWLIST`; the tick fences itself
- * as well). Bounded to {@link LOGOUT_ROWS_PER_RUN} deliveries a tick, each in its own try and catch
- * recording only a status and a fixed word. The name avoids the word `sweep` on purpose: it is not one,
- * and `cron-sweep-wiring.test.ts` would ask for an entry it has no use for.
+ * are due, then prune the finished ones past their retention window. Returns null, having read and written
+ * nothing, outside ENVIRONMENT exactly `production` (a dev Worker shares real accounts, and the job is absent
+ * from `DEV_CRON_ALLOWLIST`; the tick fences itself as well). Bounded to {@link LOGOUT_ROWS_PER_RUN}
+ * deliveries a tick, each in its own try and catch recording only a status and a fixed word. The prune
+ * comes AFTER the delivery work, so a slow or failing prune never delays a logout, and a prune that throws
+ * is counted as an error and costs nothing else (`OIDC_LOGOUT_PRUNE_PER_TICK`, and the windows, are in
+ * `shared/oidc.ts`). The name avoids the word `sweep` on purpose: it is not one, and
+ * `cron-sweep-wiring.test.ts` would ask for an entry it has no use for.
  */
 export async function runOidcLogoutRetryTick(
   env: LogoutEnv,
   options: LogoutOptions = {},
 ): Promise<LogoutTally | null> {
   if (!isExactProduction(env)) return null;
-  return attemptDueLogouts(env, options);
+  const tally = await attemptDueLogouts(env, options);
+  try {
+    tally.pruned = await pruneDeliveries(env.DB);
+  } catch (err) {
+    tally.errors++;
+    tally.errorClass = errorClassName(err);
+  }
+  return tally;
 }
 
 /**
  * The tick's one log line, or null when it did nothing and nothing went wrong: a tick that found no
- * delivery says nothing. Counts and a fixed word only, never a client, a subject or an address.
+ * delivery and pruned none says nothing. Counts and a fixed word only, never a client, a subject or an address.
  */
 export function logoutTickLogLine(
   t: LogoutTally,
 ): { level: "info" | "error"; line: string } | null {
-  if (t.examined === 0 && t.errors === 0) return null;
-  const line = `[oidc-logout] examined=${t.examined} sent=${t.sent} retried=${t.retried} failed=${t.failed} fenced=${t.fenced} lost=${t.lost} errors=${t.errors}${t.errorClass ? ` errorClass=${t.errorClass}` : ""}`;
+  if (t.examined === 0 && t.errors === 0 && t.pruned === 0) return null;
+  const line = `[oidc-logout] examined=${t.examined} sent=${t.sent} retried=${t.retried} failed=${t.failed} fenced=${t.fenced} lost=${t.lost} errors=${t.errors} pruned=${t.pruned}${t.errorClass ? ` errorClass=${t.errorClass}` : ""}`;
   return { level: t.errors > 0 || t.failed > 0 ? "error" : "info", line };
 }
