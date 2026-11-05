@@ -291,6 +291,7 @@ Migration `0119_compute_access_reports.sql`, `backend/src/services/compute-relea
    Outside production the body carries `debug`, which the design says the interface offers for tests.
 7. **The key, the resource name and the spelling are the owner's and unverified.**
    The key is the Worker secret `ACCESS_GATEWAY_ATTRIBUTES_KEY` and the resource name `ACCESS_RESOURCE_NAME`, both optional, both absent from every table of `wrangler-sccn.toml` and pinned absent by test; unset, a row stays `pending` with `unconfigured`.
+   A persistent refusal is noticed in hours, not days: a key ACCESS refuses (401, 403) or a wrong base address (404) is retried with a delay doubling from an hour, which is about 79 hours of info-level lines before the eighth attempt fails the row, so every tick logs one error-level line (counts and a fixed word only) whenever a pending row has used three attempts with a retry class, whether or not any row is due.
    `GET /admin/compute/status` and `nemar admin compute status` report the presence of each (never a value), because the reports wait until both are set, and every tick that leaves a row waiting for either logs one error-level line with the count: silence while there is work to do is evidence of nothing (ADR 0053, 0054).
    The key is sent in a header and never logged, stored or put in a job.
    The header name (`ACCESS_KEY_HEADER`), the body field names and the time format (`ACCESS_BODY_FIELDS`, `accessSubmitTime`) and the `debug` field are each one constant, taken from the design page and the phase issue, and none has been seen against the real interface.
@@ -305,7 +306,14 @@ Migration `0119_compute_access_reports.sql`, `backend/src/services/compute-relea
 
 Open points for the phases that follow, recorded so nobody reads them as settled:
 - A partner job with no account has no pseudonym and ends `failed` with `no_gateway_user`; the partner contract must supply one for account-less partner jobs (for example per client and Tapis owner).
-- A partner reservation of an ended account is the partner contract's to resolve (item 2).
+- The partner contract (phase D4) must define, for a partner reservation (item 2):
+  (a) who ends or expires an unlaunched reservation and releases its hold;
+  (b) what a person's cancel of a reservation means: today it records the intent and reports success while the row stays `created` with its hold open, and a later partner bind is refused because `BIND_TAPIS_JOB_SQL` requires `cancel_requested_at IS NULL`;
+  (c) a partner that launches under the reservation of an ended account runs unchallenged under a frozen pool, because the cascade records no intent on a reservation (it fails open): consider recording the intent so the bind refuses (fail closed);
+  (d) a way to list stuck reservations for the reporting phase (the status view does not count them).
+- Residuals of the reporter, accepted and recorded so nobody reads them as closed:
+  (i) a 503 that a proxy answers after the upstream had processed the request (an upstream reset behind a gateway) would duplicate a report; it is rare, and the checkpoint accepted it;
+  (ii) if the runtime stops `waitUntil` work about thirty seconds after `scheduled()` returns, a twenty-second budget plus a fifteen-second POST can exceed it; the reaper then ends the claimed row `outcome_unknown`, so the report is lost and never doubled.
 - The reporting phase lists `failed` report rows by word, and an owner-only re-queue requires an explicit acknowledgement that the report is confirmed not recorded at ACCESS.
 - The cancel sweep takes the oldest ten rows with a recorded cancel, so a queue of cancels that cannot complete can stall it (pre-existing, phase A5), and staging never cancels at Tapis (phase A5's choice).
 - Which headers the interface wants, beyond the key's (for example a resource header), is checked against the real interface when the key is issued.
