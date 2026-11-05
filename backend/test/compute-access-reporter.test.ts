@@ -707,6 +707,76 @@ describe("what cannot be sent yet stays pending, and costs no attempt", () => {
   });
 });
 
+describe("a refusal that persists is noticed in hours, not days", () => {
+  // A key ACCESS refuses (401, 403) or a wrong base address (404) is retried with a delay doubling from an
+  // hour, which is 79 hours of info-level `retry` lines before the eighth attempt fails the row. So any
+  // row that has used 3 attempts with a retry class makes EVERY tick log one error-level line.
+  test("the third refused attempt turns the tick's line to error level, and it stays so while the row waits (MUTATION: threshold, class filter)", async () => {
+    const { made } = await queuedJob();
+    const e = env();
+    const lines: Array<{ level: string; line: string } | null> = [];
+    for (const attempt of [1, 2, 3]) {
+      access.answer(401);
+      await makeDue(e, made.job.id);
+      const tick = await runAccessReportCron(e);
+      expect([attempt, tick]).toEqual([attempt, expect.objectContaining({ retry: 1 })]);
+      lines.push(accessReportsLogLine(tick as NonNullable<typeof tick>));
+    }
+    expect(lines[0]).toMatchObject({ level: "info" });
+    expect(lines[0]?.line).toContain("persistent=0");
+    expect(lines[1]).toMatchObject({ level: "info" });
+    expect(lines[2]).toMatchObject({ level: "error" });
+    expect(lines[2]?.line).toContain("persistent=1");
+    // Nothing is due for hours, and the tick still says so: silence while there is work is evidence of nothing.
+    const quiet = await runAccessReportCron(e);
+    expect(quiet).toMatchObject({ examined: 0, persistent: 1 });
+    const line = accessReportsLogLine(quiet as NonNullable<typeof quiet>);
+    expect(line).toMatchObject({ level: "error" });
+    // Counts and a fixed word only: no key, address, Slurm id, pseudonym or job id.
+    for (const secret of [
+      KEY,
+      access.url,
+      made.job.slurm_job_id ?? "",
+      made.job.gateway_user ?? "",
+      made.job.id,
+    ]) {
+      expect(line?.line).not.toContain(secret);
+    }
+    expect(line?.line).toMatch(/^\[access-report\] .*persistent=1/);
+  });
+
+  test("only a PENDING row with a retry class and three attempts counts: not two attempts, not a sent or failed row, not a waiting word", async () => {
+    const e = env();
+    const rows = {
+      twoAttempts: (await queuedJob()).made.job.id,
+      sent: (await queuedJob()).made.job.id,
+      noTime: (await queuedJob()).made.job.id,
+      unconfigured: (await queuedJob()).made.job.id,
+      exhausted: (await queuedJob()).made.job.id,
+      persistent: (await queuedJob()).made.job.id,
+    };
+    const set = (id: string, state: string, attempts: number, code: string | null) =>
+      e.DB.prepare(
+        `UPDATE compute_access_reports SET state = ?2, attempts = ?3, last_error_code = ?4,
+           sent_at = CASE WHEN ?2 = 'sent' THEN datetime('now') ELSE NULL END,
+           next_attempt_at = datetime('now', '+1 day') WHERE job_id = ?1`,
+      )
+        .bind(id, state, attempts, code)
+        .run();
+    await set(rows.twoAttempts, "pending", 2, "refused");
+    await set(rows.sent, "sent", 4, null);
+    await set(rows.noTime, "pending", 5, "no_submit_time");
+    await set(rows.unconfigured, "pending", 3, "unconfigured");
+    // A row whose attempts ran out is `failed`, final, and counted by its own line, not as a waiting refusal.
+    await set(rows.exhausted, "failed", ACCESS_REPORT_MAX_ATTEMPTS, "unavailable");
+    expect(await runAccessReportCron(e)).toMatchObject({ persistent: 0 });
+    await set(rows.persistent, "pending", 3, "busy");
+    expect(await runAccessReportCron(e)).toMatchObject({ persistent: 1 });
+    await set(rows.twoAttempts, "pending", 3, "unavailable");
+    expect(await runAccessReportCron(e)).toMatchObject({ persistent: 2 });
+  });
+});
+
 describe("a record that never gets a scheduler submission time is not looked at for ever", () => {
   /** A job whose record has no submission time, and a report row that first showed `days` ago. */
   async function stuck(days: number) {
@@ -971,6 +1041,7 @@ describe("the tick", () => {
         deferred: 0,
         reaped: 0,
         skipped: 0,
+        persistent: 0,
         errors: [],
         errorClass: null,
       }),

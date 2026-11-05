@@ -102,6 +102,13 @@ export const ACCESS_REPORT_ROWS_PER_TICK = 10;
  */
 export const ACCESS_REPORT_TICK_BUDGET_MS = 20_000;
 
+/**
+ * A row that has used this many attempts with a retry class (`refused`, `busy`, `unavailable`) is a
+ * PERSISTENT refusal (a key ACCESS refuses, a wrong address): at the doubling delays the eighth attempt
+ * is about 79 hours away, so from the third attempt on every tick logs an error-level line.
+ */
+export const ACCESS_REPORT_PERSISTENT_ATTEMPTS = 3;
+
 /** The first delay after a refusal, and the longest, in minutes. */
 const RETRY_FIRST_MINUTES = 60;
 const RETRY_LONGEST_MINUTES = 24 * 60;
@@ -201,6 +208,14 @@ export const ACCESS_REPORT_DEFER_SQL = `UPDATE compute_access_reports SET
 export const ACCESS_REPORT_NO_TIME_FAIL_SQL = `UPDATE compute_access_reports SET
     state = 'failed', last_error_code = 'no_submit_time'
   WHERE job_id = ?1 AND state = 'pending'`;
+
+/**
+ * How many pending rows have been refused (a retry class) at least `?1` times: what the tick's error-level
+ * line counts, whether or not any row is due. Only the pending rows are read (the partial index).
+ */
+export const ACCESS_REPORT_PERSISTENT_SQL = `SELECT COUNT(*) AS n FROM compute_access_reports
+  WHERE state = 'pending' AND attempts >= ?1
+    AND last_error_code IN ('refused', 'busy', 'unavailable')`;
 
 /** With no key or no resource name every due row says so, and nothing else changes. */
 export const ACCESS_REPORT_UNCONFIGURED_SQL = `UPDATE compute_access_reports SET
@@ -434,6 +449,8 @@ export interface AccessReportTick {
   deferred: number;
   /** Rows whose sender died holding its lease, ended `failed`, `outcome_unknown`. */
   reaped: number;
+  /** Pending rows refused (a retry class) at least `ACCESS_REPORT_PERSISTENT_ATTEMPTS` times, counted whether or not any is due. */
+  persistent: number;
   /** Due rows this tick did not claim (its time budget was spent, or an outcome it could not judge stopped it): they wait for the next tick. */
   skipped: number;
   /** Fixed words; never a message. */
@@ -451,6 +468,7 @@ const emptyTick = (): AccessReportTick => ({
   deferred: 0,
   reaped: 0,
   skipped: 0,
+  persistent: 0,
   errors: [],
   errorClass: null,
 });
@@ -470,9 +488,30 @@ export async function runAccessReportCron(
   options: { timeoutMs?: number; now?: () => number } = {},
 ): Promise<AccessReportTick | null> {
   if (!isExactProduction(env)) return null;
+  const r = emptyTick();
+  await runAccessReportTick(env, options, r);
+  // A persistent refusal is counted at the END of every tick, due rows or none, so it is never silent.
+  try {
+    r.persistent =
+      (
+        await env.DB.prepare(ACCESS_REPORT_PERSISTENT_SQL)
+          .bind(ACCESS_REPORT_PERSISTENT_ATTEMPTS)
+          .first<{ n: number }>()
+      )?.n ?? 0;
+  } catch (err) {
+    r.errors.push("count_failed");
+    r.errorClass = errorClassName(err);
+  }
+  return r;
+}
+
+async function runAccessReportTick(
+  env: Bindings,
+  options: { timeoutMs?: number; now?: () => number },
+  r: AccessReportTick,
+): Promise<void> {
   const clock = options.now ?? Date.now;
   const started = clock();
-  const r = emptyTick();
   try {
     r.reaped = (await env.DB.prepare(ACCESS_REPORT_REAP_SQL).run()).meta?.changes ?? 0;
     const due = (
@@ -481,11 +520,11 @@ export async function runAccessReportCron(
         .all<{ job_id: string }>()
     ).results;
     r.examined = due.length;
-    if (due.length === 0) return r;
+    if (due.length === 0) return;
     if (accessReportConfig(env) === null) {
       await env.DB.prepare(ACCESS_REPORT_UNCONFIGURED_SQL).run();
       r.unconfigured = due.length;
-      return r;
+      return;
     }
     for (const [index, { job_id }] of due.entries()) {
       // THE TIME BUDGET: no new row is claimed once it is spent (see ACCESS_REPORT_TICK_BUDGET_MS).
@@ -524,22 +563,24 @@ export async function runAccessReportCron(
     r.errors.push("tick_failed");
     r.errorClass = errorClassName(err);
   }
-  return r;
 }
 
 /**
  * The tick's one log line, or null when it changed nothing and nothing failed. A tick that found rows
  * waiting for the key or the resource name is NOT silent (`unconfigured`): the same rows waiting for a
  * retry say nothing, but rows that wait for the owner must. Counts and fixed words only: no key,
- * address, Slurm id or pseudonym. Error level when a row needs a person (it ended `failed`, or it waits
- * for the key or the resource name) or anything threw.
+ * address, Slurm id or pseudonym. Error level when a row needs a person (it ended `failed`, it waits for
+ * the key or the resource name, or a refusal persists: a row has used `ACCESS_REPORT_PERSISTENT_ATTEMPTS`
+ * attempts with a retry class, which a key ACCESS refuses or a wrong address does for about 79 hours
+ * before the row fails) or anything threw.
  */
 export function accessReportsLogLine(
   r: AccessReportTick,
 ): { level: "info" | "error"; line: string } | null {
   // A row waiting for the key or the resource name needs a person too, and says so on EVERY tick:
   // silence while there is work to do is evidence of nothing (ADR 0053, 0054).
-  const needsPerson = r.failed + r.unknown + r.reaped + r.unconfigured > 0 || r.errors.length > 0;
+  const needsPerson =
+    r.failed + r.unknown + r.reaped + r.unconfigured + r.persistent > 0 || r.errors.length > 0;
   const acted = r.sent + r.retry + r.deferred + r.skipped;
   if (!needsPerson && acted === 0) return null;
   const line = [
@@ -553,6 +594,7 @@ export function accessReportsLogLine(
     `deferred=${r.deferred}`,
     `reaped=${r.reaped}`,
     `skipped=${r.skipped}`,
+    `persistent=${r.persistent}`,
     `errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}`,
     r.errorClass === null ? "" : `class=${r.errorClass}`,
   ]
