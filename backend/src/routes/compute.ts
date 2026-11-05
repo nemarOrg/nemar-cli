@@ -32,7 +32,11 @@ import { getJob } from "../services/compute-jobs.js";
 import { requestComputeCancel } from "../services/compute-lifecycle.js";
 import { mintResultLinks } from "../services/compute-results.js";
 import type { Bindings, Variables } from "../types/bindings.js";
+import { readBoundedJsonObject } from "./callbacks/bounded-json.js";
 import { registerComputeJobCallbackRoutes } from "./callbacks/compute-job-callbacks.js";
+
+/** The most bytes the links route reads: a cursor is at most 512 characters, which is 2 KiB at four bytes each. */
+export const LINKS_BODY_MAX_BYTES = 4096;
 
 export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
@@ -62,20 +66,19 @@ computeRoutes.post("/jobs/:id/cancel", authMiddleware, cookieOriginGuard, async 
 computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (c) => {
   const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
   if (!job) return refuse(c, "job_not_found");
-  // An optional JSON body `{ "after": "<an output path>" }` asks for the page that starts after it.
+  // An optional JSON body `{ "after": "<an output path>" }` asks for the page that starts after it. Read
+  // under a small bound like every other compute route's body: a cursor is at most 512 characters.
   let after: string | null = null;
-  const raw = await c.req.text();
-  if (raw.trim() !== "") {
-    let body: unknown;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      return refuse(c, "invalid_spec");
+  const hasBody = c.req.raw.body !== null && c.req.header("Content-Length") !== "0";
+  if (hasBody) {
+    const read = await readBoundedJsonObject(c, LINKS_BODY_MAX_BYTES);
+    if (!read.ok) {
+      return c.json(
+        { error: COMPUTE_ROUTE_SENTENCES.invalid_spec, code: "invalid_spec" },
+        read.status,
+      );
     }
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      return refuse(c, "invalid_spec");
-    }
-    const cursor = (body as { after?: unknown }).after;
+    const cursor = read.body.after;
     if (cursor !== undefined && cursor !== null) {
       if (typeof cursor !== "string" || !isSafeComputePath(cursor, 512)) {
         return refuse(c, "invalid_spec");

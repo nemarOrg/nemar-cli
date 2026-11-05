@@ -328,6 +328,43 @@ describe("links", () => {
     expect((await post(path, f.key)).status).toBe(200);
   });
 
+  // Round 2 of #2041: the links route read its body unbounded, where every other compute route bounds it.
+  test("a body over 4 KiB is refused as invalid_spec (413) whether or not its length is declared, and a body within it is read as before", async () => {
+    const f = await finished();
+    const path = `/compute/jobs/${f.job.id}/links`;
+    // A cursor is at most 512 characters: this body is valid JSON and far too large.
+    const big = JSON.stringify({ after: "a".repeat(5000) });
+    const undeclared = await post(path, f.key, big);
+    expect([undeclared.status, undeclared.body.code]).toEqual([413, "invalid_spec"]);
+    const huge = await post(path, f.key, JSON.stringify({ pad: "x".repeat(2 * 1024 * 1024) }));
+    expect([huge.status, huge.body.code]).toEqual([413, "invalid_spec"]);
+    // A declared length over the bound is refused before the body is read.
+    const declared = await handle(
+      new Request(`http://api.test${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${f.key}`,
+          "content-type": "application/json",
+          "content-length": "999999",
+        },
+        body: "{}",
+      }),
+      env(),
+    );
+    expect(declared.status).toBe(413);
+    // Within the bound: an empty object, an explicit empty body and the longest cursor are all read.
+    expect((await post(path, f.key, "{}")).status).toBe(200);
+    expect((await post(path, f.key, JSON.stringify({ after: "a".repeat(512) }))).status).toBe(200);
+    const emptyDeclared = await handle(
+      new Request(`http://api.test${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${f.key}`, "content-length": "0" },
+      }),
+      env(),
+    );
+    expect(emptyDeclared.status).toBe(200);
+  });
+
   test("a job with no outputs gets no links, and no error", async () => {
     const f = await finished([]);
     const res = await post(`/compute/jobs/${f.job.id}/links`, f.key);
