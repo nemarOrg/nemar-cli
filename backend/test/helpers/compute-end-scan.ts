@@ -16,21 +16,76 @@
  * calling it. What the scan cannot follow it refuses to guess about (`unfollowable`): a dynamic import, a
  * re-export, and a reference at module top level (it could be re-exported under another name).
  *
- * "ENDS every credential" is a unit that revokes all of an account's API keys (`UPDATE tokens SET
- * revoked_at ... WHERE user_id = ?`) AND revokes sessions (`UPDATE web_sessions SET revoked_at ...`, of
- * any scope), whether the SQL is in the unit or in a constant or function it names (resolved by VALUE,
- * through aliases and namespace properties, to a fixed point, so a new constant or helper is found by
- * what it does and not by what it is called).
+ * "ENDS every credential" is a unit that revokes all of an account's API keys AND ends its sessions, THROUGH
+ * THESE STATEMENT SHAPES and no others, whether the SQL is in the unit or in a constant or function it
+ * names (resolved by VALUE, to a fixed point, so a new constant or helper is found by what it does and not
+ * by what it is called):
+ *   - keys: `UPDATE tokens SET revoked_at ...` whose WHERE clause holds `user_id` equal to a placeholder
+ *     (`?`, `?1`), `IN (...)` or a subselect, in either order of its predicates, with the table quoted,
+ *     bracketed, schema-qualified or `OR`-prefixed, in any case; a WHERE clause that also names one key
+ *     (`id`, `api_key_hash`, `api_key_prefix`) is a one-key revocation and is NOT an end;
+ *   - sessions: `UPDATE web_sessions SET revoked_at ...` (of any scope), or `DELETE FROM web_sessions`
+ *     whose WHERE clause holds `user_id` (a delete of expired sessions, or of one session by its cookie,
+ *     is not an end).
+ * A revocation written any other way (SQL built from parts the scan cannot fold, a statement in a template
+ * with the table name interpolated, a stored procedure) is NOT recognised: the scan is a tripwire for the
+ * shapes the Worker uses, not a proof that no path ends an account.
+ *
+ * KNOWN LIMIT, stated so nobody over-reads it: a name is resolved to the module that defines it through the
+ * file's own imports (named, aliased, namespace) and its own top-level declarations; a name that is neither
+ * (a parameter, a local, a property of an object, a re-exported name the scan does not follow) is
+ * unresolved and counts for nothing, so a common helper name elsewhere cannot make an unrelated function an
+ * "end". A name reached through a barrel file or an object's method is not followed.
  */
 
 import ts from "typescript";
-import { type Tree, foldString, parse, rel } from "./ts-scan";
-import { SRC } from "./ts-scan";
+import { SRC, type Tree, foldString, parse, rel, resolveImport } from "./ts-scan";
 
 export const COMPUTE_SET_FUNCTION = "computeReleaseStatements";
 
-const TOKENS_ALL_RE = /UPDATE\s+tokens\s+SET\s+revoked_at[\s\S]*?WHERE\s+user_id\s*=\s*\?/i;
-const SESSIONS_RE = /UPDATE\s+web_sessions\s+SET\s+revoked_at/i;
+const TABLE = (name: string) => `(?:["\`\\[]?\\w+["\`\\]]?\\.)?["\`\\[]?${name}["\`\\]]?`;
+const UPDATE_TOKENS_RE = new RegExp(
+  `\\bUPDATE(?:\\s+OR\\s+\\w+)?\\s+${TABLE("tokens")}\\s+SET\\s+revoked_at\\b([\\s\\S]*)$`,
+  "i",
+);
+const UPDATE_SESSIONS_RE = new RegExp(
+  `\\bUPDATE(?:\\s+OR\\s+\\w+)?\\s+${TABLE("web_sessions")}\\s+SET\\s+revoked_at\\b`,
+  "i",
+);
+const DELETE_SESSIONS_RE = new RegExp(
+  `\\bDELETE\\s+FROM\\s+${TABLE("web_sessions")}\\b([\\s\\S]*)$`,
+  "i",
+);
+/** `user_id` equal to a placeholder or a subselect, or `IN (...)`. */
+const USER_PREDICATE_RE = /\buser_id\b\s*(?:=\s*\(?\s*(?:\?\d*|SELECT\b)|IN\s*\()/i;
+/** A predicate that names ONE key: `id`, `api_key_hash` or `api_key_prefix` compared (not `user_id`). */
+const ONE_KEY_PREDICATE_RE = /(?<![\w])(?:id|api_key_hash|api_key_prefix)\s*(?:=|IN\b)/i;
+
+const whereOf = (rest: string): string | null => {
+  const m = /\bWHERE\b([\s\S]*)$/i.exec(rest);
+  return m ? (m[1] ?? "") : null;
+};
+
+/** Whether `text` holds a statement that revokes ALL of a user's API keys (see the header for the shapes). */
+export function revokesAllKeys(text: string): boolean {
+  return text.split(";").some((statement) => {
+    const m = UPDATE_TOKENS_RE.exec(statement);
+    if (!m) return false;
+    const where = whereOf(m[1] ?? "");
+    return where !== null && USER_PREDICATE_RE.test(where) && !ONE_KEY_PREDICATE_RE.test(where);
+  });
+}
+
+/** Whether `text` holds a statement that ends sessions: an UPDATE of any scope, or a DELETE of a user's. */
+export function endsSessions(text: string): boolean {
+  return text.split(";").some((statement) => {
+    if (UPDATE_SESSIONS_RE.test(statement)) return true;
+    const m = DELETE_SESSIONS_RE.exec(statement);
+    if (!m) return false;
+    const where = whereOf(m[1] ?? "");
+    return where !== null && USER_PREDICATE_RE.test(where);
+  });
+}
 
 type FnNode =
   | ts.FunctionDeclaration
@@ -72,10 +127,14 @@ interface FileFacts {
   file: string;
   sf: ts.SourceFile;
   units: Unit[];
-  /** local name to the name it was exported as, for every named import of the file. */
-  aliasOf: Map<string, string>;
+  /** local name to the name it was exported as and the module it came from, for every named import. */
+  imports: Map<string, { original: string; file: string | null }>;
   /** local names of namespace imports, with the module's base name. */
   namespaces: Map<string, string>;
+  /** local names of namespace imports, with the file the module resolves to (null when it does not). */
+  nsFiles: Map<string, string | null>;
+  /** names declared at the module's top level (functions, constants, classes). */
+  declared: Set<string>;
   /** local names that are the compute set function in this file (imported, aliased, assigned). */
   computeLocals: Set<string>;
   unfollowable: string[];
@@ -107,9 +166,20 @@ function labelOf(node: FnNode, sf: ts.SourceFile): string {
   return `<anonymous@${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}>`;
 }
 
-function collectFacts(file: string, sf: ts.SourceFile): FileFacts {
-  const aliasOf = new Map<string, string>();
+function collectFacts(tree: Tree, file: string, sf: ts.SourceFile): FileFacts {
+  const imports = new Map<string, { original: string; file: string | null }>();
   const namespaces = new Map<string, string>();
+  const nsFiles = new Map<string, string | null>();
+  const declared = new Set<string>();
+  for (const stmt of sf.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) declared.add(stmt.name.text);
+    if (ts.isClassDeclaration(stmt) && stmt.name) declared.add(stmt.name.text);
+    if (ts.isVariableStatement(stmt)) {
+      for (const d of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) declared.add(d.name.text);
+      }
+    }
+  }
   const unfollowable: string[] = [];
   const computeLocals = new Set<string>();
 
@@ -121,13 +191,20 @@ function collectFacts(file: string, sf: ts.SourceFile): FileFacts {
       if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
         for (const el of clause.namedBindings.elements) {
           const original = (el.propertyName ?? el.name).text;
-          aliasOf.set(el.name.text, original);
+          imports.set(el.name.text, {
+            original,
+            file: resolveImport(tree, file, (stmt.moduleSpecifier as ts.StringLiteral).text),
+          });
           if (base === "compute-release" && original === COMPUTE_SET_FUNCTION) {
             computeLocals.add(el.name.text);
           }
         }
       } else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
         namespaces.set(clause.namedBindings.name.text, base);
+        nsFiles.set(
+          clause.namedBindings.name.text,
+          resolveImport(tree, file, (stmt.moduleSpecifier as ts.StringLiteral).text),
+        );
       }
     }
     if (
@@ -263,7 +340,7 @@ function collectFacts(file: string, sf: ts.SourceFile): FileFacts {
     if (ts.isImportDeclaration(stmt)) continue;
     gather(stmt, top);
   }
-  return { file, sf, units, aliasOf, namespaces, computeLocals, unfollowable };
+  return { file, sf, units, imports, namespaces, nsFiles, declared, computeLocals, unfollowable };
 }
 
 export interface Analysis {
@@ -281,7 +358,7 @@ export function analyse(tree: Tree): Analysis {
   const facts = tree
     .walk(SRC)
     .filter((f) => !f.endsWith("services/compute-release.ts"))
-    .map((f) => collectFacts(f, parse(tree, f)));
+    .map((f) => collectFacts(tree, f, parse(tree, f)));
   const unfollowable = facts.flatMap((f) => f.unfollowable);
 
   // The compute set's users.
@@ -302,22 +379,36 @@ export function analyse(tree: Tree): Analysis {
     }
   }
 
+  // What a unit REFERENCES, as `module#name` keys, resolved through the file's own imports (named,
+  // aliased, namespace) and top-level declarations. A name that is neither a parameter, a local nor a
+  // property resolves to nothing: a common helper name in another module cannot be mistaken for it.
+  const refsOf = (f: FileFacts, u: Unit): Set<string> => {
+    const out = new Set<string>();
+    for (const n of u.names) {
+      const imp = f.imports.get(n);
+      if (imp) {
+        if (imp.file) out.add(`${rel(imp.file)}#${imp.original}`);
+      } else if (f.declared.has(n)) out.add(`${rel(f.file)}#${n}`);
+    }
+    for (const [ns, props] of u.nsProps) {
+      const nsFile = f.nsFiles.get(ns);
+      if (nsFile) for (const p of props) out.add(`${rel(nsFile)}#${p}`);
+    }
+    return out;
+  };
+
   // Revokers, by VALUE: module-level constants whose text revokes, and functions whose unit revokes,
-  // resolved through aliases and namespace properties to a fixed point.
+  // resolved to a fixed point.
   const tokenRevokers = new Set<string>();
   const sessionRevokers = new Set<string>();
   const resolve = (f: FileFacts, u: Unit): { tokens: boolean; sessions: boolean } => {
-    const refs = new Set<string>();
-    for (const n of u.names) refs.add(f.aliasOf.get(n) ?? n);
-    for (const props of u.nsProps.values()) for (const p of props) refs.add(p);
+    const refs = refsOf(f, u);
     return {
-      tokens:
-        u.strings.some((s) => TOKENS_ALL_RE.test(s)) || [...refs].some((r) => tokenRevokers.has(r)),
-      sessions:
-        u.strings.some((s) => SESSIONS_RE.test(s)) || [...refs].some((r) => sessionRevokers.has(r)),
+      tokens: u.strings.some(revokesAllKeys) || [...refs].some((r) => tokenRevokers.has(r)),
+      sessions: u.strings.some(endsSessions) || [...refs].some((r) => sessionRevokers.has(r)),
     };
   };
-  // Module-level constants: `const NAME = "<sql>"` is a unit-less fact of `<module>` named by its declaration.
+  // Module-level constants: `const NAME = "<sql>"`.
   for (const f of facts) {
     for (const stmt of f.sf.statements) {
       if (!ts.isVariableStatement(stmt)) continue;
@@ -325,8 +416,9 @@ export function analyse(tree: Tree): Analysis {
         if (!ts.isIdentifier(d.name) || !d.initializer) continue;
         const text = foldString(d.initializer);
         if (text === null) continue;
-        if (TOKENS_ALL_RE.test(text)) tokenRevokers.add(d.name.text);
-        if (SESSIONS_RE.test(text)) sessionRevokers.add(d.name.text);
+        const key = `${rel(f.file)}#${d.name.text}`;
+        if (revokesAllKeys(text)) tokenRevokers.add(key);
+        if (endsSessions(text)) sessionRevokers.add(key);
       }
     }
   }
@@ -337,12 +429,12 @@ export function analyse(tree: Tree): Analysis {
         if (u.label === "<module>" || u.label.startsWith("<anonymous") || /\s/.test(u.label))
           continue;
         const { tokens, sessions } = resolve(f, u);
-        if (tokens && !tokenRevokers.has(u.label)) {
-          tokenRevokers.add(u.label);
+        if (tokens && !tokenRevokers.has(u.key)) {
+          tokenRevokers.add(u.key);
           changed = true;
         }
-        if (sessions && !sessionRevokers.has(u.label)) {
-          sessionRevokers.add(u.label);
+        if (sessions && !sessionRevokers.has(u.key)) {
+          sessionRevokers.add(u.key);
           changed = true;
         }
       }
@@ -363,19 +455,19 @@ export function analyse(tree: Tree): Analysis {
     }
   }
 
-  // A unit is satisfied when it runs the compute set, or names a function that is satisfied (a route that
-  // calls `finalizeRevocation`, the sweep that calls `tombstoneUserCascade`, the cleanup that calls the
-  // sweep): to a fixed point, so a chain of delegation of any depth is followed.
+  // A unit is satisfied when it runs the compute set, or references a function that is satisfied (a route
+  // that calls `finalizeRevocation`, the sweep that calls `tombstoneUserCascade`, the cleanup that calls
+  // the sweep): to a fixed point, so a chain of delegation of any depth is followed.
   const plain = (label: string) => !/\s|^</.test(label);
-  const satisfiedNames = new Set([...users].map((k) => k.slice(k.indexOf("#") + 1)).filter(plain));
+  const satisfiedKeys = new Set([...users].filter((k) => plain(k.slice(k.indexOf("#") + 1))));
   const satisfied = new Set<string>(users);
   for (let changed = true; changed; ) {
     changed = false;
     for (const { f, u } of endsFacts) {
       if (satisfied.has(u.key)) continue;
-      if ([...u.names].some((n) => satisfiedNames.has(f.aliasOf.get(n) ?? n))) {
+      if ([...refsOf(f, u)].some((r) => satisfiedKeys.has(r))) {
         satisfied.add(u.key);
-        if (plain(u.label)) satisfiedNames.add(u.label);
+        if (plain(u.label)) satisfiedKeys.add(u.key);
         changed = true;
       }
     }

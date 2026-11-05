@@ -1,7 +1,8 @@
 /**
  * The two sets that must agree (epic #2005 phase A8, #2013; AGENTS.md, "Revocation cascades, always"):
  * the functions that RUN `computeReleaseStatements`, and the functions that END every credential of an
- * account (revoke all of its API keys and its sessions). `COMPUTE_END_CALLERS` documents the first;
+ * account (revoke all of its API keys and its sessions THROUGH THE STATEMENT SHAPES THE SCAN RECOGNISES,
+ * which `helpers/compute-end-scan.ts` lists, and no others). `COMPUTE_END_CALLERS` documents the first;
  * `COMPUTE_END_EXCEPTIONS` names the functions that revoke keys and sessions WITHOUT ending the account,
  * each with its reason. The scan (`helpers/compute-end-scan.ts`) holds both lists to the code, on the
  * syntax tree, so a third path that ends an account (the suspension of compute, an owner command that
@@ -13,8 +14,12 @@
  * reaching `computeReleaseStatements` (an aliased import, a namespace property, a local alias, a
  * destructuring, passing it as a value) is seen, while what the scan cannot follow (a dynamic import, a
  * re-export, a reference at module top level) is refused loudly and never guessed at.
+ * Every shape it recognises is planted (the predicates in either order, a numbered placeholder, `IN`, a
+ * subselect, a quoted, bracketed or schema-qualified table, `DELETE FROM web_sessions WHERE user_id`), and
+ * the one-key shapes and the delete of expired sessions are shown NOT to be an end. A helper is resolved in
+ * the module it is imported from, never by its bare name.
  * MUTATIONS: remove the statements from `finalizeRevocation` or `tombstoneUserCascade` (the scan names
- * the function); add a function of the same shape.
+ * the function); add a function of the same shape; break each rule of the scan.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -156,6 +161,139 @@ describe("the scan fires", () => {
     expect(planted.ends).not.toContain("routes/planted-keys.ts#oneKey");
     expect(planted.ends).not.toContain("routes/planted-keys.ts#rotate");
     expect(planted.ends).not.toContain("routes/planted-keys.ts#logout");
+  });
+
+  test("every shape of the statement that revokes all of an account's keys is recognised, and the one-key shapes are not", () => {
+    const sessions = `"UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?"`;
+    const ender = (keys: string, sess = sessions) => `
+      export async function ender(db: D1Database, id: number) {
+        await db.batch([db.prepare(${JSON.stringify(keys)}).bind(id), db.prepare(${sess}).bind(id)]);
+      }`;
+    const all: Record<string, string> = {
+      "the predicates in the other order":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE revoked_at IS NULL AND user_id = ?",
+      "a numbered placeholder": "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?1",
+      "no spaces": "UPDATE tokens SET revoked_at=datetime('now') WHERE user_id=?",
+      "lower case": "update tokens set revoked_at = datetime('now') where user_id = ?",
+      "multi line":
+        "UPDATE tokens\n   SET revoked_at = datetime('now')\n WHERE user_id = ?\n   AND revoked_at IS NULL",
+      "IN a list": "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id IN (?)",
+      "IN a subselect":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id IN (SELECT id FROM users WHERE email = ?)",
+      "equal to a subselect":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = (SELECT id FROM users WHERE username = ?)",
+      "a double-quoted table":
+        "UPDATE \"tokens\" SET revoked_at = datetime('now') WHERE user_id = ?",
+      "a backtick-quoted table":
+        "UPDATE `tokens` SET revoked_at = datetime('now') WHERE user_id = ?",
+      "a bracketed table": "UPDATE [tokens] SET revoked_at = datetime('now') WHERE user_id = ?",
+      "a schema-qualified table":
+        "UPDATE main.tokens SET revoked_at = datetime('now') WHERE user_id = ?",
+      "an OR clause": "UPDATE OR IGNORE tokens SET revoked_at = datetime('now') WHERE user_id = ?",
+      "a qualified column":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE tokens.user_id = ?",
+    };
+    const oneKey: Record<string, string> = {
+      "by id": "UPDATE tokens SET revoked_at = datetime('now') WHERE id = ? AND user_id = ?",
+      "by id, user first":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND id = ?",
+      "by hash":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE api_key_hash = ? AND user_id = ?",
+      "by a qualified id":
+        "UPDATE tokens SET revoked_at = datetime('now') WHERE tokens.id = ? AND user_id = ?",
+      "by id alone": "UPDATE tokens SET revoked_at = datetime('now') WHERE id = ?",
+    };
+    const overlay: Record<string, string> = {};
+    for (const [name, sql] of Object.entries(all)) {
+      overlay[`routes/planted-all-${name.replace(/\W+/g, "-")}.ts`] = ender(sql);
+    }
+    for (const [name, sql] of Object.entries(oneKey)) {
+      overlay[`routes/planted-one-${name.replace(/\W+/g, "-")}.ts`] = ender(sql);
+    }
+    const found = analyse(createTree(overlay));
+    for (const name of Object.keys(all)) {
+      const key = `routes/planted-all-${name.replace(/\W+/g, "-")}.ts#ender`;
+      expect([name, found.ends.includes(key)]).toEqual([name, true]);
+    }
+    for (const name of Object.keys(oneKey)) {
+      const key = `routes/planted-one-${name.replace(/\W+/g, "-")}.ts#ender`;
+      expect([name, found.ends.includes(key)]).toEqual([name, false]);
+    }
+  });
+
+  test("every shape of the statement that ends sessions is recognised: an UPDATE of any scope, and a DELETE of a user's sessions", () => {
+    const keys = "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?";
+    const variants: Record<string, [string, boolean]> = {
+      "an update": ["UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?", true],
+      "a quoted update": [
+        "UPDATE \"web_sessions\" SET revoked_at = datetime('now') WHERE user_id = ?",
+        true,
+      ],
+      "a delete": ["DELETE FROM web_sessions WHERE user_id = ?", true],
+      "a lower-case delete": ["delete from web_sessions where user_id = ?1", true],
+      "a quoted delete": ['DELETE FROM "web_sessions" WHERE user_id = ?', true],
+      "a delete by user in a subselect": [
+        "DELETE FROM web_sessions WHERE user_id IN (SELECT id FROM users WHERE email = ?)",
+        true,
+      ],
+      "a delete of EXPIRED sessions only": [
+        "DELETE FROM web_sessions WHERE expires_at < datetime('now')",
+        false,
+      ],
+      "a delete of one session": ["DELETE FROM web_sessions WHERE cookie_id_hash = ?", false],
+    };
+    const overlay: Record<string, string> = {};
+    for (const [name, [sql]] of Object.entries(variants)) {
+      overlay[`routes/planted-sess-${name.replace(/\W+/g, "-")}.ts`] = `
+        export async function ender(db: D1Database, id: number) {
+          await db.batch([db.prepare(${JSON.stringify(keys)}).bind(id), db.prepare(${JSON.stringify(sql)}).bind(id)]);
+        }`;
+    }
+    const found = analyse(createTree(overlay));
+    for (const [name, [, expected]] of Object.entries(variants)) {
+      const key = `routes/planted-sess-${name.replace(/\W+/g, "-")}.ts#ender`;
+      expect([name, found.ends.includes(key)]).toEqual([name, expected]);
+    }
+  });
+
+  test("a helper is resolved in the module it is imported from, never by its bare name: a function of the same name elsewhere does not make an unrelated unit an end", () => {
+    const before = analyse(createTree());
+    const planted = analyse(
+      createTree({
+        // A helper named `a`, and one named like a real revoker, each REALLY revoking.
+        "services/planted-a.ts": `
+          export async function a(db: D1Database, id: number) {
+            await db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?").bind(id).run();
+            await db.prepare("UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?").bind(id).run();
+          }
+          export async function revokeDocsCredentials(db: D1Database, id: number) {
+            await db.prepare("UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?").bind(id).run();
+          }`,
+        // Units that merely USE the same words: a parameter, a local, an unrelated function of that name.
+        "routes/planted-unrelated.ts": `
+          export function f(a: number) { return a + 1; }
+          export function g(ids: number[]) { return ids.map((a) => a * 2); }
+          async function revokeDocsCredentials() { return 1; }
+          export async function h(db: D1Database, id: number) {
+            await db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?").bind(id).run();
+            await revokeDocsCredentials();
+          }`,
+        // One that really imports the revoker from the module that defines it.
+        "routes/planted-real.ts": `
+          import { revokeDocsCredentials } from "../services/planted-a";
+          export async function k(db: D1Database, id: number) {
+            await db.prepare("UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?").bind(id).run();
+            await revokeDocsCredentials(db, id);
+          }`,
+      }),
+    );
+    // Nothing of the real tree changes because a helper elsewhere has a common name.
+    expect(planted.unsatisfied.filter((k) => !k.includes("planted-"))).toEqual(before.unsatisfied);
+    expect(planted.ends).not.toContain("routes/planted-unrelated.ts#f");
+    expect(planted.ends).not.toContain("routes/planted-unrelated.ts#g");
+    expect(planted.ends).not.toContain("routes/planted-unrelated.ts#h");
+    expect(planted.ends).toContain("routes/planted-real.ts#k");
+    expect(planted.ends).toContain("services/planted-a.ts#a");
   });
 
   test("every way of reaching the compute set is seen as a use, and a function that ends credentials through one is satisfied", () => {

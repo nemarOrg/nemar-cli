@@ -10,8 +10,12 @@
  * These are the two paths that end EVERY credential an account holds. A THIRD path that ends an account
  * needs these statements too. The list is `COMPUTE_END_CALLERS` below, and a source scan
  * (`backend/test/compute-end-callers.test.ts`) holds it to the code: it fails when either caller drops the
- * statements (as does `compute-release-cascade.test.ts`), and when ANY function that revokes all of an
- * account's API keys and its sessions neither runs them nor is named in `COMPUTE_END_EXCEPTIONS`.
+ * statements (as does `compute-release-cascade.test.ts`), and when a function that revokes all of a
+ * user's keys and sessions THROUGH THE STATEMENT SHAPES THE SCAN RECOGNISES (`UPDATE tokens SET revoked_at
+ * ... WHERE user_id ...`, and `UPDATE web_sessions SET revoked_at` or `DELETE FROM web_sessions WHERE
+ * user_id ...`, however quoted or ordered, inline or in a constant or helper it names) neither runs them
+ * nor is named in `COMPUTE_END_EXCEPTIONS`. A revocation written another way (SQL assembled from parts the
+ * scan cannot fold) is not recognised: the scan is a tripwire for the shapes the Worker uses.
  *
  * A PARTNER'S RESERVATION IS LEFT ALONE. A job with `source = 'partner'` and no Tapis job yet is a
  * reservation the partner will launch its own Tapis job under (phase D4), and NEMAR never writes a launch
@@ -186,9 +190,9 @@ export function computeReleaseStatements(userId: number): ComputeReleaseStatemen
  * `backend/src` (a route callback is `file#METHOD /path`). The two paths that end every credential an
  * account holds. `test/compute-end-callers.test.ts` holds this list to the code on the syntax tree, through
  * aliased and namespace imports and uses that pass the function as a value: a function that runs the set
- * and is not listed, or a listed one that no longer runs it, fails the test, and so does any new function
- * that revokes all of an account's API keys and its sessions and neither runs the set nor is named in
- * {@link COMPUTE_END_EXCEPTIONS}. A third path that ends an account (the suspension of compute, an owner
+ * and is not listed, or a listed one that no longer runs it, fails the test, and so does a new function
+ * that revokes all of a user's keys and sessions through the statement shapes the scan recognises (see the
+ * header) and neither runs the set nor is named in {@link COMPUTE_END_EXCEPTIONS}. A third path that ends an account (the suspension of compute, an owner
  * command that merges two accounts) therefore has to add itself here, in a reviewed change.
  */
 export const COMPUTE_END_CALLERS = [
