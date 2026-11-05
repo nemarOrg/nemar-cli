@@ -333,7 +333,8 @@ function isPrintable(text: string): boolean {
 /**
  * The `NEMAR_LAUNCH_SPEC` value for a launch specification's text (the string
  * {@link encodeLaunchSpec} returns): its bytes in base64url without padding, nothing but the
- * {@link SHELL_INERT_ENV_ALPHABET}, at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters. This is
+ * {@link SHELL_INERT_ENV_ALPHABET}, and so at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters,
+ * which is the 64 KiB cap's own arithmetic (a test pins it at both ends). This is
  * what the Worker puts in the scheduler request; the text, not this value, is what is hashed and
  * recorded. The text is taken as the one thing the digests are over, rather than the specification
  * again, so the Worker validates and escapes once and the bytes it hashes are the bytes it encodes.
@@ -353,12 +354,9 @@ export function encodeLaunchSpecEnv(text: string): string {
   if (!isPrintable(text)) {
     throw new TypeError("the launch specification text is not printable ASCII");
   }
-  // `btoa` reads each UTF-16 unit as one byte, which for ASCII is the byte itself.
-  const value = btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  if (value.length > LAUNCH_SPEC_ENV_MAX_CHARS) {
-    throw new RangeError("the encoded launch specification is over its bound");
-  }
-  return value;
+  // `btoa` reads each UTF-16 unit as one byte, which for printable ASCII is the byte itself. No
+  // second check of the length: `ceil(n * 4 / 3)` of a text within the cap is within the bound.
+  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** Why {@link decodeLaunchSpecEnv} refused a value: a fixed word, never a part of the value. */
@@ -439,8 +437,7 @@ export function launchSpecFits(job: JobSpec): boolean {
   if (job.entry !== undefined) worst.entry = job.entry;
   else worst.command = job.command ?? ["x"];
   try {
-    // The text, and then the value the scheduler is sent, each within its own bound.
-    encodeLaunchSpecEnv(encodeLaunchSpec(worst));
+    encodeLaunchSpec(worst);
     return true;
   } catch {
     return false;

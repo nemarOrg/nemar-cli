@@ -3458,22 +3458,36 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
     }
   });
 
-  test("a text of exactly 65536 bytes is 87382 characters and one byte more is refused", () => {
+  test("the bound is the cap's arithmetic: every length within 64 KiB encodes within 87382, and 65537 would not", () => {
+    // No second check in the encoder, so this is what stands in for one: ceil(n * 4 / 3) only grows,
+    // it is exactly the bound at the cap, and one byte over the cap is over the bound.
+    let previous = 0;
+    for (let bytes = 1; bytes <= LAUNCH_SPEC_MAX_BYTES; bytes++) {
+      const chars = Math.ceil((bytes * 4) / 3);
+      if (chars < previous || chars > LAUNCH_SPEC_ENV_MAX_CHARS) throw new Error(`at ${bytes}`);
+      previous = chars;
+    }
+    expect(previous).toBe(LAUNCH_SPEC_ENV_MAX_CHARS);
+    expect(Math.ceil(((LAUNCH_SPEC_MAX_BYTES + 1) * 4) / 3)).toBe(LAUNCH_SPEC_ENV_MAX_CHARS + 1);
+    // The encoder agrees with the arithmetic where it matters: the lengths around the cap.
+    for (const bytes of [65_530, 65_531, 65_532, 65_533, 65_534, 65_535, 65_536]) {
+      expect(encodeLaunchSpecEnv("a".repeat(bytes)).length, `${bytes} bytes`).toBe(
+        Math.ceil((bytes * 4) / 3),
+      );
+    }
+  });
+
+  test("a text of exactly 65536 bytes is 87382 characters and 65537 is refused by the text cap", () => {
     const next = sequence(7);
     const fits = printableText(next, LAUNCH_SPEC_MAX_BYTES);
     const value = encodeLaunchSpecEnv(fits);
     expect(value.length).toBe(LAUNCH_SPEC_ENV_MAX_CHARS);
     expect(value).toBe(oracle(fits));
+    // One byte over is refused by the text cap, with the cap's own message, never by a second check.
     expect(() => encodeLaunchSpecEnv(`${fits}a`)).toThrow(RangeError);
-    // The messages are fixed words: the text holds a token, so none of it is ever in one.
-    for (const run of [() => encodeLaunchSpecEnv(`${"SECRET".repeat(20_000)}`)]) {
-      expect(run).toThrow(RangeError);
-      try {
-        run();
-      } catch (error) {
-        expect((error as Error).message).not.toContain("SECRET");
-      }
-    }
+    expect(() => encodeLaunchSpecEnv(`${fits}a`)).toThrow(
+      "the launch specification is over 64 KiB",
+    );
   });
 
   test("the largest launch specification, 65536 bytes of JSON, travels as 87382 characters and comes back as the same text", () => {
