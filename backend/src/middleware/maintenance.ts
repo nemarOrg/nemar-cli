@@ -33,6 +33,14 @@ const PUBLIC_DOCUMENT_READS = new Set(["GET", "HEAD"]);
 const READ_ONLY_MUTATION_ALLOWLIST = ["/admin/", "/webhooks/"];
 const READ_ONLY_EXACT_MUTATIONS = new Set(["/auth/login"]);
 
+// The two OpenID Connect endpoints that are POSTs and only read (ADR 0119 rule 14): userinfo, which
+// a client may call by POST, and introspection, which a partner's resource server calls on every
+// request it checks. Their handlers write nothing, so read-only serves them; exact paths, and only
+// in read-only (`full` refuses them like everything else). The token endpoint and revocation write
+// and stay refused, so in read-only no partner can refresh and partner sessions lapse within the
+// access token's 15 minutes.
+const READ_ONLY_OIDC_READS = new Set(["/oauth/userinfo", "/oauth/introspect"]);
+
 let warnedUnknownMode = false;
 
 function parseMode(raw: string | undefined): MaintenanceMode {
@@ -101,7 +109,7 @@ export async function maintenanceMode(c: MaintenanceContext, next: Next) {
     return;
   }
 
-  if (READ_ONLY_EXACT_MUTATIONS.has(path)) {
+  if (READ_ONLY_EXACT_MUTATIONS.has(path) || READ_ONLY_OIDC_READS.has(path)) {
     await next();
     return;
   }
