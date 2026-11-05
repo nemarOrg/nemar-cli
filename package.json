@@ -88,7 +88,10 @@
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "husky": "^9.1.7",
+    "jose": "6.2.12",
     "lint-staged": "^16.3.2",
+    "oauth4webapi": "3.8.8",
+    "openid-client": "6.8.8",
     "typescript": "^5.5.4",
     "wrangler": "^4.70.0",
     "yaml": "^2.8.4"
