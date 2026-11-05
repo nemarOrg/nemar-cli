@@ -21,7 +21,8 @@
  *    the Tapis record says it used. `isPlatformFailure` survives as an INFORMATION flag
  *    (`platform_failure` on the row, for reports and for an administrator's manual grant) and it
  *    never drives a ledger write. This module calls `releaseStatements` and `settleStatements` and
- *    never `refundJob`, `settleFinal` or `adjustPool`; no path here credits a budget.
+ *    never `settleFinal` or `adjustPool` (and there is no `refundJob`: it was deleted); no path here
+ *    credits a budget.
  *  - A WEBHOOK IS A HINT. Nothing is acted on until the job has been READ BACK from Tapis, and a
  *    subscription cannot be deduplicated, so advancing from one is idempotent: every state write is
  *    `WHERE id = ? AND state = <from>`, so a replayed, reordered or concurrent writer changes nothing.
