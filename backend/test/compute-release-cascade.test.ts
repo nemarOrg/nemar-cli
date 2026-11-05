@@ -445,6 +445,58 @@ describe("revoking an account (finalizeRevocation) ends its compute in the same 
     expect(ledgerKinds(after.id)).toEqual(["hold", "release"]);
   });
 
+  test("a partner's reservation of the ended account is left alone: no cancel, no release (MUTATION: drop the partner term of the intent, the SQL cancel, the release or the stamp); one that has a Tapis job is cancelled there", async () => {
+    // NEMAR never writes a launch specification or takes a submit lease for a partner job (the partner
+    // launches its own Tapis job under the reservation), so "never reached Tapis" is true of every
+    // reservation without a Tapis job whether or not the partner has launched: releasing its hold could
+    // give compute away for a job that runs. The reservation is the partner contract's (phase D4).
+    const env = fx.env();
+    const target = await seedUser(env.DB, { username: "cascadepartner" });
+    await fundAccount(env.DB, target, 100_000, "cpu");
+    const reservation = await jobFor(env, target);
+    const bound = await runningJob(env, target);
+    for (const id of [reservation.id, bound.id]) {
+      db().run("UPDATE compute_jobs SET source = 'partner', client_id = 'c1' WHERE id = ?", [id]);
+    }
+    // And two partner reservations that something else already cancelled and nobody has settled: one
+    // whose hold is still open, one whose hold was released already. The cascade settles neither (their
+    // release and their stamp are the partner contract's).
+    const abandonedOpen = await jobFor(env, target);
+    const abandonedClosed = await jobFor(env, target);
+    for (const id of [abandonedOpen.id, abandonedClosed.id]) {
+      db().run(
+        "UPDATE compute_jobs SET source = 'partner', client_id = 'c1', state = 'cancelled', cancel_reason = 'admin', ended_at = datetime('now') WHERE id = ?",
+        [id],
+      );
+    }
+    expect((await releaseHold(env.DB, { jobId: abandonedClosed.id })).ok).toBe(true);
+    const snapshot = (id: string) =>
+      JSON.stringify(db().query("SELECT * FROM compute_jobs WHERE id = ?").get(id));
+    const before = Object.fromEntries(
+      [reservation.id, abandonedOpen.id, abandonedClosed.id].map((id) => [id, snapshot(id)]),
+    );
+
+    expect((await revoke("cascadepartner")).status).toBe(200);
+
+    // The reservation: not one column of its row, not one ledger entry, moved. Nor the two that were
+    // cancelled before the account ended.
+    for (const id of [reservation.id, abandonedOpen.id, abandonedClosed.id]) {
+      expect(snapshot(id)).toBe(before[id]);
+    }
+    expect(ledgerKinds(reservation.id)).toEqual(["hold"]);
+    expect(ledgerKinds(abandonedOpen.id)).toEqual(["hold"]);
+    expect(ledgerKinds(abandonedClosed.id)).toEqual(["hold", "release"]);
+    // The account's pools are frozen all the same, and the partner job that HAS a Tapis job records the
+    // intent for the sweep, which cancels it there.
+    expect(poolsOf(target).map((p) => p.frozen)).toEqual([1]);
+    const row = await reread(env, bound.id);
+    expect(row.cancel_reason).toBe("account_ended");
+    expect(await sweep()).toMatchObject({ examined: 1, errors: [] });
+    expect((await reread(env, bound.id)).state).toBe("cancelled");
+    expect((await reread(env, reservation.id)).state).toBe("created");
+    expect(ledgerKinds(reservation.id)).toEqual(["hold"]);
+  });
+
   test("the first recorded reason stands: a person's own earlier cancel stays `user` and keeps its time", async () => {
     const world = await seedWorld();
     // The person asked to cancel the running job; Tapis could not take it yet.

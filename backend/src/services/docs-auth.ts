@@ -291,7 +291,8 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * TWO of those three paths, `finalizeRevocation` and the tombstone cascade, also run
  * `computeReleaseStatements` (`services/compute-release.ts`, epic #2005 phase A8), which ends the
  * account's compute: a role demotion does not (compute is not an admin's standing), and key revocation
- * does not (a job's identity is the account's, not a key's; the person still has the account). A new
+ * does not (a job's identity is the account's, not a key's; the person still has the account, so a
+ * stolen key's jobs already submitted keep running until a cancel or an administrative revoke). A new
  * path that ends a whole account needs that set too.
  *
  * The by-id routes also run it when their revoke changed nothing (a

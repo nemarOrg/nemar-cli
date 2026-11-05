@@ -11,6 +11,15 @@
  * needs these statements too, and a test (`backend/test/compute-release-cascade.test.ts`) fails when
  * either caller drops them.
  *
+ * A PARTNER'S RESERVATION IS LEFT ALONE. A job with `source = 'partner'` and no Tapis job yet is a
+ * reservation the partner will launch its own Tapis job under (phase D4), and NEMAR never writes a launch
+ * specification or takes a submit lease for it, so "never reached Tapis" below is TRUE of it whether or
+ * not the partner has launched: ending it would release a hold for a job that may be running. The cascade
+ * neither records an intent on it, cancels it nor releases its hold; the pools are frozen all the same,
+ * and the reservation is the partner contract's to resolve (an open point for D4's brief). A partner job
+ * that HAS a Tapis job is an ordinary live job here: it records the intent and the retried sweep cancels
+ * it at Tapis, because NEMAR owns every Tapis job.
+ *
  * DELIBERATELY NOT CALLED, and a later reader should not "fix" either:
  *  - A ROLE DEMOTION. Compute has nothing to do with an admin's standing: a person demoted to member is
  *    still an account in good standing with a grant, a pool and jobs that are theirs, and ending those
@@ -19,12 +28,15 @@
  *  - REVOKING AN API KEY (self-service, the owner's, the emailed regeneration). A job's identity is
  *    the account's, recorded in NEMAR's job row; Tapis never sees the key, and a person who revokes one
  *    key still has the account and its other credentials. A key's end is not an account's end.
+ *    CONSEQUENCE, stated so nobody is surprised: a stolen key's jobs that were already submitted keep
+ *    running (and are charged to the account) until the person cancels them or an administrator revokes
+ *    the account; ending the key stops new submissions only.
  *  - Logout, which ends sessions and nothing else.
  *
  * WHAT IT DOES, in this order, every statement keyed by the account:
- *  1. every LIVE job records the intent to cancel (`cancel_requested_at`) and the reason
- *     `account_ended`, keeping a reason and a time that were already recorded (the first cause stands:
- *     a person's earlier cancel stays `user`);
+ *  1. every LIVE job (but a partner's reservation with no Tapis job) records the intent to cancel
+ *     (`cancel_requested_at`) and the reason `account_ended`, keeping a reason and a time that were
+ *     already recorded (the first cause stands: a person's earlier cancel stays `user`);
  *  2. a job that provably never reached Tapis is ended HERE: `cancelled`, its hold released and the
  *     release stamped as the settlement, as `commitTerminal` does it for a cancel (steps 2 to 4 are
  *     that job's terminal transition and its settlement, in the one batch). "Provably" is exactly the
@@ -76,13 +88,13 @@ const RELEASED: ComputeLedgerReason = "released";
  * The job rows step 2 may end, as a WHERE term over `compute_jobs` (no alias): the account's, not yet at
  * Tapis, with no launch specification written and no live submit lease. `?` the account.
  */
-const NEVER_REACHED_TAPIS = `account_id = ?
+const NEVER_REACHED_TAPIS = `account_id = ? AND source <> 'partner'
     AND state IN ('created', 'uploading') AND tapis_uuid IS NULL AND launch_spec_digest IS NULL
     AND (submit_claimed_at IS NULL
          OR submit_claimed_at < datetime('now', '-${SUBMIT_LEASE_MINUTES} minutes'))`;
 
 /** The same rows after step 2 has ended them and before step 4 has stamped them. `?` the account. */
-const ENDED_AND_UNSETTLED = `account_id = ?
+const ENDED_AND_UNSETTLED = `account_id = ? AND source <> 'partner'
     AND state = 'cancelled' AND tapis_uuid IS NULL AND launch_spec_digest IS NULL
     AND settled_provisional_at IS NULL`;
 
@@ -90,7 +102,8 @@ const ENDED_AND_UNSETTLED = `account_id = ?
 export const COMPUTE_RELEASE_INTENT_SQL = `UPDATE compute_jobs SET
     cancel_requested_at = COALESCE(cancel_requested_at, datetime('now')),
     cancel_reason = COALESCE(cancel_reason, '${ACCOUNT_ENDED}')
-  WHERE account_id = ? AND state IN (${LIVE_STATES_SQL})`;
+  WHERE account_id = ? AND state IN (${LIVE_STATES_SQL})
+    AND NOT (source = 'partner' AND tapis_uuid IS NULL)`;
 
 /**
  * 2. A job that never reached Tapis ends here, cancelled, with the retention `commitTerminal` gives a
@@ -119,7 +132,8 @@ export const COMPUTE_RELEASE_HOLDS_SQL = `INSERT INTO compute_ledger
     FROM compute_ledger h
    WHERE h.kind = 'hold'
      AND h.job_id IN (SELECT j.id FROM compute_jobs j
-                       WHERE j.account_id = ? AND j.state = 'cancelled' AND j.tapis_uuid IS NULL
+                       WHERE j.account_id = ? AND j.source <> 'partner'
+                         AND j.state = 'cancelled' AND j.tapis_uuid IS NULL
                          AND j.launch_spec_digest IS NULL AND j.settled_provisional_at IS NULL)
      AND NOT EXISTS (SELECT 1 FROM compute_ledger c
                       WHERE c.hold_ref = h.id AND c.kind IN ('release', 'charge'))`;
