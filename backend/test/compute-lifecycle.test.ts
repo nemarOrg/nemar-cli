@@ -690,7 +690,7 @@ describe("advance", () => {
     );
   });
 
-  test("the first sight of a Slurm id fires the hook exactly once and writes the id", async () => {
+  test("the first sight of a Slurm id writes the id once, and the report ACCESS is owed is made in the same batch", async () => {
     const s = await submittedJob();
     await drive(s.env, s.made.job.id, s.uuid, "QUEUED");
     const job = await reread(s.env, s.made.job.id);
@@ -698,6 +698,14 @@ describe("advance", () => {
     const id = job.slurm_job_id;
     await advanceComputeJob(s.env, s.made.job.id);
     expect((await reread(s.env, s.made.job.id)).slurm_job_id).toBe(id);
+    // Phase A8 (#2013): one pending report row, and none added by the read that followed
+    // (`compute-access-reports.test.ts` pins both writers and the mutations).
+    const reports = await s.env.DB.prepare(
+      "SELECT state FROM compute_access_reports WHERE job_id = ?1",
+    )
+      .bind(s.made.job.id)
+      .all<{ state: string }>();
+    expect(reports.results).toEqual([{ state: "pending" }]);
   });
 });
 

@@ -644,3 +644,35 @@ export const COMPUTE_CANCEL_REASONS = [
 ] as const;
 
 export type ComputeCancelReason = (typeof COMPUTE_CANCEL_REASONS)[number];
+
+/**
+ * Where a job's ACCESS gateway-attributes report is (epic #2005 phase A8, #2013; ADR 0118 decision 9).
+ * `pending` is owed and due at `next_attempt_at`; `attempting` is claimed by one sender for the length
+ * of a lease, so a second sender cannot make the same POST; `sent` and `failed` are final, and nothing
+ * sends a final row again.
+ */
+export const COMPUTE_ACCESS_REPORT_STATES = ["pending", "attempting", "sent", "failed"] as const;
+
+export type ComputeAccessReportState = (typeof COMPUTE_ACCESS_REPORT_STATES)[number];
+
+/**
+ * Why a report is not sent yet, or was not: the one fixed word a report row keeps
+ * (`last_error_code`), never a message. `unconfigured` (the key or the resource name is not set),
+ * `no_submit_time` (the record has no scheduler submission time yet) leave the row `pending`;
+ * `no_gateway_user` (the job has no pseudonym to report) and `outcome_unknown` (the POST may or may
+ * not have been recorded: nothing is sent twice, so a person looks) end it `failed`; `refused`
+ * (ACCESS answered with a status that refuses the request), `busy` (408 or 429) and `unavailable`
+ * (5xx) mean ACCESS did not record it, so the row is tried again later and ends `failed` only when
+ * the attempts run out.
+ */
+export const COMPUTE_ACCESS_REPORT_ERRORS = [
+  "unconfigured",
+  "no_submit_time",
+  "no_gateway_user",
+  "refused",
+  "busy",
+  "unavailable",
+  "outcome_unknown",
+] as const;
+
+export type ComputeAccessReportError = (typeof COMPUTE_ACCESS_REPORT_ERRORS)[number];

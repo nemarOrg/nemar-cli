@@ -16,6 +16,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as words from "../shared/compute-state";
 import {
+  COMPUTE_ACCESS_REPORT_ERRORS,
+  COMPUTE_ACCESS_REPORT_STATES,
   COMPUTE_CANCEL_REASONS,
   COMPUTE_FAILURE_CODES,
   COMPUTE_JOB_FLAGS,
@@ -447,6 +449,25 @@ describe("ledger reasons", () => {
     ]);
     expect(new Set(COMPUTE_LEDGER_REASONS).size).toBe(COMPUTE_LEDGER_REASONS.length);
     for (const w of COMPUTE_LEDGER_REASONS) expect(COMPUTE_WORD_RE.test(w), w).toBe(true);
+  });
+});
+
+describe("the ACCESS report words (phase A8, #2013)", () => {
+  test("the four states and the seven error words are exactly the ones the design names, each a valid word, once", () => {
+    expect([...COMPUTE_ACCESS_REPORT_STATES]).toEqual(["pending", "attempting", "sent", "failed"]);
+    expect([...COMPUTE_ACCESS_REPORT_ERRORS]).toEqual([
+      "unconfigured",
+      "no_submit_time",
+      "no_gateway_user",
+      "refused",
+      "busy",
+      "unavailable",
+      "outcome_unknown",
+    ]);
+    for (const list of [COMPUTE_ACCESS_REPORT_STATES, COMPUTE_ACCESS_REPORT_ERRORS]) {
+      expect(new Set(list).size).toBe(list.length);
+      for (const w of list) expect(COMPUTE_WORD_RE.test(w), w).toBe(true);
+    }
   });
 });
 

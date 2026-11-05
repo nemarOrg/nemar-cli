@@ -75,6 +75,7 @@ import {
   suMilliFor,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
+import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import {
   type ComputeJobRow,
   LIVE_STATES_SQL,
@@ -520,6 +521,9 @@ async function commitTerminal(
       ),
     ...settle,
     db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
+    // The report ACCESS is owed for a job whose record first shows its Slurm id at its END (phase A8,
+    // #2013): the same batch as the write that gave the row the id, `OR IGNORE`, and no network call.
+    ...(plan.slurmJobId === null ? [] : [db.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
   ]);
   return (results[0]?.meta?.changes ?? 0) === 1;
 }
@@ -688,28 +692,6 @@ async function planFromTapis(
   };
 }
 
-// --- Slurm id hook -------------------------------------------------------------------------------
-
-/**
- * THE HOOK where the job's record first shows a Slurm id. Phase A8 (#2013) fills it: it reports the
- * job's gateway attributes to ACCESS, once, with the Slurm id, the submission time, Expanse's resource
- * name and the pseudonym. Called once per job, after the row has the id, with no secret. It must never
- * throw into the transition (a caller catches), and it does nothing yet.
- */
-export async function noteSlurmJobId(_env: Bindings, _job: ComputeJobRow, _slurmJobId: string) {
-  // Intentionally empty until phase A8.
-}
-
-async function callSlurmHook(env: Bindings, job: ComputeJobRow, slurm: string): Promise<void> {
-  try {
-    await noteSlurmJobId(env, job, slurm);
-  } catch (err) {
-    console.error(
-      `[compute-lifecycle] slurm_hook_failed job=${job.id} class=${errorClassName(err)}`,
-    );
-  }
-}
-
 // --- applyTapisJob -------------------------------------------------------------------------------
 
 export type ApplyOutcome =
@@ -799,19 +781,25 @@ async function applyOnce(
     if (!canTransitionCompute(job.state, target)) return unchanged("stale");
     const slurm =
       typeof rec.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
-    const wrote = await env.DB.prepare(LIVE_TRANSITION_SQL)
-      .bind(
-        job.id,
-        job.state,
-        target,
-        rec.status,
-        sqliteTime(rec.remoteSubmitted),
-        sqliteTime(rec.remoteStarted),
-        slurm,
-      )
-      .run();
-    if ((wrote.meta?.changes ?? 0) !== 1) return unchanged("lost");
-    if (slurm !== null && job.slurm_job_id === null) await callSlurmHook(env, job, slurm);
+    // THE SLURM ID HOOK (phase A8, #2013): the report ACCESS is owed for a job is made in the SAME BATCH
+    // as the write that gives the row its Slurm id, so a job that shows an id always owes one report
+    // and the two can never disagree. It is `INSERT OR IGNORE` and reads the job row, so this write
+    // (which runs on every live read, a self-edge included) adds nothing the second time. Nothing here
+    // calls ACCESS: the report is sent later, by `runAccessReportCron`, never inside a batch.
+    const live = env.DB.prepare(LIVE_TRANSITION_SQL).bind(
+      job.id,
+      job.state,
+      target,
+      rec.status,
+      sqliteTime(rec.remoteSubmitted),
+      sqliteTime(rec.remoteStarted),
+      slurm,
+    );
+    const wrote =
+      slurm === null
+        ? await live.run()
+        : (await env.DB.batch([live, env.DB.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]))[0];
+    if ((wrote?.meta?.changes ?? 0) !== 1) return unchanged("lost");
     return {
       changed: job.state !== target,
       state: target,
@@ -825,9 +813,6 @@ async function applyOnce(
   if (!canTransitionCompute(job.state, plan.to)) return unchanged("stale");
   const won = await commitTerminal(env, job, plan, await recordsRetentionYears(env));
   if (!won) return unchanged("lost");
-  if (plan.slurmJobId !== null && job.slurm_job_id === null) {
-    await callSlurmHook(env, job, plan.slurmJobId);
-  }
   const done = (await getJob(env.DB, job.id)) ?? job;
   await afterTerminal(env, done, plan);
   return {
