@@ -277,6 +277,7 @@ async function putOnce(
   bytes: Uint8Array,
   contentType: string,
   existing: "compare" | "keep",
+  customMetadata?: Record<string, string>,
 ): Promise<Written> {
   const settle = async (): Promise<Written> => {
     if (existing === "keep") return "present";
@@ -290,6 +291,7 @@ async function putOnce(
   if ((await bucket.head(key)) !== null) return settle();
   const put = await bucket.put(key, bytes, {
     httpMetadata: { contentType },
+    ...(customMetadata === undefined ? {} : { customMetadata }),
     onlyIf: { etagDoesNotMatch: "*" },
   });
   return put === null ? settle() : "written";
@@ -299,17 +301,19 @@ async function putOnce(
  * Write one record or log of a job (`recordKey` or `logKey` builds the key) only if nothing is there:
  * an object that exists is left exactly as it is, whatever it holds (a copy is retried after a
  * failure, and a retry never rewrites what the locked bucket already took). True when it wrote.
- * Phase A5's copy of the launcher's files and the logs into the records.
+ * Phase A5's copy of the launcher's files and the logs into the records. `customMetadata` is stored with
+ * the object (a log that was cut at its bound says so there: `truncated`).
  */
 export async function putRecordOnce(
   env: ComputeRecordsEnv,
   key: string,
   bytes: Uint8Array,
   contentType: string,
+  customMetadata?: Record<string, string>,
 ): Promise<boolean> {
   const bucket = env.COMPUTE_RECORDS;
   if (!bucket) throw new Error("the records bucket is not bound");
-  return (await putOnce(bucket, key, bytes, contentType, "keep")) === "written";
+  return (await putOnce(bucket, key, bytes, contentType, "keep", customMetadata)) === "written";
 }
 
 // --- The identity snapshot and the specification -------------------------------------------------

@@ -31,6 +31,10 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { RESULT_REFUSAL_DETAILS } from "../../shared/compute-state";
+import {
+  DEFAULT_COMPUTE_POLICY,
+  RECORDS_RESULT_MANIFEST_FILE,
+} from "../../shared/contract/compute";
 import { LaunchSpecSchema, encodeLaunchSpec } from "../../shared/contract/compute-launch";
 import { resultsLauncherKey } from "../../shared/contract/compute-launch";
 import { ADVANCE_ROWS_PER_TICK, runComputeAdvanceCron } from "../src/services/compute-advance";
@@ -48,7 +52,12 @@ import {
   sqliteTime,
   submitComputeJob,
 } from "../src/services/compute-lifecycle";
-import { logKey, recordKey, sha256Hex } from "../src/services/compute-records";
+import {
+  logKey,
+  outputsBodyLimitBytes,
+  recordKey,
+  sha256Hex,
+} from "../src/services/compute-records";
 import { verifyComputeToken } from "../src/services/compute-tokens";
 import { getJob as getTapisJob, submitJob } from "../src/services/tapis/client";
 import type { Bindings } from "../src/types/bindings";
@@ -1480,6 +1489,9 @@ describe("cancel", () => {
 
 // --- The records copy ----------------------------------------------------------------------------
 
+// The bound is written out here, not imported: a test that reads the code's own constant passes at any value.
+const FIVE_MIB = 5 * 1024 * 1024;
+
 describe("copyResultRecords", () => {
   async function finishedJob() {
     const s = await submittedJob();
@@ -1567,12 +1579,101 @@ describe("copyResultRecords", () => {
     expect((await reread(made.env, made.job.id)).result_records_at).not.toBeNull();
   });
 
-  test("a Tapis log over 5 MiB is not copied, and a missing log is not an error", async () => {
+  test("a Tapis log that does not exist is not an error: the copy is done, and no log is recorded", async () => {
     const s = await submittedJob();
     await finishJob(s);
     expect((await reread(s.env, s.made.job.id)).result_records_at).not.toBeNull();
     expect(await fx.harness.records.head(logKey(s.made.job.id, "tapisjob.out"))).toBeNull();
   });
+
+  // Round 1 of #2041: the first test of the 5 MiB bound at all. The old test of this name never
+  // supplied a log, so it passed with the bound deleted.
+  test("a Tapis log of 5 MiB + 1 byte is copied as its FIRST 5 MiB and the records say it was cut; one of exactly 5 MiB is whole", async () => {
+    const make = (size: number) => {
+      const bytes = new Uint8Array(size).fill(0x61);
+      bytes[0] = 0x62;
+      bytes[size - 1] = 0x7a;
+      return bytes;
+    };
+    const over = await submittedJob();
+    fx.tapis.setOutput(over.uuid, "tapisjob.out", make(FIVE_MIB + 1));
+    await finishJob(over);
+    const cut = await fx.harness.records.get(logKey(over.made.job.id, "tapisjob.out"));
+    const cutBytes = new Uint8Array((await cut?.arrayBuffer()) ?? new ArrayBuffer(0));
+    expect(cutBytes.length).toBe(FIVE_MIB);
+    expect(cutBytes[0]).toBe(0x62);
+    expect(cutBytes[FIVE_MIB - 1]).toBe(0x61);
+    expect(cut?.customMetadata).toEqual({ truncated: "1" });
+    expect((await reread(over.env, over.made.job.id)).result_records_at).not.toBeNull();
+
+    const exact = await submittedJob();
+    fx.tapis.setOutput(exact.uuid, "tapisjob.out", make(FIVE_MIB));
+    await finishJob(exact);
+    const whole = await fx.harness.records.get(logKey(exact.made.job.id, "tapisjob.out"));
+    const wholeBytes = new Uint8Array((await whole?.arrayBuffer()) ?? new ArrayBuffer(0));
+    expect(wholeBytes.length).toBe(FIVE_MIB);
+    expect(wholeBytes[FIVE_MIB - 1]).toBe(0x7a);
+    expect(whole?.customMetadata ?? {}).toEqual({});
+  });
+
+  test("the launcher's own log is cut at 5 MiB the same way, and a launcher document over its bound is not copied while the copy still finishes", async () => {
+    const s = await finishedJob();
+    const id = s.job.id;
+    await setPolicy(s.env.DB, fx.ownerId, {
+      resultLimits: { ...DEFAULT_COMPUTE_POLICY.resultLimits, maxFiles: 1 },
+    });
+    const bound = outputsBodyLimitBytes(1);
+    await fx.harness.results.put(
+      resultsLauncherKey(id, "launcher.log"),
+      new Uint8Array(FIVE_MIB + 10).fill(0x6c),
+    );
+    await fx.harness.results.put(
+      resultsLauncherKey(id, "provenance.json"),
+      new Uint8Array(bound + 1).fill(0x20),
+    );
+    await fx.harness.results.put(
+      resultsLauncherKey(id, "manifest.json"),
+      new Uint8Array(bound).fill(0x20),
+    );
+    for (const key of [
+      logKey(id, "launcher.log"),
+      recordKey(id, "provenance.json"),
+      recordKey(id, RECORDS_RESULT_MANIFEST_FILE),
+    ]) {
+      await fx.harness.records.delete(key);
+    }
+    await s.env.DB.prepare("UPDATE compute_jobs SET result_records_at = NULL WHERE id = ?")
+      .bind(id)
+      .run();
+    await copyResultRecords(s.env, await reread(s.env, id));
+    const log = await fx.harness.records.get(logKey(id, "launcher.log"));
+    expect(log?.size).toBe(FIVE_MIB);
+    expect(log?.customMetadata).toEqual({ truncated: "1" });
+    // A document one byte over its bound is not the launcher's: it is not copied, and it is not owed.
+    expect(await fx.harness.records.head(recordKey(id, "provenance.json"))).toBeNull();
+    // One exactly at its bound is copied whole.
+    expect((await fx.harness.records.head(recordKey(id, RECORDS_RESULT_MANIFEST_FILE)))?.size).toBe(
+      bound,
+    );
+    expect((await reread(s.env, id)).result_records_at).not.toBeNull();
+  });
+
+  for (const status of [401, 429, 500]) {
+    test(`a log that could not be READ (HTTP ${status}) leaves the copy owed and nothing recorded for it`, async () => {
+      const s = await submittedJob();
+      fx.tapis.setOutput(s.uuid, "tapisjob.out", "a log\n");
+      await drive(s.env, s.made.job.id, s.uuid, "RUNNING");
+      await playLauncher(fx, s.env, await reread(s.env, s.made.job.id), s.uuid, {});
+      fx.tapis.advance(s.uuid, "FINISHED");
+      setTapisTimes(fx, s.uuid, 30 * MINUTE, 0);
+      fx.tapis.fail("GET /v3/jobs/:uuid/output/download/*", status, 3);
+      await advanceComputeJob(s.env, s.made.job.id);
+      const job = await reread(s.env, s.made.job.id);
+      expect(job.state).toBe("finished");
+      expect(job.result_records_at).toBeNull();
+      expect(await fx.harness.records.head(logKey(job.id, "tapisjob.out"))).toBeNull();
+    });
+  }
 });
 
 // --- Mail ----------------------------------------------------------------------------------------

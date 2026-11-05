@@ -100,7 +100,7 @@ import {
   type TapisContext,
   type TapisJob,
   cancelJob,
-  downloadOutput,
+  downloadOutputPrefix,
   getJob as getTapisJob,
   nemarJobTag,
   searchJobsByTag,
@@ -135,6 +135,9 @@ export const LAUNCH_DATASET_LIMITS = {
 
 /** The most bytes of a log copied into the records: 5 MiB, for `tapisjob.out` and `launcher.log` alike. */
 export const LOG_COPY_MAX_BYTES = 5 * 1024 * 1024;
+
+/** The object metadata a log copy carries when it was cut at its bound (the records say so). */
+export const TRUNCATED_NOTE = { truncated: "1" } as const;
 
 /** A live job whose last good read from Tapis is older than this is `unreported`. */
 export const UNREPORTED_AFTER_HOURS = 24;
@@ -903,40 +906,41 @@ export async function copyResultRecords(env: Bindings, job: ComputeJobRow): Prom
     if (!info) continue;
     // A document over its bound is not one the launcher wrote; a log is copied up to its bound.
     if (info.size > file.cap && !file.truncate) continue;
-    const object =
-      info.size > file.cap
-        ? await results.get(key, { range: { offset: 0, length: file.cap } })
-        : await results.get(key);
+    const cut = info.size > file.cap;
+    const object = cut
+      ? await results.get(key, { range: { offset: 0, length: file.cap } })
+      : await results.get(key);
     if (!object) continue;
     const bytes = new Uint8Array(await object.arrayBuffer());
     const contentType = file.truncate ? "text/plain" : "application/json";
-    if (await putRecordOnce(env, file.to, bytes, contentType)) written++;
+    if (await putRecordOnce(env, file.to, bytes, contentType, cut ? TRUNCATED_NOTE : undefined)) {
+      written++;
+    }
   }
 
   if (job.tapis_uuid !== null && TAPIS_JOB_UUID_RE.test(job.tapis_uuid)) {
     const ctx = tapisAccess(env, REQUEST_READ);
-    if (ctx !== null) {
-      let bytes: Uint8Array | null = null;
-      try {
-        bytes = await downloadOutput(ctx, job.tapis_uuid, "tapisjob.out", LOG_COPY_MAX_BYTES);
-      } catch (err) {
-        // No such file, or one that is not what Tapis's specification says (over the bound): there is
-        // no log to copy and a retry would meet the same. Anything else may clear: the next tick asks.
-        if (
-          !(err instanceof TapisError) ||
-          (err.kind !== "not_found" && err.kind !== "invalid_response")
-        ) {
-          throw err;
-        }
-      }
-      if (
-        bytes !== null &&
-        (await putRecordOnce(env, logKey(job.id, "tapisjob.out"), bytes, "text/plain"))
-      ) {
-        written++;
-      }
-    } else {
-      throw new Error("the Tapis tenant is not configured");
+    if (ctx === null) throw new Error("the Tapis tenant is not configured");
+    let log: { bytes: Uint8Array; truncated: boolean } | null = null;
+    try {
+      log = await downloadOutputPrefix(ctx, job.tapis_uuid, "tapisjob.out", LOG_COPY_MAX_BYTES);
+    } catch (err) {
+      // Only a log that does not exist is skipped (the job wrote none). Anything else, a timeout, a
+      // refusal or an answer that is not a file, may clear: it throws, the copy stays OWED, and a later
+      // tick asks again, so a log that could not be read is never stamped as copied.
+      if (!(err instanceof TapisError) || err.kind !== "not_found") throw err;
+    }
+    if (
+      log !== null &&
+      (await putRecordOnce(
+        env,
+        logKey(job.id, "tapisjob.out"),
+        log.bytes,
+        "text/plain",
+        log.truncated ? TRUNCATED_NOTE : undefined,
+      ))
+    ) {
+      written++;
     }
   }
 
