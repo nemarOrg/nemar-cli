@@ -43,7 +43,7 @@ import {
   type LifecycleFixture,
   MINUTE,
   type MadeJob,
-  launchSpecSeenByTapis,
+  launchSpecTextSeenByTapis,
   makeJob,
   reread,
   setPolicy,
@@ -1144,7 +1144,7 @@ describe("the launcher's whole run, through the routes", () => {
     files: OutputFile[],
     opts: { failure?: { code: string; detail: string } } = {},
   ) {
-    const spec = JSON.parse(launchSpecSeenByTapis(fx, uuid)) as {
+    const spec = JSON.parse(launchSpecTextSeenByTapis(fx, uuid)) as {
       api_base: string;
       job_id: string;
       job_token: string;
@@ -1157,7 +1157,7 @@ describe("the launcher's whole run, through the routes", () => {
       });
       return { status: res.status, body: (await res.json()) as Record<string, any> };
     };
-    const digest = sha(launchSpecSeenByTapis(fx, uuid));
+    const digest = sha(launchSpecTextSeenByTapis(fx, uuid));
     const exit = opts.failure ? 16 : 0;
     const docs: Record<string, string> = {
       "result.json": JSON.stringify({
@@ -1172,8 +1172,8 @@ describe("the launcher's whole run, through the routes", () => {
         launch_spec_digest: digest,
         bundle_digest: null,
         image: {
-          uri: JSON.parse(launchSpecSeenByTapis(fx, uuid)).image.uri,
-          digest: JSON.parse(launchSpecSeenByTapis(fx, uuid)).image.digest,
+          uri: JSON.parse(launchSpecTextSeenByTapis(fx, uuid)).image.uri,
+          digest: JSON.parse(launchSpecTextSeenByTapis(fx, uuid)).image.digest,
         },
         runtime_version: "test 1",
         staging: [],
@@ -1256,7 +1256,7 @@ describe("the launcher's whole run, through the routes", () => {
       { path: "b.txt", content: "b" },
     ];
     // The launcher is refused, uploads its own files after the follow-up, and fails with the refusal.
-    const spec = JSON.parse(launchSpecSeenByTapis(fx, uuid)) as {
+    const spec = JSON.parse(launchSpecTextSeenByTapis(fx, uuid)) as {
       api_base: string;
       job_id: string;
       job_token: string;
@@ -1294,7 +1294,7 @@ describe("the launcher's whole run, through the routes", () => {
     await submitComputeJob(workerEnv, made.job.id);
     const uuid = (await reread(workerEnv, made.job.id)).tapis_uuid as string;
     fx.tapis.advance(uuid, "RUNNING");
-    const spec = JSON.parse(launchSpecSeenByTapis(fx, uuid)) as {
+    const spec = JSON.parse(launchSpecTextSeenByTapis(fx, uuid)) as {
       api_base: string;
       job_id: string;
       job_token: string;

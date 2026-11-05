@@ -78,7 +78,7 @@ import {
   iso,
   jobTokenSeenByTapis,
   launchSpecEnvSeenByTapis,
-  launchSpecSeenByTapis,
+  launchSpecTextSeenByTapis,
   makeJob,
   playLauncher,
   reread,
@@ -226,7 +226,7 @@ describe("submit", () => {
     expect(value).toBe(launchSpecEnvSeenByTapis(fx, job.tapis_uuid as string));
 
     // The launch specification the launcher will read: what it decodes the value to.
-    const text = launchSpecSeenByTapis(fx, job.tapis_uuid as string);
+    const text = launchSpecTextSeenByTapis(fx, job.tapis_uuid as string);
     const spec = LaunchSpecSchema.parse(JSON.parse(text));
     expect(spec.job_id).toBe(job.id);
     expect(spec.datasets).toEqual([{ id: "nm000104", version: "v1.0.2" }]);
@@ -390,7 +390,7 @@ describe("submit", () => {
     expect(job.launch_spec_digest).toBe(stored as string);
     expect(job.launch_spec_digest).toBe(
       await sha256Hex(
-        new TextEncoder().encode(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
+        new TextEncoder().encode(launchSpecTextSeenByTapis(fx, job.tapis_uuid as string)),
       ),
     );
   });
@@ -454,7 +454,7 @@ describe("submit", () => {
     expect(job.launch_spec_digest).not.toBe(first);
     expect(job.launch_spec_digest).toBe(
       await sha256Hex(
-        new TextEncoder().encode(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
+        new TextEncoder().encode(launchSpecTextSeenByTapis(fx, job.tapis_uuid as string)),
       ),
     );
     expect(job.image_digest).toBe(`sha256:${"c".repeat(64)}`);
@@ -649,7 +649,7 @@ describe("submit", () => {
     expect(await submitComputeJob(env, made.job.id)).toEqual({ ok: true, outcome: "submitted" });
     const job = await reread(made.env, made.job.id);
     const spec = LaunchSpecSchema.parse(
-      JSON.parse(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
+      JSON.parse(launchSpecTextSeenByTapis(fx, job.tapis_uuid as string)),
     );
     // Written out, not computed with the contract's own function.
     expect(spec.image).toEqual({
@@ -672,7 +672,7 @@ describe("submit", () => {
     });
     const job = await reread(made.env, made.job.id);
     const spec = LaunchSpecSchema.parse(
-      JSON.parse(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
+      JSON.parse(launchSpecTextSeenByTapis(fx, job.tapis_uuid as string)),
     );
     expect(spec.runtime).toBe("image");
     expect(spec.image).toEqual({ uri: image, digest, sif: `${"d".repeat(64)}.sif` });

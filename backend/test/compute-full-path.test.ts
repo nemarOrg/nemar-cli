@@ -38,7 +38,7 @@ import {
   type LifecycleFixture,
   MINUTE,
   RUNTIME_IMAGE_DIGEST,
-  launchSpecSeenByTapis,
+  launchSpecTextSeenByTapis,
   makeJob,
   reread,
   setTapisTimes,
@@ -98,7 +98,7 @@ async function runLauncher(
   jobId: string,
   files: Array<{ path: string; content: string }>,
 ) {
-  const spec = LaunchSpecSchema.parse(JSON.parse(launchSpecSeenByTapis(fx, uuid)));
+  const spec = LaunchSpecSchema.parse(JSON.parse(launchSpecTextSeenByTapis(fx, uuid)));
   const launcherText: Record<string, string> = {
     [LAUNCHER_FILES.result]: JSON.stringify({
       job_id: jobId,
@@ -110,7 +110,7 @@ async function runLauncher(
     [LAUNCHER_FILES.provenance]: JSON.stringify({
       job_id: jobId,
       // What the launcher hashed: the value it was handed, never a number the Worker stored.
-      launch_spec_digest: sha(launchSpecSeenByTapis(fx, uuid)),
+      launch_spec_digest: sha(launchSpecTextSeenByTapis(fx, uuid)),
       bundle_digest: null,
       image: { uri: spec.image.uri, digest: RUNTIME_IMAGE_DIGEST },
       runtime_version: "full-path 1.0",

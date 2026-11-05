@@ -21,11 +21,12 @@
  * what a lost response is and what the stand-in's own failure modes (they act before they answer)
  * cannot make. It decides nothing.
  *
- * THE LAUNCHER STAND-IN HASHES WHAT THE TAPIS STAND-IN RECEIVED. `launchSpecEnvSeenByTapis` reads the
- * `NEMAR_LAUNCH_SPEC` environment value out of the stand-in's own job record, and `launchSpecSeenByTapis`
- * decodes it the way the launcher does (`decodeLaunchSpecEnv`: base64url, strict) into the specification's
- * JSON text. The launcher's `provenance.json` is built from the digest of THAT TEXT, never from the digest
- * the Worker stored: a check that compared the Worker's number with itself would prove nothing.
+ * THE LAUNCHER STAND-IN HASHES WHAT THE TAPIS STAND-IN RECEIVED. `launchSpecEnvSeenByTapis` reads
+ * the `NEMAR_LAUNCH_SPEC` environment value out of the stand-in's own job record, and
+ * `launchSpecTextSeenByTapis` decodes it the way the launcher does (`decodeLaunchSpecEnv`, strict)
+ * into the specification's JSON text. The launcher's `provenance.json` is built from the digest of
+ * THAT TEXT, never from the digest the Worker stored: a check that compared the Worker's number
+ * with itself would prove nothing.
  */
 
 import type { Database } from "bun:sqlite";
@@ -332,7 +333,7 @@ export function launchSpecEnvSeenByTapis(fx: LifecycleFixture, uuid: string): st
  * launcher does, and the bytes it hashes. A value the launcher would refuse throws here, so a test
  * never reads a specification the real launcher could not.
  */
-export function launchSpecSeenByTapis(fx: LifecycleFixture, uuid: string): string {
+export function launchSpecTextSeenByTapis(fx: LifecycleFixture, uuid: string): string {
   const decoded = decodeLaunchSpecEnv(launchSpecEnvSeenByTapis(fx, uuid));
   if (!decoded.ok) {
     throw new Error(`the launcher would refuse the launch specification: ${decoded.reason}`);
@@ -342,7 +343,7 @@ export function launchSpecSeenByTapis(fx: LifecycleFixture, uuid: string): strin
 
 /** The job token inside the launch specification the Tapis stand-in received. */
 export function jobTokenSeenByTapis(fx: LifecycleFixture, uuid: string): string {
-  return (JSON.parse(launchSpecSeenByTapis(fx, uuid)) as { job_token: string }).job_token;
+  return (JSON.parse(launchSpecTextSeenByTapis(fx, uuid)) as { job_token: string }).job_token;
 }
 
 export interface LauncherPlan {
@@ -395,7 +396,7 @@ export async function playLauncher(
       sha256: await sha256Hex(bytes),
     });
   }
-  const digest = await sha256Hex(encoder.encode(launchSpecSeenByTapis(fx, uuid)));
+  const digest = await sha256Hex(encoder.encode(launchSpecTextSeenByTapis(fx, uuid)));
   const code = plan.failureCode ?? null;
   const exit =
     plan.exitNumber ??
