@@ -219,12 +219,9 @@ export const SubmitJobRequestSchema = z
                 // shell-inert alphabet `A-Za-z0-9-_`, within the encoded bound. A raw JSON value is
                 // refused here, before anything is sent: a scheduler that quotes an environment value
                 // conditionally and writes it into a file a shell sources would not carry it intact
-                // (A1c, #2043). The rule is the contract's own `isShellInertEnvValue`, not a copy.
-                value: z
-                  .string()
-                  .min(1)
-                  .max(LAUNCH_SPEC_ENV_MAX_CHARS)
-                  .refine(isShellInertEnvValue),
+                // (A1c, #2043). The rule is the contract's own `isShellInertEnvValue`, not a copy, and
+                // "not empty" is part of it.
+                value: z.string().max(LAUNCH_SPEC_ENV_MAX_CHARS).refine(isShellInertEnvValue),
               })
               .strict(),
           )
