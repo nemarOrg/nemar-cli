@@ -6,67 +6,49 @@
  * statements: every path that ends a credential runs the cascade, and the count in the docblock is
  * LOAD-BEARING, because the next person to add a path reads it to learn whether theirs is one more.
  * A count nobody checks decays the first time someone adds a call and not a line of prose, so this
- * test reads the syntax tree (a call in a comment is not a call, and a call by another spelling is
- * still one) and fails when the code and the documented list differ in either direction:
+ * test reads the syntax tree (`helpers/oidc-end-scan.ts`: a call in a comment is not a call, and a call by
+ * another spelling is still one) and fails when the code and the documented list differ in either
+ * direction:
  *
- *   - a call to `oidcEndStatements` or `oidcClientEndStatements` that is not on the list, and a listed
- *     one that is no longer there (so removing the statement from a caller fails here as well as in
- *     the behavioural suites);
+ *   - a call to `oidcEndStatements` or `oidcClientEndStatements` that is not on the list, however it is
+ *     reached (an aliased import, a local alias chain, a namespace, a destructured namespace), and a
+ *     listed one that is no longer there (so removing the statement from a caller fails here as well as
+ *     in the behavioural suites);
+ *   - any OTHER use outside the module, each a "stray" the list cannot describe: the function passed or
+ *     stored as a value, a raw `*_SQL` constant of the cascade run on its own, a dynamic import, a
+ *     re-export, a default import, an element access on the namespace, a module-level reference;
  *   - a docblock whose spelled count is not the number of listed callers;
  *   - a deliberate non-path (a role demotion, a key revocation, the app session's sign-out) that has
  *     lost the sentence saying it is deliberate, which is how the next reader learns not to "fix" it;
- *   - a new module that scans for the wrong thing: each rule is also run on a planted violation, so
- *     it is shown to fire and not only to stay quiet.
+ *   - a scan that stopped seeing: each way of reaching the cascade is also run on a planted file, so the
+ *     scan is shown to fire and not only to stay quiet.
+ *
+ * What the scan does NOT promise: it names what an identifier is called, not what it means, and it reads
+ * `backend/src` only. A file outside it that imports the module is out of reach, which is why nothing
+ * else imports the module from the Worker's source, and why the planted cases are the proof.
  */
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import ts from "typescript";
 import { OIDC_CLIENT_END_CALLERS, OIDC_END_CALLERS } from "../src/services/oidc-cascade";
-import { SRC, type Tree, createTree, parse, rel } from "./helpers/ts-scan";
+import { type EndCall, scanEndUsers } from "./helpers/oidc-end-scan";
+import { SRC, createTree } from "./helpers/ts-scan";
 
 const CASCADE = join(SRC, "services/oidc-cascade.ts");
 
-/** Every call to a function of this name, as `file` (under `backend/src`) and the function it is in. */
-function callsOf(tree: Tree, name: string): Array<{ file: string; site: string }> {
-  const found: Array<{ file: string; site: string }> = [];
-  for (const abs of tree.walk(SRC)) {
-    if (abs === CASCADE) continue;
-    const sf = parse(tree, abs);
-    const visit = (node: ts.Node, site: string): void => {
-      let here = site;
-      if (
-        (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) &&
-        node.name !== undefined
-      ) {
-        here = node.name.getText(sf);
-      } else if (
-        ts.isVariableDeclaration(node) &&
-        node.initializer !== undefined &&
-        (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
-      ) {
-        here = node.name.getText(sf);
-      }
-      if (ts.isCallExpression(node)) {
-        const callee = ts.isPropertyAccessExpression(node.expression)
-          ? node.expression.name.text
-          : ts.isIdentifier(node.expression)
-            ? node.expression.text
-            : "";
-        if (callee === name) found.push({ file: rel(abs), site: here });
-      }
-      ts.forEachChild(node, (child) => visit(child, here));
-    };
-    visit(sf, "(module)");
-  }
-  return found.sort((a, b) => `${a.file} ${a.site}`.localeCompare(`${b.file} ${b.site}`));
-}
+const order = (a: { file: string; site: string }, b: { file: string; site: string }) =>
+  `${a.file} ${a.site}`.localeCompare(`${b.file} ${b.site}`);
+
+/** The calls of one function, as the file and the function they are in. */
+const callsOf = (calls: EndCall[], name: string) =>
+  calls
+    .filter((c) => c.name === name)
+    .map((c) => ({ file: c.file, site: c.site }))
+    .sort(order);
 
 const listed = (callers: ReadonlyArray<{ file: string; site: string }>) =>
-  callers
-    .map((c) => ({ file: c.file, site: c.site }))
-    .sort((a, b) => `${a.file} ${a.site}`.localeCompare(`${b.file} ${b.site}`));
+  callers.map((c) => ({ file: c.file, site: c.site })).sort(order);
 
 const WORDS: Record<string, number> = {
   ONE: 1,
@@ -94,14 +76,18 @@ function docblockCount(source: string, constant: string): number | null {
 }
 
 describe("the callers of oidcEndStatements", () => {
-  const real = createTree();
+  const real = scanEndUsers(createTree());
 
   test("the code calls it from exactly the places the module lists", () => {
-    expect(callsOf(real, "oidcEndStatements")).toEqual(listed(OIDC_END_CALLERS));
+    expect(callsOf(real.calls, "oidcEndStatements")).toEqual(listed(OIDC_END_CALLERS));
   });
 
   test("the client's own cascade has exactly its one caller", () => {
-    expect(callsOf(real, "oidcClientEndStatements")).toEqual(listed(OIDC_CLIENT_END_CALLERS));
+    expect(callsOf(real.calls, "oidcClientEndStatements")).toEqual(listed(OIDC_CLIENT_END_CALLERS));
+  });
+
+  test("nothing else outside the module uses the cascade: no value, no raw statement, no import the scan cannot follow", () => {
+    expect(real.strays).toEqual([]);
   });
 
   test("no path of the list is a deliberate non-path: demotion, key revocation, sign-out", () => {
@@ -145,42 +131,173 @@ describe("the callers of oidcEndStatements", () => {
 });
 
 describe("the scan fires on a planted violation", () => {
-  test("a new caller that is not on the list is found", () => {
-    const planted = createTree({
-      "routes/planted.ts": `import { oidcEndStatements } from "../services/oidc-cascade";
-export async function aNewPathThatEndsACredential(userId: number) {
+  /** Scan the real tree with one planted file laid over it. */
+  const plant = (source: string) => scanEndUsers(createTree({ "routes/planted.ts": source }));
+  const IMPORT = 'import { oidcEndStatements } from "../services/oidc-cascade";\n';
+  const NAMESPACE = 'import * as ns from "../services/oidc-cascade";\n';
+
+  /** A planted call, as the scan reports it. */
+  const calledFrom = (scan: ReturnType<typeof scanEndUsers>, site: string) =>
+    scan.calls.some((c) => c.file === "routes/planted.ts" && c.site === site);
+  const planted = (scan: ReturnType<typeof scanEndUsers>) =>
+    scan.strays.filter((x) => x.startsWith("routes/planted.ts"));
+
+  test("a new caller that is not on the list is found, and so the list differs", () => {
+    const scan = plant(`${IMPORT}export async function aNewPath(userId: number) {
   return oidcEndStatements(userId, "account_revoked");
-}`,
-    });
-    expect(callsOf(planted, "oidcEndStatements")).toContainEqual({
+}`);
+    expect(calledFrom(scan, "aNewPath")).toBe(true);
+    expect(callsOf(scan.calls, "oidcEndStatements")).not.toEqual(listed(OIDC_END_CALLERS));
+    expect(planted(scan)).toEqual([]);
+  });
+
+  test("an aliased import is still the cascade", () => {
+    const scan = plant(`import { oidcEndStatements as endThem } from "../services/oidc-cascade";
+export function viaAlias(userId: number) {
+  return endThem(userId, "account_revoked");
+}`);
+    expect(scan.calls).toContainEqual({
       file: "routes/planted.ts",
-      site: "aNewPathThatEndsACredential",
+      site: "viaAlias",
+      name: "oidcEndStatements",
     });
-    expect(callsOf(planted, "oidcEndStatements")).not.toEqual(listed(OIDC_END_CALLERS));
   });
 
-  test("a call in a comment or a string is not a call", () => {
-    const planted = createTree({
-      "routes/planted.ts": `// oidcEndStatements(1, "account_revoked")
-const text = "oidcEndStatements(1, 'account_revoked')";
-export const x = text;`,
-    });
-    expect(callsOf(planted, "oidcEndStatements")).toEqual(
-      callsOf(createTree(), "oidcEndStatements"),
-    );
+  test("a local alias chain, an assignment and a cast are followed to the call", () => {
+    const scan = plant(`${IMPORT}const first = oidcEndStatements;
+const second = (first as typeof oidcEndStatements)!;
+let third: typeof oidcEndStatements;
+third = second;
+export function viaChain(userId: number) {
+  return third(userId, "account_revoked");
+}`);
+    expect(calledFrom(scan, "viaChain")).toBe(true);
+    expect(planted(scan)).toEqual([]);
   });
 
-  test("a call through a property access is still a call", () => {
-    const planted = createTree({
-      "routes/planted.ts": `import * as cascade from "../services/oidc-cascade";
-export function viaNamespace(userId: number) {
-  return cascade.oidcEndStatements(userId, "account_revoked");
-}`,
-    });
-    expect(callsOf(planted, "oidcEndStatements")).toContainEqual({
+  test("a call through a namespace, and through a destructured namespace, is still a call", () => {
+    const scan = plant(`${NAMESPACE}export function viaNamespace(userId: number) {
+  return ns.oidcEndStatements(userId, "account_revoked");
+}
+const { oidcClientEndStatements: clientEnd } = ns;
+export function viaDestructuring(id: string) {
+  return clientEnd(id);
+}`);
+    expect(scan.calls).toContainEqual({
       file: "routes/planted.ts",
       site: "viaNamespace",
+      name: "oidcEndStatements",
     });
+    expect(scan.calls).toContainEqual({
+      file: "routes/planted.ts",
+      site: "viaDestructuring",
+      name: "oidcClientEndStatements",
+    });
+    expect(planted(scan)).toEqual([]);
+  });
+
+  test("the function passed or stored as a value is a stray", () => {
+    for (const body of [
+      "export const all = [1, 2].map(oidcEndStatements);",
+      "export const holder = { oidcEndStatements };",
+      "export const holder = { run: oidcEndStatements };",
+      "export function pass(use: (f: unknown) => void) { use(oidcEndStatements); }",
+      "export { oidcEndStatements as sneaky };",
+    ]) {
+      const strays = planted(plant(`${IMPORT}${body}`));
+      expect(strays.length, body).toBeGreaterThan(0);
+      expect(strays.join("\n"), body).toContain("used as a value");
+    }
+  });
+
+  test("a raw statement of the cascade is a stray, imported by its name or through the namespace", () => {
+    for (const source of [
+      'import { OIDC_END_GRANTS_SQL } from "../services/oidc-cascade";\nexport const sql = OIDC_END_GRANTS_SQL;',
+      'import { OIDC_ENQUEUE_LOGOUTS_SQL as q } from "../services/oidc-cascade";\nexport const sql = q;',
+      `${NAMESPACE}export const sql = ns.OIDC_END_TOKENS_SQL;`,
+      'import { OIDC_CLIENT_END_CODES_SQL } from "../services/oidc-cascade";\nexport function run(db: D1Database) { return db.prepare(OIDC_CLIENT_END_CODES_SQL); }',
+    ]) {
+      const strays = planted(plant(source));
+      expect(strays.length, source).toBeGreaterThan(0);
+      expect(strays.join("\n"), source).toContain("raw statement of the cascade");
+    }
+  });
+
+  test("the namespace used as a value, by element access, or spread, is a stray", () => {
+    for (const body of [
+      "export const everything = ns;",
+      'export function byName() { return ns["oidcEndStatements"](1, "account_revoked"); }',
+      "export const copy = { ...ns };",
+      "const { ...rest } = ns; export const r = rest;",
+    ]) {
+      const strays = planted(plant(`${NAMESPACE}${body}`));
+      expect(strays.length, body).toBeGreaterThan(0);
+    }
+  });
+
+  test("a dynamic import or require of the module is a stray, literal or not", () => {
+    for (const body of [
+      'export async function lazy() { const m = await import("../services/oidc-cascade"); return m; }',
+      'export async function lazy() { const m = await import("../services/oidc-cascade.js"); return m; }',
+      "export async function lazy(name: string) { return import(name); }",
+      'export async function lazy(part: string) { return import("../services/" + part); }',
+    ]) {
+      const strays = planted(plant(body));
+      expect(strays.length, body).toBeGreaterThan(0);
+      expect(strays.join("\n"), body).toContain("dynamic import");
+    }
+  });
+
+  test("a re-export, a default import and an import = require are strays", () => {
+    for (const [source, words] of [
+      ['export { oidcEndStatements } from "../services/oidc-cascade";', "re-export"],
+      ['export * from "../services/oidc-cascade";', "re-export"],
+      ['export * as cascade from "../services/oidc-cascade";', "re-export"],
+      [
+        'import cascade from "../services/oidc-cascade";\nexport const c = cascade;',
+        "default import",
+      ],
+      [
+        'import { default as cascade } from "../services/oidc-cascade";\nexport const c = cascade;',
+        "default import",
+      ],
+      [
+        'import cascade = require("../services/oidc-cascade");\nexport const c = cascade;',
+        "require",
+      ],
+    ] as const) {
+      const strays = planted(plant(source));
+      expect(strays.length, source).toBeGreaterThan(0);
+      expect(strays.join("\n"), source).toContain(words);
+    }
+  });
+
+  test("a call at module level has no path to name, and is a stray as well as a call", () => {
+    const scan = plant(`${IMPORT}export const eager = oidcEndStatements(1, "account_revoked");`);
+    expect(calledFrom(scan, "(module)")).toBe(true);
+    expect(planted(scan).join("\n")).toContain("module-level call");
+  });
+
+  test("a call in a comment or a string, a type import, the lists, and another object's method are not uses", () => {
+    const scan = plant(`// oidcEndStatements(1, "account_revoked")
+import type { OidcEndStatement } from "../services/oidc-cascade";
+import { OIDC_END_CALLERS } from "../services/oidc-cascade";
+const text = "oidcEndStatements(1, 'account_revoked') OIDC_END_GRANTS_SQL";
+const other = { oidcEndStatements: (n: number) => n };
+export const x = [text, other.oidcEndStatements(1), OIDC_END_CALLERS.length] as unknown as OidcEndStatement[];`);
+    expect(scan.calls.filter((c) => c.file === "routes/planted.ts")).toEqual([]);
+    expect(planted(scan)).toEqual([]);
+    expect(callsOf(scan.calls, "oidcEndStatements")).toEqual(listed(OIDC_END_CALLERS));
+  });
+
+  test("a new raw statement exported by the module is guarded without touching the scan", () => {
+    // The names come from the module's own exports, so a `*_SQL` constant added tomorrow is covered today.
+    const tree = createTree({
+      "services/oidc-cascade.ts": `${readFileSync(CASCADE, "utf8")}\nexport const OIDC_NEW_ENDING_SQL = "DELETE FROM oidc_grants";\n`,
+      "routes/planted.ts":
+        'import { OIDC_NEW_ENDING_SQL } from "../services/oidc-cascade";\nexport const s = OIDC_NEW_ENDING_SQL;',
+    });
+    expect(planted(scanEndUsers(tree)).join("\n")).toContain("OIDC_NEW_ENDING_SQL");
   });
 });
 
