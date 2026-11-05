@@ -324,6 +324,20 @@ describe("rotation", () => {
     expectInvalidGrant(await refresh(f.client, two.refresh_token));
   });
 
+  test("past the grace, a parent whose only child is untouched still gets no second child", async () => {
+    // The time limit on its own: the first child is neither rotated nor revoked, so only the 30
+    // seconds stand between this presentation and a second branch.
+    const f = await family();
+    const one = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    await age(f.first.refresh_token, 31);
+    expectInvalidGrant(await refresh(f.client, f.first.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    const rows = allRows().filter((r) => r.family_id === familyId);
+    expect(rows.filter((r) => r.revoked_at === null)).toEqual([]);
+    expect(new Set(rows.map((r) => r.revoked_reason))).toEqual(new Set(["refresh_reuse"]));
+    expect(await userinfoStatus(one.access_token)).toBe(401);
+  });
+
   test("inside the grace, at 25 seconds, the retry is still honoured, and moves nothing", async () => {
     // 25 and not 29: `datetime('now')` has one-second resolution, so a margin of a few seconds keeps
     // the test inside the grace whatever second the request lands in.
