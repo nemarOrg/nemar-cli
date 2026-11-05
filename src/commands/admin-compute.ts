@@ -587,6 +587,15 @@ function printStatus(res: ComputeStatusResponse): void {
   say(`  results binding: ${yesNo(res.storage.results_binding)}`);
   say(`  signing secrets: ${yesNo(res.storage.signing_configured)}`);
   say(`ACCESS key: ${yesNo(res.access.key_configured)}`);
+  const resourceName = res.access.resource_name_configured;
+  say(
+    `ACCESS resource name: ${
+      resourceName === undefined ? "unknown (this Worker does not report it)" : yesNo(resourceName)
+    }`,
+  );
+  if (!res.access.key_configured || resourceName === false) {
+    say("  ACCESS reports wait until both are set");
+  }
   say("Runtime image");
   const image = res.runtime_image;
   if (image === undefined) {

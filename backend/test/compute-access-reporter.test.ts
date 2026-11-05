@@ -637,7 +637,14 @@ describe("what cannot be sent yet stays pending, and costs no attempt", () => {
       { ACCESS_RESOURCE_NAME: "" },
     ]) {
       const e = env(over as Partial<Bindings>);
-      expect(await runAccessReportCron(e)).toMatchObject({ unconfigured: 1, sent: 0, errors: [] });
+      const tick = await runAccessReportCron(e);
+      expect(tick).toMatchObject({ unconfigured: 1, sent: 0, errors: [] });
+      // Silence while there is work to do is evidence of nothing (ADR 0053): every tick that leaves a
+      // row waiting for the key or the resource name says so, at error level, with the count.
+      const log = accessReportsLogLine(tick as NonNullable<typeof tick>);
+      expect(log).toMatchObject({ level: "error" });
+      expect(log?.line).toContain("unconfigured=1");
+      expect(log?.line).not.toContain(KEY);
       expect(await report(e, made.job.id)).toMatchObject({
         state: "pending",
         attempts: 0,

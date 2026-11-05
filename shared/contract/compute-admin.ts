@@ -255,7 +255,14 @@ export const ComputeStatusResponseSchema = z
         signing_configured: z.boolean(),
       })
       .passthrough(),
-    access: z.object({ key_configured: z.boolean() }).passthrough(),
+    /**
+     * Whether the two secrets the ACCESS reports wait for are SET (presence only, never a value): the key
+     * and, optional so a CLI that reads a Worker from before the field existed still parses its answer,
+     * the resource name.
+     */
+    access: z
+      .object({ key_configured: z.boolean(), resource_name_configured: z.boolean().optional() })
+      .passthrough(),
     /**
      * `COMPUTE_RUNTIME_IMAGE`, NEMAR's own image for a `python` job: whether it is `set`, whether it is a
      * `valid` digest-pinned reference, and its `digest` (null unless valid; the reference is never sent).

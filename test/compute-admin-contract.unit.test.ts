@@ -91,7 +91,7 @@ const VALID: Record<string, unknown> = {
       health: "unconfigured",
     },
     storage: { records_binding: true, results_binding: true, signing_configured: false },
-    access: { key_configured: false },
+    access: { key_configured: false, resource_name_configured: false },
     runtime_image: { set: true, valid: true, digest: `sha256:${"a".repeat(64)}` },
   },
   ComputePoolViewSchema: pool,
@@ -178,6 +178,23 @@ describe("compute-admin: every exported schema is open", () => {
     expect(
       admin.ComputeStatusResponseSchema.safeParse({ ...old, runtime_image: { set: "yes" } })
         .success,
+    ).toBe(false);
+  });
+
+  test("a status answer from a Worker that predates `resource_name_configured` still parses, and its absence is kept as absence", () => {
+    const old = JSON.parse(JSON.stringify(VALID.ComputeStatusResponseSchema)) as {
+      access: Record<string, unknown>;
+    };
+    old.access.resource_name_configured = undefined;
+    const parsed = admin.ComputeStatusResponseSchema.parse(old);
+    expect(parsed.access.resource_name_configured).toBeUndefined();
+    expect(parsed.access.key_configured).toBe(false);
+    // A malformed one is refused, not guessed.
+    expect(
+      admin.ComputeStatusResponseSchema.safeParse({
+        ...old,
+        access: { key_configured: true, resource_name_configured: "yes" },
+      }).success,
     ).toBe(false);
   });
 

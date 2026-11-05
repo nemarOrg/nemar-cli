@@ -475,14 +475,18 @@ export async function runAccessReportCron(
 }
 
 /**
- * The tick's one log line, or null when it changed nothing and nothing failed, so a tick that found the
- * same rows waiting says nothing. Counts and fixed words only: no key, address, Slurm id or pseudonym.
- * Error level when a row needs a person (it ended `failed`) or anything threw.
+ * The tick's one log line, or null when it changed nothing and nothing failed. A tick that found rows
+ * waiting for the key or the resource name is NOT silent (`unconfigured`): the same rows waiting for a
+ * retry say nothing, but rows that wait for the owner must. Counts and fixed words only: no key,
+ * address, Slurm id or pseudonym. Error level when a row needs a person (it ended `failed`, or it waits
+ * for the key or the resource name) or anything threw.
  */
 export function accessReportsLogLine(
   r: AccessReportTick,
 ): { level: "info" | "error"; line: string } | null {
-  const needsPerson = r.failed + r.unknown + r.reaped > 0 || r.errors.length > 0;
+  // A row waiting for the key or the resource name needs a person too, and says so on EVERY tick:
+  // silence while there is work to do is evidence of nothing (ADR 0053, 0054).
+  const needsPerson = r.failed + r.unknown + r.reaped + r.unconfigured > 0 || r.errors.length > 0;
   const acted = r.sent + r.retry + r.deferred;
   if (!needsPerson && acted === 0) return null;
   const line = [

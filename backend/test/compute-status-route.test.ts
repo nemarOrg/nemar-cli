@@ -62,6 +62,7 @@ beforeEach(async () => {
 });
 
 const ACCESS_KEY_MARK = "access-key-mark-7731";
+const ACCESS_RESOURCE_MARK = "access-resource-mark-7731";
 const R2_ENDPOINT_MARK = "https://r2-endpoint-mark-7731.invalid";
 
 /** Everything a fully configured Worker has, under one strategy; `over` replaces a field. */
@@ -79,6 +80,7 @@ function configured(strategy: "password" | "service", over: Record<string, unkno
       ? { TAPIS_USERNAME: standin.username, TAPIS_PASSWORD: standin.password }
       : { TAPIS_SERVICE_TOKEN: standin.serviceToken, TAPIS_USERNAME: standin.username }),
     ACCESS_GATEWAY_ATTRIBUTES_KEY: ACCESS_KEY_MARK,
+    ACCESS_RESOURCE_NAME: ACCESS_RESOURCE_MARK,
     ...over,
   } as never);
 }
@@ -136,7 +138,7 @@ describe("an unconfigured Worker", () => {
         health: "ok",
       },
       storage: { records_binding: false, results_binding: true, signing_configured: true },
-      access: { key_configured: false },
+      access: { key_configured: false, resource_name_configured: false },
       runtime_image: { set: false, valid: false, digest: null },
     });
     // The health call is the one request an address alone allows.
@@ -172,7 +174,7 @@ describe("an unconfigured Worker", () => {
           health: "unconfigured",
         },
         storage: { records_binding: false, results_binding: false, signing_configured: false },
-        access: { key_configured: false },
+        access: { key_configured: false, resource_name_configured: false },
         runtime_image: { set: false, valid: false, digest: null },
       });
       expect(standin.log).toHaveLength(0);
@@ -274,7 +276,7 @@ describe("each piece is its own flag", () => {
         results_binding: true,
         signing_configured: true,
       });
-      expect(res.body.access).toEqual({ key_configured: true });
+      expect(res.body.access).toEqual({ key_configured: true, resource_name_configured: true });
     }
   });
 
@@ -288,6 +290,11 @@ describe("each piece is its own flag", () => {
       [{ COMPUTE_RECORDS_BUCKET_NAME: undefined }, (b) => b.storage.signing_configured],
       [{ ACCESS_GATEWAY_ATTRIBUTES_KEY: undefined }, (b) => b.access.key_configured],
       [{ ACCESS_GATEWAY_ATTRIBUTES_KEY: "  " }, (b) => b.access.key_configured],
+      // The resource name is the other half of what the ACCESS reports wait for: with the key set and
+      // this one missing, every report waits for ever, so the answer must say so by itself.
+      [{ ACCESS_RESOURCE_NAME: undefined }, (b) => b.access.resource_name_configured],
+      [{ ACCESS_RESOURCE_NAME: "" }, (b) => b.access.resource_name_configured],
+      [{ ACCESS_RESOURCE_NAME: "  " }, (b) => b.access.resource_name_configured],
     ];
     for (const [over, flag] of cases) {
       const res = await status("admin", configured("password", over));
@@ -299,6 +306,7 @@ describe("each piece is its own flag", () => {
         body.storage.results_binding,
         body.storage.signing_configured,
         body.access.key_configured,
+        body.access.resource_name_configured,
       ];
       expect(all.filter((v) => v === false)).toHaveLength(1);
       expect(body.tapis.configured).toBe(true);
@@ -477,6 +485,7 @@ describe("what the answer never holds", () => {
     "r2-key-id-mark-7731",
     "r2-secret-mark-7731",
     ACCESS_KEY_MARK,
+    ACCESS_RESOURCE_MARK,
     "r2-endpoint-mark-7731",
   ];
 

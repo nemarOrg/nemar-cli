@@ -46,6 +46,8 @@ let previousOverride: string | undefined;
 let workerEnv: Record<string, unknown> = {};
 /** When set, the route's answer gets keys a newer Worker would add. */
 let augment = false;
+/** When set, the route's answer lacks the field a Worker from before it would not send. */
+let olderWorker = false;
 
 const SECRETS = {
   password: "cli-password-mark-4410",
@@ -53,6 +55,7 @@ const SECRETS = {
   username: "cli-username-mark-4410",
   tenant: "cli-tenant-mark-4410",
   access: "cli-access-key-mark-4410",
+  accessResource: "cli-access-resource-mark-4410",
 };
 
 const server = Bun.serve({
@@ -65,6 +68,11 @@ const server = Bun.serve({
       const body = (await res.json()) as Record<string, any>;
       body.future_top_level = { added: "by a newer worker" };
       body.tapis.future_nested = 7;
+      return Response.json(body, { status: res.status });
+    }
+    if (olderWorker && res.ok) {
+      const body = (await res.json()) as Record<string, any>;
+      body.access.resource_name_configured = undefined;
       return Response.json(body, { status: res.status });
     }
     return res;
@@ -93,6 +101,7 @@ beforeEach(async () => {
   await seedComputeUsers(db);
   workerEnv = {};
   augment = false;
+  olderWorker = false;
   standin.reset();
   __resetTapisTokenCacheForTests();
   (globalThis as { NEMAR_TAPIS_API_URL?: string }).NEMAR_TAPIS_API_URL = undefined;
@@ -112,6 +121,7 @@ function configuredWorker(over: Record<string, unknown> = {}) {
     TAPIS_USERNAME: SECRETS.username,
     TAPIS_PASSWORD: SECRETS.password,
     ACCESS_GATEWAY_ATTRIBUTES_KEY: SECRETS.access,
+    ACCESS_RESOURCE_NAME: SECRETS.accessResource,
     ...over,
   };
 }
@@ -181,6 +191,8 @@ describe("status", () => {
     expect(r.stdout).toContain("TAPIS_AUTH_STRATEGY:missing");
     expect(r.stdout).toContain("records binding: no");
     expect(r.stdout).toContain("ACCESS key: no");
+    expect(r.stdout).toContain("ACCESS resource name: no");
+    expect(r.stdout).toContain("ACCESS reports wait until both are set");
     expect(r.stdout).toContain("Runtime image");
     expect(r.stdout).toContain("set: no (a python job stays created until it is)");
     expect(standin.log).toHaveLength(0);
@@ -210,6 +222,8 @@ describe("status", () => {
     expect(r.stdout).toContain("token: ok");
     expect(r.stdout).toContain("health: ok");
     expect(r.stdout).toContain("ACCESS key: yes");
+    expect(r.stdout).toContain("ACCESS resource name: yes");
+    expect(r.stdout).not.toContain("ACCESS reports wait");
     expectNoSecrets(r);
     const j = await runCli("owner", ["status", "--json"]);
     expect(JSON.parse(j.stdout).tapis).toEqual({
@@ -220,6 +234,33 @@ describe("status", () => {
       health: "ok",
     });
     expectNoSecrets(j);
+  });
+
+  test("a key without a resource name is not `configured`: the command says the reports wait, by name, and never the values", async () => {
+    configuredWorker({ ACCESS_RESOURCE_NAME: undefined });
+    const r = await runCli("owner", ["status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("ACCESS key: yes");
+    expect(r.stdout).toContain("ACCESS resource name: no");
+    expect(r.stdout).toContain("ACCESS reports wait until both are set");
+    expectNoSecrets(r);
+    const j = await runCli("owner", ["status", "--json"]);
+    expect(JSON.parse(j.stdout).access).toEqual({
+      key_configured: true,
+      resource_name_configured: false,
+    });
+    expectNoSecrets(j);
+  });
+
+  test("a Worker from before `resource_name_configured` is shown as unknown, never as not set", async () => {
+    olderWorker = true;
+    configuredWorker();
+    const r = await runCli("owner", ["status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("ACCESS key: yes");
+    expect(r.stdout).toContain("ACCESS resource name: unknown (this Worker does not report it)");
+    expect(r.stdout).not.toContain("ACCESS reports wait");
+    expectNoSecrets(r);
   });
 
   test("the runtime image: its digest when valid, a plain word when set to something that is not a pinned reference, and never the reference", async () => {

@@ -126,7 +126,12 @@ export async function computeStatus(
       results_binding: Boolean(env.COMPUTE_RESULTS),
       signing_configured: computeS3(env) !== null,
     },
-    access: { key_configured: present(env.ACCESS_GATEWAY_ATTRIBUTES_KEY) },
+    // PRESENCE ONLY, never a value. The ACCESS reports wait until BOTH are set (`accessReportConfig`), so
+    // the answer says each: a key without a resource name must not read as "configured".
+    access: {
+      key_configured: present(env.ACCESS_GATEWAY_ATTRIBUTES_KEY),
+      resource_name_configured: present(env.ACCESS_RESOURCE_NAME),
+    },
     runtime_image: runtimeImageStatus(env),
   };
 }
