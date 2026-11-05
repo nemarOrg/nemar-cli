@@ -92,6 +92,7 @@ import {
   normalizeEmail,
   normalizeOrcid,
 } from "../services/identity";
+import { oidcEndStatements } from "../services/oidc-cascade";
 import {
   CLI_STATE_TTL_MS,
   type CliOauthState,
@@ -265,6 +266,13 @@ async function relinkIdentity(
       resourceId: String(userId),
       details: JSON.stringify({ from: fromOrcid, to: toOrcid }),
     }),
+    // The proof the `person_proven_orcid` clients granted on was the OLD iD: a person who replaces it
+    // has to be asked again, and those clients are told (ADR 0119 rule 12). The other grants stay,
+    // because they never depended on an iD. Not conditional on the swap, because the batch is one
+    // transaction: it lands with the swap or not at all.
+    ...oidcEndStatements(userId, "orcid_changed", { rule: "person_proven_orcid" }).map((s) =>
+      env.DB.prepare(s.sql).bind(...s.binds),
+    ),
   ]);
 }
 
@@ -1213,6 +1221,26 @@ authOrcidRoutes.post("/orcid/finalize", zValidator("json", finalizeSchema), asyn
   }
 });
 
+/**
+ * Remove the account's ORCID link completely, in ONE batch: the identity row, `orcid_verified` and
+ * `users.orcid`, and, with them, what a `person_proven_orcid` client granted on that proof (ADR 0119
+ * rule 12). The grants, tokens and unused codes of those clients end and each is queued to be told;
+ * the grants of a client that asks only for an active account stay, because they never depended on an
+ * iD. All of it lands or none of it does, so an unlink can never leave the identity gone with a client
+ * still honouring the session.
+ */
+async function unlinkOrcid(env: Bindings, userId: number): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM oauth_identities WHERE user_id = ? AND provider = 'orcid'").bind(
+      userId,
+    ),
+    env.DB.prepare("UPDATE users SET orcid = NULL, orcid_verified = 0 WHERE id = ?").bind(userId),
+    ...oidcEndStatements(userId, "orcid_changed", { rule: "person_proven_orcid" }).map((s) =>
+      env.DB.prepare(s.sql).bind(...s.binds),
+    ),
+  ]);
+}
+
 authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
   // Cookie or bearer token (#1266, ADR 0044). Unlink is the one ORCID
   // operation with no browser step in it -- nothing to consent to, nothing to
@@ -1243,14 +1271,7 @@ authOrcidRoutes.post("/orcid/unlink", webSessionMiddleware, async (c) => {
   // locks the account out. The writes go in one D1 batch so we never leave
   // orcid_verified=1 with the identity row already gone (or vice versa).
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare(
-        "DELETE FROM oauth_identities WHERE user_id = ? AND provider = 'orcid'",
-      ).bind(actor.id),
-      c.env.DB.prepare("UPDATE users SET orcid = NULL, orcid_verified = 0 WHERE id = ?").bind(
-        actor.id,
-      ),
-    ]);
+    await unlinkOrcid(c.env, actor.id);
   } catch (err) {
     console.error("[auth-orcid] unlink failed", err);
     return c.json({ error: "Unlink failed" }, 500);

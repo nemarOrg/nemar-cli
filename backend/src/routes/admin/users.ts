@@ -48,6 +48,7 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
+import { oidcEndStatements } from "../../services/oidc-cascade";
 import { holderOfOidcSubject } from "../../services/oidc-subject";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
@@ -527,6 +528,11 @@ async function finalizeRevocation(
       .bind(user.id),
     // Their support tickets, queue references and away window go in the same batch (phase 3).
     ...mailReleaseStatements(user.id, "all").map((s) => db.prepare(s.sql).bind(...s.binds)),
+    // What the account holds at every OpenID Connect client: its grants, tokens and unused codes end,
+    // and each client with a back-channel logout address is queued to be told (ADR 0119 rule 12).
+    // In this batch for the same reason as the rest: a revoked account that is approved again must
+    // come back with nothing, and a cascade outside the batch could fail alone.
+    ...oidcEndStatements(user.id, "account_revoked").map((s) => db.prepare(s.sql).bind(...s.binds)),
   ]);
 
   // Update user status
@@ -771,6 +777,43 @@ export async function resolveEmailPrefsTarget(
  */
 export const KIND_CHANGE_GUARDED_UPDATE_SQL =
   "UPDATE users SET account_kind = ?, updated_at = datetime('now') WHERE id = ? AND account_kind = ?";
+
+/**
+ * Apply an account-kind change (the guarded update above) and, for a change AWAY FROM `person`, end
+ * what the account holds at the OpenID Connect clients that sign people in by `person_proven_orcid`
+ * (ADR 0119 rule 12): the account no longer meets that rule, so those grants, their tokens and their
+ * unused codes end and each such client with a logout address is queued to be told. The grants of a
+ * client that asks only for an active account stay. A change to `person`, or between two other kinds,
+ * ends nothing: no rule becomes false.
+ *
+ * ONE BATCH for a change away from `person`, so the kind and the ending land together. Each ending
+ * statement is conditional on the account NOT being a person now, rather than on this request's update
+ * having changed a row: a concurrent change that won the race also left the account a non-person, and
+ * the cascade it ran is idempotent. Returns whether THIS update changed the row, which is what the
+ * route reports as `kind_changed_concurrently` when it did not.
+ */
+async function applyKindChange(
+  db: D1Database,
+  target: { id: number; account_kind: AccountKind },
+  newKind: AccountKind,
+): Promise<boolean> {
+  const update = db
+    .prepare(KIND_CHANGE_GUARDED_UPDATE_SQL)
+    .bind(newKind, target.id, target.account_kind);
+  if (target.account_kind !== "person" || newKind === "person") {
+    return ((await update.run()).meta?.changes ?? 0) > 0;
+  }
+  const ending = oidcEndStatements(target.id, "kind_changed", { rule: "person_proven_orcid" }).map(
+    (s) =>
+      db
+        .prepare(
+          `${s.sql}\n   AND EXISTS (SELECT 1 FROM users WHERE id = ? AND account_kind <> 'person')`,
+        )
+        .bind(...s.binds, target.id),
+  );
+  const results = await db.batch([update, ...ending]);
+  return (results[0]?.meta?.changes ?? 0) > 0;
+}
 
 /**
  * The columns of one row of the admin listing.
@@ -1139,6 +1182,11 @@ export function registerUsersRoutes(admin: AdminRouter): void {
           // re-reads its role per request. Private-site sessions are left alone
           // for the same reason: `resolvePrincipal` reports the live role on
           // every call (ADR 0079, `PRIVATE_REVOKE_ALL_SQL`).
+          //
+          // OpenID Connect grants are not ended here (ADR 0119 rule 12): a token carries no role and
+          // no OIDC scope confers admin authority, so a demotion leaves nothing of theirs to
+          // downgrade. `oidc-cascade-nonmembership.test.ts` holds that the rows survive; a
+          // path that ENDS the credential (a revocation, a deletion) is in `OIDC_END_CALLERS`.
           const result = await db.batch([
             db
               .prepare(
@@ -1278,12 +1326,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         );
       }
 
-      const result = await db
-        .prepare(KIND_CHANGE_GUARDED_UPDATE_SQL)
-        .bind(newKind, target.id, target.account_kind)
-        .run();
+      const applied = await applyKindChange(db, target, newKind);
 
-      if ((result.meta?.changes ?? 0) === 0) {
+      if (!applied) {
         return c.json(
           {
             error: "kind_changed_concurrently",

@@ -7,11 +7,14 @@
  *   GET  /admin/oidc/clients/:client_id                one client
  *   POST /admin/oidc/clients/:client_id/rotate-secret  a new secret; `graceHours` (default 24)
  *                                                      keeps the old one valid for that long
- *   POST /admin/oidc/clients/:client_id/disable        cut a client off (the status only; what the
- *                                                      client holds is revoked by phase #2019)
+ *   POST /admin/oidc/clients/:client_id/disable        cut a client off: the status, and in the same
+ *                                                      batch every token, grant and unused code it holds
  *   GET  /admin/oidc/keys                              the signing keys, never their private half
  *   POST /admin/oidc/keys/rotate                       make the first keys, or rotate them
  *   POST /admin/oidc/keys/:kid/revoke                  withdraw a retired key from the key set
+ *   POST /admin/oidc/accounts/:id/end                  end an account's grants at every client and queue
+ *                                                      the logouts (the manual merge of ADR 0043, and the
+ *                                                      incident tool)
  *
  * WHO AND WHERE. `ownerMiddleware` first, so a caller is told what they are (401, 403) whether or not
  * the surface exists; then `oidcSurface`, which makes every route 404 unless the provider is on
@@ -33,24 +36,31 @@
 import type { Context } from "hono";
 import type { ZodTypeAny, z } from "zod";
 import {
+  OIDC_ACCOUNT_END_FIELDS,
   OIDC_CLIENT_CREATE_FIELDS,
   OIDC_CLIENT_ROTATE_FIELDS,
   OIDC_KEYS_ROTATE_FIELDS,
   type OidcAdminErrorCode,
+  oidcAccountEndRequestSchema,
   oidcClientCreateRequestSchema,
   oidcClientRotateRequestSchema,
   oidcKeysRotateRequestSchema,
 } from "../../../../shared/contract/oidc-admin";
 import {
+  OIDC_ACCOUNT_END_REASONS,
   OIDC_CLIENT_ID_HEX_LENGTH,
   OIDC_CLIENT_ID_PREFIX,
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
   OIDC_KID_HEX_LENGTH,
+  type OidcAccountEndReason,
+  type OidcEndReason,
   isOidcClientId,
   isOidcKid,
 } from "../../../../shared/oidc";
+import { auditLogStatement } from "../../db/audit-log";
 import { ownerMiddleware } from "../../middleware/auth";
+import { oidcEndStatements } from "../../services/oidc-cascade";
 import {
   createClient,
   disableClient,
@@ -140,6 +150,42 @@ function clientIdParam(c: Ctx): { id: string } | { response: Response } {
   return { id };
 }
 
+/**
+ * End an account's grants at every client, for `reason`: the owner's command for the manual merge of
+ * ADR 0043 (the loser of a merge stops being a person, and its grants end; the winner's are
+ * untouched) and the tool for an incident. One batch: the logouts are queued from the live grants,
+ * then the tokens and grants end and the unused codes go, and one audit row records the act, by the
+ * reason and the account id and nothing else.
+ *
+ * It ends ONLY the OpenID Connect holdings: it does not revoke the account, its keys or its sessions,
+ * which are other paths' (`finalizeRevocation`, the soft delete). It does not need the account to be
+ * active, and an account with nothing to end answers zeros: ending is idempotent. The counts are the
+ * rows each statement changed, read by the position `oidcEndStatements` promises.
+ */
+async function endAccount(c: Ctx, userId: number, reason: OidcEndReason): Promise<Response> {
+  const db = c.env.DB;
+  const account = await db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+  if (!account) return refusal(c, 404, "user_not_found", "There is no account with that id.");
+  const results = await db.batch([
+    ...oidcEndStatements(userId, reason).map((s) => db.prepare(s.sql).bind(...s.binds)),
+    auditLogStatement(db, {
+      userId: c.get("user").id,
+      action: "oidc.account.end",
+      resourceType: "user",
+      resourceId: String(userId),
+      details: JSON.stringify({ reason }),
+    }),
+  ]);
+  return c.json({
+    user_id: userId,
+    reason,
+    logouts_queued: results[0]?.meta?.changes ?? 0,
+    tokens_ended: results[1]?.meta?.changes ?? 0,
+    grants_ended: results[2]?.meta?.changes ?? 0,
+    codes_deleted: results[3]?.meta?.changes ?? 0,
+  });
+}
+
 export function registerOidcAdminRoutes(admin: AdminRouter): void {
   admin.use("/oidc/*", ownerMiddleware, oidcSurface, async (c, next) => {
     await next();
@@ -206,7 +252,23 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
     if ("response" in id) return id.response;
     const result = await disableClient(c.env, id.id, c.get("user").id);
     if (!result.ok) return refusal(c, 404, "client_not_found", "There is no client with that id.");
-    return c.json({ client: result.client, changed: result.changed });
+    return c.json({ client: result.client, changed: result.changed, revoked: result.revoked });
+  });
+
+  admin.post("/oidc/accounts/:id/end", async (c) => {
+    const raw = c.req.param("id") ?? "";
+    if (!/^[1-9][0-9]{0,15}$/.test(raw)) {
+      return refusal(
+        c,
+        400,
+        "invalid_user_id",
+        "That is not an account id (a whole number from 1).",
+      );
+    }
+    const parsed = await parseBody(c, oidcAccountEndRequestSchema, OIDC_ACCOUNT_END_FIELDS);
+    if (!parsed.ok) return parsed.response;
+    const reason = OIDC_ACCOUNT_END_REASONS[parsed.value.reason as OidcAccountEndReason];
+    return endAccount(c, Number(raw), reason);
   });
 
   admin.get("/oidc/keys", async (c) => {

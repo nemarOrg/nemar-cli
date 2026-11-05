@@ -273,6 +273,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /oidc/keys": 1,
   "POST /oidc/keys/rotate": 1,
   "POST /oidc/keys/:kid/revoke": 1,
+  // Phase #2019: the owner's command for the manual merge and the incident tool. A route added under
+  // /oidc/ inherits the three above and is its handler alone.
+  "POST /oidc/accounts/:id/end": 1,
 };
 
 describe("admin route inventory", () => {
@@ -327,7 +330,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(213);
+    expect(adminRoutes.routes.length).toBe(214);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

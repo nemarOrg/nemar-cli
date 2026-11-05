@@ -523,8 +523,11 @@ describe("what a refresh re-reads, and refuses without writing", () => {
       status: 401,
       error: "invalid_client",
     });
+    // Not spent, and revoked (phase #2019): disabling a client revokes everything it holds, so the
+    // token is gone and not merely unusable while the client is off.
     expect((await rowOf(f.first.refresh_token)).used_at).toBeNull();
-    expect((await rowOf(f.first.refresh_token)).revoked_at).toBeNull();
+    expect((await rowOf(f.first.refresh_token)).revoked_at).not.toBeNull();
+    expect((await rowOf(f.first.refresh_token)).revoked_reason).toBe("client_disabled");
   });
 
   test("a first-party grant stops refreshing once its client no longer qualifies as first-party", async () => {

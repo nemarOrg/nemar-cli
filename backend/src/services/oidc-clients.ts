@@ -47,11 +47,17 @@ import {
   isOidcSignInRule,
 } from "../../../shared/oidc.js";
 import { isPartnerHost } from "../../../shared/partner-hosts.js";
-import { applyEditWithAudit, auditLogStatement } from "../db/audit-log.js";
+import {
+  AUDIT_IF_PREVIOUS_CHANGED_SQL,
+  applyEditWithAudit,
+  auditLogParams,
+  auditLogStatement,
+} from "../db/audit-log.js";
 import { timingSafeEqual } from "../lib/constant-time.js";
 import type { Bindings } from "../types/bindings.js";
 import { isWebsitePagesHost } from "./cors-origins.js";
 import { isNonProductionEnv } from "./environment.js";
+import { oidcClientEndStatements } from "./oidc-cascade.js";
 import { randomHex, toBase64Url } from "./oidc-encoding.js";
 import { hashApiKey } from "./token.js";
 
@@ -861,27 +867,61 @@ export const DISABLE_CLIENT_SQL = `UPDATE oidc_clients
   SET status = 'disabled', disabled_at = datetime('now'), updated_at = datetime('now')
   WHERE client_id = ? AND status = 'active'`;
 
+/** What disabling a client revoked, as the rows the batch changed: the owner is told these. */
+export interface DisabledHoldings {
+  tokens: number;
+  grants: number;
+  codes: number;
+}
+
 /**
- * Cut a client off: the status and the time, nothing else. Revoking what the client holds is the
- * revocation phase's (#2019); here a disabled client simply authenticates with no secret.
- * Idempotent: disabling a disabled client changes nothing and writes no audit row.
+ * Cut a client off, in ONE batch: the status and the time, then everything the client holds. Every
+ * token it was issued (an account's, and the client's own), every grant any account made to it and
+ * every unused code are revoked or deleted, so the client has nothing left to use and a person's
+ * consent to it is gone (ADR 0119 rule 12). It queues NO logout: the owner cut the client off and
+ * telling it is not owed (`oidcClientEndStatements`).
+ *
+ * The three statements are NOT conditional on this request having changed the status, and that is on
+ * purpose: they are keyed by the client and idempotent, so disabling a client that is already
+ * disabled revokes whatever it may still hold (a client disabled before the revocation existed
+ * included) and a second run reports what it found. The audit row is written only when the status
+ * changed (`AUDIT_IF_PREVIOUS_CHANGED_SQL` reads the statement just before it, so it directly follows
+ * the update); it holds the shape of the act, never a name or an address.
  */
 export async function disableClient(
   env: Pick<Bindings, "DB">,
   clientId: string,
   actorId: number,
 ): Promise<
-  { ok: true; client: ClientView; changed: boolean } | { ok: false; code: "client_not_found" }
+  | { ok: true; client: ClientView; changed: boolean; revoked: DisabledHoldings }
+  | { ok: false; code: "client_not_found" }
 > {
   const db = env.DB;
-  const changed = await applyEditWithAudit(db, db.prepare(DISABLE_CLIENT_SQL).bind(clientId), {
-    userId: actorId,
-    action: "oidc.client.disable",
-    resourceType: "oidc_client",
-    resourceId: clientId,
-    details: null,
-  });
+  const ending = oidcClientEndStatements(clientId);
+  const results = await db.batch([
+    db.prepare(DISABLE_CLIENT_SQL).bind(clientId),
+    db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
+      ...auditLogParams({
+        userId: actorId,
+        action: "oidc.client.disable",
+        resourceType: "oidc_client",
+        resourceId: clientId,
+        details: null,
+      }),
+    ),
+    ...ending.map((s) => db.prepare(s.sql).bind(...s.binds)),
+  ]);
+  const changed = (results[0]?.meta?.changes ?? 0) > 0;
   const client = await getClient(db, clientId);
   if (!client) return { ok: false, code: "client_not_found" };
-  return { ok: true, client, changed };
+  return {
+    ok: true,
+    client,
+    changed,
+    revoked: {
+      tokens: results[2]?.meta?.changes ?? 0,
+      grants: results[3]?.meta?.changes ?? 0,
+      codes: results[4]?.meta?.changes ?? 0,
+    },
+  };
 }
