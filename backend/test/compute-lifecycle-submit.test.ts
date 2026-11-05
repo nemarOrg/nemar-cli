@@ -24,7 +24,11 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { PARTITIONS, type PartitionName } from "../../shared/contract/compute";
-import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
+import {
+  BOUND_ROWS_SQL,
+  runComputeAdvanceCron,
+  sweepComputeCancellations,
+} from "../src/services/compute-advance";
 import {
   CLAIM_SUBMIT_SQL,
   RELEASE_SUBMIT_SQL,
@@ -108,6 +112,27 @@ describe("the tick cannot starve", () => {
       const now = await reread(healthy.env, row.job.id);
       expect([now.state, now.examined_at === null]).toEqual(["unreported", false]);
     }
+  });
+
+  // Round 2 of #2041: `ORDER BY COALESCE(examined_at, '')` could not use the index built for the rotation,
+  // so every tick walked every row that ever had a Tapis job.
+  test("the live-row query is served by the rotation's own index, and a never-examined row still comes first", async () => {
+    const plan = (
+      fx.harness.db
+        .query(`EXPLAIN QUERY PLAN ${BOUND_ROWS_SQL.replace("?1", "10")}`)
+        .all() as Array<{ detail: string }>
+    ).map((r) => r.detail);
+    expect(plan.some((line) => line.includes("compute_jobs_examined"))).toBe(true);
+    // The order is unchanged by the bare column: NULL sorts before every time.
+    const a = await unreadable(40);
+    const b = await unreadable(41);
+    await b.env.DB.prepare("UPDATE compute_jobs SET examined_at = datetime('now') WHERE id = ?")
+      .bind(b.job.id)
+      .run();
+    const ids = (await a.env.DB.prepare(BOUND_ROWS_SQL).bind(10).all<{ id: string }>()).results.map(
+      (r) => r.id,
+    );
+    expect(ids.indexOf(a.job.id)).toBeLessThan(ids.indexOf(b.job.id));
   });
 
   test("rows are stamped as examined whether the step succeeds or not, and the stamp moves a row to the back of the line", async () => {

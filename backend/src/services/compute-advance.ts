@@ -70,11 +70,15 @@ export const ADVANCE_ROWS_PER_TICK = 10;
 
 /**
  * The live rows Tapis has accepted (a `tapis_uuid`), least recently EXAMINED first (a row never
- * examined comes first): NEMAR's own jobs, and a partner's once Tapis has accepted it.
+ * examined comes first: SQLite sorts NULL before every value): NEMAR's own jobs, and a partner's once
+ * Tapis has accepted it. The ORDER BY names the bare column so that the partial index
+ * `compute_jobs_examined` (live rows only, by `examined_at`) serves it; with `COALESCE(examined_at, '')`
+ * in its place the planner could not use the index and walked every row that ever had a Tapis job
+ * (`compute-lifecycle-submit.test.ts` pins the plan).
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL
-  ORDER BY COALESCE(examined_at, '') ASC, created_at ASC LIMIT ?1`;
+  ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
  * The `created` and `uploading` rows with no Tapis job, least recently examined first: the ones to be
@@ -83,11 +87,11 @@ export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
  */
 export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
-  ORDER BY COALESCE(examined_at, '') ASC, created_at ASC LIMIT ?1`;
+  ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /** Rows with a Tapis job NEMAR made that no row owns, whose cancel is still owed. */
 export const ORPHAN_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE orphan_tapis_uuid IS NOT NULL ORDER BY COALESCE(examined_at, '') ASC LIMIT ?1`;
+  WHERE orphan_tapis_uuid IS NOT NULL ORDER BY examined_at ASC LIMIT ?1`;
 
 /** Live rows with a cancel recorded, oldest request first. */
 export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
