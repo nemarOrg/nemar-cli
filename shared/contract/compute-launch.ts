@@ -330,6 +330,11 @@ function isPrintable(text: string): boolean {
   return true;
 }
 
+/** The base64url text, without padding, of a string of bytes (one per UTF-16 unit, each below 0x100). */
+function toBase64Url(bytes: string): string {
+  return btoa(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 /**
  * The `NEMAR_LAUNCH_SPEC` value for a launch specification's text (the string
  * {@link encodeLaunchSpec} returns): its bytes in base64url without padding, nothing but the
@@ -354,9 +359,8 @@ export function encodeLaunchSpecEnv(text: string): string {
   if (!isPrintable(text)) {
     throw new TypeError("the launch specification text is not printable ASCII");
   }
-  // `btoa` reads each UTF-16 unit as one byte, which for printable ASCII is the byte itself. No
-  // second check of the length: `ceil(n * 4 / 3)` of a text within the cap is within the bound.
-  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  // No second check of the length: `ceil(n * 4 / 3)` of a text within the cap is within the bound.
+  return toBase64Url(text);
 }
 
 /** Why {@link decodeLaunchSpecEnv} refused a value: a fixed word, never a part of the value. */
@@ -370,19 +374,23 @@ export const LAUNCH_SPEC_ENV_REFUSALS = [
 export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
 
 /**
- * The text a `NEMAR_LAUNCH_SPEC` value carries, or the reason it is not one. STRICT: the value is a
- * non-empty string of at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, only the
- * {@link SHELL_INERT_ENV_ALPHABET} (so no padding, no `+` or `/`, no whitespace or line break, and
- * a raw JSON document, which starts with `{`, is refused: nothing is registered with a tenant, so
- * no earlier format is accepted), whose length is not 1 modulo 4, and which decodes to printable
- * ASCII only (every byte 0x20 to 0x7e). The caller then parses the text as JSON; a launcher hashes the
- * TEXT before it does.
+ * The text a `NEMAR_LAUNCH_SPEC` value carries, or the reason it is not one. STRICT, and one answer
+ * for every value: the checks run in this order, and the first to fail names the refusal.
  *
- * A value that breaks more than one rule is refused with the word of one of them; which one is not
- * part of the contract. The last character's unused trailing bits are not checked (RFC 4648
- * section 3.5 leaves it to the decoder): the encoder always writes them as zero, and a value that
- * differs only there decodes to the same text and so to the same digest. Pure; never throws, and a
- * refusal is a word that holds no part of the value.
+ *  1. the value is a string, else `not_base64url`;
+ *  2. it is not empty, else `empty`;
+ *  3. it is at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, else `too_long`;
+ *  4. it is made only of the {@link SHELL_INERT_ENV_ALPHABET}, else `not_base64url` (so no padding,
+ *     no `+` or `/`, no whitespace or line break; a raw JSON document, which starts with `{`, is
+ *     refused here: nothing is registered with a tenant, so no earlier format is accepted);
+ *  5. its length is not 1 modulo 4, else `bad_length`;
+ *  6. it decodes to bytes that are all printable ASCII, 0x20 to 0x7e (no control byte, not DEL, and
+ *     nothing from 0x80 up), else `not_printable`;
+ *  7. it is CANONICAL, else `not_base64url`: encoding the decoded text again gives the value back,
+ *     so the unused trailing bits of its last character are zero and there is one value per text.
+ *
+ * The caller then parses the text as JSON; a launcher hashes the TEXT before it does. Pure; never
+ * throws, and a refusal is a word that holds no part of the value.
  */
 export function decodeLaunchSpecEnv(
   value: string,
@@ -396,6 +404,7 @@ export function decodeLaunchSpecEnv(
   const standard = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "="));
   if (!isPrintable(binary)) return refuse("not_printable");
+  if (toBase64Url(binary) !== value) return refuse("not_base64url");
   return { ok: true, text: binary };
 }
 

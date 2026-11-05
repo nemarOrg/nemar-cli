@@ -3713,11 +3713,48 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       expect(Object.keys(ok).sort()).toEqual(["ok", "text"]);
     });
 
-    test("a value that differs from the encoder's only in the unused trailing bits decodes to the same text", () => {
-      // Documented, not endorsed: the digest is over the text, so a non-canonical value is the same
-      // specification. The encoder never writes one (see the oracle test above).
+    test("only the canonical value of a text is accepted: the unused trailing bits are zero", () => {
+      // "A" is the byte 0x41, two characters, and the last of them has four bits to spare. The
+      // canonical value is QQ; QR decodes to the same byte and is not the value the encoder writes.
       expect(decodeLaunchSpecEnv("QQ")).toEqual({ ok: true, text: "A" });
-      expect(decodeLaunchSpecEnv("QR")).toEqual({ ok: true, text: "A" });
+      expect(refusal("QR")).toBe("not_base64url");
+      // The same for a text of two bytes (three characters, two spare bits): QUI is canonical.
+      expect(decodeLaunchSpecEnv("QUI")).toEqual({ ok: true, text: "AB" });
+      expect(refusal("QUJ")).toBe("not_base64url");
+      // Every value of every one-byte and two-byte printable text: the spare bits of the last
+      // character take each of their values, and exactly the zero one is the encoder's. The other
+      // characters, and so the decoded bytes, do not change, so nothing but canonicity is tested.
+      const at = (ch: string) => ALPHABET.indexOf(ch);
+      const printable = Array.from({ length: 95 }, (_, i) => String.fromCharCode(0x20 + i));
+      const texts = [...printable, ...printable.flatMap((a) => printable.map((b) => `${a}${b}`))];
+      for (const text of texts) {
+        const canonical = oracle(text);
+        const spare = text.length === 1 ? 16 : 4; // 2^4 values in two characters, 2^2 in three
+        const last = canonical.slice(-1);
+        expect(at(last) % spare, JSON.stringify(text)).toBe(0);
+        for (let bits = 0; bits < spare; bits++) {
+          const value = canonical.slice(0, -1) + ALPHABET[at(last) + bits];
+          expect(refusal(value), `${JSON.stringify(text)} with spare bits ${bits}`).toBe(
+            bits === 0 ? "ok" : "not_base64url",
+          );
+        }
+      }
+    });
+
+    test("the order of the checks is fixed: a value that breaks two rules gets the word of the earlier", () => {
+      const rows: Array<[string, string, string]> = [
+        [
+          "over the bound and not in the alphabet",
+          "{".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1),
+          "too_long",
+        ],
+        ["not in the alphabet and 1 modulo 4 long", "A{{{{", "not_base64url"],
+        ["empty is empty, not a bad value", "", "empty"],
+        ["1 modulo 4 long", "AAAAA", "bad_length"],
+        ["not printable and not canonical: AB is NUL with spare bits", "AB", "not_printable"],
+        ["printable and not canonical: QR is A with spare bits", "QR", "not_base64url"],
+      ];
+      for (const [label, value, reason] of rows) expect(refusal(value), label).toBe(reason);
     });
   });
 
