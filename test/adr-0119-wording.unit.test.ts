@@ -18,6 +18,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import {
+  OIDC_END_REASONS,
+  OIDC_LOGOUT_ERROR_CLASSES,
+  OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
+} from "../shared/oidc";
 
 const DECISIONS = join(import.meta.dir, "../.context/decisions");
 const ADR_FILE = readdirSync(DECISIONS).find((f) => f.startsWith("0119-")) as string;
@@ -154,6 +159,89 @@ describe("ADR 0119 records what the token phase settled (#2018)", () => {
     expect(fourteen).toMatch(/`oidcBearer` is the one middleware/);
     expect(fourteen).toMatch(/shown to its own client only/);
     expect(readmeLine).toContain("oidc_token_not_accepted");
-    expect(adr).toMatch(/Fourteen rules inside that/);
+    expect(adr).toMatch(/Fifteen rules inside that/);
+  });
+});
+
+describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
+  test("rule 12: the cascade is one function, its order, its callers, its filters and the client's disabling", () => {
+    const twelve = rule(12);
+    expect(twelve).toContain("`oidcEndStatements`");
+    expect(twelve).toContain("`OIDC_END_CALLERS`");
+    expect(twelve).toMatch(/BEFORE they are revoked/);
+    expect(twelve).toMatch(/A used code stays/);
+    expect(twelve).toMatch(/a later sign-in is a NEW grant/);
+    expect(twelve).toMatch(/`oidc_clients.id` row, never the public `oc_` string/);
+    expect(twelve).toMatch(/what it selects is GRANTS/);
+    expect(twelve).toContain("`{scopePrefix}`");
+    expect(twelve).toMatch(/no caller yet, because its state does not exist/);
+    expect(twelve).toContain("`oidcClientEndStatements`");
+    expect(twelve).toMatch(/does not revoke the account/);
+    expect(readmeLine).toContain("oidcEndStatements");
+    expect(readmeLine).toContain("OIDC_END_CALLERS");
+    expect(readmeLine).toContain("nemar admin oidc end-account");
+  });
+
+  test("every end reason and every delivery error class the code has is named in the ADR", () => {
+    for (const word of [...OIDC_END_REASONS, ...OIDC_LOGOUT_ERROR_CLASSES]) {
+      expect(adr, word).toContain(`\`${word}\``);
+    }
+  });
+
+  test("rule 15: the intent is a row, the call is afterwards, the token and the request are exact", () => {
+    const fifteen = rule(15);
+    expect(fifteen).toMatch(/never touches the network/);
+    expect(fifteen).toMatch(/`waitUntil` right after the commit/);
+    expect(fifteen).toMatch(/every 30 minutes, in production only/);
+    expect(fifteen).toMatch(/at most 20 deliveries a tick/);
+    expect(fifteen).toContain("`typ: logout+jwt`");
+    expect(fifteen).toMatch(/two minutes later/);
+    expect(fifteen).toMatch(/no `nonce`/);
+    expect(fifteen).toMatch(/no `sid`/);
+    expect(fifteen).toMatch(/new for every attempt/);
+    expect(fifteen).toMatch(/no `Authorization`, no cookie, no client secret, no API key/);
+    expect(fifteen).toMatch(
+      /waits 5 seconds, never follows a redirect, and never reads the answer's body/,
+    );
+    expect(fifteen).toMatch(/`200` or `204` is `sent`/);
+    expect(fifteen).toMatch(/the first attempt and five retries/);
+    expect(fifteen).toMatch(/The wait is the EARLIEST time/);
+    expect(fifteen).toMatch(/claimed before it is made/);
+  });
+
+  test("rule 15: the retry schedule in the ADR is the one in the code", () => {
+    const words = (s: number): string =>
+      s < 3600
+        ? `${s / 60} minute${s === 60 ? "" : "s"}`
+        : `${s / 3600} hour${s === 3600 ? "" : "s"}`;
+    const delays = OIDC_LOGOUT_RETRY_DELAYS_SECONDS.map(words);
+    const spelled = `${delays.slice(0, -1).join(", ")} and ${delays.at(-1)}`;
+    expect(rule(15)).toContain(spelled);
+  });
+
+  test("rule 15: the fence is exact, fails closed, and the var is the owner's", () => {
+    const fifteen = rule(15);
+    expect(fifteen).toMatch(/checked again at send time and not only at registration/);
+    expect(fifteen).toMatch(/`ENVIRONMENT` exactly `production`/);
+    expect(fifteen).toMatch(/an unset or mistyped value included/);
+    expect(fifteen).toContain("`OIDC_LOGOUT_DEV_HOSTS`");
+    expect(fifteen).toMatch(/does not admit its subdomains/);
+    expect(fifteen).toMatch(/fails closed the other way from `isNonProductionEnv`/);
+    expect(fifteen).toMatch(/absent from `wrangler-sccn.toml`, is ignored in production/);
+    expect(fifteen).toMatch(/does not resolve a name itself/);
+    expect(readmeLine).toContain("OIDC_LOGOUT_DEV_HOSTS");
+  });
+
+  test("the consequences and the not-decided list say what a logout cannot promise", () => {
+    const consequences = adr.slice(adr.indexOf("## Consequences"), adr.indexOf("## Alternatives"));
+    expect(consequences).toMatch(/A logout is a best effort, and the revocation is not/);
+    expect(consequences).toMatch(/Outside production nothing retries/);
+    const notDecided = adr.slice(
+      adr.indexOf("### Not decided here"),
+      adr.indexOf("## Consequences"),
+    );
+    expect(notDecided).toMatch(/`408` or a `429`/);
+    expect(notDecided).toMatch(/How long a delivery row is kept/);
+    expect(notDecided).toMatch(/`sid` claim/);
   });
 });

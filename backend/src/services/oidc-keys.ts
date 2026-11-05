@@ -196,7 +196,7 @@ export const CURRENT_KEY_SQL =
  * which is how a client picks the published key that verifies it.
  *
  * `typ` is the token type in the header: `JWT` for an identity token, and `logout+jwt` for a back-channel
- * logout token (OpenID Connect Back-Channel Logout 1.0), which the logout phase signs with this.
+ * logout token (OpenID Connect Back-Channel Logout 1.0), which `services/oidc-logout.ts` signs with this.
  *
  * Throws {@link OidcNotConfiguredError} with no usable secret, {@link NoSigningKeyError} with no
  * current key, an `EncryptionError` when the stored key cannot be decrypted under the secret, and a
