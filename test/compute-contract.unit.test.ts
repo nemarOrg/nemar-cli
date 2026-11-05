@@ -3399,9 +3399,9 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       return state;
     };
   }
-  /** `bytes` ASCII characters, any of 0x00 to 0x7f, so every 6-bit group occurs. */
-  function asciiText(next: () => number, bytes: number): string {
-    return Array.from({ length: bytes }, () => String.fromCharCode(next() % 128)).join("");
+  /** `bytes` printable ASCII characters, any of 0x20 to 0x7e: the only text the encoder takes. */
+  function printableText(next: () => number, bytes: number): string {
+    return Array.from({ length: bytes }, () => String.fromCharCode(0x20 + (next() % 95))).join("");
   }
 
   test("the bound is ceil(65536 * 4 / 3), 87382, and the alphabet is the 64 characters of RFC 4648 section 5", () => {
@@ -3442,9 +3442,10 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
   test("encodeLaunchSpecEnv is base64url without padding, equal to an independent oracle", () => {
     const next = sequence(0x9e3779b9);
     const texts = [
-      ...Array.from({ length: 128 }, (_, byte) => String.fromCharCode(byte)),
-      ...Array.from({ length: 200 }, (_, i) => asciiText(next, 1 + (i % 40))),
-      ...Array.from({ length: 60 }, () => asciiText(next, 1 + (next() % 3000))),
+      // Each of the 95 printable characters alone: 0x20 (space) to 0x7e (tilde).
+      ...Array.from({ length: 95 }, (_, i) => String.fromCharCode(0x20 + i)),
+      ...Array.from({ length: 200 }, (_, i) => printableText(next, 1 + (i % 40))),
+      ...Array.from({ length: 60 }, () => printableText(next, 1 + (next() % 3000))),
     ];
     for (const text of texts) {
       const value = encodeLaunchSpecEnv(text);
@@ -3459,7 +3460,7 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
 
   test("a text of exactly 65536 bytes is 87382 characters and one byte more is refused", () => {
     const next = sequence(7);
-    const fits = asciiText(next, LAUNCH_SPEC_MAX_BYTES);
+    const fits = printableText(next, LAUNCH_SPEC_MAX_BYTES);
     const value = encodeLaunchSpecEnv(fits);
     expect(value.length).toBe(LAUNCH_SPEC_ENV_MAX_CHARS);
     expect(value).toBe(oracle(fits));
@@ -3489,22 +3490,58 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
     expect(() => encodeLaunchSpec(withTail(m + 1))).toThrow(RangeError);
   });
 
-  test("encodeLaunchSpecEnv refuses what is not the text of a launch specification", () => {
-    expect(() => encodeLaunchSpecEnv("")).toThrow(TypeError);
-    expect(() => encodeLaunchSpecEnv("café")).toThrow(TypeError);
-    expect(() => encodeLaunchSpecEnv("\u0080")).toThrow(TypeError);
+  test("encodeLaunchSpecEnv refuses every byte outside 0x20 to 0x7e with a TypeError, and accepts both ends", () => {
+    // The rule is on the unit (the text is ASCII-only JSON, so a unit is a byte): a control byte, DEL,
+    // and everything from 0x80 up, alone and inside an otherwise good text.
+    for (let unit = 0; unit < 0x300; unit++) {
+      const ch = String.fromCharCode(unit);
+      const printable = unit >= 0x20 && unit <= 0x7e;
+      for (const text of [ch, `ab${ch}cd`, `${ch}abc`, `abc${ch}`]) {
+        const label = `U+${unit.toString(16).padStart(4, "0")} in ${JSON.stringify(text)}`;
+        if (printable) expect(encodeLaunchSpecEnv(text), label).toBe(oracle(text));
+        else expect(() => encodeLaunchSpecEnv(text), label).toThrow(TypeError);
+      }
+    }
     expect(() => encodeLaunchSpecEnv("a\u{1F600}")).toThrow(TypeError);
+    // The ends of the range: the space and the tilde.
+    expect(encodeLaunchSpecEnv(" ")).toBe("IA");
+    expect(encodeLaunchSpecEnv("~")).toBe("fg");
+    // DEL, the byte just above the range, is refused (the decoder refuses it too: see below).
+    expect(() => encodeLaunchSpecEnv("\u007f")).toThrow(TypeError);
+    // Not text at all.
+    expect(() => encodeLaunchSpecEnv("")).toThrow(TypeError);
     expect(() => encodeLaunchSpecEnv(undefined as unknown as string)).toThrow(TypeError);
     expect(() => encodeLaunchSpecEnv(7 as unknown as string)).toThrow(TypeError);
-    // The last ASCII character and the first byte of the other half.
-    expect(encodeLaunchSpecEnv("\u007f")).toBe("fw");
-    expect(() => encodeLaunchSpecEnv("\u0080")).toThrow();
+  });
+
+  test("no refusal of the encoder holds any part of the text, which holds a token", () => {
+    const secret = "SECRETTOKEN0123456789";
+    const refused: Array<[string, unknown]> = [
+      ["a control byte", `${secret}\u0000`],
+      ["DEL", `${secret}\u007f`],
+      ["a character from 0x80 up", `${secret}\u00e9`],
+      ["a character outside the Basic Multilingual Plane", `${secret}\u{1F600}`],
+      ["over the cap", secret.repeat(LAUNCH_SPEC_MAX_BYTES)],
+      ["not a string", { toString: () => secret }],
+    ];
+    for (const [label, text] of refused) {
+      let error: unknown;
+      try {
+        encodeLaunchSpecEnv(text as string);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error, label).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message, label).not.toContain("SECRET");
+      expect(message, label).not.toContain("0123456789");
+    }
   });
 
   test("decodeLaunchSpecEnv is the inverse of encodeLaunchSpecEnv, and agrees with the oracle", () => {
     const next = sequence(0x1234abcd);
     for (let i = 0; i < 300; i++) {
-      const text = asciiText(next, 1 + (i % 50) + (i % 7 === 0 ? next() % 2000 : 0));
+      const text = printableText(next, 1 + (i % 50) + (i % 7 === 0 ? next() % 2000 : 0));
       const value = oracle(text);
       expect(decodeLaunchSpecEnv(value), JSON.stringify(text)).toEqual({ ok: true, text });
       expect(decodeLaunchSpecEnv(encodeLaunchSpecEnv(text))).toEqual({ ok: true, text });
@@ -3528,10 +3565,11 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       expect(refusal("A".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1))).toBe("too_long");
       expect(refusal("A".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 2))).toBe("too_long");
       expect(refusal("A".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 5))).toBe("too_long");
-      // The longest accepted value decodes to the 64 KiB the launcher reads, and no more.
-      const longest = decodeLaunchSpecEnv("A".repeat(LAUNCH_SPEC_ENV_MAX_CHARS));
-      expect(longest.ok).toBe(true);
-      expect(longest.ok && longest.text.length).toBe(LAUNCH_SPEC_MAX_BYTES);
+      // The longest accepted value is the encoding of the largest text, 64 KiB of printable ASCII.
+      const text = printableText(sequence(3), LAUNCH_SPEC_MAX_BYTES);
+      const longest = oracle(text);
+      expect(longest.length).toBe(LAUNCH_SPEC_ENV_MAX_CHARS);
+      expect(decodeLaunchSpecEnv(longest)).toEqual({ ok: true, text });
     });
 
     test("a character outside the alphabet: padding, the standard alphabet's two, whitespace, a line break, non-ASCII", () => {
@@ -3589,24 +3627,42 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       for (const length of [1, 5, 9, 13, 101, 4001]) {
         expect(refusal("A".repeat(length)), `length ${length}`).toBe("bad_length");
       }
-      // The other three residues are fine: 0, 2 and 3 characters left over.
-      for (const length of [4, 6, 7, 8, 10, 11, 12]) {
-        expect(refusal("A".repeat(length)), `length ${length}`).toBe("ok");
+      // The other three residues are fine: 0, 2 and 3 characters left over, for texts of 3n, 3n+1
+      // and 3n+2 bytes. (`AAAA` is a good length and a bad value: it is three NUL bytes.)
+      for (const bytes of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+        const value = oracle("abcdefghijkl".slice(0, bytes));
+        expect(refusal(value), `${bytes} bytes, ${value.length} characters`).toBe("ok");
       }
     });
 
-    test("bytes from 0x80 up are refused, and 0x7f is the last one accepted", () => {
-      expect(decodeLaunchSpecEnv("fw")).toEqual({ ok: true, text: "\u007f" });
-      expect(refusal("gA")).toBe("not_ascii");
-      expect(refusal("w6k")).toBe("not_ascii");
-      expect(refusal(Buffer.from("café", "utf8").toString("base64url"))).toBe("not_ascii");
-      expect(refusal(Buffer.from([0x41, 0xff, 0x42]).toString("base64url"))).toBe("not_ascii");
-      // One non-ASCII byte anywhere in a long, otherwise ASCII, value.
-      const bytes = Buffer.alloc(3000, 0x61);
-      bytes[2999] = 0x80;
-      expect(refusal(bytes.toString("base64url"))).toBe("not_ascii");
-      bytes[2999] = 0x7f;
-      expect(refusal(bytes.toString("base64url"))).toBe("ok");
+    test("a decoded byte outside 0x20 to 0x7e is refused as not printable, whichever byte it is", () => {
+      // All 256 byte values alone, each as the encoder-canonical value of that byte: only 0x20 to 0x7e
+      // (space to tilde) are text. NUL, the other control bytes and DEL (0x7f) are not, and nothing
+      // from 0x80 up is.
+      for (let byte = 0; byte < 0x100; byte++) {
+        const value = Buffer.from([byte]).toString("base64url");
+        const printable = byte >= 0x20 && byte <= 0x7e;
+        expect(refusal(value), `byte 0x${byte.toString(16).padStart(2, "0")}`).toBe(
+          printable ? "ok" : "not_printable",
+        );
+      }
+      expect(decodeLaunchSpecEnv("fg")).toEqual({ ok: true, text: "~" });
+      expect(decodeLaunchSpecEnv("IA")).toEqual({ ok: true, text: " " });
+      expect(refusal("fw")).toBe("not_printable"); // DEL, 0x7f
+      expect(refusal("AA")).toBe("not_printable"); // NUL
+      expect(refusal("gA")).toBe("not_printable"); // 0x80
+      expect(refusal("w6k")).toBe("not_printable"); // an e with an acute accent, as two UTF-8 bytes
+      expect(refusal(Buffer.from([0x41, 0xff, 0x42]).toString("base64url"))).toBe("not_printable");
+      // One bad byte at the start, the middle and the end of a long, otherwise printable, value.
+      for (const bad of [0x00, 0x0a, 0x1f, 0x7f, 0x80, 0xff]) {
+        for (const at of [0, 1499, 2999]) {
+          const bytes = Buffer.alloc(3000, 0x61);
+          bytes[at] = bad;
+          expect(refusal(bytes.toString("base64url")), `0x${bad.toString(16)} at ${at}`).toBe(
+            "not_printable",
+          );
+        }
+      }
     });
 
     test("anything that is not a string is refused rather than thrown at", () => {
@@ -3615,19 +3671,30 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       }
     });
 
-    test("the words are a closed list, and a refusal holds no part of the value", () => {
+    test("the words are a closed list of five, each reached, and a refusal holds no part of the value", () => {
       expect([...LAUNCH_SPEC_ENV_REFUSALS]).toEqual([
         "empty",
         "too_long",
         "not_base64url",
         "bad_length",
-        "not_ascii",
+        "not_printable",
       ]);
-      const secret = "SECRETSECRET{";
-      const out = decodeLaunchSpecEnv(secret);
-      expect(out).toEqual({ ok: false, reason: "not_base64url" });
-      expect(JSON.stringify(out)).not.toContain("SECRET");
-      expect(Object.keys(out).sort()).toEqual(["ok", "reason"]);
+      // One value per word, each made of the secret where the rule lets it be: the refusal is the
+      // word and nothing else, so none of the value can be in it.
+      const rows: Array<[string, string]> = [
+        ["", "empty"],
+        ["SECRET".repeat(20_000), "too_long"],
+        ["SECRETSECRET{", "not_base64url"],
+        ["SECRETSECRETS", "bad_length"],
+        ["SECRETSECRET", "not_printable"],
+      ];
+      for (const [value, reason] of rows) {
+        const out = decodeLaunchSpecEnv(value);
+        expect(out, reason).toEqual({ ok: false, reason });
+        expect(JSON.stringify(out), reason).not.toContain("SECRET");
+        expect(Object.keys(out).sort(), reason).toEqual(["ok", "reason"]);
+      }
+      expect(new Set(rows.map(([, reason]) => reason))).toEqual(new Set(LAUNCH_SPEC_ENV_REFUSALS));
       const ok = decodeLaunchSpecEnv("QUJD");
       expect(Object.keys(ok).sort()).toEqual(["ok", "text"]);
     });

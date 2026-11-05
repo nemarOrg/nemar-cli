@@ -317,10 +317,15 @@ export function encodeLaunchSpec(spec: unknown): string {
   return text;
 }
 
-/** Every UTF-16 unit of the text is below 0x80, so each is one ASCII byte. */
-function isAscii(text: string): boolean {
+/**
+ * Every UTF-16 unit of the text is a printable ASCII character: 0x20 (space) to 0x7e (tilde). No
+ * control byte, not DEL (0x7f), nothing from 0x80 up. The launch specification's JSON text always is
+ * (`encodeLaunchSpec` escapes the rest), and the decoded text of a value has to be.
+ */
+function isPrintable(text: string): boolean {
   for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) > 0x7f) return false;
+    const unit = text.charCodeAt(i);
+    if (unit < 0x20 || unit > 0x7e) return false;
   }
   return true;
 }
@@ -333,18 +338,20 @@ function isAscii(text: string): boolean {
  * recorded. The text is taken as the one thing the digests are over, rather than the specification
  * again, so the Worker validates and escapes once and the bytes it hashes are the bytes it encodes.
  *
- * Checks what it can see of the text (non-empty, ASCII only, within 64 KiB, the cap
- * `encodeLaunchSpec` already enforced) and then the length of what it wrote. Throws TypeError for
- * text that is not ASCII and RangeError for text over the cap or an encoding over the bound; neither
- * message holds a value, since the text holds a token. The inverse of {@link decodeLaunchSpecEnv}.
+ * Every refusal is a fixed message that holds no part of the text, which holds a token. Throws
+ * TypeError for text that is not a string, is empty, or has a byte outside 0x20 to 0x7e (a control
+ * byte, DEL, or anything from 0x80 up), and RangeError for text over the 64 KiB cap. The inverse of
+ * {@link decodeLaunchSpecEnv}.
  */
 export function encodeLaunchSpecEnv(text: string): string {
   if (typeof text !== "string" || text.length === 0) {
-    throw new TypeError("the launch specification text is empty");
+    throw new TypeError("the launch specification text is not a non-empty string");
   }
-  if (!isAscii(text)) throw new TypeError("the launch specification text is not ASCII");
   if (text.length > LAUNCH_SPEC_MAX_BYTES) {
     throw new RangeError("the launch specification is over 64 KiB");
+  }
+  if (!isPrintable(text)) {
+    throw new TypeError("the launch specification text is not printable ASCII");
   }
   // `btoa` reads each UTF-16 unit as one byte, which for ASCII is the byte itself.
   const value = btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -360,7 +367,7 @@ export const LAUNCH_SPEC_ENV_REFUSALS = [
   "too_long",
   "not_base64url",
   "bad_length",
-  "not_ascii",
+  "not_printable",
 ] as const;
 export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
 
@@ -369,8 +376,9 @@ export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
  * non-empty string of at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, only the
  * {@link SHELL_INERT_ENV_ALPHABET} (so no padding, no `+` or `/`, no whitespace or line break, and
  * a raw JSON document, which starts with `{`, is refused: nothing is registered with a tenant, so
- * no earlier format is accepted), whose length is not 1 modulo 4, and whose bytes are all ASCII
- * (below 0x80). The caller then parses the text as JSON; a launcher hashes the TEXT before it does.
+ * no earlier format is accepted), whose length is not 1 modulo 4, and which decodes to printable
+ * ASCII only (every byte 0x20 to 0x7e). The caller then parses the text as JSON; a launcher hashes the
+ * TEXT before it does.
  *
  * A value that breaks more than one rule is refused with the word of one of them; which one is not
  * part of the contract. The last character's unused trailing bits are not checked (RFC 4648
@@ -389,7 +397,7 @@ export function decodeLaunchSpecEnv(
   if (value.length % 4 === 1) return refuse("bad_length");
   const standard = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "="));
-  if (!isAscii(binary)) return refuse("not_ascii");
+  if (!isPrintable(binary)) return refuse("not_printable");
   return { ok: true, text: binary };
 }
 
