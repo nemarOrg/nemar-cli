@@ -57,6 +57,7 @@ import {
   OIDC_REFRESH_TOKEN_IDLE_SECONDS,
   OIDC_REFRESH_TOKEN_PREFIX,
   OIDC_SCOPES,
+  type OidcTokenErrorCode,
   isMachineOnlyScope,
   isOidcScope,
 } from "../../../shared/oidc.js";
@@ -401,13 +402,7 @@ export const REVOKE_FAMILY_SQL = `UPDATE oidc_tokens
 // ---------------------------------------------------------------------------------------------
 
 /** An error of RFC 6749 section 5.2, as the route answers it. */
-export type OAuthErrorCode =
-  | "invalid_request"
-  | "invalid_client"
-  | "invalid_grant"
-  | "unauthorized_client"
-  | "unsupported_grant_type"
-  | "invalid_scope";
+export type OAuthErrorCode = OidcTokenErrorCode;
 
 export type GrantOutcome =
   | { ok: true; body: Record<string, unknown> }
