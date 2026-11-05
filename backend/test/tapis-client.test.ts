@@ -82,7 +82,11 @@ const OTHER_OWNER = "another-owner";
 const JOB_ID = "job_0123456789abcdef01234567";
 /** Stands for the job's token inside the launch specification. It must never be echoed. */
 const TOKEN_MARK = "JOBTOKEN-MARK-5512";
-/** A launch specification's text, with no space in it (the case a conditional quoter leaves bare). */
+/**
+ * A stand-in for a launch specification's text: NOT a valid specification (the client checks only the
+ * shape of the value it is given, never the document), but printable ASCII with the token mark in it
+ * and no space, the case a conditional quoter would leave bare.
+ */
 const LAUNCH_SPEC_TEXT = `{"schema":"nemar.launch-spec.v1","job_id":"${JOB_ID}","job_token":"${TOKEN_MARK}"}`;
 /**
  * The value of `NEMAR_LAUNCH_SPEC`: that text in base64url. It holds the token, which is no longer a
@@ -922,12 +926,8 @@ describe("submitJob", () => {
       { gpus: -1 },
       { minutes: 0 },
       { memoryMb: 0 },
-      { launchSpecEnv: notAValue("") },
-      { launchSpecEnv: notAValue("café") },
-      // One over the ENCODED bound (87,382), though every character is in the alphabet.
-      { launchSpecEnv: notAValue("x".repeat(LAUNCH_SPEC_ENV_MAX_CHARS + 1)) },
-      // The raw JSON text: what the value was before A1c, and what the client now refuses.
-      { launchSpecEnv: notAValue(LAUNCH_SPEC_TEXT) },
+      // The launch value's own refusals (empty, non-ASCII, over the bound, raw JSON, and more) are
+      // one table, `REFUSED_VALUES`, further down: not repeated here.
     ];
     for (const over of bad) {
       await expect(submitJob(ctx(env), { ...SUBMIT, ...over })).rejects.toThrow(RangeError);
