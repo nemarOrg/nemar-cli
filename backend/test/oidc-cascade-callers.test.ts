@@ -15,8 +15,9 @@
  *     listed one that is no longer there (so removing the statement from a caller fails here as well as
  *     in the behavioural suites);
  *   - any OTHER use outside the module, each a "stray" the list cannot describe: the function passed or
- *     stored as a value, a raw `*_SQL` constant of the cascade run on its own, a dynamic import, a
- *     re-export, a default import, an element access on the namespace, a module-level reference;
+ *     stored as a value, an alias EXPORTED where it is declared (another file could call it), a raw
+ *     `*_SQL` constant of the cascade run on its own, a dynamic import, a re-export, a default import, an
+ *     element access on the namespace, a module-level reference;
  *   - a docblock whose spelled count is not the number of listed callers;
  *   - a deliberate non-path (a role demotion, a key revocation, the app session's sign-out) that has
  *     lost the sentence saying it is deliberate, which is how the next reader learns not to "fix" it;
@@ -25,7 +26,9 @@
  *
  * What the scan does NOT promise: it names what an identifier is called, not what it means, and it reads
  * `backend/src` only. A file outside it that imports the module is out of reach, which is why nothing
- * else imports the module from the Worker's source, and why the planted cases are the proof.
+ * else imports the module from the Worker's source, and why the planted cases are the proof. A call that
+ * is present but never executed, or whose result is discarded, passes this scan; the behavioural suites
+ * prove each path runs its statements.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -208,6 +211,70 @@ export function viaDestructuring(id: string) {
       expect(strays.length, body).toBeGreaterThan(0);
       expect(strays.join("\n"), body).toContain("used as a value");
     }
+  });
+
+  test("an alias exported where it is declared is a stray: a caller in another file would hide behind it", () => {
+    // `export const endIt = oidcEndStatements;` makes no call and passes no value, so the scan saw nothing,
+    // and `import { endIt } from "./planted"` in another file called the cascade without being listed.
+    const FORMS: Array<[string, string]> = [
+      ["export const", `${IMPORT}export const endIt = oidcEndStatements;`],
+      ["export let", `${IMPORT}export let endIt = oidcEndStatements;`],
+      ["export var", `${IMPORT}export var endIt = oidcEndStatements;`],
+      [
+        "the client's function",
+        'import { oidcClientEndStatements } from "../services/oidc-cascade";\nexport const endIt = oidcClientEndStatements;',
+      ],
+      ["a cast", `${IMPORT}export const endIt = oidcEndStatements as unknown as () => void;`],
+      ["a non-null assertion", `${IMPORT}export const endIt = oidcEndStatements!;`],
+      [
+        "an aliased import",
+        'import { oidcEndStatements as e } from "../services/oidc-cascade";\nexport const endIt = e;',
+      ],
+      ["an alias chain", `${IMPORT}const first = oidcEndStatements;\nexport const endIt = first;`],
+      ["a namespace member", `${NAMESPACE}export const endIt = ns.oidcEndStatements;`],
+      ["a destructured namespace", `${NAMESPACE}export const { oidcEndStatements: endIt } = ns;`],
+      [
+        "a renamed destructured namespace member among others",
+        `${NAMESPACE}export const { OIDC_END_CALLERS: lists, oidcClientEndStatements: endIt } = ns;`,
+      ],
+      ["one of several declarators", `${IMPORT}export const other = 1, endIt = oidcEndStatements;`],
+      [
+        "a later assignment to an exported let",
+        `${IMPORT}export let endIt: typeof oidcEndStatements;\nendIt = oidcEndStatements;`,
+      ],
+    ];
+    for (const [label, source] of FORMS) {
+      const strays = planted(plant(source));
+      // Reported once, however many rounds the alias pass takes to settle.
+      expect(strays.length, `${label}: ${strays.join(" | ")}`).toBe(1);
+      expect(strays.join("\n"), label).toContain("exported alias");
+    }
+  });
+
+  test("an alias exported afterwards, as the default, or by an import-equals, is a stray as well", () => {
+    for (const body of [
+      `${IMPORT}const f = oidcEndStatements;\nexport { f };`,
+      `${IMPORT}const f = oidcEndStatements;\nexport { f as g };`,
+      `${IMPORT}export default oidcEndStatements;`,
+      `${IMPORT}const f = oidcEndStatements;\nexport default f;`,
+      `${NAMESPACE}export import endIt = ns.oidcEndStatements;`,
+    ]) {
+      expect(planted(plant(body)).length, body).toBeGreaterThan(0);
+    }
+  });
+
+  test("an export that is not an alias of the cascade is not a stray, and neither is an alias that stays in its file", () => {
+    const scan = plant(`${IMPORT}declare const somethingElse: () => void;
+export const endIt = somethingElse;
+export const value = 1, holder = { a: 2 };
+export let counter: number;
+counter = 3;
+const local = oidcEndStatements;
+export function viaLocal(userId: number) {
+  return local(userId, "account_revoked");
+}`);
+    expect(planted(scan)).toEqual([]);
+    expect(calledFrom(scan, "viaLocal")).toBe(true);
   });
 
   test("a raw statement of the cascade is a stray, imported by its name or through the namespace", () => {

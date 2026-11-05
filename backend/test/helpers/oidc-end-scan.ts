@@ -11,6 +11,10 @@
  *     (`const { oidcEndStatements: f } = ns`);
  *   - the function passed or stored as a VALUE (`list.map(oidcEndStatements)`, `{ oidcEndStatements }`,
  *     `export { x }`), which is not a call this scan can attribute to a path;
+ *   - an alias EXPORTED where it is declared (`export const endIt = oidcEndStatements`, `export let`, an
+ *     exported destructured alias or namespace member, `export let f; f = oidcEndStatements`): it makes no
+ *     call and passes no value in its own file, and another file can import it and call the cascade
+ *     without being listed;
  *   - direct use of a raw `*_SQL` constant, which would run a statement of the cascade outside it;
  *   - the module reached in ways the scan cannot follow: a dynamic `import()` or `require()` (of the module,
  *     or of a name the scan cannot read), a re-export (`export ... from`), a default import, an element
@@ -23,6 +27,9 @@
  * It resolves what an identifier is called, not what it means: scoping is not modelled, so an unrelated
  * local that shares a tracked name is flagged too, which is the safe direction (a false stray is a
  * rename; a missed alias is a path that ends a credential without being listed).
+ *
+ * A call that is present but never executed, or whose result is discarded, passes this scan; the
+ * behavioural suites prove each path runs its statements.
  */
 
 import { join } from "node:path";
@@ -98,6 +105,7 @@ function siteOf(node: ts.Node, sf: ts.SourceFile): string {
 export function scanEndUsers(tree: Tree): EndScan {
   const calls: EndCall[] = [];
   const strays: string[] = [];
+  const reported = new Set<string>();
   const guardedFunctions = new Set<string>(END_FUNCTIONS);
   const sqlNames = new Set(cascadeSqlExports(tree));
   const guarded = new Set<string>([...guardedFunctions, ...sqlNames]);
@@ -109,8 +117,41 @@ export function scanEndUsers(tree: Tree): EndScan {
     const isCascade = (spec: string): boolean => resolveImport(tree, abs, spec) === CASCADE;
     const stray = (node: ts.Node, what: string): void => {
       const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-      strays.push(`${file}:${line + 1}: ${what}`);
+      const message = `${file}:${line + 1}: ${what}`;
+      // The alias pass runs to a fixed point, so it reports the same use on each round.
+      if (!reported.has(message)) {
+        reported.add(message);
+        strays.push(message);
+      }
     };
+
+    /**
+     * The names this file exports at the declaration of a variable (`export const a = 1, { b } = x`), at any
+     * depth (a namespace block can export too). An alias with one of these names is reachable from another
+     * file, which is the one thing the references in THIS file cannot show.
+     */
+    const exportedNames = new Set<string>();
+    const collectNames = (name: ts.BindingName): void => {
+      if (ts.isIdentifier(name)) {
+        exportedNames.add(name.text);
+        return;
+      }
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) collectNames(element.name);
+      }
+    };
+    const collectExports = (node: ts.Node): void => {
+      if (
+        ts.isVariableStatement(node) &&
+        node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+      ) {
+        for (const declaration of node.declarationList.declarations) {
+          collectNames(declaration.name);
+        }
+      }
+      ts.forEachChild(node, collectExports);
+    };
+    collectExports(sf);
 
     /** local name -> the guarded export it stands for. */
     const aliases = new Map<string, string>();
@@ -194,6 +235,12 @@ export function scanEndUsers(tree: Tree): EndScan {
     // ---- Pass 2: aliases, to a fixed point ------------------------------------------------------
     const addAlias = (local: string, name: string, source: ts.Node): void => {
       consumed.add(source);
+      // An alias EXPORTED where it is declared is a path the list cannot describe: nothing in this file is
+      // a call or a value, and another file imports it and calls it. (`const f = x; export { f }` and
+      // `export default` are caught as values in the last pass, where the export names the alias.)
+      if (exportedNames.has(local)) {
+        stray(source, `an exported alias (${local}) of ${name}, which another file could call`);
+      }
       if (aliases.get(local) !== name) {
         aliases.set(local, name);
         changed = true;
