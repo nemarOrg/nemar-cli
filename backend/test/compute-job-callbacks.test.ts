@@ -651,12 +651,13 @@ describe("outputs refuses before it signs anything", () => {
     expect(declared.launcher).toHaveLength(4);
     expect(await uploadAll(followUp, [])).toEqual([200, 200, 200, 200]);
     expect((await call(j.job.id, "outputs/complete", { token })).status).toBe(200);
-    // Outputs after the refusal are refused with the recorded word, never accepted.
+    // After `complete` no address is issued at all, whatever the body names: `bad_state`, no uploads
+    // (a refused request BEFORE `complete` is refused with the recorded word: see "a refusal replayed").
     const late = await call(j.job.id, "outputs", {
       token: await tokenFor(j.job.id),
       body: outputsBody([{ path: "a.txt", content: "a" }]),
     });
-    expect([late.status]).toEqual([409]);
+    expect([late.status, late.body.code, late.body.uploads]).toEqual([409, "bad_state", undefined]);
   });
 });
 
@@ -1069,11 +1070,29 @@ describe("complete", () => {
     expect((await reread(workerEnv, j.job.id)).outputs_completed_at).toBe("2001-01-01 00:00:00");
   });
 
-  test("complete before any outputs request is `bad_state`, and an object removed after a 200 is not re-checked", async () => {
+  test("complete before any outputs request is `bad_state`", async () => {
     const j = await person();
     const token = await tokenFor(j.job.id);
     const early = await call(j.job.id, "outputs/complete", { token });
     expect([early.status, early.body.code]).toEqual([409, "bad_state"]);
+  });
+
+  test("once complete has answered 200, an object removed afterwards is NOT re-checked: a replay answers the same 200 and writes nothing", async () => {
+    const j = await person();
+    const token = await tokenFor(j.job.id);
+    const files: OutputFile[] = [{ path: "report.txt", content: "a result" }];
+    const reply = await call(j.job.id, "outputs", {
+      token,
+      body: outputsBody(files, launcherSizesOf()),
+    });
+    expect(await uploadAll(reply, files)).toEqual([200, 200, 200, 200, 200]);
+    expect((await call(j.job.id, "outputs/complete", { token })).status).toBe(200);
+    const stamped = (await reread(workerEnv, j.job.id)).outputs_completed_at;
+    expect(stamped).not.toBeNull();
+    await fx.harness.results.delete(`jobs/${j.job.id}/outputs/report.txt`);
+    const replay = await call(j.job.id, "outputs/complete", { token });
+    expect([replay.status, replay.body]).toEqual([200, { ok: true }]);
+    expect((await reread(workerEnv, j.job.id)).outputs_completed_at).toBe(stamped);
   });
 });
 

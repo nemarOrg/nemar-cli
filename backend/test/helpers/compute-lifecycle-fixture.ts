@@ -1,7 +1,14 @@
 /**
  * The world the compute lifecycle suites run in (epic #2005 phase A5, #2010; ADR 0118).
  *
- * NOTHING HERE STANDS IN FOR NEMAR LOGIC. The database is real SQLite carrying every migration (and,
+ * NO NEMAR DECISION IS STOOD IN FOR, but ONE STEP IS PLAYED: `playLauncher` writes the launcher's files
+ * and `declared.json` into the results bucket directly and stamps `outputs_completed_at` by an UPDATE,
+ * where the launcher would go through the outputs and complete routes. Those routes are driven for real
+ * by `compute-job-callbacks.test.ts` and by the route-driven full path in `compute-full-path.test.ts`
+ * (which does not use `playLauncher` at all); a suite that uses `playLauncher` is about what the
+ * lifecycle does with what the launcher left, not about how it got there.
+ *
+ * The database is real SQLite carrying every migration (and,
  * for the cases that name it, Miniflare's D1, the engine `wrangler --local` runs); the two buckets are
  * Miniflare's R2 reached through the Worker's own bindings; the S3 interface the signer addresses is
  * the real local server over those buckets; the Tapis tenant is the A4 stand-in (a real HTTP server
@@ -348,7 +355,7 @@ const encoder = new TextEncoder();
  * through the binding, and marking the upload complete the way the `complete` route does. The
  * provenance carries the digest of the value the Tapis stand-in RECEIVED. The route-driven version,
  * which goes through the outputs and complete routes and presigned addresses, is
- * `compute-job-callbacks.test.ts`'s and the lifecycle test's full path.
+ * `compute-job-callbacks.test.ts`'s and `compute-full-path.test.ts`'s.
  */
 export async function playLauncher(
   fx: LifecycleFixture,

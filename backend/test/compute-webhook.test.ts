@@ -132,7 +132,7 @@ describe("a webhook is a hint, and the job is read back from Tapis", () => {
     ).toBeGreaterThanOrEqual(1);
   });
 
-  test("a stale RUNNING hint after FINISHED changes nothing, and neither does a replay", async () => {
+  test("a hint repeated after the job FINISHED, and one the stand-in fires from its own event log, change nothing", async () => {
     const s = await submitted();
     fx.tapis.advance(s.uuid, "RUNNING");
     await playLauncher(fx, workerEnv, await reread(workerEnv, s.job.id), s.uuid, {});
