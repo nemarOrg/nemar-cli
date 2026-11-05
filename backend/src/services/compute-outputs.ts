@@ -48,12 +48,17 @@ import {
   resultsLauncherKey,
   resultsOutputKey,
 } from "../../../shared/contract/compute-launch.js";
-import { LAUNCHER_FILE_NAMES, RESULT_MAX_FILE_BYTES } from "../../../shared/contract/compute.js";
+import {
+  LAUNCHER_FILES,
+  LAUNCHER_FILE_NAMES,
+  RESULT_MAX_FILE_BYTES,
+  computeIsWellFormed,
+} from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
 import { getPolicy } from "./compute-policy.js";
 import { outputsBodyLimitBytes } from "./compute-records.js";
-import { COMPUTE_UPLOAD_SECONDS, computeS3, presignPut } from "./compute-s3.js";
+import { COMPUTE_UPLOAD_SECONDS, computeS3, objectKeyProblem, presignPut } from "./compute-s3.js";
 import { declaredKey, declaredText, firstIncomplete, readDeclared } from "./compute-verify.js";
 
 const TERMINAL_SQL = TERMINAL_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
@@ -64,18 +69,23 @@ const TERMINAL_SQL = TERMINAL_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
  * `?6` the platform's total. ONE statement: the person's other unexpired totals and every other job's
  * unexpired totals are read inside it, so D1 serialises two claims and the second sees the first.
  * `meta.changes` is the winner test, and a refused claim writes nothing.
+ *
+ * `?3 = 1` (the launcher's follow-up, its own four files after a refusal) skips only the PERSON'S share:
+ * those files are small and the person did not choose them. The platform's total is NEVER skipped
+ * (round 1 of #2041): a follow-up claim is bytes in the bucket like any other, and a launcher that could
+ * declare any size there would not be held to the platform's limit at all. Each launcher file is also
+ * capped on its own (`launcherFileCap`).
  */
 export const CLAIM_RESULTS_BYTES_SQL = `UPDATE compute_jobs SET results_bytes = ?2
   WHERE id = ?1 AND results_bytes IS NULL AND outputs_completed_at IS NULL
     AND state NOT IN (${TERMINAL_SQL})
-    AND (?3 = 1 OR (
-      (account_id IS NULL OR (SELECT COALESCE(SUM(o.results_bytes), 0) FROM compute_jobs o
+    AND (?3 = 1 OR account_id IS NULL OR (SELECT COALESCE(SUM(o.results_bytes), 0) FROM compute_jobs o
          WHERE o.account_id = compute_jobs.account_id AND o.id <> compute_jobs.id
            AND o.results_bytes IS NOT NULL
            AND (o.ended_at IS NULL OR o.ended_at > datetime('now', ?4))) + ?2 <= ?5)
-      AND (SELECT COALESCE(SUM(o.results_bytes), 0) FROM compute_jobs o
-            WHERE o.id <> compute_jobs.id AND o.results_bytes IS NOT NULL
-              AND (o.ended_at IS NULL OR o.ended_at > datetime('now', ?4))) + ?2 <= ?6))`;
+    AND (SELECT COALESCE(SUM(o.results_bytes), 0) FROM compute_jobs o
+          WHERE o.id <> compute_jobs.id AND o.results_bytes IS NOT NULL
+            AND (o.ended_at IS NULL OR o.ended_at > datetime('now', ?4))) + ?2 <= ?6`;
 
 /** A refusal records itself as the job's `failure_detail`, once: `?1` the job, `?2` the word. */
 export const RECORD_REFUSAL_SQL = `UPDATE compute_jobs SET failure_detail = ?2
@@ -84,6 +94,22 @@ export const RECORD_REFUSAL_SQL = `UPDATE compute_jobs SET failure_detail = ?2
 /** The launcher completed: once, and only while the job is live. `?1` the job. */
 export const COMPLETE_OUTPUTS_SQL = `UPDATE compute_jobs SET outputs_completed_at = datetime('now')
   WHERE id = ?1 AND outputs_completed_at IS NULL AND state NOT IN (${TERMINAL_SQL})`;
+
+/**
+ * The most bytes the launcher's log may declare: 16 MiB. The records keep the first 5 MiB of it
+ * (`LOG_COPY_MAX_BYTES`), so the launcher is expected to stay far below; this is the Worker's own bound,
+ * so a launcher cannot declare an unbounded file as one of its "own four".
+ */
+export const LAUNCHER_LOG_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The most one launcher file may declare: a JSON document is bounded by what the records copy accepts
+ * (the outputs body's bound for the owner's `maxFiles`, since the manifest lists every output) and the
+ * log by `LAUNCHER_LOG_MAX_BYTES`.
+ */
+export function launcherFileCap(name: string, maxFiles: number): number {
+  return name === LAUNCHER_FILES.log ? LAUNCHER_LOG_MAX_BYTES : outputsBodyLimitBytes(maxFiles);
+}
 
 export type OutputsRefusalCode =
   | "too_many_outputs"
@@ -184,6 +210,16 @@ export async function handleOutputs(
   for (const [i, o] of outputs.entries()) {
     if (seen.has(o.path)) return refuse("invalid_spec", `outputs.${i}.path`);
     seen.add(o.path);
+    // A path the schema accepts can still be one no address can be signed for (the key is over 1,024
+    // bytes of UTF-8 for a long multi-byte name, or the name holds a lone surrogate, which the stored
+    // declaration and the key would each write differently). Found here, BEFORE the claim; found after
+    // it, the route answered 500 and the replay 409 with the bytes claimed for nothing.
+    if (
+      !computeIsWellFormed(o.path) ||
+      objectKeyProblem(resultsOutputKey(job.id, o.path)) !== null
+    ) {
+      return refuse("invalid_spec", `outputs.${i}.path`);
+    }
   }
 
   // A refusal already recorded: a follow-up with no outputs is the launcher's way to upload its own
@@ -195,7 +231,11 @@ export async function handleOutputs(
   }
   const sizes = [...outputs.map((o) => o.size), ...launcher.map((f) => f.size)];
   const total = sizes.reduce((sum, n) => sum + n, 0);
-  if (sizes.some((n) => n > RESULT_MAX_FILE_BYTES) || total > policy.resultLimits.maxJobBytes) {
+  if (
+    sizes.some((n) => n > RESULT_MAX_FILE_BYTES) ||
+    launcher.some((f) => f.size > launcherFileCap(f.name, policy.resultLimits.maxFiles)) ||
+    total > policy.resultLimits.maxJobBytes
+  ) {
     return refuseAndRecord(env, job, "results_too_large");
   }
   if (!Number.isSafeInteger(total)) return refuseAndRecord(env, job, "results_too_large");

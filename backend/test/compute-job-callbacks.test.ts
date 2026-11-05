@@ -621,14 +621,15 @@ describe("outputs refuses before it signs anything", () => {
   });
 
   test("the launcher's follow-up with no outputs is accepted; failure_detail is never cleared; outputs after a refusal are refused again", async () => {
-    await policyOf({ maxFiles: 1, maxStoredBytesPerPerson: 1, maxStoredBytesTotal: 1 });
+    await policyOf({ maxFiles: 1, maxStoredBytesPerPerson: 1 });
     const j = await person();
     const token = await tokenFor(j.job.id);
     const files = ["a", "b"].map((n) => ({ path: `${n}.txt`, content: n }));
     const refused = await call(j.job.id, "outputs", { token, body: outputsBody(files) });
     expect(refused.body.code).toBe("too_many_outputs");
-    // The follow-up names no outputs. The quotas are NOT applied to the launcher's own files (one byte
-    // would refuse them), they are claimed, and the declared file says so.
+    // The follow-up names no outputs. The PERSON'S share is not applied to the launcher's own files
+    // (one byte would refuse them), they are claimed, and the declared file says so. The platform's
+    // total still is: see the next test.
     const sizes = launcherSizesOf();
     const followUp = await call(j.job.id, "outputs", {
       token,
@@ -654,6 +655,88 @@ describe("outputs refuses before it signs anything", () => {
       body: outputsBody([{ path: "a.txt", content: "a" }]),
     });
     expect([late.status]).toEqual([409]);
+  });
+});
+
+describe("the launcher's own files", () => {
+  const LAUNCHER_PATHS = LAUNCHER_FILE_NAMES.map((n) => `launcher/${n}`).sort();
+
+  // Round 1 of #2041: the follow-up claim skipped BOTH quotas and each launcher file's declared size
+  // was bounded by nothing but the job limit.
+  test("the follow-up is held to the PLATFORM's total even though the person's share is skipped: refused, nothing claimed, the files still presigned", async () => {
+    await policyOf({
+      maxFiles: 1,
+      maxStoredBytesPerPerson: 1,
+      maxStoredBytesTotal: 1000,
+      maxJobBytes: 1000,
+    });
+    const holder = await person();
+    await workerEnv.DB.prepare("UPDATE compute_jobs SET results_bytes = 950 WHERE id = ?")
+      .bind(holder.job.id)
+      .run();
+    const j = await person();
+    const token = await tokenFor(j.job.id);
+    const files = ["a", "b"].map((n) => ({ path: `${n}.txt`, content: n }));
+    expect((await call(j.job.id, "outputs", { token, body: outputsBody(files) })).body.code).toBe(
+      "too_many_outputs",
+    );
+    // 100 bytes of launcher files do not fit the 50 left on the platform.
+    const followUp = await call(j.job.id, "outputs", {
+      token,
+      body: { outputs: [], launcher: launcherFiles([25, 25, 25, 25]) },
+    });
+    expect([followUp.status, followUp.body.code]).toEqual([409, "results_quota_exceeded"]);
+    const row = await reread(workerEnv, j.job.id);
+    expect(row.results_bytes).toBeNull();
+    expect(row.failure_detail).toBe("too_many_outputs");
+    expect(await hasDeclared(j.job.id)).toBe(false);
+    expect((followUp.body.uploads as Array<{ path: string }>).map((u) => u.path).sort()).toEqual(
+      LAUNCHER_PATHS,
+    );
+    // 50 bytes fit exactly.
+    const fits = await call(j.job.id, "outputs", {
+      token,
+      body: { outputs: [], launcher: launcherFiles([10, 10, 10, 20]) },
+    });
+    expect(fits.status).toBe(200);
+    expect((await reread(workerEnv, j.job.id)).results_bytes).toBe(50);
+  });
+
+  test("each launcher file is capped on its own: a document at the outputs-body bound and a log at 16 MiB are accepted, one byte more is `results_too_large`, recorded", async () => {
+    await policyOf({
+      maxFiles: 100,
+      maxJobBytes: 4 * 1024 ** 3,
+      maxStoredBytesPerPerson: 4 * 1024 ** 3,
+      maxStoredBytesTotal: 4 * 1024 ** 3,
+    });
+    // The documents' bound for maxFiles 100: the 1 MiB floor. The log's: 16 MiB. Written out, not
+    // imported, so the test fails at any other value.
+    const docCap = 1024 * 1024;
+    const logCap = 16 * 1024 * 1024;
+    const sizes = (doc: number, log: number) =>
+      launcherFiles(LAUNCHER_FILE_NAMES.map((n) => (n === "launcher.log" ? log : doc)));
+    const ok = await person();
+    const accepted = await call(ok.job.id, "outputs", {
+      token: await tokenFor(ok.job.id),
+      body: { outputs: [], launcher: sizes(docCap, logCap) },
+    });
+    expect(accepted.status).toBe(200);
+    for (const [name, launcher] of [
+      ["a document one byte over", sizes(docCap + 1, logCap)],
+      ["a log one byte over", sizes(docCap, logCap + 1)],
+    ] as const) {
+      const j = await person();
+      const reply = await call(j.job.id, "outputs", {
+        token: await tokenFor(j.job.id),
+        body: { outputs: [], launcher },
+      });
+      expect([name, reply.status, reply.body.code]).toEqual([name, 413, "results_too_large"]);
+      expect([name, (await reread(workerEnv, j.job.id)).failure_detail]).toEqual([
+        name,
+        "results_too_large",
+      ]);
+      expect([name, (await reread(workerEnv, j.job.id)).results_bytes]).toEqual([name, null]);
+    }
   });
 });
 
@@ -896,6 +979,43 @@ describe("outputs, accepted", () => {
     }
     expect((await reread(workerEnv, j.job.id)).failure_detail).toBeNull();
     expect(await hasDeclared(j.job.id)).toBe(false);
+  });
+
+  // Round 1 of #2041: a path the schema allowed (512 characters) whose object KEY could not be signed
+  // (over 1,024 bytes of UTF-8, or a lone surrogate) was found out AFTER the claim, so the route
+  // answered 500 and the replay answered 409 `bad_state`, with the bytes claimed for nothing.
+  test("a path whose object key cannot be signed is `invalid_spec` before the claim, naming the output, and a corrected request is accepted", async () => {
+    const j = await person();
+    const token = await tokenFor(j.job.id);
+    const unsignable: Array<[string, string]> = [
+      ["a key over 1,024 bytes", "\u3042".repeat(350)],
+      ["a lone surrogate", "bad-\ud800-name.txt"],
+    ];
+    for (const [name, path] of unsignable) {
+      const body = {
+        outputs: [
+          { path: "fine.txt", size: 1, sha256: "a".repeat(64) },
+          { path, size: 1, sha256: "b".repeat(64) },
+        ],
+        launcher: launcherFiles(),
+      };
+      const reply = await call(j.job.id, "outputs", { token, body });
+      expect([name, reply.status, reply.body.code, reply.body.field]).toEqual([
+        name,
+        400,
+        "invalid_spec",
+        "outputs.1.path",
+      ]);
+      const row = await reread(workerEnv, j.job.id);
+      expect([name, row.results_bytes, row.failure_detail]).toEqual([name, null, null]);
+      expect([name, await hasDeclared(j.job.id)]).toEqual([name, false]);
+      expect(reply.text).not.toContain("\u3042");
+    }
+    const fixed = await call(j.job.id, "outputs", {
+      token,
+      body: outputsBody(FILES.slice(0, 1), launcherSizesOf()),
+    });
+    expect(fixed.status).toBe(200);
   });
 });
 
