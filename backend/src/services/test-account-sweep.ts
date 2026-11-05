@@ -73,7 +73,7 @@
 import { tombstoneUserCascade } from "../db/user-tombstone.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
-import { attemptDueLogouts } from "./oidc-logout.js";
+import { attemptDueLogouts, logFirstAttempt } from "./oidc-logout.js";
 
 /**
  * Accounts one run may tombstone. Oldest first; the rest wait for the next daily run.
@@ -243,14 +243,8 @@ export async function sweepCiTestAccounts(
   // outside production, so this is the attempt a swept account's deliveries get. Best effort, and
   // bounded to one run of the sender.
   if (result.tombstoned > 0) {
-    try {
-      await attemptDueLogouts(env as Parameters<typeof attemptDueLogouts>[0]);
-    } catch (err) {
-      console.error(
-        "[test-account-sweep] logout delivery failed:",
-        err instanceof Error ? err.name : "Error",
-      );
-    }
+    // The sender never throws: a fault shows in its tally, and is logged as a fixed word and a count.
+    logFirstAttempt(await attemptDueLogouts(env as Parameters<typeof attemptDueLogouts>[0]));
   }
 
   console.log(

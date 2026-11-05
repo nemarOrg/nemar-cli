@@ -387,19 +387,36 @@ export async function attemptDueLogouts(
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The one line a first attempt logs when it met a fault, or null when it met none. `attemptDueLogouts`
+ * never throws, so its tally is the only place a database fault of a first attempt shows: a delivery hit
+ * by one stays `pending`, or is claimed and sent again when its claim lapses, and without this line there
+ * is no trace of why. Counts and a fixed word only (the class of the error), never an address, a token or a
+ * subject, as the tick's line is.
+ */
+export function firstAttemptLogLine(t: Pick<LogoutTally, "errors" | "errorClass">): string | null {
+  if (t.errors === 0) return null;
+  return `[oidc-logout] first attempt errors=${t.errors} errorClass=${t.errorClass ?? "unknown"}`;
+}
+
+/** Log a first attempt's fault line, if it has one. */
+export function logFirstAttempt(t: Pick<LogoutTally, "errors" | "errorClass">): void {
+  const line = firstAttemptLogLine(t);
+  if (line) console.error(line);
+}
+
+/**
  * The first attempt, after the batch that ended the grants has committed: handed to `waitUntil`, so the
- * request that revoked is answered without waiting for any partner, and caught, so nothing a partner does
- * can fail it. Pass the request's `waitUntil`, or none (outside a Worker invocation, where Hono's getter
- * throws): then the attempt is simply started and the tick takes up whatever it leaves.
+ * request that revoked is answered without waiting for any partner, and so nothing a partner does can
+ * fail it (the sender never throws; what went wrong is in the tally, and a fault is logged by
+ * {@link logFirstAttempt}). Pass the request's `waitUntil`, or none (outside a Worker invocation, where
+ * Hono's getter throws): then the attempt is simply started and the tick takes up whatever it leaves.
  */
 export function deferLogoutDelivery(
   env: LogoutEnv,
   userId: number,
   defer: ((work: Promise<unknown>) => void) | undefined,
 ): void {
-  const work = attemptDueLogouts(env, { userId }).catch((err) => {
-    console.error(`[oidc-logout] first attempt failed (${errorClassName(err)})`);
-  });
+  const work = attemptDueLogouts(env, { userId }).then(logFirstAttempt);
   if (defer) defer(work);
 }
 
