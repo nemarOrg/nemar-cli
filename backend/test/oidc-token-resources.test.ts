@@ -225,27 +225,32 @@ describe("claims are exactly the granted scopes', in the identity token and at u
 // ---------------------------------------------------------------------------------------------
 
 describe("userinfo refuses what is not a live access token with openid", () => {
-  test("no token, a CLI key, a refresh token, a client secret or garbage is 401 invalid_token", async () => {
+  test("no token, a CLI key, a refresh token, a client secret or garbage is 401, by GET and by POST", async () => {
     const { client, issued } = await issue({ scope: "openid offline_access" });
-    const none = await h.call("GET", "/oauth/userinfo");
-    expect(none.status).toBe(401);
-    expect(none.headers.get("WWW-Authenticate")).toBe("Bearer");
-    expect(none.headers.get("Cache-Control")).toBe("no-store");
-    for (const token of [
-      MEMBER_KEY,
-      OWNER_KEY,
-      issued.refresh_token as string,
-      client.secret,
-      `nmo_at_${"A".repeat(43)}`,
-      "garbage",
-    ]) {
-      const res = await userinfo(token);
-      expect({ token: token.slice(0, 8), status: res.status }).toEqual({
-        token: token.slice(0, 8),
-        status: 401,
-      });
-      expect(res.headers.get("WWW-Authenticate")).toBe('Bearer error="invalid_token"');
-      expect(res.json?.error).toBe("invalid_token");
+    for (const method of ["GET", "POST"] as const) {
+      // No credential: the bare challenge, with no error code in it or in a body (RFC 6750 3.1).
+      const none = await h.call(method, "/oauth/userinfo");
+      expect({ method, status: none.status }).toEqual({ method, status: 401 });
+      expect(none.headers.get("WWW-Authenticate")).toBe("Bearer");
+      expect(none.headers.get("Cache-Control")).toBe("no-store");
+      expect(none.text).toBe("");
+      for (const token of [
+        MEMBER_KEY,
+        OWNER_KEY,
+        issued.refresh_token as string,
+        client.secret,
+        `nmo_at_${"A".repeat(43)}`,
+        "garbage",
+      ]) {
+        const res = await userinfo(token, method);
+        expect({ method, token: token.slice(0, 8), status: res.status }).toEqual({
+          method,
+          token: token.slice(0, 8),
+          status: 401,
+        });
+        expect(res.headers.get("WWW-Authenticate")).toBe('Bearer error="invalid_token"');
+        expect(res.json?.error).toBe("invalid_token");
+      }
     }
   });
 
@@ -341,11 +346,33 @@ describe("userinfo refuses what is not a live access token with openid", () => {
       { grant_type: "client_credentials" },
       { authorization: basic(machine.clientId, machine.secret) },
     );
-    const info = await userinfo((res.json as { access_token: string }).access_token);
-    expect(info.status).toBe(403);
-    expect(info.headers.get("WWW-Authenticate")).toBe(
-      'Bearer error="insufficient_scope", scope="openid"',
+    for (const method of ["GET", "POST"] as const) {
+      const info = await userinfo((res.json as { access_token: string }).access_token, method);
+      expect({ method, status: info.status }).toEqual({ method, status: 403 });
+      expect(info.headers.get("WWW-Authenticate")).toBe(
+        'Bearer error="insufficient_scope", scope="openid"',
+      );
+    }
+    // A person's token that carries openid but was narrowed away from it by a refresh is the same.
+    const narrowed = await issue({ scope: "openid profile offline_access" });
+    const refreshed = await formPost(
+      h,
+      "/oauth/token",
+      {
+        grant_type: "refresh_token",
+        refresh_token: narrowed.issued.refresh_token as string,
+        scope: "profile",
+      },
+      { authorization: basic(narrowed.client.clientId, narrowed.client.secret) },
     );
+    expect(refreshed.status).toBe(200);
+    for (const method of ["GET", "POST"] as const) {
+      const info = await userinfo(
+        (refreshed.json as { access_token: string }).access_token,
+        method,
+      );
+      expect({ method, status: info.status }).toEqual({ method, status: 403 });
+    }
   });
 });
 

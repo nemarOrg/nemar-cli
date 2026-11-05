@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { isOidcBearerMiddleware } from "../src/middleware/oidc-bearer";
+import { isOidcBearerMiddleware, oidcBearerScopes } from "../src/middleware/oidc-bearer";
 import { oidcAuthorizeSurface } from "../src/routes/auth-oidc";
 import { noStore, oauthRoutes } from "../src/routes/oauth";
 
@@ -48,7 +48,11 @@ describe("the /oauth router's route table", () => {
       expect({ key, second: chain[1] === noStore }).toEqual({ key, second: true });
       const bearers = chain.filter(isOidcBearerMiddleware).length;
       expect({ key, bearers }).toEqual({ key, bearers: key.endsWith("/userinfo") ? 1 : 0 });
-      if (key.endsWith("/userinfo")) expect(isOidcBearerMiddleware(chain[2])).toBe(true);
+      if (key.endsWith("/userinfo")) {
+        expect(isOidcBearerMiddleware(chain[2])).toBe(true);
+        // Both methods require exactly openid.
+        expect({ key, scopes: oidcBearerScopes(chain[2]) }).toEqual({ key, scopes: ["openid"] });
+      }
     }
   });
 });

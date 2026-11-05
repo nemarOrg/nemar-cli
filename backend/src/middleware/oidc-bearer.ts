@@ -16,7 +16,8 @@
  * refresh token or a client secret is not an access token.
  *
  * WHAT IT ANSWERS (RFC 6750 section 3), always `no-store`:
- *   - no `Authorization` header: 401, `WWW-Authenticate: Bearer` (no error code, section 3.1);
+ *   - no `Authorization` header: 401, `WWW-Authenticate: Bearer` and an empty body (no error code
+ *     anywhere, section 3.1);
  *   - anything that is not a live access token: 401, `WWW-Authenticate: Bearer error="invalid_token"`;
  *   - a live token without every scope the route needs: 403,
  *     `WWW-Authenticate: Bearer error="insufficient_scope", scope="<the scopes>"`.
@@ -33,12 +34,20 @@ type Env = { Bindings: Bindings; Variables: Variables };
 
 const NO_STORE = { "Cache-Control": "no-store", Pragma: "no-cache" } as const;
 
-/** Every middleware `oidcBearer` has made, so a route table can be checked for it by reference. */
-const made = new WeakSet<object>();
+/**
+ * Every middleware `oidcBearer` has made, with the scopes it requires, so a route table can be checked
+ * for it by reference and its scopes pinned.
+ */
+const made = new WeakMap<object, readonly string[]>();
 
 /** True for a handler that `oidcBearer` made. */
 export function isOidcBearerMiddleware(handler: unknown): boolean {
   return typeof handler === "function" && made.has(handler);
+}
+
+/** The scopes a handler `oidcBearer` made requires, or null for any other handler. */
+export function oidcBearerScopes(handler: unknown): readonly string[] | null {
+  return typeof handler === "function" ? (made.get(handler) ?? null) : null;
 }
 
 function refuse(
@@ -66,7 +75,8 @@ export function oidcBearer(requiredScopes: readonly string[]): MiddlewareHandler
   const middleware: MiddlewareHandler<Env> = async (c, next) => {
     const header = c.req.header("Authorization");
     if (!header) {
-      return refuse(c, 401, "Bearer", "invalid_token", "An access token is required.");
+      // No credential at all: the bare challenge, and no error code anywhere (RFC 6750 3.1).
+      return c.body(null, 401, { ...NO_STORE, "WWW-Authenticate": "Bearer" });
     }
     const token = bearerToken(header);
     const invalid = () =>
@@ -114,6 +124,6 @@ export function oidcBearer(requiredScopes: readonly string[]): MiddlewareHandler
     });
     await next();
   };
-  made.add(middleware);
+  made.set(middleware, Object.freeze([...required]));
   return middleware;
 }

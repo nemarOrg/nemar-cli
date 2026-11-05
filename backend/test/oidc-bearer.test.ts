@@ -111,6 +111,7 @@ describe("oidcBearer on a compute-scope route", () => {
     const none = await call("/compute/me");
     expect(none.status).toBe(401);
     expect(none.headers.get("WWW-Authenticate")).toBe("Bearer");
+    expect(none.json).toBeNull();
     for (const authorization of [
       `Bearer ${MEMBER_KEY}`,
       "Bearer ",
