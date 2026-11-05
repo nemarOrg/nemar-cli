@@ -24,10 +24,15 @@ import {
   OIDC_LOGOUT_ERROR_CLASSES,
   OIDC_LOGOUT_LEASE_SECONDS,
   OIDC_LOGOUT_MAX_ATTEMPTS,
+  OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS,
   OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
   OIDC_LOGOUT_TIMEOUT_MS,
 } from "../../shared/oidc";
-import { attemptDueLogouts, logoutAddressVerdict } from "../src/services/oidc-logout";
+import {
+  attemptDueLogouts,
+  logoutAddressVerdict,
+  parseRetryAfter,
+} from "../src/services/oidc-logout";
 import { claimDelivery } from "../src/services/oidc-logout-store";
 import {
   type DeliveryRow,
@@ -484,10 +489,27 @@ describe("a partner that is throttling", () => {
     within((await throttled(429, { "Retry-After": past })).wait, 60);
   });
 
-  test("a huge Retry-After is capped at 12 hours", async () => {
-    within((await throttled(429, { "Retry-After": "999999999" })).wait, 43200);
+  test("a huge Retry-After is capped at 12 hours, however many digits it has", async () => {
+    // Just over the cap, then 9, 12 and 25 digits, then one too long to be a finite number: a partner
+    // that asks for the longest wait gets the longest wait, and is never read as having asked for none.
+    for (const value of [
+      "43201",
+      "999999999",
+      "9".repeat(12),
+      "9".repeat(25),
+      "9".repeat(400),
+      `${"0".repeat(30)}86400`,
+    ]) {
+      const { wait } = await throttled(429, { "Retry-After": value });
+      expect(Math.abs(wait - 43200), `${value.length} characters`).toBeLessThanOrEqual(5);
+    }
     const farFuture = new Date(Date.now() + 90 * 86400_000).toUTCString();
     within((await throttled(429, { "Retry-After": farFuture })).wait, 43200);
+  });
+
+  test("a Retry-After just under the cap is kept as it is", async () => {
+    within((await throttled(429, { "Retry-After": "43199" })).wait, 43199);
+    within((await throttled(429, { "Retry-After": "43200" })).wait, 43200);
   });
 
   test("a Retry-After that is not one is ignored", async () => {
@@ -542,6 +564,63 @@ describe("a partner that is throttling", () => {
 
   test("Retry-After is read from a throttled answer only: a 503 keeps the schedule", async () => {
     within((await throttled(503, { "Retry-After": "600" })).wait, 60);
+  });
+});
+
+describe("parseRetryAfter, the one place a partner's Retry-After is read", () => {
+  const NOW = Date.UTC(2030, 0, 1, 12, 0, 0);
+  const CAP = OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS;
+
+  test("the cap is twelve hours", () => {
+    expect(CAP).toBe(43200);
+  });
+
+  test("a run of digits of ANY length is a number of seconds, and is never more than the cap", () => {
+    expect(parseRetryAfter("0", NOW)).toBe(0);
+    expect(parseRetryAfter("60", NOW)).toBe(60);
+    expect(parseRetryAfter("007", NOW)).toBe(7);
+    expect(parseRetryAfter(" 60 ", NOW)).toBe(60);
+    expect(parseRetryAfter("43200", NOW)).toBe(CAP);
+    expect(parseRetryAfter("43201", NOW)).toBe(CAP);
+    for (const digits of [10, 11, 12, 18, 25, 100, 400, 5000]) {
+      // 11 digits and more were once read as no header at all, which gave the partner that asked for
+      // the longest wait the shortest one; 400 digits is not a finite number and is still the cap.
+      expect(parseRetryAfter("9".repeat(digits), NOW), `${digits} digits`).toBe(CAP);
+    }
+    expect(parseRetryAfter("0".repeat(5000), NOW)).toBe(0);
+    expect(parseRetryAfter(`${"0".repeat(5000)}60`, NOW)).toBe(60);
+  });
+
+  test("an HTTP date is seconds from now, never negative and never more than the cap", () => {
+    const at = (ms: number) => new Date(NOW + ms).toUTCString();
+    expect(parseRetryAfter(at(90_000), NOW)).toBe(90);
+    // An HTTP date has a resolution of one second, so a date is read to the second.
+    expect(parseRetryAfter(at(1_000), NOW)).toBe(1);
+    expect(parseRetryAfter(at(-3_600_000), NOW)).toBe(0);
+    expect(parseRetryAfter(at(30 * 86400_000), NOW)).toBe(CAP);
+    expect(parseRetryAfter(at(CAP * 1000), NOW)).toBe(CAP);
+  });
+
+  test("anything else is no Retry-After at all", () => {
+    for (const value of [
+      null,
+      "",
+      " ",
+      "-5",
+      "+60",
+      "1e3",
+      "12.5",
+      "0x10",
+      "60 seconds",
+      "soon",
+      "NaN",
+      "Infinity",
+      "\u0666\u0660",
+      "2099-01-01T00:00:00Z",
+      "Tue, not a date",
+    ]) {
+      expect(parseRetryAfter(value, NOW), JSON.stringify(value)).toBeNull();
+    }
   });
 });
 

@@ -182,23 +182,37 @@ export type SendOutcome =
       kind: "retry";
       status: number | null;
       errorClass: OidcLogoutErrorClass;
-      /** A throttled partner's `Retry-After` in seconds, a lower bound for the wait; absent otherwise. */
+      /**
+       * A throttled partner's `Retry-After` in seconds, a lower bound for the wait, at most
+       * {@link OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS} (`parseRetryAfter` bounds it); absent otherwise.
+       */
       retryAfterSeconds?: number;
     };
 
 /**
  * A `Retry-After` header as seconds from now (RFC 9110 section 10.2.3: a whole number of seconds, or an
  * HTTP date), or null for an absent, empty, negative or unparseable value. A date in the past is 0.
+ *
+ * NEVER MORE THAN {@link OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS}: this is where a partner's number enters, so
+ * this is where it is bounded, and the value returned is the wait it can ask for and not the number it
+ * wrote. A run of digits of ANY length is a whole number of seconds: one too long to be a finite number is
+ * still longer than the cap, and is the cap. (It was once read as no header at all past ten digits, which
+ * gave the partner that asked for the longest wait the shortest one.) Anything that is not one of the two
+ * forms is no `Retry-After`, whatever `Number` or `Date.parse` would make of it.
+ *
  * Pure: `nowMs` is the clock.
  */
 export function parseRetryAfter(value: string | null, nowMs: number = Date.now()): number | null {
   if (value === null) return null;
   const text = value.trim();
-  if (/^[0-9]{1,10}$/.test(text)) return Number(text);
+  if (/^[0-9]+$/.test(text)) {
+    return Math.min(Number(text), OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS);
+  }
   // A date has letters and a year; a bare sign or a word is not one, whatever `Date.parse` makes of it.
   if (!/^[A-Za-z]{3,9},? /.test(text)) return null;
   const at = Date.parse(text);
-  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - nowMs) / 1000)) : null;
+  if (!Number.isFinite(at)) return null;
+  return Math.min(Math.max(0, Math.ceil((at - nowMs) / 1000)), OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS);
 }
 
 /**
@@ -266,9 +280,13 @@ function recordOf(outcome: SendOutcome, attempts: number): AttemptRecord {
     return { status: "failed", retryDelaySeconds: 0, ...base };
   }
   const scheduled = OIDC_LOGOUT_RETRY_DELAYS_SECONDS[attempts - 1] as number;
-  // A partner's `Retry-After` can only lengthen the wait, and never past the schedule's longest.
-  const asked = Math.min(outcome.retryAfterSeconds ?? 0, OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS);
-  return { status: "pending", retryDelaySeconds: Math.max(scheduled, asked), ...base };
+  // A partner's `Retry-After` can only lengthen the wait; `parseRetryAfter` has already bounded it by the
+  // schedule's longest, so a partner can slow a delivery and can never add an attempt or park one.
+  return {
+    status: "pending",
+    retryDelaySeconds: Math.max(scheduled, outcome.retryAfterSeconds ?? 0),
+    ...base,
+  };
 }
 
 /** Make one delivery's attempt, or record why it is not made. Throws only on a database fault. */

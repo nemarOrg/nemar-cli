@@ -236,6 +236,8 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     const fifteen = rule(15);
     expect(fifteen).toMatch(/A `408` or a `429` is recorded `http_throttled`/);
     expect(fifteen).toMatch(/LOWER bound for the next wait/);
+    expect(fifteen).toMatch(/a number of seconds, of any length, or an HTTP date/);
+    expect(fifteen).toMatch(/is never read as no header at all/);
     expect(fifteen).toMatch(/at most 12 hours/);
     expect(fifteen).toMatch(/can never add an attempt/);
     expect(fifteen).toMatch(/A `Retry-After` on any other answer is not read/);

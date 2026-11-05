@@ -251,7 +251,7 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     A `200` or `204` is `sent`.
     A redirect, any other `4xx` (a `408` and a `429` are the exceptions, next) and any other answer that is not a `5xx` are `failed` at once, because repeating a refusal does not change it.
     A `5xx`, a `408`, a `429`, no answer in time and a connection that could not be made are retried at 1 minute, 5 minutes, 30 minutes, 2 hours and 12 hours (the first attempt and five retries), then `failed`.
-    A `408` or a `429` is recorded `http_throttled`, and the `Retry-After` it may carry (a number of seconds or an HTTP date; the header is read and the body still never is) is a LOWER bound for the next wait: the longer of it and the schedule's, at most 12 hours, so a partner can slow a delivery and can never add an attempt.
+    A `408` or a `429` is recorded `http_throttled`, and the `Retry-After` it may carry (a number of seconds, of any length, or an HTTP date; the header is read and the body still never is) is a LOWER bound for the next wait: the longer of it and the schedule's, at most 12 hours, so a partner can slow a delivery and can never add an attempt; a run of digits too long to be a finite number is the 12 hours, and is never read as no header at all.
     A `Retry-After` on any other answer is not read.
     A token that NEMAR could not sign (no key, a database fault) is retried too: it is NEMAR's fault and not the partner's.
     The wait is the EARLIEST time of the next attempt, and the tick runs every half hour, so a short wait is taken up at the next half hour; a faster cron for the short waits is not built, because six attempts over fifteen to eighteen hours do not need one.
