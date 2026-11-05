@@ -27,7 +27,7 @@ import {
   sessionCookie,
   tokenRequest,
 } from "./helpers/oidc-flow";
-import { type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
+import { OWNER_KEY, type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 
 let h: OidcHarness;
 
@@ -435,6 +435,19 @@ describe("what a refresh re-reads, and refuses without writing", () => {
       expect((await rowOf(f.first.refresh_token)).used_at).toBeNull();
       expect((await rowOf(f.first.refresh_token)).revoked_at).toBeNull();
     }
+    // A disabled client cannot authenticate at all, so it is refused before its token is read.
+    const f = await family();
+    const off = await h.call("POST", `/admin/oidc/clients/${f.client.clientId}/disable`, {
+      key: OWNER_KEY,
+    });
+    expect(off.status).toBe(200);
+    const res = await refresh(f.client, f.first.refresh_token);
+    expect({ status: res.status, error: res.json?.error }).toEqual({
+      status: 401,
+      error: "invalid_client",
+    });
+    expect((await rowOf(f.first.refresh_token)).used_at).toBeNull();
+    expect((await rowOf(f.first.refresh_token)).revoked_at).toBeNull();
   });
 
   test("a first-party grant stops refreshing once its client no longer qualifies as first-party", async () => {

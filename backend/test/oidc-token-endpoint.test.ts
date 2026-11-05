@@ -16,6 +16,7 @@ import {
   OIDC_AUTHORIZE_CALLER_HEADER,
   OIDC_AUTHORIZE_CALLER_VALUE,
 } from "../../shared/contract/oidc-authorize";
+import { readBasicCredentials } from "../src/services/oidc-clients";
 import { verifiedIdTokenClaims } from "../src/services/oidc-id-token";
 import { CURRENT_KEY_SQL } from "../src/services/oidc-keys";
 import { hashApiKey } from "../src/services/token";
@@ -186,6 +187,16 @@ describe("client authentication is client_secret_basic, and nothing else", () =>
     // None of them spent the code.
     expect(codeRow(f.code)?.used_at).toBeNull();
     expect((await redeem(h, f.client, f.code)).status).toBe(200);
+  });
+
+  test("form decoding reads `+` as a space and %2B as a plus (RFC 6749 2.3.1)", () => {
+    // No NEMAR client id or secret holds a space or a plus, so this is held on the reader itself.
+    expect(readBasicCredentials(basic("a b", "c+d"))).toEqual({ id: "a b", secret: "c+d" });
+    expect(readBasicCredentials(`Basic ${btoa("a+b:c%2Bd")}`)).toEqual({
+      id: "a b",
+      secret: "c+d",
+    });
+    expect(readBasicCredentials(`Basic ${btoa("a%zz:c")}`)).toBeNull();
   });
 
   test("the id and secret are form-decoded before they are compared (RFC 6749 2.3.1)", async () => {

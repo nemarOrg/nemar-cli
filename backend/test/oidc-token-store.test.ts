@@ -537,6 +537,51 @@ describe("ACCESS_FROM_CODE_SQL on its own: the claim predicate and the gates", (
   );
 
   onEveryEngine(
+    "a code whose grant is another account's, or this account's to another client, mints nothing",
+    async (e) => {
+      // `g.id = k.grant_id` alone would accept these rows; the grant must also be THIS account's to
+      // THIS client. No route writes such a code (the code's insert joins the session's own grant),
+      // so the rows are made by hand: the guard is defence in depth, held here.
+      // Another account's grant to THIS client: only the account differs.
+      const mine = await world(e);
+      const other = await world(e);
+      await ok(
+        e,
+        "INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind) VALUES (?, ?, ?, 'user')",
+        other.userId,
+        mine.clientRow,
+        JSON.stringify(["offline_access", "openid", "profile"]),
+      );
+      const theirs = await one<{ id: number }>(
+        e,
+        "SELECT id FROM oidc_grants WHERE user_id = ? AND client_id = ?",
+        other.userId,
+        mine.clientRow,
+      );
+      await ok(e, "UPDATE oidc_codes SET grant_id = ? WHERE id = ?", theirs.id, mine.codeId);
+      expect((await mintFromCode(e, mine)).changes).toBe(0);
+      // This account's grant to ANOTHER client: only the client differs.
+      const w = await world(e);
+      const elsewhere = await world(e);
+      await ok(
+        e,
+        "INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind) VALUES (?, ?, ?, 'user')",
+        w.userId,
+        elsewhere.clientRow,
+        JSON.stringify(["offline_access", "openid", "profile"]),
+      );
+      const foreign = await one<{ id: number }>(
+        e,
+        "SELECT id FROM oidc_grants WHERE user_id = ? AND client_id = ?",
+        w.userId,
+        elsewhere.clientRow,
+      );
+      await ok(e, "UPDATE oidc_codes SET grant_id = ? WHERE id = ?", foreign.id, w.codeId);
+      expect((await mintFromCode(e, w)).changes).toBe(0);
+    },
+  );
+
+  onEveryEngine(
     "CODE_SPEND_SQL marks the code used only beside this request's own token",
     async (e) => {
       const w = await world(e);

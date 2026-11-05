@@ -13,6 +13,7 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import { accountTier } from "../src/services/account-tier";
 import { hashApiKey } from "../src/services/token";
 import {
   type RegisteredClient,
@@ -196,6 +197,29 @@ describe("claims are exactly the granted scopes', in the identity token and at u
       account: { givenName: null, familyName: null },
     });
     expect(scopeClaimsOf(noName.issued.id_token)).toEqual({ sub: subjectOf(noName.userId) });
+  });
+
+  test("names are trimmed: surrounding spaces are not part of a name", async () => {
+    const { issued } = await issue({
+      scope: "openid profile",
+      account: { givenName: "  Ada  ", familyName: " Lovelace " },
+    });
+    expect(scopeClaimsOf(issued.id_token)).toMatchObject({
+      name: "Ada Lovelace",
+      given_name: "Ada",
+      family_name: "Lovelace",
+    });
+  });
+
+  test("accountTier, for every caller: the provider serves only its active branches", () => {
+    // The provider reads it only for an active account (base or upload). The other branches mirror
+    // the website's `deriveAccountTier` for any other caller, and are held here rather than deleted.
+    expect(accountTier("verified", false)).toBe("base");
+    expect(accountTier("approved", true)).toBe("upload");
+    expect(accountTier("verified", true)).toBe("upload");
+    expect(accountTier("pending", true)).toBe("unverified");
+    expect(accountTier("revoked", true)).toBeNull();
+    expect(accountTier("unknown", false)).toBeNull();
   });
 
   test("the tier: an active account without upload access is base", async () => {
