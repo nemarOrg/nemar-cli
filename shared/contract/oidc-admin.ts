@@ -29,7 +29,7 @@
 
 import { z } from "zod";
 import {
-  OIDC_ACCOUNT_END_REASONS,
+  OIDC_ACCOUNT_END_NAMES,
   OIDC_AUDIENCE_MAX_LENGTH,
   OIDC_CLIENT_NAME_MAX_LENGTH,
   OIDC_CONSENT_MODES,
@@ -244,8 +244,9 @@ export type OidcKeyRevokeResponse = z.infer<typeof oidcKeyRevokeResponseSchema>;
 
 /** The body of `POST /admin/oidc/accounts/:id/end`: why, as the owner names it. */
 export const oidcAccountEndRequestSchema = z.object({
-  reason: z.string().refine((v) => Object.hasOwn(OIDC_ACCOUNT_END_REASONS, v), {
-    message: `reason must be one of: ${Object.keys(OIDC_ACCOUNT_END_REASONS).join(", ")}`,
+  // The message names the words and never the value sent: an unknown reason is not echoed back.
+  reason: z.enum(OIDC_ACCOUNT_END_NAMES, {
+    errorMap: () => ({ message: `reason must be one of: ${OIDC_ACCOUNT_END_NAMES.join(", ")}` }),
   }),
 });
 export const OIDC_ACCOUNT_END_FIELDS: readonly string[] = Object.keys(

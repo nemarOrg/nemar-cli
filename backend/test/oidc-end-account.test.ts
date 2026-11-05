@@ -101,6 +101,14 @@ describe("the request", () => {
     });
   });
 
+  test("a refusal names the words and never echoes what was sent", async () => {
+    const { userId } = await holder();
+    const res = await end(userId, { reason: "zzz-secret-value" });
+    expect(res.status).toBe(400);
+    expect(res.text).toContain("merged, revoked");
+    expect(res.text).not.toContain("zzz-secret-value");
+  });
+
   test("the reason is merged or revoked, required, and no other field is accepted", async () => {
     const { userId } = await holder();
     for (const body of [

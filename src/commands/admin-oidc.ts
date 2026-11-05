@@ -32,7 +32,7 @@ import type {
   OidcLogoutDeliveryView,
 } from "../../shared/contract/oidc-admin.js";
 import {
-  OIDC_ACCOUNT_END_REASONS,
+  OIDC_ACCOUNT_END_NAMES,
   OIDC_CONSENT_MODES,
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_GRANTS,
@@ -369,15 +369,29 @@ Exit codes:
      first), the question was not answered yes (nothing was changed), or a server on which the
      provider is off.`;
 
+/**
+ * The question `end-account` asks before it ends anything. A first-party client skips the consent screen,
+ * so it is not true that "the person is asked again" at every client: only a third-party client asks.
+ */
+export function endAccountQuestion(userId: number): string {
+  return `End every OpenID Connect grant of account ${userId}? Its tokens are revoked at once, each client with a logout address is told, and a third-party client asks the person for consent again at their next sign-in (a first-party client does not ask). The CLI cannot undo it.`;
+}
+
 const END_ACCOUNT_HELP = `
 Ends every OpenID Connect grant an account holds, at every client, in one step (owner only): the
-account's access and refresh tokens are revoked, its grants are ended (a later sign-in is a new grant,
-and a third-party client asks the person again), its unused authorization codes are deleted, and each
-client that registered a back-channel logout address is queued to be told. Nothing else of the account
-changes: it is not revoked, its keys and sessions stay. It is the manual-merge step of ADR 0043 (end the
-loser of a merge with --reason merged; the winner's grants are untouched) and the incident tool.
+account's access and refresh tokens are revoked, its grants are ended (a later sign-in is a new grant:
+a third-party client asks the person for consent again, a first-party client does not ask), its unused
+authorization codes are deleted, and each client that registered a back-channel logout address is queued
+to be told. Nothing else of the account changes: it is not revoked, its keys and sessions stay. It is the
+manual-merge step of ADR 0043 (end the loser of a merge with --reason merged; the winner's grants are
+untouched) and the incident tool.
 
-  --reason   ${Object.keys(OIDC_ACCOUNT_END_REASONS).join(" or ")}: the word recorded on the revoked tokens and the queued logouts
+Ending the grants does not stop the account signing in again, because its app sessions and keys survive,
+so it can get a new first-party grant at once. For the loser of a merge, pair this command with revoking
+or deleting that account, or changing its kind away from person (those paths end the grants themselves);
+used alone it is for an incident that is about the grants and not the account.
+
+  --reason   ${OIDC_ACCOUNT_END_NAMES.join(" or ")}: the word recorded on the revoked tokens and the queued logouts
              (account_merged or account_revoked).
 
 The call to each client is made after the step commits, from the server, and is retried on a schedule
@@ -731,7 +745,7 @@ oidcCommand
   .description("End an account's grants at every client and tell the clients (owner only)")
   .addOption(
     new Option("--reason <reason>", "Why: the word recorded on the tokens and the logouts")
-      .choices(Object.keys(OIDC_ACCOUNT_END_REASONS))
+      .choices([...OIDC_ACCOUNT_END_NAMES])
       .makeOptionMandatory(),
   )
   .option("-y, --yes", "Do not ask first")
@@ -751,10 +765,7 @@ oidcCommand
         return;
       }
       if (!requireSignedIn(json)) return;
-      const answer = await confirm(
-        `End every OpenID Connect grant of account ${userId}? Its tokens are revoked at once, each client with a logout address is told, and the person is asked again at their next sign-in. The CLI cannot undo it.`,
-        { yes: options.yes },
-      );
+      const answer = await confirm(endAccountQuestion(userId), { yes: options.yes });
       if (answer !== "confirmed") {
         failMessage("Nothing was changed: the question was not answered yes (use --yes).", {
           json,

@@ -57,6 +57,7 @@ import {
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
 } from "../shared/oidc";
+import { endAccountQuestion } from "../src/commands/admin-oidc";
 import { help } from "./help-output";
 
 // Many of these tests spawn the CLI several times in one test (the "who may run it" walks make 28
@@ -709,6 +710,20 @@ describe("nemar admin oidc end-account", () => {
       db.query("SELECT COUNT(*) AS n FROM oidc_grants WHERE revoked_at IS NULL").get(),
     ).toEqual({ n: 1 });
     expect(requests.filter((q) => q.path.includes("/accounts/"))).toHaveLength(0);
+  });
+
+  test("the question is true of every kind of client, and the help says what to pair the command with", async () => {
+    const question = endAccountQuestion(7);
+    // A first-party client skips the consent screen, so only a third-party client "asks again".
+    expect(question).toContain("a third-party client asks the person for consent again");
+    expect(question).toContain("(a first-party client does not ask)");
+    expect(question).not.toMatch(/the person is asked again/);
+    expect(question).toContain("account 7");
+    const out = await help(["admin", "oidc", "end-account", "--help-all"]);
+    expect(out).toMatch(/a first-party client does not ask/);
+    expect(out).toMatch(/does not stop the account signing in again/);
+    expect(out).toMatch(/pair this command with revoking\s+or deleting that account/);
+    expect(out).not.toMatch(/asks the person again\)/);
   });
 
   test("a bad id, a missing reason, an unknown reason and an unknown account exit 1", async () => {

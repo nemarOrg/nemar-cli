@@ -357,9 +357,15 @@ describe("the delivery store on D1", () => {
   test("a delivery that is not to be sent is finished without a claim, and only while it is due", async () => {
     const a = await queueOne();
     const later = await queueOne("datetime('now', '+1 hour')");
-    expect(await finishWithoutSend(d1, later.id, "fenced", "fenced")).toBe(false);
-    expect(await finishWithoutSend(d1, a.id, "fenced", "fenced")).toBe(true);
-    expect(await finishWithoutSend(d1, a.id, "fenced", "fenced")).toBe(false);
+    expect(await finishWithoutSend(d1, later.id, { status: "fenced", errorClass: "fenced" })).toBe(
+      false,
+    );
+    expect(await finishWithoutSend(d1, a.id, { status: "fenced", errorClass: "fenced" })).toBe(
+      true,
+    );
+    expect(await finishWithoutSend(d1, a.id, { status: "fenced", errorClass: "fenced" })).toBe(
+      false,
+    );
     expect(
       await one(
         "SELECT status, attempts, next_attempt_at, last_error_class FROM oidc_logout_deliveries WHERE id = ?",

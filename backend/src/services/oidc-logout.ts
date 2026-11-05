@@ -95,7 +95,8 @@ export interface LogoutOptions {
 /** Whether to request an address, and if not what to record (`fenced`, or `failed` with `address_refused`). */
 export type AddressVerdict =
   | { send: true }
-  | { send: false; status: "fenced" | "failed"; errorClass: "fenced" | "address_refused" };
+  | { send: false; status: "fenced"; errorClass: "fenced" }
+  | { send: false; status: "failed"; errorClass: "address_refused" };
 
 const SEND: AddressVerdict = { send: true };
 const REFUSED: AddressVerdict = { send: false, status: "failed", errorClass: "address_refused" };
@@ -279,19 +280,31 @@ async function attemptOne(
   const db = env.DB;
   // A client that is gone or disabled is owed nothing: the owner cut it off.
   if (row.client_public === null || row.client_status !== "active") {
-    return (await finishWithoutSend(db, row.id, "failed", "client_disabled")) ? "failed" : "lost";
+    return (await finishWithoutSend(db, row.id, {
+      status: "failed",
+      errorClass: "client_disabled",
+    }))
+      ? "failed"
+      : "lost";
   }
   if (row.uri === null) {
-    return (await finishWithoutSend(db, row.id, "failed", "address_refused")) ? "failed" : "lost";
+    return (await finishWithoutSend(db, row.id, {
+      status: "failed",
+      errorClass: "address_refused",
+    }))
+      ? "failed"
+      : "lost";
   }
   const verdict = logoutAddressVerdict(env, row.uri);
   if (!verdict.send) {
-    const done = await finishWithoutSend(db, row.id, verdict.status, verdict.errorClass);
+    const done = await finishWithoutSend(db, row.id, verdict);
     return done ? (verdict.status === "fenced" ? "fenced" : "failed") : "lost";
   }
   // Every attempt is spent: a claim that never recorded (an evicted isolate) has none left to make.
   if (row.attempts >= OIDC_LOGOUT_MAX_ATTEMPTS) {
-    return (await finishWithoutSend(db, row.id, "failed", "unreported")) ? "failed" : "lost";
+    return (await finishWithoutSend(db, row.id, { status: "failed", errorClass: "unreported" }))
+      ? "failed"
+      : "lost";
   }
 
   const jti = randomHex(16);

@@ -7,9 +7,12 @@
  * request to a stand-in partner on the loopback interface (`helpers/oidc-logout-standin.ts`), which
  * records what it receives and answers as the test says. The stand-in is the PARTNER and nothing else:
  * the signing, the claims, the form, the timeout, the redirect rule, the fence, the claim of an
- * attempt, the retry schedule and what is recorded are all NEMAR's own code. Two tests that need a
- * production Worker (which refuses a loopback address by design) give the sender a `fetchImpl` that
- * forwards the request to the stand-in, and say so.
+ * attempt, the retry schedule and what is recorded are all NEMAR's own code. Five tests (all in
+ * `describe("the fence")`) give the sender a `fetchImpl`: it records the address the sender asked for and
+ * forwards the request to the stand-in. Two run outside production (a fenced host, where it shows that
+ * nothing was asked, and a listed host, where it shows that only that host was); three run in production,
+ * which refuses a loopback address by design, so the stand-in is reachable only through the shim (one
+ * sends to a named host, two refuse an address and assert the shim is never called).
  *
  * The delivery table is read for what the sender WRITES (a status, an attempt count, a time, a fixed
  * word); what a partner is sent is read off the stand-in.

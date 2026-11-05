@@ -56,7 +56,6 @@ import {
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
   OIDC_KID_HEX_LENGTH,
   OIDC_LOGOUT_STATUSES,
-  type OidcAccountEndReason,
   type OidcEndReason,
   isOidcClientId,
   isOidcKid,
@@ -308,7 +307,7 @@ export function registerOidcAdminRoutes(admin: AdminRouter): void {
     }
     const parsed = await parseBody(c, oidcAccountEndRequestSchema, OIDC_ACCOUNT_END_FIELDS);
     if (!parsed.ok) return parsed.response;
-    const reason = OIDC_ACCOUNT_END_REASONS[parsed.value.reason as OidcAccountEndReason];
+    const reason = OIDC_ACCOUNT_END_REASONS[parsed.value.reason];
     return endAccount(c, Number(raw), reason);
   });
 

@@ -75,7 +75,7 @@ function certificate(): { key: string; cert: string } {
     );
     if (made.status !== 0) {
       throw new Error(
-        `openssl could not make the stand-in's certificate (status ${made.status}): ${made.stderr}`,
+        `openssl could not make the stand-in's certificate (status ${made.status}): ${made.error?.message ?? made.stderr}`,
       );
     }
     material = {

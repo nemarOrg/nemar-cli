@@ -94,8 +94,6 @@ const ownerCall = (method: string, path: string, body?: unknown) =>
 interface Path {
   name: string;
   reason: string;
-  /** Whether the account can be put back as an approval would, to show that nothing comes back. */
-  restorable: boolean;
   run(userId: number): Promise<void>;
 }
 
@@ -103,7 +101,6 @@ const PATHS: Path[] = [
   {
     name: "POST /admin/revoke/:username",
     reason: "account_revoked",
-    restorable: true,
     async run(userId) {
       expect((await ownerCall("POST", `/admin/revoke/${usernameOf(h, userId)}`)).status).toBe(200);
     },
@@ -111,7 +108,6 @@ const PATHS: Path[] = [
   {
     name: "POST /admin/revoke/by-id/:id",
     reason: "account_revoked",
-    restorable: true,
     async run(userId) {
       expect((await ownerCall("POST", `/admin/revoke/by-id/${userId}`)).status).toBe(200);
     },
@@ -119,7 +115,6 @@ const PATHS: Path[] = [
   {
     name: "DELETE /admin/users/by-id/:id (the owner's soft delete)",
     reason: "account_deleted",
-    restorable: false,
     async run(userId) {
       expect((await ownerCall("DELETE", `/admin/users/by-id/${userId}`)).status).toBe(200);
     },
@@ -127,7 +122,6 @@ const PATHS: Path[] = [
   {
     name: "the sweep of the live tests' accounts",
     reason: "account_deleted",
-    restorable: false,
     async run(userId) {
       makeSweepable(userId);
       const swept = await sweepCiTestAccounts(h.env);
@@ -197,24 +191,26 @@ describe.each(PATHS)("$name", (path) => {
     expect(deliveries(h, bystander.userId)).toEqual([]);
   });
 
-  if (path.restorable) {
-    test("restoring the account restores nothing, and signing in again is a new grant", async () => {
-      const s = await subject();
-      await path.run(s.userId);
-      restoreAccount(h, s.userId);
+  test("restoring the account restores nothing, and signing in again is a new grant", async () => {
+    // The strongest form of the precondition, by an UPDATE and not a route: it puts back the status and
+    // clears `deleted_at`, as an approval would for a revoked account. A tombstoned account has no
+    // approval route and its PII stays erased, so for a soft delete or the sweep this is the account
+    // coming back as far as it ever could: the credentials still must not.
+    const s = await subject();
+    await path.run(s.userId);
+    restoreAccount(h, s.userId);
 
-      // THE case: before the cascade, revocation left the rows live and merely suppressed by the
-      // status check, so putting the status back put the credentials back.
-      expect(await everythingStops(s)).toEqual([false, false, false]);
-      expect(countsOf(h, s.userId).grantsLive).toBe(0);
+    // THE case: before the cascade, revocation left the rows live and merely suppressed by the
+    // status check, so putting the status back put the credentials back.
+    expect(await everythingStops(s)).toEqual([false, false, false]);
+    expect(countsOf(h, s.userId).grantsLive).toBe(0);
 
-      const again = await signInAt(h, s.userId, withLogout);
-      expect(await stillWorks(h, again)).toBe(true);
-      expect(countsOf(h, s.userId).grantsLive).toBe(1);
-      // The old grant stays what it was: a new row, not a revived one.
-      expect(countsOf(h, s.userId).grantsRevoked).toBe(3);
-    });
-  }
+    const again = await signInAt(h, s.userId, withLogout);
+    expect(await stillWorks(h, again)).toBe(true);
+    expect(countsOf(h, s.userId).grantsLive).toBe(1);
+    // The old grant stays what it was: a new row, not a revived one.
+    expect(countsOf(h, s.userId).grantsRevoked).toBe(3);
+  });
 });
 
 describe("what the statements leave alone", () => {

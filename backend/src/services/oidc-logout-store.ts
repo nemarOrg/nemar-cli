@@ -150,14 +150,25 @@ export async function recordAttempt(
   return (result.meta?.changes ?? 0) === 1;
 }
 
+/**
+ * A delivery that is not to be sent, with the one class that goes with each status: `fenced` is always
+ * `fenced`, and `failed` is one of the three that need no attempt. The pairs are the only ones that can be
+ * written, so a wrong pairing is a type error and not a row.
+ */
+export type NotSent =
+  | { status: "fenced"; errorClass: "fenced" }
+  | { status: "failed"; errorClass: "address_refused" | "client_disabled" | "unreported" };
+
 /** Finish a delivery that is not to be sent. False when the row was claimed or finished meanwhile. */
 export async function finishWithoutSend(
   db: D1Database,
   id: number,
-  status: "fenced" | "failed",
-  errorClass: OidcLogoutErrorClass,
+  outcome: NotSent,
 ): Promise<boolean> {
-  const result = await db.prepare(FINISH_WITHOUT_SEND_SQL).bind(status, errorClass, id).run();
+  const result = await db
+    .prepare(FINISH_WITHOUT_SEND_SQL)
+    .bind(outcome.status, outcome.errorClass, id)
+    .run();
   return (result.meta?.changes ?? 0) === 1;
 }
 
