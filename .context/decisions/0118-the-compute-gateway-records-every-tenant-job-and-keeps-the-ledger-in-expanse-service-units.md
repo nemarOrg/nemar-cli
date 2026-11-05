@@ -319,3 +319,56 @@ Open points for the phases that follow, recorded so nobody reads them as settled
 - Which headers the interface wants, beyond the key's (for example a resource header), is checked against the real interface when the key is issued.
 
 Not verified, and listed so nobody reads it as fact: which header carries the key, the body's spelling and time format, whether `debug` is a body field, what the interface answers for a duplicate, and whether it accepts the pseudonymous gateway user.
+
+## Amendment 2026-11-04 (#2043): the launch specification travels as base64url (contract follow-up A1c)
+
+The review of the launcher phase found that the launch specification, which travels as ONE scheduler environment value, is not safe to carry as compact JSON.
+The scheduler writes an environment value into a file that a shell sources on the compute node, and it quotes a value only conditionally.
+A value with no space is written bare, so the shell consumes the quotes of the JSON and the launcher reads invalid JSON; and shell-active characters in a user's strings (a command substitution, a backtick, a quote, a backslash) are expanded or break the quoting, outside the container.
+Nothing is registered with a tenant and every compute switch is dark, so nothing was exposed.
+The repository owner approved the fix on 2026-11-04: base64url without padding.
+"Item N" means the numbered item of THIS amendment.
+
+1. **The `NEMAR_LAUNCH_SPEC` value is the launch specification's JSON text in base64url, with no padding.**
+   RFC 4648 section 5, alphabet `A-Za-z0-9-_` (`SHELL_INERT_ENV_ALPHABET`), no padding and no line break, applied to the bytes of the ASCII-only JSON text that `encodeLaunchSpec` writes.
+   The variable name is unchanged.
+   A value made only of that alphabet holds none of the characters the scheduler quotes for and none that a shell, a glob or a quoting rule acts on, so how the scheduler quotes is no longer something the launch specification depends on.
+   `encodeLaunchSpecEnv(text)` is the wire step, beside `encodeLaunchSpec`, which still returns the JSON text because the text is what is hashed and recorded.
+   The two are separate functions, so the text that is digested and the value that is sent stay two named things; the Tapis client refuses a text where a value belongs (item 5).
+   A5's builder (`buildLaunch`) calls both, records the digest of the text and sends only the encoded value in `parameterSet.envVariables`.
+2. **The JSON text, its 64 KiB cap and both digests are unchanged.**
+   `spec_digest` is the SHA-256 of `records/<id>/spec.json`, and `launch_spec_digest` is the SHA-256 of the launch specification's JSON text, which is what the value decodes to; neither is over the encoded value.
+   The launcher decodes the value, hashes the TEXT, then parses it, and records that digest in `provenance.json`.
+   The Worker's digest, written before the submit, is of the same text, so the check that compares them (item 7 of the A5 amendment) proves what it proved before.
+   The golden vector's text and its SHA-256 are unchanged; an encoded golden vector (its string, its length and its SHA-256) is added beside it, with a second vector chosen to hold both `-` and `_` and the characters a shell acts on.
+3. **The encoded value is bounded, and the bound is declared once.**
+   `LAUNCH_SPEC_ENV_MAX_CHARS` is `ceil(65536 * 4 / 3)`, which is 87,382: base64url without padding spends `ceil(n * 4 / 3)` characters on `n` bytes, so every text within the 64 KiB cap encodes within the bound, and a text of exactly the cap encodes to exactly the bound.
+   `encodeLaunchSpecEnv` re-checks the length it wrote, `launchSpecFits` (the Worker's worst case) goes through both steps, and the Tapis client's request schema bounds the value by the same constant.
+   The encoder's two size checks refuse the same inputs, by arithmetic; the second is the contract's own statement of the bound at the wire, not a second limit.
+4. **The decoder is strict, and there is no earlier format.**
+   `decodeLaunchSpecEnv(value)` returns the text or a fixed refusal word (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_ascii`) that never holds a part of the value.
+   It accepts only a non-empty string of at most the bound, made only of the alphabet (so no padding, no `+` or `/`, no whitespace and no line break), whose length is not 1 modulo 4 and whose bytes are all ASCII; the caller then parses the JSON.
+   A raw JSON value, which starts with `{`, is refused: nothing is registered with a tenant, so no earlier format is accepted anywhere.
+   The unused trailing bits of the last character are not checked.
+   The encoder always writes them as zero, and a value that differs only there decodes to the same text and so to the same digest; this is a recorded choice, and the launcher's decoder is required to follow the same rules.
+5. **The Tapis client refuses anything else before a request is built.**
+   The request schema's value is `isShellInertEnvValue` (the contract's own rule, not a copy) within the bound, so a raw JSON text, padding, a quote, a space, a newline and a value over the bound are each refused with the field's name and never the value.
+   The closed one-variable array and `archiveFilter.includeLaunchFiles: false` are unchanged.
+   The encoded value holds the per-job token, so it is held to every rule the plain token is: it is not logged, returned or stored, and the tests that look for a leak look for it too, because the plain token is no longer a substring of it.
+6. **The hazard is reproduced, not asserted.**
+   `test/compute-launch-env-shell.test.ts` implements the scheduler's conditional quoting (`backend/test/helpers/scheduler-launch-file.ts`), writes `export NEMAR_LAUNCH_SPEC=<value>`, sources the file with a real `sh` in a fresh directory and prints the variable back.
+   The old value, kept in the test as the negative control, fails the round trip for a specification without a space and for `$(...)`, a backtick, `"` and `\` in a user's string; the first two make the shell run what the value holds (the examples are inert: a `touch` of a path in that directory).
+   One shape the old value did carry is asserted too, so the detector is seen to tell cases apart.
+   The new value comes back exactly for adversarial arguments, a command, environment values and a document of 64 KiB, and no file is made.
+   The scheduler's rule is the review's reading of it and is unverified; that is why the launch specification is made independent of it.
+7. **What this supersedes.**
+   Decision 11 says the digest is "of the exact raw bytes of the `NEMAR_LAUNCH_SPEC` value, which is ASCII-only JSON": read it as the exact bytes of the launch specification's JSON text, which the value decodes to.
+   Item 4 of the A5 amendment ("the SHA-256 of the exact `NEMAR_LAUNCH_SPEC` bytes") reads the same way.
+   The last clause of the A5 amendment's not-verified paragraph (whether Tapis passes a JSON launch specification, quotes and braces included, through an environment variable unaltered) is no longer the question: the value holds no quote or brace.
+   Nothing is removed from this record; the earlier sentences stay as they were written.
+8. **Registration stays blocked.**
+   No application definition is registered with any tenant, and `COMPUTE_ENABLED` is not turned on anywhere, until the launcher's decoder lands in `nemar-process` (it implements the same format, with the golden vectors and the alphabet pinned on both sides) AND the owner items recorded on the launcher phase's pull request (`nemarOrg/nemar-process#9`) are settled.
+   The order is: this change merges into the compute epic branch, then `nemar-process` re-pins the schema file to this merge commit and merges.
+   The schema file `shared/contract/compute-launch.schema.json` changes in its descriptions and not its structure: it describes the document, says the document travels as base64url and claims nothing about the scheduler; `nemar-process` copies it byte for byte.
+
+Not verified against a real tenant, and listed so nobody reads it as fact: how the scheduler quotes an environment value (the rule the tests reproduce is a reading of it), and whether Tapis and the scheduler accept an environment value of up to 87,382 characters.
