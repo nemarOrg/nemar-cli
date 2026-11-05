@@ -394,6 +394,51 @@ export function suMilliFor(
   return Number(charged);
 }
 
+/**
+ * The memory per node, in MB, a Tapis submit must ASK FOR on `partition` (phase A5, #2010; round 1 of the
+ * review). Tapis always passes a memory to the scheduler, and its own defaults are 100 MB and 10
+ * minutes, so a job that names none is LIMITED to 100 MB however much the hold charged it for: a
+ * whole-node job would pay for a node and be given a hundred megabytes. This is the memory the CHARGE
+ * already pays for, from the rate table, so the request and the price cannot disagree:
+ *
+ *  - a whole `compute` node: `cpuNodeCores` core-units of `memoryMbPerCoreUnit` (262,144 MB);
+ *  - a whole `gpu` node: `gpuNodeGpus` GPU-units of `memoryMbPerGpuUnit` (376,832 MB);
+ *  - a per-core partition: the job's own `memory_mb` when it names one, else its cores' share
+ *    (`cores` x `memoryMbPerCoreUnit`, which is what `core_or_memory` charges for);
+ *  - a per-GPU partition: the job's own `memory_mb` when it names one, else its GPUs' share
+ *    (`gpus` x `memoryMbPerGpuUnit`).
+ *
+ * The partition table has NO per-node memory field of its own, so a whole node's memory is derived
+ * from the rate table; the figures are the design's reading of Expanse's published node sizes and are
+ * UNCONFIRMED with SDSC (design section 12, question 5) like the rates. A row's own `memory_mb` on a
+ * whole-node partition is not used: the node is charged and given whole. Throws RangeError for a
+ * partition that is not one and for a per-resource job that names neither memory nor the resource.
+ */
+export function submitMemoryMb(
+  partition: PartitionName,
+  resources: { cores?: number; memory_mb?: number | null; gpus?: number },
+): number {
+  if (!Object.hasOwn(PARTITIONS, partition)) throw new RangeError("not a partition");
+  const t = RATE_TABLE_V1;
+  const own = resources.memory_mb ?? null;
+  switch (PARTITIONS[partition].rate) {
+    case "whole_cpu_node":
+      return t.cpuNodeCores * t.memoryMbPerCoreUnit;
+    case "whole_gpu_node":
+      return t.gpuNodeGpus * t.memoryMbPerGpuUnit;
+    case "core_or_memory": {
+      const memory = own ?? (resources.cores ?? 0) * t.memoryMbPerCoreUnit;
+      if (!Number.isSafeInteger(memory) || memory < 1) throw new RangeError("no memory to ask for");
+      return memory;
+    }
+    case "gpu_or_memory": {
+      const memory = own ?? (resources.gpus ?? 0) * t.memoryMbPerGpuUnit;
+      if (!Number.isSafeInteger(memory) || memory < 1) throw new RangeError("no memory to ask for");
+      return memory;
+    }
+  }
+}
+
 /** The hold for a job: what it would cost if it ran for every minute it asked for. */
 export function estimateSuMilli(
   spec: ComputeResources & { partition: PartitionName; minutes: number },

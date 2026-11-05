@@ -28,7 +28,11 @@
  */
 
 import type { z } from "zod";
-import type { ComputeFailureCode } from "../../../shared/compute-state.js";
+import {
+  type ComputeFailureCode,
+  RECORDS_UNREADABLE,
+  type VerifyReason,
+} from "../../../shared/compute-state.js";
 import { resultsLauncherKey, resultsOutputKey } from "../../../shared/contract/compute-launch.js";
 import {
   COMPUTE_JOB_ID_RE,
@@ -286,27 +290,6 @@ export function tapisExitCode(rec: TapisJob): number | null {
 
 // --- verifyResults --------------------------------------------------------------------------------
 
-export const VERIFY_REASONS = [
-  "not_completed",
-  "declared_missing",
-  "result_missing",
-  "provenance_missing",
-  "manifest_missing",
-  "job_id_mismatch",
-  "launch_digest_mismatch",
-  "bundle_digest_mismatch",
-  "image_digest_mismatch",
-  "result_reports_failure",
-  "exit_mismatch",
-  "output_missing",
-  "output_size_mismatch",
-  "output_checksum_mismatch",
-  "manifest_mismatch",
-  "launcher_file_missing",
-] as const;
-
-export type VerifyReason = (typeof VERIFY_REASONS)[number];
-
 export type VerifyResult =
   | { ok: true }
   | {
@@ -316,14 +299,14 @@ export type VerifyResult =
         ComputeFailureCode,
         "result_upload_failed" | "result_verification_failed" | "records_unavailable"
       >;
-      reason: VerifyReason | "records_unreadable";
+      reason: VerifyReason | typeof RECORDS_UNREADABLE;
       /** The launcher's documents disagreed with what NEMAR knows: an administrator looks. */
       mismatch: boolean;
     };
 
 const fail = (
   code: "result_upload_failed" | "result_verification_failed" | "records_unavailable",
-  reason: VerifyReason | "records_unreadable",
+  reason: VerifyReason | typeof RECORDS_UNREADABLE,
   mismatch = false,
 ): VerifyResult => ({ ok: false, code, reason, mismatch });
 
@@ -387,7 +370,7 @@ export async function verifyResults(
   }
 
   const spec = await readRecordedSpec(records, job);
-  if (spec === null) return fail("records_unavailable", "records_unreadable");
+  if (spec === null) return fail("records_unavailable", RECORDS_UNREADABLE);
   if (provenance.bundle_digest !== (spec.bundle?.sha256 ?? null)) {
     return fail("result_verification_failed", "bundle_digest_mismatch", true);
   }

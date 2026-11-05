@@ -23,6 +23,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { PARTITIONS, type PartitionName } from "../../shared/contract/compute";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import {
   CLAIM_SUBMIT_SQL,
@@ -423,5 +424,93 @@ describe("what the new paths log", () => {
     for (const word of [fx.tapis.url, fx.tapis.password, "NEMAR_LAUNCH_SPEC", "x-007"]) {
       expect([word, joined.includes(word)]).toEqual([word, false]);
     }
+  });
+});
+
+// --- What every submit asks the scheduler for ----------------------------------------------------
+
+// Tapis always passes a memory to the scheduler and its own default is 100 MB, so a job that names none
+// is limited to 100 MB however much its hold charged it for: a whole node would be paid for and not
+// given. Every submit therefore carries all four (memory, minutes, nodes and cores), on every partition.
+describe("every partition's submit carries memory, minutes, nodes and cores", () => {
+  /** Per partition: [row cores, row GPUs, row memory in MB or null, memory the submit must carry]. */
+  const WRITTEN_OUT: Record<PartitionName, [number, number, number | null, number]> = {
+    shared: [4, 0, null, 8192],
+    compute: [128, 0, null, 262144],
+    debug: [4, 0, null, 8192],
+    "large-shared": [4, 0, null, 8192],
+    preempt: [4, 0, null, 8192],
+    "gpu-shared": [10, 1, null, 94208],
+    gpu: [40, 4, null, 376832],
+    "gpu-debug": [10, 1, null, 94208],
+    "gpu-preempt": [10, 1, null, 94208],
+  };
+
+  test("the table written out here covers exactly the contract's partitions", () => {
+    expect(Object.keys(WRITTEN_OUT).sort()).toEqual(Object.keys(PARTITIONS).sort());
+  });
+
+  for (const partition of Object.keys(PARTITIONS) as PartitionName[]) {
+    const [cores, gpus, memory, expected] = WRITTEN_OUT[partition];
+    test(`${partition}: a row with ${memory === null ? "no memory" : `${memory} MB`} submits memoryMB ${expected} with maxMinutes, nodeCount and coresPerNode`, async () => {
+      const made = await makeJob(fx);
+      await made.env.DB.prepare(
+        `UPDATE compute_jobs SET partition = ?1, pool = ?2, nodes = 1, cores_per_node = ?3,
+                gpus = ?4, memory_mb = ?5, minutes = 30 WHERE id = ?6`,
+      )
+        .bind(partition, PARTITIONS[partition].pool, cores, gpus, memory, made.job.id)
+        .run();
+      expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+        ok: true,
+        outcome: "submitted",
+      });
+      const request = fx.tapis.log.find((r) => r.route === "POST /v3/jobs/submit");
+      const body = JSON.parse(request?.body ?? "{}");
+      expect([partition, body.memoryMB]).toEqual([partition, expected]);
+      expect([partition, body.maxMinutes, body.nodeCount, body.coresPerNode]).toEqual([
+        partition,
+        30,
+        1,
+        cores,
+      ]);
+      expect(body.execSystemLogicalQueue).toBe(partition);
+    });
+  }
+
+  test("a per-resource job's own memory is what is asked for; a whole node's own is not (the node is charged and given whole)", async () => {
+    const own = await makeJob(fx);
+    await own.env.DB.prepare("UPDATE compute_jobs SET memory_mb = 20000 WHERE id = ?")
+      .bind(own.job.id)
+      .run();
+    await submitComputeJob(own.env, own.job.id);
+    const whole = await makeJob(fx);
+    await whole.env.DB.prepare(
+      "UPDATE compute_jobs SET partition = 'compute', cores_per_node = 128, memory_mb = 1000, minutes = 30 WHERE id = ?",
+    )
+      .bind(whole.job.id)
+      .run();
+    await submitComputeJob(whole.env, whole.job.id);
+    const sent = fx.tapis.log
+      .filter((r) => r.route === "POST /v3/jobs/submit")
+      .map((r) => JSON.parse(r.body ?? "{}").memoryMB);
+    expect(sent).toEqual([20000, 262144]);
+  });
+
+  test("a row with nothing to ask memory for cannot launch: it ends failed with the hold released, and Tapis is never reached", async () => {
+    const made = await makeJob(fx);
+    await made.env.DB.prepare(
+      "UPDATE compute_jobs SET cores_per_node = 0, memory_mb = NULL WHERE id = ?",
+    )
+      .bind(made.job.id)
+      .run();
+    expect(await submitComputeJob(made.env, made.job.id)).toMatchObject({ ok: false });
+    const job = await reread(made.env, made.job.id);
+    expect([job.state, job.failure_code, job.failure_detail]).toEqual([
+      "failed",
+      "tapis_submit_failed",
+      "invalid_spec",
+    ]);
+    expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
+    expect(submitsAtTapis()).toBe(0);
   });
 });

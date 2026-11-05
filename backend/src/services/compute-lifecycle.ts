@@ -43,19 +43,23 @@
  *  - THE LAUNCH SPECIFICATION IS NEVER STORED, LOGGED OR RETURNED. It holds the job token. Its SHA-256 is
  *    written to the row BEFORE the submit, so a launcher that ran another one fails verification.
  *  - LOGS CARRY JOB IDS, FIXED WORDS AND ERROR CLASSES ONLY: no token, name, path, address or output.
- *  - THE SWITCH IS READ HERE ONLY, in `submitComputeJob`. A job that is live is never stranded by it.
+ *  - THE SWITCH IS READ HERE ONLY, in `submitLeased` (the attempt `submitComputeJob` makes once it holds
+ *    the lease). A job that is live is never stranded by it: `compute-source-scan.test.ts` pins that.
  */
 
 import {
+  type ComputeFailureCode,
+  type ComputeFailureDetail,
   type ComputeJobFlag,
   type ComputeState,
   LIVE_COMPUTE_STATES,
-  RESULT_REFUSAL_DETAILS,
+  RECORDS_UNREADABLE,
   TERMINAL_COMPUTE_STATES,
   canTransitionCompute,
   failureCodeFromTapisCondition,
   isPlatformFailure,
   isTerminalComputeState,
+  resultRefusalOf,
   stateFromTapisStatus,
 } from "../../../shared/compute-state.js";
 import { encodeLaunchSpec, resultsLauncherKey } from "../../../shared/contract/compute-launch.js";
@@ -68,6 +72,7 @@ import {
   RECORDS_RESULT_MANIFEST_FILE,
   dataTagForVersion,
   suMilliFor,
+  submitMemoryMb,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
@@ -439,8 +444,8 @@ export function provisionalCharge(
 /** What a terminal transition writes, decided before the batch is built. */
 export interface TerminalPlan {
   to: "finished" | "failed" | "cancelled";
-  failureCode: string | null;
-  failureDetail: string | null;
+  failureCode: ComputeFailureCode | null;
+  failureDetail: ComputeFailureDetail | null;
   cancelReason: string | null;
   platformFailure: boolean;
   /** Tapis said FINISHED and the results were verified. */
@@ -544,13 +549,16 @@ async function resolveFailure(
   env: Bindings,
   job: ComputeJobRow,
   rec: TapisJob,
-): Promise<{ code: string; detail: string | null; mismatch: boolean; cancelledByUs: boolean }> {
-  const refusal = (RESULT_REFUSAL_DETAILS as readonly string[]).includes(job.failure_detail ?? "")
-    ? job.failure_detail
-    : null;
+): Promise<{
+  code: ComputeFailureCode;
+  detail: ComputeFailureDetail | null;
+  mismatch: boolean;
+  cancelledByUs: boolean;
+}> {
+  const refusal = resultRefusalOf(job.failure_detail);
   let mismatch = false;
-  let code: string | null = null;
-  let detail: string | null = null;
+  let code: ComputeFailureCode | null = null;
+  let detail: ComputeFailureDetail | null = null;
   if (refusal === null && env.COMPUTE_RESULTS) {
     const docs = await readLauncherDocs(
       env.COMPUTE_RESULTS,
@@ -569,7 +577,9 @@ async function resolveFailure(
       if (result.job_id !== job.id || provenanceBad || exitBad) mismatch = true;
       else if (result.failure_code !== null) {
         code = result.failure_code;
-        detail = result.detail;
+        // The launcher's own fixed word: declared for its code or not, kept as said (a transport word,
+        // say), and the one place such a word is accepted as a detail.
+        detail = result.detail as ComputeFailureDetail | null;
       }
     }
   }
@@ -636,7 +646,7 @@ async function planFromTapis(
       ...base,
       to: "failed",
       failureCode: "records_unavailable",
-      failureDetail: "records_unreadable",
+      failureDetail: RECORDS_UNREADABLE,
       platformFailure: true,
     };
   }
@@ -649,9 +659,9 @@ async function planFromTapis(
   );
   if (verdict.ok) return { ...base, to: "finished", verified: true };
   // A Worker-recorded refusal is the reason a launcher that was refused did not complete.
-  const refused = (RESULT_REFUSAL_DETAILS as readonly string[]).includes(job.failure_detail ?? "");
-  const code = refused ? "result_upload_failed" : verdict.code;
-  const detail = refused ? job.failure_detail : verdict.reason;
+  const refusal = resultRefusalOf(job.failure_detail);
+  const code: ComputeFailureCode = refusal !== null ? "result_upload_failed" : verdict.code;
+  const detail: ComputeFailureDetail = refusal ?? verdict.reason;
   return {
     ...base,
     to: "failed",
@@ -1070,8 +1080,8 @@ async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResu
 function unsubmittedPlan(
   job: ComputeJobRow,
   to: "failed" | "cancelled",
-  code: string | null,
-  detail: string | null,
+  code: ComputeFailureCode | null,
+  detail: ComputeFailureDetail | null,
 ): TerminalPlan {
   return {
     to,
@@ -1097,8 +1107,8 @@ async function endUnsubmitted(
   env: Bindings,
   job: ComputeJobRow,
   to: "failed" | "cancelled",
-  code: string | null,
-  detail: string | null,
+  code: ComputeFailureCode | null,
+  detail: ComputeFailureDetail | null,
 ): Promise<boolean> {
   const won = await commitTerminal(
     env,
@@ -1329,6 +1339,22 @@ async function submitLeased(
       ? refused("failed")
       : refused("bad_state");
   }
+  // ALWAYS sent: Tapis passes a memory to the scheduler whatever it is given (its own default is 100 MB),
+  // so a job that names none would be limited to that however much the hold charged it for. The figure
+  // is the memory the charge pays for (`submitMemoryMb`); a row that has none to ask for cannot launch.
+  let memoryMb: number;
+  try {
+    memoryMb = submitMemoryMb(row.partition as PartitionName, {
+      cores: row.cores_per_node,
+      memory_mb: row.memory_mb,
+      gpus: row.gpus,
+    });
+  } catch {
+    console.error(`[compute-lifecycle] launch_unbuildable job=${row.id}`);
+    return (await endUnsubmitted(env, row, "failed", "tapis_submit_failed", "invalid_spec"))
+      ? refused("failed")
+      : refused("bad_state");
+  }
   const wrote = await env.DB.prepare(LAUNCH_DIGEST_SQL)
     .bind(row.id, built.launch.digest, built.launch.imageDigest)
     .run();
@@ -1345,7 +1371,7 @@ async function submitLeased(
         partition: row.partition as PartitionName,
         nodes: row.nodes,
         coresPerNode: row.cores_per_node,
-        ...(row.memory_mb === null ? {} : { memoryMb: row.memory_mb }),
+        memoryMb,
         gpus: row.gpus,
         minutes: row.minutes,
         launchSpec: built.launch.text,

@@ -72,6 +72,7 @@ import {
   launchVariableBytes,
   parseSuToMilli,
   suMilliFor,
+  submitMemoryMb,
 } from "../shared/contract/compute";
 import {
   BundleResponseSchema,
@@ -254,6 +255,52 @@ describe("estimateSuMilli and suMilliFor", () => {
     expect(() => suMilliFor("nonsense" as "shared", { nodes: 1, cores: 1 }, 10)).toThrow(
       RangeError,
     );
+  });
+});
+
+describe("submitMemoryMb: the memory a submit must ask for is the memory the charge pays for", () => {
+  test("a whole compute node is 128 core-units of 2048 MB, and a whole gpu node 4 GPU-units of 94208 MB, whatever the row says", () => {
+    expect(submitMemoryMb("compute", {})).toBe(262144);
+    expect(submitMemoryMb("compute", { cores: 1, memory_mb: 1 })).toBe(262144);
+    expect(submitMemoryMb("gpu", {})).toBe(376832);
+    expect(submitMemoryMb("gpu", { gpus: 1, memory_mb: 5 })).toBe(376832);
+  });
+
+  test("a per-core partition asks for the job's own memory, else its cores' share", () => {
+    for (const partition of ["shared", "debug", "large-shared", "preempt"] as const) {
+      expect(submitMemoryMb(partition, { cores: 4 })).toBe(8192);
+      expect(submitMemoryMb(partition, { cores: 4, memory_mb: null })).toBe(8192);
+      expect(submitMemoryMb(partition, { cores: 4, memory_mb: 20000 })).toBe(20000);
+      expect(submitMemoryMb(partition, { memory_mb: 512 })).toBe(512);
+    }
+  });
+
+  test("a per-GPU partition asks for the job's own memory, else its GPUs' share", () => {
+    for (const partition of ["gpu-shared", "gpu-debug", "gpu-preempt"] as const) {
+      expect(submitMemoryMb(partition, { gpus: 2 })).toBe(188416);
+      expect(submitMemoryMb(partition, { gpus: 2, memory_mb: 30000 })).toBe(30000);
+    }
+  });
+
+  test("nothing to ask for, or a partition that is not one, is a RangeError", () => {
+    expect(() => submitMemoryMb("shared", {})).toThrow(RangeError);
+    expect(() => submitMemoryMb("shared", { cores: 0 })).toThrow(RangeError);
+    expect(() => submitMemoryMb("gpu-shared", { gpus: 0 })).toThrow(RangeError);
+    expect(() => submitMemoryMb("toString" as never, { cores: 1 })).toThrow(RangeError);
+  });
+
+  test("it never asks for less than the rate table's own figure, on every partition", () => {
+    // The memory the charge pays for per node: priced back through the rate, it is the same charge.
+    expect(
+      suMilliFor("shared", { nodes: 1, memory_mb: submitMemoryMb("shared", { cores: 4 }) }, 3600),
+    ).toBe(4000);
+    expect(
+      suMilliFor(
+        "gpu-shared",
+        { nodes: 1, memory_mb: submitMemoryMb("gpu-shared", { gpus: 2 }) },
+        3600,
+      ),
+    ).toBe(2000);
   });
 });
 

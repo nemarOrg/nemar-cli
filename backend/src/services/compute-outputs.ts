@@ -40,8 +40,8 @@
 
 import {
   COMPUTE_REFUSAL_STATUS,
-  RESULT_REFUSAL_DETAILS,
   TERMINAL_COMPUTE_STATES,
+  resultRefusalOf,
 } from "../../../shared/compute-state.js";
 import {
   OutputsRequestSchema,
@@ -136,9 +136,6 @@ export type OutputsResult =
       field?: string;
     };
 
-const isResultRefusal = (word: string | null): word is (typeof RESULT_REFUSAL_DETAILS)[number] =>
-  word !== null && (RESULT_REFUSAL_DETAILS as readonly string[]).includes(word);
-
 const refuse = (code: OutputsRefusalCode, field?: string): OutputsResult =>
   field === undefined
     ? { ok: false, code, status: COMPUTE_REFUSAL_STATUS[code] }
@@ -197,7 +194,7 @@ export async function handleOutputs(
   // After `complete` no address is issued: a token holder could overwrite same-size objects.
   if (job.outputs_completed_at !== null) return refuse("bad_state");
 
-  const recorded = isResultRefusal(job.failure_detail) ? job.failure_detail : null;
+  const recorded = resultRefusalOf(job.failure_detail);
   if (body === "too_large") return refuseAndRecord(env, job, recorded ?? "too_many_outputs");
 
   const parsed = OutputsRequestSchema.safeParse(body);

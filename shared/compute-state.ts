@@ -246,6 +246,43 @@ export const RESULT_REFUSAL_DETAILS = [
 
 export type ResultRefusalDetail = (typeof RESULT_REFUSAL_DETAILS)[number];
 
+/** `word` as a {@link ResultRefusalDetail}, or null when it is not one (or there is none). */
+export function resultRefusalOf(word: string | null | undefined): ResultRefusalDetail | null {
+  return typeof word === "string" && (RESULT_REFUSAL_DETAILS as readonly string[]).includes(word)
+    ? (word as ResultRefusalDetail)
+    : null;
+}
+
+/**
+ * Why verification of a `FINISHED` job's results ended it `failed`: the sixteen fixed words the
+ * Worker writes as the `failure_detail` of `result_upload_failed`, `result_verification_failed` and
+ * `records_unavailable` (phase A5, #2010). Declared here, beside {@link RESULT_REFUSAL_DETAILS}, so a
+ * reader of a job's detail has one place to find every word the Worker itself chooses.
+ */
+export const VERIFY_REASONS = [
+  "not_completed",
+  "declared_missing",
+  "result_missing",
+  "provenance_missing",
+  "manifest_missing",
+  "job_id_mismatch",
+  "launch_digest_mismatch",
+  "bundle_digest_mismatch",
+  "image_digest_mismatch",
+  "result_reports_failure",
+  "exit_mismatch",
+  "output_missing",
+  "output_size_mismatch",
+  "output_checksum_mismatch",
+  "manifest_mismatch",
+  "launcher_file_missing",
+] as const;
+
+export type VerifyReason = (typeof VERIFY_REASONS)[number];
+
+/** The detail of a job whose recorded specification (or whose records bucket) could not be read to verify it. */
+export const RECORDS_UNREADABLE = "records_unreadable";
+
 /**
  * Every fixed-word `detail` the launcher may write into `launcher/result.json` with each of its
  * seven codes (a word, never text a person, a response or the container chose). Declared here so
@@ -358,6 +395,20 @@ export const PLATFORM_LAUNCHER_DETAILS = [
 ] as const;
 
 export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode;
+
+/**
+ * A detail the launcher itself wrote in `result.json` that {@link LAUNCHER_DETAILS} does not declare for
+ * its code (a transport word such as `http_500`): kept as the launcher said it, and deliberately so (the
+ * code alone then decides who caused the failure). A brand, so that the one place that accepts such a
+ * word is visible in the types and no other string passes for a detail.
+ */
+export type LauncherWord = string & { readonly __launcherWord: true };
+
+/** Every fixed word the WORKER chooses as a failure detail: the launcher's declared words, the verification reasons, and one more. */
+export type WorkerFailureDetail = LauncherDetail | VerifyReason | typeof RECORDS_UNREADABLE;
+
+/** What `failure_detail` may hold when the Worker writes it: a closed word, or the launcher's own undeclared one. */
+export type ComputeFailureDetail = WorkerFailureDetail | LauncherWord;
 
 /** Every code a failed job may carry, each once: the launcher's seven, then the platform's rest. */
 export const COMPUTE_FAILURE_CODES: readonly ComputeFailureCode[] = [
