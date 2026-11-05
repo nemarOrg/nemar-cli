@@ -332,10 +332,13 @@ Exit codes:
 
 const POOL_ADJUST_HELP = `
 Corrects one pool: --target granted changes what was granted, --target charged changes what was
-charged (and, for an account's pool, the platform \`people\` budget of the same word follows). It
-adds <amount> SU, or takes it away with --decrease. --reason is required, a fixed word. A
-correction that would make a stored total negative is refused and writes nothing; one that takes
+charged. It adds <amount> SU, or takes it away with --decrease. --reason is required, a fixed word.
+A correction that would make a stored total negative is refused and writes nothing; one that takes
 the grant below what is used is allowed, and available goes negative.
+
+The platform \`people\` budget records consumption only. Raising an account's charge also counts
+against the budget of the same word; lowering it leaves that budget as it was, so nothing done to a
+person's pool gives budget back. A job's final settlement is the one thing that lowers it.
 
 Correcting an account's charge is the owner's for now (an administrator corrects a grant); a
 platform budget is the owner's too.

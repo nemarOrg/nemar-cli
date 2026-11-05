@@ -516,6 +516,12 @@ describe("pool adjust", () => {
       (await runCli("owner", adjustArgs("0.25", ["--target", "charged", "--decrease"]))).exitCode,
     ).toBe(0);
     expect(pool("cpu")?.charged_milli).toBe(750);
+    // The platform budget records consumption only: raising the charge raised it, lowering did not.
+    expect(
+      rows(
+        "SELECT charged_milli FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = 'people' AND pool = 'cpu'",
+      ),
+    ).toEqual([{ charged_milli: 1000 }]);
     expect(await totalsDisagreements(realD1(db))).toEqual([]);
   });
 
@@ -723,5 +729,14 @@ describe("help", () => {
       expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 0]);
       expect(r.stdout).toContain("Exit codes:");
     }
+  });
+
+  test("pool adjust says what a correction does to the platform budget: raising counts, lowering does not", async () => {
+    const r = await runCli(null, ["pool", "adjust", "--help-all"]);
+    const text = r.stdout.replace(/\s+/g, " ");
+    expect(text).toMatch(/consumption only/);
+    expect(text).toMatch(/lowering it leaves that budget as it was/);
+    // The text that said the budget "follows" a correction, in either direction, is gone.
+    expect(text).not.toMatch(/budget of the same word follow/i);
   });
 });
