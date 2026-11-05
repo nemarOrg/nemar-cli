@@ -693,6 +693,9 @@ describe("every partition's submit carries memory, minutes, nodes and cores", ()
       "invalid_spec",
     ]);
     expect(job.tapis_uuid).toBeNull();
+    // The digest of the launch specification is written BEFORE the call, as always, so the failed row
+    // carries it though nothing was sent: it is the digest of the text last built, never of the value.
+    expect(job.launch_spec_digest).toMatch(/^[0-9a-f]{64}$/);
     // Released, not refunded, and not charged: the whole hold goes back.
     expect(await kinds(made.env, made.job.id)).toEqual(["hold", "release"]);
     expect(submitsAtTapis()).toBe(0);
