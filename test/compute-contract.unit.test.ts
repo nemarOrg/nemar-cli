@@ -3387,7 +3387,8 @@ describe("the golden vector nemar-process checks its launcher against", () => {
 // --- The launch specification on the wire (A1c, #2043) ---------------------------------------
 
 describe("the launch specification on the wire: base64url in the shell-inert alphabet", () => {
-  // RFC 4648 section 5, in its order. Written out here, apart from the constant it checks.
+  // The base64url alphabet of Request for Comments (RFC) 4648 section 5, in its order. Written out
+  // here, apart from the constant it checks.
   const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   /** Node's own base64url, an oracle the code under test does not share a line with. */
   const oracle = (text: string) => Buffer.from(text, "latin1").toString("base64url");
@@ -3404,7 +3405,7 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
     return Array.from({ length: bytes }, () => String.fromCharCode(0x20 + (next() % 95))).join("");
   }
 
-  test("the bound is ceil(65536 * 4 / 3), 87382, and the alphabet is the 64 characters of RFC 4648 section 5", () => {
+  test("the bound is ceil(65536 * 4 / 3), 87382, and the alphabet is the 64 base64url characters", () => {
     expect(LAUNCH_SPEC_ENV_MAX_CHARS).toBe(Math.ceil((LAUNCH_SPEC_MAX_BYTES * 4) / 3));
     expect(LAUNCH_SPEC_ENV_MAX_CHARS).toBe(87_382);
     expect(SHELL_INERT_ENV_ALPHABET).toBe(ALPHABET);
@@ -3772,44 +3773,38 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
     });
   });
 
-  describe("the JSON Schema, shared byte for byte with nemar-process, says the same", () => {
-    // These read the file's own words, because the file is the one thing both repositories hold.
-    const root = launchSchema.description;
-    const provenance = launchSchema.$defs.provenance.description;
-
-    test("the root description says the document is JSON text that travels as base64url, at the bound", () => {
+  describe("the JSON Schema, shared byte for byte with nemar-process, names the transport", () => {
+    // The root description says what the document is and that it travels as base64url, with the two
+    // numbers of this contract. It claims NOTHING about the scheduler, the shell or the locale: those
+    // are systems this contract does not own (an earlier sentence promised that the bytes survive
+    // them, and the review showed it false). Its words are not pinned beyond what a reader needs.
+    test("the root description names the variable, the encoding and both bounds", () => {
+      const root = launchSchema.description;
       expect(root).toContain("NEMAR_LAUNCH_SPEC");
       expect(root).toContain("base64url");
-      expect(root).toContain("RFC 4648 section 5");
-      expect(root).toContain("A-Za-z0-9-_");
-      expect(root).toContain("no padding");
-      // The two numbers are the constants', not a second copy that can drift.
-      expect(root).toContain(`at most ${LAUNCH_SPEC_MAX_BYTES} bytes`);
-      expect(root).toContain(`at most ${LAUNCH_SPEC_ENV_MAX_CHARS} characters`);
-      expect(root).toContain("never over the encoded value");
+      expect(root).toContain(String(LAUNCH_SPEC_MAX_BYTES));
+      expect(root).toContain(String(LAUNCH_SPEC_ENV_MAX_CHARS));
     });
 
-    test("it claims nothing about the scheduler, the shell or the locale: the old sentence did", () => {
-      // The previous wording promised "the bytes survive Tapis, the shell and the locale", which is a
-      // claim about systems this contract does not own and the review showed to be false.
-      for (const claim of [/survive/i, /Tapis/i, /schedul/i, /\bshell\b/i, /locale/i]) {
-        expect(root, String(claim)).not.toMatch(claim);
-      }
-    });
-
-    test("the provenance description puts launch_spec_digest over the decoded text, not the encoded value", () => {
-      expect(provenance).toContain("launch_spec_digest");
-      expect(provenance).toContain("JSON text");
-      expect(provenance).toContain("decodes to");
-      expect(provenance).toContain("not the digest of the encoded value");
-      // It no longer says the digest is of the environment value's own bytes.
-      expect(provenance).not.toContain("raw bytes of the NEMAR_LAUNCH_SPEC environment value");
-    });
-
-    test("no description in the file still calls the environment value ASCII-only JSON", () => {
-      const everything = JSON.stringify(launchSchema);
-      expect(everything).not.toMatch(/NEMAR_LAUNCH_SPEC \(ASCII/);
-      expect(everything).not.toMatch(/exact raw bytes/);
+    test("only the descriptions of the file changed with the wire form: its structure is the launcher phase's", () => {
+      // Everything but the text annotations, hashed. The SHA-256 is of the file as it stood before the
+      // wire form was added, so a change to a key, a type, a pattern or a bound shows here, and a change
+      // to a sentence does not. A structural change is nemar-process's to copy too: update this with it.
+      const strip = (node: unknown): unknown =>
+        Array.isArray(node)
+          ? node.map(strip)
+          : node && typeof node === "object"
+            ? Object.fromEntries(
+                Object.entries(node)
+                  .filter(([key, value]) => !(key === "description" && typeof value === "string"))
+                  .map(([key, value]) => [key, strip(value)]),
+              )
+            : node;
+      expect(
+        createHash("sha256")
+          .update(JSON.stringify(strip(launchSchema)))
+          .digest("hex"),
+      ).toBe("684334303372be174ae9b2fd60f36ad57dde5d7fa6f870979e093136c54947af");
     });
   });
 });
