@@ -582,7 +582,11 @@ export type ComputeRouteSentenceCode = keyof typeof COMPUTE_ROUTE_SENTENCES;
 
 // --- The rest of the vocabulary ----------------------------------------------------------------
 
-/** What a ledger entry does to a pool (design section 5). */
+/**
+ * What a ledger entry does to a pool (design section 5). `refund` has no writer: the owner decided
+ * on 2026-11-04 that no failure is refunded automatically and that the `people` budget records
+ * consumption only, so the kind stays in the table's vocabulary and nothing writes it.
+ */
 export const LEDGER_ENTRY_KINDS = [
   "grant",
   "hold",
@@ -599,8 +603,9 @@ export type LedgerEntryKind = (typeof LEDGER_ENTRY_KINDS)[number];
 /**
  * The reasons the ledger writes of itself (phase A2, #2007), each a fixed word. An administrator's
  * own reason is any word of {@link COMPUTE_WORD_RE}; these are the ones the service defaults to:
- * a grant (`admin_grant` from an administrator's route, `grant` otherwise), a release, a refund,
- * an expiry and a job's final settlement.
+ * a grant (`admin_grant` from an administrator's route, `grant` otherwise), a release, an expiry and a
+ * job's final settlement. `refund` stays in the list for an entry of that kind, which the vocabulary
+ * keeps and nothing writes (see {@link LEDGER_ENTRY_KINDS}).
  */
 export const COMPUTE_LEDGER_REASONS = [
   "admin_grant",
