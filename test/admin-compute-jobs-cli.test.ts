@@ -35,6 +35,7 @@ import {
   setTapisTimes,
   startLifecycleFixture,
 } from "../backend/test/helpers/compute-lifecycle-fixture";
+import { launchSecretForms } from "../backend/test/helpers/launch-secret-forms";
 import { ComputeJobAdminResponseSchema } from "../shared/contract/compute-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -248,8 +249,7 @@ describe("what is printed", () => {
     for (const out of [first, second]) {
       const all = out.stdout + out.stderr;
       for (const word of [
-        token,
-        launchValue,
+        ...launchSecretForms(token, launchValue),
         fx.tapis.url,
         "NEMAR_LAUNCH_SPEC",
         "analyse",

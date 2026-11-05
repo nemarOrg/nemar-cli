@@ -73,6 +73,7 @@ import * as clientModule from "../src/services/tapis/client";
 import { TAPIS_BASE, tapisConfig } from "../src/services/tapis/config";
 import { TAPIS_ERROR_KINDS, TapisError } from "../src/services/tapis/errors";
 import { SubmitJobRequestSchema } from "../src/services/tapis/schemas";
+import { launchSecretForms } from "./helpers/launch-secret-forms";
 import { launchFileLine } from "./helpers/scheduler-launch-file";
 import { SPEC_JOB_STATUSES, type TapisStandin, startTapisStandin } from "./helpers/tapis-standin";
 
@@ -88,8 +89,11 @@ const LAUNCH_SPEC_TEXT = `{"schema":"nemar.launch-spec.v1","job_id":"${JOB_ID}",
  * plain substring of it, so a test that looks for a leak looks for the value too (`SPEC_SECRETS`).
  */
 const LAUNCH_SPEC = encodeLaunchSpecEnv(LAUNCH_SPEC_TEXT);
-/** What must never be echoed: the token, and the encoded value that carries it. */
-const SPEC_SECRETS = [TOKEN_MARK, LAUNCH_SPEC] as const;
+/**
+ * What must never be echoed: the token in every form it takes (plain, inside the whole encoded value, and
+ * as the three alignments of its base64url text), so that a leak of part of the value is seen too.
+ */
+const SPEC_SECRETS = launchSecretForms(TOKEN_MARK, LAUNCH_SPEC);
 /**
  * A value the client must refuse. The type is branded and only `encodeLaunchSpecEnv` returns the brand,
  * so a value that is meant to be invalid is cast to it, here, in the one place that says so.

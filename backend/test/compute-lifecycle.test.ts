@@ -87,6 +87,7 @@ import {
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
 import { roundTripD1, seedUser } from "./helpers/compute-seed";
+import { launchSecretForms } from "./helpers/launch-secret-forms";
 import { logged } from "./helpers/logs";
 import { makeSandbox, sourceLaunchFile } from "./helpers/scheduler-launch-file";
 
@@ -270,9 +271,11 @@ describe("submit", () => {
       ledger: (await made.env.DB.prepare("SELECT * FROM compute_ledger").all()).results,
       audit: (await made.env.DB.prepare("SELECT * FROM audit_log").all()).results,
     });
-    expect(everything).not.toContain(spec.job_token);
-    // The encoded value holds the token too, and the plain token is no longer a substring of it.
-    expect(everything).not.toContain(value);
+    // Every form of the token: the plain token, the whole encoded value, and the token's base64url text
+    // at each alignment (the plain token is no longer a substring of the value, nor of a slice of it).
+    launchSecretForms(spec.job_token, value).forEach((form, i) => {
+      expect(everything.includes(form), `form ${i} of the token`).toBe(false);
+    });
     expect(everything).not.toContain("NEMAR_LAUNCH_SPEC");
 
     // One webhook subscription, carrying a token that is a different kind from the job's.
@@ -2253,10 +2256,9 @@ describe("logs", () => {
     expect(isShellInertEnvValue(launchValue)).toBe(true);
     expect(isShellInertEnvValue(otherLaunchValue)).toBe(true);
     const forbidden = [
-      token,
-      otherToken,
-      launchValue,
-      otherLaunchValue,
+      // Each job's token in every form: plain, the whole encoded value, and its three alignments.
+      ...launchSecretForms(token, launchValue),
+      ...launchSecretForms(otherToken, otherLaunchValue),
       CALLBACK_SECRET,
       "secret-name-path.txt",
       fx.tapis.password,

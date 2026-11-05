@@ -32,6 +32,7 @@ import {
   setTapisTimes,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
+import { launchSecretForms } from "./helpers/launch-secret-forms";
 
 let fx: LifecycleFixture;
 const handle = makeComputeApp();
@@ -200,8 +201,7 @@ describe("what an administrator is shown", () => {
       .query("SELECT username, email, given_name, orcid FROM users WHERE id = ?")
       .get(made.accountId) as Record<string, string | null>;
     for (const word of [
-      token,
-      launchValue,
+      ...launchSecretForms(token, launchValue),
       "NEMAR_LAUNCH_SPEC",
       "A LINE THE USER'S CODE PRINTED",
       fx.tapis.url,
