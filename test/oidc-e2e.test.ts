@@ -374,19 +374,32 @@ function atHash(accessToken: string): string {
 let partner: LogoutStandin;
 
 describe("a relying-party library signs a person in, end to end", () => {
+  // What THIS test started, so a failed setup is cleaned up for what it did start and never touches
+  // a previous test's values.
+  let startedPartner: LogoutStandin | undefined;
+  let started = false;
+
   beforeEach(async () => {
+    waitUntilFailures.length = 0;
+    startedPartner = undefined;
+    started = false;
+    // The stand-in first: it sets the process-wide TLS setting that its `stop` restores.
+    startedPartner = partner = startLogoutStandin();
     h = await startOidcHarness({
       ENVIRONMENT: "development",
       API_BASE_URL: API,
       HOST_PREFIXED_SESSION_COOKIE: "1",
     });
     env = h.env;
-    partner = startLogoutStandin();
+    started = true;
   });
 
   afterEach(async () => {
-    await settle();
-    await partner.stop();
+    try {
+      if (started) await settle();
+    } finally {
+      await startedPartner?.stop();
+    }
   });
 
   test("keys, client, authorize and consent, redeem, verify, userinfo, refresh, introspect, refusal, replay, revoke, logout", async () => {
@@ -567,16 +580,24 @@ describe("a relying-party library signs a person in, end to end", () => {
 describe("the loser of a manual merge", () => {
   let m: OidcHarness;
   let told: LogoutStandin;
+  // What THIS test started (see the flow describe's hooks).
+  let startedM: OidcHarness | undefined;
+  let startedTold: LogoutStandin | undefined;
 
   beforeEach(async () => {
-    m = await startOidcHarness({ HOST_PREFIXED_SESSION_COOKIE: "1" });
+    startedM = undefined;
+    startedTold = undefined;
+    startedTold = told = startLogoutStandin();
+    startedM = m = await startOidcHarness({ HOST_PREFIXED_SESSION_COOKIE: "1" });
     await rotateKeys(m);
-    told = startLogoutStandin();
   });
 
   afterEach(async () => {
-    await m.settle();
-    await told.stop();
+    try {
+      await startedM?.settle();
+    } finally {
+      await startedTold?.stop();
+    }
   });
 
   async function loser() {
