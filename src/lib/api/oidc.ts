@@ -10,6 +10,7 @@
  */
 
 import {
+  type OidcAccountEndResponse,
   type OidcClientCreateRequest,
   type OidcClientCreateResponse,
   type OidcClientDisableResponse,
@@ -19,6 +20,8 @@ import {
   type OidcKeyRevokeResponse,
   type OidcKeysResponse,
   type OidcKeysRotateResponse,
+  type OidcLogoutDeliveriesResponse,
+  oidcAccountEndResponseSchema,
   oidcClientCreateResponseSchema,
   oidcClientDisableResponseSchema,
   oidcClientListResponseSchema,
@@ -27,7 +30,9 @@ import {
   oidcKeyRevokeResponseSchema,
   oidcKeysResponseSchema,
   oidcKeysRotateResponseSchema,
+  oidcLogoutDeliveriesResponseSchema,
 } from "../../../shared/contract/oidc-admin.js";
+import type { OidcAccountEndReason } from "../../../shared/oidc.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -117,6 +122,42 @@ export async function revokeOidcKey(kid: string): Promise<OidcKeyRevokeResponse>
     { method: "POST", body: "{}" },
     true,
     oidcKeyRevokeResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/oidc/accounts/:id/end`: end an account's grants at every client (the manual merge of
+ * ADR 0043, and the incident tool). `reason` is `merged` or `revoked`; the answer counts what the one
+ * batch ended and how many clients will be told. Idempotent: a second call finds nothing live.
+ */
+export async function endOidcAccount(
+  userId: number,
+  reason: OidcAccountEndReason,
+): Promise<OidcAccountEndResponse> {
+  return request(
+    `${BASE}/accounts/${encodeURIComponent(String(userId))}/end`,
+    { method: "POST", body: JSON.stringify({ reason }) },
+    true,
+    oidcAccountEndResponseSchema,
+  );
+}
+
+/**
+ * `GET /admin/oidc/logout-deliveries`: the back-channel logouts owed to clients, newest first, and a
+ * count of every status. `status` narrows the list (not the counts); `limit` is 1 to 500.
+ */
+export async function listOidcLogoutDeliveries(
+  options: { status?: string; limit?: number } = {},
+): Promise<OidcLogoutDeliveriesResponse> {
+  const query = new URLSearchParams();
+  if (options.status !== undefined) query.set("status", options.status);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const qs = query.toString();
+  return request(
+    `${BASE}/logout-deliveries${qs === "" ? "" : `?${qs}`}`,
+    {},
+    true,
+    oidcLogoutDeliveriesResponseSchema,
   );
 }
 

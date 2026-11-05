@@ -10,6 +10,8 @@
  *   nemar admin oidc keys list              the signing keys and their states
  *   nemar admin oidc keys rotate            make the first keys, or rotate them
  *   nemar admin oidc keys revoke <kid>      withdraw a retired key from the key set
+ *   nemar admin oidc end-account <user-id>  end an account's grants at every client (manual merge, incident)
+ *   nemar admin oidc logout-deliveries      the back-channel logouts owed to clients, and what became of each
  *
  * A secret is printed on `add` and on `rotate-secret` and nowhere else, and no command prints a
  * hash or a private key, because the Worker returns none. Every command takes `--json`: standard
@@ -24,12 +26,19 @@
 
 import chalk from "chalk";
 import { Command, InvalidArgumentError, Option } from "commander";
-import type { OidcClientView, OidcKeyView } from "../../shared/contract/oidc-admin.js";
+import type {
+  OidcClientView,
+  OidcKeyView,
+  OidcLogoutDeliveryView,
+} from "../../shared/contract/oidc-admin.js";
 import {
+  OIDC_ACCOUNT_END_REASONS,
   OIDC_CONSENT_MODES,
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_GRANTS,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
+  OIDC_LOGOUT_STATUSES,
   OIDC_MAX_REDIRECT_URIS,
   OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS,
   OIDC_RETIRED_KEY_PUBLISH_DAYS,
@@ -39,6 +48,7 @@ import {
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
   OIDC_SIGN_IN_RULES,
+  type OidcAccountEndReason,
   type OidcConsentMode,
   type OidcSignInRule,
 } from "../../shared/oidc.js";
@@ -47,9 +57,11 @@ import { isRouteNotFound } from "../lib/api/errors.js";
 import {
   createOidcClient,
   disableOidcClient,
+  endOidcAccount,
   getOidcClient,
   listOidcClients,
   listOidcKeys,
+  listOidcLogoutDeliveries,
   oidcErrorCode,
   revokeOidcKey,
   rotateOidcClientSecret,
@@ -79,6 +91,7 @@ function hintsFor(error: unknown, afterNetworkError?: string): Record<number, st
   }
   // A refusal of a rotation says what to do about it; 409 is the status of all of them.
   const code = oidcErrorCode(error);
+  if (code === "user_not_found") hints[404] = "There is no account with that id.";
   if (code === "rotation_next_too_new") {
     hints[409] =
       "In an emergency, `nemar admin oidc keys rotate --force --emergency` overrides this; the audit trail records it.";
@@ -196,6 +209,23 @@ function clientTable(clients: OidcClientView[]): string[] {
   );
 }
 
+function deliveryTable(rows: OidcLogoutDeliveryView[]): string[] {
+  return renderTable(
+    ["ID", "CLIENT", "REASON", "STATUS", "TRIES", "NEXT ATTEMPT", "LAST", "CLASS", "CREATED"],
+    rows.map((d) => [
+      String(d.id),
+      d.client_id ? plain(d.client_id) : "(gone)",
+      plain(d.reason),
+      plain(d.status),
+      String(d.attempts),
+      d.next_attempt_at ? utc(d.next_attempt_at) : "-",
+      d.last_status === null ? "-" : String(d.last_status),
+      d.last_error_class ? plain(d.last_error_class) : "-",
+      utc(d.created_at),
+    ]),
+  );
+}
+
 function keyTable(keys: OidcKeyView[]): string[] {
   return renderTable(
     ["KEY ID", "STATE", "ALG", "CREATED", "PROMOTED", "RETIRED", "REVOKED"],
@@ -284,12 +314,14 @@ Exit codes:
      the provider is off.`;
 
 const DISABLE_HELP = `
-Cuts a client off: it can no longer authenticate. There is no command to enable it again, so it asks
-first (--yes answers). This phase sets the status only; revoking what the client already holds is a
-later phase.
+Cuts a client off: it can no longer authenticate, and in the same step everything it holds is revoked:
+every token it was issued, every grant a person made to it and every unused authorization code. It is
+NOT told (no back-channel logout is sent): the owner cut it off, and telling it is not owed. There is no
+command to enable it again, so it asks first (--yes answers). Disabling a client that is already disabled
+revokes whatever it may still hold, and says how many.
 
 Exit codes:
-  0  disabled, or it already was (the answer says which).
+  0  disabled, or it already was (the answer says which, and how many tokens, grants and codes went).
   1  not signed in, not the owner, no such client, the question was not answered yes (nothing was
      changed), or a server on which the provider is off.`;
 
@@ -335,6 +367,45 @@ Exit codes:
   0  revoked, or it already was (the answer says which).
   1  not signed in, not the owner, not a key id, no such key, a key that is current or next (rotate
      first), the question was not answered yes (nothing was changed), or a server on which the
+     provider is off.`;
+
+const END_ACCOUNT_HELP = `
+Ends every OpenID Connect grant an account holds, at every client, in one step (owner only): the
+account's access and refresh tokens are revoked, its grants are ended (a later sign-in is a new grant,
+and a third-party client asks the person again), its unused authorization codes are deleted, and each
+client that registered a back-channel logout address is queued to be told. Nothing else of the account
+changes: it is not revoked, its keys and sessions stay. It is the manual-merge step of ADR 0043 (end the
+loser of a merge with --reason merged; the winner's grants are untouched) and the incident tool.
+
+  --reason   ${Object.keys(OIDC_ACCOUNT_END_REASONS).join(" or ")}: the word recorded on the revoked tokens and the queued logouts
+             (account_merged or account_revoked).
+
+The call to each client is made after the step commits, from the server, and is retried on a schedule
+(${OIDC_LOGOUT_RETRY_DELAYS_SECONDS.length} times, from 1 minute to 12 hours): what became of each is in \`logout-deliveries\`. It
+asks first (--yes answers); ending is idempotent, so running it again finds nothing live.
+
+Exit codes:
+  0  ended (the answer counts the logouts queued, tokens and grants ended and codes deleted; zero
+     everywhere means the account held nothing).
+  1  not signed in, not the owner, not an account id, no such account, a missing or unknown --reason,
+     the question was not answered yes (nothing was changed), a network failure (the step may have been
+     carried out: it is safe to run again), or a server on which the provider is off.`;
+
+const LOGOUT_DELIVERIES_HELP = `
+Lists the back-channel logouts owed to clients, newest first: one row for each client told about each
+ending, with why (the reason word), its status, how many attempts were made, when the next is due, the
+last answer's HTTP status and a fixed word for what went wrong. No token, no address, no text of any
+partner's answer. The counts of every status are printed whatever --status says.
+
+  pending  to be attempted or retried (the retry tick runs every 30 minutes, so a short wait is taken up
+           at the next half hour)
+  sent     the client answered 200 or 204
+  failed   the client refused it (a 4xx, a redirect, any other answer), or every attempt was used
+  fenced   outside production, an address that is neither loopback nor listed: recorded and never sent
+
+Exit codes:
+  0  listed (an empty list is not a failure).
+  1  not signed in, not the owner, a --status or --limit the server refuses, or a server on which the
      provider is off.`;
 
 // ---------------------------------------------------------------------------------------------
@@ -542,11 +613,18 @@ clientsCommand
       printJson(result);
       return;
     }
-    say(false)(
+    const out = say(false);
+    out(
       result.changed
         ? `Disabled ${plain(result.client.client_id)} (${plain(result.client.name)}).`
-        : `${plain(result.client.client_id)} was already disabled; nothing changed.`,
+        : `${plain(result.client.client_id)} was already disabled; its status is unchanged.`,
     );
+    if (result.revoked) {
+      const { tokens, grants, codes } = result.revoked;
+      out(
+        `Revoked ${tokens} ${tokens === 1 ? "token" : "tokens"}, ${grants} ${grants === 1 ? "grant" : "grants"} and deleted ${codes} unused ${codes === 1 ? "code" : "codes"}. No logout was sent.`,
+      );
+    }
   });
 
 keysCommand
@@ -638,6 +716,108 @@ keysCommand
         ? `Revoked signing key ${plain(result.key.kid)}; it is no longer published.`
         : `Signing key ${plain(result.key.kid)} was already revoked; nothing changed.`,
     );
+  });
+
+/** A positive whole number argument: an account id. */
+function accountId(value: string): number {
+  if (!/^[1-9][0-9]{0,15}$/.test(value)) {
+    throw new InvalidArgumentError("an account id is a whole number from 1.");
+  }
+  return Number(value);
+}
+
+oidcCommand
+  .command("end-account <user-id>")
+  .description("End an account's grants at every client and tell the clients (owner only)")
+  .addOption(
+    new Option("--reason <reason>", "Why: the word recorded on the tokens and the logouts")
+      .choices(Object.keys(OIDC_ACCOUNT_END_REASONS))
+      .makeOptionMandatory(),
+  )
+  .option("-y, --yes", "Do not ask first")
+  .option("--json", "Print the answer as JSON")
+  .addHelpText("after", END_ACCOUNT_HELP)
+  .action(
+    async (
+      rawId: string,
+      options: { reason: OidcAccountEndReason; yes?: boolean; json?: boolean },
+    ) => {
+      const json = options.json === true;
+      let userId: number;
+      try {
+        userId = accountId(rawId);
+      } catch {
+        failMessage("An account id is a whole number from 1.", { json, answered: true });
+        return;
+      }
+      if (!requireSignedIn(json)) return;
+      const answer = await confirm(
+        `End every OpenID Connect grant of account ${userId}? Its tokens are revoked at once, each client with a logout address is told, and the person is asked again at their next sign-in. The CLI cannot undo it.`,
+        { yes: options.yes },
+      );
+      if (answer !== "confirmed") {
+        failMessage("Nothing was changed: the question was not answered yes (use --yes).", {
+          json,
+          answered: true,
+        });
+        return;
+      }
+      const result = await run(
+        json,
+        "end the account's grants",
+        () => endOidcAccount(userId, options.reason),
+        "The request may have been carried out before it failed. Ending is safe to run again: a second run finds nothing live.",
+      );
+      if (!result) return;
+      if (json) {
+        printJson(result);
+        return;
+      }
+      const out = say(false);
+      out(
+        `Ended the OpenID Connect grants of account ${result.user_id} (${plain(result.reason)}).`,
+      );
+      out(
+        `Tokens revoked ${result.tokens_ended}, grants ended ${result.grants_ended}, unused codes deleted ${result.codes_deleted}, logouts queued ${result.logouts_queued}.`,
+      );
+      if (result.logouts_queued > 0) {
+        out(
+          chalk.dim(
+            "The clients are told after this step, and retried if they do not answer: see `logout-deliveries`.",
+          ),
+        );
+      }
+    },
+  );
+
+oidcCommand
+  .command("logout-deliveries")
+  .description("List the back-channel logouts owed to clients, and what became of each")
+  .addOption(
+    new Option("--status <status>", "Only deliveries in this state").choices([
+      ...OIDC_LOGOUT_STATUSES,
+    ]),
+  )
+  .option("--limit <n>", "How many to list, from 1 to 500 (default 100)", wholeNumber(500))
+  .option("--json", "Print the answer as JSON")
+  .addHelpText("after", LOGOUT_DELIVERIES_HELP)
+  .action(async (options: { status?: string; limit?: number; json?: boolean }) => {
+    const json = options.json === true;
+    const result = await run(json, "list the logout deliveries", () =>
+      listOidcLogoutDeliveries({ status: options.status, limit: options.limit }),
+    );
+    if (!result) return;
+    if (json) {
+      printJson(result);
+      return;
+    }
+    const counts = OIDC_LOGOUT_STATUSES.map((s) => `${s} ${result.counts[s] ?? 0}`).join(", ");
+    console.log(`All deliveries: ${counts}.`);
+    if (result.deliveries.length === 0) {
+      console.log(options.status ? `None is ${options.status}.` : "There are no deliveries.");
+      return;
+    }
+    for (const line of deliveryTable(result.deliveries)) console.log(line);
   });
 
 oidcCommand.addCommand(clientsCommand);
