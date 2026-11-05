@@ -101,16 +101,22 @@ export const LAUNCH_SPEC_ENV_MAX_CHARS = Math.ceil((LAUNCH_SPEC_MAX_BYTES * 4) /
 export const SHELL_INERT_ENV_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/** A non-empty value of the {@link SHELL_INERT_ENV_ALPHABET} and nothing else. */
-const SHELL_INERT_ENV_VALUE_RE = /^[A-Za-z0-9_-]+$/;
+/** The characters of {@link SHELL_INERT_ENV_ALPHABET}: the one place the alphabet is written down. */
+const SHELL_INERT_ENV_CHARS: ReadonlySet<string> = new Set(SHELL_INERT_ENV_ALPHABET);
 
 /**
- * Whether an environment value is made only of the shell-inert alphabet and is not empty (so an
- * empty value, padding, a newline and every character of a JSON document but letters, digits, `-`
- * and `_` are false). Pure; never throws.
+ * Whether an environment value is non-empty and made only of the characters of
+ * {@link SHELL_INERT_ENV_ALPHABET} (so an empty value, padding, a newline and every character of a JSON
+ * document but letters, digits, `-` and `_` are false). Built from that constant, not from a second
+ * copy of the alphabet. It says the value is safe for a shell; whether it is a launch specification
+ * is {@link decodeLaunchSpecEnv}'s question. Pure; never throws.
  */
 export function isShellInertEnvValue(value: unknown): value is string {
-  return typeof value === "string" && SHELL_INERT_ENV_VALUE_RE.test(value);
+  if (typeof value !== "string" || value.length === 0) return false;
+  for (const ch of value) {
+    if (!SHELL_INERT_ENV_CHARS.has(ch)) return false;
+  }
+  return true;
 }
 
 /**
@@ -399,7 +405,7 @@ export function decodeLaunchSpecEnv(
   if (typeof value !== "string") return refuse("not_base64url");
   if (value.length === 0) return refuse("empty");
   if (value.length > LAUNCH_SPEC_ENV_MAX_CHARS) return refuse("too_long");
-  if (!SHELL_INERT_ENV_VALUE_RE.test(value)) return refuse("not_base64url");
+  if (!isShellInertEnvValue(value)) return refuse("not_base64url");
   if (value.length % 4 === 1) return refuse("bad_length");
   const standard = value.replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "="));

@@ -3425,7 +3425,21 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
     expect(isShellInertEnvValue("-")).toBe(true);
     expect(isShellInertEnvValue("")).toBe(false);
     // Each of these is one character of the alphabet plus one that is not, in each position.
-    for (const bad of ["a=", "=a", "a b", " a", "a ", "a\n", "\na", "a\r", "a\0", "aé", "a+b"]) {
+    for (const bad of [
+      "a=",
+      "=a",
+      "a b",
+      " a",
+      "a ",
+      "a\n",
+      "\na",
+      "a\r",
+      "a\0",
+      "aé",
+      "a+b",
+      "a\u{1F600}",
+      "\ud800",
+    ]) {
       expect(isShellInertEnvValue(bad), JSON.stringify(bad)).toBe(false);
     }
     for (const notText of [undefined, null, 7, {}, [], ["a"], true]) {
