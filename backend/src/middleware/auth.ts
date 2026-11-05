@@ -158,8 +158,15 @@ export type BearerAuthResult =
  * live token whose account may not authenticate, and `misconfigured` is an
  * account whose `role` column holds a value `parseRole` rejects. `profile` is
  * present only when the caller asked for it.
+ *
+ * `oidc_token` is a value with the OpenID Connect prefix (`nmo_`: an access
+ * token, a refresh token or a client secret), which is NEVER looked up as a
+ * key and never resolves to a user (ADR 0119 rule 4): an OIDC access token is
+ * accepted only by the routes that serve its scopes (`oidcBearer`), and every
+ * caller of this lookup refuses it.
  */
 export type ApiKeyResolution<Profile = undefined> =
+  | { kind: "oidc_token" }
   | { kind: "malformed" }
   | { kind: "unknown" }
   | { kind: "inactive"; status: string }
@@ -238,6 +245,11 @@ export async function resolveApiKeyUser(
   apiKey: string,
   opts?: ApiKeyLookupOptions & { withProfile?: true },
 ): Promise<ApiKeyResolution<ApiKeyProfile | undefined>> {
+  // An OpenID Connect credential is refused before anything else, by its prefix: it is not an API
+  // key, whatever the `tokens` table holds (ADR 0119 rule 4). `nm_` does not match `nmo_`.
+  if (typeof apiKey === "string" && apiKey.startsWith(OIDC_CREDENTIAL_PREFIX)) {
+    return { kind: "oidc_token" };
+  }
   if (!apiKey || apiKey.length < 32) return { kind: "malformed" };
 
   // Hash the key for lookup
@@ -327,6 +339,19 @@ export async function resolveApiKeyUser(
   };
 }
 
+/** The prefix every OpenID Connect credential carries: `nmo_at_`, `nmo_rt_` and `nmo_cs_`. */
+const OIDC_CREDENTIAL_PREFIX = "nmo_";
+
+/**
+ * The refusal of an OpenID Connect token on a route that is not an OIDC route (ADR 0119 rule 4). A
+ * 401 like any other credential the route cannot use, with a code a client can act on: the token is
+ * for the client's own use at the routes that serve its scopes, not for the rest of the API.
+ */
+export const OIDC_TOKEN_REFUSAL = {
+  error: "An OpenID Connect access token is not accepted here. Use a NEMAR API key.",
+  code: "oidc_token_not_accepted",
+} as const;
+
 /**
  * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
  *
@@ -353,6 +378,8 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
 
   const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7));
   switch (resolved.kind) {
+    case "oidc_token":
+      return { kind: "refused", response: c.json(OIDC_TOKEN_REFUSAL, 401) };
     case "malformed":
       return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
     case "unknown":
@@ -642,6 +669,9 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   // reads: an awaited write would turn a failed UPDATE into a 500 on a route
   // that has an anonymous answer, and `/notices` is served even in `full`
   // maintenance mode, when nothing should write.
+  //
+  // An OpenID Connect token (`oidc_token`) is no identity here either: like
+  // every other kind but `user`, it leaves the route on its anonymous branch.
   const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7), { touch: false });
   if (resolved.kind === "user") {
     c.set("user", resolved.user);

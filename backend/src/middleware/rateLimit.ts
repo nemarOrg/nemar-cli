@@ -848,6 +848,22 @@ const DATA_PATH_RE = /^\/(nemar\/)?data(\/|$)/;
 // 1,200/min is above any rate it sustains and still bounds a runaway caller.
 const NEUROBAGEL_PATH_RE = /^\/neurobagel(\/|$)/;
 const NEUROBAGEL_MAX_REQUESTS = 1200;
+// The OpenID Connect provider's three client endpoints (epic #2014 phase #2018, ADR 0119): the token
+// endpoint, revocation and introspection. Their own IP-keyed bucket, matched BEFORE the bearer branch,
+// for the Neurobagel route's reasons and one of their own. A client authenticates with HTTP Basic,
+// which the bearer branch does not read, so a partner's server would otherwise sit in the anonymous
+// `ip` bucket, and that one server redeems codes, refreshes tokens and introspects them for every
+// person signed in to it, from one address: 1,000 a minute is not its ceiling. And a request that
+// carries a bearer anyway must not mint a bucket per rotated value. Every credential here is 256
+// random bits and every refusal writes nothing, so the cap bounds load and is no guessing defence.
+// Exactly these paths: userinfo carries a bearer access token and rides the token bucket, and the key
+// set and discovery are not limited at all.
+const OAUTH_PATHS: ReadonlySet<string> = new Set([
+  "/oauth/token",
+  "/oauth/revoke",
+  "/oauth/introspect",
+]);
+const OAUTH_MAX_REQUESTS = 2000;
 // The zarr serving gateway (#901), the highest-request-volume data-plane path,
 // which bypassed the middleware stack and went unthrottled. Two reachable path
 // shapes, because Hono's `app.route("/zarrproxy", zarrDataRoutes)` PREPENDS the
@@ -1042,6 +1058,9 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *  - `neurobagel-ip` for the Neurobagel artifact store's read route
  *    (`/neurobagel/*`). 1,200/60s, IP-keyed, checked before the bearer branch for
  *    the reasons at NEUROBAGEL_PATH_RE.
+ *  - `oauth-ip` for the OpenID Connect token, revocation and introspection
+ *    endpoints. 2,000/60s, IP-keyed, checked before the bearer branch for the
+ *    reasons at OAUTH_PATHS.
  *  - `ip` for everything else (the unauthenticated cap), or, for a caller
  *    without `CF-Connecting-IP`, `site-ip` (the visitor it forwarded) or
  *    `site-unattributed` (nobody named). The `ip` argument is the caller key
@@ -1060,7 +1079,8 @@ export interface __BucketSelection {
     | "site-unattributed"
     | "token"
     | "data-ip"
-    | "neurobagel-ip";
+    | "neurobagel-ip"
+    | "oauth-ip";
   /** Pre-hash key material: the caller key (see {@link __CallerIdentity}), or the raw bearer token. */
   rawKey: string;
   maxRequests: number;
@@ -1326,6 +1346,10 @@ export function __selectBucket(
   // bearer neither mints a bucket nor reaches the privileged-token lookup.
   if (NEUROBAGEL_PATH_RE.test(path)) {
     return { keyKind: "neurobagel-ip", rawKey: ip, maxRequests: NEUROBAGEL_MAX_REQUESTS };
+  }
+  // The OpenID Connect client endpoints: IP-keyed whatever they carry (see OAUTH_PATHS).
+  if (OAUTH_PATHS.has(path)) {
+    return { keyKind: "oauth-ip", rawKey: ip, maxRequests: OAUTH_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
   if (bearer) {
@@ -2028,6 +2052,7 @@ export const __limits = {
   NEUROBAGEL_MAX_REQUESTS,
   PRIVATE_GRANT_MAX_REQUESTS,
   OIDC_AUTHORIZE_MAX_REQUESTS,
+  OAUTH_MAX_REQUESTS,
   WINDOW_SIZE,
 };
 

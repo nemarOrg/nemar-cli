@@ -105,3 +105,55 @@ describe("ADR 0119 records the key and secret decisions", () => {
     expect(consequences).toMatch(/removing the unreadable key rows by hand/);
   });
 });
+
+describe("ADR 0119 records what the token phase settled (#2018)", () => {
+  test("rule 13: replay, rotation, the retry, the expiries and client authentication", () => {
+    const thirteen = rule(13);
+    expect(thirteen).toContain("`code_replay`");
+    expect(thirteen).toContain("`refresh_reuse`");
+    expect(thirteen).toMatch(/one more child, never two/);
+    expect(thirteen).toMatch(/30 days after it was minted/);
+    expect(thirteen).toMatch(/90 days after the code was redeemed/);
+    expect(thirteen).toMatch(/code's scopes, never the grant's/);
+    expect(thirteen).toMatch(/HTTP Basic only/);
+    expect(thirteen).toMatch(/machine-only scopes/);
+    // Round 1: the retry's children are mutually exclusive, and a used code revokes only after its
+    // verifier and redirect address match.
+    expect(thirteen).toContain("`refresh_superseded`");
+    expect(thirteen).toMatch(/mutually exclusive/);
+    expect(thirteen).toMatch(/with the right verifier and redirect address/);
+    expect(thirteen).not.toMatch(/both children stay live/);
+    expect(thirteen).not.toMatch(/whatever verifier or redirect address/);
+    expect(readmeLine).toContain("refresh_superseded");
+    // Round 2: the retry needs the first child untouched, and a late retry is reuse.
+    expect(thirteen).toMatch(/itself untouched, neither rotated nor revoked/);
+    expect(thirteen).toMatch(/whatever the order the two holders acted in/);
+    expect(thirteen).toMatch(/access tokens stay valid for up to their 15 minutes/);
+  });
+
+  test("rule 14 and the consequences: read-only maintenance, faults, the table's growth", () => {
+    const fourteen = rule(14);
+    expect(fourteen).toMatch(/`POST \/oauth\/userinfo` and `POST \/oauth\/introspect` are served/);
+    expect(fourteen).toMatch(/never `invalid_token`, `invalid_grant` or `\{active: false\}`/);
+    const consequences = adr.slice(adr.indexOf("## Consequences"), adr.indexOf("## Alternatives"));
+    expect(consequences).toMatch(/In read-only maintenance no partner can refresh/);
+    expect(consequences).toMatch(/What to watch once a partner is live/);
+    expect(consequences).toMatch(/minimum interval between two rotations/);
+    expect(consequences).toMatch(/A fault is never a verdict/);
+    expect(consequences).toMatch(/The prune shares the batch that mints/);
+    expect(fourteen).toMatch(/POST only/);
+  });
+
+  test("rule 14: the claim names, the refusal elsewhere and introspection's blindness", () => {
+    const fourteen = rule(14);
+    for (const claim of ["nemar_kind", "nemar_status", "nemar_tier"]) {
+      expect(fourteen).toContain(claim);
+      expect(readmeLine).toContain(claim);
+    }
+    expect(fourteen).toContain("oidc_token_not_accepted");
+    expect(fourteen).toMatch(/`oidcBearer` is the one middleware/);
+    expect(fourteen).toMatch(/shown to its own client only/);
+    expect(readmeLine).toContain("oidc_token_not_accepted");
+    expect(adr).toMatch(/Fourteen rules inside that/);
+  });
+});

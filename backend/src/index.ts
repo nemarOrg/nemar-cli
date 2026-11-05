@@ -37,6 +37,7 @@ import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
 import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
+import { oauthRoutes } from "./routes/oauth";
 import { oidcDiscoveryRoutes } from "./routes/oidc-discovery";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
@@ -228,6 +229,12 @@ api.route("/neurobagel", neurobagelRoutes);
 // rate limiter, and both are 404 unless OIDC_SECRET is set and the request names the issuer's own
 // host with no /nemar prefix (routes/oidc-discovery.ts, `oidcSurface`).
 api.route("/", oidcDiscoveryRoutes);
+// The token, userinfo, revocation and introspection endpoints (epic #2014 phase #2018, ADR 0119):
+// /oauth/token, /oauth/userinfo, /oauth/revoke and /oauth/introspect. 404 until OIDC_SECRET is set
+// AND HOST_PREFIXED_SESSION_COOKIE is "1", on the issuer's host with no /nemar prefix, as the
+// authorization routes are (routes/oauth.ts). Unlike discovery and the key set they are rate limited
+// (the `oauth-ip` bucket) and under the maintenance mode.
+api.route("/oauth", oauthRoutes);
 
 // Mount route handlers
 api.route("/auth", authRoutes);
@@ -399,6 +406,21 @@ app.route("/", api);
 // apps: `POST /auth/docs/grant` answers 404 for a signed-in non-admin, and a
 // 404 that does not look like the others is a 404 that identifies itself.
 app.notFound(notFoundResponse);
+
+/**
+ * The Worker's whole route table, for the test that calls every route with an OpenID Connect access
+ * token and requires the answer an unknown API key gets (epic #2014 phase #2018; ADR 0119 rule 4):
+ * built from this table, a route added later is in that test without anyone listing it. A function
+ * and not the app itself, because a named export that is an object with a `fetch` method could be
+ * read by the runtime as an entrypoint.
+ */
+export function __workerRouteTable(): ReadonlyArray<{
+  method: string;
+  path: string;
+  handler: unknown;
+}> {
+  return app.routes;
+}
 
 /**
  * Scheduled cleanup handler (Cloudflare Workers cron trigger).

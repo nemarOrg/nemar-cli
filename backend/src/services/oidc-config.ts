@@ -121,7 +121,8 @@ function decodedForms(path: string): string[] {
  * because the sign-in cookie lives only there (ADR 0119 rule 2); every other endpoint is under the
  * issuer.
  *
- * `claims_supported` lists the claims ADR 0119 names, which for `nemar.account` is none yet.
+ * `claims_supported` lists the claims ADR 0119 names (`oidcClaimsSupported`), `nemar.account`'s
+ * included since the token phase (#2018) named them.
  * `request_parameter_supported` and `request_uri_parameter_supported` are false: the OpenID Connect
  * default for the second is TRUE, so leaving it out would tell a client it may send a request
  * object by reference.

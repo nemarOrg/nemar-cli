@@ -40,6 +40,7 @@ import {
   type OidcConsentMode,
   type OidcSignInRule,
   isMachineOnlyScope,
+  isOidcClientId,
   isOidcConsentMode,
   isOidcGrant,
   isOidcScope,
@@ -581,6 +582,127 @@ export async function getClientAuthRow(
   clientId: string,
 ): Promise<ClientAuthRow | null> {
   return db.prepare(CLIENT_AUTH_SQL).bind(clientId).first<ClientAuthRow>();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Authenticating a client at the token, revocation and introspection endpoints (#2018)
+// ---------------------------------------------------------------------------------------------
+
+/** What those endpoints know of a client that authenticated. Never a hash. */
+export interface AuthenticatedClient {
+  /** The ROW id, `oidc_clients.id`: what grants, codes and tokens store as `client_id`. */
+  id: number;
+  /** The PUBLIC client id, `oc_...`. */
+  clientId: string;
+  allowedGrants: string[];
+  allowedScopes: string[];
+  audience: string;
+  introspectionAudiences: string[];
+  /** As registered; whether it still qualifies is {@link isFirstPartyRedirect}'s to say. */
+  firstParty: boolean;
+  redirectUris: string[];
+}
+
+/** The row authentication reads: the status, the two hashes, and what the endpoints need after. */
+export const CLIENT_TOKEN_AUTH_SQL = `SELECT id, client_id, status, secret_hash, previous_secret_hash,
+    previous_secret_expires_at, allowed_grants, allowed_scopes, audience, introspection_audiences,
+    first_party, redirect_uris
+  FROM oidc_clients WHERE client_id = ?`;
+
+interface ClientTokenAuthRow extends ClientAuthRow {
+  id: number;
+  client_id: string;
+  allowed_grants: string;
+  allowed_scopes: string;
+  audience: string;
+  introspection_audiences: string;
+  first_party: number;
+  redirect_uris: string;
+}
+
+/**
+ * Body parameters that carry a client credential. A client authenticates with HTTP Basic and
+ * nothing else (ADR 0119 rule 1): a secret in the body is refused even beside a valid header, so a
+ * client cannot come to depend on a second method by accident, and `private_key_jwt` is not decided.
+ */
+const BODY_CREDENTIALS = ["client_secret", "client_assertion", "client_assertion_type"] as const;
+
+/** `application/x-www-form-urlencoded` decoding of one value: `+` is a space, then percent-decoding. */
+function formDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " "));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The client id and secret of an `Authorization: Basic` header, each form-decoded as RFC 6749
+ * section 2.3.1 requires (the client form-encodes both before it joins them with a colon), or null
+ * for a header that is absent, of another scheme, not base64, not UTF-8, without a colon, or with an
+ * empty half. The scheme name is matched without regard to case (RFC 7235).
+ */
+export function readBasicCredentials(
+  header: string | undefined,
+): { id: string; secret: string } | null {
+  if (!header) return null;
+  const match = /^basic ([A-Za-z0-9+/]+={0,2})$/i.exec(header.trim());
+  if (!match) return null;
+  let decoded: string;
+  try {
+    const binary = atob(match[1] as string);
+    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+    decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+  const colon = decoded.indexOf(":");
+  if (colon < 0) return null;
+  const id = formDecode(decoded.slice(0, colon));
+  const secret = formDecode(decoded.slice(colon + 1));
+  if (id === null || secret === null || id === "" || secret === "") return null;
+  return { id, secret };
+}
+
+/**
+ * The client a token, revocation or introspection request authenticates as, or null: no Basic
+ * header, a credential in the body, a `client_id` in the body that is not the header's, an unknown
+ * client, a disabled one, or a secret that is neither the current one nor the previous one inside
+ * its grace ({@link verifyClientSecret}: compared as hashes, in constant time). Every null is the
+ * same answer to the caller (`invalid_client`).
+ */
+export async function authenticateClient(
+  db: D1Database,
+  authorization: string | undefined,
+  form: URLSearchParams,
+): Promise<AuthenticatedClient | null> {
+  if (BODY_CREDENTIALS.some((name) => form.has(name))) return null;
+  const pair = readBasicCredentials(authorization);
+  if (!pair || !isOidcClientId(pair.id)) return null;
+  // RFC 6749 section 3.2.1 lets a client name itself in the body as well; it must be the same one.
+  const named = form.getAll("client_id").filter((v) => v !== "");
+  if (named.length > 1 || (named.length === 1 && named[0] !== pair.id)) return null;
+  const row = await db.prepare(CLIENT_TOKEN_AUTH_SQL).bind(pair.id).first<ClientTokenAuthRow>();
+  if (!row) return null;
+  if ((await verifyClientSecret(row, pair.secret)) === null) return null;
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    allowedGrants: JSON.parse(row.allowed_grants) as string[],
+    allowedScopes: JSON.parse(row.allowed_scopes) as string[],
+    audience: row.audience,
+    introspectionAudiences: JSON.parse(row.introspection_audiences) as string[],
+    firstParty: row.first_party === 1,
+    redirectUris: JSON.parse(row.redirect_uris) as string[],
+  };
+}
+
+/** Whether a registered first-party client still qualifies: every redirect address passes now. */
+export function stillFirstParty(
+  client: Pick<AuthenticatedClient, "firstParty" | "redirectUris">,
+  env: Pick<Bindings, "ENVIRONMENT">,
+): boolean {
+  return client.firstParty && client.redirectUris.every((uri) => isFirstPartyRedirect(uri, env));
 }
 
 // ---------------------------------------------------------------------------------------------
