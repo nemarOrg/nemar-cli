@@ -419,6 +419,16 @@ describe("revoking an account (finalizeRevocation) ends its compute in the same 
     expect(poolsOf(target).map((p) => [p.frozen, p.held_milli])).toEqual([[1, 0]]);
   });
 
+  test("the by-id twin of the route (an account with no username) runs the same batch", async () => {
+    const world = await seedWorld("cascadebyid");
+    expect((await ownerCall("POST", `/admin/revoke/by-id/${world.target}`)).status).toBe(200);
+    expect((await reread(fx.env(), world.unsubmitted.id)).state).toBe("cancelled");
+    for (const id of [world.running.id, world.inFlight.id]) {
+      expect((await reread(fx.env(), id)).cancel_reason).toBe("account_ended");
+    }
+    expect(poolsOf(world.target).map((p) => p.frozen)).toEqual([1, 1]);
+  });
+
   test("the first recorded reason stands: a person's own earlier cancel stays `user` and keeps its time", async () => {
     const world = await seedWorld();
     // The person asked to cancel the running job; Tapis could not take it yet.
