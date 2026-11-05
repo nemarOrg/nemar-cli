@@ -10,10 +10,11 @@
  * The signing keys' public set, `/oauth/jwks`, is the discovery router's (`oidc-discovery.ts`).
  *
  * THE ORDER OF THE GUARDS, which a route cannot reorder (`test/oauth-route-inventory.test.ts`):
- *   1. `oidcAuthorizeSurface`: 404, as an unrouted path does, unless the provider is on, the request
- *      is on the issuer's host with no `/nemar` prefix, and `HOST_PREFIXED_SESSION_COOKIE` is `"1"`.
- *      The same rule as the authorization routes', so the provider's whole flow is dark (production
- *      today) or lit together.
+ *   1. `oidcAuthorizeSurface` (`auth-oidc.ts`): 404, as an unrouted path does, unless the provider is
+ *      on, the request is on the issuer's host with no `/nemar` prefix (`onOidcSurface`, the test the
+ *      discovery router's `oidcSurface` makes), AND `HOST_PREFIXED_SESSION_COOKIE` is `"1"`. The
+ *      authorization routes' guard, imported rather than restated, so the provider's whole flow is
+ *      dark (production today) or lit together; discovery and the key set need the surface only.
  *   2. {@link noStore}: every answer from here on, success or refusal, is `Cache-Control: no-store`
  *      and `Pragma: no-cache` (RFC 6749 section 5.1): it carries a token, a claim or a verdict.
  *   3. Userinfo only: `oidcBearer(["openid"])`, the one middleware that accepts an access token.

@@ -138,7 +138,11 @@ export const CODE_READ_SQL = `SELECT k.id, k.client_id, k.redirect_uri, k.scopes
        CAST(strftime('%s', 'now') AS INTEGER) AS now_unix
   FROM oidc_codes k WHERE k.code_hash = ?`;
 
-/** The account a code names, for the identity token's claims, read before the batch signs nothing. */
+/**
+ * The account a code names, read before the batch for the identity token's claims. The batch's own
+ * gates read the account again, so a change in between mints nothing; at worst the claims of a token
+ * that was then not minted are discarded with it.
+ */
 export const CODE_ACCOUNT_SQL = `SELECT ${ACCOUNT_CLAIM_COLUMNS}
   FROM oidc_codes k JOIN users u ON u.id = k.user_id WHERE k.id = ?`;
 
@@ -152,7 +156,10 @@ const CODE_GATES = `c.status = 'active'
    AND EXISTS (SELECT 1 FROM json_each(c.allowed_grants) WHERE value = 'authorization_code')
    AND u.oidc_subject IS NOT NULL
    AND ${SIGN_IN_RULE_SQL}
-   AND g.revoked_at IS NULL AND g.user_id = k.user_id AND g.client_id = k.client_id
+   AND g.revoked_at IS NULL
+   -- Defence in depth over the join on the code's grant id: the grant must be this account's, to this
+   -- client (no route writes a code whose grant is not; a store test holds the rule anyway).
+   AND g.user_id = k.user_id AND g.client_id = k.client_id
    AND NOT EXISTS (SELECT 1 FROM json_each(k.scopes) s
                     WHERE s.value NOT IN (SELECT value FROM json_each(g.scopes))
                        OR s.value NOT IN (SELECT value FROM json_each(c.allowed_scopes))

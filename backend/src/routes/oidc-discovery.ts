@@ -17,8 +17,11 @@
  * and forks the data, zarr and MCP hosts before the API app is reached; a document served on any of
  * those would name an issuer the host is not.
  *
- * {@link oidcSurface} is the middleware every `/oauth` route and every owner route reuses, so the
- * rule is one function and a route cannot forget it.
+ * {@link oidcSurface} is the middleware the owner routes reuse, so the rule is one function and a
+ * route cannot forget it. The authorization routes (`auth-oidc.ts`) and the token, userinfo,
+ * revocation and introspection endpoints (`oauth.ts`) use `oidcAuthorizeSurface` instead, which is
+ * this same test (`onOidcSurface`) AND `HOST_PREFIXED_SESSION_COOKIE` being `"1"`: the provider's
+ * whole flow is lit or dark together, while discovery and the key set answer on the surface alone.
  */
 
 import { Hono, type MiddlewareHandler } from "hono";

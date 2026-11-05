@@ -4,8 +4,10 @@
  *
  * An access token is accepted only by the routes that serve its scopes, and every other route refuses
  * it (`resolveApiKeyUser` answers `oidc_token` for an `nmo_` bearer). This middleware is the
- * acceptance: a route that serves a scope names it here, and nothing else in the Worker reads an
- * access token. Today that is `/oauth/userinfo` (`openid`); the compute routes that serve
+ * acceptance: a route that serves a scope names it here, and it is the only thing in the Worker that
+ * lets an access token AUTHENTICATE a request. (Revocation and introspection read tokens too, as form
+ * parameters a client passes about a token, never as the credential of the request.) Today it is on
+ * `/oauth/userinfo` (`openid`); the compute routes that serve
  * `compute.*` are the compute epics', and `test/oidc-token-allowlist.test.ts` fails when this
  * middleware appears on a route it does not list.
  *
