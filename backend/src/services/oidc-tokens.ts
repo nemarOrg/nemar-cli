@@ -29,10 +29,12 @@
  *   unspent with no child yet, OR it was spent under 30 seconds ago and has exactly one child (the
  *   retried request: one more child, never two); the access token is inserted beside that child; and
  *   the parent is marked spent if it was not already, so the grace is measured from the first
- *   rotation. THE CHILDREN OF ONE PARENT ARE MUTUALLY EXCLUSIVE: rotating one of them revokes its
- *   unspent siblings (`refresh_superseded`) in the same batch, so the retry's second child and the
- *   first can never both go on rotating; whichever is presented first wins, and the other one,
- *   presented later, is a revoked token. A parent that is revoked, or spent and past the grace, or
+ *   rotation. The retry is honoured only while the first child is untouched (neither rotated nor
+ *   revoked). THE CHILDREN OF ONE PARENT ARE MUTUALLY EXCLUSIVE: rotating one of them revokes its
+ *   live siblings (`refresh_superseded`) in the same batch, so the retry's second child and the first
+ *   can never both go on rotating; whichever is presented first wins, and the other one, presented
+ *   later, is a revoked token. A retry that comes after the first child was rotated or revoked is
+ *   reuse. A parent that is revoked, or spent and past the grace, or
  *   already retried, revokes its whole family (`refresh_reuse`), in a statement that re-checks that
  *   very condition. A refresh
  *   token keeps its scopes; the access token gets the scopes asked for, which may only narrow. The
@@ -267,7 +269,12 @@ export const REFRESH_CHILD_SQL = `INSERT INTO oidc_tokens
            AND NOT EXISTS (SELECT 1 FROM oidc_tokens k WHERE k.parent_id = p.id AND k.kind = 'refresh'))
        OR (p.used_at > datetime('now', '-' || ? || ' seconds')
            AND (SELECT COUNT(*) FROM oidc_tokens k
-                 WHERE k.parent_id = p.id AND k.kind = 'refresh') = 1))`;
+                 WHERE k.parent_id = p.id AND k.kind = 'refresh') = 1
+           -- The retry is a retry only while the first child is untouched: once it was rotated or
+           -- revoked, a second child would be a branch the sibling rule can no longer reach.
+           AND NOT EXISTS (SELECT 1 FROM oidc_tokens k
+                            WHERE k.parent_id = p.id AND k.kind = 'refresh'
+                              AND (k.used_at IS NOT NULL OR k.revoked_at IS NOT NULL))))`;
 
 /**
  * Mint the access token of a rotation beside the child, or nothing. Binds: token hash, the scopes
@@ -290,24 +297,26 @@ export const REFRESH_SPEND_SQL = `UPDATE oidc_tokens SET used_at = datetime('now
    AND EXISTS (SELECT 1 FROM oidc_tokens k WHERE k.token_hash = ? AND k.parent_id = oidc_tokens.id)`;
 
 /**
- * Siblings: revoke the unspent refresh tokens that share the presented token's parent, other than
- * the presented token, only when this request's child of the presented token exists. The retry of
- * rule 13 gives a parent two children; this makes them mutually exclusive, so whichever is rotated
- * first wins and the other, presented later, is a revoked token whose presentation revokes the
- * family. Their access tokens are left to expire (15 minutes): one of them may be the one the session
- * that rotated is still using. A family's first token has no parent and no sibling. Binds: presented
- * token id (three times), the child's hash.
+ * Siblings: revoke the live refresh tokens that share the presented token's parent, other than the
+ * presented token, only when this request's child of the presented token exists. The retry of rule
+ * 13 gives a parent a second child only while the first is untouched (`REFRESH_CHILD_SQL`); this makes
+ * the two mutually exclusive, so whichever is rotated first wins and the other, presented later, is a
+ * revoked token whose presentation revokes the family. A sibling is therefore never spent when this
+ * runs, and none is spared for being spent. Their access tokens are left to expire (at most 15
+ * minutes): one of them may be the one the session that rotated is still using. A family's first
+ * token has no parent and no sibling. Binds: presented token id (three times), the child's hash.
  */
 export const REFRESH_SIBLINGS_REVOKE_SQL = `UPDATE oidc_tokens
    SET revoked_at = datetime('now'), revoked_reason = ${reason("refresh_superseded")}
- WHERE kind = 'refresh' AND revoked_at IS NULL AND used_at IS NULL
+ WHERE kind = 'refresh' AND revoked_at IS NULL
    AND parent_id = (SELECT parent_id FROM oidc_tokens WHERE id = ?)
    AND id <> ?
    AND EXISTS (SELECT 1 FROM oidc_tokens k WHERE k.token_hash = ? AND k.parent_id = ?)`;
 
 /**
  * Reuse: revoke the presented token's whole family, access tokens included, when that token is
- * revoked, or spent and past the grace, or already retried once. The condition is re-checked here,
+ * revoked, or spent and past the grace, or already retried once, or spent with a child that was
+ * itself rotated or revoked since (the retry's own refusal, mirrored). The condition is re-checked here,
  * so a rotation that failed for another reason (an inactive account, a revoked grant) revokes
  * nothing. Binds: the token's id, client row id, grace seconds.
  */
@@ -320,7 +329,11 @@ export const REFRESH_REUSE_REVOKE_SQL = `UPDATE oidc_tokens
                          OR (p.used_at IS NOT NULL
                            AND (p.used_at <= datetime('now', '-' || ? || ' seconds')
                              OR (SELECT COUNT(*) FROM oidc_tokens k
-                                  WHERE k.parent_id = p.id AND k.kind = 'refresh') >= 2))))`;
+                                  WHERE k.parent_id = p.id AND k.kind = 'refresh') >= 2
+                             OR EXISTS (SELECT 1 FROM oidc_tokens k
+                                         WHERE k.parent_id = p.id AND k.kind = 'refresh'
+                                           AND (k.used_at IS NOT NULL
+                                             OR k.revoked_at IS NOT NULL))))))`;
 
 /**
  * A client credentials token, or nothing. Binds: token hash, scopes (JSON), lifetime in seconds,

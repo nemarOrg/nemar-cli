@@ -661,6 +661,19 @@ describe("REFRESH_CHILD_SQL on its own: first use, one retry, nothing else", () 
   );
 
   onEveryEngine(
+    "inside the grace, a parent whose only child was rotated or revoked mints nothing",
+    async (e) => {
+      const w = await world(e);
+      const rotated = await refreshRow(e, w, { usedAgo: 5 });
+      await refreshRow(e, w, { family: rotated.family, parent: rotated.id, usedAgo: 2 });
+      expect((await rotate(e, w, rotated.id)).changes).toBe(0);
+      const revoked = await refreshRow(e, w, { usedAgo: 5 });
+      await refreshRow(e, w, { family: revoked.family, parent: revoked.id, revoked: true });
+      expect((await rotate(e, w, revoked.id)).changes).toBe(0);
+    },
+  );
+
+  onEveryEngine(
     "a parent spent past the grace, or spent with no child, mints nothing",
     async (e) => {
       const w = await world(e);
@@ -773,6 +786,18 @@ describe("REFRESH_REUSE_REVOKE_SQL re-checks why it runs", () => {
       const w = await world(e);
       expect(await revoke(e, (await familyOf(e, w, 31, 1)).id, w.clientRow)).toBe(2);
       expect(await revoke(e, (await familyOf(e, w, 5, 2)).id, w.clientRow)).toBe(3);
+      // Spent inside the grace, its only child rotated since (or revoked): the retry's refusal, mirrored.
+      const late = await refreshRow(e, w, { usedAgo: 5 });
+      await refreshRow(e, w, { family: late.family, parent: late.id, usedAgo: 2 });
+      expect(await revoke(e, late.id, w.clientRow)).toBe(2);
+      const cut = await refreshRow(e, w, { usedAgo: 5 });
+      const cutChild = await refreshRow(e, w, { family: cut.family, parent: cut.id });
+      await ok(
+        e,
+        "UPDATE oidc_tokens SET revoked_at = datetime('now'), revoked_reason = 'client_revoked' WHERE id = ?",
+        cutChild.id,
+      );
+      expect(await revoke(e, cut.id, w.clientRow)).toBe(1);
       const revoked = await refreshRow(e, w, { revoked: true });
       await refreshRow(e, w, { family: revoked.family });
       expect(await revoke(e, revoked.id, w.clientRow)).toBe(1);
@@ -900,12 +925,15 @@ describe("the prune reads only what it may delete", () => {
 
 describe("REFRESH_SIBLINGS_REVOKE_SQL: the children of one parent are mutually exclusive", () => {
   onEveryEngine(
-    "rotating one child revokes its unspent refresh siblings, and nothing else",
+    "rotating one child revokes its live refresh siblings, spent or not, and nothing else",
     async (e) => {
       const w = await world(e);
       const root = await refreshRow(e, w, { usedAgo: 5 });
       const presented = await refreshRow(e, w, { family: root.family, parent: root.id });
       const sibling = await refreshRow(e, w, { family: root.family, parent: root.id });
+      // A spent sibling cannot arise through the routes any more (the retry is refused once the first
+      // child is rotated); written here by hand, it is revoked like any other live sibling, so no
+      // branch survives by being spent.
       const spentSibling = await refreshRow(e, w, {
         family: root.family,
         parent: root.id,
@@ -931,14 +959,15 @@ describe("REFRESH_SIBLINGS_REVOKE_SQL: the children of one parent are mutually e
       // Not before this request's child of the presented token exists.
       expect(await revokeSiblings(HASH())).toBe(0);
       const child = await refreshRow(e, w, { family: root.family, parent: presented.id });
-      expect(await revokeSiblings(child.hash)).toBe(1);
+      expect(await revokeSiblings(child.hash)).toBe(2);
       const rows = await e.all<{ token_hash: string; revoked_reason: string | null }>(
         "SELECT token_hash, revoked_reason FROM oidc_tokens WHERE family_id = ?",
         root.family,
       );
       const reasonOf = (hash: string) => rows.find((r) => r.token_hash === hash)?.revoked_reason;
       expect(reasonOf(sibling.hash)).toBe("refresh_superseded");
-      for (const hash of [presented.hash, spentSibling.hash, root.hash, child.hash, accessHash]) {
+      expect(reasonOf(spentSibling.hash)).toBe("refresh_superseded");
+      for (const hash of [presented.hash, root.hash, child.hash, accessHash]) {
         expect(reasonOf(hash)).toBeNull();
       }
     },

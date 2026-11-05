@@ -218,6 +218,69 @@ describe("rotation", () => {
     }
   });
 
+  test("a retry after the first child was already rotated is reuse: the whole family ends", async () => {
+    // Holder A refreshes and rotates its child again; holder B then presents the original parent
+    // inside the 30 seconds. B must not get a second branch that rotates on beside A's.
+    const f = await family();
+    const a1 = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    const a2 = (await refresh(f.client, a1.refresh_token)).json as unknown as Issued;
+    expect(await userinfoStatus(a2.access_token)).toBe(200);
+    expectInvalidGrant(await refresh(f.client, f.first.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    const rows = allRows().filter((r) => r.family_id === familyId);
+    expect(rows.filter((r) => r.revoked_at === null)).toEqual([]);
+    expect(new Set(rows.map((r) => r.revoked_reason))).toEqual(new Set(["refresh_reuse"]));
+    expect(await userinfoStatus(a2.access_token)).toBe(401);
+    expectInvalidGrant(await refresh(f.client, a2.refresh_token));
+    // Nothing was minted for the late presentation: the root still has one refresh child.
+    const rootId = (await rowOf(f.first.refresh_token)).id;
+    expect(rows.filter((r) => r.parent_id === rootId && r.kind === "refresh")).toHaveLength(1);
+  });
+
+  test("a retry after the first child was revoked is reuse: the whole family ends", async () => {
+    const f = await family();
+    const a1 = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    // The first child alone is ended (as a cascade that ends one token would), unspent.
+    h.db
+      .query(
+        "UPDATE oidc_tokens SET revoked_at = datetime('now'), revoked_reason = 'client_revoked' WHERE token_hash = ?",
+      )
+      .run(await hashApiKey(a1.refresh_token));
+    expectInvalidGrant(await refresh(f.client, f.first.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    const rows = allRows().filter((r) => r.family_id === familyId);
+    expect(rows.filter((r) => r.revoked_at === null)).toEqual([]);
+    expect(await userinfoStatus(a1.access_token)).toBe(401);
+  });
+
+  test("a retry while the first child is still unspent works, and the siblings stay exclusive", async () => {
+    const f = await family();
+    const a1 = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    const b1 = await refresh(f.client, f.first.refresh_token);
+    expect(b1.status).toBe(200);
+    const b = b1.json as unknown as Issued;
+    // B rotates first: A's child is superseded, and A coming back ends the family.
+    expect((await refresh(f.client, b.refresh_token)).status).toBe(200);
+    expect((await rowOf(a1.refresh_token)).revoked_reason).toBe("refresh_superseded");
+    expectInvalidGrant(await refresh(f.client, a1.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    expect(allRows().filter((r) => r.family_id === familyId && r.revoked_at === null)).toEqual([]);
+  });
+
+  test("a retry of a middle generation whose child was rotated is reuse too", async () => {
+    // Three generations deep: A rotates root, then its child, then its grandchild, all inside the
+    // grace; B presents the child (spent seconds ago, its own child spent too).
+    const f = await family();
+    const c1 = (await refresh(f.client, f.first.refresh_token)).json as unknown as Issued;
+    const c2 = (await refresh(f.client, c1.refresh_token)).json as unknown as Issued;
+    const c3 = (await refresh(f.client, c2.refresh_token)).json as unknown as Issued;
+    expectInvalidGrant(await refresh(f.client, c1.refresh_token));
+    const familyId = (await rowOf(f.first.refresh_token)).family_id;
+    expect(allRows().filter((r) => r.family_id === familyId && r.revoked_at === null)).toEqual([]);
+    expect(await userinfoStatus(c3.access_token)).toBe(401);
+    expectInvalidGrant(await refresh(f.client, c3.refresh_token));
+  });
+
   test("a single session that refreshed twice at once keeps working with either token it stored", async () => {
     for (const stored of [0, 1]) {
       const f = await family();
