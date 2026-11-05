@@ -7,14 +7,25 @@
  */
 
 import { Hono } from "hono";
+import { accessLogger } from "../../src/middleware/access-log";
+import { maintenanceMode } from "../../src/middleware/maintenance";
 import { computeRoutes } from "../../src/routes/compute";
 import webhooks from "../../src/routes/webhooks";
 import type { Bindings, Variables } from "../../src/types/bindings";
 
 export type RoutesHandle = (req: Request, env: Bindings) => Response | Promise<Response>;
 
-export function makeRoutesApp(): RoutesHandle {
+/**
+ * `accessLog` and `maintenance` mount the Worker's REAL access logger and maintenance middleware first,
+ * in the order `index.ts` does (logger, then maintenance), for a suite that asserts something about what
+ * they do to these routes. They are off by default so the other suites' output stays quiet.
+ */
+export function makeRoutesApp(
+  options: { accessLog?: boolean; maintenance?: boolean } = {},
+): RoutesHandle {
   const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  if (options.accessLog === true) app.use("*", accessLogger());
+  if (options.maintenance === true) app.use("*", maintenanceMode);
   app.route("/compute", computeRoutes);
   app.route("/webhooks", webhooks);
   return (req, env) =>

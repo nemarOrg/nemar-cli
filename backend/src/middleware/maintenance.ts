@@ -7,12 +7,14 @@
  */
 
 import type { Context, Next } from "hono";
+import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute";
 import type { Bindings, Variables } from "../types/bindings";
 import {
   type ActiveMaintenanceMode,
   type MaintenanceMode,
   isMaintenanceMode,
 } from "../types/maintenance";
+import { redactSecretPaths } from "./access-log";
 
 type MaintenanceContext = Context<{ Bindings: Bindings; Variables: Variables }>;
 
@@ -26,6 +28,22 @@ const ALWAYS_ALLOWED_PATHS = new Set(["/", "/health", "/notices"]);
 // blocked.
 const READ_ONLY_MUTATION_ALLOWLIST = ["/admin/", "/webhooks/"];
 const READ_ONLY_EXACT_MUTATIONS = new Set(["/auth/login"]);
+
+/**
+ * The compute launcher's three callbacks (`POST /compute/jobs/<job id>/bundle`, `/outputs` and
+ * `/outputs/complete`) stay open in read-only mode, by exact shape and for POST only: a job that is
+ * already running on a cluster has no way to hold its results, and a launcher refused here would fail a
+ * job that did nothing wrong and was already paid for. They write only that job's own prefix and its own
+ * row, behind a per-job token. `full` still refuses them (it refuses everything), and the person's own
+ * `cancel` and `links` stay blocked in read-only like any other write (round 1 of #2041).
+ */
+const LAUNCHER_CALLBACK_RE = /^\/compute\/jobs\/([^/]+)\/(?:bundle|outputs|outputs\/complete)$/;
+
+function isLauncherCallback(method: string, path: string): boolean {
+  if (method !== "POST") return false;
+  const match = LAUNCHER_CALLBACK_RE.exec(path);
+  return match !== null && COMPUTE_JOB_ID_RE.test(match[1] ?? "");
+}
 
 let warnedUnknownMode = false;
 
@@ -42,7 +60,9 @@ function parseMode(raw: string | undefined): MaintenanceMode {
 }
 
 function respond503(c: MaintenanceContext, mode: ActiveMaintenanceMode) {
-  console.warn(`[maintenance] blocked ${c.req.method} ${c.req.path} (mode=${mode})`);
+  console.warn(
+    `[maintenance] blocked ${c.req.method} ${redactSecretPaths(c.req.path)} (mode=${mode})`,
+  );
   c.header("Retry-After", "3600");
   return c.json(
     {
@@ -98,6 +118,11 @@ export async function maintenanceMode(c: MaintenanceContext, next: Next) {
   }
 
   if (READ_ONLY_MUTATION_ALLOWLIST.some((prefix) => path.startsWith(prefix))) {
+    await next();
+    return;
+  }
+
+  if (isLauncherCallback(c.req.method, path)) {
     await next();
     return;
   }

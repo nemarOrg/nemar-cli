@@ -10,7 +10,6 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
 
 // Single source of truth for the version. The worker reads the repo-root
@@ -20,6 +19,7 @@ import { secureHeaders } from "hono/secure-headers";
 // the two manifests fails the bump rather than silently shipping.
 import pkg from "../../package.json" with { type: "json" };
 import { notFoundResponse } from "./lib/not-found";
+import { accessLogger } from "./middleware/access-log";
 import { optionalAuthMiddleware } from "./middleware/auth";
 import { maintenanceMode } from "./middleware/maintenance";
 import { rateLimiter } from "./middleware/rateLimit";
@@ -135,7 +135,7 @@ import type { Bindings, Variables } from "./types/bindings";
 const api = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 // Global middleware
-api.use("*", logger());
+api.use("*", accessLogger());
 api.use("*", secureHeaders());
 api.use(
   "*",

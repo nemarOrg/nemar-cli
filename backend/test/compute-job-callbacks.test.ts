@@ -68,7 +68,9 @@ let workerEnv: Bindings;
 
 beforeAll(async () => {
   fx = await startLifecycleFixture();
-  handle = makeRoutesApp();
+  // The REAL maintenance middleware is mounted in front of the routes, as in the entry point; it does
+  // nothing unless a test sets `MAINTENANCE_MODE`.
+  handle = makeRoutesApp({ maintenance: true });
 }, 120_000);
 
 beforeEach(async () => {
@@ -1076,6 +1078,47 @@ describe("complete", () => {
 });
 
 // --- The launcher's whole run through these routes ------------------------------------------------
+
+// Round 1 of #2041: a job already running on a cluster hands in its results while the API is
+// read-only, through the REAL routes behind the REAL maintenance middleware.
+describe("maintenance mode and the launcher", () => {
+  test("read-only: the three callbacks work for a live job; the person's cancel and links are refused; full refuses the callbacks too", async () => {
+    const j = await person();
+    const token = await tokenFor(j.job.id);
+    workerEnv = { ...workerEnv, MAINTENANCE_MODE: "read-only" } as Bindings;
+    const files: OutputFile[] = [{ path: "report.txt", content: "a result" }];
+    const outputs = await call(j.job.id, "outputs", {
+      token,
+      body: outputsBody(files, launcherSizesOf()),
+    });
+    expect(outputs.status).toBe(200);
+    expect(await uploadAll(outputs, files)).toEqual([200, 200, 200, 200, 200]);
+    // `complete` is the callback that ends the upload: a job refused here never finishes.
+    expect((await call(j.job.id, "outputs/complete", { token })).status).toBe(200);
+    const cancel = await handle(
+      new Request(`http://api.test/compute/jobs/${j.job.id}/cancel`, { method: "POST" }),
+      workerEnv,
+    );
+    expect(cancel.status).toBe(503);
+    const links = await handle(
+      new Request(`http://api.test/compute/jobs/${j.job.id}/links`, { method: "POST" }),
+      workerEnv,
+    );
+    expect(links.status).toBe(503);
+
+    const other = await person();
+    const otherToken = await tokenFor(other.job.id);
+    workerEnv = { ...workerEnv, MAINTENANCE_MODE: "full" } as Bindings;
+    for (const route of ["bundle", "outputs", "outputs/complete"] as const) {
+      const refused = await call(other.job.id, route, {
+        token: otherToken,
+        body: outputsBody(files, launcherSizesOf()),
+      });
+      expect([route, refused.status, refused.body.mode]).toEqual([route, 503, "full"]);
+    }
+    expect((await reread(workerEnv, other.job.id)).results_bytes).toBeNull();
+  });
+});
 
 describe("the launcher's whole run, through the routes", () => {
   /** What a launcher does, from the specification Tapis gave it: read `api_base` and the token, call the routes. */

@@ -40,7 +40,8 @@ let workerEnv: Bindings;
 
 beforeAll(async () => {
   fx = await startLifecycleFixture();
-  handle = makeRoutesApp();
+  // The REAL access logger is mounted, as in the entry point: what a line holds is what production prints.
+  handle = makeRoutesApp({ accessLog: true });
 }, 120_000);
 
 beforeEach(async () => {
@@ -292,13 +293,16 @@ describe("the address expires with the nonce", () => {
 });
 
 describe("logs", () => {
-  test("no token, address or path reaches a log, for a refusal or an accepted hint", async () => {
+  // Round 1 of #2041: this test used to run on an app WITHOUT the Worker's access logger, so it proved
+  // only what the route itself logs. The app now mounts the real logger, whose lines carry the path.
+  test("with the Worker's own access logger mounted, no token or secret reaches a log line, and the line names the job and nothing after it", async () => {
     const s = await submitted();
     fx.tapis.advance(s.uuid, "RUNNING");
     const token = await webhookToken(s.job.id);
     const lines = await logged(async () => {
       await post(hookUrl(s.job.id, "f".repeat(64)));
       await post(hookUrl(s.job.id, token));
+      await post(`http://127.0.0.1:${server.port}/webhooks/tapis/${"e".repeat(64)}`);
       fx.tapis.down();
       try {
         await post(hookUrl(s.job.id, token));
@@ -310,11 +314,18 @@ describe("logs", () => {
     for (const word of [
       token,
       "f".repeat(64),
-      "/webhooks/tapis/",
+      "e".repeat(64),
       CALLBACK_SECRET,
       fx.tapis.password,
     ]) {
       expect([word, joined.includes(word)]).toEqual([word, false]);
+    }
+    // The access logger DID log these requests (a test that saw no line would prove nothing): the
+    // incoming and outgoing line of each, with the job id and the token replaced.
+    const hookLines = lines.filter((l) => l.includes("/webhooks/tapis/"));
+    expect(hookLines.length).toBeGreaterThanOrEqual(8);
+    for (const line of hookLines) {
+      expect(line).toMatch(/\/webhooks\/tapis\/(job_[0-9a-f]{24}|\[redacted\])\/\[redacted\]/);
     }
   });
 });
