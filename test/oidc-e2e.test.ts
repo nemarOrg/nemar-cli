@@ -12,14 +12,17 @@
  *
  * The library has no back-channel logout verifier, so the logout token is verified with `jose` by
  * `verifyLogoutToken` below, which is the check a partner must make. Its negative controls prove the
- * verifier itself rejects what it must (an unsigned token, a wrong audience, a wrong type, a nonce), so
- * that "the logout token verified" in the end-to-end test means something.
+ * verifier itself rejects what it must (an unsigned token, a token signed by another key, a wrong
+ * issuer, a wrong audience, a wrong type, an absent `events` member, an `events` member without the
+ * logout event, an expired token, a nonce), so that "the logout token verified" in the end-to-end test
+ * means something.
  *
  * The properties, each with a test of its own:
  *  - the whole flow: authorize and consent, redeem with PKCE, verify the identity token, userinfo,
  *    refresh, introspection, the refusal of the access token on the rest of the API, a replayed code,
  *    an administrator's revoke, and the logout the partner receives;
- *  - the verifier rejects alg none, a wrong aud, a wrong typ and a token carrying a nonce;
+ *  - the verifier rejects alg none, a foreign signer, a wrong iss, a wrong aud, a wrong typ, an absent
+ *    events member, events without the logout event, an expired token and a token carrying a nonce;
  *  - the loser of a manual merge keeps the merge as the reason when the owner ends it first, and records
  *    the revocation when the order is reversed.
  *
