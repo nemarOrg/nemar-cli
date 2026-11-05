@@ -2226,6 +2226,8 @@ describe("logs", () => {
   test("no token, address, path, secret or job output reaches a log, through a full lifecycle with failures", async () => {
     let token = "";
     let launchValue = "";
+    let otherToken = "";
+    let otherLaunchValue = "";
     const lines = await logged(async () => {
       const s = await submittedJob();
       token = jobTokenSeenByTapis(fx, s.uuid);
@@ -2236,14 +2238,25 @@ describe("logs", () => {
       fx.tapis.fail("POST /v3/jobs/submit", 503);
       const other = await makeJob(fx);
       await submitComputeJob(other.env, other.job.id);
+      // The failed submit built the launch value and logged `submit_unclear`: it is that job's secrets a
+      // leak there would carry. A retry succeeds, and the token is a function of the job and its nonce,
+      // so the stand-in then holds exactly the value the failed attempt built.
+      expect(await submitComputeJob(other.env, other.job.id)).toMatchObject({ ok: true });
+      const sent = (await reread(other.env, other.job.id)).tapis_uuid as string;
+      otherToken = jobTokenSeenByTapis(fx, sent);
+      otherLaunchValue = launchSpecEnvSeenByTapis(fx, sent);
     });
     const joined = lines.join("\n");
     expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(otherToken).toMatch(/^[0-9a-f]{64}$/);
     // The encoded launch value holds the token, and the plain token is no longer a substring of it.
     expect(isShellInertEnvValue(launchValue)).toBe(true);
+    expect(isShellInertEnvValue(otherLaunchValue)).toBe(true);
     const forbidden = [
       token,
+      otherToken,
       launchValue,
+      otherLaunchValue,
       CALLBACK_SECRET,
       "secret-name-path.txt",
       fx.tapis.password,
