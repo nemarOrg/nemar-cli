@@ -2,10 +2,10 @@
  * The scheduler's launch file and a shell that sources it (epic #2005, contract follow-up A1c, #2043).
  *
  * THE HAZARD this reproduces. The launch specification travels as ONE scheduler environment value.
- * The scheduler writes an environment value into a file that a shell sources on the compute node, and
- * it quotes the value only conditionally: left bare unless it contains a space or one of `&`, `>`,
- * `<`, `|`, `;` or a backtick, and then wrapped in double quotes with only `"` escaped. That rule is
- * the one the review of the launcher phase recorded; it is UNVERIFIED against a real scheduler, and
+ * The review of the launcher phase read the scheduler as writing an environment value into a file
+ * that a shell sources on the compute node, and as quoting the value only conditionally: left bare
+ * unless it contains a space or one of `&`, `>`, `<`, `|`, `;` or a backtick, and then wrapped in
+ * double quotes with only `"` escaped. That reading is UNVERIFIED against a real scheduler, and
  * these helpers do not claim to be one. They are the rule, written out, so a test can put a value
  * through it and through a real `sh` and see what comes back.
  *

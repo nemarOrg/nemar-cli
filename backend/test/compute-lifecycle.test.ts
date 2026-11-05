@@ -396,9 +396,9 @@ describe("submit", () => {
   });
 
   test("a job with shell-active arguments is sent as a value a shell sources back intact, and nothing it holds runs (A1c)", async () => {
-    // The scheduler writes the value into a file a shell sources, quoting it only conditionally
-    // (`scheduler-launch-file.ts`). Every string below is inert: a command, if it ran, only makes a
-    // file in a fresh directory, which is listed afterwards.
+    // The scheduler is read as writing the value into a file a shell sources, quoting it only
+    // conditionally (`scheduler-launch-file.ts`; unverified). Every string below is inert: a command,
+    // if it ran, only makes a file in a fresh directory, which is listed afterwards.
     const sandbox = makeSandbox();
     try {
       const args = [

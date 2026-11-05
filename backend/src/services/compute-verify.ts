@@ -336,10 +336,11 @@ export async function readRecordedSpec(
  * In order: the launcher completed (`outputs_completed_at`); the three documents exist and parse; each
  * carries this job's id; the provenance's `launch_spec_digest` is the one NEMAR stored before it
  * submitted (the launcher hashed the text it decoded from the value it received, so a launcher that
- * ran another specification differs); its `bundle_digest` is the specification's bundle (null when there is none)
- * and its image digest is the job's; the result reports no failure and its exit number is the one
- * Tapis reports (when Tapis reports one); the manifest is exactly what was declared; every declared
- * output is in the bucket with the exact size; and the four launcher files are as declared.
+ * ran another specification differs); its `bundle_digest` is the specification's bundle (null when
+ * there is none) and its image digest is the job's; the result reports no failure and its exit
+ * number is the one Tapis reports (when Tapis reports one); the manifest is exactly what was
+ * declared; every declared output is in the bucket with the exact size; and the four launcher files
+ * are as declared.
  */
 export async function verifyResults(
   results: R2Bucket,

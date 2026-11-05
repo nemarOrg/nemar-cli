@@ -2,19 +2,20 @@
  * The launch specification against the scheduler's launch file (epic #2005, contract follow-up A1c,
  * #2043; ADR 0118).
  *
- * THE HAZARD. The launch specification travels as ONE scheduler environment value, and the scheduler
- * writes an environment value into a file that a shell sources on the compute node, quoting it only
- * conditionally (see `backend/test/helpers/scheduler-launch-file.ts`, which writes the rule out; the
- * rule is the one the review of the launcher phase recorded and is UNVERIFIED against a real scheduler).
- * Compact JSON is not shell-inert: a value with no space is left bare and the shell eats the quotes of
+ * THE HAZARD. The launch specification travels as ONE scheduler environment value. The review of the
+ * launcher phase read the scheduler as writing an environment value into a file that a shell sources
+ * on the compute node, and as quoting it only conditionally; that reading is UNVERIFIED against a real
+ * scheduler, and `backend/test/helpers/scheduler-launch-file.ts` writes the rule out. On that reading,
+ * compact JSON is not shell-inert: a value with no space is left bare and the shell eats the quotes of
  * the JSON, and shell-active characters in a user's strings are expanded or break the quoting.
  *
  * WHAT IS ASSERTED, with a real `sh` in a fresh sandbox directory (the only place a command in these
  * inert examples ever writes, a `touch` of a path inside it):
  *  (a) THE NEGATIVE CONTROL. The wire value as it was before A1c, written out here and not imported,
- *      does NOT survive: no space, and `$(...)`, a backtick, `"` and `\\` in a user string each fail the
- *      round trip, and the first two make the shell RUN what the value holds. One case it carries
- *      (a space and nothing else) is asserted too, so the detector is seen to tell the cases apart.
+ *      does NOT survive: no space, and `$(...)`, a backtick, `"` and a backslash in a user string each
+ *      fail the round trip. `$(...)` and a backtick make the shell RUN what the value holds. One case
+ *      it carries (a space and nothing else) is asserted too, so the detector is seen to tell the
+ *      cases apart, and each failing case asserts that what the shell printed is not the value.
  *  (b) THE NEW VALUE, the specification's text in base64url, comes back from the shell EXACTLY, for
  *      arguments, a command and environment values full of what a shell treats as special and for a
  *      document of 64 KiB, and no file is made by sourcing it. What the launcher then does (decode

@@ -21,16 +21,18 @@
  * classification test in `test/contract-schemas.test.ts` checks both by behaviour.
  *
  * ON THE WIRE THE DOCUMENT IS BASE64URL (A1c, #2043; ADR 0118). The document is canonical, compact,
- * ASCII-only JSON text (`encodeLaunchSpec`); it travels as the environment value
- * `NEMAR_LAUNCH_SPEC` in the shell-inert alphabet `A-Za-z0-9-_`: the text's UTF-8 bytes in base64url
- * (RFC 4648 section 5), no padding, no line break (`encodeLaunchSpecEnv`, and
- * `decodeLaunchSpecEnv`, which the launcher's decoder mirrors strictly). Compact JSON is not
- * shell-inert (its quotes, braces and any `$`, backtick, `;` or `&` in a user string are special to a
- * shell that sources an environment file), and the scheduler quotes a value only conditionally, so the
- * value carries no character a shell treats as special. The JSON text, its 64 KiB cap and both digests
- * (`spec_digest`, `launch_spec_digest`) are over the TEXT and are unchanged: a digest is never over
- * the encoded value. What a scheduler does with a value is not part of this contract and is not
- * claimed here; the alphabet is what makes the answer irrelevant.
+ * printable-ASCII JSON text (`encodeLaunchSpec`: every byte 0x20 to 0x7e); it travels as the
+ * environment value `NEMAR_LAUNCH_SPEC` in the shell-inert alphabet `A-Za-z0-9-_`: the text's bytes
+ * in base64url (Request for Comments (RFC) 4648 section 5), no padding, no line break, and canonical,
+ * which is one value per text (`encodeLaunchSpecEnv`, and `decodeLaunchSpecEnv`, whose rules and
+ * order of checks the launcher's decoder must follow). Compact JSON is not shell-inert: its quotes,
+ * braces and any `$`, backtick, `;` or `&` in a user string are special to a shell that sources an
+ * environment file. The scheduler is read as writing an environment value into such a file and
+ * quoting it only conditionally (that reading is UNVERIFIED; see the unverified lists in ADR 0118 and
+ * the implementation notes), so the value carries no character a shell treats as special. The JSON
+ * text, its 64 KiB cap and both digests (`spec_digest`, `launch_spec_digest`) are over the TEXT and
+ * are unchanged: a digest is never over the encoded value. What a scheduler does with a value is not
+ * part of this contract and is not claimed here; the alphabet is what makes the answer irrelevant.
  *
  * What the launch specification does NOT carry, on purpose: a URL for the code bundle (the
  * launcher asks the Worker for a presigned address with `job_token`), any storage credential, and
@@ -93,10 +95,11 @@ export const LAUNCH_SPEC_MAX_BYTES = 64 * 1024;
 export const LAUNCH_SPEC_ENV_MAX_CHARS = Math.ceil((LAUNCH_SPEC_MAX_BYTES * 4) / 3);
 
 /**
- * The shell-inert alphabet of an environment value, in RFC 4648 section 5 order: the 64 base64url
- * characters. A value made only of these is left unquoted by a scheduler that quotes conditionally
- * and is untouched by a shell: none is special to a shell, to a glob or to a quoting rule. A
- * WIRE CONTRACT with the launcher in nemar-process: both repositories' tests pin this string.
+ * The shell-inert alphabet of an environment value, in Request for Comments (RFC) 4648 section 5
+ * order: the 64 base64url characters. A value made only of these holds none of the characters a
+ * conditional quoter quotes for, and nothing a shell acts on: none is special to a shell, to a glob
+ * or to a quoting rule. The one place the alphabet is written down in the code, and a WIRE CONTRACT
+ * with the launcher in nemar-process: both repositories' tests pin this string.
  */
 export const SHELL_INERT_ENV_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -303,9 +306,10 @@ function asciiOnly(json: string): string {
 }
 
 /**
- * The text for `NEMAR_LAUNCH_SPEC`: the specification validated, as ASCII-only JSON (see
- * `asciiOnly`), within 64 KiB. The size is checked AFTER escaping, because that is what the
- * launcher reads and the digest covers; a non-ASCII character costs six bytes. Keys follow the
+ * The text for `NEMAR_LAUNCH_SPEC`: the specification validated, as printable-ASCII JSON (JSON
+ * escapes the control bytes and `asciiOnly` the rest, so every byte is 0x20 to 0x7e), within 64 KiB.
+ * The size is checked AFTER escaping, because that is what the launcher reads and the digest
+ * covers; a non-ASCII character costs six bytes. Keys follow the
  * schema's order and there is no whitespace, so one document is one text. Throws TypeError (naming
  * the failing keys, never a value, since the document holds a token) for a document that is not
  * valid and RangeError for one over the size the launcher reads.

@@ -323,18 +323,18 @@ Not verified, and listed so nobody reads it as fact: which header carries the ke
 ## Amendment 2026-11-04 (#2043): the launch specification travels as base64url (contract follow-up A1c)
 
 The review of the launcher phase found that the launch specification, which travels as ONE scheduler environment value, is not safe to carry as compact JSON.
-The scheduler writes an environment value into a file that a shell sources on the compute node, and it quotes a value only conditionally.
-A value with no space is written bare, so the shell consumes the quotes of the JSON and the launcher reads invalid JSON; and shell-active characters in a user's strings (a command substitution, a backtick, a quote, a backslash) are expanded or break the quoting, outside the container.
+It read the scheduler as writing an environment value into a file that a shell sources on the compute node, and as quoting a value only conditionally; that reading is unverified (see the list at the end).
+On that reading, a value with no space is written bare, so the shell consumes the quotes of the JSON and the launcher reads invalid JSON; and shell-active characters in a user's strings (a command substitution, a backtick, a quote, a backslash) are expanded or break the quoting, outside the container.
 Nothing is registered with a tenant and every compute switch is dark, so nothing was exposed.
 The repository owner approved the fix on 2026-11-04: base64url without padding.
 "Item N" means the numbered item of THIS amendment.
 
 1. **The `NEMAR_LAUNCH_SPEC` value is the launch specification's JSON text in base64url, with no padding.**
-   RFC 4648 section 5, alphabet `A-Za-z0-9-_` (`SHELL_INERT_ENV_ALPHABET`), no padding and no line break, applied to the bytes of the ASCII-only JSON text that `encodeLaunchSpec` writes.
+   Request for Comments (RFC) 4648 section 5, alphabet `A-Za-z0-9-_` (`SHELL_INERT_ENV_ALPHABET`), no padding and no line break, applied to the bytes of the printable-ASCII JSON text that `encodeLaunchSpec` writes (every byte 0x20 to 0x7e: JSON escapes the control bytes, and the encoder escapes DEL and everything from 0x80 up).
    The variable name is unchanged.
-   A value made only of that alphabet holds none of the characters the scheduler quotes for and none that a shell, a glob or a quoting rule acts on, so how the scheduler quotes is no longer something the launch specification depends on.
+   A value made only of that alphabet holds none of the characters a conditional quoter would quote for and none that a shell, a glob or a quoting rule acts on, so how the scheduler quotes is no longer something the launch specification depends on.
    `encodeLaunchSpecEnv(text)` is the wire step, beside `encodeLaunchSpec`, which still returns the JSON text because the text is what is hashed and recorded.
-   The two are separate functions, so the text that is digested and the value that is sent stay two named things; the Tapis client refuses a text where a value belongs (item 5).
+   It returns a branded type, `LaunchSpecEnvValue`, and the Tapis client's input is that type (`SubmitJobInput.launchSpecEnv`), so the text that is digested and the value that is sent stay two named things that the compiler keeps apart; at run time the client's schema refuses a text where a value belongs (item 5).
    A5's builder (`buildLaunch`) calls both, records the digest of the text and sends only the encoded value in `parameterSet.envVariables`.
 2. **The JSON text, its 64 KiB cap and both digests are unchanged.**
    `spec_digest` is the SHA-256 of `records/<id>/spec.json`, and `launch_spec_digest` is the SHA-256 of the launch specification's JSON text, which is what the value decodes to; neither is over the encoded value.
@@ -343,21 +343,28 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
    The golden vector's text and its SHA-256 are unchanged; an encoded golden vector (its string, its length and its SHA-256) is added beside it, with a second vector chosen to hold both `-` and `_` and the characters a shell acts on.
 3. **The encoded value is bounded, and the bound is declared once.**
    `LAUNCH_SPEC_ENV_MAX_CHARS` is `ceil(65536 * 4 / 3)`, which is 87,382: base64url without padding spends `ceil(n * 4 / 3)` characters on `n` bytes, so every text within the 64 KiB cap encodes within the bound, and a text of exactly the cap encodes to exactly the bound.
-   `encodeLaunchSpecEnv` re-checks the length it wrote, `launchSpecFits` (the Worker's worst case) goes through both steps, and the Tapis client's request schema bounds the value by the same constant.
-   The encoder's two size checks refuse the same inputs, by arithmetic; the second is the contract's own statement of the bound at the wire, not a second limit.
-4. **The decoder is strict, and there is no earlier format.**
-   `decodeLaunchSpecEnv(value)` returns the text or a fixed refusal word (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_ascii`) that never holds a part of the value.
-   It accepts only a non-empty string of at most the bound, made only of the alphabet (so no padding, no `+` or `/`, no whitespace and no line break), whose length is not 1 modulo 4 and whose bytes are all ASCII; the caller then parses the JSON.
+   The encoder checks the cap on the text and nothing else, because a second check of the encoded length could never fire; a test pins the arithmetic instead (`ceil(n * 4 / 3)` only grows, is exactly the bound at 65,536 and one past it at 65,537), and `launchSpecFits` (the Worker's worst case) asks the text cap alone.
+   The decoder and the Tapis client's request schema bound the value by the same constant.
+4. **The decoder is strict and canonical, and there is no earlier format.**
+   `decodeLaunchSpecEnv(value)` returns the text or one of five fixed refusal words (`empty`, `too_long`, `not_base64url`, `bad_length` or `not_printable`) that never holds a part of the value.
+   The checks run in this order, and the first to fail names the refusal: the value is a string; it is not empty; it is at most the bound; it is made only of the alphabet (so no padding, no `+` or `/`, no whitespace and no line break); its length is not 1 modulo 4; it decodes to printable ASCII only, every byte 0x20 to 0x7e; and it is canonical.
+   A value is canonical when encoding the decoded text again gives the value back, so the unused trailing bits of its last character are zero and there is one value per text: `QQ` is accepted, and `QR`, which decodes to the same byte, is refused with `not_base64url`.
+   The caller then parses the JSON.
+   The encoder refuses a text with a byte outside 0x20 to 0x7e (a control byte, DEL or anything from 0x80 up) with a TypeError, and a text over the cap with a RangeError, and no message holds any part of the text.
+   The printable rule is one rule for both sides: the launcher drops its separate NUL check (`has_nul`) and uses `not_printable`.
    A raw JSON value, which starts with `{`, is refused: nothing is registered with a tenant, so no earlier format is accepted anywhere.
-   The unused trailing bits of the last character are not checked.
-   The encoder always writes them as zero, and a value that differs only there decodes to the same text and so to the same digest; this is a recorded choice, and the launcher's decoder is required to follow the same rules.
-5. **The Tapis client refuses anything else before a request is built.**
-   The request schema's value is `isShellInertEnvValue` (the contract's own rule, not a copy) within the bound, so a raw JSON text, padding, a quote, a space, a newline and a value over the bound are each refused with the field's name and never the value.
+   The launcher's decoder is required to follow the same rules, with the same words, in the same order.
+5. **The Tapis client refuses anything else before a request is built, and a refusal of the job's own data ends the job.**
+   The request schema's value passes only when `decodeLaunchSpecEnv` accepts it (one rule, shared with the decoder, and not a second check of the characters), so a raw JSON text, padding, a quote, a space, a newline, a value over the bound, a value that is not canonical and one that does not decode to printable text are each refused with the field's name and never the value.
    The closed one-variable array and `archiveFilter.includeLaunchFiles: false` are unchanged.
-   The encoded value holds the per-job token, so it is held to every rule the plain token is: it is not logged, returned or stored, and the tests that look for a leak look for it too, because the plain token is no longer a substring of it.
+   A request refused for the job's own data (the launch value, or a field that comes from the job's row) is wrong the same way on every attempt, so it is a typed error, `SubmitRequestRefused`, with a reason word (`launch_spec_env` or `job_field`).
+   `submitLeased` ends such a job `failed` with `tapis_submit_failed` and the detail `invalid_spec`, the code a refused launch specification already carries, and releases the whole hold through the path of a job that never started (released, not refunded), instead of trying again on every tick until the reservation wait runs out.
+   The owner is NEMAR's configuration and not the job's data: a bad one stays a plain RangeError and the job waits for the fix, and any other exception keeps the unavailable retry.
+   The encoded value holds the per-job token, so it is held to every rule the plain token is: it is not logged, returned or stored.
+   The tests that look for a leak look for every form of the token (the plain token, the whole value, and the token's base64url text at each of its three alignments in a group), because the plain token is not a substring of the value, nor of a slice of it.
 6. **The hazard is reproduced, not asserted.**
    `test/compute-launch-env-shell.test.ts` implements the scheduler's conditional quoting (`backend/test/helpers/scheduler-launch-file.ts`), writes `export NEMAR_LAUNCH_SPEC=<value>`, sources the file with a real `sh` in a fresh directory and prints the variable back.
-   The old value, kept in the test as the negative control, fails the round trip for a specification without a space and for `$(...)`, a backtick, `"` and `\` in a user's string; the first two make the shell run what the value holds (the examples are inert: a `touch` of a path in that directory).
+   The old value, kept in the test as the negative control, fails the round trip for a specification without a space and for `$(...)`, a backtick, `"` and `\` in a user's string; `$(...)` and a backtick make the shell run what the value holds (the examples are inert: a `touch` of a path in that directory).
    One shape the old value did carry is asserted too, so the detector is seen to tell cases apart.
    The new value comes back exactly for adversarial arguments, a command, environment values and a document of 64 KiB, and no file is made.
    The scheduler's rule is the review's reading of it and is unverified; that is why the launch specification is made independent of it.
