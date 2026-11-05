@@ -1,12 +1,11 @@
 /**
  * The ACCESS gateway-attributes report of every Slurm job (epic #2005 phase A8, #2013; ADR 0118
- * decision 9, design section 9), against the real migrations, the real lifecycle over the Tapis
+ * decision 9, design section 9), against the real migrations and the real lifecycle over the Tapis
  * stand-in (a real HTTP server built from Tapis's published specifications; NO RESPONSE IN IT WAS
- * RECORDED FROM A REAL TENANT) and, for the reporter, a stand-in for the ACCESS endpoint
- * (`helpers/access-standin.ts`: a real HTTP server; NO RESPONSE IN IT WAS RECORDED FROM THE REAL
- * SERVICE either, and the key header name and the body spelling are UNVERIFIED).
+ * RECORDED FROM A REAL TENANT). THE ROW ONLY: the reporter that sends what the row owes, and its
+ * stand-in for the ACCESS endpoint, are `compute-access-reporter.test.ts`.
  *
- * Part 1, the row. The batch in which a job's record first shows a Slurm id inserts a `pending` row,
+ * The batch in which a job's record first shows a Slurm id inserts a `pending` row,
  * in both writers of `slurm_job_id` (the live transition and the terminal transition), with
  * `INSERT OR IGNORE`, so a replayed read adds no second row and never resets one that has moved on.
  * MUTATIONS: drop `OR IGNORE` (the replay throws on the primary key); remove the insert from the live

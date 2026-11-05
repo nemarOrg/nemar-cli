@@ -43,6 +43,7 @@ import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
+import { accessReportsLogLine, runAccessReportCron } from "./services/access-attributes";
 import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
@@ -1194,6 +1195,30 @@ export default {
             .catch((err) =>
               console.error(
                 "[compute-cancel] sweep failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // #2013 (epic #2005 phase A8, ADR 0118 decision 9): the ACCESS gateway-attributes reporter.
+        // It sends each Slurm job's pseudonymous gateway user to ACCESS ONCE (the claim is one
+        // conditional UPDATE made before the POST, and a report that may have been recorded is never
+        // sent again by code), ten due rows a tick, retrying only what ACCESS visibly refused. The
+        // POST is never made inside a batch. PRODUCTION-ONLY, and deliberately NOT in
+        // DEV_CRON_ALLOWLIST: it reaches a third party with an owner-set key, and the dev database
+        // shares real users. It also refuses outside exact production on its own, reads no switch
+        // (a job that ran is owed its report whether or not compute is on), and with no key or
+        // resource name set sends nothing. One log line, only when it changed something or a row
+        // needs a person: counts and fixed words, never the key, an address or an id of ACCESS's.
+        ctx.waitUntil(
+          runAccessReportCron(env)
+            .then((r) => {
+              const log = r ? accessReportsLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[access-report] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),

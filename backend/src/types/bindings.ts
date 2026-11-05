@@ -100,9 +100,14 @@ export interface Bindings {
   TAPIS_USERNAME?: string;
   TAPIS_PASSWORD?: string;
   TAPIS_SERVICE_TOKEN?: string;
-  /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym);
-   *  only `GET /admin/compute/status` reads its presence in this phase. */
+  /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym).
+   *  Owner-set Worker secret, absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that).
+   *  `runAccessReportCron` (services/access-attributes.ts) sends it in a header and never logs or stores
+   *  it; `GET /admin/compute/status` reports only whether it is set. Unset, reports wait `unconfigured`. */
   ACCESS_GATEWAY_ATTRIBUTES_KEY?: string;
+  /** The name ACCESS knows the cluster by in the gateway-attributes interface (the design's question 14),
+   *  an owner-set Worker secret like the key and pinned absent from wrangler-sccn.toml the same way. */
+  ACCESS_RESOURCE_NAME?: string;
   /** NEMAR's own runtime image for a `python` job (epic #2005 phase A5, services/compute-lifecycle.ts):
    *  a digest-pinned reference, `[docker://]registry/path@sha256:<64 hex>`. Owner-set, like the Tapis
    *  names, and absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that). Unset, a

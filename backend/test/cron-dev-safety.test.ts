@@ -33,6 +33,7 @@ import {
   NON_PROD_SANDBOX_CLEANUP_QUERY as NON_PROD_SANDBOX_QUERY,
   PROD_SANDBOX_CLEANUP_QUERY as PROD_SANDBOX_QUERY,
 } from "../src/index";
+import { runAccessReportCron } from "../src/services/access-attributes";
 import { archiveRetrySweep } from "../src/services/archive-retry";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import {
@@ -531,5 +532,58 @@ describe("the compute gateway's cron jobs refuse outside exact production (#2010
     const q = untouched();
     await sweepComputeCancellations({ ENVIRONMENT: "production", DB: q.db } as unknown as Bindings);
     expect(q.touched()).toBe(true);
+  });
+});
+
+describe("the ACCESS reporter refuses outside exact production (#2013)", () => {
+  // The reporter POSTs to a third party with an owner-set key, and the development database shares real
+  // users. It tests `ENVIRONMENT` for the exact string `production`, so an unset or misspelled binding
+  // leaves it off. A D1 that throws on first use proves nothing was read or written.
+  const untouched = () => {
+    let touched = false;
+    const db = {
+      prepare() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+      batch() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    return { db, touched: () => touched };
+  };
+
+  for (const environment of [
+    "development",
+    "staging",
+    "test",
+    "",
+    undefined,
+    "prod",
+    "Production",
+    " production",
+  ]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: it returns null with D1 untouched`, async () => {
+      const p = untouched();
+      const e = {
+        ENVIRONMENT: environment,
+        DB: p.db,
+        ACCESS_GATEWAY_ATTRIBUTES_KEY: "a-key",
+        ACCESS_RESOURCE_NAME: "a-resource",
+      } as unknown as Bindings;
+      expect(await runAccessReportCron(e)).toBeNull();
+      expect(p.touched()).toBe(false);
+    });
+  }
+
+  test("in production it reaches D1, so the probe above is not vacuous", async () => {
+    const db = realD1(freshDb());
+    expect(
+      await runAccessReportCron({ ENVIRONMENT: "production", DB: db } as unknown as Bindings),
+    ).toMatchObject({ examined: 0, errors: [] });
+    const p = untouched();
+    await runAccessReportCron({ ENVIRONMENT: "production", DB: p.db } as unknown as Bindings);
+    expect(p.touched()).toBe(true);
   });
 });

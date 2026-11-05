@@ -154,6 +154,11 @@ const SWEEP_WIRING: Record<
   // switch, so turning compute off never strands a live job.
   runComputeAdvanceCron: "tick-prod-only",
   sweepComputeCancellations: "tick-prod-only",
+  // Epic #2005 phase A8 (#2013, ADR 0118 decision 9): the ACCESS gateway-attributes reporter. It sends
+  // each Slurm job's pseudonymous gateway user to a third party with an owner-set key, so it rides the
+  // 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
+  // exact production on its own, and reads no switch (a job that ran is owed its report).
+  runAccessReportCron: "tick-prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
