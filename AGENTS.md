@@ -344,6 +344,10 @@ each name the callers of their revoke and grants-purge statements and say a new 
 credential needs the lines too; those counts are load-bearing, so add yourself to them rather
 than assuming someone else did. A role demotion and an API key revocation deliberately leave
 `private` sessions alone; `PRIVATE_REVOKE_ALL_SQL` says why.
+`services/compute-release.ts` does the same for an account's compute: two callers, `finalizeRevocation` and
+`tombstoneUserCascade`, a role demotion and a key revocation deliberately outside it, and
+`backend/test/compute-end-callers.test.ts` fails when a new path that revokes all of an account's keys and sessions
+runs neither those statements nor a named exception.
 
 ### Never hand-bump the version
 

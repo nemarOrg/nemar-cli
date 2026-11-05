@@ -8,8 +8,10 @@
  * by username and by id) and `tombstoneUserCascade` (`db/user-tombstone.ts`: the owner-only soft delete
  * and the scheduled sweep of the live tests' accounts, which run the same function, so it counts once).
  * These are the two paths that end EVERY credential an account holds. A THIRD path that ends an account
- * needs these statements too, and a test (`backend/test/compute-release-cascade.test.ts`) fails when
- * either caller drops them.
+ * needs these statements too. The list is `COMPUTE_END_CALLERS` below, and a source scan
+ * (`backend/test/compute-end-callers.test.ts`) holds it to the code: it fails when either caller drops the
+ * statements (as does `compute-release-cascade.test.ts`), and when ANY function that revokes all of an
+ * account's API keys and its sessions neither runs them nor is named in `COMPUTE_END_EXCEPTIONS`.
  *
  * A PARTNER'S RESERVATION IS LEFT ALONE. A job with `source = 'partner'` and no Tapis job yet is a
  * reservation the partner will launch its own Tapis job under (phase D4), and NEMAR never writes a launch
@@ -178,3 +180,30 @@ export function computeReleaseStatements(userId: number): ComputeReleaseStatemen
     { sql: COMPUTE_RELEASE_FREEZE_SQL, binds: [String(userId)] },
   ];
 }
+
+/**
+ * THE DOCUMENTED LIST of the functions that run {@link computeReleaseStatements}, as `file#function` under
+ * `backend/src` (a route callback is `file#METHOD /path`). The two paths that end every credential an
+ * account holds. `test/compute-end-callers.test.ts` holds this list to the code on the syntax tree, through
+ * aliased and namespace imports and uses that pass the function as a value: a function that runs the set
+ * and is not listed, or a listed one that no longer runs it, fails the test, and so does any new function
+ * that revokes all of an account's API keys and its sessions and neither runs the set nor is named in
+ * {@link COMPUTE_END_EXCEPTIONS}. A third path that ends an account (the suspension of compute, an owner
+ * command that merges two accounts) therefore has to add itself here, in a reviewed change.
+ */
+export const COMPUTE_END_CALLERS = [
+  "db/user-tombstone.ts#tombstoneUserCascade",
+  "routes/admin/users.ts#finalizeRevocation",
+] as const;
+
+/**
+ * The functions that revoke ALL of an account's API keys and its sessions and deliberately do NOT end its
+ * compute, each with its reason (the same shape as {@link COMPUTE_END_CALLERS}). A new entry is a
+ * decision that an account survives the revocation, and is made in a reviewed change.
+ */
+export const COMPUTE_END_EXCEPTIONS: Readonly<Record<string, string>> = {
+  "routes/admin/users.ts#POST /users/:username/role":
+    "A role demotion revokes every API key and the docs credential because what exists only for an admin ends, but the person keeps an account in good standing with a grant, pools and jobs of their own, so their compute is not ended.",
+  "routes/auth.ts#GET /confirm-key-regeneration":
+    "The emailed key regeneration revokes every API key and the docs credential and mints a new key in the same request: the person keeps the account, so nothing of their compute ends.",
+};
