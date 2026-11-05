@@ -25,10 +25,11 @@
 --   sub                the account's `users.oidc_subject` when the row was queued: `nmu_` plus 32
 --                      lowercase hexadecimal characters. It is the logout token's `sub`.
 --   reason             why the grants ended: a fixed word, `OIDC_END_REASONS` in `shared/oidc.ts`
---                      (the list below is that list, and a test holds the two together). It is NOT
+--                      (the list below is that list, and a test holds the two equal as sets). It is NOT
 --                      sent to the partner: a logout token carries no reason.
 --   status             `pending` (to be attempted, or retried), `sent` (the partner answered 200 or
---                      204), `failed` (refused by the partner with a 4xx, or every attempt used),
+--                      204), `failed` (refused by the partner with a 4xx other than 408 and 429, or
+--                      every attempt used),
 --                      `fenced` (outside production, an address that is neither loopback nor listed:
 --                      recorded and never sent). A row that is not `pending` is never attempted again.
 --   attempts           how many attempts were claimed, 0 to 6: the first and at most five retries.
@@ -37,9 +38,9 @@
 --                      of that attempt's claim. NULL once the row is terminal.
 --   last_status        the HTTP status of the last attempt that got an answer, else NULL.
 --   last_error_class   a fixed word for what went wrong on the last attempt (`timeout`, `network`,
---                      `redirect`, `http_4xx`, `http_5xx`, ...: `OIDC_LOGOUT_ERROR_CLASSES`), NEVER
---                      the text of an error or of the partner's answer. Lowercase letters, digits and
---                      `_`, at most 40 characters; the words are the service's rule.
+--                      `redirect`, `http_4xx`, `http_5xx`, `http_throttled`, ...: the closed list
+--                      below, which is `OIDC_LOGOUT_ERROR_CLASSES` in `shared/oidc.ts` and which a test
+--                      holds equal as a SET), NEVER the text of an error or of the partner's answer.
 --   jti                the `jti` of the logout token the LAST attempt sent: 32 lowercase hexadecimal
 --                      characters, unique, so a partner's complaint can be matched to a row. A token
 --                      is made per attempt, so a retry is a new token and not a replay of the old.
@@ -62,8 +63,9 @@ CREATE TABLE oidc_logout_deliveries (
   next_attempt_at TEXT,
   last_status INTEGER CHECK (last_status IS NULL
     OR (typeof(last_status) = 'integer' AND last_status BETWEEN 100 AND 599)),
-  last_error_class TEXT CHECK (last_error_class IS NULL
-    OR (length(last_error_class) BETWEEN 1 AND 40 AND last_error_class NOT GLOB '*[^a-z0-9_]*')),
+  last_error_class TEXT CHECK (last_error_class IS NULL OR last_error_class IN ('timeout', 'network',
+    'redirect', 'http_4xx', 'http_5xx', 'http_throttled', 'http_other', 'sign_failed',
+    'address_refused', 'client_disabled', 'fenced', 'unreported')),
   jti TEXT CHECK (jti IS NULL OR (length(jti) = 32 AND jti NOT GLOB '*[^0-9a-f]*')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   sent_at TEXT,

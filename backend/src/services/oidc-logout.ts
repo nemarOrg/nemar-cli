@@ -29,10 +29,12 @@
  *   - NOTHING BUT THE SIGNED TOKEN GOES OUT: no `Authorization`, no cookie, no client secret, no API
  *     key. A logout token proves itself by its signature, which the partner checks against the key set.
  *   - ATTEMPTS ARE BOUNDED AND RECORDED: one, and five retries (1 minute, 5 minutes, 30 minutes, 2
- *     hours, 12 hours), then `failed`. A 5xx, a timeout and a network failure are retried; any other
- *     4xx, a redirect and any other answer are not (retrying a refusal does not change it). What is
- *     recorded is a status and a fixed word (`OIDC_LOGOUT_ERROR_CLASSES`), never the text of an error
- *     or of an answer.
+ *     hours, 12 hours), then `failed`. A 5xx, a 408, a 429, a timeout and a network failure are
+ *     retried; any other 4xx, a redirect and any other answer are not (retrying a refusal does not
+ *     change it). A 408 or 429 may carry a `Retry-After`, which is read as a LOWER bound for the wait
+ *     (the longer of it and the schedule's, at most 12 hours), so a partner can slow a delivery and can
+ *     never add an attempt. What is recorded is a status and a fixed word
+ *     (`OIDC_LOGOUT_ERROR_CLASSES`), never the text of an error or of an answer.
  *
  * WHAT THIS DOES NOT GUARANTEE, said plainly: the sender does not resolve a name itself, so a registered
  * name that a partner points at an address of its own choosing is still requested. That is the partner's
@@ -49,6 +51,7 @@
 import {
   OIDC_BACKCHANNEL_LOGOUT_EVENT,
   OIDC_LOGOUT_MAX_ATTEMPTS,
+  OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS,
   OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
   OIDC_LOGOUT_TIMEOUT_MS,
   OIDC_LOGOUT_TOKEN_TTL_SECONDS,
@@ -173,13 +176,35 @@ export async function buildLogoutToken(
 export type SendOutcome =
   | { kind: "sent"; status: number }
   | { kind: "failed"; status: number | null; errorClass: OidcLogoutErrorClass }
-  | { kind: "retry"; status: number | null; errorClass: OidcLogoutErrorClass };
+  | {
+      kind: "retry";
+      status: number | null;
+      errorClass: OidcLogoutErrorClass;
+      /** A throttled partner's `Retry-After` in seconds, a lower bound for the wait; absent otherwise. */
+      retryAfterSeconds?: number;
+    };
 
 /**
- * POST the token to the partner and say what came of it. Never throws. `200` and `204` are `sent`; a 5xx
- * is a `retry`; a redirect (never followed), any other 4xx and any other status are `failed`; no answer
- * inside the time is a `retry` (`timeout`) and so is a connection that could not be made or an answer that
- * could not be read (`network`). The body of the answer is cancelled and never read.
+ * A `Retry-After` header as seconds from now (RFC 9110 section 10.2.3: a whole number of seconds, or an
+ * HTTP date), or null for an absent, empty, negative or unparseable value. A date in the past is 0.
+ * Pure: `nowMs` is the clock.
+ */
+export function parseRetryAfter(value: string | null, nowMs: number = Date.now()): number | null {
+  if (value === null) return null;
+  const text = value.trim();
+  if (/^[0-9]{1,10}$/.test(text)) return Number(text);
+  // A date has letters and a year; a bare sign or a word is not one, whatever `Date.parse` makes of it.
+  if (!/^[A-Za-z]{3,9},? /.test(text)) return null;
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.max(0, Math.ceil((at - nowMs) / 1000)) : null;
+}
+
+/**
+ * POST the token to the partner and say what came of it. Never throws. `200` and `204` are `sent`; a 5xx,
+ * a 408 and a 429 are a `retry` (the last two, `http_throttled`, with the answer's `Retry-After` if it sent
+ * one: the header is read, the body never is); a redirect (never followed), any other 4xx and any other
+ * status are `failed`; no answer inside the time is a `retry` (`timeout`) and so is a connection that
+ * could not be made or that broke (`network`). The body of the answer is cancelled and never read.
  */
 export async function postLogoutToken(
   uri: string,
@@ -202,10 +227,21 @@ export async function postLogoutToken(
     return { kind: "retry", status: null, errorClass: signal.aborted ? "timeout" : "network" };
   }
   const status = response.status;
-  // Not read, ever: a partner's answer is a status to this code and nothing more.
+  // The one header read, and only for a throttled answer; the body is not read, ever: a partner's
+  // answer is a status to this code, and `Retry-After` when it says to slow down.
+  const retryAfter = response.headers.get("Retry-After");
   await response.body?.cancel().catch(() => {});
   if (status === 200 || status === 204) return { kind: "sent", status };
   if (status >= 300 && status < 400) return { kind: "failed", status, errorClass: "redirect" };
+  if (status === 408 || status === 429) {
+    const seconds = parseRetryAfter(retryAfter);
+    return {
+      kind: "retry",
+      status,
+      errorClass: "http_throttled",
+      ...(seconds === null ? {} : { retryAfterSeconds: seconds }),
+    };
+  }
   if (status >= 400 && status < 500) return { kind: "failed", status, errorClass: "http_4xx" };
   if (status >= 500 && status < 600) return { kind: "retry", status, errorClass: "http_5xx" };
   return { kind: "failed", status, errorClass: "http_other" };
@@ -227,11 +263,10 @@ function recordOf(outcome: SendOutcome, attempts: number): AttemptRecord {
   if (outcome.kind === "failed" || attempts >= OIDC_LOGOUT_MAX_ATTEMPTS) {
     return { status: "failed", retryDelaySeconds: 0, ...base };
   }
-  return {
-    status: "pending",
-    retryDelaySeconds: OIDC_LOGOUT_RETRY_DELAYS_SECONDS[attempts - 1] as number,
-    ...base,
-  };
+  const scheduled = OIDC_LOGOUT_RETRY_DELAYS_SECONDS[attempts - 1] as number;
+  // A partner's `Retry-After` can only lengthen the wait, and never past the schedule's longest.
+  const asked = Math.min(outcome.retryAfterSeconds ?? 0, OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS);
+  return { status: "pending", retryDelaySeconds: Math.max(scheduled, asked), ...base };
 }
 
 /** Make one delivery's attempt, or record why it is not made. Throws only on a database fault. */

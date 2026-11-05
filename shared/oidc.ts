@@ -308,11 +308,12 @@ export function isOidcEndReason(value: unknown): value is OidcEndReason {
 export const OIDC_COMPUTE_SCOPE_PREFIX = "compute.";
 
 /** The two reasons an owner may name for `nemar admin oidc end-account`, and the words they become. */
-export const OIDC_ACCOUNT_END_REASONS = {
+export const OIDC_ACCOUNT_END_NAMES = ["merged", "revoked"] as const;
+export type OidcAccountEndReason = (typeof OIDC_ACCOUNT_END_NAMES)[number];
+export const OIDC_ACCOUNT_END_REASONS: Readonly<Record<OidcAccountEndReason, OidcEndReason>> = {
   merged: "account_merged",
   revoked: "account_revoked",
-} as const;
-export type OidcAccountEndReason = keyof typeof OIDC_ACCOUNT_END_REASONS;
+};
 
 /** The states of a logout delivery (`oidc_logout_deliveries.status`). */
 export const OIDC_LOGOUT_STATUSES = ["pending", "sent", "failed", "fenced"] as const;
@@ -328,10 +329,13 @@ export function isOidcLogoutStatus(value: unknown): value is OidcLogoutStatus {
  * error or of the partner's answer (`oidc_logout_deliveries.last_error_class`).
  *
  *   timeout          no answer inside {@link OIDC_LOGOUT_TIMEOUT_MS}
- *   network          the connection failed, or the answer could not be read
+ *   network          the connection could not be made, or broke before an answer
  *   redirect         the partner answered with a redirect, which is never followed
- *   http_4xx         the partner refused the token (any 4xx): not retried
+ *   http_4xx         the partner refused the token (any 4xx but 408 and 429): not retried
  *   http_5xx         the partner failed (any 5xx): retried
+ *   http_throttled   the partner answered 408 or 429: retried on the same schedule, and its `Retry-After`,
+ *                    if it sent one, is a LOWER bound for the wait (at most
+ *                    {@link OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS})
  *   http_other       any answer that is neither 200, 204, a redirect, a 4xx nor a 5xx: not retried
  *   sign_failed      NEMAR could not sign the token (no key, a database fault): retried
  *   address_refused  the registered address is not one NEMAR will send to (not https, or in
@@ -347,6 +351,7 @@ export const OIDC_LOGOUT_ERROR_CLASSES = [
   "redirect",
   "http_4xx",
   "http_5xx",
+  "http_throttled",
   "http_other",
   "sign_failed",
   "address_refused",
@@ -387,3 +392,35 @@ export const OIDC_LOGOUT_MAX_ATTEMPTS = OIDC_LOGOUT_RETRY_DELAYS_SECONDS.length 
  * again when this lapses; it was counted when it was claimed, so the retries stay bounded.
  */
 export const OIDC_LOGOUT_LEASE_SECONDS = 120;
+
+/**
+ * The most a partner's `Retry-After` can postpone the next attempt of a throttled delivery (408 or 429):
+ * twelve hours, the longest wait of the schedule. It is a LOWER bound only (the wait is the longer of the
+ * schedule's and the partner's, capped here), so a partner can slow a delivery and can never add an attempt.
+ */
+export const OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS = 43200;
+
+// ---------------------------------------------------------------------------------------------
+// How long a finished delivery is kept
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * THE OWNER SETS THESE, before the first client registers. They are DEFAULTS pending that decision, not
+ * a ruling: a delivery row holds the pseudonymous `sub` of an account, possibly a deleted one (the
+ * tombstone keeps the subject), so pruning is also data minimisation, and the windows are the time a
+ * finished row stays readable for the owner's own debugging. A row that is NOT finished (`pending`, which
+ * includes an attempt in flight) is never pruned, whatever its age.
+ *
+ * The production retry tick prunes after its delivery work, at most {@link OIDC_LOGOUT_PRUNE_PER_TICK}
+ * rows a tick, oldest first: `sent` and `fenced` rows older than the first two windows (by `sent_at` for
+ * `sent`, by `created_at` for `fenced`), `failed` rows older than the third (by `created_at`; the table
+ * has no last-update column, and a failed row's last attempt is under a day after its creation, which does
+ * not matter against the window). A dev or staging Worker has no tick, so its table is not pruned and
+ * grows with the number of endings there, which is few.
+ */
+export const OIDC_LOGOUT_SENT_RETENTION_DAYS = 30;
+export const OIDC_LOGOUT_FENCED_RETENTION_DAYS = 30;
+export const OIDC_LOGOUT_FAILED_RETENTION_DAYS = 180;
+
+/** The most finished deliveries one tick deletes, so a backlog clears over several ticks. */
+export const OIDC_LOGOUT_PRUNE_PER_TICK = 500;

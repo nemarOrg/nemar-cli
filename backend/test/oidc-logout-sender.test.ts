@@ -286,21 +286,25 @@ describe("what the partner answers", () => {
     expect(OIDC_LOGOUT_MAX_ATTEMPTS).toBe(6);
   });
 
-  test("a 4xx is failed at once and not retried", async () => {
-    partner.respond(() => new Response("no", { status: 400 }));
-    const { userId } = await signedIn();
-    await endAccount(userId);
-    await h.settle();
-    expect(only(userId)).toMatchObject({
-      status: "failed",
-      attempts: 1,
-      last_status: 400,
-      last_error_class: "http_4xx",
-      next_attempt_at: null,
-    });
-    makeDue();
-    await attemptDueLogouts(h.env, {});
-    expect(partner.requests.length).toBe(1);
+  test("a 4xx is failed at once and not retried, whichever 4xx it is (408 and 429 are the exceptions)", async () => {
+    for (const status of [400, 401, 403, 404, 410, 422]) {
+      h.db.query("DELETE FROM oidc_logout_deliveries").run();
+      const before = partner.requests.length;
+      partner.respond(() => new Response("no", { status }));
+      const { userId } = await signedIn();
+      await endAccount(userId);
+      await h.settle();
+      expect(only(userId), `status ${status}`).toMatchObject({
+        status: "failed",
+        attempts: 1,
+        last_status: status,
+        last_error_class: "http_4xx",
+        next_attempt_at: null,
+      });
+      makeDue();
+      await attemptDueLogouts(h.env, {});
+      expect(partner.requests.length - before, `status ${status}`).toBe(1);
+    }
   });
 
   test("a redirect is not followed, and is failed", async () => {
@@ -429,6 +433,107 @@ describe("what the partner answers", () => {
     );
     expect(JSON.stringify(row)).not.toContain("secret-partner-text");
     expect(JSON.stringify(row)).not.toContain(partner.url);
+  });
+});
+
+describe("a partner that is throttling", () => {
+  /** End an account at a partner that answers `status` with `headers`, and say what was recorded. */
+  async function throttled(status: number, headers: Record<string, string> = {}) {
+    h.db.query("DELETE FROM oidc_logout_deliveries").run();
+    partner.respond(() => new Response("slow down", { status, headers }));
+    const { userId } = await signedIn();
+    await endAccount(userId);
+    await h.settle();
+    const row = only(userId);
+    return { row, wait: secondsUntilNext(row.id) };
+  }
+
+  test("a 408 and a 429 are retried on the schedule, with their own class", async () => {
+    for (const status of [408, 429]) {
+      const { row, wait } = await throttled(status);
+      expect(row, `status ${status}`).toMatchObject({
+        status: "pending",
+        attempts: 1,
+        last_status: status,
+        last_error_class: "http_throttled",
+      });
+      within(wait, 60);
+    }
+  });
+
+  test("a Retry-After is a LOWER bound for the wait, and only a lower bound", async () => {
+    // Longer than the schedule's 60 seconds: the partner's word.
+    within((await throttled(429, { "Retry-After": "600" })).wait, 600);
+    // Shorter: the schedule's wait stays, and the partner cannot make NEMAR retry sooner.
+    within((await throttled(429, { "Retry-After": "5" })).wait, 60);
+    within((await throttled(429, { "Retry-After": "0" })).wait, 60);
+  });
+
+  test("a Retry-After date is read as seconds from now", async () => {
+    const inHalfAnHour = new Date(Date.now() + 1800_000).toUTCString();
+    within((await throttled(429, { "Retry-After": inHalfAnHour })).wait, 1800);
+    const past = new Date(Date.now() - 3600_000).toUTCString();
+    within((await throttled(429, { "Retry-After": past })).wait, 60);
+  });
+
+  test("a huge Retry-After is capped at 12 hours", async () => {
+    within((await throttled(429, { "Retry-After": "999999999" })).wait, 43200);
+    const farFuture = new Date(Date.now() + 90 * 86400_000).toUTCString();
+    within((await throttled(429, { "Retry-After": farFuture })).wait, 43200);
+  });
+
+  test("a Retry-After that is not one is ignored", async () => {
+    for (const value of [
+      "soon",
+      "-5",
+      "",
+      "1e3",
+      "60 seconds",
+      "12.5",
+      "0x10",
+      // An ISO date parses as a date to JavaScript and is not an HTTP-date.
+      "2099-01-01T00:00:00Z",
+    ]) {
+      within((await throttled(429, { "Retry-After": value })).wait, 60);
+    }
+  });
+
+  test("it never adds an attempt: a partner that throttles forever gets six requests, then failed", async () => {
+    partner.respond(
+      () => new Response("slow down", { status: 429, headers: { "Retry-After": "1" } }),
+    );
+    const { userId } = await signedIn();
+    await endAccount(userId);
+    await h.settle();
+    for (let attempt = 1; attempt < OIDC_LOGOUT_MAX_ATTEMPTS; attempt++) {
+      makeDue();
+      await attemptDueLogouts(h.env, {});
+    }
+    expect(only(userId)).toMatchObject({
+      status: "failed",
+      attempts: 6,
+      last_status: 429,
+      last_error_class: "http_throttled",
+      next_attempt_at: null,
+    });
+    makeDue();
+    await attemptDueLogouts(h.env, {});
+    expect(partner.requests.length).toBe(6);
+  });
+
+  test("a later attempt waits its own scheduled time, or the partner's if that is longer", async () => {
+    partner.respond(() => new Response(null, { status: 429, headers: { "Retry-After": "100" } }));
+    const { userId } = await signedIn();
+    await endAccount(userId);
+    await h.settle();
+    makeDue();
+    await attemptDueLogouts(h.env, {});
+    // Attempt 2 waits the schedule's 300 seconds, not the partner's 100.
+    within(secondsUntilNext(only(userId).id), 300);
+  });
+
+  test("Retry-After is read from a throttled answer only: a 503 keeps the schedule", async () => {
+    within((await throttled(503, { "Retry-After": "600" })).wait, 60);
   });
 });
 

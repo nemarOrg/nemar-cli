@@ -4,8 +4,10 @@
  * `wrangler --local` runs, because bun:sqlite is more permissive than the SQLite D1 ships.
  *
  * Pinned, with the services out of the way:
- *   - a delivery's `reason`, `status` and `sub` are closed shapes, and the reason list is exactly
- *     `OIDC_END_REASONS` (the TypeScript vocabulary and the table's CHECK cannot drift apart);
+ *   - a delivery's `reason`, `status`, `last_error_class` and `sub` are closed shapes, and each list the
+ *     table's CHECK holds is EQUAL, as a set, to the TypeScript vocabulary (`OIDC_END_REASONS`,
+ *     `OIDC_LOGOUT_STATUSES`, `OIDC_LOGOUT_ERROR_CLASSES`): read from the table's own definition, so a
+ *     word added to one side only fails here, in either direction;
  *   - `next_attempt_at` is set exactly while a delivery is `pending`, and `sent_at` exactly when it
  *     is `sent`, so a terminal row is never picked up again and a pending row always has a time;
  *   - the attempt count is bounded by `OIDC_LOGOUT_MAX_ATTEMPTS`, the last answer is a real HTTP
@@ -150,6 +152,32 @@ describe("oidc_logout_deliveries", () => {
     },
   );
 
+  /** The words of `<column> IN (...)` in the table's own definition, as the engine stores it. */
+  async function checkWords(e: Engine, column: string): Promise<string[]> {
+    const [row] = await e.all<{ sql: string }>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'oidc_logout_deliveries'",
+    );
+    const lists = [...(row?.sql ?? "").matchAll(new RegExp(`\\b${column} IN \\(([^)]*)\\)`, "g"))];
+    // Exactly one `IN` list for the column, so a second one cannot hide an extra word.
+    expect(lists.length, `${column} IN (...) lists`).toBe(1);
+    return [...(lists[0]?.[1] ?? "").matchAll(/'([^']*)'/g)].map((m) => m[1] as string);
+  }
+
+  onEveryEngine(
+    "each closed list in the table's CHECKs equals its vocabulary, as a set",
+    async (e) => {
+      for (const [column, vocabulary] of [
+        ["reason", OIDC_END_REASONS],
+        ["status", OIDC_LOGOUT_STATUSES],
+        ["last_error_class", OIDC_LOGOUT_ERROR_CLASSES],
+      ] as const) {
+        const words = await checkWords(e, column);
+        expect(new Set(words).size, `${column} repeats a word`).toBe(words.length);
+        expect([...words].sort(), column).toEqual([...vocabulary].sort());
+      }
+    },
+  );
+
   onEveryEngine("every reason of the vocabulary is accepted, and no other word", async (e) => {
     for (const reason of OIDC_END_REASONS) {
       expect((await insert(e, { reason })).error).toBeNull();
@@ -222,7 +250,7 @@ describe("oidc_logout_deliveries", () => {
   });
 
   onEveryEngine(
-    "the last answer is an HTTP status and the error class a word's shape",
+    "the last answer is an HTTP status and the error class one of the closed words",
     async (e) => {
       expect((await insert(e, { last_status: 503 })).error).toBeNull();
       for (const last_status of [0, 99, 600, 503.5, "ok"]) {
@@ -231,12 +259,15 @@ describe("oidc_logout_deliveries", () => {
       for (const word of OIDC_LOGOUT_ERROR_CLASSES) {
         expect((await insert(e, { last_error_class: word })).error).toBeNull();
       }
+      // A word of the right SHAPE that is not on the list is refused too: the column is closed.
       for (const bad of [
         "",
         "Timeout",
         "connect ECONNREFUSED 127.0.0.1",
         "a".repeat(41),
         "tls-error",
+        "tls_error",
+        "http_418",
       ]) {
         expect((await insert(e, { last_error_class: bad })).error).not.toBeNull();
       }
