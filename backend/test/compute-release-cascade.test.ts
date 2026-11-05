@@ -36,7 +36,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { Hono } from "hono";
 import { MASK_APPLIED_SQL, tombstoneUserCascade } from "../src/db/user-tombstone";
 import { adminRoutes } from "../src/routes/admin";
-import { sweepComputeCancellations } from "../src/services/compute-advance";
+import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import { type ComputeJobRow, createJob } from "../src/services/compute-jobs";
 import { releaseHold } from "../src/services/compute-ledger";
 import {
@@ -427,6 +427,22 @@ describe("revoking an account (finalizeRevocation) ends its compute in the same 
       expect((await reread(fx.env(), id)).cancel_reason).toBe("account_ended");
     }
     expect(poolsOf(world.target).map((p) => p.frozen)).toEqual([1, 1]);
+  });
+
+  test("the 30-minute tick finishes what the batch leaves: the records copy of a job the cascade ended, with no second release", async () => {
+    const world = await seedWorld("cascadecopy");
+    await revoke(world.username);
+    const ended = await reread(fx.env(), world.unsubmitted.id);
+    expect(ended.state).toBe("cancelled");
+    expect(ended.result_records_at).toBeNull();
+
+    const tick = await runComputeAdvanceCron(fx.env());
+    expect(tick).toMatchObject({ errors: [] });
+    const after = await reread(fx.env(), world.unsubmitted.id);
+    expect(after.result_records_at).not.toBeNull();
+    expect(after.state).toBe("cancelled");
+    expect(after.cancel_reason).toBe("account_ended");
+    expect(ledgerKinds(after.id)).toEqual(["hold", "release"]);
   });
 
   test("the first recorded reason stands: a person's own earlier cancel stays `user` and keeps its time", async () => {
