@@ -38,6 +38,8 @@ import {
   ACCESS_REPORT_LEASE_MINUTES,
   ACCESS_REPORT_MAX_ATTEMPTS,
   ACCESS_REPORT_ROWS_PER_TICK,
+  ACCESS_REPORT_TICK_BUDGET_MS,
+  ACCESS_REPORT_TIMEOUT_MS,
   accessAttributesUrl,
   accessReportsLogLine,
   accessRetryDelayMinutes,
@@ -824,6 +826,52 @@ describe("the tick", () => {
     expect((await report(e, stuck.made.job.id)).state).toBe("pending");
   });
 
+  test("a tick stops CLAIMING new rows once its time budget is spent, so it is not killed mid-POST holding a lease; the rest wait for the next tick (MUTATION: remove the check, or lengthen the budget)", async () => {
+    const e = env();
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push((await queuedJob()).made.job.id);
+    // A slow ACCESS, played by a clock the test owns: the first POST takes EXACTLY the budget of the
+    // tick's time (the boundary: spent means spent), so no second row is claimed.
+    let now = 1_000_000;
+    access.beforeAnswer(async () => {
+      now += ACCESS_REPORT_TICK_BUDGET_MS;
+    });
+    const first = await runAccessReportCron(e, { now: () => now });
+    expect(first).toMatchObject({ examined: 4, sent: 1, skipped: 3, errors: [] });
+    expect(access.requests).toHaveLength(1);
+    // The rows it did not take were never claimed: still pending, no attempt spent.
+    const states = await Promise.all(ids.map(async (id) => (await report(e, id)) as ReportRow));
+    expect(states.filter((r) => r.state === "sent")).toHaveLength(1);
+    const waiting = states.filter((r) => r.state === "pending");
+    expect(waiting).toHaveLength(3);
+    for (const r of waiting)
+      expect(r).toMatchObject({ attempts: 0, claimed_at: null, last_error_code: null });
+
+    // The next tick, with a clock that does not run away, takes them.
+    expect(await runAccessReportCron(e)).toMatchObject({ examined: 3, sent: 3, skipped: 0 });
+    expect(access.requests).toHaveLength(4);
+    expect(new Set(access.requests.map((r) => r.body?.jobid)).size).toBe(4);
+  });
+
+  test("a tick whose budget is not yet spent goes on: a POST that took a millisecond less than the budget does not stop it", async () => {
+    const e = env();
+    for (let i = 0; i < 3; i++) await queuedJob();
+    let now = 1_000_000;
+    access.beforeAnswer(async () => {
+      now += ACCESS_REPORT_TICK_BUDGET_MS - 1;
+    });
+    expect(await runAccessReportCron(e, { now: () => now })).toMatchObject({
+      examined: 3,
+      sent: 3,
+      skipped: 0,
+    });
+  });
+
+  test("the budget is about twenty seconds, well under what a Worker may spend and above one POST's fifteen", () => {
+    expect(ACCESS_REPORT_TICK_BUDGET_MS).toBe(20_000);
+    expect(ACCESS_REPORT_TICK_BUDGET_MS).toBeGreaterThan(ACCESS_REPORT_TIMEOUT_MS);
+  });
+
   test("its one log line is counts and fixed words: no key, no Slurm id, no address, no pseudonym", async () => {
     const e = env();
     const { made } = await queuedJob();
@@ -857,6 +905,7 @@ describe("the tick", () => {
         unconfigured: 0,
         deferred: 0,
         reaped: 0,
+        skipped: 0,
         errors: [],
         errorClass: null,
       }),

@@ -93,6 +93,15 @@ export const ACCESS_REPORT_TIMEOUT_MS = 15_000;
 /** Rows a tick sends at most. */
 export const ACCESS_REPORT_ROWS_PER_TICK = 10;
 
+/**
+ * How long a tick keeps CLAIMING new rows, from its start. Ten POSTs of up to fifteen seconds each, one
+ * after the other, could run for minutes; a Worker killed mid-tick leaves its claimed row `attempting`,
+ * and that row is reaped as `outcome_unknown` (lost, never doubled). So after about twenty seconds (one
+ * POST's fifteen and a margin) the tick takes no new row and returns: the rows it did not claim are
+ * still `pending` and wait for the next tick.
+ */
+export const ACCESS_REPORT_TICK_BUDGET_MS = 20_000;
+
 /** The first delay after a refusal, and the longest, in minutes. */
 const RETRY_FIRST_MINUTES = 60;
 const RETRY_LONGEST_MINUTES = 24 * 60;
@@ -425,6 +434,8 @@ export interface AccessReportTick {
   deferred: number;
   /** Rows whose sender died holding its lease, ended `failed`, `outcome_unknown`. */
   reaped: number;
+  /** Due rows this tick did not claim because its time budget was spent: they wait for the next tick. */
+  skipped: number;
   /** Fixed words; never a message. */
   errors: string[];
   errorClass: string | null;
@@ -439,6 +450,7 @@ const emptyTick = (): AccessReportTick => ({
   unconfigured: 0,
   deferred: 0,
   reaped: 0,
+  skipped: 0,
   errors: [],
   errorClass: null,
 });
@@ -449,12 +461,16 @@ const emptyTick = (): AccessReportTick => ({
  * Null outside exact production, before anything is read or written. It reads the database first and
  * touches nothing else when no row is due. With no key or resource name set it sends nothing and says
  * `unconfigured` on the due rows. It reads no switch: the reports are owed for jobs that already ran.
+ * It stops claiming new rows after `ACCESS_REPORT_TICK_BUDGET_MS`, so a run that is killed does not
+ * strand a claimed row; the rest wait for the next tick. `now` is the clock, for a test.
  */
 export async function runAccessReportCron(
   env: Bindings,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; now?: () => number } = {},
 ): Promise<AccessReportTick | null> {
   if (!isExactProduction(env)) return null;
+  const clock = options.now ?? Date.now;
+  const started = clock();
   const r = emptyTick();
   try {
     r.reaped = (await env.DB.prepare(ACCESS_REPORT_REAP_SQL).run()).meta?.changes ?? 0;
@@ -470,7 +486,12 @@ export async function runAccessReportCron(
       r.unconfigured = due.length;
       return r;
     }
-    for (const { job_id } of due) {
+    for (const [index, { job_id }] of due.entries()) {
+      // THE TIME BUDGET: no new row is claimed once it is spent (see ACCESS_REPORT_TICK_BUDGET_MS).
+      if (clock() - started >= ACCESS_REPORT_TICK_BUDGET_MS) {
+        r.skipped = due.length - index;
+        break;
+      }
       try {
         const outcome = await sendAccessReport(
           env,
@@ -508,7 +529,7 @@ export function accessReportsLogLine(
   // A row waiting for the key or the resource name needs a person too, and says so on EVERY tick:
   // silence while there is work to do is evidence of nothing (ADR 0053, 0054).
   const needsPerson = r.failed + r.unknown + r.reaped + r.unconfigured > 0 || r.errors.length > 0;
-  const acted = r.sent + r.retry + r.deferred;
+  const acted = r.sent + r.retry + r.deferred + r.skipped;
   if (!needsPerson && acted === 0) return null;
   const line = [
     "[access-report]",
@@ -520,6 +541,7 @@ export function accessReportsLogLine(
     `unconfigured=${r.unconfigured}`,
     `deferred=${r.deferred}`,
     `reaped=${r.reaped}`,
+    `skipped=${r.skipped}`,
     `errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}`,
     r.errorClass === null ? "" : `class=${r.errorClass}`,
   ]
