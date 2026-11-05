@@ -556,7 +556,11 @@ describe("redeeming a code with PKCE", () => {
     expect(tokenRows()).toHaveLength(2);
   });
 
-  test("a second presentation by the code's own client revokes, whatever verifier or address it carries", async () => {
+  test("a used code presented with a wrong verifier or redirect is refused and writes nothing", async () => {
+    // Revoking on such a presentation would let someone who captured a victim's code have the
+    // legitimate client present it again with another verifier and end the victim's tokens. Detection
+    // is not lost: whoever redeemed first held the right verifier, so a real second redemption by the
+    // legitimate client still matches, and still revokes (the test above).
     for (const over of [
       { code_verifier: "b".repeat(43) },
       { redirect_uri: "https://tools.nemar.org/x" },
@@ -566,8 +570,28 @@ describe("redeeming a code with PKCE", () => {
       expect(first.status).toBe(200);
       expectOauthError(await redeem(h, f.client, f.code, over), 400, "invalid_grant");
       const rows = tokenRows().filter((r) => r.user_id === f.userId);
-      expect(rows.map((r) => r.revoked_reason)).toEqual(["code_replay"]);
+      expect(rows.map((r) => r.revoked_at)).toEqual([null]);
+      expect(await userinfoStatus((first.json as { access_token: string }).access_token)).toBe(200);
     }
+  });
+
+  test("a used code presented with a missing or malformed verifier, or no redirect, revokes nothing", async () => {
+    const f = await flow();
+    const first = await redeem(h, f.client, f.code);
+    expect(first.status).toBe(200);
+    for (const form of [
+      { grant_type: "authorization_code", code: f.code, redirect_uri: f.client.redirect },
+      {
+        grant_type: "authorization_code",
+        code: f.code,
+        redirect_uri: f.client.redirect,
+        code_verifier: "short",
+      },
+      { grant_type: "authorization_code", code: f.code, code_verifier: RFC_VERIFIER },
+    ]) {
+      expectOauthError(await tokenRequest(h, f.client, form), 400, "invalid_request");
+    }
+    expect(tokenRows().map((r) => r.revoked_at)).toEqual([null]);
   });
 
   test("a second redemption after a rotation revokes the rotated tokens too: they carry the code", async () => {
