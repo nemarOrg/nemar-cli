@@ -104,7 +104,7 @@ export const LAUNCH_SPEC_ENV_MAX_CHARS = Math.ceil((LAUNCH_SPEC_MAX_BYTES * 4) /
 export const SHELL_INERT_ENV_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/** The characters of {@link SHELL_INERT_ENV_ALPHABET}: the one place the alphabet is written down. */
+/** The characters of {@link SHELL_INERT_ENV_ALPHABET}, for lookup: derived from it, not a second copy. */
 const SHELL_INERT_ENV_CHARS: ReadonlySet<string> = new Set(SHELL_INERT_ENV_ALPHABET);
 
 /**
@@ -357,10 +357,10 @@ function toBase64Url(bytes: string): string {
  * The `NEMAR_LAUNCH_SPEC` value for a launch specification's text (the string
  * {@link encodeLaunchSpec} returns): its bytes in base64url without padding, nothing but the
  * {@link SHELL_INERT_ENV_ALPHABET}, and so at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters,
- * which is the 64 KiB cap's own arithmetic (a test pins it at both ends). This is
- * what the Worker puts in the scheduler request; the text, not this value, is what is hashed and
- * recorded. The text is taken as the one thing the digests are over, rather than the specification
- * again, so the Worker validates and escapes once and the bytes it hashes are the bytes it encodes.
+ * which is the 64 KiB cap's own arithmetic (a test pins it at both ends). This is what the Worker
+ * puts in the scheduler request; the text, not this value, is what is hashed and recorded. The text
+ * is taken as the one thing the digests are over, rather than the specification again, so the
+ * Worker validates and escapes once and the bytes it hashes are the bytes it encodes.
  *
  * Every refusal is a fixed message that holds no part of the text, which holds a token. Throws
  * TypeError for text that is not a string, is empty, or has a byte outside 0x20 to 0x7e (a control
