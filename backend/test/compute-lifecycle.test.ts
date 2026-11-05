@@ -42,7 +42,6 @@ import { sweepComputeCancellations } from "../src/services/compute-advance";
 import type { ComputeJobRow } from "../src/services/compute-jobs";
 import { releaseStatements, settleStatements } from "../src/services/compute-ledger";
 import {
-  LIVE_TRANSITION_SQL,
   SETTLEMENT_GATE_SQL,
   advanceComputeJob,
   applyTapisJob,
@@ -59,7 +58,7 @@ import {
   sha256Hex,
 } from "../src/services/compute-records";
 import { verifyComputeToken } from "../src/services/compute-tokens";
-import { getJob as getTapisJob, submitJob } from "../src/services/tapis/client";
+import { submitJob } from "../src/services/tapis/client";
 import type { Bindings } from "../src/types/bindings";
 import {
   CALLBACK_SECRET,
@@ -71,7 +70,6 @@ import {
   iso,
   jobTokenSeenByTapis,
   launchSpecSeenByTapis,
-  launchableSpec,
   makeJob,
   playLauncher,
   reread,
@@ -79,7 +77,7 @@ import {
   setTapisTimes,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
-import { jobSpec, roundTripD1, seedUser } from "./helpers/compute-seed";
+import { roundTripD1, seedUser } from "./helpers/compute-seed";
 import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
@@ -2063,7 +2061,6 @@ describe("the 30-minute tick", () => {
     expect((await reread(s.env, id)).state).toBe("unreported");
     // It is still live: the tick keeps reading it.
     fx.tapis.up();
-    __reset();
     expect(await runComputeAdvanceCron(s.env)).toMatchObject({ advanced: 1 });
     expect((await reread(s.env, id)).state).toBe("running");
     // A job read less than a day ago is not marked, however many reads fail.
@@ -2140,10 +2137,3 @@ describe("logs", () => {
     expect(lines.some((l) => l.includes("submit_unclear"))).toBe(true);
   });
 });
-
-function __reset() {
-  // The Tapis token cache is module state: a stand-in that was down and came back is a new session.
-}
-
-// Keep the helpers used by the cases above referenced, so a refactor that drops one fails loudly.
-void [LIVE_TRANSITION_SQL, getTapisJob, jobSpec, launchableSpec, jobTokenSeenByTapis];

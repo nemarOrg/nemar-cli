@@ -21,7 +21,11 @@
  */
 
 import { Hono } from "hono";
-import { COMPUTE_REFUSAL_STATUS } from "../../../shared/compute-state.js";
+import {
+  COMPUTE_REFUSAL_STATUS,
+  COMPUTE_ROUTE_SENTENCES,
+  type ComputeRouteSentenceCode,
+} from "../../../shared/compute-state.js";
 import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../shared/contract/compute.js";
 import { authMiddleware, cookieOriginGuard } from "../middleware/auth.js";
 import { getJob } from "../services/compute-jobs.js";
@@ -34,18 +38,10 @@ export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 
 registerComputeJobCallbackRoutes(computeRoutes);
 
-const SENTENCES = {
-  job_not_found: "No such job.",
-  bad_state: "The job is not in a state that accepts this.",
-  results_expired: "The results of this job have expired.",
-  compute_disabled: "Compute storage is not configured.",
-  invalid_spec: "The request is not valid.",
-} as const;
-
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },
-  code: keyof typeof SENTENCES,
-) => c.json({ error: SENTENCES[code], code }, COMPUTE_REFUSAL_STATUS[code]);
+  code: ComputeRouteSentenceCode,
+) => c.json({ error: COMPUTE_ROUTE_SENTENCES[code], code }, COMPUTE_REFUSAL_STATUS[code]);
 
 /** The job a signed-in person owns, or null for any other reason (never says which). */
 async function ownJob(env: Bindings, id: string, userId: number) {

@@ -75,7 +75,13 @@ import {
   submitMemoryMb,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
-import { type ComputeJobRow, getJob } from "./compute-jobs.js";
+import {
+  type ComputeJobRow,
+  LIVE_STATES_SQL,
+  TAPIS_REPORTING_STATES_SQL,
+  TERMINAL_STATES_SQL,
+  getJob,
+} from "./compute-jobs.js";
 import { releaseStatements, settleStatements } from "./compute-ledger.js";
 import { getPolicy } from "./compute-policy.js";
 import {
@@ -147,10 +153,6 @@ const WEBHOOK_TTL_MAX_MINUTES = 40_320;
 
 /** A copy of a terminal job's files is retried while the job ended within this many days. */
 export const RECORDS_COPY_RETRY_DAYS = 3;
-
-const STATES_SQL = (states: readonly string[]) => states.map((s) => `'${s}'`).join(", ");
-const LIVE_SQL = STATES_SQL(LIVE_COMPUTE_STATES);
-const TERMINAL_SQL = STATES_SQL(TERMINAL_COMPUTE_STATES);
 
 // --- Statements ----------------------------------------------------------------------------------
 
@@ -276,17 +278,17 @@ export const LAUNCH_DIGEST_SQL = `UPDATE compute_jobs SET
 export const CANCEL_INTENT_SQL = `UPDATE compute_jobs SET
     cancel_requested_at = COALESCE(cancel_requested_at, datetime('now')),
     cancel_reason = COALESCE(cancel_reason, ?2)
-  WHERE id = ?1 AND state IN (${LIVE_SQL})`;
+  WHERE id = ?1 AND state IN (${LIVE_STATES_SQL})`;
 
 /** A live job whose last good read is too old: `?1` the job, `?2` the state it was read in. */
 export const UNREPORTED_SQL = `UPDATE compute_jobs SET state = 'unreported'
-  WHERE id = ?1 AND state = ?2 AND state IN ('submitted', 'queued', 'running', 'archiving')
+  WHERE id = ?1 AND state = ?2 AND state IN (${TAPIS_REPORTING_STATES_SQL})
     AND tapis_uuid IS NOT NULL
     AND COALESCE(tapis_synced_at, submitted_at) < datetime('now', '-${UNREPORTED_AFTER_HOURS} hours')`;
 
 /** The job's webhook address stops working: one day after the job is terminal its nonce is cleared. */
 export const CLEAR_NONCES_SQL = `UPDATE compute_jobs SET webhook_nonce = NULL
-  WHERE webhook_nonce IS NOT NULL AND state IN (${TERMINAL_SQL})
+  WHERE webhook_nonce IS NOT NULL AND state IN (${TERMINAL_STATES_SQL})
     AND ended_at < datetime('now', '-1 day')`;
 
 /** `?1` the job: a tag search found more than one Tapis job, so an administrator looks. */
@@ -294,13 +296,13 @@ export const FLAG_MISMATCH_SQL = "UPDATE compute_jobs SET flag_mismatch = 1 WHER
 
 /** Terminal jobs whose provisional settlement is owed and whose hold exists: the repair's list. */
 export const UNSETTLED_TERMINAL_SQL = `SELECT id FROM compute_jobs j
-  WHERE j.state IN (${TERMINAL_SQL}) AND j.settled_provisional_at IS NULL
+  WHERE j.state IN (${TERMINAL_STATES_SQL}) AND j.settled_provisional_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger h WHERE h.kind = 'hold' AND h.job_id = j.id)
   ORDER BY j.ended_at ASC LIMIT ?1`;
 
 /** Terminal jobs whose launcher files and logs have not been copied into the records yet. */
 export const UNCOPIED_TERMINAL_SQL = `SELECT id FROM compute_jobs
-  WHERE state IN (${TERMINAL_SQL}) AND result_records_at IS NULL AND settled_provisional_at IS NOT NULL
+  WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL AND settled_provisional_at IS NOT NULL
     AND ended_at >= datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')
   ORDER BY ended_at ASC LIMIT ?1`;
 
@@ -951,7 +953,7 @@ export async function copyResultRecords(env: Bindings, job: ComputeJobRow): Prom
 
   await env.DB.prepare(
     `UPDATE compute_jobs SET result_records_at = datetime('now')
-      WHERE id = ?1 AND result_records_at IS NULL AND state IN (${TERMINAL_SQL})`,
+      WHERE id = ?1 AND result_records_at IS NULL AND state IN (${TERMINAL_STATES_SQL})`,
   )
     .bind(job.id)
     .run();

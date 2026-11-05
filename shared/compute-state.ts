@@ -53,6 +53,14 @@ export const LIVE_COMPUTE_STATES = [
   "unreported",
 ] as const satisfies readonly ComputeState[];
 
+/**
+ * The live states whose Tapis job exists and whose status Tapis reports: the ones a long silence turns
+ * into `unreported`. `created` and `uploading` have no Tapis job, and `unreported` already is the state.
+ */
+export const TAPIS_REPORTING_STATES = LIVE_COMPUTE_STATES.filter(
+  (s) => s !== "created" && s !== "uploading" && s !== "unreported",
+) as readonly ComputeState[];
+
 export function isComputeState(value: unknown): value is ComputeState {
   return typeof value === "string" && (COMPUTE_STATES as readonly string[]).includes(value);
 }
@@ -550,6 +558,27 @@ export const COMPUTE_REFUSAL_STATUS = {
   guard_refused: 409,
   results_incomplete: 409,
 } as const satisfies Record<ComputeRefusalCode, number>;
+
+/**
+ * The one sentence each refusal of the job routes (`/compute/jobs/...`, the launcher's three callbacks
+ * and the person's cancel and links) answers with, declared once beside the status so no route words its
+ * own. A sentence says what was refused and never why a token, a job or a bundle was not accepted. A code
+ * a route answers with that has no sentence here is a type error at the route. The pool and job-creation
+ * routes carry their own words.
+ */
+export const COMPUTE_ROUTE_SENTENCES = {
+  job_not_found: "No such job.",
+  bad_state: "The job is not in a state that accepts this.",
+  results_expired: "The results of this job have expired.",
+  compute_disabled: "Compute storage is not configured.",
+  invalid_spec: "The request is not valid.",
+  too_many_outputs: "The job declared more output files than the owner's limit allows.",
+  results_too_large: "The job's results are over the size limit.",
+  results_quota_exceeded: "There is no room left in the results budget for this job.",
+  results_incomplete: "An object the job declared is missing or short; upload it and ask again.",
+} as const satisfies Partial<Record<ComputeRefusalCode, string>>;
+
+export type ComputeRouteSentenceCode = keyof typeof COMPUTE_ROUTE_SENTENCES;
 
 // --- The rest of the vocabulary ----------------------------------------------------------------
 

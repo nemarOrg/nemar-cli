@@ -30,6 +30,12 @@ export const COMPUTE_JOB_TOKEN_DOMAIN = "compute-job";
 
 export type ComputeTokenKind = "webhook" | "job";
 
+/**
+ * The nonce a verification uses when the job has none (no such job, or its nonce was cleared): a value
+ * no job has, so a missing job costs the same HMAC a real one does and a route can answer them alike.
+ */
+export const NO_NONCE = "00000000-0000-0000-0000-000000000000";
+
 const DOMAIN: Readonly<Record<ComputeTokenKind, string>> = {
   webhook: COMPUTE_WEBHOOK_TOKEN_DOMAIN,
   job: COMPUTE_JOB_TOKEN_DOMAIN,

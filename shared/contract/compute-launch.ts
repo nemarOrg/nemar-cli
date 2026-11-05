@@ -84,6 +84,13 @@ const relativePath = computePathSchema;
 const API_BASE_RE = /^https?:\/\/[^\s/?#][^\s?#]*$/;
 const URL_RE = /^https?:\/\/[^\s]+$/;
 const JOB_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/;
+
+/**
+ * The header the launcher sends its per-job token in, to the bundle, outputs and complete routes (never a
+ * URL). A WIRE CONTRACT with the launcher in nemar-process: changing the word breaks every launcher, so
+ * it is declared once, here, and `compute-contract.unit.test.ts` pins its spelling.
+ */
+export const COMPUTE_JOB_TOKEN_HEADER = "X-Compute-Job-Token";
 /**
  * The Singularity image file on the node: exactly `<64 lowercase hex>.sif`, a basename with no
  * directory, relative to `NEMAR_SIF_ROOT` (`LAUNCHER_ENV.SIF_ROOT`). It is the file name of the SIF

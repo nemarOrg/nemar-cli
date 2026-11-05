@@ -41,8 +41,8 @@
  * on it. The Worker's reads on behalf of a request are one attempt of at most eight seconds.
  */
 
-import { LIVE_COMPUTE_STATES } from "../../../shared/compute-state.js";
 import type { Bindings } from "../types/bindings.js";
+import { LIVE_STATES_SQL } from "./compute-jobs.js";
 import {
   CLEAR_NONCES_SQL,
   STAMP_EXAMINED_SQL,
@@ -59,14 +59,12 @@ import { isExactProduction } from "./repull-switches.js";
 /** Rows of each list one tick examines at most. */
 export const ADVANCE_ROWS_PER_TICK = 10;
 
-const LIVE_SQL = LIVE_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
-
 /**
  * The live rows Tapis has accepted (a `tapis_uuid`), least recently EXAMINED first (a row never
  * examined comes first): NEMAR's own jobs, and a partner's once Tapis has accepted it.
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE state IN (${LIVE_SQL}) AND tapis_uuid IS NOT NULL
+  WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL
   ORDER BY COALESCE(examined_at, '') ASC, created_at ASC LIMIT ?1`;
 
 /**
@@ -84,7 +82,7 @@ export const ORPHAN_ROWS_SQL = `SELECT id FROM compute_jobs
 
 /** Live rows with a cancel recorded, oldest request first. */
 export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE state IN (${LIVE_SQL}) AND cancel_requested_at IS NOT NULL
+  WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
   ORDER BY cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {

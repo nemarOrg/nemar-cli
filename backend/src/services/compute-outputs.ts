@@ -55,13 +55,11 @@ import {
   computeIsWellFormed,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
-import { type ComputeJobRow, getJob } from "./compute-jobs.js";
+import { type ComputeJobRow, TERMINAL_STATES_SQL, getJob } from "./compute-jobs.js";
 import { getPolicy } from "./compute-policy.js";
 import { outputsBodyLimitBytes } from "./compute-records.js";
 import { COMPUTE_UPLOAD_SECONDS, computeS3, objectKeyProblem, presignPut } from "./compute-s3.js";
 import { declaredKey, declaredText, firstIncomplete, readDeclared } from "./compute-verify.js";
-
-const TERMINAL_SQL = TERMINAL_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
 
 /**
  * Claim the declared bytes: `?1` the job, `?2` the bytes, `?3` 1 to skip the quotas (the launcher's own
@@ -78,7 +76,7 @@ const TERMINAL_SQL = TERMINAL_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
  */
 export const CLAIM_RESULTS_BYTES_SQL = `UPDATE compute_jobs SET results_bytes = ?2
   WHERE id = ?1 AND results_bytes IS NULL AND outputs_completed_at IS NULL
-    AND state NOT IN (${TERMINAL_SQL})
+    AND state NOT IN (${TERMINAL_STATES_SQL})
     AND (?3 = 1 OR account_id IS NULL OR (SELECT COALESCE(SUM(o.results_bytes), 0) FROM compute_jobs o
          WHERE o.account_id = compute_jobs.account_id AND o.id <> compute_jobs.id
            AND o.results_bytes IS NOT NULL
@@ -89,11 +87,11 @@ export const CLAIM_RESULTS_BYTES_SQL = `UPDATE compute_jobs SET results_bytes = 
 
 /** A refusal records itself as the job's `failure_detail`, once: `?1` the job, `?2` the word. */
 export const RECORD_REFUSAL_SQL = `UPDATE compute_jobs SET failure_detail = ?2
-  WHERE id = ?1 AND failure_detail IS NULL AND state NOT IN (${TERMINAL_SQL})`;
+  WHERE id = ?1 AND failure_detail IS NULL AND state NOT IN (${TERMINAL_STATES_SQL})`;
 
 /** The launcher completed: once, and only while the job is live. `?1` the job. */
 export const COMPLETE_OUTPUTS_SQL = `UPDATE compute_jobs SET outputs_completed_at = datetime('now')
-  WHERE id = ?1 AND outputs_completed_at IS NULL AND state NOT IN (${TERMINAL_SQL})`;
+  WHERE id = ?1 AND outputs_completed_at IS NULL AND state NOT IN (${TERMINAL_STATES_SQL})`;
 
 /**
  * The most bytes the launcher's log may declare: 16 MiB. The records keep the first 5 MiB of it

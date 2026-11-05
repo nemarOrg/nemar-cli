@@ -32,44 +32,35 @@
 import type { Context, Hono } from "hono";
 import {
   COMPUTE_REFUSAL_STATUS,
+  COMPUTE_ROUTE_SENTENCES,
+  type ComputeRouteSentenceCode,
   isTerminalComputeState,
 } from "../../../../shared/compute-state.js";
+import { COMPUTE_JOB_TOKEN_HEADER } from "../../../../shared/contract/compute-launch.js";
 import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute.js";
 import { type ComputeJobRow, getJob } from "../../services/compute-jobs.js";
 import { handleComplete, handleOutputs, outputsBodyCap } from "../../services/compute-outputs.js";
 import { presignBundleRead } from "../../services/compute-records.js";
-import { verifyComputeToken } from "../../services/compute-tokens.js";
+import { NO_NONCE, verifyComputeToken } from "../../services/compute-tokens.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
 type Router = Hono<{ Bindings: Bindings; Variables: Variables }>;
 type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
 
-/** The header the launcher sends its job token in. */
-export const COMPUTE_JOB_TOKEN_HEADER = "X-Compute-Job-Token";
-
 /** The most bytes a body without a schema may declare: the launcher's own request cap. */
 const SMALL_BODY_BYTES = 1024 * 1024;
 
-const NO_NONCE = "00000000-0000-0000-0000-000000000000";
-
 /** The one refusal of a token, a job and a bundle: `job_not_found`, which never says why. */
 const refused = (c: Ctx) =>
-  c.json({ error: "No such job.", code: "job_not_found" }, COMPUTE_REFUSAL_STATUS.job_not_found);
+  c.json(
+    { error: COMPUTE_ROUTE_SENTENCES.job_not_found, code: "job_not_found" },
+    COMPUTE_REFUSAL_STATUS.job_not_found,
+  );
 
 /** A refusal with a word of the gateway's own (the three outputs refusals, `results_incomplete`, ...). */
-const answer = (c: Ctx, status: number, code: string, extra: object = {}) =>
-  c.json({ error: SENTENCES[code] ?? "Refused.", code, ...extra }, status as 400);
-
-const SENTENCES: Record<string, string> = {
-  too_many_outputs: "The job declared more output files than the owner's limit allows.",
-  results_too_large: "The job's results are over the size limit.",
-  results_quota_exceeded: "There is no room left in the results budget for this job.",
-  results_incomplete: "An object the job declared is missing or short; upload it and ask again.",
-  invalid_spec: "The request is not one this route takes.",
-  bad_state: "The job is not in a state that accepts this.",
-  compute_disabled: "Compute storage is not configured.",
-};
+const answer = (c: Ctx, status: number, code: ComputeRouteSentenceCode, extra: object = {}) =>
+  c.json({ error: COMPUTE_ROUTE_SENTENCES[code], code, ...extra }, status as 400);
 
 /** The job a verified token names, or null for any reason at all. */
 async function authorize(c: Ctx): Promise<ComputeJobRow | null> {

@@ -27,7 +27,7 @@
 
 import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute.js";
 import { REQUEST_READ, advanceComputeJob } from "../../services/compute-lifecycle.js";
-import { verifyComputeToken } from "../../services/compute-tokens.js";
+import { NO_NONCE, verifyComputeToken } from "../../services/compute-tokens.js";
 import type { WebhookContext, WebhookRouter } from "../webhooks/shared.js";
 import { readBoundedJsonObject } from "./bounded-json.js";
 
@@ -36,9 +36,6 @@ const MAX_HINT_BYTES = 16 * 1024;
 
 /** The one refusal: the same status and body whatever the reason. */
 const refusal = (c: WebhookContext) => c.json({ error: "Not found.", code: "not_found" }, 404);
-
-/** A nonce no job has, so a missing job costs the same HMAC a real one does. */
-const NO_NONCE = "00000000-0000-0000-0000-000000000000";
 
 export function registerTapisCallbackRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/tapis/:jobId/:token", async (c) => {

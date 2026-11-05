@@ -63,6 +63,8 @@ import {
   type ComputeSource,
   type ComputeState,
   LIVE_COMPUTE_STATES,
+  TAPIS_REPORTING_STATES,
+  TERMINAL_COMPUTE_STATES,
 } from "../../../shared/compute-state.js";
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
 import {
@@ -340,7 +342,14 @@ export const JOB_BY_KEY_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs
   WHERE account_id = ?1 AND idempotency_key = ?2`;
 
 /** The live states as a SQL list, from the one list of them: the partial index answers only this literal. */
-const LIVE_STATES_SQL = LIVE_COMPUTE_STATES.map((s) => `'${s}'`).join(", ");
+/** `'a', 'b'` for a SQL `IN (...)`, from this tree's own fixed state words (never a caller's). */
+const sqlList = (states: readonly string[]) => states.map((s) => `'${s}'`).join(", ");
+
+/** The live states and the terminal states as SQL lists: declared once, imported by every compute statement. */
+export const LIVE_STATES_SQL = sqlList(LIVE_COMPUTE_STATES);
+export const TERMINAL_STATES_SQL = sqlList(TERMINAL_COMPUTE_STATES);
+/** The live states whose Tapis job exists and is reported on (what a long silence turns `unreported`). */
+export const TAPIS_REPORTING_STATES_SQL = sqlList(TAPIS_REPORTING_STATES);
 
 /**
  * A person's live-job limit, as a guard on the hold (plain `?` placeholders: the account and the

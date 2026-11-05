@@ -2388,6 +2388,13 @@ const ZOD_ONLY_LAUNCH_CASES: ReadonlyArray<
   ],
 ];
 
+describe("the launcher's job-token header is a wire contract", () => {
+  test("its spelling is pinned here, written out", async () => {
+    const { COMPUTE_JOB_TOKEN_HEADER } = await import("../shared/contract/compute-launch");
+    expect(COMPUTE_JOB_TOKEN_HEADER).toBe("X-Compute-Job-Token");
+  });
+});
+
 describe("the launch specification", () => {
   test("the version is nemar.launch-spec.v1 and the runtimes are python and image", () => {
     expect(LAUNCH_SPEC_VERSION).toBe("nemar.launch-spec.v1");

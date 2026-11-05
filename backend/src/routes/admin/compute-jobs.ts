@@ -16,7 +16,10 @@
  * sit behind the admin router's middleware (authentication, the admin role, the cookie-origin guard).
  */
 
-import { COMPUTE_REFUSAL_STATUS } from "../../../../shared/compute-state.js";
+import {
+  COMPUTE_REFUSAL_STATUS,
+  COMPUTE_ROUTE_SENTENCES,
+} from "../../../../shared/compute-state.js";
 import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute.js";
 import { getJob } from "../../services/compute-jobs.js";
 import {
@@ -31,7 +34,7 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
     const id = c.req.param("id");
     if (!COMPUTE_JOB_ID_RE.test(id)) {
       return c.json(
-        { error: "No such job.", code: "job_not_found" },
+        { error: COMPUTE_ROUTE_SENTENCES.job_not_found, code: "job_not_found" },
         COMPUTE_REFUSAL_STATUS.job_not_found,
       );
     }
@@ -39,7 +42,13 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
     if (!result.ok) {
       const code = result.outcome === "job_not_found" ? "job_not_found" : "bad_state";
       return c.json(
-        { error: code === "bad_state" ? "The job has already ended." : "No such job.", code },
+        {
+          error:
+            code === "bad_state"
+              ? "The job has already ended."
+              : COMPUTE_ROUTE_SENTENCES.job_not_found,
+          code,
+        },
         COMPUTE_REFUSAL_STATUS[code],
       );
     }
@@ -51,14 +60,14 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
     const id = c.req.param("id");
     if (!COMPUTE_JOB_ID_RE.test(id)) {
       return c.json(
-        { error: "No such job.", code: "job_not_found" },
+        { error: COMPUTE_ROUTE_SENTENCES.job_not_found, code: "job_not_found" },
         COMPUTE_REFUSAL_STATUS.job_not_found,
       );
     }
     const result = await advanceComputeJob(c.env, id);
     if (result.job === null) {
       return c.json(
-        { error: "No such job.", code: "job_not_found" },
+        { error: COMPUTE_ROUTE_SENTENCES.job_not_found, code: "job_not_found" },
         COMPUTE_REFUSAL_STATUS.job_not_found,
       );
     }

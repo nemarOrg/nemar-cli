@@ -23,6 +23,7 @@ import {
   COMPUTE_LEDGER_REASONS,
   COMPUTE_REFUSAL_CODES,
   COMPUTE_REFUSAL_STATUS,
+  COMPUTE_ROUTE_SENTENCES,
   COMPUTE_SOURCES,
   COMPUTE_STATES,
   COMPUTE_TRANSITIONS,
@@ -34,13 +35,17 @@ import {
   LIVE_COMPUTE_STATES,
   PLATFORM_FAILURE_CODES,
   PLATFORM_LAUNCHER_DETAILS,
+  RECORDS_UNREADABLE,
   RESULT_REFUSAL_DETAILS,
+  TAPIS_REPORTING_STATES,
   TERMINAL_COMPUTE_STATES,
+  VERIFY_REASONS,
   canTransitionCompute,
   failureCodeFromTapisCondition,
   isPlatformFailure,
   isTerminalComputeState,
   launcherExitNumber,
+  resultRefusalOf,
   stateFromTapisStatus,
 } from "../shared/compute-state";
 
@@ -909,6 +914,69 @@ describe("Tapis conditions", () => {
     const known = new Set<string>([...LAUNCHER_FAILURE_CODES, ...PLATFORM_FAILURE_CODES]);
     for (const [condition] of EXPECTED) {
       expect(known.has(failureCodeFromTapisCondition(condition)), condition).toBe(true);
+    }
+  });
+});
+
+// Round 1 of #2041: the words the Worker chooses for a job are declared once, here, and these are the
+// literals a reader finds them by.
+describe("the words the job routes and the lifecycle share", () => {
+  test("the sixteen verification reasons, and the one more word for an unreadable record", () => {
+    expect([...VERIFY_REASONS]).toEqual([
+      "not_completed",
+      "declared_missing",
+      "result_missing",
+      "provenance_missing",
+      "manifest_missing",
+      "job_id_mismatch",
+      "launch_digest_mismatch",
+      "bundle_digest_mismatch",
+      "image_digest_mismatch",
+      "result_reports_failure",
+      "exit_mismatch",
+      "output_missing",
+      "output_size_mismatch",
+      "output_checksum_mismatch",
+      "manifest_mismatch",
+      "launcher_file_missing",
+    ]);
+    expect(RECORDS_UNREADABLE).toBe("records_unreadable");
+    for (const word of [...VERIFY_REASONS, RECORDS_UNREADABLE]) {
+      expect(COMPUTE_WORD_RE.test(word), word).toBe(true);
+    }
+  });
+
+  test("resultRefusalOf is the three refusal words and nothing else", () => {
+    for (const word of RESULT_REFUSAL_DETAILS) expect(resultRefusalOf(word)).toBe(word);
+    for (const other of [null, undefined, "", "output_missing", "TOO_MANY_OUTPUTS", "bad_state"]) {
+      expect(resultRefusalOf(other as string | null | undefined), String(other)).toBeNull();
+    }
+  });
+
+  test("a sentence for every refusal a job route answers with, a whole sentence each, and each code has a status", () => {
+    expect(Object.keys(COMPUTE_ROUTE_SENTENCES).sort()).toEqual([
+      "bad_state",
+      "compute_disabled",
+      "invalid_spec",
+      "job_not_found",
+      "results_expired",
+      "results_incomplete",
+      "results_quota_exceeded",
+      "results_too_large",
+      "too_many_outputs",
+    ]);
+    for (const [code, sentence] of Object.entries(COMPUTE_ROUTE_SENTENCES)) {
+      expect(sentence.endsWith("."), code).toBe(true);
+      expect(sentence.includes("\u2014"), code).toBe(false);
+      expect(Object.hasOwn(COMPUTE_REFUSAL_STATUS, code), code).toBe(true);
+    }
+    expect(COMPUTE_ROUTE_SENTENCES.job_not_found).toBe("No such job.");
+  });
+
+  test("the states a long silence can turn `unreported` are the live states that have a Tapis job and are not that state", () => {
+    expect([...TAPIS_REPORTING_STATES]).toEqual(["submitted", "queued", "running", "archiving"]);
+    for (const state of TAPIS_REPORTING_STATES) {
+      expect(LIVE_COMPUTE_STATES.includes(state as never), state).toBe(true);
     }
   });
 });

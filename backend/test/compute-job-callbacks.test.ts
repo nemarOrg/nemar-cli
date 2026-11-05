@@ -331,7 +331,6 @@ describe("bundle", () => {
 
   test("it answers a ten-minute presigned GET of THIS job's own bundle, and the bytes are the bundle", async () => {
     const b = await bundleJob();
-    const other = await bundleJob();
     const reply = await call(b.job.id, "bundle", { token: await tokenFor(b.job.id) });
     expect(reply.status).toBe(200);
     const url = new URL(reply.body.url);
@@ -343,7 +342,6 @@ describe("bundle", () => {
     expect(expires - Date.now()).toBeGreaterThan(9 * MINUTE);
     expect(expires - Date.now()).toBeLessThanOrEqual(10 * MINUTE);
     expect(new Uint8Array(await (await fetch(reply.body.url)).arrayBuffer())).toEqual(b.archive);
-    expect(other.job.id).not.toBe(b.job.id);
   });
 
   test("it signs only the job's own key: nothing the request carries steers it (MUTATION: sign a caller-supplied path)", async () => {

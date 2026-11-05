@@ -16,7 +16,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { runComputeAdvanceCron } from "../src/services/compute-advance";
-import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
+import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { signComputeToken } from "../src/services/compute-tokens";
 import type { Bindings } from "../src/types/bindings";
 import { recordAbortTimeouts } from "./helpers/abort-timeouts";
@@ -404,5 +404,3 @@ describe("the time a read-back may take", () => {
     expect((await reread(workerEnv, s.job.id)).state).toBe("running");
   });
 });
-
-void advanceComputeJob;
