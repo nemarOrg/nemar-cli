@@ -1,3 +1,4 @@
+import { computeReleaseStatements } from "../services/compute-release";
 import { DOCS_GRANTS_PURGE_SQL } from "../services/docs-auth";
 import { PRIVATE_GRANTS_PURGE_SQL } from "../services/private-auth";
 import { mailReleaseStatements, mailTombstoneStatements } from "../services/ticket-assignment";
@@ -101,6 +102,17 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        updated_at = datetime('now')
    WHERE id = ? AND deleted_at IS NULL`;
 
+/**
+ * The guard a call with `onlyIfEmail` appends to EVERY statement of the cascade after the mask: true
+ * once the row carries its masked address (the mask has just applied to it, or an earlier tombstone
+ * did). For the latter every statement keyed by user_id is a no-op (nothing live is left to end), and
+ * the one keyed by ADDRESS, the login code expiry, has its own extra condition. It is appended to the
+ * statement's SQL text and its two `?` take the next two binds, so EVERY statement of the cascade must
+ * END in a WHERE clause that takes an `AND`, and use plain `?` placeholders only. Exported so a test
+ * runs each statement with it, instead of copying the text.
+ */
+export const MASK_APPLIED_SQL = " AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email = ?)";
+
 /** What {@link tombstoneUserCascade} reports. */
 export interface TombstoneCascadeResult {
   /** True when the mask UPDATE changed a row. False means nothing was tombstoned. */
@@ -130,6 +142,13 @@ export interface TombstoneCascadeResult {
  * result says `tombstoned: false`. Without it (the owner-only route) the
  * statements are exactly the unconditional ones they always were.
  *
+ * The account's COMPUTE ends in this batch too (`computeReleaseStatements`, epic #2005 phase
+ * A8): every live job records the intent to cancel with the reason `account_ended`, a job that
+ * provably never reached Tapis is cancelled and its hold released, and every pool is frozen. The
+ * Tapis cancels are NOT made here (a network call never runs inside a batch); the retried sweep
+ * (`sweepComputeCancellations`) makes them. Each of those statements goes through `step` like the
+ * rest, so under `onlyIfEmail` it applies only when the mask did.
+ *
  * What it does NOT do, because both are network calls with their own failure
  * modes and only the owner-only route wants them: remove GitHub collaborators
  * and revoke legacy IAM keys. A caller that skips those must have established
@@ -148,11 +167,7 @@ export async function tombstoneUserCascade(
   originalEmail: string | null,
   onlyIfEmail?: string,
 ): Promise<TombstoneCascadeResult> {
-  // True once the row carries its masked address: the mask above has just applied to
-  // it, or an earlier tombstone did. For the latter every statement keyed by user_id
-  // is a no-op (nothing live is left to end), and the one keyed by ADDRESS, the login
-  // code expiry, has its own extra condition below.
-  const MASK_APPLIED = " AND EXISTS (SELECT 1 FROM users WHERE id = ? AND email = ?)";
+  const MASK_APPLIED = MASK_APPLIED_SQL;
   const guarded = onlyIfEmail !== undefined;
   const step = (sql: string, ...binds: unknown[]): D1PreparedStatement =>
     guarded
@@ -178,6 +193,11 @@ export async function tombstoneUserCascade(
     ...mailReleaseStatements(id, "all").map((s) => step(s.sql, ...s.binds)),
     // The account link on tickets they wrote goes too; the correspondence stays by address.
     ...mailTombstoneStatements(id).map((s) => step(s.sql, ...s.binds)),
+    // The account's compute (epic #2005 phase A8): every live job records `account_ended`, a job
+    // that never reached Tapis is cancelled with its hold released, and every pool is frozen. The
+    // Tapis cancels follow from the retried sweep; nothing here calls Tapis. Every statement ends in
+    // a WHERE clause (see compute-release.ts), because `step` appends the mask guard to each.
+    ...computeReleaseStatements(id).map((s) => step(s.sql, ...s.binds)),
     // Expire any outstanding passwordless login codes for the original email so
     // a code issued just before deletion can't be submitted (it would otherwise
     // be consumed and then cleanly denied; this avoids even that round-trip).
