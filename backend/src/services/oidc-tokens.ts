@@ -47,6 +47,7 @@
  * `client_id` IN THESE TABLES IS THE `oidc_clients.id` ROW ID, NOT THE PUBLIC `oc_...` STRING.
  */
 
+import type { OIDC_TOKEN_ERROR_CODES } from "../../../shared/oidc.js";
 import {
   OIDC_ACCESS_TOKEN_PREFIX,
   OIDC_ACCESS_TOKEN_TTL_SECONDS,
@@ -403,6 +404,19 @@ export const REVOKE_FAMILY_SQL = `UPDATE oidc_tokens
 
 /** An error of RFC 6749 section 5.2, as the route answers it. */
 export type OAuthErrorCode = OidcTokenErrorCode;
+
+/**
+ * Compile-time guard, checked by `tsc -p backend`: the Worker's error type is exactly the declared list,
+ * so a word added here without being added to `OIDC_TOKEN_ERROR_CODES` (or the reverse) fails the
+ * typecheck. The runtime half is `test/oidc-token-error-codes.test.ts`.
+ */
+type SameType<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+type MustBeTrue<T extends true> = T;
+export type OAuthErrorCodesAreDeclared = MustBeTrue<
+  SameType<OAuthErrorCode, (typeof OIDC_TOKEN_ERROR_CODES)[number]>
+>;
 
 export type GrantOutcome =
   | { ok: true; body: Record<string, unknown> }

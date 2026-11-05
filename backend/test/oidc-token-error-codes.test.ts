@@ -46,12 +46,12 @@ describe("OIDC_TOKEN_ERROR_CODES", () => {
     ]);
   });
 
-  test("is the type the Worker uses (a word outside the list does not compile)", () => {
+  test("is what the Worker's error type is built from (the compile-time half is in oidc-tokens.ts)", () => {
+    // Runtime only: every declared word is assignable to the Worker's type. The converse, that the type
+    // admits no other word, is `OAuthErrorCodesAreDeclared` in `services/oidc-tokens.ts`, which
+    // `tsc -p backend` enforces; this file is not in a typecheck include list.
     const every: OAuthErrorCode[] = [...OIDC_TOKEN_ERROR_CODES];
     expect(every).toHaveLength(OIDC_TOKEN_ERROR_CODES.length);
-    // @ts-expect-error a word that is not declared is not an OAuthErrorCode
-    const undeclared: OAuthErrorCode = "invalid_token";
-    expect(OIDC_TOKEN_ERROR_CODES as readonly string[]).not.toContain(undeclared);
   });
 
   test("holds every word the endpoint's source writes", () => {
@@ -61,10 +61,16 @@ describe("OIDC_TOKEN_ERROR_CODES", () => {
       readFileSync(join(root, "services", "oidc-tokens.ts"), "utf8"),
     ].join("\n");
     const written = new Set<string>();
-    for (const m of sources.matchAll(/(?:oauthError\(c,|fail\()\s*"([a-z_]+)"/g)) {
+    for (const m of sources.matchAll(/(?:oauthError\(\s*c,|fail\()\s*"([a-z_]+)"/g)) {
       written.add(m[1] as string);
     }
     expect(written.size).toBeGreaterThan(0);
+    // A call split over lines (`oauthError(\n c,\n "invalid_request", ...`) is a call site too: the scan
+    // finds as many literal-word call sites as the source has, so none is skipped for its layout.
+    const sites = sources.match(/\boauthError\(\s*c,\s*"[a-z_]+"/g) ?? [];
+    const scanned = [...sources.matchAll(/oauthError\(\s*c,\s*"[a-z_]+"/g)];
+    expect(scanned.length).toBe(sites.length);
+    expect(sources.match(/\boauthError\(\s*\n/g)?.length ?? 0).toBeGreaterThan(0);
     for (const word of written) {
       expect(OIDC_TOKEN_ERROR_CODES as readonly string[]).toContain(word);
     }
