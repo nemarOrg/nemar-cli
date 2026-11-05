@@ -286,10 +286,14 @@ describe("(a) the old wire value, the JSON text itself, does not survive the sch
 describe("(b) the new value, the text in base64url, comes back from the shell exactly", () => {
   /**
    * Strings a shell, a glob or a quoting rule has something to say about, each inert as written.
-   * Every character a shell acts on is printable ASCII, so the hostile part of the corpus is printable.
-   * The last few entries are not (a newline, a tab, a carriage return, NUL, DEL, a character from 0x80
-   * up): they are here to show that such a user string travels as the escape JSON writes for it, in a
-   * text that is itself printable. The encoder would refuse the raw byte (the contract tests pin that).
+   * Most are printable ASCII: the operators, the quotes, `$`, the backtick, the glob characters. Three
+   * entries in the MIDDLE of the list are control characters, which a shell also acts on (a newline, a
+   * tab, a carriage return). The last five are not printable ASCII either (an accented character, an
+   * astral character, DEL, NUL, U+2028). Every one of them travels as an escape: JSON escapes the
+   * control characters (the newline, the tab, the carriage return and NUL), and `encodeLaunchSpec`
+   * escapes DEL and everything from 0x80 up, so the TEXT built from the corpus is printable. The
+   * wire encoder would refuse the raw bytes (the contract tests pin that); what is shown here is that
+   * the escapes survive a shell.
    */
   const adversarial = (sandbox: Sandbox): string[] => [
     "a b",
