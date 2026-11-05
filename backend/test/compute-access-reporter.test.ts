@@ -705,6 +705,73 @@ describe("what cannot be sent yet stays pending, and costs no attempt", () => {
   });
 });
 
+describe("a record that never gets a scheduler submission time is not looked at for ever", () => {
+  /** A job whose record has no submission time, and a report row that first showed `days` ago. */
+  async function stuck(days: number) {
+    const { made } = await queuedJob();
+    const e = env();
+    await e.DB.prepare("UPDATE compute_jobs SET remote_submitted_at = NULL WHERE id = ?1")
+      .bind(made.job.id)
+      .run();
+    await e.DB.prepare(
+      "UPDATE compute_access_reports SET created_at = datetime('now', ?2), next_attempt_at = datetime('now', '-1 minute') WHERE job_id = ?1",
+    )
+      .bind(made.job.id, `-${days} days`)
+      .run();
+    return { made, e };
+  }
+
+  test("within a week it waits, and costs no attempt (MUTATION: the bound moves a day later)", async () => {
+    const { made, e } = await stuck(6);
+    expect(await runAccessReportCron(e)).toMatchObject({ deferred: 1, failed: 0, sent: 0 });
+    expect(await report(e, made.job.id)).toMatchObject({
+      state: "pending",
+      attempts: 0,
+      last_error_code: "no_submit_time",
+    });
+  });
+
+  test("past a week from the first sight of the Slurm id it ends `failed` with `no_submit_time`, so a person is told, and it leaves the due window for good (MUTATION: remove the bound)", async () => {
+    const { made, e } = await stuck(8);
+    expect(await sendAccessReport(e, made.job.id)).toBe("failed");
+    expect(await report(e, made.job.id)).toMatchObject({
+      state: "failed",
+      attempts: 0,
+      last_error_code: "no_submit_time",
+      claimed_at: null,
+    });
+    expect(access.requests).toHaveLength(0);
+    // Final: not in the due window, and not sent when the time turns up later.
+    await e.DB.prepare(
+      "UPDATE compute_jobs SET remote_submitted_at = '2026-11-04 10:00:00' WHERE id = ?1",
+    )
+      .bind(made.job.id)
+      .run();
+    expect(await runAccessReportCron(e)).toMatchObject({ examined: 0 });
+    expect(access.requests).toHaveLength(0);
+  });
+
+  test("the tick counts it `failed` and says so, at error level", async () => {
+    const { e } = await stuck(8);
+    const tick = await runAccessReportCron(e);
+    expect(tick).toMatchObject({ examined: 1, failed: 1, deferred: 0 });
+    expect(accessReportsLogLine(tick as NonNullable<typeof tick>)).toMatchObject({
+      level: "error",
+    });
+  });
+
+  test("a stuck row does not delay a new report: after the bound, ten stuck rows are not in the window", async () => {
+    const e = env();
+    for (let i = 0; i < ACCESS_REPORT_ROWS_PER_TICK; i++) {
+      const s = await stuck(30);
+      expect(await sendAccessReport(e, s.made.job.id)).toBe("failed");
+    }
+    const fresh = await queuedJob();
+    expect(await runAccessReportCron(e)).toMatchObject({ examined: 1, sent: 1 });
+    expect(access.requests.at(-1)?.body?.jobid).toBe(fresh.made.job.slurm_job_id);
+  });
+});
+
 // --- The tick ------------------------------------------------------------------------------------
 
 describe("the tick", () => {

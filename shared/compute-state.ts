@@ -658,7 +658,8 @@ export type ComputeAccessReportState = (typeof COMPUTE_ACCESS_REPORT_STATES)[num
 /**
  * Why a report is not sent yet, or was not: the one fixed word a report row keeps
  * (`last_error_code`), never a message. `unconfigured` (the key or the resource name is not set),
- * `no_submit_time` (the record has no scheduler submission time yet) leave the row `pending`;
+ * `no_submit_time` (the record has no scheduler submission time yet; for a week from the first sight of
+ * the Slurm id, then it ends `failed`) leave the row `pending`;
  * `no_gateway_user` (the job has no pseudonym to report) and `outcome_unknown` (the POST may or may
  * not have been recorded: nothing is sent twice, so a person looks) end it `failed`; `refused`
  * (a 4xx other than 409), `busy` (408 or 429) and `unavailable` (503) are answers that show ACCESS did

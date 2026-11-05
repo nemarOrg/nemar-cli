@@ -100,6 +100,14 @@ const RETRY_LONGEST_MINUTES = 24 * 60;
 /** How long a row that cannot be sent yet (no submission time) waits before it is looked at again. */
 const DEFER_MINUTES = 60;
 
+/**
+ * How long, from the first sight of the Slurm id, a record may go without the scheduler's submission time
+ * before the row ends `failed` (`no_submit_time`) for a person to look at: a terminal job is never read
+ * from Tapis again, so a time that is not there by now will not come, and the row would otherwise come
+ * back into the ten-row window every hour for ever.
+ */
+export const ACCESS_SUBMIT_TIME_WAIT_DAYS = 7;
+
 /** The delay after the `attempts`-th claim was refused: an hour doubled each time, a day at most. Pure. */
 export function accessRetryDelayMinutes(attempts: number): number {
   if (!Number.isFinite(attempts) || attempts < 1) return RETRY_FIRST_MINUTES;
@@ -128,6 +136,8 @@ export const ACCESS_REPORT_DUE_SQL = `SELECT job_id FROM compute_access_reports
 /** One report with what the body is made of, from the job row. `?1` the job. */
 export const ACCESS_REPORT_ROW_SQL = `SELECT r.state AS state, r.attempts AS attempts,
     CASE WHEN r.next_attempt_at <= datetime('now') THEN 1 ELSE 0 END AS due,
+    CASE WHEN r.created_at < datetime('now', '-${ACCESS_SUBMIT_TIME_WAIT_DAYS} days') THEN 1 ELSE 0 END
+      AS overdue,
     j.slurm_job_id AS slurm_job_id, j.remote_submitted_at AS remote_submitted_at,
     j.gateway_user AS gateway_user
   FROM compute_access_reports r JOIN compute_jobs j ON j.id = r.job_id
@@ -176,6 +186,11 @@ export const ACCESS_REPORT_NO_USER_SQL = `UPDATE compute_access_reports SET
 /** A row whose record has no submission time yet waits an hour, and costs no attempt. `?1` the job. */
 export const ACCESS_REPORT_DEFER_SQL = `UPDATE compute_access_reports SET
     last_error_code = 'no_submit_time', next_attempt_at = datetime('now', '+${DEFER_MINUTES} minutes')
+  WHERE job_id = ?1 AND state = 'pending'`;
+
+/** The wait for the submission time is over: `failed`, so a person is told. Nothing was sent. `?1` the job. */
+export const ACCESS_REPORT_NO_TIME_FAIL_SQL = `UPDATE compute_access_reports SET
+    state = 'failed', last_error_code = 'no_submit_time'
   WHERE job_id = ?1 AND state = 'pending'`;
 
 /** With no key or no resource name every due row says so, and nothing else changes. */
@@ -280,7 +295,7 @@ async function post(
 /**
  * What `sendAccessReport` did for one job: `sent`; `retry` (refused, pending again, delayed); `failed` (the
  * attempts ran out, or the job has no pseudonym); `outcome_unknown` (no answer: failed, never sent again by
- * code); `unconfigured` and `no_submit_time` (waiting, no attempt spent); and the ones that sent nothing
+ * code); `unconfigured` and `no_submit_time` (waiting, no attempt spent; the latter for a week at most, and then `failed`); and the ones that sent nothing
  * because the row was not this sender's to send: `not_found`, `not_pending` (sent, failed or claimed
  * already), `not_due`, `claim_lost` (another sender won the claim) and `lease_lost` (this sender's lease was
  * reaped while its POST was in flight: the row keeps what the reaper wrote).
@@ -303,6 +318,7 @@ interface ReportJoin {
   state: string;
   attempts: number;
   due: number;
+  overdue: number;
   slurm_job_id: string | null;
   remote_submitted_at: string | null;
   gateway_user: string | null;
@@ -335,6 +351,11 @@ export async function sendAccessReport(
   }
   const submitTime = accessSubmitTime(row.remote_submitted_at);
   if (submitTime === null || row.slurm_job_id === null) {
+    // It waits for the time, an hour at a time, and costs no attempt; after a week it ends `failed`.
+    if (row.overdue === 1) {
+      await db.prepare(ACCESS_REPORT_NO_TIME_FAIL_SQL).bind(jobId).run();
+      return "failed";
+    }
     await db.prepare(ACCESS_REPORT_DEFER_SQL).bind(jobId).run();
     return "no_submit_time";
   }
