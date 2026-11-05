@@ -23,11 +23,13 @@
  * (`COMPUTE_REQUEST_MILLI_MAX`), and a total that would pass 2^53 - 1 is a 409 `would_exceed_limit`.
  *
  * INTERIM OWNER RULES, easy to loosen: a correction of an account's CHARGE is the owner's (an
- * administrator may correct a grant), because whether a charge correction credits the platform
- * budget back is the owner's decision. What this does today: an adjustment of the charge of an
- * account's pool also moves the `people` budget of the same word, so the budget and the people
- * never disagree (option B; the table does not require it, and refuses only a budget that is not
- * the `people` budget of the pool's word). A grant to a
+ * administrator may correct a grant). THE `people` BUDGET RECORDS CONSUMPTION ONLY (the owner's
+ * decision of 2026-11-04, option A): an adjustment that RAISES the charge of an account's pool
+ * raises the `people` budget of the same word with it, and one that LOWERS it moves the person's
+ * pool alone and leaves the budget's consumption as it was, so nothing an administrator does to a
+ * person's pool gives budget back (a job's final settlement is the only entry that lowers it; the
+ * table would take either, and the ledger service refuses a lowering correction that names the
+ * budget). A platform pool is its own budget, and a correction of a grant names none. A grant to a
  * deleted account is refused; its pools are still read and its grant corrected, for the record.
  *
  * Nothing here mails anyone, calls GitHub, or is a cron.
@@ -325,17 +327,19 @@ async function adjustRoute(c: Ctx, holder: Holder) {
   if (!parsed.success) return invalidBody(c, issuesOf(parsed.error));
   const body = parsed.data;
   // Interim: an account's charge is corrected by an owner (a platform pool's route is owner-only
-  // already). Easy to loosen once the owner decides what a charge correction does to the budget.
+  // already). Easy to loosen: a correction downward no longer touches the budget either way.
   if (holder.kind === "account" && body.target === "charged" && c.get("user").role !== "owner") {
     return refuse(c, "owner_only");
   }
   try {
     const pool = await targetPool(c, holder, body.pool, false);
     if (pool instanceof Response) return pool;
-    // A correction of what a person or a partner was charged follows the `people` budget of the
-    // same word; a platform pool is its own budget, and a correction of a grant has none.
+    // The `people` budget records consumption only: a correction that RAISES what a person or a
+    // partner was charged is counted against the budget of the same word, and one that LOWERS it
+    // names no budget, so the person's pool falls and the budget's consumption stays. A platform pool
+    // is its own budget, and a correction of a grant has none.
     let budgetPoolId: number | null = null;
-    if (body.target === "charged" && pool.holder_kind !== "platform") {
+    if (body.target === "charged" && body.delta_milli > 0 && pool.holder_kind !== "platform") {
       const budget = await platformPool(c.env.DB, COMPUTE_PEOPLE_BUDGET, body.pool);
       if (!budget) throw new Error("the platform people budget is missing");
       budgetPoolId = budget.id;

@@ -1,7 +1,7 @@
 /**
  * The compute gateway's allocation ledger (epic #2005 phase A2, #2007; ADR 0118, decision 3).
  *
- * A hold, a release, a settlement, a refund, a grant, an adjustment and an expiry, over the three
+ * A hold, a release, a settlement, a grant, an adjustment and an expiry, over the three
  * tables of migration 0114: `compute_pools` (a holder's running totals), `compute_ledger` (the
  * append-only entries) and the trigger that is the ONE writer of the totals. Amounts are whole
  * thousandths of a service unit (SU), never floating point.
@@ -16,11 +16,24 @@
  *    whose pool or budget totals would leave 0 to 2^53 - 1, a hold that would take available below 0,
  *    a hold, release, charge, overrun or final settlement on an account or partner pool that names no
  *    `people` budget, any entry whose budget is not the `people` budget of its pool's word, and a
- *    release or charge that does not close the hold it names, under every conflict clause. A refund
- *    and a correction of a charge may name the budget or none: crediting it back is this module's
- *    choice (today it does, the owner's option B) and not the table's. The statements below say
- *    the same as WHERE terms, so that a refusal writes nothing and raises nothing; a caller that
- *    skips them is refused by the table with an error.
+ *    release or charge that does not close the hold it names, under every conflict clause. A
+ *    correction of a charge may name the budget or none, and so may an entry of kind `refund` (the
+ *    vocabulary keeps the kind and nothing here writes one): never crediting the budget back is this
+ *    module's rule (the owner's option A, decided 2026-11-04) and not the table's. The statements
+ *    below say the same as WHERE terms, so that a refusal writes nothing and raises nothing; a caller
+ *    that skips them is refused by the table with an error.
+ *  - THE `people` BUDGET RECORDS CONSUMPTION ONLY (option A, the owner's decision of 2026-11-04). It
+ *    is the overall cap on everything people can spend, so what it counts is what was consumed, and
+ *    nothing a person or an administrator does to a person's pool gives it back. There is no
+ *    refund here (no failure is refunded automatically: a job that never started is RELEASED, which
+ *    gives back a hold and consumed nothing, and compensation is a manual grant). A correction that
+ *    lowers the charge of an account's or a partner's pool names NO budget (`adjustPool` refuses one
+ *    that does), so the pool falls and the budget stays; one that raises it names the budget, so
+ *    both rise. The only entry that names the budget and lowers its charged total is a job's FINAL
+ *    settlement (`settleFinal`), because it corrects a figure that was recorded as consumption (the
+ *    provisional charge was counted against the budget, and the true cost replaces it), and it can
+ *    only take back what that job itself charged. The owner's own correction of a platform pool is
+ *    the pool's own entry and names no budget.
  *  - A hold is ONE conditional INSERT (`HOLD_INSERT_SQL`): the pool not frozen, the pool's
  *    available at least the amount, the budget pool's available at least the amount, the key unused
  *    and any guard the caller adds, all in its WHERE. D1 runs a statement whole, so two holds for the
@@ -47,7 +60,7 @@
  *    built (`ComputeLedgerError`, `invalid_argument`), so a fraction, NaN or a number a double
  *    cannot hold exactly never reaches SQL; the table refuses what slips past (`typeof`).
  *  - A retry is safe, and a key is never shared. Every entry has a unique key. The Worker's own keys
- *    are made of the job (`job:<id>:hold`, `:final`, `:refund`) or the hold (`hold:<id>:charge`), so
+ *    are made of the job (`job:<id>:hold`, `:final`) or the hold (`hold:<id>:charge`), so
  *    no caller builds a colliding one (a caller's key may not start with `job:` or `hold:`); a grant,
  *    an adjustment and an expiry take the caller's, which an administrator's route scopes to the
  *    actor (`adminKey`). A key that finds its entry returns it only if the request is the same on
@@ -96,7 +109,6 @@ const ACCOUNT_REF_RE = /^[1-9][0-9]*$/;
 const REASON = {
   grant: "grant",
   released: "released",
-  refund: "refund",
   expired: "expired",
   final: "final_settlement",
 } as const satisfies Record<string, (typeof COMPUTE_LEDGER_REASONS)[number]>;
@@ -158,9 +170,6 @@ export const holdKey = (jobId: string): string => `job:${jobId}:hold`;
 
 /** A job's final settlement, once. */
 export const finalKey = (jobId: string): string => `job:${jobId}:final`;
-
-/** A job's refund, once. */
-export const refundKey = (jobId: string): string => `job:${jobId}:refund`;
 
 /**
  * An administrator's key as the ledger stores it: behind the kind of entry and the actor, so two
@@ -748,13 +757,14 @@ export async function settleProvisional(
   };
 }
 
-// --- Final settlement and refund -------------------------------------------------------------
+// --- Final settlement ------------------------------------------------------------------------
 
 /**
  * What a job has been charged on its pool, and what happened to it: `?1` the job. `settled` (its
- * hold was closed by a charge), `refunded` (a refund entry exists) and `total` (the sum of
- * `charged_delta_milli` by job over its pool: the charge, the overrun, the final settlement and the
- * refund). Driven from the hold, so every lookup is by the job's index.
+ * hold was closed by a charge), `refunded` (an entry of kind `refund` exists: nothing in this module
+ * writes one, the vocabulary keeps the kind) and `total` (the sum of `charged_delta_milli` by job
+ * over its pool: the charge, the overrun, the final settlement and any refund entry). Driven from
+ * the hold, so every lookup is by the job's index.
  */
 export const JOB_CHARGE_SQL = `SELECT h.id AS hold_id,
     EXISTS (SELECT 1 FROM compute_ledger c
@@ -776,11 +786,21 @@ interface JobCharge {
 /**
  * The final settlement: `?1` the job, `?2` the figure Expanse's own accounting gave. One `adjust`
  * entry of the difference between that and everything already charged to the job on its pool (the
- * charge, any overrun, any earlier refund), once per job (`job:<id>:final`), only after the hold was
- * settled by a charge and never after a refund (a refund ends the job's charge, and a final
- * settlement after it would charge again). A difference of 0 is still the entry: the key is what
- * records that the final settlement happened. One that would take the pool's or the budget's
- * charged below zero (an administrator already corrected it) writes nothing.
+ * charge and any overrun), once per job (`job:<id>:final`), only after the hold was settled by a
+ * charge and never after an entry of kind `refund` (which ends the job's charge, so a final
+ * settlement after it would charge again; nothing here writes one). A difference of 0 is still the
+ * entry: the key is what records that the final settlement happened. One that would take the
+ * pool's or the budget's charged below zero (an administrator already corrected it) writes nothing.
+ *
+ * THE ONE ENTRY THAT MAY LOWER THE `people` BUDGET'S CONSUMPTION. The entry names the budget of the
+ * job's hold (`d.budget_pool_id`) and its delta may be negative: under option A (the budget records
+ * consumption only, the owner's decision of 2026-11-04) a negative figure is still not a credit
+ * back, it is the correction of a number that was recorded as consumption. The provisional charge
+ * was counted against the budget when the job ended, and Expanse's own accounting replaces it, so
+ * the budget ends at what was truly consumed. The delta is the job's own (the figure minus what THIS
+ * job was charged), so it can never take back more than the job consumed. No other entry that names
+ * the budget lowers its charged total; `compute-ledger-budget.test.ts` enumerates every operation
+ * and says so.
  */
 export const FINAL_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key)
@@ -812,8 +832,13 @@ export type FinalResult =
  * that brings the job's whole charge to it, once per job, even when the figure is the charge
  * already (an entry of nothing). The same figure again is a replay (`replayed: true`); another is
  * `already_final`. `not_settled` when the hold was never settled by a charge (open, released or
- * never made); `refunded` after a refund, whatever the figure; `would_go_negative` when a
- * correction would take a stored total below zero, and nothing is written.
+ * never made); `refunded` after an entry of kind `refund` (nothing here writes one), whatever the
+ * figure; `would_go_negative` when a correction would take a stored total below zero, and nothing
+ * is written.
+ *
+ * A figure BELOW the job's charge lowers the person's pool and the `people` budget together, and
+ * this is the only path that lowers the budget's consumption (see `FINAL_INSERT_SQL`): it corrects
+ * a figure that was recorded as consumption, it is not a refund.
  */
 export async function settleFinal(
   db: D1Database,
@@ -840,54 +865,6 @@ export async function settleFinal(
   return { ok: false, code: "would_go_negative" };
 }
 
-/**
- * A refund of everything charged to a job on its pool (`?1` the job, `?2` the reason), once per job
- * (`job:<id>:refund`): a failure NEMAR caused is returned whole. A job with nothing charged writes
- * nothing, and neither does a refund that would take the pool's or the budget's charged below zero
- * (an administrator already corrected it).
- */
-export const REFUND_INSERT_SQL = `INSERT INTO compute_ledger
-  (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key)
-  SELECT 'refund', d.pool_id, d.budget_pool_id, -d.total, d.job_id, ?2,
-         'job:' || d.job_id || ':refund'
-    FROM (SELECT h.pool_id AS pool_id, h.budget_pool_id AS budget_pool_id, h.job_id AS job_id,
-                 COALESCE((SELECT SUM(e.charged_delta_milli) FROM compute_ledger e
-                            WHERE e.job_id = h.job_id AND e.pool_id = h.pool_id), 0) AS total
-            FROM compute_ledger h
-           WHERE h.kind = 'hold' AND h.job_id = ?1) d
-   WHERE d.total > 0
-     AND (SELECT charged_milli FROM compute_pools WHERE id = d.pool_id) >= d.total
-     AND (d.budget_pool_id IS NULL
-          OR (SELECT charged_milli FROM compute_pools WHERE id = d.budget_pool_id) >= d.total)
-     AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'job:' || d.job_id || ':refund')`;
-
-export type RefundResult =
-  | { ok: true; replayed: boolean; refundedMilli: number; entry: LedgerRow }
-  | { ok: false; code: "nothing_to_refund" | "would_go_negative" };
-
-/**
- * Return a job's whole charge to its pool (and its budget), once. A refund replayed returns the
- * refund (`replayed: true`); `nothing_to_refund` for a job with nothing charged (released, never
- * settled, never held); `would_go_negative` when the pool or its budget no longer holds that much
- * charge.
- */
-export async function refundJob(
-  db: D1Database,
-  input: { jobId: string; reason?: string },
-): Promise<RefundResult> {
-  const job = jobIdArg(input.jobId);
-  const reason = reasonArg(input.reason, REASON.refund);
-  const changes = await runOrZero(db.prepare(REFUND_INSERT_SQL).bind(job, reason));
-  const entry = await findEntryByKey(db, refundKey(job));
-  if (entry) {
-    return { ok: true, replayed: changes === 0, refundedMilli: -entry.charged_delta_milli, entry };
-  }
-  const charge = await db.prepare(JOB_CHARGE_SQL).bind(job).first<JobCharge>();
-  return (charge?.total ?? 0) > 0
-    ? { ok: false, code: "would_go_negative" }
-    : { ok: false, code: "nothing_to_refund" };
-}
-
 // --- Grant, adjustment and expiry ------------------------------------------------------------
 
 /**
@@ -906,7 +883,8 @@ export const GRANT_INSERT_SQL = `INSERT INTO compute_ledger
  * An adjustment: `?1` pool, `?2` the budget pool (NULL for none), `?3` the change to granted, `?4`
  * the change to charged, `?5` actor, `?6` reason, `?7` key. Only if the pool is there, the key
  * unused, and no stored total (the pool's granted or charged, or the budget's charged) would leave
- * 0 to 2^53 - 1.
+ * 0 to 2^53 - 1. `adjustPool` binds a budget only when `?4` is positive: the `people` budget records
+ * consumption only, so a correction that lowers a charge never reaches it.
  */
 export const ADJUST_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, granted_delta_milli, charged_delta_milli, actor_user_id, reason,
@@ -986,11 +964,14 @@ export type AdjustResult =
 
 /**
  * Correct a pool's grant or its charge, up or down: one `adjust` entry whose delta is on exactly
- * one of them, with who and a fixed-word reason (required). A correction of the charge of an
- * account's or a partner's pool names the platform `people` budget of its word (`budgetPoolId`),
- * which follows it (the table refuses another budget but not none: following it is the code's
- * choice, the owner's option B, and the owner may choose that the budget stays as it was); a
- * correction of the grant names none. One that would take a stored total below zero (the pool's granted or charged, or the
+ * one of them, with who and a fixed-word reason (required). THE `people` BUDGET RECORDS CONSUMPTION
+ * ONLY (the owner's option A, 2026-11-04), so a correction of the charge of an account's or a
+ * partner's pool that RAISES it names the platform `people` budget of its word (`budgetPoolId`),
+ * which rises with it, and one that LOWERS it names NONE: the pool falls and the budget stays as it
+ * was. A lowering correction that names a budget is `invalid_argument` (a programming error: the
+ * table would take the entry, which is why this refuses it), and nothing is written. A correction of
+ * the grant names none either way, and a platform pool's own correction names none (it is the
+ * budget). One that would take a stored total below zero (the pool's granted or charged, or the
  * budget's charged) is `would_go_negative`, and one that would take it past 2^53 - 1 is
  * `would_exceed_limit`; both write nothing. A grant adjusted below what is used is allowed, and
  * available goes negative. A budget that is not there is `pool_not_found`.
@@ -1025,6 +1006,12 @@ export async function adjustPool(
       ? null
       : positiveId("a budget pool", input.budgetPoolId);
   if (budget !== null && charged === 0) invalid("only an adjustment of the charge names a budget");
+  if (budget !== null && charged < 0) {
+    // Option A: the people budget records consumption only, so lowering a charge never credits it.
+    invalid(
+      "an adjustment that lowers a charge names no budget: the people budget records consumption only",
+    );
+  }
   if (input.reason === undefined || input.reason === null) invalid("an adjustment has a reason");
   const reason = reasonArg(input.reason, null);
   const actor = actorArg(input.actorUserId);

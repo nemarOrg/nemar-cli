@@ -29,7 +29,6 @@ import {
   getPool,
   grantPool,
   placeHold,
-  refundJob,
   releaseHold,
   settleFinal,
   settleProvisional,
@@ -452,6 +451,8 @@ describe("a crowd of mixed concurrent operations", () => {
 describe("every operation runs on D1 as it does on SQLite", () => {
   test("a whole life of a job, an adjustment and an expiry, with the totals equal to the ledger", async () => {
     const { person, budget } = await scene(20000, 100000);
+    // The budget is shared by the file's tests, so what is pinned of it is what THIS test did.
+    const budgetBefore = (await poolTotals(d1, budget.id)).charged_milli;
     const job = jobId(next());
     expect((await hold(person, budget, 6000, { jobId: job })).ok).toBe(true);
     // Used more than held: a charge, an overrun, and a negative-free pool.
@@ -465,10 +466,9 @@ describe("every operation runs on D1 as it does on SQLite", () => {
       ok: true,
       deltaMilli: -500,
     });
-    expect(await refundJob(d1, { jobId: job, reason: "platform_failure" })).toMatchObject({
-      ok: true,
-      refundedMilli: 7000,
-    });
+    // Final settlement is the one entry that lowers the budget: it took 500 back from both.
+    expect((await poolTotals(d1, person.id)).charged_milli).toBe(7000);
+    expect((await poolTotals(d1, budget.id)).charged_milli).toBe(budgetBefore + 7000);
     const other = jobId(next());
     expect((await hold(person, budget, 2000, { jobId: other })).ok).toBe(true);
     expect(await releaseHold(d1, { jobId: other })).toMatchObject({
@@ -484,6 +484,21 @@ describe("every operation runs on D1 as it does on SQLite", () => {
       idempotencyKey: `race-adjust-${next()}`,
     });
     expect(adj.ok).toBe(true);
+    // The people budget records consumption only: a correction that lowers the person's charge
+    // moves the person alone, and one that names the budget for it is refused, here as on SQLite.
+    const lower = (budgetPoolId: number | null) =>
+      adjustPool(d1, {
+        poolId: person.id,
+        budgetPoolId,
+        chargedDeltaMilli: -300,
+        actorUserId: 1,
+        reason: "correction",
+        idempotencyKey: `race-adjust-${next()}`,
+      });
+    await expect(lower(budget.id)).rejects.toMatchObject({ code: "invalid_argument" });
+    expect((await lower(null)).ok).toBe(true);
+    expect((await poolTotals(d1, person.id)).charged_milli).toBe(7000);
+    expect((await poolTotals(d1, budget.id)).charged_milli).toBe(budgetBefore + 7300);
     expect(
       await adjustPool(d1, {
         poolId: person.id,
@@ -495,9 +510,9 @@ describe("every operation runs on D1 as it does on SQLite", () => {
     ).toEqual({ ok: false, code: "would_go_negative" });
     expect(
       await expireUnused(d1, { poolId: person.id, idempotencyKey: `race-expire-${next()}` }),
-    ).toMatchObject({ ok: true, expiredMilli: 19700 });
+    ).toMatchObject({ ok: true, expiredMilli: 13000 });
     const t = await poolTotals(d1, person.id);
-    expect([t.granted_milli, t.held_milli, t.charged_milli]).toEqual([300, 0, 300]);
+    expect([t.granted_milli, t.held_milli, t.charged_milli]).toEqual([7000, 0, 7000]);
     expect(await totalsDisagreements(d1)).toEqual([]);
   });
 

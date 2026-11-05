@@ -3,8 +3,9 @@
  * the real migration and the real service (bun:sqlite behind `realD1`; the engine parity of the
  * statements is in compute-ledger-race.test.ts and compute-ledger-migration.test.ts).
  *
- * What is pinned: a refund ends a job's charge (a final settlement after one is `refunded`, never a
- * re-charge); a job's final settlement happens once even when it equals the charge; a closing step
+ * What is pinned: a refund entry that exists ends a job's charge (a final settlement after one is
+ * `refunded`, never a re-charge; no code writes one any more, the owner having decided that no failure
+ * is refunded, so the entry here is a row put in by hand); a job's final settlement happens once even when it equals the charge; a closing step
  * is replayed (the closing entry, `replayed: true`) when it is of the requested kind, and `hold_closed`
  * says which kind closed the hold otherwise; the hold's key is made of the job, so no caller can
  * build a colliding one, and an idempotency key is compared on EVERY field of the request; an
@@ -28,8 +29,6 @@ import {
   grantPool,
   holdKey,
   placeHold,
-  refundJob,
-  refundKey,
   releaseHold,
   settleFinal,
   settleProvisional,
@@ -102,7 +101,6 @@ describe("the keys the ledger writes of itself", () => {
     const { job } = await held(w);
     expect(holdKey(job)).toBe(`job:${job}:hold`);
     expect(finalKey(job)).toBe(`job:${job}:final`);
-    expect(refundKey(job)).toBe(`job:${job}:refund`);
     const entry = await findEntryByKey(w.d1, holdKey(job));
     expect(entry).toMatchObject({ kind: "hold", job_id: job });
   });
@@ -110,7 +108,8 @@ describe("the keys the ledger writes of itself", () => {
   test("a caller's key can never be one of them: a grant, an adjustment or an expiry that tries is refused", async () => {
     const w = world();
     const { person, job } = await held(w);
-    const taken = [holdKey(job), finalKey(job), refundKey(job), "hold:1:charge", "job:x"];
+    // The retired refund key is still a `job:` key, which no caller may use.
+    const taken = [holdKey(job), finalKey(job), `job:${job}:refund`, "hold:1:charge", "job:x"];
     for (const idempotencyKey of taken) {
       await expect(
         grantPool(w.d1, { poolId: person.id, amountMilli: 1, actorUserId: 1, idempotencyKey }),
@@ -162,17 +161,22 @@ describe("the keys the ledger writes of itself", () => {
   });
 });
 
-describe("a refund ends a job's charge", () => {
-  test("a final settlement after a refund is refused, whatever the figure, and moves no total", async () => {
+describe("a refund entry that exists ends a job's charge", () => {
+  test("a final settlement after one is refused, whatever the figure, and moves no total", async () => {
     const w = world();
     const { person, budget, job } = await held(w);
     await settleProvisional(w.d1, { jobId: job, chargeMilli: 3000 });
-    expect(await refundJob(w.d1, { jobId: job, reason: "platform_failure" })).toMatchObject({
-      ok: true,
-      refundedMilli: 3000,
-    });
+    // No function of the service writes a refund (the owner decided that none is automatic), but the
+    // kind stays in the table's vocabulary, so a row of it put in by hand, which names no budget,
+    // is what this guard is for: it must not be possible to charge the job again after it.
+    w.db.run(
+      `INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key)
+       VALUES ('refund', ?, NULL, -3000, ?, 'refund', ?)`,
+      [person.id, job, `by-hand:${job}`],
+    );
     const entries = await count(w);
     const before = [await reread(w, person), await reread(w, budget)];
+    expect(before.map((p) => p.charged_milli)).toEqual([0, 3000]);
     for (const finalMilli of [3000, 3500, 0, 1]) {
       expect([finalMilli, await settleFinal(w.d1, { jobId: job, finalMilli })]).toEqual([
         finalMilli,
@@ -181,21 +185,7 @@ describe("a refund ends a job's charge", () => {
     }
     expect(await count(w)).toBe(entries);
     expect([await reread(w, person), await reread(w, budget)]).toEqual(before);
-    expect((await reread(w, person)).charged_milli).toBe(0);
     expect(await totalsDisagreements(w.d1)).toEqual([]);
-  });
-
-  test("a final settlement before a refund is refunded whole, and a final settlement after that is refunded too", async () => {
-    const w = world();
-    const { person, job } = await held(w);
-    await settleProvisional(w.d1, { jobId: job, chargeMilli: 3000 });
-    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3500 })).toMatchObject({ ok: true });
-    expect(await refundJob(w.d1, { jobId: job })).toMatchObject({ ok: true, refundedMilli: 3500 });
-    expect(await settleFinal(w.d1, { jobId: job, finalMilli: 3500 })).toEqual({
-      ok: false,
-      code: "refunded",
-    });
-    expect((await reread(w, person)).charged_milli).toBe(0);
   });
 });
 
@@ -269,7 +259,7 @@ describe("a job's final settlement happens once, even of nothing", () => {
 });
 
 describe("a job's charge is the job's own, not its pool's", () => {
-  /** Two jobs on one pool, one settled to 3000 and the other released. */
+  /** Two jobs held on one pool. */
   async function twoJobs() {
     const w = world();
     const person = await ensurePool(w.d1, "account", String(20000 + next()), "cpu");
@@ -310,15 +300,6 @@ describe("a job's charge is the job's own, not its pool's", () => {
       ok: false,
       code: "already_final",
     });
-  });
-
-  test("a job that was released has nothing to refund, though its pool has charge", async () => {
-    const { w, a, b } = await twoJobs();
-    await settleProvisional(w.d1, { jobId: a, chargeMilli: 3000 });
-    await releaseHold(w.d1, { jobId: b });
-    expect(await refundJob(w.d1, { jobId: b })).toEqual({ ok: false, code: "nothing_to_refund" });
-    // And a refund returns the job's charge only.
-    expect(await refundJob(w.d1, { jobId: a })).toMatchObject({ ok: true, refundedMilli: 3000 });
   });
 });
 
@@ -392,21 +373,6 @@ describe("a closing step is replayed when it is of the requested kind", () => {
       ok: false,
       code: "no_hold",
     });
-  });
-
-  test("a refund replayed returns the refund, whatever has happened since", async () => {
-    const w = world();
-    const { person, job } = await held(w);
-    await settleProvisional(w.d1, { jobId: job, chargeMilli: 3000 });
-    const first = await refundJob(w.d1, { jobId: job, reason: "platform_failure" });
-    expect(first).toMatchObject({ ok: true, replayed: false, refundedMilli: 3000 });
-    const entries = await count(w);
-    expect(await refundJob(w.d1, { jobId: job, reason: "platform_failure" })).toEqual({
-      ...(first as object),
-      replayed: true,
-    });
-    expect(await count(w)).toBe(entries);
-    expect((await reread(w, person)).charged_milli).toBe(0);
   });
 });
 
@@ -871,7 +837,6 @@ describe("every statement the service exports searches compute_ledger by an inde
       "RELEASE_INSERT_SQL",
       "SETTLE_INSERT_SQL",
       "FINAL_INSERT_SQL",
-      "REFUND_INSERT_SQL",
       "GRANT_INSERT_SQL",
       "ADJUST_INSERT_SQL",
       "EXPIRE_INSERT_SQL",

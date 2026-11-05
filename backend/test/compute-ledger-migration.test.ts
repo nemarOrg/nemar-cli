@@ -1011,7 +1011,8 @@ describe("compute_ledger: the budget an entry names", () => {
       ];
       for (const [name, row] of cases) {
         const delta = Number(row().charged_delta_milli);
-        // Naming the people budget credits it (or charges it); naming none moves the pool alone.
+        // Naming the people budget credits it (or charges it); naming none moves the pool alone. The
+        // table takes both; the service's rule (option A: a lowering never names it) is the budget file's.
         const named = [await totals(e, c.pool), await totals(e, c.budget)];
         expect(
           [name, await entry(e, { pool_id: c.pool, ...row(), budget_pool_id: c.budget })],

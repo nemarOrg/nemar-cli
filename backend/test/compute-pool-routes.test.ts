@@ -11,8 +11,10 @@
  *  - an invalid body is a 400 that names the fields and never echoes a value, and nothing is
  *    written; amounts are whole milli-SU (a fraction, a string and a number a double cannot hold
  *    are refused);
- *  - an adjustment of the charge of an account's pool follows the `people` budget of the same
- *    word, and one that would make a stored total negative is a 409 that writes nothing;
+ *  - an adjustment that RAISES the charge of an account's pool raises the `people` budget of the
+ *    same word with it, and one that LOWERS it leaves the budget's consumption as it was (the
+ *    budget records consumption only: the owner's decision of 2026-11-04); one that would make a
+ *    stored total negative is a 409 that writes nothing;
  *  - the totals still equal the ledger's sums after all of it.
  */
 
@@ -595,18 +597,50 @@ describe("an adjustment", () => {
     });
   });
 
-  test("an adjustment of the charge follows the people budget of the same word", async () => {
+  test("an adjustment of the charge upward raises the people budget of the same word, and downward leaves it", async () => {
     await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 100000 });
     await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 10000 });
     const up = await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 3000 }));
     expect(up.body.pool).toMatchObject({ charged_milli: 3000, available_milli: 7000 });
     expect(up.body.entry).toMatchObject({ charged_delta_milli: 3000, granted_delta_milli: 0 });
+    expect(up.body.entry.budget_pool_id).toBe(poolOf("platform", "people", "cpu")?.id);
     expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(3000);
     expect(poolOf("platform", "people", "gpu")?.charged_milli).toBe(0);
     expect(poolOf("platform", "pipelines", "cpu")?.charged_milli).toBe(0);
+    // Taking it back moves the person's pool alone: the budget records what was consumed, and a
+    // correction by an administrator never gives it back.
     const down = await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: -3000 }));
-    expect(down.body.pool.charged_milli).toBe(0);
-    expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(0);
+    expect(down.status).toBe(201);
+    expect(down.body.pool).toMatchObject({ charged_milli: 0, available_milli: 10000 });
+    expect(down.body.entry).toMatchObject({ charged_delta_milli: -3000 });
+    expect(down.body.entry.budget_pool_id).toBeNull();
+    expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(3000);
+    expect(poolOf("platform", "people", "cpu")?.held_milli).toBe(0);
+    expect(await totalsDisagreements(realD1(db))).toEqual([]);
+  });
+
+  test("no correction of an account's pool, of either sign or either target, ever lowers the people budget", async () => {
+    await grant("owner", PEOPLE, { pool: "cpu", amount_milli: 100000 });
+    await grant("admin", ACCOUNT(), { pool: "cpu", amount_milli: 10000 });
+    await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 4000 }));
+    const consumed = poolOf("platform", "people", "cpu")?.charged_milli;
+    expect(consumed).toBe(4000);
+    for (const [who, over] of [
+      ["owner", { target: "charged", delta_milli: -1 }],
+      ["owner", { target: "charged", delta_milli: -2500 }],
+      ["admin", { target: "granted", delta_milli: -2000 }],
+      ["admin", { target: "granted", delta_milli: 2000 }],
+    ] as Array<[ComputeWho, Record<string, unknown>]>) {
+      const r = await adjust(who, ACCOUNT(), body(over));
+      expect([who, over, r.status]).toEqual([who, over, 201]);
+      expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(consumed);
+    }
+    const lowered = db
+      .query(
+        "SELECT COUNT(*) AS n FROM compute_ledger WHERE budget_pool_id IS NOT NULL AND charged_delta_milli < 0",
+      )
+      .get() as { n: number };
+    expect(lowered.n).toBe(0);
     expect(await totalsDisagreements(realD1(db))).toEqual([]);
   });
 
@@ -636,8 +670,8 @@ describe("an adjustment", () => {
       const r = await adjust(who, ACCOUNT(), body(over));
       expect([r.status, r.body.code]).toEqual([409, "would_go_negative"]);
     }
-    // And one the budget could not take: the owner took the budget's charge back, so the person
-    // holds what the budget does not.
+    // The budget is not part of a correction downward, so the owner taking the budget's own charge
+    // back cannot make the person's correction fail: it applies, and the budget stays where it is.
     expect(
       (await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: 500 }))).status,
     ).toBe(201);
@@ -645,13 +679,11 @@ describe("an adjustment", () => {
       (await adjust("owner", PEOPLE, body({ target: "charged", delta_milli: -500 }))).status,
     ).toBe(201);
     const writes = ledger();
-    const budgetRefusal = await adjust(
-      "owner",
-      ACCOUNT(),
-      body({ target: "charged", delta_milli: -500 }),
-    );
-    expect([budgetRefusal.status, budgetRefusal.body.code]).toEqual([409, "would_go_negative"]);
-    expect(ledger()).toBe(writes);
+    const budgetBefore = poolOf("platform", "people", "cpu")?.charged_milli;
+    const down = await adjust("owner", ACCOUNT(), body({ target: "charged", delta_milli: -500 }));
+    expect([down.status, down.body.pool.charged_milli]).toEqual([201, 0]);
+    expect(poolOf("platform", "people", "cpu")?.charged_milli).toBe(budgetBefore as number);
+    expect(ledger()).toBe(writes + 1);
     expect(writes).toBe(before + 2);
   });
 
