@@ -1271,8 +1271,11 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * Kinds are set only by an owner, never inferred. Mirrors the role route's
    * self-change guard (a demoted/re-kinded owner locking themselves out is
    * the same failure mode either way), but carries none of role's other
-   * machinery: a kind change never revokes tokens, and there is no "last
-   * owner" analog to protect.
+   * machinery: a kind change never revokes API keys, and there is no "last
+   * owner" analog to protect. It does end one thing, and only when the account
+   * moves AWAY FROM `person`: the OpenID Connect grants of the clients that sign
+   * people in by `person_proven_orcid`, whose rule the account no longer meets
+   * (`applyKindChange`, ADR 0119 rule 12).
    *
    * Every refusal below (except "not found", the generic 404 every
    * username-keyed admin route shares) answers `{ error: <code>, message }`

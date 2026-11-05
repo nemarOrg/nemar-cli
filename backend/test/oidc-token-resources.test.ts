@@ -343,7 +343,10 @@ describe("userinfo refuses what is not a live access token with openid", () => {
           "SELECT revoked_at FROM oidc_tokens WHERE token_hash = ?",
         )
         .get(await hashApiKey(issued.access_token));
-      if (label !== "revoked token") expect(row?.revoked_at).toBeNull();
+      // Disabling a client revokes what it holds (phase #2019), so that row is revoked by the disable
+      // and not by the read; every other change leaves the row as it was.
+      if (label === "client") expect(row?.revoked_at).not.toBeNull();
+      else if (label !== "revoked token") expect(row?.revoked_at).toBeNull();
     }
   });
 
