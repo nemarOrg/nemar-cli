@@ -36,7 +36,7 @@ import {
   RECORDS_RESULT_MANIFEST_FILE,
 } from "../../shared/contract/compute";
 import { LaunchSpecSchema, encodeLaunchSpec } from "../../shared/contract/compute-launch";
-import { resultsLauncherKey } from "../../shared/contract/compute-launch";
+import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
 import { ADVANCE_ROWS_PER_TICK, runComputeAdvanceCron } from "../src/services/compute-advance";
 import { sweepComputeCancellations } from "../src/services/compute-advance";
 import type { ComputeJobRow } from "../src/services/compute-jobs";
@@ -1241,7 +1241,7 @@ describe("verification: a Tapis FINISHED stands only after the upload is verifie
     expect(job.failure_detail).toBe("not_completed");
   });
 
-  test("a verified job is `finished`, with the manifest and provenance checked and the checksums counted as unverified where R2 gave none", async () => {
+  test("a verified job is `finished`: the manifest and provenance agree, and every output is there at its declared size", async () => {
     const s = await submittedJob();
     await finishJob(s, {
       outputs: [
@@ -1253,6 +1253,159 @@ describe("verification: a Tapis FINISHED stands only after the upload is verifie
     const job = await reread(s.env, s.made.job.id);
     expect(job.state).toBe("finished");
     expect(job.results_verified_at).not.toBeNull();
+  });
+
+  // Round 1 of #2041: these checks had no failing test (with each disabled every compute test passed).
+  async function verifyAfter(
+    after: (s: { made: MadeJob; uuid: string; env: Bindings }) => Promise<void>,
+    plan: Parameters<typeof playLauncher>[4] = {},
+  ) {
+    const s = await submittedJob();
+    const id = s.made.job.id;
+    await drive(s.env, id, s.uuid, "RUNNING");
+    await playLauncher(fx, s.env, await reread(s.env, id), s.uuid, plan);
+    await after(s);
+    fx.tapis.advance(s.uuid, "FINISHED");
+    setTapisTimes(fx, s.uuid, 30 * MINUTE, 0);
+    setTapisExit(s.uuid, 0);
+    await advanceComputeJob(s.env, id);
+    return { s, job: await reread(s.env, id) };
+  }
+
+  const twoOutputs = [
+    { path: "a.txt", content: "alpha" },
+    { path: "b.txt", content: "beta" },
+  ];
+
+  async function editManifest(
+    s: { made: MadeJob },
+    edit: (files: Array<{ path: string; size: number; sha256: string }>) => unknown[],
+  ) {
+    const key = resultsLauncherKey(s.made.job.id, "manifest.json");
+    const manifest = JSON.parse((await (await fx.harness.results.get(key))?.text()) as string);
+    manifest.files = edit(manifest.files);
+    await fx.harness.results.put(key, new TextEncoder().encode(JSON.stringify(manifest)));
+  }
+
+  const manifestEdits: Array<
+    [string, (f: Array<{ path: string; size: number; sha256: string }>) => unknown[]]
+  > = [
+    ["another path", (f) => [{ ...f[0], path: "other.txt" }, f[1]]],
+    ["another size", (f) => [{ ...f[0], size: (f[0]?.size ?? 0) + 1 }, f[1]]],
+    ["another checksum", (f) => [{ ...f[0], sha256: "0".repeat(64) }, f[1]]],
+    [
+      "one entry more than was declared",
+      (f) => [...f, { path: "c.txt", size: 1, sha256: "1".repeat(64) }],
+    ],
+    ["one entry fewer than was declared", (f) => [f[0]]],
+  ];
+  for (const [name, edit] of manifestEdits) {
+    test(`a manifest with ${name} fails verification as \`manifest_mismatch\`, flagged for an administrator`, async () => {
+      const { job } = await verifyAfter((s) => editManifest(s, edit), { outputs: twoOutputs });
+      expect([job.state, job.failure_code, job.failure_detail]).toEqual([
+        "failed",
+        "result_verification_failed",
+        "manifest_mismatch",
+      ]);
+      expect([job.flag_mismatch, job.platform_failure]).toEqual([1, 1]);
+    });
+  }
+
+  test("an output whose stored SHA-256 is not the declared one fails as `output_checksum_mismatch`; one that matches, or has none, passes", async () => {
+    const encoder = new TextEncoder();
+    const hex = async (text: string) => sha256Hex(encoder.encode(text));
+    // Same size, other bytes, stored WITH R2's checksum of those other bytes.
+    const bad = await verifyAfter(
+      async (s) => {
+        await fx.harness.results.put(
+          resultsOutputKey(s.made.job.id, "a.txt"),
+          encoder.encode("ALPHA"),
+          { sha256: await hex("ALPHA") },
+        );
+      },
+      { outputs: twoOutputs },
+    );
+    expect([bad.job.state, bad.job.failure_detail, bad.job.flag_mismatch]).toEqual([
+      "failed",
+      "output_checksum_mismatch",
+      1,
+    ]);
+    // The right bytes with R2's checksum of them: verified.
+    const good = await verifyAfter(
+      async (s) => {
+        await fx.harness.results.put(
+          resultsOutputKey(s.made.job.id, "a.txt"),
+          encoder.encode("alpha"),
+          { sha256: await hex("alpha") },
+        );
+      },
+      { outputs: twoOutputs },
+    );
+    expect(good.job.state).toBe("finished");
+    // The same size, other bytes, and NO checksum from R2: size is all there is to check, and it passes
+    // (the residual the ADR states).
+    const sizeOnly = await verifyAfter(
+      async (s) => {
+        await fx.harness.results.put(
+          resultsOutputKey(s.made.job.id, "a.txt"),
+          encoder.encode("ALPHA"),
+        );
+      },
+      { outputs: twoOutputs },
+    );
+    expect(sizeOnly.job.state).toBe("finished");
+  });
+
+  test("a launcher file replaced after `complete` by an object of another size fails as `launcher_file_missing`", async () => {
+    const { job } = await verifyAfter(async (s) => {
+      await fx.harness.results.put(
+        resultsLauncherKey(s.made.job.id, "launcher.log"),
+        new TextEncoder().encode("a log that is not the size that was declared"),
+      );
+    });
+    expect([job.state, job.failure_code, job.failure_detail]).toEqual([
+      "failed",
+      "result_verification_failed",
+      "launcher_file_missing",
+    ]);
+  });
+
+  test("a recorded specification that cannot be read (deleted, or not the digest the row holds) is `records_unavailable` and the platform's", async () => {
+    for (const break_ of [
+      (s: { made: MadeJob }) => fx.harness.records.delete(recordKey(s.made.job.id, "spec.json")),
+      (s: { made: MadeJob }) =>
+        fx.harness.records.put(
+          recordKey(s.made.job.id, "spec.json"),
+          new TextEncoder().encode("{}"),
+        ),
+    ]) {
+      const { job } = await verifyAfter(async (s) => {
+        await break_(s);
+      });
+      expect([job.state, job.failure_code, job.failure_detail, job.platform_failure]).toEqual([
+        "failed",
+        "records_unavailable",
+        "records_unreadable",
+        1,
+      ]);
+      expect(job.results_verified_at).toBeNull();
+    }
+  });
+
+  test("a Worker with no records bucket cannot verify, and says so the same way", async () => {
+    const s = await submittedJob();
+    const id = s.made.job.id;
+    await drive(s.env, id, s.uuid, "RUNNING");
+    await playLauncher(fx, s.env, await reread(s.env, id), s.uuid, {});
+    fx.tapis.advance(s.uuid, "FINISHED");
+    setTapisTimes(fx, s.uuid, 30 * MINUTE, 0);
+    await advanceComputeJob({ ...s.env, COMPUTE_RECORDS: undefined } as Bindings, id);
+    const job = await reread(s.env, id);
+    expect([job.state, job.failure_code, job.failure_detail]).toEqual([
+      "failed",
+      "records_unavailable",
+      "records_unreadable",
+    ]);
   });
 });
 

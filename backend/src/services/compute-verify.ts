@@ -308,13 +308,7 @@ export const VERIFY_REASONS = [
 export type VerifyReason = (typeof VERIFY_REASONS)[number];
 
 export type VerifyResult =
-  | {
-      ok: true;
-      /** Outputs whose SHA-256 R2 returned and that matched. */
-      checksumsVerified: number;
-      /** Outputs whose SHA-256 was not compared, because R2 returned none. */
-      checksumsUnverified: number;
-    }
+  | { ok: true }
   | {
       ok: false;
       /** `result_upload_failed` when the launcher never completed; the platform's own code otherwise. */
@@ -420,17 +414,18 @@ export async function verifyResults(
     }
   }
 
+  // Size always; the SHA-256 too, but ONLY where R2 returned one for the object. A presigned upload
+  // carries no checksum unless the launcher sends one, so an output without one is verified by size
+  // alone (UNVERIFIED in the ADR: whether R2 returns a SHA-256 on a listing for the launcher's uploads).
+  // Nothing counts how many were size-only: a count nobody reads is not a record.
   const outputs = await listObjects(results, `jobs/${job.id}/outputs/`);
-  let verified = 0;
-  let unverified = 0;
   for (const o of declared.value.outputs) {
     const there = outputs.get(resultsOutputKey(job.id, o.path));
     if (!there) return fail("result_verification_failed", "output_missing");
     if (there.size !== o.size) return fail("result_verification_failed", "output_size_mismatch");
-    if (there.sha256 === null) unverified++;
-    else if (there.sha256 !== o.sha256) {
+    if (there.sha256 !== null && there.sha256 !== o.sha256) {
       return fail("result_verification_failed", "output_checksum_mismatch", true);
-    } else verified++;
+    }
   }
 
   const launcher = await listObjects(results, `jobs/${job.id}/launcher/`);
@@ -440,5 +435,5 @@ export async function verifyResults(
       return fail("result_verification_failed", "launcher_file_missing");
     }
   }
-  return { ok: true, checksumsVerified: verified, checksumsUnverified: unverified };
+  return { ok: true };
 }
