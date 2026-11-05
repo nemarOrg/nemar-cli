@@ -137,6 +137,7 @@ describe("an unconfigured Worker", () => {
       },
       storage: { records_binding: false, results_binding: true, signing_configured: true },
       access: { key_configured: false },
+      runtime_image: { set: false, valid: false, digest: null },
     });
     // The health call is the one request an address alone allows.
     expect(standin.log.map((r) => r.path)).toEqual(["/v3/jobs/healthcheck"]);
@@ -172,6 +173,7 @@ describe("an unconfigured Worker", () => {
         },
         storage: { records_binding: false, results_binding: false, signing_configured: false },
         access: { key_configured: false },
+        runtime_image: { set: false, valid: false, digest: null },
       });
       expect(standin.log).toHaveLength(0);
     } finally {
@@ -187,6 +189,31 @@ describe("an unconfigured Worker", () => {
     const parsed = ComputeStatusResponseSchema.parse(future);
     expect((parsed as Record<string, unknown>).added).toBe(1);
     expect((parsed.tapis as Record<string, unknown>).added_too).toEqual([1]);
+  });
+});
+
+describe("the runtime image, as the Worker reads it", () => {
+  const HEX = "7".repeat(64);
+
+  test("unset, set to a digest-pinned reference, and set to something that is not one: the digest is reported, the reference never is", async () => {
+    const reference = `ghcr.io/example-owner/example-image@sha256:${HEX}`;
+    const cases: Array<
+      [string | undefined, { set: boolean; valid: boolean; digest: string | null }]
+    > = [
+      [undefined, { set: false, valid: false, digest: null }],
+      ["", { set: false, valid: false, digest: null }],
+      [reference, { set: true, valid: true, digest: `sha256:${HEX}` }],
+      [`  ${reference}\n`, { set: true, valid: true, digest: `sha256:${HEX}` }],
+      ["ghcr.io/example-owner/example-image:latest", { set: true, valid: false, digest: null }],
+      [`${reference}-and-text`, { set: true, valid: false, digest: null }],
+    ];
+    for (const [value, expected] of cases) {
+      const res = await status("admin", harness.env({ COMPUTE_RUNTIME_IMAGE: value } as never));
+      expect([value, res.body.runtime_image]).toEqual([value, expected]);
+      // The reference is a value the owner set: only its digest, when valid, is ever sent.
+      expect(res.text).not.toContain("example-owner");
+      expect(res.text).not.toContain("example-image");
+    }
   });
 });
 

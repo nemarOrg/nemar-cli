@@ -181,6 +181,8 @@ describe("status", () => {
     expect(r.stdout).toContain("TAPIS_AUTH_STRATEGY:missing");
     expect(r.stdout).toContain("records binding: no");
     expect(r.stdout).toContain("ACCESS key: no");
+    expect(r.stdout).toContain("Runtime image");
+    expect(r.stdout).toContain("set: no (a python job stays created until it is)");
     expect(standin.log).toHaveLength(0);
     expectNoSecrets(r);
   });
@@ -218,6 +220,29 @@ describe("status", () => {
       health: "ok",
     });
     expectNoSecrets(j);
+  });
+
+  test("the runtime image: its digest when valid, a plain word when set to something that is not a pinned reference, and never the reference", async () => {
+    const hex = "5".repeat(64);
+    configuredWorker({
+      COMPUTE_RUNTIME_IMAGE: `ghcr.io/example-owner/example-image@sha256:${hex}`,
+    });
+    const valid = await runCli("owner", ["status"]);
+    expect(valid.exitCode).toBe(0);
+    expect(valid.stdout).toContain(`set: yes, digest sha256:${hex}`);
+    expect(valid.stdout).not.toContain("example-owner");
+    expect(JSON.parse((await runCli("owner", ["status", "--json"])).stdout).runtime_image).toEqual({
+      set: true,
+      valid: true,
+      digest: `sha256:${hex}`,
+    });
+
+    configuredWorker({ COMPUTE_RUNTIME_IMAGE: "ghcr.io/example-owner/example-image:latest" });
+    const invalid = await runCli("owner", ["status"]);
+    expect(invalid.stdout).toContain(
+      "set: yes, but not a digest-pinned reference (a python job stays created)",
+    );
+    expect(invalid.stdout).not.toContain("example-owner");
   });
 
   test("a credential Tapis refuses prints `unauthorized`, and still exits 0", async () => {

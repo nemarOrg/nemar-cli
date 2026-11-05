@@ -92,6 +92,7 @@ const VALID: Record<string, unknown> = {
     },
     storage: { records_binding: true, results_binding: true, signing_configured: false },
     access: { key_configured: false },
+    runtime_image: { set: true, valid: true, digest: `sha256:${"a".repeat(64)}` },
   },
   ComputePoolViewSchema: pool,
   ComputeLedgerEntryViewSchema: entry,
@@ -163,6 +164,21 @@ describe("compute-admin: every exported schema is open", () => {
     expect(admin.ComputeLedgerEntryViewSchema.safeParse({ ...entry, kind: "waive" }).success).toBe(
       true,
     );
+  });
+
+  test("a status answer from a Worker that predates `runtime_image` still parses, and its absence is kept as absence", () => {
+    const old = JSON.parse(JSON.stringify(VALID.ComputeStatusResponseSchema)) as Record<
+      string,
+      unknown
+    >;
+    old.runtime_image = undefined;
+    const parsed = admin.ComputeStatusResponseSchema.parse(old);
+    expect(parsed.runtime_image).toBeUndefined();
+    // A malformed one is refused, not guessed.
+    expect(
+      admin.ComputeStatusResponseSchema.safeParse({ ...old, runtime_image: { set: "yes" } })
+        .success,
+    ).toBe(false);
   });
 
   test("the file declares no closed schema at all", () => {

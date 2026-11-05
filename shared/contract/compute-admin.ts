@@ -227,7 +227,8 @@ export type ComputePolicyResponse = z.infer<typeof ComputePolicyResponseSchema>;
  *  - `tapis.token` and `tapis.health` are `ok`, `unconfigured`, `skipped` (no username to probe
  *    with under the service strategy) or the kind of the error the call failed with
  *    (`unauthorized`, `not_found`, `rejected`, `unavailable`, `invalid_response`): a string here,
- *    not an enum, so a word the Worker adds does not break a released CLI.
+ *    not an enum, so a word the Worker adds does not break a released CLI;
+ *  - `runtime_image` is whether the runtime image variable is set and valid, and its digest.
  */
 export const ComputeStatusResponseSchema = z
   .object({
@@ -255,6 +256,15 @@ export const ComputeStatusResponseSchema = z
       })
       .passthrough(),
     access: z.object({ key_configured: z.boolean() }).passthrough(),
+    /**
+     * `COMPUTE_RUNTIME_IMAGE`, NEMAR's own image for a `python` job: whether it is `set`, whether it is a
+     * `valid` digest-pinned reference, and its `digest` (null unless valid; the reference is never sent).
+     * Optional so a CLI that reads a Worker from before the field existed still parses its answer.
+     */
+    runtime_image: z
+      .object({ set: z.boolean(), valid: z.boolean(), digest: z.string().nullable() })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 

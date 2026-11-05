@@ -15,10 +15,15 @@
  * tenant can be reached, and the mint says the credential works. They run together, each with a short
  * timeout and a single attempt, so the route answers within a few seconds whatever Tapis does. This
  * route writes nothing.
+ *
+ * `runtime_image` (round 1 of #2041) says whether the owner has set `COMPUTE_RUNTIME_IMAGE`, whether
+ * what is set is a digest-pinned reference, and its digest: a `python` job is not submitted until it is
+ * `valid`. The reference itself is never echoed.
  */
 
 import type { ComputeStatusResponse } from "../../../shared/contract/compute-admin";
 import type { Bindings } from "../types/bindings";
+import { readRuntimeImage } from "./compute-runtime-image";
 import { computeS3 } from "./compute-s3";
 import { computeEnabled, computePipelinesDispatchEnabled } from "./compute-switches";
 import { mintTapisToken } from "./tapis/auth";
@@ -56,6 +61,16 @@ async function outcome(run: () => Promise<unknown>): Promise<string> {
     );
     return "unavailable";
   }
+}
+
+/** Whether `COMPUTE_RUNTIME_IMAGE` is set, whether it is a digest-pinned reference, and its digest; never the reference. */
+function runtimeImageStatus(env: Bindings): ComputeStatusResponse["runtime_image"] {
+  const image = readRuntimeImage(env);
+  return {
+    set: image.state !== "unset",
+    valid: image.state === "ok",
+    digest: image.state === "ok" ? image.digest : null,
+  };
 }
 
 export interface StatusOptions {
@@ -112,5 +127,6 @@ export async function computeStatus(
       signing_configured: computeS3(env) !== null,
     },
     access: { key_configured: present(env.ACCESS_GATEWAY_API_KEY) },
+    runtime_image: runtimeImageStatus(env),
   };
 }

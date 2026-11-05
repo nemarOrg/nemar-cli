@@ -540,19 +540,59 @@ describe("submit", () => {
     expect(submits()).toBe(0);
   });
 
-  test("an unset runtime image keeps a python job `created` until it is set", async () => {
-    const made = await makeJob(fx);
-    expect(
-      await submitComputeJob(
-        { ...fx.env({ COMPUTE_RUNTIME_IMAGE: undefined }), DB: made.env.DB } as Bindings,
-        made.job.id,
-      ),
-    ).toEqual({
-      ok: false,
-      outcome: "unconfigured",
-    });
-    expect((await reread(made.env, made.job.id)).state).toBe("created");
+  // Round 1 of #2041: the variable is ONE digest-pinned reference, validated when it is read. A value
+  // that is not one (unset, blank, a tag, a short digest, upper case, junk after the digest) is never
+  // launched: the job stays `created`, exactly as when it is unset.
+  test("an unset or invalid runtime image keeps a python job `created` until it is a digest-pinned reference", async () => {
+    const hex = "e".repeat(64);
+    const unusable: Array<string | undefined> = [
+      undefined,
+      "",
+      "   ",
+      "ghcr.io/example/nemar-python:latest",
+      `ghcr.io/example/nemar-python@sha256:${"e".repeat(63)}`,
+      `ghcr.io/example/nemar-python@sha256:${hex}\nextra`,
+      `ghcr.io/example/nemar-python@sha256:${hex} extra`,
+      `GHCR.io/example/nemar-python@sha256:${hex}`,
+      `ghcr.io/example/nemar-python@sha256:${"E".repeat(64)}`,
+      `{"uri":"ghcr.io/example/nemar-python@sha256:${hex}"}`,
+    ];
+    for (const value of unusable) {
+      const made = await makeJob(fx);
+      expect([
+        value,
+        await submitComputeJob(
+          { ...fx.env({ COMPUTE_RUNTIME_IMAGE: value }), DB: made.env.DB } as Bindings,
+          made.job.id,
+        ),
+      ]).toEqual([value, { ok: false, outcome: "unconfigured" }]);
+      expect([value, (await reread(made.env, made.job.id)).state]).toEqual([value, "created"]);
+    }
     expect(submits()).toBe(0);
+  });
+
+  test("a python job's launch specification carries the configured reference, its digest and the Singularity file named for that digest", async () => {
+    const hex = "9".repeat(64);
+    const made = await makeJob(fx);
+    // Padding around the value is not part of it.
+    const env = {
+      ...fx.env({
+        COMPUTE_RUNTIME_IMAGE: `  docker://ghcr.io/example/nemar-python@sha256:${hex}\n`,
+      }),
+      DB: made.env.DB,
+    } as Bindings;
+    expect(await submitComputeJob(env, made.job.id)).toEqual({ ok: true, outcome: "submitted" });
+    const job = await reread(made.env, made.job.id);
+    const spec = LaunchSpecSchema.parse(
+      JSON.parse(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
+    );
+    // Written out, not computed with the contract's own function.
+    expect(spec.image).toEqual({
+      uri: `docker://ghcr.io/example/nemar-python@sha256:${hex}`,
+      digest: `sha256:${hex}`,
+      sif: `${hex}.sif`,
+    });
+    expect(job.image_digest).toBe(`sha256:${hex}`);
   });
 
   test("an image job brings its own image, and the Singularity file is named for its digest", async () => {

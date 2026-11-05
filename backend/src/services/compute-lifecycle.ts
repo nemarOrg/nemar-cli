@@ -58,14 +58,8 @@ import {
   isTerminalComputeState,
   stateFromTapisStatus,
 } from "../../../shared/compute-state.js";
+import { encodeLaunchSpec, resultsLauncherKey } from "../../../shared/contract/compute-launch.js";
 import {
-  encodeLaunchSpec,
-  resultsLauncherKey,
-  sifFileNameForDigest,
-} from "../../../shared/contract/compute-launch.js";
-import {
-  COMPUTE_IMAGE_DIGEST_RE,
-  COMPUTE_IMAGE_REF_RE,
   type JobSpec,
   LAUNCHER_FILES,
   type LauncherFileName,
@@ -88,6 +82,7 @@ import {
   sha256Hex,
 } from "./compute-records.js";
 import { sendComputeResultsReadyEmail } from "./compute-results.js";
+import { type ImageFacts, imageFacts, readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled } from "./compute-switches.js";
 import { signComputeToken } from "./compute-tokens.js";
 import {
@@ -1017,18 +1012,17 @@ async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResu
   const spec: JobSpec | null = await readRecordedSpec(env.COMPUTE_RECORDS, job);
   if (spec === null || spec.runtime === "matlab") return { ok: false, why: "unbuildable" };
 
-  let imageRef: string;
+  let image: ImageFacts | null;
   if (spec.runtime === "image") {
     if (spec.image === undefined) return { ok: false, why: "unbuildable" };
-    imageRef = spec.image;
+    image = imageFacts(spec.image);
+    if (image === null) return { ok: false, why: "unbuildable" };
   } else {
-    imageRef = (env.COMPUTE_RUNTIME_IMAGE ?? "").trim();
-    if (!COMPUTE_IMAGE_REF_RE.test(imageRef)) return { ok: false, why: "unconfigured" };
+    const configured = readRuntimeImage(env);
+    if (configured.state !== "ok") return { ok: false, why: "unconfigured" };
+    image = configured;
   }
-  const digest = /@(sha256:[0-9a-f]{64})$/.exec(imageRef)?.[1] ?? "";
-  const sif = sifFileNameForDigest(digest);
-  if (!COMPUTE_IMAGE_DIGEST_RE.test(digest) || sif === null)
-    return { ok: false, why: "unbuildable" };
+  const { ref: imageRef, digest, sif } = image;
 
   const datasets = spec.datasets.map((d) => ({
     id: d.id,
