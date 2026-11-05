@@ -338,7 +338,9 @@ the grant below what is used is allowed, and available goes negative.
 
 The platform \`people\` budget records consumption only. Raising an account's charge also counts
 against the budget of the same word; lowering it leaves that budget as it was, so nothing done to a
-person's pool gives budget back. A job's final settlement is the one thing that lowers it.
+person's pool gives budget back. The only entries that lower it are a job's final settlement and
+the owner's own correction of the platform budget. A raise made by mistake is undone against the
+budget only by the owner's correction of the platform \`people\` pool.
 
 Correcting an account's charge is the owner's for now (an administrator corrects a grant); a
 platform budget is the owner's too.

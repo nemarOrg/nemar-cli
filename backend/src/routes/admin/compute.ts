@@ -27,10 +27,12 @@
  * decision of 2026-11-04, option A): an adjustment that RAISES the charge of an account's pool
  * raises the `people` budget of the same word with it, and one that LOWERS it moves the person's
  * pool alone and leaves the budget's consumption as it was, so nothing an administrator does to a
- * person's pool gives budget back (a job's final settlement is the only entry that lowers it; the
- * table would take either, and the ledger service refuses a lowering correction that names the
- * budget). A platform pool is its own budget, and a correction of a grant names none. A grant to a
- * deleted account is refused; its pools are still read and its grant corrected, for the record.
+ * person's pool gives budget back (the only entries that lower the budget are a job's final
+ * settlement and the owner's own correction of the platform budget, which is that pool's own entry
+ * and names no budget; the table would take either, and the ledger service refuses a lowering
+ * correction that names the budget). A platform pool is its own budget, and a correction of a grant
+ * names none. A grant to a deleted account is refused; its pools are still read and its grant
+ * corrected, for the record.
  *
  * Nothing here mails anyone, calls GitHub, or is a cron.
  */
@@ -327,7 +329,9 @@ async function adjustRoute(c: Ctx, holder: Holder) {
   if (!parsed.success) return invalidBody(c, issuesOf(parsed.error));
   const body = parsed.data;
   // Interim: an account's charge is corrected by an owner (a platform pool's route is owner-only
-  // already). Easy to loosen: a correction downward no longer touches the budget either way.
+  // already). Easy to loosen: this rule says WHO may correct a charge, not what it does to the
+  // budget, which is settled (option A): a correction upward still raises the `people` budget and
+  // one downward leaves it.
   if (holder.kind === "account" && body.target === "charged" && c.get("user").role !== "owner") {
     return refuse(c, "owner_only");
   }

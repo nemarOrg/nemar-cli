@@ -736,6 +736,14 @@ describe("help", () => {
     const text = r.stdout.replace(/\s+/g, " ");
     expect(text).toMatch(/consumption only/);
     expect(text).toMatch(/lowering it leaves that budget as it was/);
+    // What lowers the budget is said exactly: the final settlement and the owner's own correction.
+    expect(text).toMatch(
+      /only entries that lower it are a job's final settlement and the owner's own correction of the platform budget/,
+    );
+    expect(text).toMatch(
+      /raise made by mistake is undone against the budget only by the owner's correction of the platform `people` pool/,
+    );
+    expect(text).not.toMatch(/the one thing that lowers it/);
     // The text that said the budget "follows" a correction, in either direction, is gone.
     expect(text).not.toMatch(/budget of the same word follow/i);
   });
