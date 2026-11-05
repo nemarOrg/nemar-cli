@@ -16,7 +16,9 @@
  *
  * SECURITY, from the Jobs specification and documentation (all of it UNVERIFIED against a real
  * tenant): the launch specification, which holds a job's `job_token`, travels in the environment
- * variable `NEMAR_LAUNCH_SPEC`, so it is part of the job record's `parameterSet.envVariables`. Tapis
+ * variable `NEMAR_LAUNCH_SPEC` as base64url text (`encodeLaunchSpecEnv`, A1c), so it is part of the
+ * job record's `parameterSet.envVariables`. The encoding is for the shell, not for secrecy: the
+ * value holds the token and is the secret it always was, so it is never logged or returned. Tapis
  * returns `parameterSet` (and `subscriptions`, whose webhook address carries a token) in a job record
  * to whoever may read the record: the job's owner, its creator and a tenant administrator
  * (`GET /v3/jobs/{uuid}`, and the search with every attribute); a user the job's `JOB_HISTORY`
@@ -37,7 +39,10 @@ import {
   LAUNCHER_ENV,
   PARTITION_NAMES,
 } from "../../../../shared/contract/compute";
-import { LAUNCH_SPEC_MAX_BYTES } from "../../../../shared/contract/compute-launch";
+import {
+  LAUNCH_SPEC_ENV_MAX_CHARS,
+  isShellInertEnvValue,
+} from "../../../../shared/contract/compute-launch";
 
 /** The environment variable that carries the launch specification: the contract's own word. */
 export const LAUNCH_SPEC_ENV_KEY = LAUNCHER_ENV.SPEC;
@@ -210,13 +215,16 @@ export const SubmitJobRequestSchema = z
             z
               .object({
                 key: z.literal(LAUNCH_SPEC_ENV_KEY),
-                // Printable ASCII only: Tapis refuses a control character in an environment value,
-                // and the launch specification is ASCII by contract.
+                // The launch specification's text in base64url (`encodeLaunchSpecEnv`): ONLY the
+                // shell-inert alphabet `A-Za-z0-9-_`, within the encoded bound. A raw JSON value is
+                // refused here, before anything is sent: a scheduler that quotes an environment value
+                // conditionally and writes it into a file a shell sources would not carry it intact
+                // (A1c, #2043). The rule is the contract's own `isShellInertEnvValue`, not a copy.
                 value: z
                   .string()
                   .min(1)
-                  .max(LAUNCH_SPEC_MAX_BYTES)
-                  .regex(/^[\x20-\x7e]+$/),
+                  .max(LAUNCH_SPEC_ENV_MAX_CHARS)
+                  .refine(isShellInertEnvValue),
               })
               .strict(),
           )

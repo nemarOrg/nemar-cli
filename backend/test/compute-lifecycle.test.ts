@@ -4,14 +4,16 @@
  * the real ledger, Miniflare's R2 through the Worker's own bindings, the real local S3 interface, and
  * the Tapis stand-in (a real HTTP server built from Tapis's published specifications; NO RESPONSE IN IT
  * WAS RECORDED FROM A REAL TENANT). The launcher is played by the test (`compute-lifecycle-fixture.ts`):
- * it hashes the launch specification value the Tapis stand-in RECEIVED, never the digest the Worker
- * stored, so the digest check proves something.
+ * it decodes the launch specification value the Tapis stand-in RECEIVED (base64url, strictly, as the
+ * launcher does) and hashes the TEXT, never the digest the Worker stored, so the digest check proves
+ * something.
  *
  * What is pinned, each with a test of its own:
  *  - a job is submitted ONCE: the hold exists, the request names no archive field and asks Tapis not to
  *    archive the launch files, the owner is the NEMAR service identity from configuration, the launch
- *    specification (token and all) is in the one environment variable and nowhere in D1, its SHA-256 is
- *    written to the row BEFORE the call, and a webhook is subscribed;
+ *    specification (token and all) is in the one environment variable, as base64url text that a shell
+ *    sources intact even for shell-active arguments, and nowhere in D1; the SHA-256 written to the row
+ *    BEFORE the call is of the TEXT, not of the value; and a webhook is subscribed;
  *  - a submit whose answer was lost finds its job by tag and submits once (MUTATION: skip the tag
  *    search and the stand-in sees two submits); a rejection fails the job and releases the hold; an
  *    unavailable Tapis leaves it `created`; two jobs under one tag submit nothing and flag the job;
@@ -35,7 +37,13 @@ import {
   DEFAULT_COMPUTE_POLICY,
   RECORDS_RESULT_MANIFEST_FILE,
 } from "../../shared/contract/compute";
-import { LaunchSpecSchema, encodeLaunchSpec } from "../../shared/contract/compute-launch";
+import {
+  LaunchSpecSchema,
+  decodeLaunchSpecEnv,
+  encodeLaunchSpec,
+  encodeLaunchSpecEnv,
+  isShellInertEnvValue,
+} from "../../shared/contract/compute-launch";
 import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
 import { ADVANCE_ROWS_PER_TICK, runComputeAdvanceCron } from "../src/services/compute-advance";
 import { sweepComputeCancellations } from "../src/services/compute-advance";
@@ -69,6 +77,7 @@ import {
   RUNTIME_IMAGE_DIGEST,
   iso,
   jobTokenSeenByTapis,
+  launchSpecEnvSeenByTapis,
   launchSpecSeenByTapis,
   makeJob,
   playLauncher,
@@ -79,6 +88,7 @@ import {
 } from "./helpers/compute-lifecycle-fixture";
 import { roundTripD1, seedUser } from "./helpers/compute-seed";
 import { logged } from "./helpers/logs";
+import { makeSandbox, sourceLaunchFile } from "./helpers/scheduler-launch-file";
 
 let fx: LifecycleFixture;
 /** An owner of the Miniflare D1, which is never reset. */
@@ -208,8 +218,13 @@ describe("submit", () => {
     expect(body.maxMinutes).toBe(60);
     expect(body.parameterSet.envVariables).toHaveLength(1);
     expect(body.parameterSet.envVariables[0].key).toBe("NEMAR_LAUNCH_SPEC");
+    // The value is shell-inert: base64url text, nothing a shell or a conditional quoter acts on (A1c).
+    const value = body.parameterSet.envVariables[0].value as string;
+    expect(isShellInertEnvValue(value)).toBe(true);
+    expect(value.startsWith("{")).toBe(false);
+    expect(value).toBe(launchSpecEnvSeenByTapis(fx, job.tapis_uuid as string));
 
-    // The launch specification the launcher will read.
+    // The launch specification the launcher will read: what it decodes the value to.
     const text = launchSpecSeenByTapis(fx, job.tapis_uuid as string);
     const spec = LaunchSpecSchema.parse(JSON.parse(text));
     expect(spec.job_id).toBe(job.id);
@@ -222,9 +237,12 @@ describe("submit", () => {
     expect(spec.command).toEqual(["analyse", "--fast"]);
     expect(spec.resources).toEqual({ gpus: 0 });
     expect(spec.api_base).toBe("http://127.0.0.1:9");
-    // Its text is exactly what `encodeLaunchSpec` writes, and its digest is what the row holds.
+    // Its text is exactly what `encodeLaunchSpec` writes, the value is that text in base64url, and the
+    // digest the row holds is of the TEXT the launcher decodes: never of the value that was sent.
     expect(text).toBe(encodeLaunchSpec(spec));
+    expect(value).toBe(encodeLaunchSpecEnv(text));
     expect(job.launch_spec_digest).toBe(await sha256Hex(new TextEncoder().encode(text)));
+    expect(job.launch_spec_digest).not.toBe(await sha256Hex(new TextEncoder().encode(value)));
     // The job's runtime image is recorded, because it is what ran.
     expect(job.image_digest).toBe(RUNTIME_IMAGE_DIGEST);
 
@@ -253,6 +271,8 @@ describe("submit", () => {
       audit: (await made.env.DB.prepare("SELECT * FROM audit_log").all()).results,
     });
     expect(everything).not.toContain(spec.job_token);
+    // The encoded value holds the token too, and the plain token is no longer a substring of it.
+    expect(everything).not.toContain(value);
     expect(everything).not.toContain("NEMAR_LAUNCH_SPEC");
 
     // One webhook subscription, carrying a token that is a different kind from the job's.
@@ -370,6 +390,50 @@ describe("submit", () => {
         new TextEncoder().encode(launchSpecSeenByTapis(fx, job.tapis_uuid as string)),
       ),
     );
+  });
+
+  test("a job with shell-active arguments is sent as a value a shell sources back intact, and nothing it holds runs (A1c)", async () => {
+    // The scheduler writes the value into a file a shell sources, quoting it only conditionally
+    // (`scheduler-launch-file.ts`). Every string below is inert: a command, if it ran, only makes a
+    // file in a fresh directory, which is listed afterwards.
+    const sandbox = makeSandbox();
+    try {
+      const args = [
+        "a b",
+        `$(touch ${sandbox.sentinel})`,
+        `$(touch ${sandbox.relativeSentinel})`,
+        `\`touch ${sandbox.sentinel}\``,
+        'say "hi"',
+        "C:\\dir\\file",
+        "a;b&c|d<e>f",
+        "line1\nline2",
+        "$HOME ${PATH} $$",
+        "~ * ? [a-z] ! #",
+        "caf\u00e9 \u{1F600}",
+      ];
+      const made = await makeJob(fx, { spec: { args } });
+      expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+        ok: true,
+        outcome: "submitted",
+      });
+      const job = await reread(made.env, made.job.id);
+      const uuid = job.tapis_uuid as string;
+
+      // What Tapis received, put through the scheduler's quoting and a real shell.
+      const value = launchSpecEnvSeenByTapis(fx, uuid);
+      const sourced = sourceLaunchFile(value, sandbox);
+      expect(sourced.intact).toBe(true);
+      expect(sourced.made).toEqual([]);
+
+      // And what the launcher then does with it: decode, hash the text, parse. The arguments are intact.
+      const decoded = decodeLaunchSpecEnv(sourced.seen);
+      expect(decoded.ok).toBe(true);
+      const text = decoded.ok ? decoded.text : "";
+      expect(LaunchSpecSchema.parse(JSON.parse(text)).args).toEqual(args);
+      expect(job.launch_spec_digest).toBe(await sha256Hex(new TextEncoder().encode(text)));
+    } finally {
+      sandbox.remove();
+    }
   });
 
   test("a retry that finds nothing rebuilds the specification and overwrites the digest before it submits", async () => {
@@ -2161,9 +2225,11 @@ describe("the 30-minute tick", () => {
 describe("logs", () => {
   test("no token, address, path, secret or job output reaches a log, through a full lifecycle with failures", async () => {
     let token = "";
+    let launchValue = "";
     const lines = await logged(async () => {
       const s = await submittedJob();
       token = jobTokenSeenByTapis(fx, s.uuid);
+      launchValue = launchSpecEnvSeenByTapis(fx, s.uuid);
       fx.tapis.fail("GET /v3/jobs/:uuid", 503);
       await advanceComputeJob(s.env, s.made.job.id);
       await finishJob(s, { outputs: [{ path: "secret-name-path.txt", content: "x" }] });
@@ -2173,8 +2239,11 @@ describe("logs", () => {
     });
     const joined = lines.join("\n");
     expect(token).toMatch(/^[0-9a-f]{64}$/);
+    // The encoded launch value holds the token, and the plain token is no longer a substring of it.
+    expect(isShellInertEnvValue(launchValue)).toBe(true);
     const forbidden = [
       token,
+      launchValue,
       CALLBACK_SECRET,
       "secret-name-path.txt",
       fx.tapis.password,

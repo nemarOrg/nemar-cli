@@ -29,6 +29,7 @@ import {
   type LifecycleFixture,
   MINUTE,
   jobTokenSeenByTapis,
+  launchSpecEnvSeenByTapis,
   makeJob,
   reread,
   setTapisTimes,
@@ -237,6 +238,8 @@ describe("what is printed", () => {
     const first = await runCli("admin", ["advance", made.job.id]);
     const uuid = (await reread(made.env, made.job.id)).tapis_uuid as string;
     const token = jobTokenSeenByTapis(fx, uuid);
+    // The value Tapis holds carries the token, and the plain token is not a substring of it.
+    const launchValue = launchSpecEnvSeenByTapis(fx, uuid);
     fx.tapis.advance(uuid, "RUNNING");
     const second = await runCli("admin", ["advance", made.job.id, "--json"]);
     const user = fx.harness.db
@@ -246,6 +249,7 @@ describe("what is printed", () => {
       const all = out.stdout + out.stderr;
       for (const word of [
         token,
+        launchValue,
         fx.tapis.url,
         "NEMAR_LAUNCH_SPEC",
         "analyse",

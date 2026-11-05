@@ -25,6 +25,7 @@ import {
   type LifecycleFixture,
   MINUTE,
   jobTokenSeenByTapis,
+  launchSpecEnvSeenByTapis,
   makeJob,
   playLauncher,
   reread,
@@ -180,6 +181,8 @@ describe("what an administrator is shown", () => {
     await post(`/compute/jobs/${made.job.id}/advance`, "admin");
     const uuid = (await reread(made.env, made.job.id)).tapis_uuid as string;
     const token = jobTokenSeenByTapis(fx, uuid);
+    // The value Tapis holds carries the token, and the plain token is not a substring of it.
+    const launchValue = launchSpecEnvSeenByTapis(fx, uuid);
     fx.tapis.setOutput(uuid, "tapisjob.out", "A LINE THE USER'S CODE PRINTED");
     fx.tapis.advance(uuid, "RUNNING");
     await post(`/compute/jobs/${made.job.id}/advance`, "admin");
@@ -198,6 +201,7 @@ describe("what an administrator is shown", () => {
       .get(made.accountId) as Record<string, string | null>;
     for (const word of [
       token,
+      launchValue,
       "NEMAR_LAUNCH_SPEC",
       "A LINE THE USER'S CODE PRINTED",
       fx.tapis.url,

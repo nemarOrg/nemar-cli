@@ -12,7 +12,8 @@
  *
  * WHO CAN READ A JOB'S `parameterSet`, and with it the job's token (from the Jobs specification and
  * documentation; ALL OF IT UNVERIFIED against a real tenant). The launch specification, which holds
- * `job_token`, travels in the environment variable `NEMAR_LAUNCH_SPEC`, which Tapis keeps in the job
+ * `job_token`, travels in the environment variable `NEMAR_LAUNCH_SPEC` as base64url text (A1c; an
+ * encoding for the shell, not a protection: the value holds the token), which Tapis keeps in the job
  * record's `parameterSet.envVariables`. The roles that can read it are: the job's owner, its creator
  * (`createdby`) and a tenant administrator, through `GET /v3/jobs/{uuid}` and the search with every
  * attribute; a user the job's `JOB_HISTORY` resource was shared with (the documentation says that
@@ -312,7 +313,12 @@ export interface SubmitJobInput {
   memoryMb?: number;
   gpus: number;
   minutes: number;
-  /** The exact text of `NEMAR_LAUNCH_SPEC` (`encodeLaunchSpec`): printable ASCII, within 64 KiB. */
+  /**
+   * The VALUE of `NEMAR_LAUNCH_SPEC`: the launch specification's text in base64url
+   * (`encodeLaunchSpecEnv`), shell-inert characters only and within 87,382 of them. Raw JSON, or
+   * anything else, is refused before a request is built. It holds the job's token, so it is never
+   * logged or returned.
+   */
   launchSpec: string;
 }
 

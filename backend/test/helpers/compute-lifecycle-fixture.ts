@@ -21,16 +21,21 @@
  * what a lost response is and what the stand-in's own failure modes (they act before they answer)
  * cannot make. It decides nothing.
  *
- * THE LAUNCHER STAND-IN HASHES THE VALUE THE TAPIS STAND-IN RECEIVED. `launchSpecSeenByTapis` reads the
- * `NEMAR_LAUNCH_SPEC` environment value out of the stand-in's own job record and the launcher's
- * `provenance.json` is built from ITS digest, never from the digest the Worker stored: a check that
- * compared the Worker's number with itself would prove nothing.
+ * THE LAUNCHER STAND-IN HASHES WHAT THE TAPIS STAND-IN RECEIVED. `launchSpecEnvSeenByTapis` reads the
+ * `NEMAR_LAUNCH_SPEC` environment value out of the stand-in's own job record, and `launchSpecSeenByTapis`
+ * decodes it the way the launcher does (`decodeLaunchSpecEnv`: base64url, strict) into the specification's
+ * JSON text. The launcher's `provenance.json` is built from the digest of THAT TEXT, never from the digest
+ * the Worker stored: a check that compared the Worker's number with itself would prove nothing.
  */
 
 import type { Database } from "bun:sqlite";
 import type { JobSpec } from "../../../shared/contract/compute";
 import { JobSpecSchema, LAUNCHER_FILES } from "../../../shared/contract/compute";
-import { resultsLauncherKey, resultsOutputKey } from "../../../shared/contract/compute-launch";
+import {
+  decodeLaunchSpecEnv,
+  resultsLauncherKey,
+  resultsOutputKey,
+} from "../../../shared/contract/compute-launch";
 import { type ComputeJobRow, createJob, getJob } from "../../src/services/compute-jobs";
 import { declaredKey, declaredText } from "../../src/services/compute-verify";
 import { __resetTapisTokenCacheForTests } from "../../src/services/tapis/auth";
@@ -310,8 +315,8 @@ export const MINUTE = 60_000;
 
 // --- The launcher stand-in -----------------------------------------------------------------------------
 
-/** The `NEMAR_LAUNCH_SPEC` value the Tapis stand-in received for a job: the bytes the launcher hashes. */
-export function launchSpecSeenByTapis(fx: LifecycleFixture, uuid: string): string {
+/** The `NEMAR_LAUNCH_SPEC` value the Tapis stand-in received for a job: base64url, as sent. */
+export function launchSpecEnvSeenByTapis(fx: LifecycleFixture, uuid: string): string {
   const record = fx.tapis.jobs.get(uuid)?.record as
     | { parameterSet?: { envVariables?: Array<{ key: string; value: string }> } }
     | undefined;
@@ -320,6 +325,19 @@ export function launchSpecSeenByTapis(fx: LifecycleFixture, uuid: string): strin
   )?.value;
   if (typeof value !== "string") throw new Error("the stand-in received no launch specification");
   return value;
+}
+
+/**
+ * The launch specification's JSON TEXT the launcher gets from that value: decoded strictly, as the
+ * launcher does, and the bytes it hashes. A value the launcher would refuse throws here, so a test
+ * never reads a specification the real launcher could not.
+ */
+export function launchSpecSeenByTapis(fx: LifecycleFixture, uuid: string): string {
+  const decoded = decodeLaunchSpecEnv(launchSpecEnvSeenByTapis(fx, uuid));
+  if (!decoded.ok) {
+    throw new Error(`the launcher would refuse the launch specification: ${decoded.reason}`);
+  }
+  return decoded.text;
 }
 
 /** The job token inside the launch specification the Tapis stand-in received. */

@@ -63,7 +63,11 @@ import {
   resultRefusalOf,
   stateFromTapisStatus,
 } from "../../../shared/compute-state.js";
-import { encodeLaunchSpec, resultsLauncherKey } from "../../../shared/contract/compute-launch.js";
+import {
+  encodeLaunchSpec,
+  encodeLaunchSpecEnv,
+  resultsLauncherKey,
+} from "../../../shared/contract/compute-launch.js";
 import {
   type JobSpec,
   LAUNCHER_FILES,
@@ -989,9 +993,13 @@ const refused = (outcome: Exclude<SubmitOutcome, "submitted" | "bound" | "alread
   outcome,
 });
 
-/** The launch specification's text and what the row records of it. Never logged, never returned. */
+/**
+ * The launch specification as it is sent and what the row records of it. Never logged, never returned.
+ * `env` is the `NEMAR_LAUNCH_SPEC` value (the specification's text in base64url, A1c); `digest` is the
+ * SHA-256 of the TEXT the launcher decodes it to, never of `env`.
+ */
 interface BuiltLaunch {
-  text: string;
+  env: string;
   digest: string;
   imageDigest: string;
 }
@@ -1008,7 +1016,9 @@ type BuildResult =
  * Worker's configured runtime image for `python`, the Singularity image file named for its digest), the
  * allowlisted environment, the GPUs, the staging limits, the API base the launcher calls, and the
  * per-job token (`compute-job`, valid until the job is terminal). The text is ASCII-only JSON within 64
- * KiB (`encodeLaunchSpec`), and its SHA-256 is the `launch_spec_digest` the row records.
+ * KiB (`encodeLaunchSpec`), and its SHA-256 is the `launch_spec_digest` the row records. What is sent
+ * is that text in base64url (`encodeLaunchSpecEnv`), the shell-inert value of `NEMAR_LAUNCH_SPEC`: the
+ * digest is over the text, which is what the launcher decodes and hashes, and never over the value.
  *
  * `limits.max_total_bytes` bounds the dataset selection and NOT the outputs: the Worker's per-job
  * results limit is `resultLimits.maxJobBytes` and the outputs route enforces it; the two numbers are
@@ -1065,7 +1075,7 @@ async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResu
     return {
       ok: true,
       launch: {
-        text,
+        env: encodeLaunchSpecEnv(text),
         digest: await sha256Hex(new TextEncoder().encode(text)),
         imageDigest: digest,
       },
@@ -1378,7 +1388,7 @@ async function submitLeased(
         memoryMb,
         gpus: row.gpus,
         minutes: row.minutes,
-        launchSpec: built.launch.text,
+        launchSpec: built.launch.env,
       },
     );
   } catch (err) {
