@@ -18,9 +18,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { AUTO_IMPORT_CRON } from "../backend/src/services/auto-import";
 import {
   OIDC_END_REASONS,
   OIDC_LOGOUT_ERROR_CLASSES,
+  OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS,
   OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
 } from "../shared/oidc";
 
@@ -288,6 +290,45 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     // The claim this replaces, which was false for an active_account client, is in no sentence about a merge.
     expect(twelve).not.toMatch(/revocation, deletion or kind change/);
     expect(twelve).not.toMatch(/which end the grants themselves/);
+  });
+
+  test("rule 15: how long a delivery's attempts last is derived from the constants, and the ADR and the code say it", () => {
+    const HOUR = 3600;
+    const waits = OIDC_LOGOUT_RETRY_DELAYS_SECONDS.length;
+    const TICK = 30 * 60;
+    // The tick is the 30-minute cron the Worker runs, so a wait is taken up at most this much late.
+    expect(AUTO_IMPORT_CRON).toBe("*/30 * * * *");
+    // The cap on a partner's Retry-After IS the schedule's longest wait, so no wait is ever longer.
+    expect(OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS).toBe(Math.max(...OIDC_LOGOUT_RETRY_DELAYS_SECONDS));
+    // The schedule alone: its waits, each up to a tick late, and the first attempt up to a tick late if
+    // the one after the commit did not run. Roughly fifteen to eighteen hours.
+    const scheduleOnly =
+      OIDC_LOGOUT_RETRY_DELAYS_SECONDS.reduce((a, b) => a + b, 0) + (waits + 1) * TICK;
+    expect(scheduleOnly / HOUR).toBeGreaterThan(14.5);
+    expect(scheduleOnly / HOUR).toBeLessThan(18);
+    // A partner that asks for the longest wait every time: five waits of the cap, each up to a tick late,
+    // and the same first attempt. 63 hours at the most, which is within three days and is NOT under a day.
+    const throttled = (waits + 1) * TICK + waits * OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS;
+    expect(throttled / HOUR).toBe(63);
+    expect(throttled).toBeLessThan(3 * 24 * HOUR);
+    expect(throttled).toBeGreaterThan(24 * HOUR);
+
+    const fifteen = rule(15);
+    expect(fifteen).toMatch(/a failed row's last attempt comes within three days of its creation/);
+    expect(fifteen).toMatch(/63 hours at the most/);
+    expect(fifteen).not.toMatch(/under a day/);
+    expect(fifteen).toMatch(
+      /the six attempts of the schedule alone span fifteen to eighteen hours/,
+    );
+    const consequences = adr.slice(adr.indexOf("## Consequences"), adr.indexOf("## Alternatives"));
+    expect(consequences).toMatch(/over roughly fifteen to eighteen hours on the schedule alone/);
+    expect(consequences).toMatch(
+      /over 63 hours at the most when a throttling partner asks for the longest wait every time/,
+    );
+    // The code's own statement of it, in the retention constants' comment.
+    const shared = readFileSync(join(import.meta.dir, "../shared/oidc.ts"), "utf-8");
+    expect(shared).toMatch(/a failed row's last attempt comes within three days of its creation/);
+    expect(shared).not.toMatch(/under a day/);
   });
 
   test("the consequences and the not-decided list say what a logout cannot promise", () => {

@@ -812,6 +812,25 @@ describe("nemar admin oidc logout-deliveries", () => {
     expect(text.stdout).toMatch(/no deliveries/i);
   });
 
+  test("the help says which answers are final and which are retried, as the sender does", async () => {
+    // The facts are pinned in `backend/test/oidc-logout-sender.test.ts` ("which answers are retried...").
+    const out = (await help(["admin", "oidc", "logout-deliveries", "--help-all"])).replace(
+      /\s+/g,
+      " ",
+    );
+    expect(out).toContain(
+      "failed not to be tried again: the client answered with a redirect, a 4xx other than 408 and 429, or any answer that is not a 200, a 204, a 408, a 429 or a 5xx",
+    );
+    expect(out).toContain(
+      "or all 6 attempts were used on answers that are retried (a 5xx, a 408, a 429, no answer in time, a connection that failed, a token NEMAR could not sign)",
+    );
+    expect(out).toContain(
+      "or it was never sent because its client was disabled or its address is no longer one NEMAR sends to",
+    );
+    // The line it replaces called every 4xx final and left out what is retried.
+    expect(out).not.toContain("the client refused it (a 4xx, a redirect, any other answer)");
+  });
+
   test("--limit bounds the list; a limit the server refuses and an unknown status exit 1", async () => {
     signIn(OWNER_KEY);
     await addClient();

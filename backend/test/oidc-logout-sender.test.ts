@@ -32,6 +32,7 @@ import {
   attemptDueLogouts,
   logoutAddressVerdict,
   parseRetryAfter,
+  postLogoutToken,
 } from "../src/services/oidc-logout";
 import { claimDelivery } from "../src/services/oidc-logout-store";
 import {
@@ -446,6 +447,79 @@ describe("what the partner answers", () => {
     );
     expect(JSON.stringify(row)).not.toContain("secret-partner-text");
     expect(JSON.stringify(row)).not.toContain(partner.url);
+  });
+});
+
+describe("which answers are retried, which are final, and which are sent", () => {
+  // The facts the words rest on. The help of `nemar admin oidc logout-deliveries` and ADR 0119 rule 15 say
+  // this table in words, and `test/admin-oidc-cli.test.ts` and `test/adr-0119-wording.unit.test.ts` pin the
+  // words; a change to what the sender retries is a change to THIS test first, and then to those words.
+  test("every status from 200 to 599, through the real function and a real HTTPS partner", async () => {
+    const server = startLogoutStandin((req) => {
+      return new Response(null, { status: Number(req.path.split("/").pop()) });
+    });
+    standins.push(server);
+    const base = server.url.replace(/\/oidc\/logout$/, "/status");
+    const groups = new Map<string, number[]>();
+    for (let status = 200; status <= 599; status++) {
+      const out = await postLogoutToken(`${base}/${status}`, "token");
+      const key = out.kind === "sent" ? "sent" : `${out.kind}:${out.errorClass}`;
+      groups.set(key, [...(groups.get(key) ?? []), status]);
+    }
+    const range = (from: number, to: number) =>
+      Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    const without = (xs: number[], drop: number[]) => xs.filter((x) => !drop.includes(x));
+    expect(Object.fromEntries(groups)).toEqual({
+      // Sent: exactly these two.
+      sent: [200, 204],
+      // Final, never retried: any other 2xx, every redirect, and a 4xx other than 408 and 429.
+      "failed:http_other": without(range(201, 299), [204]),
+      "failed:redirect": range(300, 399),
+      "failed:http_4xx": without(range(400, 499), [408, 429]),
+      // Retried, on the schedule: a 408, a 429 and every 5xx.
+      "retry:http_throttled": [408, 429],
+      "retry:http_5xx": range(500, 599),
+    });
+  }, 60_000);
+
+  test("no answer in time and a connection that cannot be made are retried too", async () => {
+    const hang = startLogoutStandin(() => new Promise<Response>(() => {}));
+    standins.push(hang);
+    expect(await postLogoutToken(hang.url, "token", { timeoutMs: 200 })).toEqual({
+      kind: "retry",
+      status: null,
+      errorClass: "timeout",
+    });
+    expect(await postLogoutToken(await refusedAddress(), "token", { timeoutMs: 2000 })).toEqual({
+      kind: "retry",
+      status: null,
+      errorClass: "network",
+    });
+  });
+
+  test("a token NEMAR could not sign is retried as well (sign_failed), and a spent schedule is failed", async () => {
+    // With no signing key nothing is requested and the attempt is a retry: NEMAR's fault, not the partner's.
+    const fresh = await startOidcHarness({ HOST_PREFIXED_SESSION_COOKIE: "1" });
+    const client = await registerClient(fresh, { backchannel_logout_uri: partner.url });
+    const userId = seedAccount(fresh);
+    fresh.db
+      .query(
+        "INSERT INTO oidc_grants (user_id, client_id, scopes, consent_kind) SELECT ?, id, '[\"openid\"]', 'user' FROM oidc_clients WHERE client_id = ?",
+      )
+      .run(userId, client.clientId);
+    fresh.db
+      .query(
+        `INSERT INTO oidc_logout_deliveries (client_id, sub, reason, next_attempt_at)
+         SELECT g.client_id, u.oidc_subject, 'account_revoked', datetime('now')
+           FROM oidc_grants g JOIN users u ON u.id = g.user_id WHERE g.user_id = ?`,
+      )
+      .run(userId);
+    const tally = await attemptDueLogouts(fresh.env, {});
+    expect(tally).toMatchObject({ examined: 1, retried: 1, failed: 0 });
+    expect(partner.requests.length).toBe(0);
+    expect(
+      fresh.db.query("SELECT status, last_error_class FROM oidc_logout_deliveries").get(),
+    ).toEqual({ status: "pending", last_error_class: "sign_failed" });
   });
 });
 

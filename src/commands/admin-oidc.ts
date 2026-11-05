@@ -37,6 +37,7 @@ import {
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_GRANTS,
   OIDC_KEY_MIN_NEXT_AGE_HOURS,
+  OIDC_LOGOUT_MAX_ATTEMPTS,
   OIDC_LOGOUT_RETRY_DELAYS_SECONDS,
   OIDC_LOGOUT_STATUSES,
   OIDC_MAX_REDIRECT_URIS,
@@ -418,7 +419,11 @@ partner's answer. The counts of every status are printed whatever --status says.
   pending  to be attempted or retried (the retry tick runs every 30 minutes, so a short wait is taken up
            at the next half hour)
   sent     the client answered 200 or 204
-  failed   the client refused it (a 4xx, a redirect, any other answer), or every attempt was used
+  failed   not to be tried again: the client answered with a redirect, a 4xx other than 408 and 429, or
+           any answer that is not a 200, a 204, a 408, a 429 or a 5xx; or all ${OIDC_LOGOUT_MAX_ATTEMPTS} attempts were used on
+           answers that are retried (a 5xx, a 408, a 429, no answer in time, a connection that failed, a
+           token NEMAR could not sign); or it was never sent because its client was disabled or its
+           address is no longer one NEMAR sends to
   fenced   outside production, an address that is neither loopback nor listed: recorded and never sent
 
 Exit codes:

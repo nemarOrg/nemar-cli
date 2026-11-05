@@ -414,9 +414,11 @@ export const OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS = 43200;
  * The production retry tick prunes after its delivery work, at most {@link OIDC_LOGOUT_PRUNE_PER_TICK}
  * rows a tick, oldest first: `sent` and `fenced` rows older than the first two windows (by `sent_at` for
  * `sent`, by `created_at` for `fenced`), `failed` rows older than the third (by `created_at`; the table
- * has no last-update column, and a failed row's last attempt is under a day after its creation, which does
- * not matter against the window). A dev or staging Worker has no tick, so its table is not pruned and
- * grows with the number of endings there, which is few.
+ * has no last-update column, and a failed row's last attempt comes within three days of its creation:
+ * the first attempt, at the next tick if the one after the commit did not run, and five waits of at most
+ * {@link OIDC_LOGOUT_RETRY_AFTER_MAX_SECONDS}, each taken up at the next half-hour tick, are 63 hours at
+ * the most, which does not matter against the window). A dev or staging Worker has no tick, so its table
+ * is not pruned and grows with the number of endings there, which is few.
  */
 export const OIDC_LOGOUT_SENT_RETENTION_DAYS = 30;
 export const OIDC_LOGOUT_FENCED_RETENTION_DAYS = 30;
