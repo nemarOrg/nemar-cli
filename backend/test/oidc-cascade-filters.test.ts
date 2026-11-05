@@ -22,6 +22,7 @@ import { oidcEndStatements } from "../src/services/oidc-cascade";
 import { encodeState } from "../src/services/orcid-auth";
 import {
   type Held,
+  authorizeAnswer,
   clientRowId,
   countsOf,
   deliveries,
@@ -241,6 +242,36 @@ describe("the clients that sign in by a proven ORCID iD lose the grant when the 
     expect(res.status).toBe(409);
     expect(countsOf(h, a.userId).grantsRevoked).toBe(0);
     expect(deliveries(h, a.userId)).toEqual([]);
+  });
+});
+
+describe("a change of kind away from person is no way to cut an account off", () => {
+  // The help of `nemar admin oidc end-account` and ADR 0119 rule 12 say so, and a merge loser is ended by
+  // a revocation or a deletion and not by this: a non-person account still satisfies `active_account`.
+  test("it keeps its grants at the active_account clients, and signs in at one again at once", async () => {
+    const c = await clients();
+    const a = await account(c);
+    h.db.query("UPDATE users SET orcid_verified = 0 WHERE id = ?").run(a.userId);
+    const res = await h.call("POST", `/admin/users/${usernameOf(h, a.userId)}/kind`, {
+      key: OWNER_KEY,
+      body: { kind: "service" },
+    });
+    expect(res.status).toBe(200);
+
+    // What it loses is what its proof gave: the grants at the person_proven_orcid clients.
+    expect(await stillWorks(h, a.held.proven)).toBe(false);
+    expect(await stillWorks(h, a.held.provenSecond)).toBe(false);
+    // Everything at the active_account clients is untouched, tokens included...
+    expect(await stillWorks(h, a.held.open)).toBe(true);
+    expect(await stillWorks(h, a.held.openNoLogout)).toBe(true);
+    // ...the real authorization check still gives it a grant there, and a new sign-in works...
+    expect((await authorizeAnswer(h, a.userId, c.open)).kind).toBe("redirect");
+    expect(await stillWorks(h, await signInAt(h, a.userId, c.open))).toBe(true);
+    // ...and refuses it only at the clients whose rule it no longer meets.
+    expect(await authorizeAnswer(h, a.userId, c.proven)).toMatchObject({
+      kind: "rule_refused",
+      reason: "account_not_person",
+    });
   });
 });
 

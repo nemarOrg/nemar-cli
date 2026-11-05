@@ -387,9 +387,13 @@ manual-merge step of ADR 0043 (end the loser of a merge with --reason merged; th
 untouched) and the incident tool.
 
 Ending the grants does not stop the account signing in again, because its app sessions and keys survive,
-so it can get a new first-party grant at once. For the loser of a merge, pair this command with revoking
-or deleting that account, or changing its kind away from person (those paths end the grants themselves);
-used alone it is for an incident that is about the grants and not the account.
+so it can get a new first-party grant at once. For the loser of a merge, run this command and then revoke
+or delete that account: revoking and deleting end every grant the account holds and leave it unable to sign
+in, and running this command first is what makes the revoked tokens and the queued logouts record the merge
+and not the revocation. Changing the account's kind away from person is no substitute: it ends only the
+grants of the clients that sign people in by person_proven_orcid, and a non-person account still meets the
+active_account rule, so it keeps its other grants and can sign in again. Used alone, this command is for an
+incident that is about the grants and not the account.
 
   --reason   ${OIDC_ACCOUNT_END_NAMES.join(" or ")}: the word recorded on the revoked tokens and the queued logouts
              (account_merged or account_revoked).

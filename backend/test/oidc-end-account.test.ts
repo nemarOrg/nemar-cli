@@ -7,10 +7,17 @@
  * to be told, with the reason the owner named; the winner of a merge is untouched; it ends ONLY the
  * OpenID Connect holdings (the account, its keys and its sessions are other paths'); it is
  * idempotent; and the audit row records the reason and the account and nothing else.
+ *
+ * The merge procedure the help and ADR 0119 rule 12 give is held here too: the loser of a merge is ended
+ * with this command and then REVOKED or DELETED, in that order, which ends every grant it holds, leaves it
+ * unable to get another, and keeps the merge (not the revocation) as the reason on its tokens and logouts.
+ * A change of kind is no substitute for either, and that is held where the kind route is
+ * (`oidc-cascade-filters.test.ts`).
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
 import {
+  authorizeAnswer,
   clientRowId,
   countsOf,
   deliveries,
@@ -249,4 +256,70 @@ describe("ending an account", () => {
       },
     ]);
   });
+});
+
+describe("the merge procedure: end the loser with this command, then revoke or delete it", () => {
+  const FINISHES: Array<[string, (id: number) => ReturnType<typeof h.call>]> = [
+    ["revoke", (id) => h.call("POST", `/admin/revoke/by-id/${id}`, { key: OWNER_KEY })],
+    ["delete", (id) => h.call("DELETE", `/admin/users/by-id/${id}`, { key: OWNER_KEY })],
+  ];
+
+  for (const [name, finish] of FINISHES) {
+    test(`${name}: the tokens and the logouts record the merge, nothing is queued twice, and the loser gets no new grant`, async () => {
+      const loser = await holder();
+      const winner = await holder();
+      // Before: the account can get a grant at both clients.
+      expect((await authorizeAnswer(h, loser.userId, told)).kind).toBe("redirect");
+      expect((await authorizeAnswer(h, loser.userId, quiet)).kind).toBe("redirect");
+
+      expect((await end(loser.userId, { reason: "merged" })).status).toBe(200);
+      await h.settle();
+      const queued = deliveries(h, loser.userId).map((d) => [d.client_id, d.reason]);
+      expect(queued).toEqual([[clientRowId(h, told), "account_merged"]]);
+
+      const done = await finish(loser.userId);
+      expect(done.status).toBe(200);
+      await h.settle();
+
+      // The merge stays the reason: the revocation or deletion found nothing live to end.
+      expect(revokedReasons(h, loser.userId)).toEqual(["account_merged"]);
+      expect(deliveries(h, loser.userId).map((d) => [d.client_id, d.reason])).toEqual(queued);
+      expect(countsOf(h, loser.userId)).toEqual({
+        grantsLive: 0,
+        grantsRevoked: 2,
+        tokensLive: 0,
+        tokensRevoked: 4,
+        codesUnused: 0,
+      });
+      // And it can no longer get a grant at ANY client: the real authorization check refuses it, so
+      // neither an app session it may still hold nor a key gets it back into a partner.
+      for (const client of [told, quiet]) {
+        expect((await authorizeAnswer(h, loser.userId, client)).kind, name).not.toBe("redirect");
+      }
+      // The winner is untouched.
+      for (const held of winner.held) expect(await stillWorks(h, held)).toBe(true);
+    });
+
+    test(`${name} FIRST records the revocation as the reason, and this command then finds nothing`, async () => {
+      // The order matters, which is why the help says to run this command first.
+      const loser = await holder();
+      expect((await finish(loser.userId)).status).toBe(200);
+      await h.settle();
+      expect(revokedReasons(h, loser.userId)).toEqual([
+        name === "revoke" ? "account_revoked" : "account_deleted",
+      ]);
+
+      const after = await end(loser.userId, { reason: "merged" });
+      expect(after.status).toBe(200);
+      expect(after.json).toMatchObject({
+        logouts_queued: 0,
+        tokens_ended: 0,
+        grants_ended: 0,
+        codes_deleted: 0,
+      });
+      expect(revokedReasons(h, loser.userId)).toEqual([
+        name === "revoke" ? "account_revoked" : "account_deleted",
+      ]);
+    });
+  }
 });

@@ -719,11 +719,27 @@ describe("nemar admin oidc end-account", () => {
     expect(question).toContain("(a first-party client does not ask)");
     expect(question).not.toMatch(/the person is asked again/);
     expect(question).toContain("account 7");
-    const out = await help(["admin", "oidc", "end-account", "--help-all"]);
+    // The help is read as a person reads it: whitespace and line breaks are one space.
+    const out = (await help(["admin", "oidc", "end-account", "--help-all"])).replace(/\s+/g, " ");
     expect(out).toMatch(/a first-party client does not ask/);
     expect(out).toMatch(/does not stop the account signing in again/);
-    expect(out).toMatch(/pair this command with revoking\s+or deleting that account/);
     expect(out).not.toMatch(/asks the person again\)/);
+    // A merge loser is ended with this command and then revoked or deleted, in that order and for that
+    // reason; a change of its kind is NOT a way to cut it off (it ends the person_proven_orcid grants only).
+    expect(out).toContain("run this command and then revoke or delete that account");
+    expect(out).toContain(
+      "revoking and deleting end every grant the account holds and leave it unable to sign in",
+    );
+    expect(out).toContain(
+      "running this command first is what makes the revoked tokens and the queued logouts record the merge",
+    );
+    expect(out).toContain("Changing the account's kind away from person is no substitute");
+    expect(out).toContain(
+      "it ends only the grants of the clients that sign people in by person_proven_orcid",
+    );
+    expect(out).toContain("a non-person account still meets the active_account rule");
+    expect(out).not.toMatch(/changing its kind away from person/);
+    expect(out).not.toMatch(/those paths end the grants themselves/);
   });
 
   test("a bad id, a missing reason, an unknown reason and an unknown account exit 1", async () => {

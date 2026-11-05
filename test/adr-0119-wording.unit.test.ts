@@ -255,7 +255,7 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     expect(readmeLine).toMatch(/prunes finished ones/);
   });
 
-  test("rule 12: a new path adds to OIDC_END_CALLERS, the sweep alone is guarded, a merge pairs end-account", () => {
+  test("rule 12: a new path adds to OIDC_END_CALLERS, and only the sweep is guarded", () => {
     const twelve = rule(12);
     expect(twelve).toMatch(/adds a line here and to `OIDC_END_CALLERS`/);
     expect(twelve).toMatch(/only when it also runs their statements/);
@@ -266,10 +266,26 @@ describe("ADR 0119 records what the revocation phase settled (#2019)", () => {
     expect(twelve).not.toMatch(
       /soft delete and the sweep of the live tests' accounts, which run it with every statement/,
     );
-    expect(twelve).toMatch(
-      /pairs `end-account` with that account's revocation, deletion or kind change/,
-    );
+  });
+
+  test("rule 12: a merge loser is ended with end-account and then a revocation or a deletion, and a kind change is no substitute", () => {
+    const twelve = rule(12);
     expect(twelve).toMatch(/can get a new first-party grant at once/);
+    expect(twelve).toMatch(
+      /the owner runs `end-account` and then revokes or deletes that account, which end every grant it holds and leave it unable to sign in/,
+    );
+    expect(twelve).toMatch(
+      /running `end-account` first is what makes the revoked tokens and the queued logouts record the merge and not the revocation/,
+    );
+    expect(twelve).toMatch(/A change of the account's kind away from `person` is no substitute/);
+    expect(twelve).toMatch(
+      /ends only the grants of the clients that sign people in by `person_proven_orcid`/,
+    );
+    expect(twelve).toMatch(/a non-person account still satisfies `active_account`/);
+    expect(twelve).toMatch(/keeps its other grants and can sign in again at once/);
+    // The claim this replaces, which was false for an active_account client, is in no sentence about a merge.
+    expect(twelve).not.toMatch(/revocation, deletion or kind change/);
+    expect(twelve).not.toMatch(/which end the grants themselves/);
   });
 
   test("the consequences and the not-decided list say what a logout cannot promise", () => {

@@ -12,8 +12,15 @@
  */
 
 import { expect } from "bun:test";
+import {
+  OIDC_AUTHORIZE_CALLER_HEADER,
+  OIDC_AUTHORIZE_CALLER_VALUE,
+  OIDC_AUTHORIZE_CHECK_PATH,
+} from "../../../shared/contract/oidc-authorize";
 import { hashApiKey } from "../../src/services/token";
 import {
+  APP,
+  RFC_CHALLENGE,
   type RegisteredClient,
   authorize,
   basic,
@@ -234,4 +241,36 @@ export function restoreAccount(h: OidcHarness, userId: number): void {
       "UPDATE users SET status = 'verified', revoked_at = NULL, deleted_at = NULL WHERE id = ?",
     )
     .run(userId);
+}
+
+/**
+ * What the REAL authorization check answers for an account that presents a live app session, at a
+ * client: `kind` (`redirect` when a grant would be given, `rule_refused`, `login`, ...), the refusal's
+ * `reason` when it has one, and the `location` it sends the person to. The session is issued afresh, as a person who signed in again would hold it,
+ * so this asks "can this account get a grant NOW", not "does an old credential still work".
+ */
+export async function authorizeAnswer(
+  h: OidcHarness,
+  userId: number,
+  client: RegisteredClient,
+): Promise<{ kind: string; reason?: string; location?: string }> {
+  const request = new URLSearchParams({
+    client_id: client.clientId,
+    redirect_uri: client.redirect,
+    response_type: "code",
+    scope: "openid profile",
+    state: "s-check",
+    code_challenge: RFC_CHALLENGE,
+    code_challenge_method: "S256",
+  }).toString();
+  const res = await h.call("POST", OIDC_AUTHORIZE_CHECK_PATH, {
+    body: { request },
+    headers: {
+      Cookie: await sessionCookie(h, userId),
+      Origin: APP,
+      [OIDC_AUTHORIZE_CALLER_HEADER]: OIDC_AUTHORIZE_CALLER_VALUE,
+    },
+  });
+  expect(res.status).toBe(200);
+  return res.json as { kind: string; reason?: string; location?: string };
 }
