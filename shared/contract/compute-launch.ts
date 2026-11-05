@@ -1,8 +1,8 @@
 /**
  * The launch specification `nemar.launch-spec.v1` and the launcher's routes (epic #2005 phase A1,
  * #2006; ADR 0118): the one document NEMAR's Worker hands the launcher on the node, in the
- * environment variable `NEMAR_LAUNCH_SPEC`, and the three shapes the launcher exchanges with the
- * Worker, distinct from the user-facing job specification in `./compute.ts`.
+ * environment variable `NEMAR_LAUNCH_SPEC` (as base64url text, see below), and the three shapes the
+ * launcher exchanges with the Worker, distinct from the user-facing job specification in `./compute.ts`.
  *
  * THE JSON SCHEMA NEXT TO THIS FILE IS SHARED BYTE FOR BYTE with `nemarOrg/nemar-process`
  * (`launcher/schema/launch-spec.v1.json`), where the launcher is written. The launcher cannot

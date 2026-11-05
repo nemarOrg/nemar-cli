@@ -519,7 +519,10 @@ export type LauncherFileName = (typeof LAUNCHER_FILE_NAMES)[number];
 
 /** The environment variables the launcher reads or sets. None is ever a job's own to set. */
 export const LAUNCHER_ENV = {
-  /** The launch specification, JSON (`shared/contract/compute-launch.ts`). */
+  /**
+   * The launch specification: its ASCII-only JSON text in base64url, no padding (A1c, #2043; see
+   * `shared/contract/compute-launch.ts`, `encodeLaunchSpecEnv` and `decodeLaunchSpecEnv`).
+   */
   SPEC: "NEMAR_LAUNCH_SPEC",
   /** Where the entry writes its outputs, set inside the container. */
   OUT: "NEMAR_OUT",
@@ -1020,11 +1023,12 @@ const stagingRecordSchema = z
  * `launcher/provenance.json`, written from outside the container: what ran and how. Nothing the
  * container wrote is in it.
  *
- * `launch_spec_digest` is the SHA-256, in lowercase hex, of the exact raw bytes of the
- * `NEMAR_LAUNCH_SPEC` environment value, hashed by the launcher BEFORE it parses them (the text is
- * ASCII-only JSON, so the bytes are the same whatever the locale). It is the launcher's digest and
- * phase A5 stores it on the job row. It is not the job row's `spec_digest`, which is the digest of
- * `records/<id>/spec.json` (see {@link JobSpecSchema}).
+ * `launch_spec_digest` is the SHA-256, in lowercase hex, of the exact bytes of the launch
+ * specification's JSON TEXT: what the `NEMAR_LAUNCH_SPEC` environment value (base64url, see
+ * `decodeLaunchSpecEnv`) decodes to, hashed by the launcher BEFORE it parses it. It is never the digest
+ * of the encoded value (A1c, #2043). It is the launcher's digest and phase A5 stores it on the job row.
+ * It is not the job row's `spec_digest`, which is the digest of `records/<id>/spec.json` (see
+ * {@link JobSpecSchema}).
  */
 export const LauncherProvenanceSchema = z
   .object({

@@ -5,10 +5,12 @@
 -- backstop, settles its charge, serves the launcher's three job callbacks, verifies the upload,
 -- copies the launcher's files into the records and mails the person a link to a page. Six columns
 -- record what those steps did, so each can be told "done" without reading a bucket:
---   * `launch_spec_digest`: the SHA-256, 64 lowercase hex digits, of the EXACT bytes of the
---     `NEMAR_LAUNCH_SPEC` value the Worker put in the Tapis submit request (ASCII-only JSON, which
---     carries the per-job token). NULL until submit. It is the launcher's digest (the launcher hashes
---     the raw environment bytes before it parses them and writes it to `launcher/provenance.json`),
+--   * `launch_spec_digest`: the SHA-256, 64 lowercase hex digits, of the EXACT bytes of the launch
+--     specification's JSON TEXT (ASCII-only JSON, which carries the per-job token), which is what the
+--     `NEMAR_LAUNCH_SPEC` value the Worker put in the Tapis submit request decodes to: that value is the
+--     text in base64url, and the digest is never over it (contract follow-up A1c, #2043). NULL until
+--     submit. It is the launcher's digest (the launcher decodes the value and hashes the text before it
+--     parses it, and writes it to `launcher/provenance.json`),
 --     NOT the job row's `spec_digest`, which is the digest of `records/<id>/spec.json`: two digests,
 --     named apart. The result verification compares them; a launcher that ran another specification
 --     fails the job. The text of the specification itself is never stored.

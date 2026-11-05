@@ -169,7 +169,10 @@ export interface ComputeJobRow {
   retention_until: string | null;
   legal_hold: number;
   webhook_nonce: string | null;
-  /** Phase A5 (migration 0116): the SHA-256 of the exact `NEMAR_LAUNCH_SPEC` bytes; NULL until submit. */
+  /**
+   * Phase A5 (migration 0116): the SHA-256 of the launch specification's JSON TEXT, which is what the
+   * `NEMAR_LAUNCH_SPEC` value (base64url) decodes to, never of the encoded value; NULL until submit.
+   */
   launch_spec_digest: string | null;
   results_verified_at: string | null;
   outputs_completed_at: string | null;

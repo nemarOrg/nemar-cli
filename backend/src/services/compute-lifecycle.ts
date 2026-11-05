@@ -284,9 +284,10 @@ export const STAMP_EXAMINED_SQL =
   "UPDATE compute_jobs SET examined_at = datetime('now') WHERE id = ?1";
 
 /**
- * The digest of the launch specification, written BEFORE the submit: `?1` the job, `?2` the digest, `?3`
- * the digest of the image the launch specification names (the runtime image can change between two
- * attempts, so a retry that finds nothing overwrites it: the row records what was last sent).
+ * The digest of the launch specification, written BEFORE the submit: `?1` the job, `?2` the digest (of
+ * the specification's JSON text, never of the base64url value sent), `?3` the digest of the image the
+ * launch specification names (the runtime image can change between two attempts, so a retry that finds
+ * nothing overwrites it: the row records what was last sent).
  */
 export const LAUNCH_DIGEST_SQL = `UPDATE compute_jobs SET
     launch_spec_digest = ?2, image_digest = ?3
