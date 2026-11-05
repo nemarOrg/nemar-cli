@@ -193,12 +193,14 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     Tokens carry the code's scopes, never the grant's, which accumulate.
     The identity token carries `iss`, `sub`, `aud` (the client), `iat`, `exp` (5 minutes), `nonce` when the request had one, `auth_time` (the sign-in of the session behind the code) and `at_hash`, with the claims of the code's scopes (rule 14); a refresh returns no identity token.
     A refresh token is issued only when the code carries `offline_access` and the client is allowed the refresh token grant.
-    A refresh rotates in one batch: the child is inserted only while the parent is live, unrevoked and this client's and its client, grant and account still pass, and only when the parent is either unspent with no child, or was spent under 30 seconds ago and has exactly one child.
+    A refresh rotates in one batch: the child is inserted only while the parent is live, unrevoked and this client's and its client, grant and account still pass, and only when the parent is either unspent with no child, or was spent under 30 seconds ago and has exactly one child that is itself untouched, neither rotated nor revoked.
     That second case is a retried request: it mints one more child, never two, so two requests that refresh together both succeed.
-    The children of one parent are mutually exclusive: rotating one of them revokes its unspent siblings in the same batch (`refresh_superseded`), so whichever is rotated first wins and the other, presented later, is a revoked token that revokes the whole family.
+    The children of one parent are mutually exclusive: rotating one of them revokes its live siblings in the same batch (`refresh_superseded`), so whichever is rotated first wins and the other, presented later, is a revoked token that revokes the whole family.
+    A retry that comes after the first child was rotated or revoked gets no second child: it is reuse, whatever the order the two holders acted in.
+    The revoked siblings' access tokens stay valid for up to their 15 minutes, by design: one of them may be the one the session that rotated is still using.
     A session that refreshed twice at once keeps working with whichever answer it stored; two holders of one token inside the 30 seconds cannot both go on rotating, because the second of them to come back ends the family.
     The parent is marked spent once, so the 30 seconds run from the first rotation and a retry never stretches them.
-    A parent presented when it is revoked, or spent and past the 30 seconds, or already retried once, revokes its whole family, access tokens included (`refresh_reuse`), in a statement that checks that condition again, so a rotation refused for another reason (an inactive account, a revoked grant, an expired token) revokes nothing.
+    A parent presented when it is revoked, or spent and past the 30 seconds, or already retried once, or spent with a child that was rotated or revoked since, revokes its whole family, access tokens included (`refresh_reuse`), in a statement that checks that condition again, so a rotation refused for another reason (an inactive account, a revoked grant, an expired token) revokes nothing.
     A refresh token expires 30 days after it was minted and never after its family's end, 90 days after the code was redeemed, which every rotation copies unchanged; a spent one is kept until a day past that end, so its reuse can be recognized.
     A refresh may narrow the access token's scopes and never widen them, and the new refresh token keeps its own.
     A grant recorded while its client was first-party feeds a refresh only while every redirect address of the client still qualifies (rule 8).
@@ -215,7 +217,7 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     Revocation (RFC 7009) answers 200 whatever it is given and ends only the caller's own token: an access token alone, a refresh token with its family (`client_revoked`).
     Introspection (RFC 7662) answers `{active: false}` unless the token is active now and the caller is the client it was issued to, or the token is an access token whose audience the caller is registered to introspect; a refresh token is shown to its own client only, and with no `token_type`, which RFC 7662 defines for access tokens.
     A database fault is a server error, never `invalid_token`, `invalid_grant` or `{active: false}`.
-    In the `read-only` maintenance mode, `POST /oauth/userinfo` and `POST /oauth/introspect` are served (exact paths; both only read), and the token endpoint and revocation answer 503; in `full` all four answer 503.
+    In the `read-only` maintenance mode, `POST /oauth/userinfo` and `POST /oauth/introspect` are served (exact paths, POST only; both only read; a GET is served as every read is, and PUT, DELETE and PATCH on them answer 503), and the token endpoint and revocation answer 503; in `full` all four answer 503.
     The three client endpoints have a rate-limit bucket of their own, keyed by address and generous, because a partner's server answers for every person signed in to it from one address.
 
 ### What this phase builds, and what it does not
@@ -263,6 +265,11 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   The prune runs at the head of every batch that mints and reads only what it may delete: the access tokens' expiry index is partial on their kind, so retained refresh rows cost the prune nothing.
   What to watch once a partner is live: row counts by kind, and how many are spent and how many revoked; the largest family by row count, and rotations per family per day; rows deleted per prune, and the token endpoint's latency; the size of the D1 database.
   Two levers exist if the size ever matters, noted here and not built: prune a revoked family about a day after it is revoked (nothing in it can be used, and its reuse needs no detecting), and a minimum interval between two rotations of one family.
+  The prune shares the batch that mints, so a backlog of expired rows in the millions (an outage of the prune, or a burst of short-lived families) would slow, or fail, the token endpoint until it clears; the watch list above is what shows it coming.
+- **A fault is never a verdict, and replay detection waits for the database (rules 13 and 14).**
+  A database or signing-key fault is a server error, never `invalid_grant`, `invalid_token` or `{active: false}`.
+  A matching second redemption whose signing-key read fails answers 5xx and revokes nothing yet; the next presentation when the database answers revokes, so a 4xx for a matching second redemption is never given without its revocation (except for a code whose account row no longer exists, whose tokens are inactive already).
+  The tests prove an unreachable database and a failed key read; a batch that fails halfway relies on D1 running a batch as one transaction, which no test here can break.
 - **In read-only maintenance no partner can refresh (rule 14).**
   The token endpoint writes, so it answers 503; userinfo and introspection keep answering, but every partner session lapses within the access token's 15 minutes and the person signs in again once the mode is off.
   A maintenance window that has to keep partners signed in is a `full` decision the owner makes knowing that.

@@ -125,6 +125,10 @@ describe("ADR 0119 records what the token phase settled (#2018)", () => {
     expect(thirteen).not.toMatch(/both children stay live/);
     expect(thirteen).not.toMatch(/whatever verifier or redirect address/);
     expect(readmeLine).toContain("refresh_superseded");
+    // Round 2: the retry needs the first child untouched, and a late retry is reuse.
+    expect(thirteen).toMatch(/itself untouched, neither rotated nor revoked/);
+    expect(thirteen).toMatch(/whatever the order the two holders acted in/);
+    expect(thirteen).toMatch(/access tokens stay valid for up to their 15 minutes/);
   });
 
   test("rule 14 and the consequences: read-only maintenance, faults, the table's growth", () => {
@@ -135,6 +139,9 @@ describe("ADR 0119 records what the token phase settled (#2018)", () => {
     expect(consequences).toMatch(/In read-only maintenance no partner can refresh/);
     expect(consequences).toMatch(/What to watch once a partner is live/);
     expect(consequences).toMatch(/minimum interval between two rotations/);
+    expect(consequences).toMatch(/A fault is never a verdict/);
+    expect(consequences).toMatch(/The prune shares the batch that mints/);
+    expect(fourteen).toMatch(/POST only/);
   });
 
   test("rule 14: the claim names, the refusal elsewhere and introspection's blindness", () => {
