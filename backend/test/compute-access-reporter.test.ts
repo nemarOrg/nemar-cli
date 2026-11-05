@@ -853,6 +853,71 @@ describe("the tick", () => {
     expect(new Set(access.requests.map((r) => r.body?.jobid)).size).toBe(4);
   });
 
+  test("after the FIRST unjudgeable outcome the tick claims no more rows, so a bad minute at ACCESS loses one report and not ten (MUTATION: keep claiming)", async () => {
+    // A deploy's 502, a 500, a 301 from a wrong address, a timeout: each is an outcome the sender cannot
+    // judge, and a fault that is systematic makes every later row in the tick the same. The rows not
+    // claimed stay pending with no attempt spent and no lease, for the next tick.
+    for (const [name, arrange, status] of [
+      ["a 502 on every request", () => access.answer(502, 6), 502],
+      ["a 500 on every request", () => access.answer(500, 6), 500],
+      ["a 308 on every request", () => access.answer(308, 6), 308],
+      ["a 409 on every request", () => access.answer(409, 6), 409],
+      ["no answer", () => access.hang(6), null],
+    ] as const) {
+      access.reset();
+      const e = env();
+      const ids: string[] = [];
+      for (let i = 0; i < 6; i++) ids.push((await queuedJob()).made.job.id);
+      arrange();
+      const tick = await runAccessReportCron(e, { timeoutMs: 300 });
+      expect([name, tick]).toEqual([
+        name,
+        expect.objectContaining({ examined: 6, sent: 0, unknown: 1, skipped: 5, errors: [] }),
+      ]);
+      expect([name, access.requests.length]).toEqual([name, 1]);
+      const rows = await Promise.all(ids.map(async (id) => (await report(e, id)) as ReportRow));
+      expect([name, rows.filter((r) => r.state === "failed").length]).toEqual([name, 1]);
+      const waiting = rows.filter((r) => r.state === "pending");
+      expect([name, waiting.length]).toEqual([name, 5]);
+      for (const r of waiting) {
+        expect([name, r]).toEqual([
+          name,
+          expect.objectContaining({ attempts: 0, claimed_at: null, last_error_code: null }),
+        ]);
+      }
+      expect(status === null || status >= 300).toBe(true);
+      // The next tick, with ACCESS answering, sends the rest: nothing waited for ever.
+      access.reset();
+      expect(await runAccessReportCron(e)).toMatchObject({ sent: 5, skipped: 0 });
+    }
+  });
+
+  test("an answer that proves the request was NOT processed does not stop the tick: a 503, a 429 and a 400 are each retried and the next row goes on", async () => {
+    for (const [status, word] of [
+      [503, "unavailable"],
+      [429, "busy"],
+      [400, "refused"],
+    ] as const) {
+      access.reset();
+      const e = env();
+      const ids: string[] = [];
+      for (let i = 0; i < 4; i++) ids.push((await queuedJob()).made.job.id);
+      access.answer(status, 4);
+      expect([status, await runAccessReportCron(e)]).toEqual([
+        status,
+        expect.objectContaining({ examined: 4, retry: 4, unknown: 0, skipped: 0 }),
+      ]);
+      expect([status, access.requests.length]).toEqual([status, 4]);
+      for (const id of ids) {
+        expect(await report(e, id)).toMatchObject({
+          state: "pending",
+          attempts: 1,
+          last_error_code: word,
+        });
+      }
+    }
+  });
+
   test("a tick whose budget is not yet spent goes on: a POST that took a millisecond less than the budget does not stop it", async () => {
     const e = env();
     for (let i = 0; i < 3; i++) await queuedJob();

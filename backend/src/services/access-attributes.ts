@@ -434,7 +434,7 @@ export interface AccessReportTick {
   deferred: number;
   /** Rows whose sender died holding its lease, ended `failed`, `outcome_unknown`. */
   reaped: number;
-  /** Due rows this tick did not claim because its time budget was spent: they wait for the next tick. */
+  /** Due rows this tick did not claim (its time budget was spent, or an outcome it could not judge stopped it): they wait for the next tick. */
   skipped: number;
   /** Fixed words; never a message. */
   errors: string[];
@@ -462,7 +462,8 @@ const emptyTick = (): AccessReportTick => ({
  * touches nothing else when no row is due. With no key or resource name set it sends nothing and says
  * `unconfigured` on the due rows. It reads no switch: the reports are owed for jobs that already ran.
  * It stops claiming new rows after `ACCESS_REPORT_TICK_BUDGET_MS`, so a run that is killed does not
- * strand a claimed row; the rest wait for the next tick. `now` is the clock, for a test.
+ * strand a claimed row, and after the first unjudgeable outcome (`outcome_unknown`), so a systematic
+ * fault loses one report a tick and not ten; the rest wait for the next tick. `now` is the clock, for a test.
  */
 export async function runAccessReportCron(
   env: Bindings,
@@ -503,6 +504,16 @@ export async function runAccessReportCron(
         else if (outcome === "failed" || outcome === "no_gateway_user") r.failed++;
         else if (outcome === "outcome_unknown") r.unknown++;
         else if (outcome === "no_submit_time") r.deferred++;
+        // THE FIRST UNJUDGEABLE OUTCOME ENDS THE CLAIMING: a deploy's 502, a 500, a redirect from a wrong
+        // address or a timeout may be the first sign of a fault that every later row would meet the same
+        // way, and each such row is lost for good. So one report is lost, not ten; the rows not claimed
+        // stay `pending` with no attempt spent for the next tick, and the error-level log line (an
+        // unknown outcome needs a person) has a margin of thirty minutes to be noticed in. An answer that
+        // proves the request was not processed (a retry) does not stop the tick.
+        if (outcome === "outcome_unknown") {
+          r.skipped = due.length - index - 1;
+          break;
+        }
       } catch (err) {
         r.errors.push("row_failed");
         r.errorClass = errorClassName(err);
