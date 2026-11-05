@@ -68,8 +68,8 @@ export function makeSandbox(): Sandbox {
 }
 
 export interface Sourced {
-  /** The shell's exit status; null when it did not exit (a signal or the time limit). */
-  status: number | null;
+  /** The shell's exit status. A shell that did not run or did not exit is thrown at, never reported. */
+  status: number;
   /** What `printf %s "$NEMAR_LAUNCH_SPEC"` printed after the file was sourced. */
   seen: string;
   stderr: string;
@@ -82,6 +82,11 @@ export interface Sourced {
 /**
  * Write the scheduler's line for `value` into a file, source it with `sh` in the sandbox, and print the
  * variable back. `intact` is the round trip: the shell exited 0 AND printed exactly `value`.
+ *
+ * Throws if the shell could not be run or did not exit (it was killed, or timed out). A shell that
+ * failed to run prints nothing, which is not what a value is read back as, and would let every
+ * negative control "fail" for a reason that is not the hazard; a test that cannot trust its shell
+ * must fail, not pass.
  */
 export function sourceLaunchFile(value: string, sandbox: Sandbox): Sourced {
   const file = join(sandbox.dir, LAUNCH_FILE);
@@ -96,6 +101,8 @@ export function sourceLaunchFile(value: string, sandbox: Sandbox): Sourced {
     // `touch` is found on PATH; the locale is fixed so nothing depends on the machine's.
     env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" },
   });
+  if (run.error) throw new Error(`the shell could not be run: ${run.error.message}`);
+  if (run.status === null) throw new Error(`the shell did not exit (signal ${run.signal})`);
   const seen = run.stdout ?? "";
   return {
     status: run.status,

@@ -27,6 +27,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { chmodSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type Sandbox,
   launchFileLine,
@@ -133,6 +135,46 @@ describe("the scheduler's quoting, as the test writes it", () => {
   });
 });
 
+describe("the helper cannot be fooled by a shell that does not work", () => {
+  /** Run `body` with `NEMAR_TEST_SH` set to `shell`, and put the variable back. */
+  function withShell<T>(shell: string, body: () => T): T {
+    const before = process.env.NEMAR_TEST_SH;
+    process.env.NEMAR_TEST_SH = shell;
+    try {
+      return body();
+    } finally {
+      if (before === undefined) Reflect.deleteProperty(process.env, "NEMAR_TEST_SH");
+      else process.env.NEMAR_TEST_SH = before;
+    }
+  }
+
+  test("a shell that is not there fails the test: it does not make every negative control pass", async () => {
+    await withSandbox((sandbox) => {
+      const missing = join(sandbox.dir, "no-such-shell");
+      expect(() => withShell(missing, () => sourceLaunchFile("abc", sandbox))).toThrow(
+        "the shell could not be run",
+      );
+    });
+  });
+
+  test("a shell that is killed fails the test, with the signal", async () => {
+    await withSandbox((sandbox) => {
+      const doomed = join(sandbox.dir, "doomed-shell");
+      writeFileSync(doomed, "#!/bin/sh\nkill -KILL $$\n");
+      chmodSync(doomed, 0o755);
+      expect(() => withShell(doomed, () => sourceLaunchFile("abc", sandbox))).toThrow(
+        "the shell did not exit (signal SIGKILL)",
+      );
+    });
+  });
+
+  test("the working shell still reads a plain value back (so the two throws above are the shell's)", async () => {
+    await withSandbox((sandbox) => {
+      expect(sourceLaunchFile("abc", sandbox)).toMatchObject({ status: 0, seen: "abc" });
+    });
+  });
+});
+
 describe("(a) the old wire value, the JSON text itself, does not survive the scheduler's launch file", () => {
   interface Case {
     label: string;
@@ -212,10 +254,16 @@ describe("(a) the old wire value, the JSON text itself, does not survive the sch
         // The control is the very text `encodeLaunchSpec` still writes, which every digest is over.
         expect(old).toBe(encodeLaunchSpec(spec));
         const sourced = sourceLaunchFile(old, sandbox);
-        expect(
-          sourced.intact,
-          `${c.why} (printed ${JSON.stringify(sourced.seen.slice(0, 80))})`,
-        ).toBe(c.intact);
+        const printed = `printed ${JSON.stringify(sourced.seen.slice(0, 80))}`;
+        if (c.intact) {
+          expect(sourced.seen, `${c.why} (${printed})`).toBe(old);
+          expect(sourced.status).toBe(0);
+        } else {
+          // What the shell printed is not the value: that is why this case fails, and not a shell that
+          // failed to run, which the helper throws at.
+          expect(sourced.seen, `${c.why} (${printed})`).not.toBe(old);
+        }
+        expect(sourced.intact, `${c.why} (${printed})`).toBe(c.intact);
         const ran = sourced.made.some((name) => name.startsWith("made-by-the-value"));
         expect(ran, `${c.why} (made ${JSON.stringify(sourced.made)})`).toBe(c.ran);
       });
@@ -236,7 +284,13 @@ describe("(a) the old wire value, the JSON text itself, does not survive the sch
 });
 
 describe("(b) the new value, the text in base64url, comes back from the shell exactly", () => {
-  /** Strings a shell, a glob or a quoting rule has something to say about, each inert as written. */
+  /**
+   * Strings a shell, a glob or a quoting rule has something to say about, each inert as written.
+   * Every character a shell acts on is printable ASCII, so the hostile part of the corpus is printable.
+   * The last few entries are not (a newline, a tab, a carriage return, NUL, DEL, a character from 0x80
+   * up): they are here to show that such a user string travels as the escape JSON writes for it, in a
+   * text that is itself printable. The encoder would refuse the raw byte (the contract tests pin that).
+   */
   const adversarial = (sandbox: Sandbox): string[] => [
     "a b",
     `$(touch ${sandbox.sentinel})`,
@@ -298,8 +352,10 @@ describe("(b) the new value, the text in base64url, comes back from the shell ex
   test("each adversarial string, alone in the arguments, comes back exactly and makes nothing", async () => {
     await withSandbox((sandbox) => {
       for (const arg of adversarial(sandbox)) {
-        const { value, sourced } = roundTrip(launchSpec({ args: [arg] }), sandbox);
+        const { text, value, sourced } = roundTrip(launchSpec({ args: [arg] }), sandbox);
         const label = JSON.stringify(arg);
+        // The TEXT is printable ASCII whatever the string is, so the encoder never refuses a real one.
+        expect(/^[\x20-\x7e]+$/.test(text), label).toBe(true);
         expect(isShellInertEnvValue(value), label).toBe(true);
         // The value is bare in the launch file: nothing for the scheduler to quote.
         expect(schedulerQuote(value), label).toBe(value);
@@ -320,8 +376,9 @@ describe("(b) the new value, the text in base64url, comes back from the shell ex
 
   test("all of them together, in the command, the arguments and the environment values", async () => {
     await withSandbox((sandbox) => {
-      const strings = adversarial(sandbox).filter((s) => !s.includes("\u0000"));
-      // Environment values are printable ASCII (the contract's own rule), so only those go there.
+      const strings = adversarial(sandbox);
+      // An environment value is printable ASCII of at most 256 characters (the contract's own rule for
+      // a job's environment), so only the entries that are go there. The others are arguments only.
       const printable = strings.filter((s) => /^[ -~]*$/.test(s) && s.length <= 256);
       // A command and no entry: exactly one of the two, and the bundle only an entry needs is left out.
       const { entry: _entry, bundle: _bundle, ...base } = launchSpec();
@@ -332,6 +389,7 @@ describe("(b) the new value, the text in base64url, comes back from the shell ex
         env: { OMP_NUM_THREADS: printable[1], MPLBACKEND: printable.join(" ").slice(0, 256) },
       };
       const { text, value, sourced } = roundTrip(spec, sandbox);
+      expect(/^[\x20-\x7e]+$/.test(text)).toBe(true);
       expect(sourced.intact).toBe(true);
       expect(sourced.made).toEqual([]);
       const decoded = decodeLaunchSpecEnv(sourced.seen);
