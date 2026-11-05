@@ -883,8 +883,10 @@ export const GRANT_INSERT_SQL = `INSERT INTO compute_ledger
  * An adjustment: `?1` pool, `?2` the budget pool (NULL for none), `?3` the change to granted, `?4`
  * the change to charged, `?5` actor, `?6` reason, `?7` key. Only if the pool is there, the key
  * unused, and no stored total (the pool's granted or charged, or the budget's charged) would leave
- * 0 to 2^53 - 1. `adjustPool` binds a budget only when `?4` is positive: the `people` budget records
- * consumption only, so a correction that lowers a charge never reaches it.
+ * 0 to 2^53 - 1, and a budget is named only with a charged change that RAISES it (`?2 IS NULL OR
+ * ?4 > 0`): the `people` budget records consumption only, so a correction that lowers a charge never
+ * reaches it. `adjustPool` refuses the same case with an error before it binds, and the statement
+ * says it as well, so that a caller that binds it directly writes nothing.
  */
 export const ADJUST_INSERT_SQL = `INSERT INTO compute_ledger
   (kind, pool_id, budget_pool_id, granted_delta_milli, charged_delta_milli, actor_user_id, reason,
@@ -894,6 +896,7 @@ export const ADJUST_INSERT_SQL = `INSERT INTO compute_ledger
    WHERE p.id = ?1
      AND p.granted_milli + ?3 BETWEEN 0 AND ${TOTAL_MAX}
      AND p.charged_milli + ?4 BETWEEN 0 AND ${TOTAL_MAX}
+     AND (?2 IS NULL OR ?4 > 0)
      AND (?2 IS NULL OR (SELECT b.charged_milli FROM compute_pools b WHERE b.id = ?2) + ?4
                           BETWEEN 0 AND ${TOTAL_MAX})
      AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = ?7)`;

@@ -16,13 +16,30 @@
  *    allows, says which of them lowers the budget (one) and a ledger scan says the same of every
  *    entry written;
  *  - the refund path is gone.
- * The standing mutation checks of this file are listed in the pull request that added it.
+ *
+ * The guards this file and its neighbours hold, each proven by mutating it alone and watching a test
+ * of the file named fail:
+ *  - `adjustPool` refuses a lowering charge correction that names the budget (here, and the random
+ *    sequence and the D1 life of a job in compute-ledger.test.ts and compute-ledger-race.test.ts);
+ *  - `ADJUST_INSERT_SQL` writes nothing for a budget with a charged change that does not raise it
+ *    (the statement bound directly, here);
+ *  - the route names the budget only when `delta_milli > 0` (compute-pool-routes.test.ts and the
+ *    admin compute CLI test);
+ *  - the final settlement's delta is the job's own, so it cannot take back other jobs' consumption
+ *    (here), and it names the budget (here, and the final-settlement suites);
+ *  - the per-step check of the random sequence, that no step lowers the budget but a final
+ *    settlement or the owner's platform correction (compute-ledger.test.ts);
+ *  - the source scan that refuses a shipped ledger insert that writes `refund` or a kind it cannot
+ *    read, and the export check that the refund function, statement and key are gone (here);
+ *  - the vocabulary check that every ledger kind but `refund` is written by a row of the table (here);
+ *  - the `pool adjust` help text that says what lowers the budget (admin-compute-cli.test.ts).
  */
 
 import { describe, expect, test } from "bun:test";
 import { LEDGER_ENTRY_KINDS, type LedgerEntryKind } from "../../shared/compute-state";
 import * as ledgerModule from "../src/services/compute-ledger";
 import {
+  ADJUST_INSERT_SQL,
   ComputeLedgerError,
   type LedgerRow,
   type PoolRow,
@@ -224,6 +241,60 @@ describe("a correction of the charge of an account's or a partner's pool", () =>
     if (up.ok) expect(up.entry.budget_pool_id).toBeNull();
     expect(await correction(w, budget, -1000, null)).toMatchObject({ ok: true });
     expect((await reread(w, budget)).charged_milli).toBe(0);
+  });
+});
+
+describe("the adjustment statement carries the rule itself", () => {
+  /** `ADJUST_INSERT_SQL` bound as `adjustPool` binds it, but without any of `adjustPool`'s checks. */
+  const bound = (
+    w: World,
+    pool: PoolRow,
+    budgetPoolId: number | null,
+    grantedDeltaMilli: number,
+    chargedDeltaMilli: number,
+  ) =>
+    w.d1
+      .prepare(ADJUST_INSERT_SQL)
+      .bind(
+        pool.id,
+        budgetPoolId,
+        grantedDeltaMilli,
+        chargedDeltaMilli,
+        9,
+        "correction",
+        `direct-${next()}`,
+      )
+      .run();
+
+  test("a budget with a charged delta that does not raise it writes nothing, whoever binds it", async () => {
+    const { w, holder, budget } = await scene("account");
+    expect((await correction(w, holder, 3000, budget.id)).ok).toBe(true);
+    const entries = ledgerRows(w).length;
+    const [holderBefore, budgetBefore] = [await reread(w, holder), await reread(w, budget)];
+    // A fall, and a delta of 0 (which the table would raise a CHECK for): both are refused here, as
+    // a statement that writes nothing, so a caller that skips `adjustPool` cannot credit the budget.
+    for (const [granted, charged] of [
+      [0, -1],
+      [0, -2000],
+      [0, -3000],
+      [5, 0],
+    ] as const) {
+      const r = await bound(w, holder, budget.id, granted, charged);
+      expect([granted, charged, r.meta?.changes]).toEqual([granted, charged, 0]);
+    }
+    expect(ledgerRows(w)).toHaveLength(entries);
+    expect(await reread(w, holder)).toEqual(holderBefore);
+    expect(await reread(w, budget)).toEqual(budgetBefore);
+
+    // The same statement still does what it should: a raise names the budget, and a fall that names
+    // none moves the pool alone.
+    // (`changes` counts the trigger's updates of the pools too, so a write is more than 0.)
+    expect((await bound(w, holder, budget.id, 0, 500)).meta?.changes).toBeGreaterThan(0);
+    expect((await reread(w, budget)).charged_milli).toBe(3500);
+    expect((await bound(w, holder, null, 0, -500)).meta?.changes).toBeGreaterThan(0);
+    expect((await reread(w, holder)).charged_milli).toBe(3000);
+    expect((await reread(w, budget)).charged_milli).toBe(3500);
+    expect(await totalsDisagreements(w.d1)).toEqual([]);
   });
 });
 
