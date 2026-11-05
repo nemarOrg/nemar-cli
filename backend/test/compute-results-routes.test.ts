@@ -18,7 +18,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { resultsOutputKey } from "../../shared/contract/compute-launch";
 import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
-import { RESULT_LINKS_MAX } from "../src/services/compute-results";
 import { declaredKey, declaredText } from "../src/services/compute-verify";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
@@ -70,11 +69,16 @@ interface Reply {
   body: Record<string, any>;
 }
 
-async function post(path: string, key: string | null): Promise<Reply> {
+async function post(path: string, key: string | null, jsonBody?: string): Promise<Reply> {
   const headers: Record<string, string> = {};
   if (key) headers.Authorization = `Bearer ${key}`;
+  if (jsonBody !== undefined) headers["content-type"] = "application/json";
   const res = await handle(
-    new Request(`http://api.test${path}`, { method: "POST", headers }),
+    new Request(`http://api.test${path}`, {
+      method: "POST",
+      headers,
+      ...(jsonBody === undefined ? {} : { body: jsonBody }),
+    }),
     env(),
   );
   const text = await res.text();
@@ -222,9 +226,8 @@ describe("links", () => {
       expect(await (await fetch(l.url)).text()).toBe(expected as string);
       expect(l.size).toBe(new TextEncoder().encode(expected as string).length);
     }
-    expect(Date.parse(res.body.expires_at) - Date.now()).toBeGreaterThan(
-      (6.9 * 24 * 60 * MINUTE) / 60,
-    );
+    // Seven days, written out in milliseconds: at least 6.9 days remain.
+    expect(Date.parse(res.body.expires_at) - Date.now()).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000);
     // Nothing else is reachable: the launcher's files and the declared file have no link.
     expect(res.text).not.toContain("launcher");
     expect(res.text).not.toContain("declared.json");
@@ -257,26 +260,72 @@ describe("links", () => {
     expect((await post(`/compute/jobs/${f.job.id}/links`, f.key)).body.code).toBe("bad_state");
   });
 
-  test("the number of links is bounded, and the answer says how many there are", async () => {
-    const f = await finished();
-    const many = Array.from({ length: RESULT_LINKS_MAX + 5 }, (_, i) => ({
+  // Round 1 of #2041: the first 1,000 outputs alone left the rest of a larger job unreachable, so the
+  // route pages with a cursor. The sizes are the boundaries: one under, at, one over, and several pages.
+  async function declareMany(f: Awaited<ReturnType<typeof finished>>, count: number) {
+    const many = Array.from({ length: count }, (_, i) => ({
       path: `f${String(i).padStart(5, "0")}.txt`,
       size: 1,
       sha256: "a".repeat(64),
     }));
-    // The first output of the sorted list must exist: it is what the renewal's head looks for.
-    await fx.harness.results.put(
-      resultsOutputKey(f.job.id, many[0]?.path as string),
-      new Uint8Array([1]),
-    );
+    for (const m of many) {
+      await fx.harness.results.put(resultsOutputKey(f.job.id, m.path), new Uint8Array([1]));
+    }
     await fx.harness.results.put(
       declaredKey(f.job.id),
       new TextEncoder().encode(declaredText(f.job.id, many, [{ name: "result.json", size: 1 }])),
     );
-    const res = await post(`/compute/jobs/${f.job.id}/links`, f.key);
-    expect(res.status).toBe(200);
-    expect(res.body.links).toHaveLength(RESULT_LINKS_MAX);
-    expect(res.body).toMatchObject({ total: RESULT_LINKS_MAX + 5, truncated: true });
+    return many;
+  }
+
+  for (const count of [999, 1000, 1001, 2500]) {
+    test(`${count} outputs are all reachable in pages of at most 1,000, each exactly once, in order`, async () => {
+      const f = await finished();
+      const many = await declareMany(f, count);
+      const seen: string[] = [];
+      let after: string | null = null;
+      let pages = 0;
+      do {
+        const res: Reply = await post(
+          `/compute/jobs/${f.job.id}/links`,
+          f.key,
+          JSON.stringify(after === null ? {} : { after }),
+        );
+        expect(res.status).toBe(200);
+        expect(res.body.total).toBe(count);
+        expect(res.body.links.length).toBeLessThanOrEqual(1000);
+        for (const l of res.body.links) seen.push(l.path);
+        // The last page says so, and only the last page.
+        expect(res.body.truncated).toBe(res.body.next_after !== null);
+        after = res.body.next_after;
+        pages++;
+      } while (after !== null && pages < 10);
+      expect(pages).toBe(Math.ceil(count / 1000));
+      expect(seen).toEqual(many.map((m) => m.path));
+    });
+  }
+
+  test("a cursor past the last output is an empty last page, and a cursor that is not a path is refused as invalid_spec", async () => {
+    const f = await finished();
+    const path = `/compute/jobs/${f.job.id}/links`;
+    const past = await post(path, f.key, JSON.stringify({ after: "zzzz.txt" }));
+    expect(past.status).toBe(200);
+    expect(past.body).toMatchObject({ links: [], truncated: false, next_after: null });
+    for (const bad of [
+      JSON.stringify({ after: "../etc/passwd" }),
+      JSON.stringify({ after: "/absolute" }),
+      JSON.stringify({ after: 7 }),
+      JSON.stringify({ after: "a".repeat(513) }),
+      JSON.stringify(["after"]),
+      JSON.stringify("after"),
+      "{not json",
+    ]) {
+      const res = await post(path, f.key, bad);
+      expect([res.status, res.body.code]).toEqual([400, "invalid_spec"]);
+      expect(res.text).not.toContain("X-Amz");
+    }
+    // No body at all is the first page, as before.
+    expect((await post(path, f.key)).status).toBe(200);
   });
 
   test("a job with no outputs gets no links, and no error", async () => {

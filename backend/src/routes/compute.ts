@@ -5,7 +5,8 @@
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it
- *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results
+ *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,
+ *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
  *
  * The callbacks are registered FIRST and carry no middleware of their own beyond the Worker's global
  * ones: the launcher has no account. Every route that has a person behind it declares its own
@@ -21,7 +22,7 @@
 
 import { Hono } from "hono";
 import { COMPUTE_REFUSAL_STATUS } from "../../../shared/compute-state.js";
-import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
+import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../shared/contract/compute.js";
 import { authMiddleware, cookieOriginGuard } from "../middleware/auth.js";
 import { getJob } from "../services/compute-jobs.js";
 import { requestComputeCancel } from "../services/compute-lifecycle.js";
@@ -38,6 +39,7 @@ const SENTENCES = {
   bad_state: "The job is not in a state that accepts this.",
   results_expired: "The results of this job have expired.",
   compute_disabled: "Compute storage is not configured.",
+  invalid_spec: "The request is not valid.",
 } as const;
 
 const refuse = (
@@ -64,7 +66,28 @@ computeRoutes.post("/jobs/:id/cancel", authMiddleware, cookieOriginGuard, async 
 computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (c) => {
   const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
   if (!job) return refuse(c, "job_not_found");
-  const result = await mintResultLinks(c.env, job);
+  // An optional JSON body `{ "after": "<an output path>" }` asks for the page that starts after it.
+  let after: string | null = null;
+  const raw = await c.req.text();
+  if (raw.trim() !== "") {
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return refuse(c, "invalid_spec");
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return refuse(c, "invalid_spec");
+    }
+    const cursor = (body as { after?: unknown }).after;
+    if (cursor !== undefined && cursor !== null) {
+      if (typeof cursor !== "string" || !isSafeComputePath(cursor, 512)) {
+        return refuse(c, "invalid_spec");
+      }
+      after = cursor;
+    }
+  }
+  const result = await mintResultLinks(c.env, job, after);
   if (!result.ok) return refuse(c, result.code);
   // Bearer links: returned to the owner in this answer and nowhere else, never logged.
   return c.json({
@@ -72,5 +95,6 @@ computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (
     expires_at: result.expires_at,
     total: result.total,
     truncated: result.truncated,
+    next_after: result.next_after,
   });
 });

@@ -125,7 +125,15 @@ export interface ResultLink {
 }
 
 export type LinksResult =
-  | { ok: true; links: ResultLink[]; expires_at: string; total: number; truncated: boolean }
+  | {
+      ok: true;
+      links: ResultLink[];
+      expires_at: string;
+      total: number;
+      truncated: boolean;
+      /** Pass as `after` to get the next page; null when this page is the last. */
+      next_after: string | null;
+    }
   | { ok: false; code: "bad_state" | "results_expired" | "compute_disabled"; status: number };
 
 const linkRefusal = (code: "bad_state" | "results_expired" | "compute_disabled"): LinksResult => ({
@@ -136,13 +144,20 @@ const linkRefusal = (code: "bad_state" | "results_expired" | "compute_disabled")
 
 /**
  * 7-day presigned GETs for a finished job's declared outputs, in path order, at most `RESULT_LINKS_MAX`
- * (`truncated` says there are more, and `total` how many). The job must be `finished` and verified
+ * (`truncated` says there are more, `total` how many there are in all, and `next_after` is the cursor of
+ * the next page: the last path of this one). `after` starts the page at the first output whose path sorts
+ * strictly after it, so every output of a job of any size is reachable in pages (round 1 of #2041: the
+ * first 1,000 alone left the rest unreachable). The job must be `finished` and verified
  * (`bad_state` otherwise). The objects must still be there: the declared file and the first output are
  * read with a head through the binding, and one that is gone is `results_expired` (the bucket's rule
  * deletes results after their retention; a renewal never makes a link for an object that is not there).
  * The caller has already checked that the person is the job's owner.
  */
-export async function mintResultLinks(env: Bindings, job: ComputeJobRow): Promise<LinksResult> {
+export async function mintResultLinks(
+  env: Bindings,
+  job: ComputeJobRow,
+  after: string | null = null,
+): Promise<LinksResult> {
   if (job.state !== "finished" || job.results_verified_at === null) return linkRefusal("bad_state");
   const bucket = env.COMPUTE_RESULTS;
   const s3 = computeS3(env);
@@ -152,11 +167,12 @@ export async function mintResultLinks(env: Bindings, job: ComputeJobRow): Promis
   const outputs = [...declared.value.outputs].sort((a, b) =>
     a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
   );
-  const first = outputs[0];
+  const remaining = after === null ? outputs : outputs.filter((o) => o.path > after);
+  const first = remaining[0];
   if (first !== undefined && (await bucket.head(resultsOutputKey(job.id, first.path))) === null) {
     return linkRefusal("results_expired");
   }
-  const chosen = outputs.slice(0, RESULT_LINKS_MAX);
+  const chosen = remaining.slice(0, RESULT_LINKS_MAX);
   const links: ResultLink[] = [];
   let expires = "";
   for (const o of chosen) {
@@ -174,6 +190,7 @@ export async function mintResultLinks(env: Bindings, job: ComputeJobRow): Promis
     links,
     expires_at: expires,
     total: outputs.length,
-    truncated: outputs.length > chosen.length,
+    truncated: remaining.length > chosen.length,
+    next_after: remaining.length > chosen.length ? (chosen[chosen.length - 1]?.path ?? null) : null,
   };
 }
