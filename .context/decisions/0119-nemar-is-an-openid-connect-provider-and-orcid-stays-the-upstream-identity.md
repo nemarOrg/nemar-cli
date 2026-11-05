@@ -301,7 +301,7 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - **`OIDC_SECRET` is for good once a key exists.**
   Changing it after the first rotation makes every stored key unreadable.
   A rotation refuses to promote a key it cannot read, so the mistake is caught and nothing changes, but nothing re-encrypts the stored keys, and no re-encryption path exists; building one (with a version on each row) is not part of this epic.
-  Losing or changing it leaves no CLI way back (a rotation refuses with `key_unreadable`, and revoke refuses the current and next keys), so recovery means removing the unreadable key rows by hand before a rotation can make a new pair (delete the `oidc_signing_keys` rows, then run `keys rotate`), and the operations runbook (#2020) documents that procedure.
+  Losing or changing it leaves no CLI way back (a rotation refuses with `key_unreadable`, and revoke refuses the current and next keys), so recovery is by hand: delete the current and next rows of `oidc_signing_keys` (retired rows hold no private half and can stay), then run `keys rotate`, and the operations runbook (#2020) documents that procedure.
 - **The cookie rename is a three-step release.**
   Until the website reads the new name, turning the flag on logs everyone out of the website: the API would set a cookie the website's middleware does not know.
   The flag is `"1"` in the dev Worker's vars, so the dev Worker issues `__Host-nemar_session` as soon as it deploys, and the website pull request that reads it (nemarOrg/website#499) must already be live on the website's `staging` before this epic reaches `dev`.
