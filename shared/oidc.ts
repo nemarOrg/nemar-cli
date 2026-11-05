@@ -268,3 +268,119 @@ export const OIDC_INTROSPECT_PATH = "/oauth/introspect";
  * them during maintenance or a burst cannot validate a token.
  */
 export const OIDC_PUBLIC_DOCUMENT_PATHS: readonly string[] = [OIDC_DISCOVERY_PATH, OIDC_JWKS_PATH];
+
+// ---------------------------------------------------------------------------------------------
+// Ending an account's grants, and telling the client (ADR 0119 rule 12 and rule 15)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Why a path ended an account's grants: a fixed word, never text a caller wrote. It is the
+ * `revoked_reason` of every token the path revoked (`OIDC_TOKEN_REVOKE_REASONS` in the Worker adds
+ * these to its own words) and the `reason` of every logout delivery it queued, and migration 0124's
+ * CHECK on `oidc_logout_deliveries.reason` lists exactly these.
+ *
+ *   account_revoked    an administrator revoked the account (`finalizeRevocation`)
+ *   account_deleted    the owner soft-deleted it, or the sweep of the live tests' accounts did
+ *   account_merged     the owner ended the loser of a manual merge (ADR 0043)
+ *   compute_suspended  compute was suspended; only grants that carry a `compute.` scope end. No path
+ *                      writes this word yet: the compute access phase of the compute program adds the
+ *                      caller, and the filter it needs ({@link OIDC_COMPUTE_SCOPE_PREFIX}) is built
+ *   orcid_changed      the ORCID iD was unlinked or replaced; only grants of clients that sign in by
+ *                      `person_proven_orcid` end
+ *   kind_changed       the account's kind was changed away from `person`; the same grants end
+ */
+export const OIDC_END_REASONS = [
+  "account_revoked",
+  "account_deleted",
+  "account_merged",
+  "compute_suspended",
+  "orcid_changed",
+  "kind_changed",
+] as const;
+export type OidcEndReason = (typeof OIDC_END_REASONS)[number];
+
+/** True for a string that names an end reason, exactly. */
+export function isOidcEndReason(value: unknown): value is OidcEndReason {
+  return typeof value === "string" && (OIDC_END_REASONS as readonly string[]).includes(value);
+}
+
+/** The scope prefix that makes a grant a compute grant: a compute suspension ends only these. */
+export const OIDC_COMPUTE_SCOPE_PREFIX = "compute.";
+
+/** The two reasons an owner may name for `nemar admin oidc end-account`, and the words they become. */
+export const OIDC_ACCOUNT_END_REASONS = {
+  merged: "account_merged",
+  revoked: "account_revoked",
+} as const;
+export type OidcAccountEndReason = keyof typeof OIDC_ACCOUNT_END_REASONS;
+
+/** The states of a logout delivery (`oidc_logout_deliveries.status`). */
+export const OIDC_LOGOUT_STATUSES = ["pending", "sent", "failed", "fenced"] as const;
+export type OidcLogoutStatus = (typeof OIDC_LOGOUT_STATUSES)[number];
+
+/** True for a string that names a delivery state, exactly. */
+export function isOidcLogoutStatus(value: unknown): value is OidcLogoutStatus {
+  return typeof value === "string" && (OIDC_LOGOUT_STATUSES as readonly string[]).includes(value);
+}
+
+/**
+ * What a delivery records of a failed or refused attempt, as a fixed word and never the text of an
+ * error or of the partner's answer (`oidc_logout_deliveries.last_error_class`).
+ *
+ *   timeout          no answer inside {@link OIDC_LOGOUT_TIMEOUT_MS}
+ *   network          the connection failed, or the answer could not be read
+ *   redirect         the partner answered with a redirect, which is never followed
+ *   http_4xx         the partner refused the token (any 4xx): not retried
+ *   http_5xx         the partner failed (any 5xx): retried
+ *   http_other       any answer that is neither 200, 204, a redirect, a 4xx nor a 5xx: not retried
+ *   sign_failed      NEMAR could not sign the token (no key, a database fault): retried
+ *   address_refused  the registered address is not one NEMAR will send to (not https, or in
+ *                    production a loopback or an IP literal)
+ *   client_disabled  the client was disabled before the token was sent: telling it is not owed
+ *   fenced           outside production, an address that is neither loopback nor listed
+ */
+export const OIDC_LOGOUT_ERROR_CLASSES = [
+  "timeout",
+  "network",
+  "redirect",
+  "http_4xx",
+  "http_5xx",
+  "http_other",
+  "sign_failed",
+  "address_refused",
+  "client_disabled",
+  "fenced",
+] as const;
+export type OidcLogoutErrorClass = (typeof OIDC_LOGOUT_ERROR_CLASSES)[number];
+
+/** The event a back-channel logout token carries (OpenID Connect Back-Channel Logout 1.0, 2.4). */
+export const OIDC_BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
+
+/** The `typ` header of a logout token (RFC 8725, section 3.11: explicit typing). */
+export const OIDC_LOGOUT_TOKEN_TYP = "logout+jwt";
+
+/** A logout token is good for this long: the partner reads it the moment it arrives. */
+export const OIDC_LOGOUT_TOKEN_TTL_SECONDS = 120;
+
+/** How long NEMAR waits for the partner's answer, and the redirect it never follows. */
+export const OIDC_LOGOUT_TIMEOUT_MS = 5000;
+
+/**
+ * The wait before retry n (the first retry is index 0) after a 5xx or a network error: 1 minute,
+ * 5 minutes, 30 minutes, 2 hours and 12 hours. A delivery is attempted once and retried at most
+ * {@link OIDC_LOGOUT_RETRY_DELAYS_SECONDS}`.length` times, then recorded `failed`. The wait is the
+ * EARLIEST time of the next attempt: the retry tick runs every half hour, so a short wait is taken up
+ * at the next tick.
+ */
+export const OIDC_LOGOUT_RETRY_DELAYS_SECONDS: readonly number[] = [60, 300, 1800, 7200, 43200];
+
+/** The most attempts of one delivery: the first and every retry. */
+export const OIDC_LOGOUT_MAX_ATTEMPTS = OIDC_LOGOUT_RETRY_DELAYS_SECONDS.length + 1;
+
+/**
+ * An attempt is claimed for this long before its answer is recorded, so a second runner (the first
+ * attempt after a commit and the retry tick, or two ticks) never sends the same delivery twice at
+ * once. An attempt that never records its answer, because the isolate was evicted, is taken up
+ * again when this lapses; it was counted when it was claimed, so the retries stay bounded.
+ */
+export const OIDC_LOGOUT_LEASE_SECONDS = 120;
