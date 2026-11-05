@@ -3651,6 +3651,12 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
         " abcd",
         "abcd ",
         "abcd\n",
+        // A canonical value with a line break or a blank after it: not the value, whatever it decodes to.
+        "QQ\n",
+        "QQ\r\n",
+        "QQ ",
+        "QQ\t",
+        "QUI\n",
         "\nabcd",
         "ab\ncd",
         "abcd\r\n",
@@ -3701,6 +3707,37 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       }
     });
 
+    test("the padding is added back by length before decoding: two signs for 2 modulo 4, one for 3 modulo 4, none for 0", () => {
+      // The oracle is Node's base64 decoder, given the value with its padding written out by the rule.
+      const signsFor = (length: number) => ({ 0: 0, 2: 2, 3: 1 })[(length % 4) as 0 | 2 | 3];
+      const decodeWithPadding = (value: string) =>
+        Buffer.from(
+          value.replace(/-/g, "+").replace(/_/g, "/") +
+            "=".repeat(signsFor(value.length) as number),
+          "base64",
+        ).toString("latin1");
+      for (let bytes = 1; bytes <= 30; bytes++) {
+        const text = "abcdefghijklmnopqrstuvwxyz0123".slice(0, bytes);
+        const value = oracle(text);
+        expect(signsFor(value.length), `${bytes} bytes`).toBe(
+          value.length % 4 === 0 ? 0 : value.length % 4 === 2 ? 2 : 1,
+        );
+        expect(decodeWithPadding(value), `${bytes} bytes`).toBe(text);
+        expect(decodeLaunchSpecEnv(value), `${bytes} bytes`).toEqual({ ok: true, text });
+      }
+      // The three residues as fixed vectors (the golden vectors are both 2 modulo 4).
+      expect(decodeLaunchSpecEnv("QUJD")).toEqual({ ok: true, text: "ABC" }); // 0: no sign
+      expect(decodeLaunchSpecEnv("QUI")).toEqual({ ok: true, text: "AB" }); // 3: one sign
+      expect(decodeLaunchSpecEnv("QQ")).toEqual({ ok: true, text: "A" }); // 2: two signs
+      // The sender never writes the padding: a value that carries it is not a value.
+      for (const withSigns of ["QUI=", "QQ==", "QQ=", "QUJD=", "QUJD===="]) {
+        expect(refusal(withSigns), withSigns).toBe("not_base64url");
+      }
+      // A length of 1 modulo 4 is refused before the padding step, whatever follows it.
+      for (const value of ["Q", "QUJDQ", "QUJDQUJDQ"])
+        expect(refusal(value), value).toBe("bad_length");
+    });
+
     test("a decoded byte outside 0x20 to 0x7e is refused as not printable, whichever byte it is", () => {
       // All 256 byte values alone, each as the encoder-canonical value of that byte: only 0x20 to 0x7e
       // (space to tilde) are text. NUL, the other control bytes and DEL (0x7f) are not, and nothing
@@ -3731,7 +3768,9 @@ describe("the launch specification on the wire: base64url in the shell-inert alp
       }
     });
 
-    test("anything that is not a string is refused rather than thrown at", () => {
+    test("an unset environment variable is a non-string: refused with not_base64url, and anything else that is not a string is too", () => {
+      // `undefined` is what reading an unset variable gives (a launcher's `None` or missing key is the same).
+      expect(refusal(undefined as unknown as string)).toBe("not_base64url");
       for (const notText of [undefined, null, 7, {}, [], ["QUJD"], true]) {
         expect(refusal(notText as unknown as string), String(notText)).toBe("not_base64url");
       }

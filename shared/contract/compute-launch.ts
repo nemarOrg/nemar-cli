@@ -401,7 +401,8 @@ export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
  * The text a `NEMAR_LAUNCH_SPEC` value carries, or the reason it is not one. STRICT, and one answer
  * for every value: the checks run in this order, and the first to fail names the refusal.
  *
- *  1. the value is a string, else `not_base64url`;
+ *  1. the value is a string, else `not_base64url` (an unset environment variable is not a string,
+ *     and is refused the same way);
  *  2. it is not empty, else `empty`;
  *  3. it is at most {@link LAUNCH_SPEC_ENV_MAX_CHARS} characters, else `too_long` (the unit is
  *     characters of the value, UTF-16 code units in this reference; for every ACCEPTED value that is
@@ -410,8 +411,10 @@ export type LaunchSpecEnvRefusal = (typeof LAUNCH_SPEC_ENV_REFUSALS)[number];
  *     no `+` or `/`, no whitespace or line break; a raw JSON document, which starts with `{`, is
  *     refused here: nothing is registered with a tenant, so no earlier format is accepted);
  *  5. its length is not 1 modulo 4, else `bad_length`;
- *  6. it decodes to bytes that are all printable ASCII, 0x20 to 0x7e (no control byte, not DEL, and
- *     nothing from 0x80 up), else `not_printable`;
+ *  6. the `=` padding is added back to a multiple of four (one sign for a length of 3 modulo 4, two
+ *     for 2 modulo 4; a length of 1 modulo 4 was refused in step 5) and the value is decoded; the
+ *     bytes are all printable ASCII, 0x20 to 0x7e (no control byte, not DEL, and nothing from 0x80
+ *     up), else `not_printable`;
  *  7. it is CANONICAL, else `not_base64url`: encoding the decoded text again gives the value back,
  *     so the unused trailing bits of its last character are zero and there is one value per text.
  *
@@ -433,6 +436,9 @@ export function decodeLaunchSpecEnv(
   if (!isShellInertEnvValue(value)) return refuse("not_base64url");
   if (value.length % 4 === 1) return refuse("bad_length");
   const standard = value.replace(/-/g, "+").replace(/_/g, "/");
+  // The padding is restored as step 6 says. `atob` would take the value without it, but a decoder that
+  // does not forgive (Python's `b64decode` says "Incorrect padding") needs it, so the rule is stated
+  // and tested by its outcome, which the launcher has to reach.
   const binary = atob(standard.padEnd(standard.length + ((4 - (standard.length % 4)) % 4), "="));
   if (!isPrintable(binary)) return refuse("not_printable");
   if (toBase64Url(binary) !== value) return refuse("not_base64url");
