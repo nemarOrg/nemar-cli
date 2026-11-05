@@ -117,6 +117,24 @@ describe("ADR 0119 records what the token phase settled (#2018)", () => {
     expect(thirteen).toMatch(/code's scopes, never the grant's/);
     expect(thirteen).toMatch(/HTTP Basic only/);
     expect(thirteen).toMatch(/machine-only scopes/);
+    // Round 1: the retry's children are mutually exclusive, and a used code revokes only after its
+    // verifier and redirect address match.
+    expect(thirteen).toContain("`refresh_superseded`");
+    expect(thirteen).toMatch(/mutually exclusive/);
+    expect(thirteen).toMatch(/with the right verifier and redirect address/);
+    expect(thirteen).not.toMatch(/both children stay live/);
+    expect(thirteen).not.toMatch(/whatever verifier or redirect address/);
+    expect(readmeLine).toContain("refresh_superseded");
+  });
+
+  test("rule 14 and the consequences: read-only maintenance, faults, the table's growth", () => {
+    const fourteen = rule(14);
+    expect(fourteen).toMatch(/`POST \/oauth\/userinfo` and `POST \/oauth\/introspect` are served/);
+    expect(fourteen).toMatch(/never `invalid_token`, `invalid_grant` or `\{active: false\}`/);
+    const consequences = adr.slice(adr.indexOf("## Consequences"), adr.indexOf("## Alternatives"));
+    expect(consequences).toMatch(/In read-only maintenance no partner can refresh/);
+    expect(consequences).toMatch(/What to watch once a partner is live/);
+    expect(consequences).toMatch(/minimum interval between two rotations/);
   });
 
   test("rule 14: the claim names, the refusal elsewhere and introspection's blindness", () => {

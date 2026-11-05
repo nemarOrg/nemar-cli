@@ -181,18 +181,22 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     This is a decision for the repository owner, who can reverse it before the first client registers, and it is marked as such so that acceptance of this ADR does not carry it unseen.
 13. **The token endpoint decides in the statement that writes, and a second use of a code or of a spent refresh token ends what it issued (phase #2018).**
     A client authenticates with HTTP Basic only: the identifier and the secret are form-decoded (RFC 6749 section 2.3.1) and the secret is compared as a hash in constant time, the previous secret is accepted until its grace ends, a disabled client is refused, and a credential in the body is refused even beside a valid header (`invalid_client`, with a Basic challenge).
-    A code is checked before anything is written: the PKCE verifier, 43 to 128 unreserved characters, against its S256 challenge in constant time, and the redirect address exactly; a mismatch writes nothing.
+    A token request whose `code`, `redirect_uri` or `code_verifier` is missing, or whose verifier is not 43 to 128 unreserved characters, is `invalid_request` before the code is read.
+    A code is then checked before anything is written: the verifier against its S256 challenge in constant time, and the redirect address exactly; a mismatch is `invalid_grant` and writes nothing, whether or not the code is used.
     Another client's code is refused and writes nothing, used or not, so one client can never end what another holds.
     One batch then mints and claims.
     The access token is inserted only while the code is unused, unexpired and this client's, and while its client, its grant and its account still pass, the account by the client's sign-in rule (rule 7) read at that moment; the refresh token only beside that access token; and the code is marked used only when that access token's row exists.
     So two redemptions in flight cannot both mint, and a redemption refused for any reason writes nothing.
-    A code its own client presents again once it is used, or a redemption that lost the claim of a code used by now, is a second redemption: every token issued from the code, rotations included, is revoked (`code_replay`), and nothing else is written.
-    That holds whatever verifier or redirect address the second presentation carries, because the code has left the client's hands either way; it is recognized until an hour past the code's expiry, when used codes are pruned.
+    A used code its own client presents again with the right verifier and redirect address, or a redemption that lost the claim of a code used by now, is a second redemption: every token issued from the code, rotations included, is revoked (`code_replay`), and nothing else is written.
+    The verifier comes first because whoever redeemed the code first held the right one: a second redemption by the legitimate client still matches and still revokes, while someone who captured a victim's code cannot have the legitimate client present it again with another verifier to end the victim's tokens.
+    A second redemption is recognized until an hour past the code's expiry, when used codes are pruned.
     Tokens carry the code's scopes, never the grant's, which accumulate.
     The identity token carries `iss`, `sub`, `aud` (the client), `iat`, `exp` (5 minutes), `nonce` when the request had one, `auth_time` (the sign-in of the session behind the code) and `at_hash`, with the claims of the code's scopes (rule 14); a refresh returns no identity token.
     A refresh token is issued only when the code carries `offline_access` and the client is allowed the refresh token grant.
     A refresh rotates in one batch: the child is inserted only while the parent is live, unrevoked and this client's and its client, grant and account still pass, and only when the parent is either unspent with no child, or was spent under 30 seconds ago and has exactly one child.
-    That second case is a retried request: it mints one more child, never two, and both children stay live, so two requests that refresh together both succeed.
+    That second case is a retried request: it mints one more child, never two, so two requests that refresh together both succeed.
+    The children of one parent are mutually exclusive: rotating one of them revokes its unspent siblings in the same batch (`refresh_superseded`), so whichever is rotated first wins and the other, presented later, is a revoked token that revokes the whole family.
+    A session that refreshed twice at once keeps working with whichever answer it stored; two holders of one token inside the 30 seconds cannot both go on rotating, because the second of them to come back ends the family.
     The parent is marked spent once, so the 30 seconds run from the first rotation and a retry never stretches them.
     A parent presented when it is revoked, or spent and past the 30 seconds, or already retried once, revokes its whole family, access tokens included (`refresh_reuse`), in a statement that checks that condition again, so a rotation refused for another reason (an inactive account, a revoked grant, an expired token) revokes nothing.
     A refresh token expires 30 days after it was minted and never after its family's end, 90 days after the code was redeemed, which every rotation copies unchanged; a spent one is kept until a day past that end, so its reuse can be recognized.
@@ -201,14 +205,17 @@ Fourteen rules inside that, each of which reopens a hole if reversed.
     The client credentials grant gives one access token for the client's own machine-only scopes (`compute.stats`): no account, no identity token, no refresh token.
     Every answer is `Cache-Control: no-store`, every error is the two fields of RFC 6749 section 5.2 with a fixed sentence that repeats nothing the caller sent, and a token, a code, a verifier or a secret is stored only as a SHA-256 and logged nowhere.
 14. **An access token is used only where its scopes are served, and what it says about an account is read at the moment it is used (phase #2018).**
-    `oidcBearer` is the one middleware that accepts an access token; today it is on `/oauth/userinfo` alone, and a test built from the Worker's whole route table fails when it appears on any other route.
+    `oidcBearer` is the one middleware that lets an access token authenticate a request; today it is on `/oauth/userinfo` alone, and a test built from the Worker's whole route table fails when it appears on any other route.
+    Without an `Authorization` header it answers the bare `Bearer` challenge with no error code and no body (RFC 6750 section 3.1).
     Every other route refuses an OpenID Connect credential by its `nmo_` prefix before any lookup: a route behind the API key check answers 401 `oidc_token_not_accepted`, and a route with an anonymous answer gives that answer, as it would for an unknown key.
     The token routes refuse a CLI key in turn: `invalid_token` at userinfo, `invalid_client` at the three client endpoints.
     Every use reads the token, its client, its grant and the account against the client's sign-in rule again, so the token of a suspended, revoked or deleted account is inactive while its row is live.
     An access token lives its 15 minutes whenever it was minted; the family's end bounds when one can be minted, not how long it lives.
     The claims are the token's scopes', and an absent value is left out rather than sent empty: `sub`; `name`, `given_name`, `family_name`; `email`, `email_verified`; `orcid` (`https://orcid.org/<iD>`) and `orcid_verified`, true only for an iD proven by an ORCID sign-in, neither for an account with no iD; and for `nemar.account`, `nemar_kind`, `nemar_status` and `nemar_tier` (`base` or `upload`, the tiers of ADR 0040).
     Revocation (RFC 7009) answers 200 whatever it is given and ends only the caller's own token: an access token alone, a refresh token with its family (`client_revoked`).
-    Introspection (RFC 7662) answers `{active: false}` unless the token is active now and the caller is the client it was issued to, or the token is an access token whose audience the caller is registered to introspect; a refresh token is shown to its own client only.
+    Introspection (RFC 7662) answers `{active: false}` unless the token is active now and the caller is the client it was issued to, or the token is an access token whose audience the caller is registered to introspect; a refresh token is shown to its own client only, and with no `token_type`, which RFC 7662 defines for access tokens.
+    A database fault is a server error, never `invalid_token`, `invalid_grant` or `{active: false}`.
+    In the `read-only` maintenance mode, `POST /oauth/userinfo` and `POST /oauth/introspect` are served (exact paths; both only read), and the token endpoint and revocation answer 503; in `full` all four answer 503.
     The three client endpoints have a rate-limit bucket of their own, keyed by address and generous, because a partner's server answers for every person signed in to it from one address.
 
 ### What this phase builds, and what it does not
@@ -252,7 +259,13 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
   The owner checks that no live username already does before the release, because a migration cannot rename a person's handle.
 - **Spent refresh tokens are rows that stay (rule 13).**
   Every rotation writes two rows and keeps the spent one until a day past its family's end, up to 91 days, so the token table grows with the number of refreshes and not with the number of people.
-  That is the price of recognizing the reuse of any spent token in a family; if the table's size ever matters, the lever is how long a spent row is kept, which is this ADR's to change.
+  That is the price of recognizing the reuse of any spent token in a family.
+  The prune runs at the head of every batch that mints and reads only what it may delete: the access tokens' expiry index is partial on their kind, so retained refresh rows cost the prune nothing.
+  What to watch once a partner is live: row counts by kind, and how many are spent and how many revoked; the largest family by row count, and rotations per family per day; rows deleted per prune, and the token endpoint's latency; the size of the D1 database.
+  Two levers exist if the size ever matters, noted here and not built: prune a revoked family about a day after it is revoked (nothing in it can be used, and its reuse needs no detecting), and a minimum interval between two rotations of one family.
+- **In read-only maintenance no partner can refresh (rule 14).**
+  The token endpoint writes, so it answers 503; userinfo and introspection keep answering, but every partner session lapses within the access token's 15 minutes and the person signs in again once the mode is off.
+  A maintenance window that has to keep partners signed in is a `full` decision the owner makes knowing that.
 
 ## Alternatives considered
 
