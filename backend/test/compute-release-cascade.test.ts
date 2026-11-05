@@ -48,6 +48,7 @@ import {
 } from "../src/services/compute-lifecycle";
 import { computeReleaseStatements } from "../src/services/compute-release";
 import { hashApiKey } from "../src/services/token";
+import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import {
   type LifecycleFixture,
@@ -58,15 +59,24 @@ import {
   setTapisTimes,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
-import { fundAccount, seedUser } from "./helpers/compute-seed";
+import { fundAccount, fundPlatform, seedUser } from "./helpers/compute-seed";
 
 const OWNER_KEY = "release-owner-key-0123456789abcdef0123456789abcdef";
 
 let fx: LifecycleFixture;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 
+/** An owner of Miniflare's D1 (never reset) and the key its routes are called with. */
+let d1Owner = 0;
+
 beforeAll(async () => {
-  fx = await startLifecycleFixture();
+  fx = await startLifecycleFixture({ withD1: true });
+  const d1 = fx.harness.d1 as D1Database;
+  d1Owner = await seedUser(d1, { role: "owner", username: "releaseowner-d1" });
+  await d1
+    .prepare("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+    .bind(d1Owner, await hashApiKey(OWNER_KEY), OWNER_KEY.slice(0, 8))
+    .run();
 }, 120_000);
 
 beforeEach(async () => {
@@ -746,5 +756,171 @@ describe("the statements", () => {
     expect(code).not.toMatch(/from\s+["']\.\/tapis\//);
     expect(code).not.toMatch(/\bcancelJob\b|\bdriveCancel\b|\bsearchJobsByTag\b/);
     expect(computeReleaseStatements(7)).toBeInstanceOf(Array);
+  });
+});
+
+// --- The same batch --------------------------------------------------------------------------------
+
+describe("the compute statements are in the SAME batch as the credential revocations", () => {
+  // `finalizeRevocation` orders its batch BEFORE the status write precisely so that a failure leaves
+  // the account `approved` and a retry reaches the cascade again; a second batch for compute, after
+  // the first, that failed would leave the account's sessions revoked and its compute live, and the
+  // route's `User already revoked` would make that unrecoverable. So when ONE statement of the batch
+  // aborts (here, the ledger refusing the release), NOTHING of the batch is written (sessions
+  // included), and the retry ends both. Run on bun:sqlite and on Miniflare's D1, the engine `wrangler
+  // --local` runs, whose batch is the transaction production relies on.
+  interface Target {
+    id: number;
+    username: string;
+    job: ComputeJobRow;
+  }
+
+  const engines = (): Array<{ name: string; env: Bindings }> => [
+    { name: "bun:sqlite", env: fx.env({ ENVIRONMENT: "test", RESEND_API_KEY: "" }) },
+    {
+      name: "Miniflare D1",
+      env: fx.env({
+        DB: fx.harness.d1 as D1Database,
+        ENVIRONMENT: "test",
+        RESEND_API_KEY: "",
+      }),
+    },
+  ];
+
+  let counter = 0;
+
+  /** An account with a live session and a job that never reached Tapis (a hold the cascade releases). */
+  async function seedOn(env: Bindings): Promise<Target> {
+    const username = `samebatch${++counter}${Math.floor(Math.random() * 1e6)}`;
+    const id = await seedUser(env.DB, { username });
+    // The platform budget of a database that is never reset (Miniflare's D1): generous, and added to.
+    await fundPlatform(env.DB, "people", 1_000_000_000);
+    await fundAccount(env.DB, id, 100_000, "cpu");
+    const job = await jobFor(env, id);
+    await issueSession(env, id, false, "test-agent", "127.0.0.1", "orcid");
+    return { id, username, job };
+  }
+
+  const one = async <T>(env: Bindings, sql: string, ...binds: unknown[]): Promise<T> =>
+    (await env.DB.prepare(sql)
+      .bind(...binds)
+      .first<T>()) as T;
+
+  /** What an aborted batch must leave exactly as it was, and what a completed one ends. */
+  async function observe(env: Bindings, t: Target) {
+    return {
+      liveSessions: (
+        await one<{ n: number }>(
+          env,
+          "SELECT COUNT(*) AS n FROM web_sessions WHERE user_id = ? AND revoked_at IS NULL",
+          t.id,
+        )
+      ).n,
+      jobState: (
+        await one<{ state: string }>(env, "SELECT state FROM compute_jobs WHERE id = ?", t.job.id)
+      ).state,
+      ledger: (
+        await env.DB.prepare("SELECT kind FROM compute_ledger WHERE job_id = ? ORDER BY id")
+          .bind(t.job.id)
+          .all<{ kind: string }>()
+      ).results.map((r) => r.kind),
+      frozen: (
+        await one<{ frozen: number }>(
+          env,
+          "SELECT frozen FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?",
+          String(t.id),
+        )
+      ).frozen,
+      status: (await one<{ status: string }>(env, "SELECT status FROM users WHERE id = ?", t.id))
+        .status,
+      deleted: (
+        await one<{ d: number }>(
+          env,
+          "SELECT deleted_at IS NOT NULL AS d FROM users WHERE id = ?",
+          t.id,
+        )
+      ).d,
+    };
+  }
+
+  const LIVE = {
+    liveSessions: 1,
+    jobState: "created",
+    ledger: ["hold"],
+    frozen: 0,
+    status: "approved",
+    deleted: 0,
+  };
+
+  /** The ledger refuses THIS job's release: the statement of the compute set that fails. */
+  async function refuseRelease(env: Bindings, t: Target): Promise<string> {
+    const name = `release_refused_${t.id}`;
+    await env.DB.prepare(
+      `CREATE TRIGGER ${name} BEFORE INSERT ON compute_ledger
+         WHEN NEW.kind = 'release' AND NEW.job_id = '${t.job.id}'
+       BEGIN SELECT RAISE(ABORT, 'test: the release is refused'); END`,
+    ).run();
+    return name;
+  }
+
+  async function call(env: Bindings, method: string, path: string): Promise<Response> {
+    return app.request(path, { method, headers: { Authorization: `Bearer ${OWNER_KEY}` } }, env);
+  }
+
+  test("finalizeRevocation: a failing compute statement leaves the sessions AND the compute as they were, and the retry ends both (MUTATION: run the compute statements in a second batch)", async () => {
+    for (const { name, env } of engines()) {
+      const t = await seedOn(env);
+      expect([name, await observe(env, t)]).toEqual([name, LIVE]);
+      const trigger = await refuseRelease(env, t);
+
+      const failed = await call(env, "POST", `/admin/revoke/${t.username}`);
+      expect([name, failed.status >= 500]).toEqual([name, true]);
+      // Nothing of the batch was written: not the session revoke that comes BEFORE the compute
+      // statements in it, and not the pool freeze that comes after; the account is still approved, so
+      // the retry reaches the cascade again.
+      expect([name, await observe(env, t)]).toEqual([name, LIVE]);
+
+      await env.DB.prepare(`DROP TRIGGER ${trigger}`).run();
+      const retried = await call(env, "POST", `/admin/revoke/${t.username}`);
+      expect([name, retried.status]).toEqual([name, 200]);
+      expect([name, await observe(env, t)]).toEqual([
+        name,
+        {
+          liveSessions: 0,
+          jobState: "cancelled",
+          ledger: ["hold", "release"],
+          frozen: 1,
+          status: "revoked",
+          deleted: 0,
+        },
+      ]);
+    }
+  });
+
+  test("tombstoneUserCascade: a failing compute statement leaves the mask, the sessions AND the compute as they were, and the retry ends all (MUTATION: run the compute statements in a second batch)", async () => {
+    for (const { name, env } of engines()) {
+      const t = await seedOn(env);
+      expect([name, await observe(env, t)]).toEqual([name, LIVE]);
+      const trigger = await refuseRelease(env, t);
+
+      const failed = await call(env, "DELETE", `/admin/users/by-id/${t.id}`);
+      expect([name, failed.status]).toEqual([name, 500]);
+      expect([name, await observe(env, t)]).toEqual([name, LIVE]);
+
+      await env.DB.prepare(`DROP TRIGGER ${trigger}`).run();
+      const retried = await call(env, "DELETE", `/admin/users/by-id/${t.id}`);
+      expect([name, retried.status]).toEqual([name, 200]);
+      expect([name, await observe(env, t)]).toEqual([
+        name,
+        {
+          liveSessions: 0,
+          jobState: "cancelled",
+          ledger: ["hold", "release"],
+          frozen: 1,
+          status: "revoked",
+          deleted: 1,
+        },
+      ]);
+    }
   });
 });
