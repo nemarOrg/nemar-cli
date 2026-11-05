@@ -12,19 +12,24 @@
  *   the tick     `runAccessReportCron`: the 30-minute tick's production-only call, ten due rows at a time.
  *
  * THE GUARANTEE, and what it is not. TOWARDS ACCESS A REPORT IS SENT AT MOST ONCE for every outcome this
- * code cannot judge, and is retried only when ACCESS visibly did not record it:
+ * code cannot judge, and is retried only when ACCESS visibly did not process the request:
  *  - THE CLAIM. The row is taken by ONE conditional UPDATE (`pending` to `attempting`, a lease stamp,
  *    the attempt counted) BEFORE the POST. Two overlapping ticks, a tick and a retry, or two Workers
  *    cannot both send: only the one that changed the row goes on. The claim is the only thing that
  *    makes a request; nothing sends without it.
- *  - WHAT IS RETRIED. An HTTP answer that is not 2xx (a refusal, a deferral, a server error) means ACCESS
- *    answered and, as far as this code can tell, recorded nothing: the row goes back to `pending` with an
- *    exponential delay (an hour, doubling, a day at most) and ends `failed` only when the attempts run
- *    out. That is a retry of a request ACCESS refused, not a second report.
- *  - WHAT IS NOT. NO ANSWER (a timeout, a lost or refused connection: a runtime cannot tell the last
- *    from a reset after the request left) may mean the request was recorded; a sender that died holding
- *    its lease may have died before or after the POST. Both end the row `failed` with `outcome_unknown`,
- *    and NOTHING IN CODE SENDS IT AGAIN: a person looks (ACCESS can say whether it holds the job) and
+ *  - WHAT IS RETRIED. ONLY AN ANSWER THAT SHOWS THE REQUEST WAS NOT PROCESSED: a 4xx other than 409 (a
+ *    refusal of the request itself), 408 and 429 (the server did not take it) and 503 (the service is
+ *    unavailable, which a server says before it reads the request). The row goes back to `pending` with
+ *    an exponential delay (an hour, doubling, a day at most) and ends `failed` only when the attempts
+ *    run out. That is a retry of a request ACCESS did not process, not a second report.
+ *  - WHAT IS NOT. Everything else is an outcome this code cannot judge, and it is the same as no answer:
+ *    NO ANSWER (a timeout, a lost or refused connection: a runtime cannot tell the last from a reset
+ *    after the request left); a 500, 502 or 504 (a gateway in front of a server that already stored the
+ *    request answers 502 or 504, and a server answers 500 after the write); every 3xx (303, "created,
+ *    see other", is the usual reply to a POST that stored something, and a redirect is never followed);
+ *    409 (which may turn out to mean "already recorded"); a sender that died holding its lease, which
+ *    may have died before or after the POST. Each ends the row `failed` with `outcome_unknown`, and
+ *    NOTHING IN CODE SENDS IT AGAIN: a person looks (ACCESS can say whether it holds the job) and
  *    resolves it. The lease is ten minutes, far longer than the fifteen seconds a POST may take, and the
  *    tick reaps an expired one.
  *  - THE OUTCOME IS WRITTEN UNDER THE SENDER'S OWN STAMP (`AND claimed_at = ?`), so a sender whose lease
@@ -32,8 +37,9 @@
  * So the residual is a LOST report, never a doubled one: a report that may have been recorded and is not
  * known to have been is not sent a second time, because the design says a second report double-counts a
  * person and nothing in the interface (UNVERIFIED) promises that a duplicate is ignored. If the owner
- * learns that ACCESS ignores a duplicate for one job id and resource, the only change is the
- * classification in `classifyAnswer` (an unknown outcome becomes a retry); nothing else depends on it.
+ * learns that `job_attributes` stores ONE record per (job id, resource), so that a duplicate is
+ * ignored, the only change is the classification in `classifyAnswer` (the unknown outcomes become
+ * retries); nothing else depends on it. That is a question for ACCESS, and an owner action.
  *
  * NO NETWORK CALL RUNS INSIDE A DATABASE BATCH: the claim, the POST and the outcome are three separate
  * steps, and the POST is made between two statements, never in a batch (a test scans for it).
@@ -142,7 +148,7 @@ export const ACCESS_REPORT_SENT_SQL = `UPDATE compute_access_reports SET
   WHERE job_id = ?1 AND state = 'attempting' AND claimed_at = ?2`;
 
 /**
- * ACCESS answered and recorded nothing: back to `pending` after a delay, or `failed` when this was the
+ * ACCESS answered that it did not process the request: back to `pending` after a delay, or `failed` when this was the
  * last attempt. `?1` the job, `?2` the stamp, `?3` the error word, `?4` the delay as a SQLite modifier
  * (`+60 minutes`), `?5` the most attempts.
  */
@@ -225,10 +231,14 @@ function leaseStamp(nowMs: number): string {
 const errorClassName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
 
 /**
- * What an answer means, in one place. `null` is NO ANSWER: the outcome is unknown. A 2xx is accepted. Any
- * other status is an answer that recorded nothing: 408 and 429 are `busy`, 5xx is `unavailable`, the
- * rest (a redirect, which is never followed, a 4xx) is `refused`. If ACCESS is found to ignore a
- * duplicate, `null` becomes a retry here and nowhere else.
+ * What an answer means, in one place. `null` is NO ANSWER: the outcome is unknown. A 2xx is accepted. A
+ * retry is only an answer that shows the request was NOT processed: 408 and 429 are `busy`, 503 is
+ * `unavailable`, and a 4xx other than 409 is `refused`. EVERYTHING ELSE is unknown and is never resent: a
+ * 500, 502 or 504 (a gateway in front of a server that already stored the request, a server that failed
+ * after the write), every 3xx (303 is the usual reply to a POST that created something; a redirect is
+ * never followed), 409 (which may mean "already recorded") and any other status. If ACCESS is found to
+ * keep one record per job id and resource, so that a duplicate is ignored, the unknown cases become
+ * retries here and nowhere else.
  */
 export function classifyAnswer(
   status: number | null,
@@ -236,8 +246,9 @@ export function classifyAnswer(
   if (status === null) return { kind: "unknown" };
   if (status >= 200 && status < 300) return { kind: "sent" };
   if (status === 408 || status === 429) return { kind: "retry", word: "busy" };
-  if (status >= 500) return { kind: "retry", word: "unavailable" };
-  return { kind: "retry", word: "refused" };
+  if (status === 503) return { kind: "retry", word: "unavailable" };
+  if (status >= 400 && status < 500 && status !== 409) return { kind: "retry", word: "refused" };
+  return { kind: "unknown" };
 }
 
 /** One POST: the status of the answer, or null when none came (a timeout, a lost or refused connection). The body is discarded unread. */

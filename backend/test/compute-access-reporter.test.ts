@@ -42,6 +42,7 @@ import {
   accessReportsLogLine,
   accessRetryDelayMinutes,
   accessSubmitTime,
+  classifyAnswer,
   reportableGatewayUser,
   runAccessReportCron,
   sendAccessReport,
@@ -538,18 +539,19 @@ describe("what ACCESS refused is tried again, with an exponential delay, and end
     expect(accessRetryDelayMinutes(Number.NaN)).toBe(60);
   });
 
-  test("each kind of refusal is its own fixed word", async () => {
+  test("only an answer that shows the request was NOT processed is retried: 4xx other than 409, and 408, 429 and 503, each its own fixed word (MUTATION: move a class boundary)", async () => {
     const e = env();
     const cases: Array<[number, string]> = [
       [400, "refused"],
       [401, "refused"],
       [403, "refused"],
       [404, "refused"],
-      [302, "refused"],
+      [405, "refused"],
+      [410, "refused"],
+      [422, "refused"],
+      [499, "refused"],
       [408, "busy"],
       [429, "busy"],
-      [500, "unavailable"],
-      [502, "unavailable"],
       [503, "unavailable"],
     ];
     for (const [status, word] of cases) {
@@ -564,15 +566,61 @@ describe("what ACCESS refused is tried again, with an exponential delay, and end
     for (const w of COMPUTE_ACCESS_REPORT_ERRORS) expect(COMPUTE_WORD_RE.test(w)).toBe(true);
   });
 
-  test("a redirect is never followed: the key goes only where it was sent (MUTATION: follow redirects)", async () => {
+  test("an answer that may follow a recorded request is NEVER resent: every 3xx, 409, 500, 502 and 504 end the row `failed`, `outcome_unknown` (MUTATION: retry one of them)", async () => {
+    // A gateway's 502 or 504 in front of a server that already stored the request, a 500 after the write, a
+    // 303 ("created, see other", the usual reply to a POST) and a 409 (which may turn out to mean "already
+    // recorded") are each an answer the sender cannot judge, so each is the same as no answer: lost, never
+    // doubled. The stand-in answers each with its status; none is followed.
+    const e = env();
+    for (const status of [300, 301, 302, 303, 307, 308, 409, 500, 501, 502, 504, 505]) {
+      const { made } = await queuedJob();
+      const before = access.requests.length;
+      access.answer(status);
+      expect([status, await sendAccessReport(e, made.job.id)]).toEqual([status, "outcome_unknown"]);
+      expect([status, await report(e, made.job.id)]).toEqual([
+        status,
+        expect.objectContaining({
+          state: "failed",
+          last_error_code: "outcome_unknown",
+          attempts: 1,
+          claimed_at: null,
+        }),
+      ]);
+      // However long it waits, and whatever the tick does, nothing is sent again.
+      await e.DB.prepare(
+        "UPDATE compute_access_reports SET next_attempt_at = datetime('now', '-1 year') WHERE job_id = ?1",
+      )
+        .bind(made.job.id)
+        .run();
+      await runAccessReportCron(e);
+      expect(access.requests.length - before).toBe(1);
+    }
+  });
+
+  test("classifyAnswer over every status: sent for 2xx, a retry only for the answers that show nothing was processed, and unknown for the rest", () => {
+    for (let status = 100; status <= 599; status++) {
+      let expected: ReturnType<typeof classifyAnswer>;
+      if (status >= 200 && status < 300) expected = { kind: "sent" };
+      else if (status === 408 || status === 429) expected = { kind: "retry", word: "busy" };
+      else if (status === 503) expected = { kind: "retry", word: "unavailable" };
+      else if (status >= 400 && status < 500 && status !== 409) {
+        expected = { kind: "retry", word: "refused" };
+      } else expected = { kind: "unknown" };
+      expect([status, classifyAnswer(status)]).toEqual([status, expected]);
+    }
+    expect(classifyAnswer(null)).toEqual({ kind: "unknown" });
+  });
+
+  test("a redirect is never followed: the key goes only where it was sent, and the row is not resent (MUTATION: follow redirects)", async () => {
     const { made } = await queuedJob();
     access.redirect(`${access.url}/elsewhere`);
     await sendAccessReport(env(), made.job.id);
-    // One request, to the address that was asked for, and the row is refused (and will be tried again).
+    // One request, to the address that was asked for. A 3xx may follow a recorded request (303 is the
+    // usual answer to a POST that created something), so the row is `failed`, never retried.
     expect(access.requests.map((r) => r.path)).toEqual(["/job_attributes"]);
     expect(await report(env(), made.job.id)).toMatchObject({
-      state: "pending",
-      last_error_code: "refused",
+      state: "failed",
+      last_error_code: "outcome_unknown",
     });
   });
 });

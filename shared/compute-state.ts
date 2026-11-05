@@ -661,9 +661,9 @@ export type ComputeAccessReportState = (typeof COMPUTE_ACCESS_REPORT_STATES)[num
  * `no_submit_time` (the record has no scheduler submission time yet) leave the row `pending`;
  * `no_gateway_user` (the job has no pseudonym to report) and `outcome_unknown` (the POST may or may
  * not have been recorded: nothing is sent twice, so a person looks) end it `failed`; `refused`
- * (ACCESS answered with a status that refuses the request), `busy` (408 or 429) and `unavailable`
- * (5xx) mean ACCESS did not record it, so the row is tried again later and ends `failed` only when
- * the attempts run out.
+ * (a 4xx other than 409), `busy` (408 or 429) and `unavailable` (503) are answers that show ACCESS did
+ * not process the request, so the row is tried again later and ends `failed` only when the attempts
+ * run out. A 500, 502, 504, any 3xx and 409 are `outcome_unknown`, not retries.
  */
 export const COMPUTE_ACCESS_REPORT_ERRORS = [
   "unconfigured",

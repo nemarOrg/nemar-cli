@@ -270,14 +270,16 @@ Migration `0119_compute_access_reports.sql`, `backend/src/services/compute-relea
    `compute_access_reports` has one row per job (the primary key), made by `INSERT OR IGNORE` from the job row in the batch of each of the two writers of `slurm_job_id`: the live transition and the terminal transition of `applyTapisJob`.
    So a replayed read adds no second row and never resets a row that has moved on, and a job the scheduler never saw owes nothing.
    This replaces the empty hook `noteSlurmJobId` of the A5 amendment, which ran after the write and could not be one batch with it.
-5. **A report is sent at most once towards ACCESS for every outcome the sender cannot judge, and retried only when ACCESS visibly recorded nothing.**
+5. **A report is sent at most once towards ACCESS for every outcome the sender cannot judge, and retried only when the answer shows the request was not processed.**
    The claim is one conditional UPDATE (`pending` to `attempting`, a lease stamp, the attempt counted) made before the POST, so two overlapping ticks or Workers cannot both send; the POST is made between two statements and never inside a batch; the outcome is written only under the sender's own stamp.
    A 2xx is `sent`.
-   Any other HTTP answer (a refusal, a deferral, a server error; a redirect is never followed) means ACCESS answered and recorded nothing, so the row is `pending` again with an hour's delay doubling to a day, and `failed` after eight attempts.
-   No answer (a timeout, a lost or refused connection) may mean the request was recorded, and a sender that died holding its ten-minute lease may have died before or after the POST: both end the row `failed` with `outcome_unknown`, which nothing in code sends again.
+   Only an answer that shows the request was not processed is retried: a 4xx other than 409, 408, 429 and 503; the row is then `pending` again with an hour's delay doubling to a day, and `failed` after eight attempts.
+   Every other outcome is one the sender cannot judge, and is treated as no answer: no answer at all (a timeout, a lost or refused connection), a 500, 502 or 504 (a gateway in front of a server that already stored the request answers 502 or 504, and a server answers 500 after the write), every 3xx (303, "created, see other", is the usual reply to a POST that stored something, and a redirect is never followed), 409 (which may turn out to mean "already recorded"), and a sender that died holding its ten-minute lease and may have died before or after the POST.
+   Each of these ends the row `failed` with `outcome_unknown`, which nothing in code sends again.
    `sent` and `failed` are final.
    The guarantee is therefore that a report may be LOST and is never doubled; it is not that every job is reported.
-   The choice follows the design page, where a second report double-counts a person, and the interface's behaviour on a duplicate is unverified; if ACCESS is found to ignore a duplicate for one job id and resource, the one function `classifyAnswer` changes an unknown outcome into a retry and nothing else moves.
+   The choice follows the design page, where a second report double-counts a person, and the interface's behaviour on a duplicate is unverified.
+   Owner action: ask ACCESS whether `job_attributes` stores one record per (job id, resource), so that a duplicate is ignored; if it does, the one function `classifyAnswer` turns the unknown outcomes into retries and nothing else moves.
 6. **ACCESS is told the pseudonym and nothing else about a person.**
    The body is the Slurm job id, the scheduler's submission time, the resource name and the job row's `gateway_user` (the stored `gw_` pseudonym, or `nemar-pipelines`), checked against that shape before it is sent; it never carries a name, an email, an ORCID iD or the sign-in subject.
    A job with no pseudonym (a partner job that maps to no account) ends `failed` with `no_gateway_user` and nothing is sent; a record with no submission time waits, costs no attempt and is looked at again in an hour.
