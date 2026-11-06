@@ -24,10 +24,13 @@
  * would be refused for the same reason. A refusal that would repeat for every pool (the switch off, no
  * image, no account) stops the run.
  *
- * REGISTRY DRIFT. A recipe whose recent success carries a version or an engine other than the registry's
- * (the stamp is rewritten from the recipe's own record) is a registry out of date: dispatching it again
- * would run the same dataset over and over, each run stamped with the version the table does not name. It
- * is not dispatched until the table is fixed, and the result says so.
+ * REGISTRY DRIFT. When a job finishes, the sync compares the tuple its record names with the tuple its stamp
+ * claimed. A difference holds the CLAIMED tuple (a `tuple_mismatch` stamp, `tupleHeld`): the registry is out
+ * of date or the image is, and dispatching again would run the same datasets over and over under a tuple the
+ * table does not name. The hold is checked on every path (`dispatchPipelineJob`, the queue, the dry run), so
+ * this cron skips the recipe (`registry_drift`) and says so. It clears when the registry declares another
+ * tuple, which is what a version bump is: a bump is never held. What remains exposed are the jobs already in
+ * flight when a mismatch first appears: they finish under the same mismatch.
  *
  * COST. The daily tick shares one subrequest allowance with every daily job. The tick syncs the stamps ONCE
  * (each run over the queue is told not to sync again): at most 50 open stamps at about 5 statements and calls
@@ -58,9 +61,6 @@ import { isExactProduction } from "./repull-switches.js";
 
 /** The most jobs one daily tick dispatches, whatever the owner's daily cap says: see COST above. */
 export const CRON_DISPATCH_PER_TICK = 10;
-
-/** How far back a success with another version or engine counts as the registry being out of date. */
-export const DRIFT_WINDOW_DAYS = 7;
 
 /** The refusals that would repeat for every recipe and every pool: they end the run. */
 const ENDS_THE_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
@@ -108,11 +108,6 @@ export const PIPELINE_JOBS_TODAY_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
 /** Pipeline jobs live in a pool (`?1`). */
 export const PIPELINE_JOBS_LIVE_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE source = 'pipeline' AND pool = ?1 AND state IN (${LIVE_STATES_SQL})`;
-
-/** A recent success whose version (`?2`) or engine (`?3`) is not the registry's, for a recipe (`?1`). */
-export const REGISTRY_DRIFT_SQL = `SELECT 1 FROM compute_pipeline_stamps
-  WHERE recipe = ?1 AND state = 'succeeded' AND (recipe_version <> ?2 OR engine <> ?3)
-    AND updated_at >= datetime('now', ?4) LIMIT 1`;
 
 const count = async (db: D1Database, sql: string, ...binds: unknown[]): Promise<number> =>
   (
@@ -164,14 +159,6 @@ export async function runComputePipelineDispatchCron(
         outcome.skipped = "pool_refused";
         continue;
       }
-      const drifted = await db
-        .prepare(REGISTRY_DRIFT_SQL)
-        .bind(recipe.name, recipe.version, recipe.engine, `-${DRIFT_WINDOW_DAYS} days`)
-        .first();
-      if (drifted) {
-        outcome.skipped = "registry_drift";
-        continue;
-      }
       if (dailyLeft <= 0) {
         outcome.skipped = "daily_cap";
         continue;
@@ -196,7 +183,9 @@ export async function runComputePipelineDispatchCron(
       result.dispatched += run.dispatched;
       dailyLeft -= run.dispatched;
       tickLeft -= run.dispatched;
-      if (run.stoppedBy === "run_failed") {
+      if (run.stoppedBy === "registry_drift") {
+        outcome.skipped = "registry_drift";
+      } else if (run.stoppedBy === "run_failed") {
         result.errors.push("run_failed");
         ended = true;
       } else if (run.stoppedBy !== null) {

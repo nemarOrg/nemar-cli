@@ -684,7 +684,7 @@ describe("the stamp follows its job to the end", () => {
     });
     // And the tuple stays claimed: a run of the same tuple the registry names is not blocked by it, a
     // run of the one the record names is.
-    expect(await run(env)).toMatchObject({ ok: true, attempt: 1 });
+    expect(await run(env)).toMatchObject({ ok: false, code: "registry_drift" });
   });
 
   test("a stamp stays dispatched while its job is live, and a sync touches nothing", async () => {
@@ -911,6 +911,106 @@ describe("the stamp follows its job to the end", () => {
         .run();
     }
     expect(await syncPipelineStamps(env)).toMatchObject({ examined: 3, failed: 3 });
+  });
+});
+
+describe("a result whose tuple is not the one claimed", () => {
+  const held = async (env: Bindings) =>
+    (
+      await env.DB.prepare(
+        "SELECT dataset_id, recipe_version, engine, job_id FROM compute_pipeline_stamps WHERE state = 'failed' AND refusal_code = 'tuple_mismatch'",
+      ).all<{ dataset_id: string; recipe_version: string; engine: string; job_id: string }>()
+    ).results;
+
+  async function finishedWith(record: Record<string, unknown>) {
+    const { env } = await world();
+    await seedEegDataset(env, "nm000105");
+    const first = await run(env);
+    if (!first.ok) throw new Error("not dispatched");
+    await finishAtTapis(fx, env, first.jobId, { outputs: floorOutputs(recipeRecord(record)) });
+    await syncPipelineStamps(env);
+    return { env, first };
+  }
+
+  test("a version that differs holds the claimed tuple on every path, writing nothing", async () => {
+    const { env, first } = await finishedWith({ recipe: { id: "nemar-floor", version: "1.0.1" } });
+    // The stamp still says what ran, and the claimed tuple is held with the job that showed it.
+    expect(await getStamp(env.DB, first.stampId)).toMatchObject({
+      state: "succeeded",
+      recipe_version: "1.0.1",
+    });
+    expect(await held(env)).toEqual([
+      {
+        dataset_id: "nm000104",
+        recipe_version: floor?.version,
+        engine: floor?.engine,
+        job_id: first.jobId,
+      },
+    ]);
+    const before = [(await stampsOf(env, "nm000105")).length, await jobCount(env), submits()];
+    // single dispatch
+    expect(await run(env, { datasetId: "nm000105" })).toMatchObject({
+      ok: false,
+      code: "registry_drift",
+    });
+    // the queue
+    expect(
+      await dispatchEligible(env, { recipe: "nemar-floor", limit: 3, actor: ADMIN }),
+    ).toMatchObject({
+      dispatched: 0,
+      stoppedBy: "registry_drift",
+    });
+    // the dry run says so
+    expect(
+      await pipelineDryRun(env, { recipe: "nemar-floor", datasetId: "nm000105" }),
+    ).toMatchObject({
+      ok: true,
+      blocked: { code: "registry_drift" },
+      would_dispatch: [],
+    });
+    expect([(await stampsOf(env, "nm000105")).length, await jobCount(env), submits()]).toEqual(
+      before,
+    );
+  });
+
+  test("an engine that differs holds it too", async () => {
+    const { env } = await finishedWith({ engine: { package: "eegprep", version: "0.5.1" } });
+    expect(await held(env)).toHaveLength(1);
+    expect(await run(env, { datasetId: "nm000105" })).toMatchObject({ code: "registry_drift" });
+  });
+
+  test("a result with the tuple that was claimed holds nothing", async () => {
+    const { env } = await finishedWith({});
+    expect(await held(env)).toEqual([]);
+    expect(await run(env, { datasetId: "nm000105" })).toMatchObject({ ok: true });
+  });
+
+  test("the hold is written once for a job, however often the sync sees it", async () => {
+    const { env, first } = await finishedWith({ recipe: { id: "nemar-floor", version: "1.0.1" } });
+    // Put the stamp back as the claim left it, so the sync meets the same mismatch again.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET state = 'dispatched', recipe_version = ?2, engine = ?3 WHERE id = ?1",
+    )
+      .bind(first.stampId, floor?.version, floor?.engine)
+      .run();
+    await syncPipelineStamps(env);
+    expect(await held(env)).toHaveLength(1);
+  });
+
+  test("a version bump is not held: the old tuple's hold and successes do not touch the tuple the registry now declares", async () => {
+    const { env } = await world();
+    for (const [state, code] of [
+      ["failed", "tuple_mismatch"],
+      ["succeeded", null],
+    ] as const) {
+      await env.DB.prepare(
+        `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, refusal_code)
+         VALUES ('nm000104', 'v1.0.0', 'nemar-floor', '0.9.0', 'eegprep@0.4.0', ?1, ?2, 'job_000000000000000000000001', ?3)`,
+      )
+        .bind(state === "failed" ? 1 : 2, state, code)
+        .run();
+    }
+    expect(await run(env)).toMatchObject({ ok: true });
   });
 });
 

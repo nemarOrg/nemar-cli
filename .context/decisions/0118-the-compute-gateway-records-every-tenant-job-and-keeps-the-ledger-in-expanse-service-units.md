@@ -405,7 +405,15 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    Deleting a dataset deletes its stamps; the job rows and the ledger stay.
 3. **The stamp says what ran.**
    It is claimed with the registry's version and engine and, when the job succeeds, rewritten from the recipe's own dataset record (`extensions.nemar.recipe` and `.engine`), read from the results bucket; a record that is absent, unreadable or another recipe's ends the stamp `failed`, and the job is untouched.
-   A recipe whose recent success carries a version or an engine other than the registry's is a registry out of date; the daily dispatcher dispatches nothing for it until the table is fixed, because it would run the same dataset again every day.
+   When a job finishes, the sync compares the tuple its record names with the tuple its stamp claimed.
+   A difference holds the CLAIMED tuple (a `failed` stamp with the word `tuple_mismatch`, written once per job, before the stamp is rewritten): the registry is out of date or the image is, and dispatching again would run the same datasets over and over under a tuple the table does not name.
+   The hold is checked in the shared dispatch path, so a single dispatch, the queue, the daily dispatcher and the dry run all refuse with `registry_drift`, writing nothing.
+   It clears when the registry declares another tuple, which is what a version bump is, and in no other way; a bump is never held, because the hold names the old tuple.
+   What stays exposed are the jobs already in flight when a mismatch first appears: they were dispatched under the claimed tuple and finish under the same mismatch, so the first mismatch can cost up to the live cap of jobs, each of which is stamped with what it ran.
+   A record whose `<package>@<version>` is longer than the stamp's 64-character engine column is unreadable and ends the stamp `failed`.
+   A rewritten tuple that is already stamped ends the stamp `failed` as `tuple_already_stamped`: the run may be good and the word says only that this stamp cannot carry its tuple.
+   A tuple whose stamp failed is not a candidate of the queue for 7 days after the failure, nor once it has failed 3 times (both initial, `RETRY_COOLDOWN_DAYS` and `MAX_FAILED_ATTEMPTS`), so datasets that keep failing cannot take the page of every run.
+   A placeholder recipe (`nemar-ica`) is refused on every path with `recipe_placeholder`.
 4. **The image digest a recipe job passes is checked against the launcher's provenance.**
    `--image-digest` is the caller's claim and the recipe cannot check it.
    `verifyResults` compares the one value the recorded specification passes with the digest `provenance.json` says the launcher ran, and fails the job `result_verification_failed` with `image_digest_mismatch` (flagged for an administrator) on a difference, a missing flag, a malformed value or a second flag.

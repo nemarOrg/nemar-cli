@@ -121,6 +121,7 @@ export type PipelineRefusal =
   | "too_many_files"
   | "recipe_not_automatic"
   | "recipe_placeholder"
+  | "registry_drift"
   | "run_failed"
   | "create_failed"
   | CreateJobRefusal;
@@ -340,6 +341,41 @@ async function resolveRun(
   return { ok: true, tag: picked.tag };
 }
 
+// --- A result that is not the tuple that was claimed ------------------------------------------------
+
+/** The word of the stamp that holds a registry tuple: a finished result named another tuple than its stamp claimed. */
+export const TUPLE_MISMATCH_WORD = "tuple_mismatch";
+
+/** Is a registry tuple (`?1` recipe, `?2` version, `?3` engine) held? A hold is a failed stamp with the mismatch word. */
+export const TUPLE_HELD_SQL = `SELECT 1 FROM compute_pipeline_stamps
+  WHERE recipe = ?1 AND recipe_version = ?2 AND engine = ?3
+    AND state = 'failed' AND refusal_code = '${TUPLE_MISMATCH_WORD}' LIMIT 1`;
+
+/**
+ * Hold the tuple a stamp CLAIMED (`?1` dataset, `?2` version, `?3` recipe, `?4` claimed version, `?5`
+ * claimed engine, `?6` the job). The hold is a `failed` stamp of the claimed tuple with the job that
+ * showed the mismatch, and is written once per job. It clears when the registry declares another tuple,
+ * which is what a version bump is, and in no other way.
+ */
+export const HOLD_TUPLE_SQL = `INSERT INTO compute_pipeline_stamps
+  (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, refusal_code)
+  SELECT ?1, ?2, ?3, ?4, ?5,
+         COALESCE((SELECT MAX(s.attempt) FROM compute_pipeline_stamps s
+                    WHERE s.dataset_id = ?1 AND s.version = ?2 AND s.recipe = ?3
+                      AND s.recipe_version = ?4 AND s.engine = ?5), 0) + 1,
+         'failed', ?6, '${TUPLE_MISMATCH_WORD}'
+   WHERE NOT EXISTS (SELECT 1 FROM compute_pipeline_stamps h
+                      WHERE h.job_id = ?6 AND h.refusal_code = '${TUPLE_MISMATCH_WORD}')`;
+
+/** Whether the registry's tuple for a recipe is held. */
+export async function tupleHeld(db: D1Database, recipe: ComputeRecipe): Promise<boolean> {
+  const row = await db
+    .prepare(TUPLE_HELD_SQL)
+    .bind(recipe.name, recipe.version, recipe.engine)
+    .first();
+  return row !== null;
+}
+
 // --- dispatchPipelineJob ----------------------------------------------------------------------------
 
 const fail = (
@@ -375,6 +411,8 @@ export async function dispatchPipelineJob(
   }
   // A placeholder is on no path: not an administrator's run, not the queue, not the cron.
   if (recipe.placeholder === true) return fail("recipe_placeholder", datasetId);
+  // The registry names a tuple that a finished result has shown is not what runs: nothing is claimed.
+  if (await tupleHeld(db, recipe)) return fail("registry_drift", datasetId);
 
   // The dataset and its version, decided from the rows (ADR 0065): nothing a caller said is read.
   const resolved = await resolveRun(db, datasetId, input.version);
@@ -671,6 +709,24 @@ export async function syncPipelineStamps(
         result.failed++;
         continue;
       }
+      if (read.version !== stamp.recipe_version || read.engine !== stamp.engine) {
+        // The result carries a tuple other than the one claimed: hold the CLAIMED tuple (the registry is
+        // out of date, or the image is), before the stamp is rewritten and the claim is lost.
+        await db
+          .prepare(HOLD_TUPLE_SQL)
+          .bind(
+            stamp.dataset_id,
+            stamp.version,
+            stamp.recipe,
+            stamp.recipe_version,
+            stamp.engine,
+            job.id,
+          )
+          .run();
+        console.error(
+          `[compute-pipeline] tuple_mismatch stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id}`,
+        );
+      }
       try {
         const moved = await db
           .prepare(SUCCEED_STAMP_SQL)
@@ -886,6 +942,14 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
     pipelines_account: (await pipelinesAccountId(db)) !== null,
   };
   const base = { ok: true as const, recipe: recipe.name, estimate_milli_per_job: perJob, config };
+  if (await tupleHeld(db, recipe)) {
+    return {
+      ...base,
+      estimate_milli_total: 0,
+      would_dispatch: [],
+      blocked: { code: "registry_drift", blocked_by: [] },
+    };
+  }
 
   if (input.datasetId !== undefined) {
     const resolved = await resolveRun(db, input.datasetId, input.version);
@@ -997,6 +1061,11 @@ export async function dispatchEligible(
     return run;
   }
   if (input.sync !== false) await syncPipelineStamps(env);
+  if (await tupleHeld(env.DB, recipe)) {
+    run.results.push(fail("registry_drift", ""));
+    run.stoppedBy = "registry_drift";
+    return run;
+  }
   try {
     for (const candidate of await pipelineCandidates(env.DB, recipe, input.limit, input.after)) {
       if (run.dispatched >= input.limit) break;

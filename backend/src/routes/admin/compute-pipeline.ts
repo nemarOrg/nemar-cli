@@ -64,6 +64,8 @@ const SENTENCES: Record<string, string> = {
   recipe_unknown: "There is no such recipe.",
   recipe_not_automatic: "That recipe is not run automatically.",
   recipe_placeholder: "That recipe is a placeholder and cannot be run.",
+  registry_drift:
+    "A finished run reported another recipe version or engine than the registry names, so the recipe is held.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
   version_not_found: "That dataset has no such version.",
   version_untagged: "That version has no name the data plane serves.",

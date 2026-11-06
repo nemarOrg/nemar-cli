@@ -400,20 +400,20 @@ describe("a refusal", () => {
   });
 });
 
-describe("registry drift", () => {
-  async function drifted(version: string, engine: string, age = "-1 days") {
-    const env = await world(ids(3));
+describe("a result that does not carry the tuple it was dispatched with", () => {
+  /** The hold the sync leaves when a finished result's tuple is not the one its stamp claimed. */
+  async function held(env: Bindings, recipeVersion: string, engine: string) {
     await env.DB.prepare(
-      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, updated_at)
-       VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, 1, 'succeeded', 'job_000000000000000000000001', datetime('now', ?4))`,
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, refusal_code)
+       VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, 1, 'failed', 'job_000000000000000000000001', 'tuple_mismatch')`,
     )
-      .bind(ids(3)[0], version, engine, age)
+      .bind(ids(3)[0], recipeVersion, engine)
       .run();
-    return env;
   }
 
-  test("a recent success with another version dispatches nothing for that recipe, and says so", async () => {
-    const env = await drifted("1.0.1", floor.engine);
+  test("a held registry tuple dispatches nothing from the cron, and says so", async () => {
+    const env = await world(ids(3));
+    await held(env, floor.version, floor.engine);
     const result = await runComputePipelineDispatchCron(env);
     expect(result?.dispatched).toBe(0);
     expect(result?.recipes[0]?.skipped).toBe("registry_drift");
@@ -421,18 +421,38 @@ describe("registry drift", () => {
     expect(await stampCount(env)).toBe(1);
   });
 
-  test("so does another engine", async () => {
-    const env = await drifted(floor.version, "eegprep@9.9.9");
+  test("so does a held engine, and the hold does not expire with time", async () => {
+    const env = await world(ids(3));
+    await held(env, floor.version, floor.engine);
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', '-400 days')",
+    ).run();
     expect((await runComputePipelineDispatchCron(env))?.recipes[0]?.skipped).toBe("registry_drift");
   });
 
-  test("an old success does not: the window is a week", async () => {
-    const env = await drifted("1.0.1", floor.engine, "-30 days");
-    expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(3);
+  test("a version bump is never held: the registry declares a tuple the old holds and successes do not name", async () => {
+    const env = await world(ids(3));
+    // Older successes, and an old mismatch, under the tuple the registry used to declare.
+    await held(env, "0.9.0", "eegprep@0.4.0");
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id)
+       VALUES (?1, 'v1.0.0', 'nemar-floor', '0.9.0', 'eegprep@0.4.0', 2, 'succeeded', 'job_000000000000000000000002')`,
+    )
+      .bind(ids(3)[0])
+      .run();
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result?.dispatched).toBe(3);
+    expect(result?.recipes[0]?.skipped).toBeNull();
   });
 
-  test("a success with the registry's own version and engine is no drift", async () => {
-    const env = await drifted(floor.version, floor.engine);
+  test("a success with the registry's own version and engine holds nothing", async () => {
+    const env = await world(ids(3));
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id)
+       VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, 1, 'succeeded', 'job_000000000000000000000001')`,
+    )
+      .bind(ids(3)[0], floor.version, floor.engine)
+      .run();
     expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(2);
   });
 });
