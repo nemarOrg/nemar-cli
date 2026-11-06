@@ -1745,8 +1745,11 @@ async function repairTerminal(
   }
   if (needsSettlement && (current.tapis_uuid === null || rec !== null || unreadableForGood)) {
     // Without a record `provisionalCharge` releases the hold unless something shows the job ran (then it
-    // charges the minimum and flags), and a settlement made blind is flagged `mismatch` either way: the
-    // observer's final settlement against Expanse's own figure is the correction.
+    // charges the minimum and flags), and a settlement made blind is flagged `mismatch` either way. Where
+    // it charged the minimum, the observer's final settlement against Expanse's own figure corrects it.
+    // Where it released the hold there is no `charge` entry for the observer to correct
+    // (`CANDIDATE_ROWS_SQL` requires one), so a sacct row for that job stays matched but unapplied: the
+    // use is flagged, not charged.
     await repairSettlement(env, current, rec, nowMs);
     if (unreadableForGood && rec === null) {
       await env.DB.prepare(FLAG_MISMATCH_SQL).bind(current.id).run();
