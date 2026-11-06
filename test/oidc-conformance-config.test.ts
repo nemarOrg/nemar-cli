@@ -15,7 +15,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
 import {
@@ -286,6 +289,57 @@ describe("the authorization log and its check", () => {
   });
 });
 
+describe("the check's entry point", () => {
+  const dir = mkdtempSync(join(tmpdir(), "nemar-check-authz-"));
+  const entry = join(ROOT, "scripts", "oidc-conformance", "check-authz.ts");
+  const run = (file: string) => spawnSync("bun", [entry, file], { cwd: ROOT, encoding: "utf8" });
+  const file = (name: string, text: string) => {
+    const path = join(dir, name);
+    writeFileSync(path, text);
+    return path;
+  };
+  const clean = [
+    "[rig] GET /oauth/authorize 302",
+    authorizationLogLine("redirect", "invalid_request", false),
+    "[rig] GET /oauth/authorize 200",
+    authorizationLogLine("consent", null, true),
+    "",
+  ].join("\n");
+
+  test("exits 0 for a clean log", () => {
+    const result = run(file("clean.log", clean));
+    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+    expect(result.stdout).toContain("invalid_request: 1");
+  });
+
+  test("exits 1 for a log with a violation", () => {
+    const bad = `${clean}${authorizationLogLine("redirect", "invalid_scope", true)}\n`;
+    const result = run(file("bad.log", bad));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("::error::");
+  });
+
+  test("exits 1 for an empty log", () => {
+    expect(run(file("empty.log", "")).status).toBe(1);
+  });
+
+  test("exits 1 for a missing log, with an ::error:: line and no stack trace", () => {
+    const result = run(join(dir, "does-not-exist.log"));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("::error::cannot read the rig's log");
+    expect(result.stderr).not.toContain("    at ");
+  });
+
+  test("exits 2 and says how to call it when given no file", () => {
+    const result = spawnSync("bun", [entry], { cwd: ROOT, encoding: "utf8" });
+    expect(result.status).toBe(2);
+  });
+
+  test("cleans up", () => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("the images", () => {
   const override = parse(read("scripts/oidc-conformance/compose.override.yml")) as {
     services: Record<string, { image: string; extra_hosts?: string[] }>;
@@ -389,6 +443,10 @@ describe("the workflow", () => {
     expect(check).toBeGreaterThan(names.indexOf("Basic plan"));
     expect(check).toBeLessThan(names.indexOf("Upload results and logs"));
     expect(String(steps[check]?.run)).toContain("check-authz.ts conformance-artifacts/rig.log");
+    // Nothing lets the step pass when the check fails: no continue-on-error, and no "||", ";" or "true".
+    const step = steps[check] as Record<string, unknown>;
+    expect("continue-on-error" in step).toBe(false);
+    expect(String(step.run)).not.toMatch(/\|\||;|true/);
     // It runs even if a plan failed, so a failure never hides the cause.
     expect(String(steps[check]?.if)).toContain("always()");
   });
