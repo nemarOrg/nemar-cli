@@ -350,6 +350,36 @@ describe("a job that skipped the reservation", () => {
     expect(Date.now() - Date.parse(`${synced.replace(" ", "T")}Z`)).toBeLessThan(60_000);
   });
 
+  test("a give-up another run closed first, and a second run over a closed row, count once in all (MUTATION: always count the give-up)", async () => {
+    const closeAfterRead = async (uuid: string) => {
+      const id = row(uuid)?.id as string;
+      const hook = hookedDb(env().DB);
+      // Another writer closes the row between this run's read and its write.
+      hook.armAfterFirst("FROM compute_policy", () => {
+        fx.harness.db.run(
+          "UPDATE compute_jobs SET state = 'cancelled', ended_at = datetime('now'), settled_provisional_at = datetime('now') WHERE id = ?",
+          [id],
+        );
+      });
+      return sweepTenantJobs(env({ DB: hook.db }), "live");
+    };
+    // The race: the record is gone, but the row was closed by someone else first.
+    const raced = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
+    await sweepTenantJobs(env(), "live");
+    fx.tapis.jobs.delete(raced);
+    expect((await closeAfterRead(raced))?.gaveUp).toBe(0);
+    // The ordinary case: the first run gives up once, and a second run over the closed row counts nothing.
+    const plain = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
+    await sweepTenantJobs(env(), "live");
+    fx.tapis.jobs.delete(plain);
+    const first = await sweepTenantJobs(env(), "live");
+    const second = await sweepTenantJobs(env(), "live");
+    expect((first?.gaveUp ?? 0) + (second?.gaveUp ?? 0)).toBe(1);
+    expect(second?.gaveUp).toBe(0);
+  });
+
   test("whose Tapis record is gone is closed after the sweep reads it: flagged, charged nothing", async () => {
     const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);
