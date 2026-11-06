@@ -28,6 +28,7 @@
  */
 
 import type { z } from "zod";
+import { recipeImageDigestArg } from "../../../shared/compute-recipes.js";
 import {
   type ComputeFailureCode,
   RECORDS_UNREADABLE,
@@ -340,7 +341,8 @@ export async function readRecordedSpec(
  * there is none) and its image digest is the job's; the result reports no failure and its exit
  * number is the one Tapis reports (when Tapis reports one); the manifest is exactly what was
  * declared; every declared output is in the bucket with the exact size; and the four launcher files
- * are as declared.
+ * are as declared. A job that names a recipe passes its image digest as an argument, and that value
+ * (read from the recorded specification) must be the digest the provenance says the launcher ran.
  */
 export async function verifyResults(
   results: R2Bucket,
@@ -376,6 +378,13 @@ export async function verifyResults(
     return fail("result_verification_failed", "bundle_digest_mismatch", true);
   }
   if (job.image_digest !== null && provenance.image.digest !== job.image_digest) {
+    return fail("result_verification_failed", "image_digest_mismatch", true);
+  }
+  // A recipe job passes its image digest as an ARGUMENT (the launch specification's environment has no
+  // name for one), and the recipe cannot check that claim against the image it runs in. So the value the
+  // job passed, read from the recorded specification, must be the digest the launcher says it ran; no
+  // value, a malformed one, or two of them fail closed (nemar-process C3 review, 2026-11-05).
+  if (spec.recipe !== undefined && recipeImageDigestArg(spec.args) !== provenance.image.digest) {
     return fail("result_verification_failed", "image_digest_mismatch", true);
   }
 
