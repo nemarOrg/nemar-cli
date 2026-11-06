@@ -189,11 +189,12 @@ export interface PipelineVersion {
 }
 
 /**
- * The newest version of a dataset as a scalar subquery over the alias `alias` (`d` or `s`): the order the
- * data plane's `latest` uses, `created_at` with the row id as the tie.
+ * A column (`version` or `total_files`) of the newest version row of a dataset, as a scalar subquery
+ * over the alias `alias` (`d` or `s`): the order the data plane's `latest` uses, `created_at` with the
+ * row id as the tie.
  */
-export const NEWEST_VERSION_SQL = (alias: string): string =>
-  `SELECT dv.version FROM dataset_versions dv WHERE dv.dataset_id = ${alias}.dataset_id
+export const NEWEST_VERSION_SQL = (alias: string, column: "version" | "total_files" = "version") =>
+  `SELECT dv.${column} FROM dataset_versions dv WHERE dv.dataset_id = ${alias}.dataset_id
      ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1`;
 
 /**

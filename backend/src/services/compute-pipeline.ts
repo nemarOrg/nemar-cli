@@ -8,6 +8,9 @@
  *                           its hold (`createJob`), link the stamp, and submit (`submitComputeJob`)
  *   `syncPipelineStamps`    move `dispatched` stamps to `succeeded` or `failed` from their job's end
  *   `listPipelineStamps`    a page of stamps, filtered, after a sync
+ *   `pipelineCandidates`    the eligible datasets a recipe has not been run over at their newest version
+ *   `dispatchEligible`      a run over the next `limit` of them, each through `dispatchPipelineJob`
+ *   `pipelineDryRun`        what a run would dispatch, the estimated SU, and what blocks the rest; reads only
  *
  * THE RULES, each one deliberate:
  *  - THE WORKER SUPPLIES THE FACTS, NEVER THE REQUEST. The dataset row (eligibility, ADR 0065: the
@@ -49,6 +52,7 @@ import {
   JobSpecSchema,
   PIPELINES_TAPIS_OWNER,
   type PartitionName,
+  dataTagForVersion,
   estimateSuMilli,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
@@ -61,9 +65,17 @@ import {
 } from "./compute-jobs.js";
 import { type SubmitOutcome, submitComputeJob } from "./compute-lifecycle.js";
 import {
+  NEWEST_VERSION_SQL,
+  PIPELINE_ELIGIBLE_SQL,
+  PIPELINE_ROW_COLUMNS,
+  PIPELINE_TERMS,
+  type PipelineRow,
   type PipelineTermId,
   type PipelineVersion,
   VERSIONS_OF_SQL,
+  VERSION_TAG_SQL,
+  failedPipelineTerms,
+  isPipelineEligible,
   loadPipelineRow,
   pickVersion,
 } from "./compute-pipeline-eligibility.js";
@@ -281,6 +293,43 @@ export function recipeEstimateMilli(recipe: ComputeRecipe): number {
   });
 }
 
+// --- What a run needs of the dataset ------------------------------------------------------------------
+
+type ResolvedRun =
+  | { ok: true; tag: string }
+  | {
+      ok: false;
+      code: "dataset_not_eligible" | "version_not_found" | "version_untagged" | "too_many_files";
+      extra: { version?: string; blockedBy?: PipelineTermId[] };
+    };
+
+/**
+ * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
+ * run cannot disagree: the eligibility predicate over the row (ADR 0065), the version row (the newest,
+ * or the one named) with a data-plane tag, and the manifest bound.
+ */
+async function resolveRun(
+  db: D1Database,
+  datasetId: string,
+  wanted: string | undefined,
+): Promise<ResolvedRun> {
+  const loaded = await loadPipelineRow(db, datasetId);
+  if (!loaded.eligible) {
+    return { ok: false, code: "dataset_not_eligible", extra: { blockedBy: loaded.blockedBy } };
+  }
+  const versions = (await db.prepare(VERSIONS_OF_SQL).bind(datasetId).all<PipelineVersion>())
+    .results;
+  const picked = pickVersion(versions, wanted);
+  if (!picked.ok) return { ok: false, code: picked.code, extra: {} };
+  if (
+    picked.version.total_files !== null &&
+    picked.version.total_files > PIPELINE_MANIFEST_MAX_ENTRIES
+  ) {
+    return { ok: false, code: "too_many_files", extra: { version: picked.tag } };
+  }
+  return { ok: true, tag: picked.tag };
+}
+
 // --- dispatchPipelineJob ----------------------------------------------------------------------------
 
 const fail = (
@@ -315,22 +364,10 @@ export async function dispatchPipelineJob(
     return fail("recipe_not_automatic", datasetId);
   }
 
-  // The dataset, decided from the row (ADR 0065): nothing a caller said is read.
-  const loaded = await loadPipelineRow(db, datasetId);
-  if (!loaded.eligible) {
-    return fail("dataset_not_eligible", datasetId, { blockedBy: loaded.blockedBy });
-  }
-  const versions = (await db.prepare(VERSIONS_OF_SQL).bind(datasetId).all<PipelineVersion>())
-    .results;
-  const picked = pickVersion(versions, input.version);
-  if (!picked.ok) return fail(picked.code, datasetId);
-  const { tag } = picked;
-  if (
-    picked.version.total_files !== null &&
-    picked.version.total_files > PIPELINE_MANIFEST_MAX_ENTRIES
-  ) {
-    return fail("too_many_files", datasetId, { version: tag });
-  }
+  // The dataset and its version, decided from the rows (ADR 0065): nothing a caller said is read.
+  const resolved = await resolveRun(db, datasetId, input.version);
+  if (!resolved.ok) return fail(resolved.code, datasetId, resolved.extra);
+  const { tag } = resolved;
 
   const image = readRuntimeImage(env);
   if (image.state !== "ok") return fail("runtime_unavailable", datasetId, { version: tag });
@@ -643,4 +680,253 @@ export async function listPipelineStamps(
   const more = rows.length > filter.limit;
   const stamps = more ? rows.slice(0, filter.limit) : rows;
   return { stamps, nextBefore: more ? (stamps[stamps.length - 1]?.id ?? null) : null };
+}
+
+// --- The queue and the dry run ----------------------------------------------------------------------------
+
+/** A dataset that is eligible and whose newest version has no live or succeeded stamp for the recipe's tuple. */
+export interface Candidate {
+  dataset_id: string;
+  version: string;
+  tag: string;
+}
+
+/**
+ * The eligible datasets a recipe has not been run over at the newest version, by id, at most `limit`.
+ * The SQL selects (the predicate and the absence of a live or succeeded stamp); the TypeScript re-checks
+ * every row it returns, and a version with no data-plane tag is skipped. A dataset the sync has not
+ * caught up with is not a candidate: its open stamp holds the tuple.
+ */
+export async function pipelineCandidates(
+  db: D1Database,
+  recipe: ComputeRecipe,
+  limit: number,
+  after = "",
+): Promise<Candidate[]> {
+  const out: Candidate[] = [];
+  let cursor = after;
+  // A page may hold rows skipped for want of a tag; read on until the limit or the end.
+  for (let page = 0; page < 20 && out.length < limit; page++) {
+    const rows = (
+      await db
+        .prepare(
+          `SELECT ${PIPELINE_ROW_COLUMNS},
+                  (${NEWEST_VERSION_SQL("d")}) AS newest_version,
+                  (${NEWEST_VERSION_SQL("d", "total_files")}) AS newest_total_files
+             FROM datasets d
+            WHERE d.dataset_id > ?1
+              AND ${PIPELINE_ELIGIBLE_SQL}
+              AND NOT EXISTS (
+                SELECT 1 FROM compute_pipeline_stamps s
+                 WHERE s.dataset_id = d.dataset_id AND s.recipe = ?2 AND s.recipe_version = ?3
+                   AND s.engine = ?4 AND s.state IN ('dispatched', 'succeeded')
+                   AND s.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("s")})`)})
+            ORDER BY d.dataset_id LIMIT ?5`,
+        )
+        .bind(cursor, recipe.name, recipe.version, recipe.engine, Math.max(limit, 25))
+        .all<PipelineRow & { newest_version: string | null; newest_total_files: number | null }>()
+    ).results;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      cursor = row.dataset_id;
+      if (out.length >= limit) break;
+      if (!isPipelineEligible(row) || row.newest_version === null) continue;
+      // A version no launcher can stage (no data-plane tag, or a manifest over the bound) is never a
+      // candidate: it would be refused again on every run and hold a place in the queue for good.
+      const tag = dataTagForVersion(row.newest_version);
+      if (tag === null) continue;
+      if (
+        row.newest_total_files !== null &&
+        row.newest_total_files > PIPELINE_MANIFEST_MAX_ENTRIES
+      ) {
+        continue;
+      }
+      out.push({ dataset_id: row.dataset_id, version: row.newest_version, tag });
+    }
+    if (rows.length < Math.max(limit, 25)) break;
+  }
+  return out;
+}
+
+// --- The dry run ---------------------------------------------------------------------------------------------
+
+export interface DryRunInput {
+  recipe: string;
+  /** One dataset (and optionally a version), or none for the queue. */
+  datasetId?: string;
+  version?: string;
+  /** For the queue: how many datasets to list. */
+  limit?: number;
+}
+
+export interface DryRunConfig {
+  /** `computeEnabled`: a real run needs it. */
+  compute_enabled: boolean;
+  /** `COMPUTE_RUNTIME_IMAGE` is a digest-pinned reference. */
+  runtime_image: boolean;
+  /** The service account exists, is approved and is a service. */
+  pipelines_account: boolean;
+}
+
+export type DryRunResult =
+  | { ok: false; code: "recipe_unknown" }
+  | {
+      ok: true;
+      recipe: string;
+      /** What the hold of one job is, in milli-SU. */
+      estimate_milli_per_job: number;
+      /** The same for every dataset listed. */
+      estimate_milli_total: number;
+      config: DryRunConfig;
+      /** The datasets a run would dispatch (a named dataset that would be refused is not here). */
+      would_dispatch: Array<{ dataset_id: string; version: string }>;
+      /**
+       * Why a named dataset would be refused, or the count of the catalog's datasets that fail each term
+       * of the predicate, over every dataset the queue read. A dataset fails every term it fails, so the
+       * counts add up to more than the number of datasets.
+       */
+      blocked?: { code: string; blocked_by: PipelineTermId[]; version?: string };
+      blocked_by_term?: Record<string, number>;
+    };
+
+/** The most dataset rows the dry run reads to count what blocks each term. */
+const DRY_RUN_SCAN_ROWS = 5000;
+
+/**
+ * What a run would do, with nothing written: the eligible datasets, the estimated SU per job and in
+ * total, and what blocks the ineligible ones. It reads D1 and the configuration and nothing else, makes
+ * no stamp, no job and no hold, calls neither Tapis nor a bucket, and works in every environment
+ * (a non-production Worker answers from its own catalog). For one named dataset it gives the very
+ * verdict a run would (`resolveRun`, and a live stamp for the tuple); for the queue it lists the next
+ * candidates and, for the datasets that are not candidates, how many fail each term.
+ */
+export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise<DryRunResult> {
+  const recipe = findRecipe(input.recipe);
+  if (recipe === null) return { ok: false, code: "recipe_unknown" };
+  const db = env.DB;
+  const perJob = recipeEstimateMilli(recipe);
+  const config: DryRunConfig = {
+    compute_enabled: computeEnabled(env),
+    runtime_image: readRuntimeImage(env).state === "ok",
+    pipelines_account: (await pipelinesAccountId(db)) !== null,
+  };
+  const base = { ok: true as const, recipe: recipe.name, estimate_milli_per_job: perJob, config };
+
+  if (input.datasetId !== undefined) {
+    const resolved = await resolveRun(db, input.datasetId, input.version);
+    if (!resolved.ok) {
+      return {
+        ...base,
+        estimate_milli_total: 0,
+        would_dispatch: [],
+        blocked: {
+          code: resolved.code,
+          blocked_by: resolved.extra.blockedBy ?? [],
+          ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+        },
+      };
+    }
+    const live = await db
+      .prepare(
+        `SELECT 1 FROM compute_pipeline_stamps
+          WHERE dataset_id = ?1 AND version = ?2 AND recipe = ?3 AND recipe_version = ?4
+            AND engine = ?5 AND state IN ('dispatched', 'succeeded')`,
+      )
+      .bind(input.datasetId, resolved.tag, recipe.name, recipe.version, recipe.engine)
+      .first();
+    if (live) {
+      return {
+        ...base,
+        estimate_milli_total: 0,
+        would_dispatch: [],
+        blocked: { code: "live_attempt_exists", blocked_by: [], version: resolved.tag },
+      };
+    }
+    return {
+      ...base,
+      estimate_milli_total: perJob,
+      would_dispatch: [{ dataset_id: input.datasetId, version: resolved.tag }],
+    };
+  }
+
+  const limit = input.limit ?? 20;
+  const candidates = await pipelineCandidates(db, recipe, limit);
+  // Everything else: what the datasets that are not eligible fail, counted per term.
+  const rows = (
+    await db
+      .prepare(`SELECT ${PIPELINE_ROW_COLUMNS} FROM datasets d ORDER BY d.dataset_id LIMIT ?1`)
+      .bind(DRY_RUN_SCAN_ROWS)
+      .all<PipelineRow>()
+  ).results;
+  const blockedByTerm: Record<string, number> = Object.fromEntries(
+    PIPELINE_TERMS.map((t) => [t.id, 0]),
+  );
+  for (const row of rows) {
+    for (const term of failedPipelineTerms(row))
+      blockedByTerm[term] = (blockedByTerm[term] ?? 0) + 1;
+  }
+  return {
+    ...base,
+    estimate_milli_total: perJob * candidates.length,
+    would_dispatch: candidates.map((c) => ({ dataset_id: c.dataset_id, version: c.tag })),
+    blocked_by_term: blockedByTerm,
+  };
+}
+
+// --- A run over the queue ---------------------------------------------------------------------------------------
+
+/** The refusals that would repeat for the next dataset, so a run over the queue stops at the first. */
+const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
+  "compute_disabled",
+  "runtime_unavailable",
+  "pipelines_account_missing",
+  "insufficient_balance",
+  "platform_budget_exhausted",
+  "suspended",
+  "over_concurrency",
+  "create_failed",
+]);
+
+export interface EligibleRun {
+  results: DispatchResult[];
+  dispatched: number;
+  /** The refusal that stopped the run before the limit, if one did. */
+  stoppedBy: PipelineRefusal | null;
+}
+
+/**
+ * Dispatch a recipe over the next `limit` datasets it has not been run over: the stamps are synced
+ * first, candidates are taken in dataset order, and every one goes through {@link dispatchPipelineJob},
+ * so each is checked again from its own row. A refusal that would repeat for the next dataset (a hold
+ * refused, the switch off, no image, no account) stops the run; a refusal about one dataset does not.
+ */
+export async function dispatchEligible(
+  env: Bindings,
+  input: { recipe: string; limit: number; actor: PipelineActor; after?: string },
+): Promise<EligibleRun> {
+  const run: EligibleRun = { results: [], dispatched: 0, stoppedBy: null };
+  const recipe = findRecipe(input.recipe);
+  if (recipe === null) {
+    run.results.push(fail("recipe_unknown", ""));
+    run.stoppedBy = "recipe_unknown";
+    return run;
+  }
+  await syncPipelineStamps(env);
+  for (const candidate of await pipelineCandidates(env.DB, recipe, input.limit, input.after)) {
+    if (run.dispatched >= input.limit) break;
+    const result = await dispatchPipelineJob(env, {
+      recipe: recipe.name,
+      datasetId: candidate.dataset_id,
+      version: candidate.tag,
+      actor: input.actor,
+    });
+    run.results.push(result);
+    if (result.ok) {
+      run.dispatched++;
+    } else if (STOPS_A_RUN.has(result.code)) {
+      run.stoppedBy = result.code;
+      break;
+    }
+  }
+  return run;
 }
