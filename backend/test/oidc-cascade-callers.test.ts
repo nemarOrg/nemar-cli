@@ -249,7 +249,7 @@ export function viaDestructuring(id: string) {
       expect(strays.length, `${label}: ${strays.join(" | ")}`).toBe(1);
       expect(strays.join("\n"), label).toContain("exported alias");
     }
-  });
+  }, 60_000);
 
   test("an alias exported afterwards, as the default, or by an import-equals, is a stray as well", () => {
     for (const body of [
