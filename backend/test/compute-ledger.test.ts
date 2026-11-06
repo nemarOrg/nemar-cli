@@ -1582,6 +1582,16 @@ describe("no path writes a pool's totals except a ledger entry", () => {
     expect(triggersOnPools(files[1]?.text ?? "")).toBe(1);
     expect(files[1]?.text).toContain("CREATE TRIGGER compute_pools_identity_fixed");
     expect(files[1]?.text).not.toContain("CREATE TRIGGER compute_ledger_apply");
+    // The A2 guard is NOT loosened to "any trigger on the pools": the one trigger 0130 may create on them
+    // is BEFORE UPDATE, and its body only raises. A body that writes anything is a writer of a total.
+    const created =
+      /CREATE TRIGGER compute_pools_identity_fixed BEFORE UPDATE OF[\s\S]*?\bEND;/.exec(
+        files[1]?.text ?? "",
+      )?.[0];
+    expect(created).toBeDefined();
+    const body = /\bBEGIN([\s\S]*)\bEND;/.exec(created ?? "")?.[1] ?? "";
+    expect(body.trim()).toMatch(/^SELECT RAISE\(ABORT, '[^']*(?:''[^']*)*'\);$/);
+    expect(body).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE)\b/i);
     expect(
       triggersOnPools("CREATE TRIGGER t AFTER INSERT ON compute_pools BEGIN SELECT 1; END;"),
     ).toBe(1);
