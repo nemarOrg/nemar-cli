@@ -24,6 +24,7 @@ import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lif
 import {
   OBSERVER_ROWS_MAX,
   OBSERVER_TOKEN_HEADER,
+  expanseFigureMilli,
   isRoutineDifference,
   mintObserverRun,
   settleObservedRows,
@@ -403,6 +404,41 @@ describe("final settlement", () => {
       });
       expect([state, res.status]).toEqual([state, 400]);
     }
+  });
+
+  test("a multi-node allocation is priced per node: the row's totals are divided by its nodes (MUTATION: do not divide)", () => {
+    const base = {
+      slurm_job_id: "1",
+      sacct_partition: "shared",
+      elapsed_seconds: 3600,
+      alloc_nodes: 2,
+      alloc_cpus: 8,
+      alloc_gpus: 0,
+      alloc_mem_mb: 0,
+      sacct_charged: null,
+      job_id: "job_0123456789abcdef01234567",
+      job_partition: "shared",
+      provisional_milli: 0,
+    };
+    // Two nodes of four cores for an hour is eight core-hours.
+    expect(expanseFigureMilli(base)).toBe(8000);
+    // Three cores over two nodes round up to two a node, so four in all.
+    expect(expanseFigureMilli({ ...base, alloc_cpus: 3 })).toBe(4000);
+    // Memory is a total too: 2 x 92 GB nodes' worth over two nodes, priced per GPU unit on a GPU partition.
+    expect(
+      expanseFigureMilli({
+        ...base,
+        sacct_partition: "gpu-shared",
+        alloc_cpus: 0,
+        alloc_gpus: 4,
+      }),
+    ).toBe(4000);
+    // The row's own figure wins, and an unknown partition falls back to the job's.
+    expect(expanseFigureMilli({ ...base, sacct_charged: 123 })).toBe(123);
+    expect(expanseFigureMilli({ ...base, sacct_partition: "weird" })).toBe(8000);
+    expect(
+      expanseFigureMilli({ ...base, sacct_partition: "weird", job_partition: "weird" }),
+    ).toBeNull();
   });
 
   test("a final figure below the charge lowers the person's pool and the budget together, and the totals hold", async () => {
