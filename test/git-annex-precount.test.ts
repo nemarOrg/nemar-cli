@@ -84,11 +84,15 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  if (existsSync(TMP_DIR)) {
-    chmodTreeWritable(TMP_DIR);
-    rmSync(TMP_DIR, { recursive: true, force: true });
+  try {
+    if (existsSync(TMP_DIR)) {
+      chmodTreeWritable(TMP_DIR);
+      rmSync(TMP_DIR, { recursive: true, force: true });
+    }
+  } finally {
+    // Unset when beforeAll threw before assigning it.
+    restoreGitIdentity?.();
   }
-  restoreGitIdentity();
 });
 
 describe("countPendingDownload", () => {
