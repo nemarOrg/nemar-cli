@@ -416,6 +416,15 @@ describe("every sweep service is declared and driven", () => {
         const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
         expect(allowlist).not.toContain(`"${name}"`);
       });
+
+      if (name === "sweepTenantJobs") {
+        test("sweepTenantJobs runs `live` on the tick and `week` in the daily block, and neither the other (MUTATION: swap the modes)", () => {
+          expect(tickProdOnlyCode).toContain('sweepTenantJobs(env, "live")');
+          expect(tickProdOnlyCode).not.toContain('sweepTenantJobs(env, "week")');
+          expect(prodOnlyCode).toContain('sweepTenantJobs(env, "week")');
+          expect(prodOnlyCode).not.toContain('sweepTenantJobs(env, "live")');
+        });
+      }
       continue;
     }
 
