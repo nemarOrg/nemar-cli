@@ -9,6 +9,9 @@
  *   nemar admin compute pool adjust <amount> ...          a correction of its grant (a charge: owner)
  *   nemar admin compute status [--json]                   the switches, Tapis and storage, as the Worker reads them (admin)
  *   nemar admin compute jobs cancel|advance <id> [--json] cancel a job, or take it one step on (admin; src/commands/admin-compute-jobs.ts)
+ *   nemar admin compute jobs list|record|report|access-report|hold|release-hold|holds|access-reports|requeue-access-report
+ *                                                         reporting, legal holds and ACCESS reports (phase A7, #2012; the same file)
+ *   nemar admin compute observer mint [--json]            mint the observer's one-hour token (admin)
  *   nemar admin compute pipeline run|status ...           run NEMAR's own recipes, or read their stamps (admin; src/commands/admin-compute-pipeline.ts)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
@@ -58,7 +61,7 @@ import {
   putComputePolicy,
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
-import { jobsCommand } from "./admin-compute-jobs.js";
+import { jobsCommand, observerCommand } from "./admin-compute-jobs.js";
 import { pipelineCommand } from "./admin-compute-pipeline.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
@@ -636,5 +639,6 @@ export const computeCommand = new Command("compute").description(
 computeCommand.addCommand(policyCommand);
 computeCommand.addCommand(poolCommand);
 computeCommand.addCommand(statusCommand);
+computeCommand.addCommand(observerCommand);
 computeCommand.addCommand(jobsCommand);
 computeCommand.addCommand(pipelineCommand);

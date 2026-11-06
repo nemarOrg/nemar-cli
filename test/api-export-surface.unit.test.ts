@@ -243,13 +243,25 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "cancelComputeJobAsAdmin",
     "computeRefusalCode",
     "getAccountComputePools",
+    "getComputeAccessReport",
+    "getComputeAccountReport",
     "getComputePipelineStatus",
     "getComputePolicy",
+    "getComputeRecord",
     "getComputeStatus",
     "grantAccountComputePool",
     "grantPlatformComputePool",
+    "listComputeAccessReports",
+    "listComputeHolds",
+    "listComputeJobs",
     "listComputePools",
+    "listUnmatchedComputeRows",
+    "mintComputeObserverRun",
+    "placeComputeHold",
     "putComputePolicy",
+    "readComputeRecord",
+    "releaseComputeHold",
+    "requeueComputeAccessReport",
     "runComputePipeline",
   ],
 };
@@ -387,6 +399,18 @@ const POST_SPLIT_ADDITIONS = [
   "adjustAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/adjust
   "grantPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/grant
   "adjustPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/adjust
+  "listComputeJobs", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listUnmatchedComputeRows", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeRecord", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "readComputeRecord", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeAccountReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listComputeHolds", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "placeComputeHold", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "releaseComputeHold", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listComputeAccessReports", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "requeueComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "mintComputeObserverRun", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list
   "OBJECTS_PER_EXPLICIT_LOCK", // #1912 phase 6f: the explicit lock's batch size
 ];

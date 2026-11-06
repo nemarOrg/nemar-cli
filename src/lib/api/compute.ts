@@ -12,10 +12,24 @@
  */
 
 import {
+  type ComputeAccessReportResponse,
+  ComputeAccessReportResponseSchema,
+  type ComputeAccessReportsResponse,
+  ComputeAccessReportsResponseSchema,
   type ComputeAccountPoolsResponse,
   ComputeAccountPoolsResponseSchema,
+  type ComputeAccountReportResponse,
+  ComputeAccountReportResponseSchema,
+  type ComputeHoldResponse,
+  ComputeHoldResponseSchema,
+  type ComputeHoldsResponse,
+  ComputeHoldsResponseSchema,
   type ComputeJobAdminResponse,
   ComputeJobAdminResponseSchema,
+  type ComputeJobsListResponse,
+  ComputeJobsListResponseSchema,
+  type ComputeObserverRunResponse,
+  ComputeObserverRunResponseSchema,
   type ComputePipelineRunRequest,
   type ComputePipelineRunResponse,
   ComputePipelineRunResponseSchema,
@@ -30,8 +44,16 @@ import {
   ComputePoolWriteResponseSchema,
   type ComputePoolsResponse,
   ComputePoolsResponseSchema,
+  type ComputeRecordReadResponse,
+  ComputeRecordReadResponseSchema,
+  type ComputeRecordResponse,
+  ComputeRecordResponseSchema,
+  type ComputeRequeueResponse,
+  ComputeRequeueResponseSchema,
   type ComputeStatusResponse,
   ComputeStatusResponseSchema,
+  type ComputeUnmatchedResponse,
+  ComputeUnmatchedResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -222,6 +244,185 @@ export async function getComputePipelineStatus(
     {},
     true,
     ComputePipelineStatusResponseSchema,
+  );
+}
+
+// --- Reporting, holds, ACCESS reports and the observer (epic #2005 phase A7, #2012) ---------------------------
+
+/** What `GET /admin/compute/jobs` filters by; `after` continues a page. */
+export interface ComputeJobsQuery {
+  flag?: string;
+  state?: string;
+  account?: number;
+  limit?: number;
+  after?: number;
+}
+
+const queryString = (params: URLSearchParams) => (params.toString() ? `?${params.toString()}` : "");
+
+/** `GET /admin/compute/jobs` (admin): jobs by flag, state and account, newest first. No identity. */
+export async function listComputeJobs(q: ComputeJobsQuery = {}): Promise<ComputeJobsListResponse> {
+  const params = new URLSearchParams();
+  if (q.flag) params.set("flag", q.flag);
+  if (q.state) params.set("state", q.state);
+  if (q.account !== undefined) params.set("account", String(q.account));
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.after !== undefined) params.set("after", String(q.after));
+  return request(
+    `/admin/compute/jobs${queryString(params)}`,
+    {},
+    true,
+    ComputeJobsListResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/jobs?unmatched=1` (admin): Expanse's rows that no job claims. */
+export async function listUnmatchedComputeRows(limit?: number): Promise<ComputeUnmatchedResponse> {
+  const params = new URLSearchParams({ unmatched: "1" });
+  if (limit !== undefined) params.set("limit", String(limit));
+  return request(
+    `/admin/compute/jobs${queryString(params)}`,
+    {},
+    true,
+    ComputeUnmatchedResponseSchema,
+  );
+}
+
+/**
+ * `GET /admin/compute/records/:ref` (admin): one job by its NEMAR id, Tapis uuid or Slurm id. The answer
+ * is parsed OPEN (unknown keys kept), never with a strict compute schema.
+ */
+export async function getComputeRecord(ref: string): Promise<ComputeRecordResponse> {
+  return request(
+    `/admin/compute/records/${encodeURIComponent(ref)}`,
+    {},
+    true,
+    ComputeRecordResponseSchema,
+  );
+}
+
+/** `POST /admin/compute/records/:ref/read` (owner): one record, with a stated reason, audited first. */
+export async function readComputeRecord(
+  ref: string,
+  name: string,
+  reason: string,
+): Promise<ComputeRecordReadResponse> {
+  return request(
+    `/admin/compute/records/${encodeURIComponent(ref)}/read`,
+    { method: "POST", body: JSON.stringify({ name, reason }) },
+    true,
+    ComputeRecordReadResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/report` (admin): one account's jobs and charge from one date to another. */
+export async function getComputeAccountReport(q: {
+  account: number;
+  from: string;
+  to: string;
+}): Promise<ComputeAccountReportResponse> {
+  const params = new URLSearchParams({
+    account: String(q.account),
+    from: q.from,
+    to: q.to,
+  });
+  return request(
+    `/admin/compute/report${queryString(params)}`,
+    {},
+    true,
+    ComputeAccountReportResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/access-report` (admin): for ACCESS, a quarter's distinct gateway users and jobs. */
+export async function getComputeAccessReport(
+  quarter: string,
+): Promise<ComputeAccessReportResponse> {
+  const params = new URLSearchParams({ quarter });
+  return request(
+    `/admin/compute/access-report${queryString(params)}`,
+    {},
+    true,
+    ComputeAccessReportResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/holds` (admin): the active legal holds, optionally for one target. */
+export async function listComputeHolds(
+  q: { scope?: string; ref?: string } = {},
+): Promise<ComputeHoldsResponse> {
+  const params = new URLSearchParams();
+  if (q.scope) params.set("scope", q.scope);
+  if (q.ref) params.set("ref", q.ref);
+  return request(
+    `/admin/compute/holds${queryString(params)}`,
+    {},
+    true,
+    ComputeHoldsResponseSchema,
+  );
+}
+
+/** `POST /admin/compute/holds` (owner): a legal hold on a job or an account. */
+export async function placeComputeHold(body: {
+  scope: string;
+  ref: string;
+  reason: string;
+}): Promise<ComputeHoldResponse> {
+  return request(
+    "/admin/compute/holds",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+    ComputeHoldResponseSchema,
+  );
+}
+
+/** `DELETE /admin/compute/holds/:id` (owner): release a hold (the row stays). */
+export async function releaseComputeHold(id: number): Promise<ComputeHoldResponse> {
+  return request(
+    `/admin/compute/holds/${id}`,
+    { method: "DELETE" },
+    true,
+    ComputeHoldResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/access-reports` (admin): ACCESS report rows in one state, and `failed` ones by word. */
+export async function listComputeAccessReports(
+  q: { state?: string; limit?: number; after?: string } = {},
+): Promise<ComputeAccessReportsResponse> {
+  const params = new URLSearchParams();
+  if (q.state) params.set("state", q.state);
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.after) params.set("after", q.after);
+  return request(
+    `/admin/compute/access-reports${queryString(params)}`,
+    {},
+    true,
+    ComputeAccessReportsResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/compute/access-reports/:jobId/requeue` (owner): put a `failed` ACCESS report back to
+ * `pending`. The body carries the owner's explicit acknowledgement that ACCESS did NOT record it: an
+ * unknown outcome is never resent by code (a report may be lost, never doubled).
+ */
+export async function requeueComputeAccessReport(jobId: string): Promise<ComputeRequeueResponse> {
+  return request(
+    `/admin/compute/access-reports/${encodeURIComponent(jobId)}/requeue`,
+    { method: "POST", body: JSON.stringify({ confirmed_not_recorded: true }) },
+    true,
+    ComputeRequeueResponseSchema,
+  );
+}
+
+/** `POST /admin/compute/observer-runs` (admin): mint the observer's one-hour token. Shown once. */
+export async function mintComputeObserverRun(): Promise<ComputeObserverRunResponse> {
+  return request(
+    "/admin/compute/observer-runs",
+    { method: "POST" },
+    true,
+    ComputeObserverRunResponseSchema,
   );
 }
 
