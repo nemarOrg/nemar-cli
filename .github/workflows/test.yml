@@ -1085,7 +1085,9 @@ jobs:
           log="$RUNNER_TEMP/unit-pure-shard.log"
 
           # pipefail keeps bun's own exit status: a failing test fails this step.
-          bun test --timings "$timings" --update-timings --shard="$shard/$SHARD_TOTAL" \
+          # --parallel=$(nproc): worker processes, one per core, each file in a fresh global (the
+          # default isolation). Measured on one shard: 167 s serial, 47 s at 4 workers, same results.
+          bun test --timings "$timings" --update-timings --shard="$shard/$SHARD_TOTAL" --parallel="$(nproc)" \
             --reporter=junit --reporter-outfile="$out/junit.xml" "${files[@]}" 2>&1 | tee "$log"
 
           # The files this shard actually ran, from the junit report: every test file appears as
