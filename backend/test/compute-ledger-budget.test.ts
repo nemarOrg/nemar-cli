@@ -52,6 +52,7 @@ import {
   releaseHold,
   settleFinal,
   settleProvisional,
+  unreservedChargeStatements,
 } from "../src/services/compute-ledger";
 import { jobId, totalsDisagreements } from "./helpers/compute-ledger";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -458,6 +459,21 @@ describe("which operations lower the people budget's consumption", () => {
       act: async (s) => {
         await adjustGrant(s, -900);
         return adjustGrant(s, 400);
+      },
+    },
+    {
+      name: "an unreserved job's charge to the partner pool (an overrun that names the budget)",
+      effect: "raises",
+      writes: ["overrun"],
+      act: async (s) => {
+        const tenant = await ensurePool(s.w.d1, "partner", "tenant", "cpu");
+        const [statement] = unreservedChargeStatements(s.w.d1, {
+          jobId: jobId(next()),
+          poolId: tenant.id,
+          budgetPoolId: s.budget.id,
+          chargeMilli: 2000,
+        });
+        return statement?.run();
       },
     },
     {

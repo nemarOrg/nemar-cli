@@ -22,8 +22,9 @@
  *     `unattributed` when the owner maps to no active account, the flags set), then the job is cancelled
  *     at Tapis, then the row is followed to its end like any cancelled job and charged what it used to
  *     the PARTNER POOL `tenant` (counted against the `people` budget), NEVER to a person, however clear it
- *     is whose job it was: an administrator may move the charge later, by an `adjust` entry. The row is
- *     written before the cancel so a crash between the two leaves a row to finish, not an unrecorded job.
+ *     is whose job it was. Moving the charge later is a ledger operation Epic D's partner-pool phase
+ *     exposes; no route reaches the partner pool today. The row is written before the cancel so a crash
+ *     between the two leaves a row to finish, not an unrecorded job.
  *
  * THE RULES.
  *  - PRODUCTION ONLY and only while compute is on (`computeEnabled`): the dev database shares real users,
