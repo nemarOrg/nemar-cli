@@ -1359,6 +1359,10 @@ jobs:
             echo "::error::matrix.shard must be 1..N in order: job $SHARD_INDEX is labeled $SHARD_LABEL, so a slice of the suite would run twice or never"
             exit 1
           fi
+          # Each shard starts one second after the one before it, so six runners do not open
+          # their first requests, token mints and CLI spawns against the shared dev backend in
+          # the same instant. The live files are the ones that flaked under load before.
+          sleep "$SHARD_INDEX"
           # Every non-e2e file that DOES hit the live dev backend, including
           # cli.test.ts (runCli spawns the binary against the backend).
           shopt -s nullglob
