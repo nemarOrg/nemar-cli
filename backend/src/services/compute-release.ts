@@ -192,8 +192,11 @@ export function computeReleaseStatements(userId: number): ComputeReleaseStatemen
  * aliased and namespace imports and uses that pass the function as a value: a function that runs the set
  * and is not listed, or a listed one that no longer runs it, fails the test, and so does a new function
  * that revokes all of a user's keys and sessions through the statement shapes the scan recognises (see the
- * header) and neither runs the set nor is named in {@link COMPUTE_END_EXCEPTIONS}. A third path that ends an account (the suspension of compute, an owner
- * command that merges two accounts) therefore has to add itself here, in a reviewed change.
+ * header) and neither runs the set nor is named in {@link COMPUTE_END_EXCEPTIONS}. A third path that ends
+ * an account (the suspension of compute) therefore has to add itself here, in a reviewed change. The
+ * owner's merge command, `oidc end-account` (`routes/admin/oidc.ts`), is not such a path: per ADR 0119 it
+ * ends the OIDC holdings only and revokes nothing, and compute ends through the revoke or delete that
+ * follows it, which are listed here.
  */
 export const COMPUTE_END_CALLERS = [
   "db/user-tombstone.ts#tombstoneUserCascade",
