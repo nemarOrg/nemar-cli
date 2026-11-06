@@ -198,10 +198,11 @@ jobs:
       # in German, to show an outcome is read from a status and not from git's message. Without the
       # de_DE.UTF-8 locale git speaks English and those cases assert nothing, so under this job's
       # NEMAR_REQUIRE_SCRUB_TOOLS=1 they fail instead (test/helpers/in-german.ts). The language pack
-      # generates the locale and carries git's German catalog; the mirror was updated just above.
-      - name: Install the German locale
-        timeout-minutes: 10
-        run: sudo apt-get install -y language-pack-de-base
+      # generates the locale and carries git's German catalog; it installs in the background (see the action).
+      - name: Start the German locale install
+        uses: ./.github/actions/german-locale
+        with:
+          phase: start
 
       # The pure tier's tools, as test.yml's unit-pure-shard installs and names them: under this
       # job's NEMAR_REQUIRE_SCRUB_TOOLS=1 a suite that needs one fails instead of skipping, and the
@@ -214,6 +215,19 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
+      # Started after the git-annex install; it needs to be done before the tools are listed
+      # and the tests run, and the dependency installs above overlap it.
+      - name: Wait for the German locale
+        uses: ./.github/actions/german-locale
+        with:
+          phase: wait
+
       - name: Tool versions
         shell: bash
         run: |
@@ -223,11 +237,6 @@ jobs:
           aws --version
           locale -a | grep -ix 'de_DE.utf8'
 
-      - name: Install dependencies
-        run: bun install
-
-      - name: Install backend dependencies
-        run: cd backend && bun install
 
       - name: Run pure unit tests (shard ${{ matrix.shard }}/${{ strategy.job-total }}, no live backend)
         env:
