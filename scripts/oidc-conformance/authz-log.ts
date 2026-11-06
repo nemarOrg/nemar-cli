@@ -13,6 +13,14 @@
  *  2. no `invalid_request` answered a request that DID carry a `code_challenge` (that would be a
  *     different refusal, wearing the PKCE deviation's name).
  *
+ * RESIDUAL RISK, stated plainly. The allowed set is global to the run, not per module. A module that
+ * stops with `invalid_request` and no challenge is indistinguishable, in this log, from another module
+ * that stopped with `invalid_request` and no challenge for a DIFFERENT cause (say, a malformed
+ * parameter): the log names no module. What the check does guarantee is that no module stopped with any
+ * other code, and that no refusal of a request that carried a challenge is called the PKCE deviation.
+ * Telling two `invalid_request` causes apart would need the rig to log which parameter was refused,
+ * which NEMAR's check route does not say.
+ *
  * The line holds a kind, an error code and a yes/no. It never holds a value: no state, code, challenge,
  * token or address.
  */

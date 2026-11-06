@@ -187,6 +187,12 @@ describe("the authorization log and its check", () => {
     for (const code of ALLOWED_AUTHORIZATION_ERRORS) expect(header).toContain(code);
   });
 
+  test("the module's header states the residual risk of a global allowed set", () => {
+    const header = read("scripts/oidc-conformance/authz-log.ts").split("*/")[0] ?? "";
+    expect(header).toContain("RESIDUAL RISK");
+    expect(header).toContain("not per module");
+  });
+
   test("a line holds a kind, an error and a yes or no, and reads back", () => {
     const line = authorizationLogLine("redirect", "invalid_request", false);
     expect(line).toBe("[rig] authz kind=redirect error=invalid_request pkce=no");
