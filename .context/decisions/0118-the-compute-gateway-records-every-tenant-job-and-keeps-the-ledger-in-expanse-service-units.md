@@ -386,3 +386,37 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
    The schema file `shared/contract/compute-launch.schema.json` changes in its descriptions and not its structure: it describes the document, says the document travels as base64url and claims nothing about the scheduler; `nemar-process` copies it byte for byte.
 
 Not verified against a real tenant, and listed so nobody reads it as fact: how the scheduler quotes an environment value (the rule the tests reproduce is a reading of it), and whether Tapis and the scheduler accept an environment value of up to 87,382 characters.
+
+## Amendment 2026-11-05 (#2011): first-party pipeline dispatch is built (phase A6)
+
+"Item N" means the numbered item of THIS amendment.
+
+1. **A recipe is resolved before `createJob`.**
+   The job is made from a complete specification: the recipe's name beside the `image` runtime, NEMAR's own runtime image (`COMPUTE_RUNTIME_IMAGE`, one digest-pinned reference), the command `nemar-recipe run <name>`, and arguments that carry the dataset directory (`/data/<id>`), the product directory (`/work/outputs/product`), the dataset identity and the image digest.
+   So `spec.json`, `spec_digest` and `launch_spec_digest` describe what ran, and the launch-specification builder never meets a recipe-only specification.
+   The arguments are absolute because the command is an argument vector and no shell expands a variable.
+   A whole-dataset run names no `--recording`.
+   The registry is `shared/compute-recipes.ts`; its numbers are initial, and its version and engine are what the Worker EXPECTS the recipe to report.
+2. **One stamp per dataset version, recipe, recipe version and engine** (`compute_pipeline_stamps`, migration 0117).
+   A run claims its tuple FIRST, with an insert whose attempt number is read inside the statement, and a partial unique index refuses a second `dispatched` or `succeeded` row for one tuple, so two runs racing for one tuple make one stamp and one job.
+   A `failed` or `refused` stamp is history and never blocks a retry.
+   The job's idempotency key is made from the tuple and the attempt, so a job whose creation committed and whose link did not is found again by its key instead of being failed.
+   A claim never followed by a job is failed after 30 minutes.
+   Deleting a dataset deletes its stamps; the job rows and the ledger stay.
+3. **The stamp says what ran.**
+   It is claimed with the registry's version and engine and, when the job succeeds, rewritten from the recipe's own dataset record (`extensions.nemar.recipe` and `.engine`), read from the results bucket; a record that is absent, unreadable or another recipe's ends the stamp `failed`, and the job is untouched.
+   A recipe whose recent success carries a version or an engine other than the registry's is a registry out of date; the daily dispatcher dispatches nothing for it until the table is fixed, because it would run the same dataset again every day.
+4. **The image digest a recipe job passes is checked against the launcher's provenance.**
+   `--image-digest` is the caller's claim and the recipe cannot check it.
+   `verifyResults` compares the one value the recorded specification passes with the digest `provenance.json` says the launcher ran, and fails the job `result_verification_failed` with `image_digest_mismatch` (flagged for an administrator) on a difference, a missing flag, a malformed value or a second flag.
+5. **Eligibility is one predicate, decided from the D1 row on every dispatch** (ADR 0065): active, public, `anonymous = 0` (NULL is unknown, and unknown is not false), first published, not withdrawn, DOI not tombstoned, a version, `eeg` as a whole modality token, and a real `nm` or `on` id outside the reserved fixture band.
+   The request names a recipe, a dataset and optionally a version, and nothing else; a body with any other key is refused.
+   A version with no data-plane tag, or one whose manifest holds more than 38,000 entries, is refused (`version_untagged`, `too_many_files`) and is never a candidate of the queue.
+6. **The daily dispatcher is dark three times over.**
+   It returns null outside exact production, does nothing and touches no table until `COMPUTE_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED` are both exactly `1`, and is wired only into the production-only daily block.
+   It dispatches `autoDispatch` recipes only, within `policy.pipelines.dailyJobCap` less today's pipeline jobs (an administrator's included) and `policy.pipelines.maxLiveJobs` per pool, and a refused hold stops the run for that pool.
+   It also stops at 10 jobs a tick, a bound of its own: one dispatch costs about 25 statements and calls against the allowance the daily jobs share, so the owner's cap is a ceiling and not a rate.
+7. **A dry run reads only** and works in every environment: it makes no stamp, job, hold or audit row and calls neither Tapis nor a bucket.
+   The compute switch is read where new pipeline work would start (the dispatch, the route's live run) and reported by the dry run; the lifecycle still gates in `submitLeased` alone, so a job already on a cluster is never stranded.
+
+Not verified: the figures in the registry (cores, memory, minutes), the 10-job tick bound against a measured subrequest count, and the engine string a real run of the recipe reports (the reader follows the recipe's published record format, not an observed record).
