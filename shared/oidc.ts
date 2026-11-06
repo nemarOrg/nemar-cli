@@ -237,6 +237,21 @@ export const OIDC_REFRESH_TOKEN_ABSOLUTE_SECONDS = 90 * 24 * 60 * 60;
 /** A spent refresh token is still accepted this long, for a request that was retried. */
 export const OIDC_REFRESH_GRACE_SECONDS = 30;
 
+/**
+ * The `error` words the token endpoint answers (RFC 6749 section 5.2), in the order the RFC lists them.
+ * The Worker's `OAuthErrorCode` is derived from this list, so a word cannot be written without being
+ * declared here, and the public page's drift test reads this list.
+ */
+export const OIDC_TOKEN_ERROR_CODES = [
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+] as const;
+export type OidcTokenErrorCode = (typeof OIDC_TOKEN_ERROR_CODES)[number];
+
 // ---------------------------------------------------------------------------------------------
 // Endpoint paths (ADR 0119 rule 2). The issuer and the host they are served from are the Worker's.
 // ---------------------------------------------------------------------------------------------

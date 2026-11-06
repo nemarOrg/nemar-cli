@@ -109,7 +109,10 @@ describe("ADR 0119 records the key and secret decisions", () => {
     // Losing the secret leaves no way back through the CLI, and the ADR says what recovery is.
     expect(consequences).toMatch(/no CLI way back/);
     expect(consequences).toContain("key_unreadable");
-    expect(consequences).toMatch(/removing the unreadable key rows by hand/);
+    expect(consequences).toMatch(
+      /delete the current and next rows of `oidc_signing_keys` \(retired rows hold no private half and can stay\), then run `keys rotate`/,
+    );
+    expect(consequences).toMatch(/no re-encryption path exists/);
   });
 });
 
