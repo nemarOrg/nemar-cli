@@ -216,6 +216,18 @@ describe("the process tier is its own job and no unit-pure shard runs a process 
     expect(UNIT_PURE_LISTER).toMatch(/grep -Fxq -- "\$f" <<<"\$process_files"; then continue/);
   });
 
+  test("the process-tier job runs the lister and refuses an empty list", () => {
+    const scripts = scriptsOf("process-tier").join("\n");
+    expect(scripts).toContain("scripts/ci/process-files.sh");
+    expect(scripts).toMatch(/\$\{#files\[@\]\}" -gt 0/);
+    expect(scripts).not.toContain("unit-pure-files.sh");
+  });
+
+  test("no unit-pure shard runs the process lister, and the process job is not a shard", () => {
+    expect(scriptsOf("unit-pure-shard").join("\n")).not.toContain("process-files.sh");
+    expect(workflow.jobs["process-tier"]?.strategy).toBeUndefined();
+  });
+
   test("the header is read as the first word after the marker", () => {
     expect(claimedBy(" * CI TIER: process. It spawns a child process.")).toBe("process");
     expect(claimedBy(" * CI TIER: unit-pure. It does not spawn a process.")).toBe("unit-pure");

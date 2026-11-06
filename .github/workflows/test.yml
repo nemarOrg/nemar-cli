@@ -1258,6 +1258,47 @@ jobs:
             + "\n| all | \([.[].files] | add) of \(.[0].discovered) | \([.[].tests] | add) | \([.[].passed] | add) |"
           ' "${reports[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # The process tier: test files whose header says `CI TIER: process`. They spawn child processes,
+  # serve the real Worker on a loopback port or need a host tool (`openssl`), so they run here, in
+  # one job of their own, and never inside a `unit-pure` shard: that tier is split across shards
+  # and holds only tests that run inside the test process. The list comes from
+  # scripts/ci/process-files.sh and `unit-pure-files.sh` skips exactly those files, so each file
+  # runs in one tier. Same trigger as the shards (`unit_pure_due`). No secrets and no live
+  # backend; a file that needs either belongs in the integration tier. Not a required check yet:
+  # a name is added to branch protection by the owner.
+  process-tier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: needs.changes.outputs.unit_pure_due == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Install backend dependencies
+        run: cd backend && bun install
+
+      - name: Tool versions
+        run: openssl version
+
+      - name: Run process-tier tests
+        run: |
+          # Written to a file first so a failing lister fails this step, and an empty list
+          # cannot become a bare `bun test` that runs the whole suite.
+          scripts/ci/process-files.sh > "$RUNNER_TEMP/process-files.txt"
+          mapfile -t files < "$RUNNER_TEMP/process-files.txt"
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no test file claims CI TIER: process"; exit 1; }
+          echo "Running ${#files[@]} process-tier test files"
+          bun test "${files[@]}"
+
   # Tier 2 (SOFT on dev, REQUIRED on main): integration tests that hit the LIVE
   # dev backend (real AWS STS / D1 / network). These flake transiently (a
   # different ~2 of ~1600 each run), so --retry=2 rides over infra hiccups while
