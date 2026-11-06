@@ -108,7 +108,7 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
    First-party is refused at registration for a client with any other redirect address, and checked again at every authorization, so a partner or a third party can never skip the consent screen.
    At authorization, a client registered first-party whose redirect addresses no longer all qualify is treated as third-party and asked, and a grant recorded while it was first-party is never taken for the person's consent (phase #2017).
    A client that is not first-party is third-party: it never skips the consent screen, and follows its consent mode.
-   `compute.nemar.org` is not first-party: its consent screen says it can reserve and spend the person's compute time.
+   `compute.nemar.org` is not first-party: its consent screen says: "If you sign in and run compute with this app, it counts against your NEMAR compute allocation."
 9. **A partner subdomain is not trusted as a NEMAR origin.**
    `shared/partner-hosts.ts` lists the partner hosts (today `compute.nemar.org`) and `isPartnerHost` matches a host or any subdomain of one.
    `isNemarWebOrigin` (which the API's cross-origin rule, the zarr host and the Model Context Protocol (MCP) host all use) and `isAllowedOrigin` (the origin check of the admin router's cookie-authenticated writes and of the authentication, profile, documentation and private-site routes; other cookie-authenticated writes rely on the website's own origin check and the absence of a cross-origin preflight allowance for the app host, as the Context says) return false for a partner host before they test anything else.
