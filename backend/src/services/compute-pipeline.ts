@@ -47,6 +47,7 @@ import {
   recipeCommand,
   recipeRequiredOutputs,
 } from "../../../shared/compute-recipes.js";
+import { PLATFORM_FAILURE_CODES } from "../../../shared/compute-state.js";
 import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
 import {
   JobSpecSchema,
@@ -104,6 +105,33 @@ export const STAMP_NO_JOB_MINUTES = 30;
  */
 export const RETRY_COOLDOWN_DAYS = 7;
 export const MAX_FAILED_ATTEMPTS = 3;
+
+/**
+ * The words of a `failed` stamp that are NOT the dataset's doing, so they never count toward the cooldown
+ * or the cap: the platform's own failure codes (`PLATFORM_FAILURE_CODES`: Tapis, staging, launch, archive,
+ * verification, records, and the launcher's fetch and upload codes, whose detail is not kept on the
+ * stamp), a cancel, and the words this file writes for its own faults and the registry's: the claim never
+ * followed by a job (`no_job`), a job row that is gone (`job_missing`), a creation that threw
+ * (`create_failed`), a recipe the table no longer names (`recipe_unknown`), and the two tuple words
+ * (`tuple_mismatch`, a hold; `tuple_already_stamped`, a run that was good). Three transient database errors
+ * on three days must not shut a dataset out until its version changes. What remains counts: the
+ * submitter-side launcher codes (`runtime_error`, `time_limit`, `out_of_memory`, `entry_not_found`), a
+ * job that failed with no word we know (`job_failed`), and the recipe's own output faults
+ * (`outputs_missing`, `record_unreadable`, `record_mismatch`).
+ */
+export const NON_DATASET_FAILURE_WORDS: readonly string[] = [
+  ...PLATFORM_FAILURE_CODES,
+  "job_cancelled",
+  "no_job",
+  "job_missing",
+  "create_failed",
+  "recipe_unknown",
+  "tuple_mismatch",
+  "tuple_already_stamped",
+];
+
+/** The list as SQL: fixed words of this tree, never a caller's. */
+const NON_DATASET_FAILURE_SQL = NON_DATASET_FAILURE_WORDS.map((w) => `'${w}'`).join(", ");
 
 /** Stamps one sync examines at most. */
 export const SYNC_STAMPS_PER_CALL = 50;
@@ -836,12 +864,14 @@ export async function pipelineCandidates(
                 SELECT 1 FROM compute_pipeline_stamps f
                  WHERE f.dataset_id = d.dataset_id AND f.recipe = ?2 AND f.recipe_version = ?3
                    AND f.engine = ?4 AND f.state = 'failed'
+                   AND f.refusal_code NOT IN (${NON_DATASET_FAILURE_SQL})
                    AND f.updated_at >= datetime('now', ?6)
                    AND f.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("f")})`)})
               AND (
                 SELECT COUNT(*) FROM compute_pipeline_stamps c
                  WHERE c.dataset_id = d.dataset_id AND c.recipe = ?2 AND c.recipe_version = ?3
                    AND c.engine = ?4 AND c.state = 'failed'
+                   AND c.refusal_code NOT IN (${NON_DATASET_FAILURE_SQL})
                    AND c.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("c")})`)}) < ?7
             ORDER BY d.dataset_id LIMIT ?5`,
         )

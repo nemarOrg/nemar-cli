@@ -413,6 +413,8 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    A record whose `<package>@<version>` is longer than the stamp's 64-character engine column is unreadable and ends the stamp `failed`.
    A rewritten tuple that is already stamped ends the stamp `failed` as `tuple_already_stamped`: the run may be good and the word says only that this stamp cannot carry its tuple.
    A tuple whose stamp failed is not a candidate of the queue for 7 days after the failure, nor once it has failed 3 times (both initial, `RETRY_COOLDOWN_DAYS` and `MAX_FAILED_ATTEMPTS`), so datasets that keep failing cannot take the page of every run.
+   Only failures a dataset can cause count toward either: the platform's failure codes, a cancel, and the words for the Worker's and the registry's own faults (`NON_DATASET_FAILURE_WORDS`) do not, so transient errors on three days cannot shut a dataset out until its version changes.
+   The cooldown and the cap govern the queue and the cron only: an administrator's dispatch of one named dataset bypasses both, and is still refused for a live stamp, a held tuple or an ineligible dataset.
    A placeholder recipe (`nemar-ica`) is refused on every path with `recipe_placeholder`.
 4. **The image digest a recipe job passes is checked against the launcher's provenance.**
    `--image-digest` is the caller's claim and the recipe cannot check it.

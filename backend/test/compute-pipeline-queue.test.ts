@@ -183,13 +183,19 @@ describe("the candidates", () => {
 });
 
 describe("a dataset that keeps failing", () => {
-  const failed = async (env: Bindings, dataset: string, attempts: number, updated = "-30 days") => {
+  const failed = async (
+    env: Bindings,
+    dataset: string,
+    attempts: number,
+    updated = "-30 days",
+    code = "job_failed",
+  ) => {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       await env.DB.prepare(
         `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code, updated_at)
-         VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, ?4, 'failed', 'job_failed', datetime('now', ?5))`,
+         VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, ?4, 'failed', ?6, datetime('now', ?5))`,
       )
-        .bind(dataset, floor.version, floor.engine, attempt, updated)
+        .bind(dataset, floor.version, floor.engine, attempt, updated, code)
         .run();
     }
   };
@@ -218,6 +224,40 @@ describe("a dataset that keeps failing", () => {
     expect((await pipelineCandidates(env.DB, floor, 10)).map((c) => c.dataset_id)).toEqual([
       "nm000105",
     ]);
+  });
+
+  test("failures that are the platform's or the registry's never count: three on three days block nothing", async () => {
+    const env = await world(["nm000104"]);
+    for (const [i, code] of [
+      "create_failed",
+      "no_job",
+      "tapis_error",
+      "job_cancelled",
+      "tuple_mismatch",
+    ].entries()) {
+      await env.DB.prepare(
+        `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code, updated_at)
+         VALUES ('nm000104', 'v1.0.0', 'nemar-floor', ?1, ?2, ?3, 'failed', ?4, datetime('now', ?5))`,
+      )
+        .bind(floor.version, floor.engine, i + 1, code, `-${i + 1} days`)
+        .run();
+    }
+    // Five platform-coded failures, the freshest a day old: inside the cooldown and over the cap, if counted.
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  test("failures a dataset causes do count: three on three days block it", async () => {
+    const env = await world(["nm000104"]);
+    for (const [i, code] of ["runtime_error", "time_limit", "out_of_memory"].entries()) {
+      await env.DB.prepare(
+        `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code, updated_at)
+         VALUES ('nm000104', 'v1.0.0', 'nemar-floor', ?1, ?2, ?3, 'failed', ?4, datetime('now', ?5))`,
+      )
+        .bind(floor.version, floor.engine, i + 1, code, `-${i + 10} days`)
+        .run();
+    }
+    // Outside the cooldown, but at the cap.
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
   });
 
   test("a refused stamp is not a failure: the pool's refusal does not cool a dataset down", async () => {
