@@ -451,8 +451,8 @@ describe("runSignalDefaultsSweep: entry-point invariants", () => {
   });
 
   // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
-  // (AGENTS.md's dataset ID bands) but is permanent, not churning -- the
-  // candidate SQL's exemplarOrFragment() carve-out must still admit it.
+  // (see the dataset ID bands in .rules/datasets-and-fixtures.md) but is
+  // permanent, not churning -- the candidate SQL's exemplarOrFragment() carve-out must still admit it.
   test("an is_exemplar=1 sandbox-band row IS a candidate (#1168)", async () => {
     db.prepare(
       `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo, is_sandbox, is_exemplar)

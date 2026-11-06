@@ -39,7 +39,7 @@ Trust these for how things work today.
 
 | Document | What it is | Destination |
 |---|---|---|
-| [systems-inventory.md](https://docs.nemar.org/admin/operations/systems-inventory/) | Every host and service, with paths, cron schedules, and deploy procedures. Expands the map in `AGENTS.md`. | private |
+| [systems-inventory.md](https://docs.nemar.org/admin/operations/systems-inventory/) | Every host and service, with paths, cron schedules, and deploy procedures. Expands the page map in [`.rules/docs-site.md`](../.rules/docs-site.md). | private |
 | [validated_workflows.md](https://docs.nemar.org/admin/operations/validated-workflows/) | Workflows proven by prototype, with the gotchas. The git-annex and staging-to-final recipes live here. | private |
 | [release-safety-playbook.md](release-safety-playbook.md) | Environments, promotion path, pre-release checks. | public |
 | [recover-runbook.md](recover-runbook.md) | Recovering 0-byte imports (epic #967 Phase 5). | public |

@@ -396,8 +396,8 @@ describe("every sweep service is declared and driven", () => {
         // the prod EZID shoulder, so a call site outside the guard would run
         // them from the dev worker against that same shared org. The D1 and S3
         // halves are NOT the risk anywhere: S3_BUCKET is env-scoped to
-        // nemar-dev, and per AGENTS.md the dev catalog was purged to fixtures
-        // and is no longer a production mirror.
+        // nemar-dev, and per .rules/environments.md the dev catalog was purged
+        // to fixtures and is no longer a production mirror.
         //
         // `runRecordingStatsSweepCron` is the exception and this assertion is
         // weaker for it: that sweep touches ONLY S3 and D1 (index.ts says so
