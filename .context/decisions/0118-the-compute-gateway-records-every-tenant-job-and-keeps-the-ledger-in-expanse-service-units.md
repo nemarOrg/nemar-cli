@@ -432,3 +432,53 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    The compute switch is read where new pipeline work would start (the dispatch, the route's live run) and reported by the dry run; the lifecycle still gates in `submitLeased` alone, so a job already on a cluster is never stranded.
 
 Not verified: the figures in the registry (cores, memory, minutes), the 10-job tick bound against a measured subrequest count, and the engine string a real run of the recipe reports (the reader follows the recipe's published record format, not an observed record).
+
+## Amendment 2026-11-05 (#2012): the tenant sweep, the observer, reporting, holds and retention are built (phase A7)
+
+"Item N" means the numbered item of THIS amendment.
+
+1. **A job that skipped the reservation is charged as an `overrun` of the partner pool `tenant`.**
+   The issue said "a `charge` entry (no hold)".
+   The table refuses a `charge` that closes no hold (`compute_ledger_closes_its_hold`), and a job nobody reserved has none, so the entry is an `overrun`: use charged to the pool without a hold, counted against the `people` budget (the table requires it), with the balance free to go negative, once per job (`job:<id>:unreserved`), for a figure above 0, and only to a partner pool (the statement checks the holder kind).
+   It is NEVER written to a person's pool, however clear whose job it was: an administrator may move the charge later, by an `adjust` entry.
+   The row's `flag_overrun` is NOT set for it (the `unreserved` flag already says what happened).
+   The decision is one small statement (`unreservedChargeStatements`); a `charge` kind that closes no hold would need a migration of the ledger's triggers, which the phase did not take.
+2. **Expanse's own figure does not correct an unreserved job's charge.**
+   A final settlement is `settleFinal`, which corrects a hold's charge; a job that skipped the reservation has no hold.
+   The observer still matches such a job's row by its Slurm id and lists it; the figure is read by an administrator, who moves the charge with an `adjust` entry if it is warranted.
+3. **The tenant sweep** (`sweepTenantJobs`, `live` every 30 minutes and `week` once a day, production only, and only while `COMPUTE_ENABLED` is `1`) lists the tenant with `listType=ALL_JOBS` (five pages of 1,000, newest first as asked with `orderBy=created(desc)`, whose spelling is UNVERIFIED) and filters in code.
+   For a Tapis job no row is bound to: a tag `nemar_job:<id>` for a row that has no Tapis job binds the row (the submit race) and cancels nothing; a tag for a row bound to another job, ended, or with a cancel pending is a duplicate, cancelled, the row flagged `mismatch`, never indexed (this is what catches a row's SECOND orphan, which the row's one orphan slot cannot hold); anything else is indexed FIRST (source `partner`, client `tenant`, `spec_digest` the SHA-256 of the Tapis fields read, `unreserved`, or `unattributed` when the owner maps to no active account by the gateway pseudonym), then cancelled, then followed to its end and charged.
+   The row is written before the cancel so that a crash between them leaves a row to finish.
+   A listing that fails changes nothing.
+   A job that skipped the reservation is the sweep's own row: the tick, a read-back, a person's or an administrator's cancel and `jobs advance` leave it alone (`flag_unreserved = 1` is excluded from every generic list and refused by `driveCancel` and `advanceComputeJob`).
+   The sweep reads the compute switch (`computeEnabled`), which the source scan of phase A5 had allowed in one place; the scan names the sweep now.
+4. **The observer is an unsigned sender with a token for one run.**
+   An administrator mints it (`POST /admin/compute/observer-runs`, audited): `<run id>.<HMAC>` under the callback secret with the domain tag `compute-observer` over the run id and the run's own nonce, valid for an hour, never stored.
+   `POST /compute/observer` takes the header `X-Compute-Observer-Token`, checks it BEFORE it reads a byte, answers ONE refusal (`403 observer_refused`) for a wrong, expired, reused, unknown or missing token, reads at most 1 MiB, validates every row to the shape of its column, and only then spends the run with one conditional UPDATE, so two posts racing make one ingest and a body that fails validation does not spend the run.
+   The two bounds, 1 MiB and 5,000 rows, are both kept; the longest row is 231 bytes, so 1 MiB admits about 4,500 of them.
+5. **Final settlement against Expanse's figure** (`settleObservedRows`, run by the ingest and by the daily sweep): a stored row is matched to the job with its Slurm id; when that job has ended with a provisional `charge` and no final one, `settleFinal` brings the charge to the row's own `charged_milli` or, when it sent none, to the rate table's figure for the allocation it reports (per node: the row's CPUs, memory and GPUs are totals).
+   A difference within `settle.toleranceMilli` or `settle.tolerancePercent` of the provisional charge is routine; beyond it `flag_mismatch` is set and the job is STILL settled to Expanse's figure.
+   A row whose job has not ended waits and is settled by the next pass; a row that cannot be priced, or that the pools cannot take, flags the job once and is judged (`applied_at`), so it is not tried for ever.
+6. **Legal holds** (`compute_legal_holds`): a hold on `job:<id>` or `account:<id>`, owner-only and audited, one active hold per target.
+   The retention sweep reads the hold when it chooses and again immediately before it deletes, and the statement that reduces the row carries the hold term as well.
+   A hold never keeps a result.
+7. **Retention** (`runComputeRetentionSweep`, daily, exact production, no switch): for a terminal job past `retention_until` with no hold it deletes `records/<id>/` and `logs/<id>/` and reduces the row to anonymous counts (null `account_id`, `tapis_owner`, `gateway_user`, `idempotency_key`); an unflagged, unheld job loses its logs after `retention.logsDays`; a flagged job keeps them with its records (design section 9); results are only reconciled (a result still present a day after `retention.resultsDays` is deleted and counted `late`).
+   It never changes a lock: ANY refusal of a `records/` or `logs/` key is counted `locked`, whatever its text (the text of R2's refusal is not verified), the job is left whole and stamped (`retention_attempted_at`) to go behind the others, and the next day asks again.
+   One audit row of counts, only when something happened, and one log line; nothing per job.
+8. **Anonymisation of a deleted account's pools and ledger actors** (migration 0130, numbered after the reserved ranges because 0114 to 0129 are taken): the two triggers that made the pools' identity and the ledger immutable are replaced by themselves plus one narrow exception.
+   A deleted account's pool may have its `holder_ref` replaced by `9` and the pool's own id padded to 15 digits (derived from the pool, unique, passing the account shape check), and nothing else about it may change in that statement (not an amount, `frozen`, the word or the kind), and not while it holds SU in an open hold.
+   A ledger entry whose `actor_user_id` is a deleted account may have it replaced by 2^53 - 1, with every other column equal, and not while it is an open hold's own entry.
+   The ledger's DELETE trigger is NOT replaced: no row is removed.
+   THE TOTALS INVARIANT therefore holds by construction: nothing the exception allows changes a delta, a total, a kind or a hold, and the one writer of a total (`compute_ledger_apply`) fires on INSERT only.
+   An administrator's idempotency key embeds the actor's number; it is kept, because rewriting a key would change the identity a replay is judged by.
+   The sweep anonymises a pool and an actor only when no job row still carries the account's number (so after the 7 years), no legal hold names the account, and nothing is open.
+9. **The five open points of phase A5 for this phase.**
+   (a) The two terminal repair lists, the orphan list and the cancel list ROTATE by the last time the list took the row (`examined_at`, and `cancel_attempted_at` for the cancel list), stamped before the step, so ten rows that cannot make progress no longer hold every slot.
+   (b) A row has one orphan slot (`orphan_tapis_uuid`): a second orphan is logged (`orphan_slot_taken`) and the row flagged; the tenant sweep cancels any duplicate it lists, which is the net.
+   (c) A terminal row whose Tapis record is gone (`not_found`), or has not been readable for a week, is settled without it (released unless something shows it ran, flagged `mismatch`); the observer's final settlement is the correction.
+   (d) The cancel sweep is production-only; `advanceComputeJob` now carries out a recorded cancel for a job that has a Tapis job, so a staging Worker, where no cron runs, no longer leaves one for ever.
+   (e) NOT CHANGED: the 30-minute tick equals the default `reservationWaitMinutes` (30), so a `created` job gets one retry before it times out.
+   It is the owner's policy, not a code constant; a value of at least two ticks (60) gives it two.
+10. **ACCESS reports in `failed`** are listed by their fixed word (`jobs access-reports`), counted in the daily sweep's log line (error level while any exist), and re-queued only by the owner, on the explicit statement that the report is CONFIRMED NOT recorded at ACCESS (`POST /admin/compute/access-reports/:jobId/requeue` with `confirmed_not_recorded: true`, and `--confirmed-not-recorded` on the command): an unknown outcome is never resent by code, so a person looked.
+
+Not verified: the order of Tapis's job list (`orderBy`), whether the tenant credential lists more than its own and shared jobs (the sweep finds what the service identity can list, and the fallback is the issue's: NEMAR is the only submitter), the text of R2's refusal of a locked key, and the observer's real export (no response of the real posting service was recorded; the bounds and shapes are the issue's).

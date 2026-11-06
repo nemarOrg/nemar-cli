@@ -322,3 +322,24 @@ Call these; never write a second way to end an account's compute, to owe a repor
 - **Secrets**: `ACCESS_GATEWAY_ATTRIBUTES_KEY` and `ACCESS_RESOURCE_NAME`, owner-set, optional, pinned absent from every table of `wrangler-sccn.toml`; unset, rows stay `pending` with `unconfigured`.
 - **Test seams**: `backend/test/helpers/access-standin.ts` (a real `Bun.serve` that records every request and can answer a status, redirect, hang or go down; nothing in it was recorded from the real service).
 - **Not here**: suspension of compute (Epic D), OIDC grant revocation (Epic B), the tenant-wide sweep and the reports that list `failed` rows by word for a person to resolve (phase A7), and an owner-only re-queue of a `failed` report that requires an acknowledgement that it is confirmed not recorded at ACCESS (phase A7). Open for A7 too: the cancel sweep takes the oldest ten rows, so a queue of cancels that cannot complete can stall it (phase A5), and staging never cancels at Tapis (phase A5's choice).
+
+## 12. Tenant sweep, observer, reporting, holds and retention shipped in phase A7 (ADR 0118, amendment of 2026-11-05, #2012)
+
+Call these; never write a second way to bind, cancel or charge a job nobody reserved, to settle against Expanse's figure, or to delete a record.
+
+- **Migrations.** `0118_compute_observer.sql`: `compute_observer_runs`, `compute_queue_snapshots`, `compute_sacct_rows` (`applied_at` is when a row was applied or judged), `compute_legal_holds` (one active hold per target) and five columns of `compute_jobs` that are the sweeps' own state (`cancel_attempted_at`, `retention_attempted_at`, `records_deleted_at`, `logs_deleted_at`, `results_reconciled_at`), with the indexes the rotations use.
+  `0130_compute_anonymise.sql` (numbered after the reserved ranges): the one exception to the pools' and the ledger's immutability, described in the amendment, item 8.
+- **The sweep** (`services/compute-tenant-sweep.ts`): `sweepTenantJobs(env, "live" | "week")`, null outside exact production and while compute is off.
+  Tapis jobs: bound by uuid (left alone), tagged for a row (bound, or a cancelled duplicate), or unreserved (indexed, cancelled, charged to the partner pool `tenant` by `unreservedChargeStatements`, an `overrun`).
+  `OWNER_ACCOUNT_SQL` is how a Tapis owner maps to an account: the stored gateway pseudonym of an active, undeleted account.
+  A row of the sweep has `flag_unreserved = 1` and is excluded from `BOUND_ROWS_SQL`, `CANCEL_ROWS_SQL` and `UNCOPIED_TERMINAL_SQL`, and refused by `driveCancel` and `advanceComputeJob`.
+- **The observer** (`services/compute-observer.ts`, `routes/callbacks/compute-observer.ts`): `mintObserverRun`, `authorizeObserverRun`, `ingestObserverPost`, `settleObservedRows`, `isRoutineDifference`, `expanseFigureMilli`.
+  The token is `<run id>.<HMAC>` in `X-Compute-Observer-Token` (kind `observer` of `compute-tokens.ts`); the route is `POST /compute/observer`, pinned in `compute-route-inventory.test.ts`.
+- **Reporting** (`services/compute-reporting.ts`, `routes/admin/compute-reporting.ts`, `src/commands/admin-compute-jobs.ts`): `jobs list [--flag --state --account --limit --after --unmatched]`, `record <nemar id | tapis uuid | slurm id> [--identity|--spec --reason]`, `report --account --from --to [--csv]`, `access-report --quarter [--csv]`, `hold`, `release-hold`, `holds`, `access-reports`, `requeue-access-report --confirmed-not-recorded` (owner), and `observer mint`.
+  Every view is fixed words, numbers and times; the identity and the specification are read only by the owner, with a reason, through `readRecordObject` (audited first).
+  The CLI parses the record answer open (passthrough), never with a strict compute schema.
+- **Holds and retention** (`services/compute-legal-holds.ts`, `services/compute-retention.ts`): `heldSql(alias)` is the one predicate "this job is held, by itself or by its account"; `deletePrefix` lists and deletes a prefix and reports a refusal as `locked`.
+- **Crons.** `sweepTenantJobs` is wired twice (the 30-minute tick's production guard, `live`; the daily `prodOnlyJobs` block, `week`) and `runComputeRetentionSweep` once (daily); `cron-sweep-wiring.test.ts` has the new kind `tick-and-daily-prod-only`.
+- **The ledger.** `unreservedChargeStatements` is the third writer of an `overrun` (with `settleStatements`) and the only one with no hold; the reason `unreserved_usage` joins `COMPUTE_LEDGER_REASONS`.
+- **Test seams.** `backend/test/helpers/compute-ended.ts` (`endedJob`: a job taken through the real lifecycle to `finished`); `compute-e2e.test.ts` is the proof of the epic, its CLI leg spawns the real CLI against a `Bun.serve` of the real routers.
+- **Unverified**: the order and reach of the Tapis job list, the text of R2's refusal of a locked key, the real observer's export, and the 30-minute tick against the default reservation wait (the owner's policy).
