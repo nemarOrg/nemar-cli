@@ -121,6 +121,7 @@ jobs:
           NODE_TLS_REJECT_UNAUTHORIZED=0 bun run scripts/oidc-conformance/smoke.ts
 
       - name: Start the suite
+        timeout-minutes: 12
         run: |
           cd "$RUNNER_TEMP/suite"
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" pull --quiet
@@ -161,7 +162,7 @@ jobs:
 
       - name: Basic plan
         id: basic_plan
-        timeout-minutes: 35
+        timeout-minutes: 30
         continue-on-error: true
         run: |
           uv run --no-project --python 3.12 --exclude-newer 2026-11-05 --with httpx==0.28.1 --with pyparsing==3.3.3 \
