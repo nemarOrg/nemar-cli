@@ -20,6 +20,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { checkAuthorizationLog } from "../scripts/oidc-conformance/authz-log";
 import { RIG_ACCOUNT_EMAIL, callbackAddress } from "../scripts/oidc-conformance/plan-config";
 
 setDefaultTimeout(60_000);
@@ -251,5 +252,178 @@ describe("the authorization responses", () => {
     ]) {
       expect(text).not.toContain(value);
     }
+  });
+});
+
+describe("each kind of authorization response is logged exactly", () => {
+  const callback = callbackAddress("https://localhost.emobix.co.uk:8443", "nemar");
+  const authz = () =>
+    readFileSync(rigLog, "utf8")
+      .split("\n")
+      .filter((l) => l.startsWith("[rig] authz "));
+  const newLines = async (before: number) => {
+    await Bun.sleep(200);
+    return authz().slice(before);
+  };
+  const query = (clientId: string, over: Record<string, string> = {}) =>
+    new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: callback,
+      scope: "openid",
+      state: "kind-state",
+      code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      code_challenge_method: "S256",
+      ...over,
+    });
+  const get = (q: URLSearchParams, cookie = "") =>
+    fetch(`${origin}/oauth/authorize?${q}`, {
+      redirect: "manual",
+      headers: cookie ? { Cookie: cookie } : {},
+      ...insecure,
+    });
+  const signIn = async () => {
+    const res = await fetch(
+      `${origin}/login`,
+      form({ email: RIG_ACCOUNT_EMAIL, next: "/oauth/authorize" }),
+    );
+    return res.headers
+      .getSetCookie()
+      .map((c) => c.split(";")[0])
+      .join("; ");
+  };
+  const hidden = (body: string, name: string) =>
+    new RegExp(`name="${name}" value="([^"]*)"`).exec(body)?.[1]?.replace(/&amp;/g, "&") ?? "";
+
+  test("error_page: an unregistered redirect address is page:invalid_redirect_uri", async () => {
+    const before = authz().length;
+    const res = await get(
+      query(readJson("basic-plan.json").client2.client_id, {
+        redirect_uri: "https://other.example.org/cb",
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("has not registered");
+    expect(await newLines(before)).toEqual([
+      "[rig] authz kind=error_page error=page:invalid_redirect_uri pkce=yes",
+    ]);
+  });
+
+  test("login: a visitor who is not signed in is sent to sign in", async () => {
+    const before = authz().length;
+    const res = await get(query(readJson("basic-plan.json").client2.client_id));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toStartWith("/login");
+    expect(await newLines(before)).toEqual(["[rig] authz kind=login error=none pkce=yes"]);
+  });
+
+  test("a cross-site POST is accepted by the stand-in and logged like any other request", async () => {
+    const before = authz().length;
+    const res = await fetch(`${origin}/oauth/authorize`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://attacker.example.org",
+      },
+      body: query(readJson("basic-plan.json").client2.client_id).toString(),
+      ...insecure,
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toStartWith("/login");
+    expect(await newLines(before)).toEqual(["[rig] authz kind=login error=none pkce=yes"]);
+  });
+
+  test("consent, then the deny redirect, then allow", async () => {
+    const clientId = readJson("basic-plan.json").client2.client_id;
+    const cookie = await signIn();
+    expect(cookie).toContain("__Host-");
+
+    let before = authz().length;
+    const page = await get(query(clientId), cookie);
+    expect(page.status).toBe(200);
+    const body = await page.text();
+    expect(await newLines(before)).toEqual(["[rig] authz kind=consent error=none pkce=yes"]);
+
+    const decide = (decision: string) =>
+      fetch(`${origin}/oauth/consent`, {
+        ...form({
+          request: hidden(body, "request"),
+          consent_token: hidden(body, "consent_token"),
+          decision,
+        }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      });
+
+    before = authz().length;
+    const denied = await decide("deny");
+    expect(denied.status).toBe(302);
+    expect(new URL(denied.headers.get("location") as string).searchParams.get("error")).toBe(
+      "access_denied",
+    );
+    expect(await newLines(before)).toEqual([
+      "[rig] authz kind=redirect error=access_denied pkce=yes",
+    ]);
+
+    before = authz().length;
+    const allowed = await decide("allow");
+    expect(allowed.status).toBe(302);
+    expect(new URL(allowed.headers.get("location") as string).searchParams.has("code")).toBe(true);
+    expect(await newLines(before)).toEqual(["[rig] authz kind=redirect error=none pkce=yes"]);
+  });
+
+  test("check_failed: a consent the route refuses is logged with its status", async () => {
+    const cookie = await signIn();
+    const before = authz().length;
+    const res = await fetch(`${origin}/oauth/consent`, {
+      ...form({
+        request: query(readJson("basic-plan.json").client2.client_id).toString(),
+        consent_token: "x",
+        decision: "maybe",
+      }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    });
+    expect(res.status).toBe(502);
+    expect(await newLines(before)).toEqual([
+      "[rig] authz kind=check_failed error=consent_status_400 pkce=yes",
+    ]);
+  });
+
+  test("check_failed: a request the page could not answer at all still gets a line", async () => {
+    // A consent POST whose body never arrives in full: reading it fails before the page logs anything.
+    const before = authz().length;
+    await new Promise<void>((resolve) => {
+      Bun.connect({
+        hostname: "localhost",
+        port,
+        tls: { rejectUnauthorized: false },
+        socket: {
+          open(socket) {
+            socket.write(
+              `POST /oauth/consent HTTP/1.1\r\nHost: localhost:${port}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 500\r\n\r\ndecision=al`,
+            );
+            setTimeout(() => socket.end(), 150);
+          },
+          data() {},
+          close() {
+            resolve();
+          },
+          error() {
+            resolve();
+          },
+        },
+      });
+    });
+    expect(await newLines(before)).toEqual([
+      "[rig] authz kind=check_failed error=handler_failed pkce=no",
+    ]);
+  });
+
+  test("over everything above, each authorization request has exactly one line and the check passes the shapes", () => {
+    const report = checkAuthorizationLog(readFileSync(rigLog, "utf8"));
+    expect(report.requests).toBe(report.authorizationLines);
+    expect(report.requests).toBeGreaterThan(8);
+    // The deny, the check failures and the unknown refusals are what the check is there to flag.
+    expect(report.violations.filter((v) => v.startsWith("unparseable"))).toEqual([]);
   });
 });
