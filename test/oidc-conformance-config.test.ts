@@ -19,6 +19,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import {
+  ALLOWED_AUTHORIZATION_ERRORS,
+  authorizationLogLine,
+  carriesChallenge,
+  checkAuthorizationLog,
+} from "../scripts/oidc-conformance/authz-log";
+import {
   RIG_ACCOUNT_EMAIL,
   RIG_TEXT,
   buildBasicPlanConfig,
@@ -133,6 +139,9 @@ describe("the expected-failures and expected-skips files", () => {
       "EnsureServerConfigurationSupportsClientSecretPost",
     ]);
     for (const f of post) expect(f.comment).toMatch(/Decisions? 3b/);
+    // The suite records the module's failure and goes on; no comment says it stops there.
+    for (const f of post) expect(f.comment).not.toMatch(/before it sends any request/);
+    expect(post[0]?.comment).toMatch(/records this failure and goes on/);
     const pkce = failures.filter((f) => f.condition === "CheckIfAuthorizationEndpointError");
     expect(pkce.length).toBeGreaterThan(20);
     for (const f of pkce) expect(f.comment).toMatch(/\b3a\b/);
@@ -153,6 +162,61 @@ describe("the expected-failures and expected-skips files", () => {
     }
     for (const entry of configFailures)
       expect(entry["configuration-filename"]).toBe("*config-plan.json");
+  });
+});
+
+describe("the authorization log and its check", () => {
+  test("the allowed set is the three codes the approved deviations and the REVIEW modules produce", () => {
+    expect([...ALLOWED_AUTHORIZATION_ERRORS]).toEqual([
+      "invalid_request",
+      "request_not_supported",
+      "page:invalid_redirect_uri",
+    ]);
+    // And the workflow writes the same set down.
+    const header = read(".github/workflows/oidc-conformance.yml").split("\n\nname:")[0] ?? "";
+    for (const code of ALLOWED_AUTHORIZATION_ERRORS) expect(header).toContain(code);
+  });
+
+  test("a line holds a kind, an error and a yes or no, and reads back", () => {
+    const line = authorizationLogLine("redirect", "invalid_request", false);
+    expect(line).toBe("[rig] authz kind=redirect error=invalid_request pkce=no");
+    expect(checkAuthorizationLog(line)).toEqual({
+      responses: 1,
+      byError: { invalid_request: 1 },
+      violations: [],
+    });
+    expect(carriesChallenge("a=b&code_challenge=x")).toBe(true);
+    expect(carriesChallenge("a=b&code_challenge_method=S256")).toBe(false);
+  });
+
+  test("passes a run made of the allowed answers", () => {
+    const log = [
+      authorizationLogLine("redirect", "invalid_request", false),
+      authorizationLogLine("redirect", "request_not_supported", false),
+      authorizationLogLine("error_page", "page:invalid_redirect_uri", false),
+      authorizationLogLine("consent", null, true),
+      authorizationLogLine("redirect", null, true),
+    ].join("\n");
+    expect(checkAuthorizationLog(log).violations).toEqual([]);
+  });
+
+  test("fails a different error that the expected failure would have hidden", () => {
+    const log = authorizationLogLine("redirect", "invalid_scope", true);
+    expect(checkAuthorizationLog(log).violations).toEqual([
+      "an authorization response (redirect) carried the error invalid_scope, which no approved deviation produces",
+    ]);
+  });
+
+  test("fails an invalid_request that came to a request with a challenge", () => {
+    const log = authorizationLogLine("redirect", "invalid_request", true);
+    expect(checkAuthorizationLog(log).violations).toEqual([
+      "invalid_request answered a request that carried a code_challenge, so it is not the PKCE deviation",
+    ]);
+  });
+
+  test("fails an empty log, which would check nothing", () => {
+    expect(checkAuthorizationLog("").violations).toHaveLength(1);
+    expect(checkAuthorizationLog("[rig] GET /login 200").responses).toBe(0);
   });
 });
 
@@ -186,6 +250,8 @@ describe("the workflow", () => {
     name?: string;
     uses?: string;
     run?: string;
+    if?: string;
+    "timeout-minutes"?: number;
     with?: { path: string };
   }
   const workflow = parse(text) as {
@@ -235,9 +301,30 @@ describe("the workflow", () => {
     expect((setup as { with?: { "enable-cache"?: boolean } }).with?.["enable-cache"]).toBe(false);
   });
 
-  test("bounds the Basic plan at 35 minutes inside the 60 minute job", () => {
-    const basic = steps.find((s) => s.name === "Basic plan") as { "timeout-minutes"?: number };
-    expect(basic["timeout-minutes"]).toBe(35);
+  test("bounds each long step so that together they fit the 60 minute job", () => {
+    const limit = (name: string) =>
+      steps.find((s) => s.name === name)?.["timeout-minutes"] as number;
+    expect(limit("Start the suite")).toBe(12);
+    expect(limit("Configuration plan (smoke test, no browser)")).toBe(10);
+    expect(limit("Basic plan")).toBe(30);
+    const total =
+      limit("Start the suite") +
+      limit("Configuration plan (smoke test, no browser)") +
+      limit("Basic plan");
+    // Leaves at least eight minutes for the installs, the pull, the logs and the upload.
+    expect(total).toBeLessThanOrEqual(52);
+    expect(workflow.jobs.conformance["timeout-minutes"]).toBe(60);
+  });
+
+  test("checks the authorization errors after the plans and before the upload", () => {
+    const names = steps.map((s) => s.name);
+    const check = names.indexOf("Check the authorization errors");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(names.indexOf("Basic plan"));
+    expect(check).toBeLessThan(names.indexOf("Upload results and logs"));
+    expect(String(steps[check]?.run)).toContain("check-authz.ts conformance-artifacts/rig.log");
+    // It runs even if a plan failed, so a failure never hides the cause.
+    expect(String(steps[check]?.if)).toContain("always()");
   });
 
   test("stops the rig and the suite before it uploads anything", () => {
@@ -249,6 +336,10 @@ describe("the workflow", () => {
     expect(body).toContain("kill");
     expect(body).toContain("docker compose");
     expect(body).toContain("down");
+    // It always runs, waits up to 10 seconds for the rig to exit, and fails if the rig is still there.
+    expect(String(steps[stop]?.if)).toContain("always()");
+    expect(body).toContain("kill -0");
+    expect(body).toMatch(/seq 1 20[\s\S]*sleep 0\.5[\s\S]*exit 1/);
     // The header says what the uploaded files do and do not hold.
     expect(text).toContain("nothing live is uploaded");
   });
