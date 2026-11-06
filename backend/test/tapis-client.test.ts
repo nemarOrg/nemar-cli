@@ -2260,3 +2260,52 @@ describe("the stand-in is faithful to what the documentation says", () => {
     ).toEqual([theirs.uuid]);
   });
 });
+
+describe("listJobs orderBy (phase A7, #2012; the spelling is UNVERIFIED against a real tenant)", () => {
+  const listRequests = () => standin.log.filter((r) => r.route === "GET /v3/jobs/list");
+
+  test("sends `orderBy=created(desc)` in the query when asked, and nothing when not", async () => {
+    const env = passwordEnv();
+    await listJobs(ctx(env), {
+      listType: "ALL_JOBS",
+      limit: 10,
+      skip: 20,
+      orderBy: "created(desc)",
+    });
+    await listJobs(ctx(env), { listType: "ALL_JOBS", limit: 10, skip: 0 });
+    const [asked, plain] = listRequests();
+    const query = new URL(`http://x${asked?.path}`).searchParams;
+    expect(query.get("orderBy")).toBe("created(desc)");
+    expect(query.get("listType")).toBe("ALL_JOBS");
+    expect(query.get("limit")).toBe("10");
+    expect(query.get("skip")).toBe("20");
+    expect(new URL(`http://x${plain?.path}`).searchParams.has("orderBy")).toBe(false);
+  });
+
+  test("an orderBy that is not a field and a direction is refused before anything is sent (MUTATION: drop the check)", async () => {
+    const env = passwordEnv();
+    for (const orderBy of [
+      "created",
+      "created(sideways)",
+      "a b(asc)",
+      "x;y(desc)",
+      "",
+      "created(desc),name(asc)",
+      "(desc)",
+      `${"c".repeat(33)}(asc)`,
+    ]) {
+      let err: unknown;
+      try {
+        await listJobs(ctx(env), { listType: "ALL_JOBS", limit: 10, skip: 0, orderBy });
+      } catch (e) {
+        err = e;
+      }
+      expect([orderBy, err instanceof RangeError]).toEqual([orderBy, true]);
+    }
+    expect(listRequests()).toHaveLength(0);
+    for (const ok of ["created(asc)", "lastUpdated(desc)"]) {
+      await listJobs(ctx(env), { listType: "ALL_JOBS", limit: 10, skip: 0, orderBy: ok });
+    }
+    expect(listRequests()).toHaveLength(2);
+  });
+});

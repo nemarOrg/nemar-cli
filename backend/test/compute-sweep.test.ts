@@ -552,6 +552,64 @@ describe("the daily pass", () => {
   });
 });
 
+describe("the listing", () => {
+  const listCalls = () => fx.tapis.log.filter((r) => r.route === "GET /v3/jobs/list");
+
+  test("asks for the newest first, 1,000 a page, through ALL_JOBS", async () => {
+    await foreign();
+    await sweepTenantJobs(env(), "live");
+    const query = new URL(`http://x${listCalls()[0]?.path}`).searchParams;
+    expect(query.get("orderBy")).toBe("created(desc)");
+    expect(query.get("listType")).toBe("ALL_JOBS");
+    expect(query.get("limit")).toBe("1000");
+    expect(query.get("skip")).toBe("0");
+  });
+
+  test("five full pages are read and no more, the cut-off is reported at error level, and nothing past it is invented (MUTATION: read on past five)", async () => {
+    // Five pages of 1,000 ended jobs: every page is full, so there may be more behind the fifth.
+    const ended = (page: number) =>
+      Array.from({ length: 1000 }, (_, i) => ({
+        uuid: `00000000-0000-0000-${String(page).padStart(4, "0")}-${String(i).padStart(12, "0")}-007`,
+        status: "FINISHED",
+        owner: fx.tapis.username,
+        created: new Date().toISOString(),
+      }));
+    for (let page = 0; page < 5; page++) {
+      fx.tapis.respond("GET /v3/jobs/list", 200, {
+        status: "success",
+        message: "ok",
+        version: "1",
+        result: ended(page),
+      });
+    }
+    const result = await sweepTenantJobs(env(), "live");
+    expect(listCalls()).toHaveLength(5);
+    expect(listCalls().map((c) => new URL(`http://x${c.path}`).searchParams.get("skip"))).toEqual([
+      "0",
+      "1000",
+      "2000",
+      "3000",
+      "4000",
+    ]);
+    expect(result).toMatchObject({ listed: 5000, truncated: true, indexed: 0 });
+    const log = result ? tenantLogLine(result) : null;
+    expect(log?.level).toBe("error");
+    expect(log?.line).toContain("truncated=1");
+  }, 30_000);
+
+  test("a last page with fewer than 1,000 ends the listing", async () => {
+    fx.tapis.respond("GET /v3/jobs/list", 200, {
+      status: "success",
+      message: "ok",
+      version: "1",
+      result: [],
+    });
+    const result = await sweepTenantJobs(env(), "live");
+    expect(result).toMatchObject({ listed: 0, truncated: false });
+    expect(listCalls()).toHaveLength(1);
+  });
+});
+
 describe("what the sweep will not do", () => {
   test("with Tapis unreachable it changes nothing at all", async () => {
     await foreign({ startedMsAgo: 30 * MINUTE });
