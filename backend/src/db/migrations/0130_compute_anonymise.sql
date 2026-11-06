@@ -49,6 +49,7 @@ WHEN NOT (
   AND OLD.holder_ref <> NEW.holder_ref
   AND NEW.granted_milli = OLD.granted_milli AND NEW.held_milli = OLD.held_milli
   AND NEW.charged_milli = OLD.charged_milli AND NEW.frozen = OLD.frozen
+  AND NEW.created_at = OLD.created_at AND NEW.updated_at = OLD.updated_at
   AND OLD.held_milli = 0
   AND EXISTS (SELECT 1 FROM users u
                WHERE u.id = CAST(OLD.holder_ref AS INTEGER) AND u.deleted_at IS NOT NULL))

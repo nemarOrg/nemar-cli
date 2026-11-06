@@ -918,6 +918,135 @@ describe("migration 0130, on both engines", () => {
     },
   );
 
+  // Each column changed ALONE, in the same statement as the anonymising change: every one is refused, so
+  // a single term of the trigger cannot be dropped without one of these failing.
+  each("changing any ONE column of a pool beside the holder reference is refused", async (e) => {
+    const columns: Array<[string, string, unknown]> = [
+      ["id", "id", 987_654_321],
+      ["holder_kind", "holder_kind", "partner"],
+      ["pool", "pool", "gpu"],
+      ["granted_milli", "granted_milli", 1],
+      ["held_milli", "held_milli", 1],
+      ["charged_milli", "charged_milli", 1],
+      ["frozen", "frozen", 1],
+      ["created_at", "created_at", "2000-01-01 00:00:00"],
+      ["updated_at", "updated_at", "2000-01-01 00:00:00"],
+    ];
+    for (const [name, column, value] of columns) {
+      const gone = await user(e, true);
+      const p = await pool(e, gone);
+      const err = await e.run(
+        `UPDATE compute_pools SET holder_ref = ?, ${column} = ? WHERE id = ?`,
+        anonymousPoolRef(p),
+        value,
+        p,
+      );
+      expect([name, err]).toEqual([name, expect.stringMatching(/identity never changes/)]);
+      const stored = (
+        await e.all<{ holder_ref: string }>("SELECT holder_ref FROM compute_pools WHERE id = ?", p)
+      )[0];
+      expect([name, stored?.holder_ref]).toEqual([name, String(gone)]);
+    }
+  });
+
+  each("changing any ONE column of a ledger entry beside the actor is refused", async (e) => {
+    const holder = await user(e, false);
+    const p = await pool(e, holder);
+    const other = await pool(e, await user(e, false));
+    const columns: Array<[string, unknown]> = [
+      ["id", 987_654_321],
+      ["kind", "expire"],
+      ["pool_id", other],
+      ["budget_pool_id", other],
+      ["granted_delta_milli", 8],
+      ["held_delta_milli", 1],
+      ["charged_delta_milli", 1],
+      ["job_id", "job_0000000000000000000000e1"],
+      ["hold_ref", 1],
+      ["reason", "other_reason"],
+      ["idempotency_key", "renamed-key"],
+      ["created_at", "2000-01-01 00:00:00"],
+    ];
+    for (const [column, value] of columns) {
+      const gone = await user(e, true);
+      const key = `col-${column}-${Date.now()}-${Math.random()}`;
+      expect(
+        await e.run(
+          "INSERT INTO compute_ledger (kind, pool_id, granted_delta_milli, actor_user_id, reason, idempotency_key) VALUES ('grant', ?, 9, ?, 'grant', ?)",
+          p,
+          gone,
+          key,
+        ),
+      ).toBeNull();
+      const err = await e.run(
+        `UPDATE compute_ledger SET actor_user_id = ?, ${column} = ? WHERE idempotency_key = ?`,
+        COMPUTE_ANONYMOUS_ACTOR_ID,
+        value,
+        key,
+      );
+      expect([column, err]).toEqual([column, expect.stringMatching(/append-only/)]);
+      const stored = (
+        await e.all<{ actor_user_id: number }>(
+          "SELECT actor_user_id FROM compute_ledger WHERE idempotency_key = ?",
+          key,
+        )
+      )[0];
+      expect([column, stored?.actor_user_id]).toEqual([column, gone]);
+    }
+  });
+
+  each(
+    "the entry of a hold that is still open keeps its actor, and the closed one gives it up",
+    async (e) => {
+      const gone = await user(e, true);
+      const holder = await user(e, false);
+      const p = await pool(e, holder);
+      const budget = (
+        await e.all<{ id: number }>(
+          "SELECT id FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = 'people' AND pool = 'cpu'",
+        )
+      )[0]?.id as number;
+      for (const target of [p, budget]) {
+        expect(
+          await e.run(
+            "INSERT INTO compute_ledger (kind, pool_id, granted_delta_milli, reason, idempotency_key) VALUES ('grant', ?, 5000, 'grant', ?)",
+            target,
+            `og-${target}-${Math.random()}`,
+          ),
+        ).toBeNull();
+      }
+      const job = `job_${Math.floor(Math.random() * 1e12)
+        .toString(16)
+        .padStart(12, "0")}${Math.floor(Math.random() * 1e12)
+        .toString(16)
+        .padStart(12, "0")}`.slice(0, 28);
+      expect(
+        await e.run(
+          "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, actor_user_id, idempotency_key) VALUES ('hold', ?, ?, 100, ?, ?, ?)",
+          p,
+          budget,
+          job,
+          gone,
+          `job:${job}:hold`,
+        ),
+      ).toBeNull();
+      const anonymise = () =>
+        e.run(
+          "UPDATE compute_ledger SET actor_user_id = ? WHERE idempotency_key = ?",
+          COMPUTE_ANONYMOUS_ACTOR_ID,
+          `job:${job}:hold`,
+        );
+      expect(await anonymise()).toMatch(/append-only/);
+      expect(
+        await e.run(
+          "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, hold_ref, idempotency_key) SELECT 'release', pool_id, budget_pool_id, -held_delta_milli, job_id, id, 'hold:' || id || ':release' FROM compute_ledger WHERE idempotency_key = ?",
+          `job:${job}:hold`,
+        ),
+      ).toBeNull();
+      expect(await anonymise()).toBeNull();
+    },
+  );
+
   each("a pool with an open hold is refused", async (e) => {
     const gone = await user(e, true);
     const p = await pool(e, gone);
