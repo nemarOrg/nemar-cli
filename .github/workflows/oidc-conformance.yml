@@ -101,7 +101,8 @@ jobs:
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" pull --quiet
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" up -d
           for _ in $(seq 1 90); do
-            if curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$CONFORMANCE_SERVER" | grep -q 200; then echo "suite is up"; exit 0; fi
+            # The suite's front page answers 302 (to its sign-in page); a 502 is its TLS front without the server.
+            if curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$CONFORMANCE_SERVER" | grep -qE '^(200|30[0-9])$'; then echo "suite is up"; exit 0; fi
             sleep 5
           done
           echo "::error::the suite did not come up in 7 minutes"
