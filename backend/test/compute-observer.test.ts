@@ -425,6 +425,30 @@ describe("final settlement", () => {
     expect((await settleObservedRows(made.env)).settled).toBe(0);
   });
 
+  test("a job first seen RUNNING is finalized when a later export says COMPLETED (MUTATION: keep the first row)", async () => {
+    const j = await endedJob(30);
+    const slurm = j.job.slurm_job_id as string;
+    const first = await mint();
+    await post(first.token, {
+      snapshots: [],
+      sacct: [sacctRow(slurm, { state: "RUNNING", elapsed_seconds: 60, charged_milli: 99_000 })],
+    });
+    expect((await reread(j.env, j.job.id)).settled_final_at).toBeNull();
+    const second = await mint();
+    const res = await post(second.token, {
+      snapshots: [],
+      sacct: [sacctRow(slurm, { state: "COMPLETED", charged_milli: 2300 })],
+    });
+    expect(JSON.parse(res.text)).toMatchObject({ settled: 1 });
+    const after = await reread(j.env, j.job.id);
+    expect(after.settled_final_at).not.toBeNull();
+    expect(after.charged_milli).toBe(2300);
+    // And a later export does not rewrite a row that is ended and applied.
+    const third = await mint();
+    await post(third.token, { snapshots: [], sacct: [sacctRow(slurm, { charged_milli: 9999 })] });
+    expect((await reread(j.env, j.job.id)).charged_milli).toBe(2300);
+  });
+
   test("a row for a job still pending or running at Slurm is not Expanse's figure yet", async () => {
     const j = await endedJob(30);
     const run = await mint();

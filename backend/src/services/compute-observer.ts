@@ -256,6 +256,21 @@ export interface IngestResult {
   unmatched: number;
 }
 
+/**
+ * A Slurm id seen again. The export repeats jobs, and a job first seen PENDING or RUNNING must not stay
+ * that row for ever: while the stored row is not applied and its state is not an ended one, the new row
+ * replaces it (the match to a job, `matched_job_id`, is kept). A row in an ended state, or one already
+ * applied to the ledger, is Expanse's final word and keeps its first values.
+ */
+export const SACCT_UPSERT = `ON CONFLICT (slurm_job_id) DO UPDATE SET
+    run_id = excluded.run_id, partition = excluded.partition, state = excluded.state,
+    elapsed_seconds = excluded.elapsed_seconds, alloc_nodes = excluded.alloc_nodes,
+    alloc_cpus = excluded.alloc_cpus, alloc_gpus = excluded.alloc_gpus,
+    alloc_mem_mb = excluded.alloc_mem_mb, submit_time = excluded.submit_time,
+    start_time = excluded.start_time, end_time = excluded.end_time,
+    charged_milli = excluded.charged_milli, ingested_at = datetime('now')
+  WHERE compute_sacct_rows.applied_at IS NULL AND compute_sacct_rows.state NOT IN ${ENDED_SQL}`;
+
 const SACCT_COLUMNS =
   "(slurm_job_id, run_id, partition, state, elapsed_seconds, alloc_nodes, alloc_cpus, alloc_gpus, alloc_mem_mb, submit_time, start_time, end_time, charged_milli)";
 
@@ -284,7 +299,7 @@ export async function ingestObserverPost(
     const values = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
     statements.push(
       env.DB.prepare(
-        `INSERT OR IGNORE INTO compute_sacct_rows ${SACCT_COLUMNS} VALUES ${values}`,
+        `INSERT INTO compute_sacct_rows ${SACCT_COLUMNS} VALUES ${values} ${SACCT_UPSERT}`,
       ).bind(
         ...chunk.flatMap((r) => [
           r.slurm_job_id,
