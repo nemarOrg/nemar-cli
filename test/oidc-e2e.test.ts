@@ -26,10 +26,11 @@
  *  - the loser of a manual merge keeps the merge as the reason when the owner ends it first, and records
  *    the revocation when the order is reversed.
  *
- * CI TIER: unit-pure. It holds none of the markers that route a file to the integration tier, and it needs
- * no live backend, retries or 30-second timeout, which is what that tier provides: the Worker, the partner
- * stand-in and the library's calls all stay on loopback addresses (the stand-in makes its own throwaway
- * certificate with `openssl`). The file sets no timeout of its own, so it runs under the tier's default.
+ * CI TIER: process. It serves the real Worker on a loopback port and its partner stand-in makes a
+ * throwaway certificate with `openssl`, and a file that listens on a port or spawns a process does not belong
+ * in a `unit-pure` shard. It holds none of the markers that route a file to the integration tier and needs
+ * no live backend: the Worker, the partner stand-in and the library's calls all stay on loopback addresses.
+ * The file sets no timeout of its own, so it runs under the default.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";

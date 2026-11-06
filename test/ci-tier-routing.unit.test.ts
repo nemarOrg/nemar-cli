@@ -186,6 +186,7 @@ describe("a header's tier claim is the tier the workflow gives the file", () => 
     // A guard whose scan found nothing would pass for ever.
     expect(claimants.some((f) => f.claim === "unit-pure")).toBe(true);
     expect(claimants.some((f) => f.claim === "integration")).toBe(true);
+    expect(claimants.some((f) => f.claim === "process")).toBe(true);
   });
 
   for (const { path, text, claim } of claimants) {
@@ -211,6 +212,24 @@ describe("a header's tier claim is the tier the workflow gives the file", () => 
 });
 
 describe("the process tier is its own job and no unit-pure shard runs a process file", () => {
+  const processFiles = claimants.filter((f) => f.claim === "process");
+
+  test("a file claiming process is routed to process, so it cannot fall back to unit-pure", () => {
+    expect(processFiles.length).toBeGreaterThan(0);
+    for (const f of processFiles) {
+      expect(markerLine(f.text), f.path).toMatch(/CI TIER: process([^A-Za-z-]|$)/);
+      expect(routedTo(basename(f.path), f.text), f.path).toBe("process");
+    }
+  });
+
+  test("a process file holds no integration marker and is not named *.integration.test.ts", () => {
+    // Otherwise the integration-dev job would run it as well and it would run twice.
+    for (const f of processFiles) {
+      expect(f.path, f.path).not.toMatch(/\.integration\.test\.ts$/);
+      expect(ROUTING_PATTERN.test(f.text), f.path).toBe(false);
+    }
+  });
+
   test("unit-pure-files.sh skips whatever process-files.sh lists", () => {
     expect(UNIT_PURE_LISTER).toContain("scripts/ci/process-files.sh");
     expect(UNIT_PURE_LISTER).toMatch(/grep -Fxq -- "\$f" <<<"\$process_files"; then continue/);
