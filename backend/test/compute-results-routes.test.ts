@@ -302,7 +302,9 @@ describe("links", () => {
       } while (after !== null && pages < 10);
       expect(pages).toBe(Math.ceil(count / 1000));
       expect(seen).toEqual(many.map((m) => m.path));
-    });
+      // Putting thousands of objects takes seconds on a shared runner. The 5 s default
+      // killed the test, and the timeout then took the Miniflare worker down with it.
+    }, 60_000);
   }
 
   test("a cursor past the last output is an empty last page, and a cursor that is not a path is refused as invalid_spec", async () => {
