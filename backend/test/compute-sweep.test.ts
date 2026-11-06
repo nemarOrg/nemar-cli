@@ -313,6 +313,44 @@ describe("a job that skipped the reservation", () => {
     expect(total("compute_ledger WHERE job_id IS NOT NULL")).toBe(0);
   });
 
+  test("a transient failure on an old row does not close it; a week of failures does (MUTATION: age from creation)", async () => {
+    const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
+    await sweepTenantJobs(env(), "live");
+    const id = row(uuid)?.id as string;
+    // Created eight days ago, but a read found the job a minute ago.
+    fx.harness.db.run(
+      "UPDATE compute_jobs SET created_at = datetime('now', '-8 days'), tapis_synced_at = datetime('now', '-1 minutes') WHERE id = ?",
+      [id],
+    );
+    fx.tapis.fail("GET /v3/jobs/:uuid", 503, 100);
+    const transient = await sweepTenantJobs(env(), "live");
+    expect(transient?.gaveUp).toBe(0);
+    expect(row(uuid)?.state).toBe("running");
+    // No good read for eight days: closed, flagged, charged nothing.
+    fx.harness.db.run(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-8 days') WHERE id = ?",
+      [id],
+    );
+    const repeated = await sweepTenantJobs(env(), "live");
+    expect(repeated?.gaveUp).toBe(1);
+    expect(row(uuid)).toMatchObject({ state: "cancelled", flag_mismatch: 1, charged_milli: 0 });
+  });
+
+  test("a good read of a live row refreshes the clock the week is counted from", async () => {
+    const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
+    await sweepTenantJobs(env(), "live");
+    const id = row(uuid)?.id as string;
+    fx.harness.db.run(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-3 days') WHERE id = ?",
+      [id],
+    );
+    await sweepTenantJobs(env(), "live");
+    const synced = row(uuid)?.tapis_synced_at as string;
+    expect(Date.now() - Date.parse(`${synced.replace(" ", "T")}Z`)).toBeLessThan(60_000);
+  });
+
   test("whose Tapis record is gone is closed after the sweep reads it: flagged, charged nothing", async () => {
     const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);

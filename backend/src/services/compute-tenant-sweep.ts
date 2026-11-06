@@ -476,8 +476,11 @@ async function followRow(
   try {
     rec = await getTapisJob(ctx, job.tapis_uuid);
   } catch (err) {
-    // A job Tapis no longer has, or has not answered for in a week, is closed: flagged, charged nothing.
-    const age = nowMs - (parseMs(job.created_at) ?? nowMs);
+    // A job Tapis no longer has, or that no read has found for a week, is closed: flagged, charged
+    // nothing. The week is counted from the last GOOD read (`tapis_synced_at`, which a good read of a live
+    // row refreshes below), so one transient 5xx on an old row does not close it: only repeated failures
+    // over the whole week do.
+    const age = nowMs - (parseMs(job.tapis_synced_at ?? job.created_at) ?? nowMs);
     const gone = err instanceof TapisError && err.kind === "not_found";
     if (gone || age > TENANT_GIVE_UP_DAYS * 86_400_000) {
       if (await closeRow(env, job.id, job.state, "cancelled", null, null, true)) r.gaveUp++;
@@ -487,6 +490,9 @@ async function followRow(
   }
   const target = stateFromTapisStatus(rec.status);
   if (target !== "finished" && target !== "failed" && target !== "cancelled") {
+    await env.DB.prepare("UPDATE compute_jobs SET tapis_synced_at = datetime('now') WHERE id = ?1")
+      .bind(job.id)
+      .run();
     await cancelAtTapis(ctx, rec.uuid, r);
     return;
   }
