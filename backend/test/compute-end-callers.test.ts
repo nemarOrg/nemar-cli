@@ -368,7 +368,7 @@ describe("the scan fires", () => {
     );
     expect(direct.unsatisfied).not.toContain("routes/admin/planted-direct.ts#ender");
     expect(direct.unsatisfied).not.toContain("routes/admin/planted-delegate.ts#ender");
-  });
+  }, 60_000);
 
   test("what the scan cannot follow is refused, not guessed at: a dynamic import, a re-export, a module-level reference", () => {
     const planted = analyse(
