@@ -162,8 +162,11 @@ describe("the compute switch is read in one place that gates", () => {
   // compute off, each before anything is written: the dispatch refuses before it claims a stamp or takes
   // a hold (a hold taken with compute off would sit on a job `submitLeased` would then refuse to submit),
   // the admin route refuses a live run with `compute_disabled`, and the dry run only REPORTS the switch.
-  // Nothing that moves a job already made reads it.
-  test("only submitLeased gates the lifecycle on it; the pipeline dispatch and its route refuse new work, the two reports only report it, and nothing else reads it", () => {
+  // Phase A7 (#2012) adds the tenant sweep: it cancels jobs in the tenant and charges the partner pool, so
+  // it acts only while the owner has switched compute on, and refuses before it lists anything. It moves
+  // no job that NEMAR made (a job bound to a row is left alone). Nothing that moves a job already made
+  // reads it.
+  test("only submitLeased gates the lifecycle on it; the pipeline dispatch and its route refuse new work, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
     expect(switchFindings(real)).toEqual({
       calls: [
         "routes/admin/compute-pipeline.ts:registerComputePipelineAdminRoutes",
@@ -171,6 +174,7 @@ describe("the compute switch is read in one place that gates", () => {
         "services/compute-pipeline.ts:dispatchPipelineJob",
         "services/compute-pipeline.ts:pipelineDryRun",
         "services/compute-status.ts:computeStatus",
+        "services/compute-tenant-sweep.ts:sweepTenantJobs",
       ],
       otherMentions: [],
     });
