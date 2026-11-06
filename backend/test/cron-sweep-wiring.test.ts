@@ -159,6 +159,11 @@ const SWEEP_WIRING: Record<
   // 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
   // exact production on its own, and reads no switch (a job that ran is owed its report).
   runAccessReportCron: "tick-prod-only",
+  // Epic #2005 phase A6 (#2011, ADR 0118): NEMAR's own pipelines. The daily dispatcher makes jobs that
+  // take the allocation ledger's holds and reach a Tapis tenant, so it is production-only and absent
+  // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and does nothing
+  // (it touches no table) until compute and COMPUTE_PIPELINES_DISPATCH_ENABLED are both "1".
+  runComputePipelineDispatchCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the

@@ -1,0 +1,387 @@
+/**
+ * The daily dispatcher of NEMAR's own pipelines (epic #2005 phase A6, #2011; ADR 0118): dark by default,
+ * production-only by wiring and by its own fence, and inside the owner's caps. Real migrations, the real
+ * ledger and policy, Miniflare's R2 and the Tapis stand-in; the services are the production ones.
+ *
+ *  - it is OFF without both switches (the pipelines switch AND compute, each exactly "1") and touches no
+ *    table; outside exact production it returns null and touches no table, whatever the switches say;
+ *  - it dispatches the automatic recipes only, honors the daily cap (counting the jobs an administrator
+ *    made today too) and the live cap per pool, and never more than one tick's bound;
+ *  - a refused hold stops the run, a refusal every recipe would meet ends it, and a registry that
+ *    disagrees with a recent success dispatches nothing for that recipe;
+ *  - the stamps are synced first.
+ * The wiring (the call site in the production-only daily block, absent from the development allowlist)
+ * is pinned by `cron-sweep-wiring.test.ts`.
+ */
+
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { COMPUTE_RECIPES, findRecipe } from "../../shared/compute-recipes";
+import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
+import { dispatchPipelineJob } from "../src/services/compute-pipeline";
+import {
+  CRON_DISPATCH_PER_TICK,
+  type PipelineCronResult,
+  pipelineDispatchLogLine,
+  runComputePipelineDispatchCron,
+} from "../src/services/compute-pipeline-dispatch";
+import type { Bindings } from "../src/types/bindings";
+import { type LifecycleFixture, startLifecycleFixture } from "./helpers/compute-lifecycle-fixture";
+import {
+  finishAtTapis,
+  floorOutputs,
+  fundPipelines,
+  seedEegDataset,
+  seedPipelinesAccount,
+} from "./helpers/compute-pipeline-fixture";
+import { setPolicy } from "./helpers/compute-seed";
+
+let fx: LifecycleFixture;
+
+beforeAll(async () => {
+  fx = await startLifecycleFixture();
+}, 120_000);
+
+afterAll(async () => {
+  await fx?.dispose();
+}, 30_000);
+
+beforeEach(async () => {
+  await fx.reset();
+});
+
+const ON = { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" } as const;
+const floor = findRecipe("nemar-floor");
+if (!floor) throw new Error("no nemar-floor");
+
+const ids = (n: number, from = 104) =>
+  Array.from({ length: n }, (_, i) => `nm${String(from + i).padStart(6, "0")}`);
+
+async function world(datasets: string[], over: Partial<Bindings> = {}) {
+  const env = fx.env({ ...ON, ...over });
+  await seedPipelinesAccount(env);
+  await fundPipelines(env);
+  for (const id of datasets) await seedEegDataset(env, id);
+  return env;
+}
+
+/** A database that throws when anything touches it, and says whether anything did. */
+function untouched() {
+  let touched = false;
+  const trap = () => {
+    touched = true;
+    throw new Error("reached-d1");
+  };
+  const db = { prepare: trap, batch: trap, exec: trap } as unknown as D1Database;
+  return { db, touched: () => touched };
+}
+
+const stampCount = async (env: Bindings) =>
+  (await env.DB.prepare("SELECT COUNT(*) AS n FROM compute_pipeline_stamps").first<{ n: number }>())
+    ?.n ?? 0;
+
+async function policy(over: Record<string, unknown>) {
+  await setPolicy(fx.env().DB, fx.ownerId, over);
+}
+
+const pipelinesPolicy = (dailyJobCap: number, cpu = 100) => ({
+  pipelines: { ...DEFAULT_COMPUTE_POLICY.pipelines, dailyJobCap, maxLiveJobs: { cpu, gpu: 4 } },
+});
+
+describe("dark by default", () => {
+  const dark: Array<[string, Partial<Bindings>]> = [
+    [
+      "no switch at all",
+      { COMPUTE_ENABLED: undefined, COMPUTE_PIPELINES_DISPATCH_ENABLED: undefined },
+    ],
+    [
+      "compute on, pipelines unset",
+      { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: undefined },
+    ],
+    [
+      "pipelines on, compute off",
+      { COMPUTE_ENABLED: undefined, COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" },
+    ],
+    ["pipelines on, compute 0", { COMPUTE_ENABLED: "0", COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" }],
+    ["compute 'true'", { COMPUTE_ENABLED: "true", COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" }],
+    ["pipelines 'true'", { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: "true" }],
+    ["pipelines ' 1'", { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: " 1" }],
+    [
+      "pipelines the number 1",
+      { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: 1 as never },
+    ],
+    ["pipelines 'yes'", { COMPUTE_ENABLED: "1", COMPUTE_PIPELINES_DISPATCH_ENABLED: "yes" }],
+  ];
+  for (const [name, bindings] of dark) {
+    test(`${name}: off, and no table is touched`, async () => {
+      const p = untouched();
+      const result = await runComputePipelineDispatchCron({
+        ENVIRONMENT: "production",
+        DB: p.db,
+        ...bindings,
+      } as unknown as Bindings);
+      expect(result).toMatchObject({ outcome: "off", dispatched: 0 });
+      expect(p.touched()).toBe(false);
+      expect(pipelineDispatchLogLine(result as PipelineCronResult)).toBeNull();
+    });
+  }
+
+  test("with eligible datasets and everything else ready, off still dispatches nothing", async () => {
+    const env = await world(ids(3), { COMPUTE_PIPELINES_DISPATCH_ENABLED: undefined });
+    expect(await runComputePipelineDispatchCron(env)).toMatchObject({ outcome: "off" });
+    expect(await stampCount(env)).toBe(0);
+  });
+});
+
+describe("production only, by its own fence", () => {
+  for (const environment of [
+    "development",
+    "staging",
+    "test",
+    "",
+    undefined,
+    "prod",
+    "Production",
+    " production",
+  ]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: null with D1 untouched, whatever the switches say`, async () => {
+      const p = untouched();
+      const e = { ENVIRONMENT: environment, DB: p.db, ...ON } as unknown as Bindings;
+      expect(await runComputePipelineDispatchCron(e)).toBeNull();
+      expect(p.touched()).toBe(false);
+    });
+  }
+
+  test("in production it reaches D1, so the probe above is not vacuous", async () => {
+    const p = untouched();
+    await runComputePipelineDispatchCron({
+      ENVIRONMENT: "production",
+      DB: p.db,
+      ...ON,
+    } as unknown as Bindings);
+    expect(p.touched()).toBe(true);
+  });
+});
+
+describe("what it dispatches", () => {
+  test("the automatic recipes only: nemar-floor is dispatched and nemar-ica never is", async () => {
+    const env = await world(ids(2));
+    await fundPipelines(env, 10_000_000, true);
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ outcome: "ran", dispatched: 2, errors: [] });
+    expect(result?.recipes.map((r) => r.recipe)).toEqual(
+      COMPUTE_RECIPES.filter((r) => r.autoDispatch).map((r) => r.name),
+    );
+    const recipes = (
+      await env.DB.prepare("SELECT DISTINCT recipe FROM compute_pipeline_stamps").all<{
+        recipe: string;
+      }>()
+    ).results.map((r) => r.recipe);
+    expect(recipes).toEqual(["nemar-floor"]);
+    expect(
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM compute_jobs WHERE pool = 'gpu'").first<{
+          n: number;
+        }>()
+      )?.n,
+    ).toBe(0);
+  });
+
+  test("a second run dispatches nothing: every dataset is stamped", async () => {
+    const env = await world(ids(2));
+    await runComputePipelineDispatchCron(env);
+    const again = await runComputePipelineDispatchCron(env);
+    expect(again).toMatchObject({ dispatched: 0 });
+    expect(await stampCount(env)).toBe(2);
+  });
+
+  test("the stamps are synced first: a finished job's dataset is current, and the run says so", async () => {
+    const env = await world(ids(1));
+    await runComputePipelineDispatchCron(env);
+    const job = (await env.DB.prepare("SELECT id FROM compute_jobs").first<{ id: string }>())
+      ?.id as string;
+    await finishAtTapis(fx, env, job, { outputs: floorOutputs() });
+    const next = await runComputePipelineDispatchCron(env);
+    expect(next?.synced).toMatchObject({ succeeded: 1 });
+    expect(next?.dispatched).toBe(0);
+  });
+});
+
+describe("the caps", () => {
+  test("the daily cap: two of five, and then none for the rest of the day", async () => {
+    const env = await world(ids(5));
+    await policy(pipelinesPolicy(2));
+    const first = await runComputePipelineDispatchCron(env);
+    expect(first).toMatchObject({ dispatched: 2, today: 0 });
+    const second = await runComputePipelineDispatchCron(env);
+    expect(second).toMatchObject({ dispatched: 0, today: 2 });
+    expect(second?.recipes[0]).toMatchObject({ recipe: "nemar-floor", skipped: "daily_cap" });
+    expect(await stampCount(env)).toBe(2);
+  });
+
+  test("the daily cap counts the pipeline jobs an administrator made today as well", async () => {
+    const env = await world(ids(5));
+    await policy(pipelinesPolicy(2));
+    await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: ids(5)[0] as string,
+      actor: { kind: "admin", userId: 1 },
+    });
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ today: 1, dispatched: 1 });
+  });
+
+  test("a job made yesterday does not count against today's cap", async () => {
+    const env = await world(ids(3));
+    await policy(pipelinesPolicy(1));
+    await runComputePipelineDispatchCron(env);
+    await env.DB.prepare("UPDATE compute_jobs SET created_at = datetime('now', '-2 days')").run();
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ today: 0, dispatched: 1 });
+  });
+
+  test("the live cap per pool: one live job fills a cap of one, and the run says why it stopped", async () => {
+    const env = await world(ids(4));
+    await policy(pipelinesPolicy(50, 1));
+    expect(await runComputePipelineDispatchCron(env)).toMatchObject({ dispatched: 1 });
+    const again = await runComputePipelineDispatchCron(env);
+    expect(again).toMatchObject({ dispatched: 0 });
+    expect(again?.recipes[0]?.skipped).toBe("live_cap");
+  });
+
+  test("the live cap is room, not a total: with two live of three it dispatches one more", async () => {
+    const env = await world(ids(6));
+    await policy(pipelinesPolicy(50, 3));
+    await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: ids(6)[0] as string,
+      actor: { kind: "admin", userId: 1 },
+    });
+    await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: ids(6)[1] as string,
+      actor: { kind: "admin", userId: 1 },
+    });
+    expect(await runComputePipelineDispatchCron(env)).toMatchObject({ dispatched: 1 });
+  });
+
+  test("never more than one tick's bound, whatever the owner's caps allow", async () => {
+    const env = await world(ids(CRON_DISPATCH_PER_TICK + 3));
+    await policy(pipelinesPolicy(100, 100));
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result?.dispatched).toBe(CRON_DISPATCH_PER_TICK);
+    expect(await stampCount(env)).toBe(CRON_DISPATCH_PER_TICK);
+    // The next day's tick takes the rest.
+    expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(3);
+  });
+
+  test("a daily cap of 0 dispatches nothing", async () => {
+    const env = await world(ids(2));
+    await policy(pipelinesPolicy(0));
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ dispatched: 0 });
+    expect(result?.recipes[0]?.skipped).toBe("daily_cap");
+  });
+});
+
+describe("a refusal", () => {
+  test("a hold the pool refused stops the run: one refused stamp, not one per dataset", async () => {
+    const env = fx.env(ON);
+    await seedPipelinesAccount(env);
+    for (const id of ids(4)) await seedEegDataset(env, id);
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ dispatched: 0 });
+    expect(result?.recipes[0]).toMatchObject({ stopped_by: "insufficient_balance" });
+    expect(await stampCount(env)).toBe(1);
+    expect(pipelineDispatchLogLine(result as PipelineCronResult)).toMatchObject({ level: "warn" });
+  });
+
+  test("a refusal every recipe would meet ends the run: no runtime image", async () => {
+    const env = await world(ids(2), { COMPUTE_RUNTIME_IMAGE: undefined });
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result?.recipes[0]).toMatchObject({ dispatched: 0, stopped_by: "runtime_unavailable" });
+    expect(await stampCount(env)).toBe(0);
+  });
+
+  test("no service account ends the run before any stamp is claimed", async () => {
+    const env = fx.env(ON);
+    await fundPipelines(env);
+    for (const id of ids(2)) await seedEegDataset(env, id);
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result?.recipes[0]?.stopped_by).toBe("pipelines_account_missing");
+    expect(await stampCount(env)).toBe(0);
+  });
+
+  test("an unreadable policy dispatches nothing and says so in a fixed word", async () => {
+    const env = await world(ids(2));
+    await env.DB.prepare(
+      "INSERT INTO compute_policy (policy_json, set_by, note) VALUES ('{\"nope\":1}', ?1, 'bad')",
+    )
+      .bind(fx.ownerId)
+      .run();
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ dispatched: 0, errors: ["policy_unreadable"] });
+    expect(pipelineDispatchLogLine(result as PipelineCronResult)?.level).toBe("error");
+    expect(await stampCount(env)).toBe(0);
+  });
+});
+
+describe("registry drift", () => {
+  async function drifted(version: string, engine: string, age = "-1 days") {
+    const env = await world(ids(3));
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, updated_at)
+       VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, 1, 'succeeded', 'job_000000000000000000000001', datetime('now', ?4))`,
+    )
+      .bind(ids(3)[0], version, engine, age)
+      .run();
+    return env;
+  }
+
+  test("a recent success with another version dispatches nothing for that recipe, and says so", async () => {
+    const env = await drifted("1.0.1", floor.engine);
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result?.dispatched).toBe(0);
+    expect(result?.recipes[0]?.skipped).toBe("registry_drift");
+    expect(pipelineDispatchLogLine(result as PipelineCronResult)).toMatchObject({ level: "warn" });
+    expect(await stampCount(env)).toBe(1);
+  });
+
+  test("so does another engine", async () => {
+    const env = await drifted(floor.version, "eegprep@9.9.9");
+    expect((await runComputePipelineDispatchCron(env))?.recipes[0]?.skipped).toBe("registry_drift");
+  });
+
+  test("an old success does not: the window is a week", async () => {
+    const env = await drifted("1.0.1", floor.engine, "-30 days");
+    expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(3);
+  });
+
+  test("a success with the registry's own version and engine is no drift", async () => {
+    const env = await drifted(floor.version, floor.engine);
+    expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(2);
+  });
+});
+
+describe("the log line", () => {
+  const base: PipelineCronResult = {
+    outcome: "ran",
+    synced: { examined: 0, succeeded: 0, failed: 0, linked: 0 },
+    today: 0,
+    dispatched: 0,
+    recipes: [{ recipe: "nemar-floor", dispatched: 0, skipped: null, stopped_by: null }],
+    errors: [],
+  };
+
+  test("a run that did nothing and met nothing has no line", () => {
+    expect(pipelineDispatchLogLine(base)).toBeNull();
+  });
+
+  test("a run that dispatched has an info line of counts and fixed words only", () => {
+    const line = pipelineDispatchLogLine({ ...base, dispatched: 3, today: 1 });
+    expect(line?.level).toBe("info");
+    expect(line?.line).toBe(
+      "[compute-pipeline-dispatch] dispatched=3 today=1 synced_succeeded=0 synced_failed=0",
+    );
+    expect(line?.line).not.toMatch(/nm\d{6}|job_|sha256|@/);
+  });
+});
