@@ -103,7 +103,11 @@ export const ObserverSacctRowSchema = z
   .object({
     slurm_job_id: z.string().regex(SLURM_RE),
     partition: z.string().regex(PARTITION_RE),
-    state: z.string().regex(/^[A-Z_]{1,32}$/),
+    // `sacct` may print "CANCELLED by 1234" or "CANCELLED+": the state is the first word, which is all that is stored.
+    state: z
+      .string()
+      .regex(/^[A-Z_]{1,32}(?:[ +][ -~]{0,48})?$/)
+      .transform((v) => (/^[A-Z_]+/.exec(v) as RegExpExecArray)[0]),
     elapsed_seconds: count(31_536_000),
     alloc_nodes: count(100_000),
     alloc_cpus: count(10_000_000),

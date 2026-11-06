@@ -373,6 +373,38 @@ describe("final settlement", () => {
     expect(after.flag_mismatch).toBe(1);
   });
 
+  test('a state with a trailing note ("CANCELLED by 1234", "CANCELLED+") is the first word, and settles (MUTATION: match the whole state)', async () => {
+    for (const note of ["CANCELLED by 1234", "CANCELLED+", "COMPLETED"]) {
+      await fx.reset();
+      const j = await endedJob(30);
+      const run = await mint();
+      const res = await post(run.token, {
+        snapshots: [],
+        sacct: [sacctRow(j.job.slurm_job_id as string, { state: note, charged_milli: 2100 })],
+      });
+      expect([note, res.status]).toEqual([note, 200]);
+      expect([note, (await reread(j.env, j.job.id)).settled_final_at !== null]).toEqual([
+        note,
+        true,
+      ]);
+      const stored = fx.harness.db.query("SELECT state FROM compute_sacct_rows").get() as {
+        state: string;
+      };
+      expect(stored.state).toBe(note.split(/[ +]/)[0] as string);
+    }
+  });
+
+  test("a state that is not shaped like one is still refused", async () => {
+    for (const state of ["cancelled", "CANCELLED by \u0007", "", "A".repeat(33), "RUNNING;DROP"]) {
+      const run = await mint();
+      const res = await post(run.token, {
+        snapshots: [],
+        sacct: [sacctRow(nextSlurm(), { state })],
+      });
+      expect([state, res.status]).toEqual([state, 400]);
+    }
+  });
+
   test("a final figure below the charge lowers the person's pool and the budget together, and the totals hold", async () => {
     const j = await endedJob(30);
     const before = await j.env.DB.prepare(
