@@ -78,6 +78,10 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  *                   driven from a section of `scheduledCleanup` (via a section function in its own
  *                   service file), not called by name from `scheduled()`. Its placement is pinned
  *                   by the dedicated block at the foot of this file, not by the generic loops.
+ *  - `tick-and-daily-prod-only` driven from BOTH production-only places, once each, with different
+ *                   arguments: the 30-minute tick's guard and the daily `prodOnlyJobs` block (the
+ *                   tenant sweep's `live` and `week` modes). Wrapped in `ctx.waitUntil` in each, and
+ *                   called nowhere else.
  *  - `tick-prod-only` driven from the 30-minute `AUTO_IMPORT_CRON` branch of
  *                   `scheduled()` (which returns before the daily block), inside
  *                   that branch's own `if (!isNonProductionEnv(env)) {` guard: a
@@ -85,7 +89,13 @@ const INDEX_PATH = join(import.meta.dir, "../src/index.ts");
  */
 const SWEEP_WIRING: Record<
   string,
-  "prod-only" | "all-envs" | "cron-wrapped" | "helper" | "tick-prod-only" | "nonprod-only"
+  | "prod-only"
+  | "all-envs"
+  | "cron-wrapped"
+  | "helper"
+  | "tick-prod-only"
+  | "nonprod-only"
+  | "tick-and-daily-prod-only"
 > = {
   archiveRetrySweep: "prod-only",
   manifestIntegritySweep: "prod-only",
@@ -164,6 +174,13 @@ const SWEEP_WIRING: Record<
   // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and does nothing
   // (it touches no table) until compute and COMPUTE_PIPELINES_DISPATCH_ENABLED are both "1".
   runComputePipelineDispatchCron: "prod-only",
+  // Epic #2005 phase A7 (#2012, ADR 0118): the tenant sweep. `live` rides the 30-minute tick and `week` the
+  // daily block, both production-only and absent from DEV_CRON_ALLOWLIST, both self-fenced and acting
+  // only while COMPUTE_ENABLED is exactly "1": it cancels jobs in a tenant and moves the ledger.
+  sweepTenantJobs: "tick-and-daily-prod-only",
+  // The retention sweep deletes from the two private compute buckets, so it is production-only, absent
+  // from DEV_CRON_ALLOWLIST and self-fenced; it reads no switch (a record that is due goes).
+  runComputeRetentionSweep: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
@@ -382,6 +399,25 @@ describe("every sweep service is declared and driven", () => {
 
   for (const [name, kind] of Object.entries(SWEEP_WIRING)) {
     if (kind === "helper" || kind === "cron-wrapped" || kind === "nonprod-only") continue;
+
+    if (kind === "tick-and-daily-prod-only") {
+      test(`${name} is wrapped in ctx.waitUntil in BOTH the tick's guard and the prod-only block`, () => {
+        expect(isScheduled(tickProdOnlyCode, name)).toBe(true);
+        expect(isScheduled(prodOnlyCode, name)).toBe(true);
+      });
+
+      test(`${name} is called once in each production-only place and nowhere else`, () => {
+        expect(callCount(tickProdOnlyCode, name)).toBe(1);
+        expect(callCount(prodOnlyCode, name)).toBe(1);
+        expect(callCount(allCode, name)).toBe(2);
+      });
+
+      test(`${name} is NOT in DEV_CRON_ALLOWLIST`, () => {
+        const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+        expect(allowlist).not.toContain(`"${name}"`);
+      });
+      continue;
+    }
 
     test(`${name} is actually called in scheduled()`, () => {
       expect(callCount(allCode, name)).toBeGreaterThanOrEqual(1);
