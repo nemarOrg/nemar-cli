@@ -82,9 +82,9 @@ import { computeStatus } from "../../services/compute-status";
 import type { Bindings, Variables } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
 
-type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
+export type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
 
-const SENTENCES: Record<ComputeAdminErrorCode, string> = {
+export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   invalid_body: "The request body is not valid.",
   invalid_query: "The query is not valid.",
   idempotency_key_required: "An Idempotency-Key header is required.",
@@ -98,9 +98,20 @@ const SENTENCES: Record<ComputeAdminErrorCode, string> = {
     "That would take a stored total past the largest NEMAR keeps, so nothing was written.",
   policy_unreadable: "The stored policy cannot be read, so nothing is served from it.",
   internal: "The compute routes failed unexpectedly.",
+  job_not_found: "There is no such job.",
+  hold_exists: "That is already under a hold.",
+  hold_not_found: "There is no such active hold.",
+  target_not_found: "There is nothing like that to hold.",
+  acknowledgement_required:
+    "This needs the explicit acknowledgement that the report is confirmed not recorded at ACCESS.",
+  report_not_found: "There is no failed ACCESS report for that job.",
+  invalid_reason: "A reason is 8 to 200 characters with no control character.",
+  record_missing: "That record is not there.",
+  compute_disabled: "Compute storage is not configured.",
+  audit_failed: "The audit row could not be written, so nothing was read.",
 };
 
-function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: object = {}) {
+export function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: object = {}) {
   return c.json(
     { error: error ?? SENTENCES[code], code, ...extra },
     COMPUTE_ADMIN_ERROR_STATUS[code],
@@ -108,7 +119,7 @@ function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: obje
 }
 
 /** A 400 that names the fields and what is wrong with each, never what was sent. */
-function invalidBody(c: Ctx, fields: PolicyIssue[]) {
+export function invalidBody(c: Ctx, fields: PolicyIssue[]) {
   const named = fields.slice(0, 5).map((f) => `${f.path || "body"}: ${f.code}`);
   return refuse(c, "invalid_body", `The request body is not valid: ${named.join("; ")}`, {
     fields,
@@ -125,7 +136,7 @@ function ledgerRefusal(c: Ctx, err: unknown) {
   return null;
 }
 
-function fail(c: Ctx, err: unknown) {
+export function fail(c: Ctx, err: unknown) {
   const known = ledgerRefusal(c, err);
   if (known) return known;
   console.error(
@@ -135,7 +146,7 @@ function fail(c: Ctx, err: unknown) {
   return refuse(c, "internal");
 }
 
-const requireOwner: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (
+export const requireOwner: MiddlewareHandler<{ Bindings: Bindings; Variables: Variables }> = async (
   c,
   next,
 ) => {
@@ -213,7 +224,7 @@ const listQuery = z.object({
 });
 
 /** The body as JSON, or null when it is not JSON (an empty body included). */
-async function readJson(c: Ctx): Promise<unknown | null> {
+export async function readJson(c: Ctx): Promise<unknown | null> {
   try {
     return await c.req.json();
   } catch {

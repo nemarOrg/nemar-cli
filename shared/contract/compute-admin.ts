@@ -79,6 +79,17 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "would_exceed_limit",
   "policy_unreadable",
   "internal",
+  // Phase A7 (#2012): reporting, legal holds, the observer and the ACCESS re-queue.
+  "job_not_found",
+  "hold_exists",
+  "hold_not_found",
+  "target_not_found",
+  "acknowledgement_required",
+  "report_not_found",
+  "invalid_reason",
+  "record_missing",
+  "compute_disabled",
+  "audit_failed",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -97,6 +108,16 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   would_exceed_limit: 409,
   policy_unreadable: 503,
   internal: 500,
+  job_not_found: 404,
+  hold_exists: 409,
+  hold_not_found: 404,
+  target_not_found: 404,
+  acknowledgement_required: 400,
+  report_not_found: 404,
+  invalid_reason: 400,
+  record_missing: 404,
+  compute_disabled: 503,
+  audit_failed: 500,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -475,3 +496,181 @@ export const ComputePipelineStatusResponseSchema = z
   .passthrough();
 
 export type ComputePipelineStatusResponse = z.infer<typeof ComputePipelineStatusResponseSchema>;
+
+// --- Reporting, holds, the observer and ACCESS reports (epic #2005 phase A7, #2012) ---------------------------
+
+/** The most rows a listing answers with at once. */
+export const COMPUTE_REPORT_PAGE_MAX = 200;
+
+/** The shortest and longest reason an owner states for reading a record (the records bucket's own bounds). */
+export const COMPUTE_RECORD_REASON_MIN = 8;
+export const COMPUTE_RECORD_REASON_MAX = 200;
+
+/** `GET /admin/compute/jobs`: a page of jobs, newest first; `next_after` continues it. */
+export const ComputeJobsListResponseSchema = z
+  .object({
+    jobs: z.array(ComputeJobViewSchema),
+    next_after: z.number().int().nullable(),
+  })
+  .passthrough();
+
+export type ComputeJobsListResponse = z.infer<typeof ComputeJobsListResponseSchema>;
+
+/** `GET /admin/compute/jobs?unmatched=1`: Expanse's rows that no job claims. */
+export const ComputeUnmatchedResponseSchema = z
+  .object({
+    rows: z.array(
+      z
+        .object({
+          slurm_job_id: z.string(),
+          partition: z.string(),
+          state: z.string(),
+          elapsed_seconds: z.number().int(),
+          alloc_nodes: z.number().int(),
+          alloc_cpus: z.number().int(),
+          alloc_gpus: z.number().int(),
+          charged_milli: z.number().int().nullable(),
+          ingested_at: z.string(),
+        })
+        .passthrough(),
+    ),
+    total: z.number().int(),
+  })
+  .passthrough();
+
+export type ComputeUnmatchedResponse = z.infer<typeof ComputeUnmatchedResponseSchema>;
+
+/**
+ * `GET /admin/compute/records/:ref`: one job's index row, ledger entries, provenance and manifest summary.
+ * OPEN (passthrough): the CLI never parses it with a strict compute schema (the amendment on #2006).
+ */
+export const ComputeRecordResponseSchema = z
+  .object({
+    job: ComputeJobViewSchema,
+    identifiers: z.object({}).passthrough(),
+    ledger: z.array(z.object({}).passthrough()),
+    provenance: z.object({}).passthrough().nullable(),
+    manifest: z
+      .object({ files: z.number().int(), bytes: z.number().int() })
+      .passthrough()
+      .nullable(),
+    legal_hold: z.boolean(),
+  })
+  .passthrough();
+
+export type ComputeRecordResponse = z.infer<typeof ComputeRecordResponseSchema>;
+
+/** `POST /admin/compute/records/:ref/read`: an owner's reasoned read of one record. */
+export const ComputeRecordReadResponseSchema = z
+  .object({
+    job_id: z.string(),
+    name: z.string(),
+    kind: z.string(),
+    content: z.unknown().optional(),
+    url: z.string().optional(),
+    expires_at: z.string().optional(),
+  })
+  .passthrough();
+
+export type ComputeRecordReadResponse = z.infer<typeof ComputeRecordReadResponseSchema>;
+
+/** `GET /admin/compute/report`: one account's jobs and charge in a date range. */
+export const ComputeAccountReportResponseSchema = z
+  .object({
+    account_id: z.number().int(),
+    from: z.string(),
+    to: z.string(),
+    totals: z.object({ jobs: z.number().int(), charged_milli: z.number().int() }).passthrough(),
+    // Each value is an open object (`jobs`, `charged_milli`): a word the Worker adds is kept.
+    by_pool: z.record(z.object({}).passthrough()),
+    jobs: z.array(z.object({}).passthrough()),
+    truncated: z.boolean(),
+  })
+  .passthrough();
+
+export type ComputeAccountReportResponse = z.infer<typeof ComputeAccountReportResponseSchema>;
+
+/** `GET /admin/compute/access-report`: for ACCESS, distinct gateway users and jobs by partition and source. */
+export const ComputeAccessReportResponseSchema = z
+  .object({
+    quarter: z.string(),
+    rows: z.array(
+      z
+        .object({
+          partition: z.string(),
+          source: z.string(),
+          distinct_users: z.number().int(),
+          jobs: z.number().int(),
+        })
+        .passthrough(),
+    ),
+    totals: z.object({ distinct_users: z.number().int(), jobs: z.number().int() }).passthrough(),
+  })
+  .passthrough();
+
+export type ComputeAccessReportResponse = z.infer<typeof ComputeAccessReportResponseSchema>;
+
+/** A legal hold. */
+export const ComputeHoldViewSchema = z
+  .object({
+    id: z.number().int(),
+    scope: z.string(),
+    ref: z.string(),
+    reason: z.string(),
+    placed_by: z.number().int(),
+    placed_at: z.string(),
+    released_at: z.string().nullable(),
+  })
+  .passthrough();
+
+export type ComputeHoldView = z.infer<typeof ComputeHoldViewSchema>;
+
+/** `GET /admin/compute/holds`. */
+export const ComputeHoldsResponseSchema = z
+  .object({ holds: z.array(ComputeHoldViewSchema) })
+  .passthrough();
+
+export type ComputeHoldsResponse = z.infer<typeof ComputeHoldsResponseSchema>;
+
+/** `POST` and `DELETE /admin/compute/holds`. */
+export const ComputeHoldResponseSchema = z.object({ hold: ComputeHoldViewSchema }).passthrough();
+
+export type ComputeHoldResponse = z.infer<typeof ComputeHoldResponseSchema>;
+
+/** `GET /admin/compute/access-reports`: ACCESS report rows in one state, and the `failed` rows counted by word. */
+export const ComputeAccessReportsResponseSchema = z
+  .object({
+    rows: z.array(
+      z
+        .object({
+          job_id: z.string(),
+          state: z.string(),
+          attempts: z.number().int(),
+          last_error_code: z.string().nullable(),
+          next_attempt_at: z.string(),
+          sent_at: z.string().nullable(),
+          created_at: z.string(),
+        })
+        .passthrough(),
+    ),
+    // Fixed word to count; open, so a word the Worker adds is kept as it came.
+    failed_by_word: z.record(z.unknown()),
+    next_after: z.string().nullable(),
+  })
+  .passthrough();
+
+export type ComputeAccessReportsResponse = z.infer<typeof ComputeAccessReportsResponseSchema>;
+
+/** `POST /admin/compute/access-reports/:jobId/requeue`. */
+export const ComputeRequeueResponseSchema = z
+  .object({ ok: z.boolean(), job_id: z.string(), previous: z.string().nullable() })
+  .passthrough();
+
+export type ComputeRequeueResponse = z.infer<typeof ComputeRequeueResponseSchema>;
+
+/** `POST /admin/compute/observer-runs`: the run and its token, shown once. */
+export const ComputeObserverRunResponseSchema = z
+  .object({ run_id: z.string(), token: z.string(), expires_in_minutes: z.number().int() })
+  .passthrough();
+
+export type ComputeObserverRunResponse = z.infer<typeof ComputeObserverRunResponseSchema>;

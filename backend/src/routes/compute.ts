@@ -7,6 +7,8 @@
  *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it
  *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,
  *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
+ *   POST /compute/observer                    the observer, with a token for one run (phase A7, #2012;
+ *                                             no session: see `routes/callbacks/compute-observer.ts`)
  *
  * The callbacks are registered FIRST and carry no middleware of their own beyond the Worker's global
  * ones: the launcher has no account. Every route that has a person behind it declares its own
@@ -34,6 +36,7 @@ import { mintResultLinks } from "../services/compute-results.js";
 import type { Bindings, Variables } from "../types/bindings.js";
 import { readBoundedJsonObject } from "./callbacks/bounded-json.js";
 import { registerComputeJobCallbackRoutes } from "./callbacks/compute-job-callbacks.js";
+import { registerComputeObserverRoute } from "./callbacks/compute-observer.js";
 
 /** The most bytes the links route reads: a cursor is at most 512 characters, which is 2 KiB at four bytes each. */
 export const LINKS_BODY_MAX_BYTES = 4096;
@@ -41,6 +44,7 @@ export const LINKS_BODY_MAX_BYTES = 4096;
 export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 registerComputeJobCallbackRoutes(computeRoutes);
+registerComputeObserverRoute(computeRoutes);
 
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },
