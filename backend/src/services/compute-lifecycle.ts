@@ -316,17 +316,36 @@ export const CLEAR_NONCES_SQL = `UPDATE compute_jobs SET webhook_nonce = NULL
 /** `?1` the job: a tag search found more than one Tapis job, so an administrator looks. */
 export const FLAG_MISMATCH_SQL = "UPDATE compute_jobs SET flag_mismatch = 1 WHERE id = ?1";
 
-/** Terminal jobs whose provisional settlement is owed and whose hold exists: the repair's list. */
+/**
+ * Terminal jobs whose provisional settlement is owed and whose hold exists: the repair's list. Least
+ * recently EXAMINED first (never-examined first), and the tick stamps every row it takes BEFORE its step,
+ * so a settlement that fails on every attempt goes to the back of the line and ten of them no longer hold
+ * every slot for ever (phase A7, #2012; the first version ordered by age with no rotation). A row of the
+ * tenant sweep has no hold and is not here. The partial index `compute_jobs_unsettled` serves it.
+ */
 export const UNSETTLED_TERMINAL_SQL = `SELECT id FROM compute_jobs j
   WHERE j.state IN (${TERMINAL_STATES_SQL}) AND j.settled_provisional_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger h WHERE h.kind = 'hold' AND h.job_id = j.id)
-  ORDER BY j.ended_at ASC LIMIT ?1`;
+  ORDER BY j.examined_at ASC, j.ended_at ASC LIMIT ?1`;
 
-/** Terminal jobs whose launcher files and logs have not been copied into the records yet. */
+/**
+ * Terminal jobs whose launcher files and logs have not been copied into the records yet, in the same
+ * rotation as {@link UNSETTLED_TERMINAL_SQL} (a copy that fails on every attempt held a slot for the
+ * three days it is retried; ten of them delayed every newer copy). A job that skipped the reservation is
+ * not NEMAR's to copy: it has no launcher files, and the tenant sweep owns its row.
+ */
 export const UNCOPIED_TERMINAL_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL AND settled_provisional_at IS NOT NULL
+    AND flag_unreserved = 0
     AND ended_at >= datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')
-  ORDER BY ended_at ASC LIMIT ?1`;
+  ORDER BY examined_at ASC, ended_at ASC LIMIT ?1`;
+
+/** The cancel sweep took this row: `?1` the job. Its own rotation (`cancel_attempted_at`), apart from the tick's. */
+export const STAMP_CANCEL_ATTEMPT_SQL =
+  "UPDATE compute_jobs SET cancel_attempted_at = datetime('now') WHERE id = ?1";
+
+/** A terminal row whose Tapis record stays unreadable this long is settled without it (phase A7). */
+export const UNREADABLE_GIVE_UP_DAYS = 7;
 
 // --- Small helpers -------------------------------------------------------------------------------
 
@@ -1169,6 +1188,23 @@ async function subscribe(
 }
 
 /**
+ * Record a Tapis job NEMAR made that no row owns, so a cancel that fails is retried. A row has ONE orphan
+ * slot (`orphan_tapis_uuid`): a second, different orphan finds it taken. That is logged (a fixed word and
+ * the job id) and the row is flagged `mismatch`; the orphan is not lost, because the tenant sweep
+ * (`sweepTenantJobs`, phase A7) lists every Tapis job tagged `nemar_job:<id>` that the row is not bound
+ * to and cancels it, on every run. Returns true when the slot now holds this uuid.
+ */
+export async function recordOrphan(env: Bindings, jobId: string, uuid: string): Promise<boolean> {
+  const wrote = await env.DB.prepare(SET_ORPHAN_SQL).bind(jobId, uuid).run();
+  if ((wrote.meta?.changes ?? 0) === 1) return true;
+  const row = await getJob(env.DB, jobId);
+  if (row?.orphan_tapis_uuid === uuid) return true;
+  await env.DB.prepare(FLAG_MISMATCH_SQL).bind(jobId).run();
+  console.error(`[compute-lifecycle] orphan_slot_taken job=${jobId}`);
+  return false;
+}
+
+/**
  * Cancel a Tapis job NEMAR made that no row owns, and clear the record of it once that is known to have
  * worked: the cancel was accepted, Tapis says the job is already over (409) or says there is no such job.
  * Any other failure leaves `orphan_tapis_uuid` set, and the next tick tries again. True when cleared.
@@ -1245,7 +1281,7 @@ async function bindTapisJob(
   if (now?.tapis_uuid === rec.uuid) return "already";
   if (now?.tapis_uuid != null) await env.DB.prepare(FLAG_MISMATCH_SQL).bind(job.id).run();
   else await env.DB.prepare(BIND_ORPHAN_UUID_SQL).bind(job.id, rec.uuid).run();
-  await env.DB.prepare(SET_ORPHAN_SQL).bind(job.id, rec.uuid).run();
+  await recordOrphan(env, job.id, rec.uuid);
   await cancelOrphan(env, ctx, job.id, rec.uuid);
   return "orphaned";
 }
@@ -1507,6 +1543,9 @@ export async function driveCancel(
 ): Promise<void> {
   let job = await getJob(env.DB, jobId);
   if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null) return;
+  // A job that skipped the reservation is the tenant sweep's, which cancels it and follows it to its end
+  // (phase A7): the lifecycle's read-back would verify results a foreign job never uploaded.
+  if (job.flag_unreserved === 1) return;
   if (job.tapis_uuid === null) {
     if (job.state !== "created" && job.state !== "uploading") return;
     // A PARTNER'S RESERVATION is the partner contract's (phase D4), never ended here. NEMAR does not take
@@ -1549,7 +1588,7 @@ export async function driveCancel(
           // A duplicate under one tag: every one of them is cancelled, and the job is flagged.
           await env.DB.prepare(FLAG_MISMATCH_SQL).bind(job.id).run();
           if (TAPIS_JOB_UUID_RE.test(extra.uuid)) {
-            await env.DB.prepare(SET_ORPHAN_SQL).bind(job.id, extra.uuid).run();
+            await recordOrphan(env, job.id, extra.uuid);
             await cancelOrphan(env, ctx, job.id, extra.uuid);
           }
         }
@@ -1616,8 +1655,22 @@ export async function advanceComputeJob(
 ): Promise<AdvanceResult> {
   const read = options.read ?? REQUEST_READ;
   const nowMs = options.nowMs ?? Date.now();
-  const job = await getJob(env.DB, jobId);
+  let job = await getJob(env.DB, jobId);
   if (!job) return { outcome: "job_not_found", job: null };
+  // The tenant sweep owns a job that skipped the reservation (phase A7): nothing here reads it back.
+  if (job.flag_unreserved === 1) return { outcome: "nothing_to_do", job };
+
+  // A cancel that is recorded and not yet carried out is carried out here too: the cancel sweep is
+  // production-only, so on staging (where no cron runs) a cancel Tapis could not take at the time would
+  // otherwise wait for ever (phase A7, #2012).
+  if (
+    !isTerminalComputeState(job.state) &&
+    job.cancel_requested_at !== null &&
+    job.tapis_uuid !== null
+  ) {
+    await driveCancel(env, job.id, read);
+    job = (await getJob(env.DB, jobId)) ?? job;
+  }
 
   if (isTerminalComputeState(job.state)) {
     return repairTerminal(env, job, read, nowMs);
@@ -1670,6 +1723,7 @@ async function repairTerminal(
   const needsCopy = current.result_records_at === null;
   if (!needsSettlement && !needsCopy) return { outcome: "terminal", job: current };
 
+  let unreadableForGood = false;
   if (current.tapis_uuid !== null) {
     const ctx = tapisAccess(env, read);
     if (ctx !== null) {
@@ -1679,11 +1733,24 @@ async function repairTerminal(
         console.warn(
           `[compute-lifecycle] readback_failed job=${current.id} kind=${tapisWord(err)}`,
         );
+        // A job Tapis no longer has, or one it has not answered for in a week, will not be read: the
+        // settlement is made without the record (phase A7, #2012). Retrying for ever held a slot of the
+        // repair list and left the hold open.
+        unreadableForGood =
+          (err instanceof TapisError && err.kind === "not_found") ||
+          ageMinutes(current.ended_at ?? current.created_at, nowMs) >
+            UNREADABLE_GIVE_UP_DAYS * 24 * 60;
       }
     }
   }
-  if (needsSettlement && (current.tapis_uuid === null || rec !== null)) {
+  if (needsSettlement && (current.tapis_uuid === null || rec !== null || unreadableForGood)) {
+    // Without a record `provisionalCharge` releases the hold unless something shows the job ran (then it
+    // charges the minimum and flags), and a settlement made blind is flagged `mismatch` either way: the
+    // observer's final settlement against Expanse's own figure is the correction.
     await repairSettlement(env, current, rec, nowMs);
+    if (unreadableForGood && rec === null) {
+      await env.DB.prepare(FLAG_MISMATCH_SQL).bind(current.id).run();
+    }
     current = (await getJob(env.DB, current.id)) ?? current;
   }
   if (current.settled_provisional_at !== null && current.result_records_at === null) {

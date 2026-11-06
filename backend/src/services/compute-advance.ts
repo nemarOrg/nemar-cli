@@ -54,6 +54,7 @@ import type { Bindings } from "../types/bindings.js";
 import { LIVE_STATES_SQL } from "./compute-jobs.js";
 import {
   CLEAR_NONCES_SQL,
+  STAMP_CANCEL_ATTEMPT_SQL,
   STAMP_EXAMINED_SQL,
   TICK_READ,
   UNCOPIED_TERMINAL_SQL,
@@ -77,7 +78,7 @@ export const ADVANCE_ROWS_PER_TICK = 10;
  * (`compute-lifecycle-submit.test.ts` pins the plan).
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL
+  WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL AND flag_unreserved = 0
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
@@ -89,19 +90,30 @@ export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
-/** Rows with a Tapis job NEMAR made that no row owns, whose cancel is still owed. */
+/**
+ * Rows with a Tapis job NEMAR made that no row owns, whose cancel is still owed, in rotation. A row that
+ * has ended is never stamped by the live lists, so its `examined_at` would never move and ten orphans that
+ * cannot be cancelled would sit at the head for ever: the sweep stamps each row it takes BEFORE its retry
+ * (phase A7, #2012), so the order is by the last time this list took the row.
+ */
 export const ORPHAN_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE orphan_tapis_uuid IS NOT NULL ORDER BY examined_at ASC LIMIT ?1`;
+  WHERE orphan_tapis_uuid IS NOT NULL ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
- * Live rows with a cancel recorded, oldest request first. A partner's reservation with no Tapis job yet
- * is the partner contract's and `driveCancel` leaves it alone, so it is not listed either: it would hold
- * one of the ten slots for ever (the same exclusion as `CREATED_ROWS_SQL`).
+ * Live rows with a cancel recorded, in rotation by the last time THIS sweep took the row (never taken
+ * first, then the oldest request). A partner's reservation with no Tapis job yet is the partner
+ * contract's and `driveCancel` leaves it alone, so it is not listed either: it would hold one of the ten
+ * slots for ever (the same exclusion as `CREATED_ROWS_SQL`). A job that skipped the reservation is the
+ * tenant sweep's. The first version took the ten oldest requests every tick, so ten cancels that could
+ * not complete blocked every newer one, and the revocation cascade adds many intents at once: each row
+ * taken is stamped (`cancel_attempted_at`) before its cancel is driven, and goes to the back (phase A7,
+ * #2012). The partial index `compute_jobs_cancelling` serves it.
  */
 export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
+    AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
-  ORDER BY cancel_requested_at ASC LIMIT ?1`;
+  ORDER BY cancel_attempted_at ASC, cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {
   /** Live rows examined: the bound ones and the `created` ones. */
@@ -182,12 +194,15 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
     const cleared = await env.DB.prepare(CLEAR_NONCES_SQL).run();
     r.cleared = cleared.meta?.changes ?? 0;
 
-    // Every live row taken is stamped BEFORE its step: whatever the step does (a read that fails, a
+    // Every row taken is stamped BEFORE its step: whatever the step does (a read that fails, a
     // submit that cannot go, an exception) the row has had its turn and goes to the back of the line.
+    // That includes the two repair lists (phase A7, #2012): a settlement or a copy that fails on every
+    // attempt no longer holds one of its ten slots, which the first version ordered by age.
     const live = [...bound, ...created];
     r.examined = live.length;
-    if (live.length > 0) {
-      await env.DB.batch(live.map((row) => env.DB.prepare(STAMP_EXAMINED_SQL).bind(row.id)));
+    const stamped = [...new Set([...live, ...unsettled, ...uncopied].map((row) => row.id))];
+    if (stamped.length > 0) {
+      await env.DB.batch(stamped.map((id) => env.DB.prepare(STAMP_EXAMINED_SQL).bind(id)));
     }
     const ids = [...new Set([...live, ...unsettled, ...uncopied].map((row) => row.id))];
     for (const id of ids) {
@@ -257,6 +272,7 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
     r.examined = rows.length;
     for (const { id } of rows) {
       try {
+        await env.DB.prepare(STAMP_CANCEL_ATTEMPT_SQL).bind(id).run();
         await driveCancel(env, id, TICK_READ);
       } catch (err) {
         r.errors.push("row_failed");
@@ -271,6 +287,7 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
     r.examined += orphans.length;
     for (const { id } of orphans) {
       try {
+        await env.DB.prepare(STAMP_EXAMINED_SQL).bind(id).run();
         await retryOrphanCancel(env, id, TICK_READ);
       } catch (err) {
         r.errors.push("orphan_failed");
