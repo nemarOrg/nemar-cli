@@ -15,7 +15,7 @@
 -- takes the next `attempt` number of its tuple (a full unique index keeps the numbers distinct).
 --
 -- STATES. `dispatched`: claimed, its job (once made) not yet over. `succeeded`: the job finished and
--- the recipe's own record was read. `failed`: the job failed or was cancelled, or its record could not
+-- the recipe's own record was read. `failed`: the job failed or was canceled, or its record could not
 -- be read, or the claim was never followed by a job; `refusal_code` says which, in a fixed word.
 -- `refused`: the hold or the job's creation was refused after the claim; `refusal_code` is the word
 -- and there is no job.

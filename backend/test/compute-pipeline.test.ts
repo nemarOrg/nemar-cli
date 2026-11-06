@@ -527,10 +527,15 @@ describe("what a run refuses, before it writes anything", () => {
     await nothingWritten(env);
   });
 
-  test("compute off is compute_disabled, and a recipe is refused before a dataset is even read", async () => {
+  test("compute off is compute_disabled, and the gate comes before the dataset is read", async () => {
     const { env } = await world();
     const off = fx.env({ COMPUTE_ENABLED: undefined });
     expect(await run(off)).toMatchObject({ ok: false, code: "compute_disabled" });
+    // A dataset that does not exist would be dataset_not_eligible if the gate came after the read.
+    expect(await run(off, { datasetId: "nm000999" })).toMatchObject({
+      ok: false,
+      code: "compute_disabled",
+    });
     await nothingWritten(env);
   });
 
@@ -682,8 +687,10 @@ describe("the stamp follows its job to the end", () => {
       job_id: jobId,
       refusal_code: null,
     });
-    // And the tuple stays claimed: a run of the same tuple the registry names is not blocked by it, a
-    // run of the one the record names is.
+    // The record named another tuple (1.0.1) than the one claimed (the registry's), so the registry's
+    // tuple is now held and is refused on every path; the cases are in "a result whose tuple is not the
+    // one claimed". The tuple the record names cannot be dispatched through the API at all: only the
+    // registry names a tuple to claim.
     expect(await run(env)).toMatchObject({ ok: false, code: "registry_drift" });
   });
 
@@ -693,7 +700,7 @@ describe("the stamp follows its job to the end", () => {
     expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
   });
 
-  test("a failed job fails the stamp with the job's own word; a cancelled one is job_cancelled", async () => {
+  test("a failed job fails the stamp with the job's own word; a canceled one is job_cancelled", async () => {
     const a = await dispatched();
     const jobA = await reread(a.env, a.jobId);
     await drive(fx, a.env, a.jobId, jobA.tapis_uuid as string, "FAILED", "JOB_LAUNCH_FAILURE");
@@ -703,7 +710,7 @@ describe("the stamp follows its job to the end", () => {
       refusal_code: "launch_failed",
     });
 
-    // A second dataset, cancelled.
+    // A second dataset, canceled.
     await seedEegDataset(a.env, "nm000105");
     const b = await run(a.env, { datasetId: "nm000105" });
     if (!b.ok) throw new Error("not dispatched");
