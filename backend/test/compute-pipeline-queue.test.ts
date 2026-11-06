@@ -16,6 +16,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { findRecipe } from "../../shared/compute-recipes";
 import {
+  MAX_FAILED_ATTEMPTS,
+  RETRY_COOLDOWN_DAYS,
   dispatchEligible,
   dispatchPipelineJob,
   pipelineCandidates,
@@ -104,7 +106,7 @@ describe("the candidates", () => {
     expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
     // A failed stamp frees the tuple.
     await env.DB.prepare(
-      "UPDATE compute_pipeline_stamps SET state = 'failed', refusal_code = 'job_failed'",
+      "UPDATE compute_pipeline_stamps SET state = 'failed', refusal_code = 'job_failed', updated_at = datetime('now', '-30 days')",
     ).run();
     expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
   });
@@ -177,6 +179,68 @@ describe("the candidates", () => {
     expect((await pipelineCandidates(env.DB, floor, 1)).map((c) => c.dataset_id)).toEqual([
       "nm000900",
     ]);
+  });
+});
+
+describe("a dataset that keeps failing", () => {
+  const failed = async (env: Bindings, dataset: string, attempts: number, updated = "-30 days") => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      await env.DB.prepare(
+        `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code, updated_at)
+         VALUES (?1, 'v1.0.0', 'nemar-floor', ?2, ?3, ?4, 'failed', 'job_failed', datetime('now', ?5))`,
+      )
+        .bind(dataset, floor.version, floor.engine, attempt, updated)
+        .run();
+    }
+  };
+
+  test("a head of datasets that failed lately does not block a dispatchable one behind it", async () => {
+    const env = await world(["nm000104", "nm000105", "nm000106", "nm000107"]);
+    for (const id of ["nm000104", "nm000105", "nm000106"]) await failed(env, id, 1, "-1 hours");
+    expect((await pipelineCandidates(env.DB, floor, 1)).map((c) => c.dataset_id)).toEqual([
+      "nm000107",
+    ]);
+  });
+
+  test("the cooldown holds: a failure inside it is not a candidate, one outside it is", async () => {
+    const env = await world(["nm000104", "nm000105"]);
+    await failed(env, "nm000104", 1, `-${RETRY_COOLDOWN_DAYS - 1} days`);
+    await failed(env, "nm000105", 1, `-${RETRY_COOLDOWN_DAYS + 1} days`);
+    expect((await pipelineCandidates(env.DB, floor, 10)).map((c) => c.dataset_id)).toEqual([
+      "nm000105",
+    ]);
+  });
+
+  test("the cap holds: at the failed-attempt cap a tuple is never a candidate again, however old", async () => {
+    const env = await world(["nm000104", "nm000105"]);
+    await failed(env, "nm000104", MAX_FAILED_ATTEMPTS);
+    await failed(env, "nm000105", MAX_FAILED_ATTEMPTS - 1);
+    expect((await pipelineCandidates(env.DB, floor, 10)).map((c) => c.dataset_id)).toEqual([
+      "nm000105",
+    ]);
+  });
+
+  test("a refused stamp is not a failure: the pool's refusal does not cool a dataset down", async () => {
+    const env = await world(["nm000104"]);
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code)
+       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', ?1, ?2, 1, 'refused', 'insufficient_balance')`,
+    )
+      .bind(floor.version, floor.engine)
+      .run();
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  test("a failure of another tuple (another version or engine) does not cool this one down", async () => {
+    const env = await world(["nm000104"]);
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code)
+       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', '0.9.0', ?1, 1, 'failed', 'job_failed'),
+              ('nm000104', 'v0.9.0', 'nemar-floor', ?2, ?1, 1, 'failed', 'job_failed')`,
+    )
+      .bind(floor.engine, floor.version)
+      .run();
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
   });
 });
 

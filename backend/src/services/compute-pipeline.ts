@@ -97,6 +97,14 @@ export const PIPELINE_MANIFEST_MAX_ENTRIES = 38_000;
 /** A stamp whose claim was never followed by a job is failed after this many minutes. */
 export const STAMP_NO_JOB_MINUTES = 30;
 
+/**
+ * INITIAL values (the issue states none; the owner adjusts them with the pilot). A tuple whose stamp
+ * failed is not a candidate of the queue for this many days, and not at all once it has failed this
+ * many times, so a head of failing datasets cannot take every slot of every run.
+ */
+export const RETRY_COOLDOWN_DAYS = 7;
+export const MAX_FAILED_ATTEMPTS = 3;
+
 /** Stamps one sync examines at most. */
 export const SYNC_STAMPS_PER_CALL = 50;
 
@@ -695,7 +703,10 @@ export interface Candidate {
  * The eligible datasets a recipe has not been run over at the newest version, by id, at most `limit`.
  * The SQL selects (the predicate and the absence of a live or succeeded stamp); the TypeScript re-checks
  * every row it returns, and a version with no data-plane tag is skipped. A dataset the sync has not
- * caught up with is not a candidate: its open stamp holds the tuple.
+ * caught up with is not a candidate: its open stamp holds the tuple. A tuple whose stamp FAILED is not a
+ * candidate for {@link RETRY_COOLDOWN_DAYS} days after the failure, nor once it has failed
+ * {@link MAX_FAILED_ATTEMPTS} times (a refusal is not a failure: the pool's word is not the dataset's),
+ * decided in the SQL so that failing datasets at the head of the order do not fill the page.
  */
 export async function pipelineCandidates(
   db: D1Database,
@@ -721,9 +732,28 @@ export async function pipelineCandidates(
                  WHERE s.dataset_id = d.dataset_id AND s.recipe = ?2 AND s.recipe_version = ?3
                    AND s.engine = ?4 AND s.state IN ('dispatched', 'succeeded')
                    AND s.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("s")})`)})
+              AND NOT EXISTS (
+                SELECT 1 FROM compute_pipeline_stamps f
+                 WHERE f.dataset_id = d.dataset_id AND f.recipe = ?2 AND f.recipe_version = ?3
+                   AND f.engine = ?4 AND f.state = 'failed'
+                   AND f.updated_at >= datetime('now', ?6)
+                   AND f.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("f")})`)})
+              AND (
+                SELECT COUNT(*) FROM compute_pipeline_stamps c
+                 WHERE c.dataset_id = d.dataset_id AND c.recipe = ?2 AND c.recipe_version = ?3
+                   AND c.engine = ?4 AND c.state = 'failed'
+                   AND c.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("c")})`)}) < ?7
             ORDER BY d.dataset_id LIMIT ?5`,
         )
-        .bind(cursor, recipe.name, recipe.version, recipe.engine, Math.max(limit, 25))
+        .bind(
+          cursor,
+          recipe.name,
+          recipe.version,
+          recipe.engine,
+          Math.max(limit, 25),
+          `-${RETRY_COOLDOWN_DAYS} days`,
+          MAX_FAILED_ATTEMPTS,
+        )
         .all<PipelineRow & { newest_version: string | null; newest_total_files: number | null }>()
     ).results;
     if (rows.length === 0) break;
