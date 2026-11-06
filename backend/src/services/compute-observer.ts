@@ -2,9 +2,12 @@
  * The observer: Expanse's own accounting, posted to NEMAR, and the final settlement it makes possible
  * (epic #2005 phase A7, #2012; ADR 0118, decision 8; design sections 5 and 8).
  *
- * A small posting service runs on the cluster once a day, summarizes the queue per partition and
- * exports `sacct` for the community account, and posts both to `POST /compute/observer` with a token
- * valid for ONE run. This module mints that token, takes the post, and settles jobs against it.
+ * A small posting service runs on the cluster, summarizes the queue per partition (every 15 minutes) and,
+ * once a day, exports `sacct` for the community account, and posts a `nemar.observation.v1` document to
+ * `POST /compute/observer` with `Authorization: Bearer <token>`, a token valid for ONE run. The Worker
+ * adopted the observer's document as it is (`shared/contract/compute-observation.ts`; the mapping to the
+ * rows below is `./compute-observation.ts`). This module mints that token, takes the post, and settles
+ * jobs against it.
  *
  *   `mintObserverRun`      an administrator mints a one-hour run; the token is `<run id>.<digest>`
  *   `ingestObserverPost`   the one post a run may make: the snapshots and the rows are stored, then the
@@ -48,13 +51,20 @@ import { settleFinal } from "./compute-ledger.js";
 import { getPolicy } from "./compute-policy.js";
 import { NO_NONCE, signComputeToken, verifyComputeToken } from "./compute-tokens.js";
 
-/** The header the observer's token travels in: never a URL, which reaches logs. */
-export const OBSERVER_TOKEN_HEADER = "X-Compute-Observer-Token";
+/**
+ * The observer's token, from its `Authorization` header: `Bearer <token>` and nothing else. Never a URL,
+ * which reaches logs. The scheme is matched without regard to case (RFC 9110, 11.1); anything else, and
+ * no header, is the empty string, which no run's token is.
+ */
+export function observerBearerToken(header: string | undefined): string {
+  const found = /^Bearer ([\x21-\x7e]{1,200})$/i.exec(header ?? "");
+  return found?.[1] ?? "";
+}
 
 /** How long a run's token lives. */
 export const OBSERVER_RUN_MINUTES = 60;
 
-/** The most bytes of a post, and the most rows (snapshots and `sacct` rows together). */
+/** The most bytes of a post, and the most rows (partitions and accounting jobs together). */
 export const OBSERVER_BODY_MAX_BYTES = 1024 * 1024;
 export const OBSERVER_ROWS_MAX = 5000;
 
@@ -91,6 +101,10 @@ const SLURM_RE = /^[0-9A-Za-z_+.-]{1,64}$/;
 const count = (max: number) => z.number().int().min(0).max(max);
 const timeText = z.string().min(10).max(40);
 
+/**
+ * THE ROWS THE WORKER STORES, which a document of the observer's is mapped to (`./compute-observation.ts`).
+ * Not a wire format: nothing posts these shapes any more.
+ */
 export const ObserverSnapshotSchema = z
   .object({
     partition: z.string().regex(PARTITION_RE),
@@ -227,13 +241,13 @@ interface RunRow {
 }
 
 /**
- * The run a token is for, or null for ANY reason: no header, a malformed token, an unknown run, a wrong
+ * The run a token is for, or null for ANY reason: no token, a malformed token, an unknown run, a wrong
  * digest, a run that is spent, and a run past its hour. The same HMAC is computed whether or not the
  * run exists, so a missing run costs what a real one does. Nothing is written.
  */
-export async function authorizeObserverRun(env: Bindings, header: string): Promise<RunRow | null> {
+export async function authorizeObserverRun(env: Bindings, token: string): Promise<RunRow | null> {
   const secret = env.PRESCREEN_CALLBACK_SECRET;
-  const [runId = "", digest = "", ...rest] = header.split(".");
+  const [runId = "", digest = "", ...rest] = token.split(".");
   const wellFormed = rest.length === 0 && RUN_ID_RE.test(runId) && /^[0-9a-f]{64}$/.test(digest);
   const row = wellFormed ? await env.DB.prepare(RUN_BY_ID_SQL).bind(runId).first<RunRow>() : null;
   const verified =

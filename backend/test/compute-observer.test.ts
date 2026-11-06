@@ -2,9 +2,11 @@
  * The observer, its token and the final settlement it makes possible (epic #2005 phase A7, #2012; ADR
  * 0118, decision 8). Real migrations (0118 included), the real ledger with its triggers, the real
  * compute router, Miniflare's R2 and the Tapis stand-in (nothing from which was recorded from a real
- * tenant). The observer itself is not stood in for: the tests are its client, and post what a real
- * `sacct` export would carry, in the shape the route documents. No response of the real posting service
- * was recorded.
+ * tenant). The observer itself is not stood in for: the tests are its client, and post the REAL
+ * `nemar.observation.v1` documents it writes (the two it wrote are `test/fixtures/compute-observation/`,
+ * compared byte for byte with nemar-process's copies by `test/compute-observation-contract.unit.test.ts`),
+ * with `Authorization: Bearer <token>`. A test starts from one of them and changes the fields it is about.
+ * No response of the real posting service was recorded.
  *
  * What is pinned, each with a test of its own:
  *  - A WRONG, AN EXPIRED, A REUSED AND AN UNKNOWN TOKEN get the same answer, byte for byte, and write
@@ -14,19 +16,24 @@
  *  - a row that matches no job is stored and listed; a row whose job has not ended waits and is settled
  *    by the next pass; a body that fails validation does not spend the run;
  *  - two posts racing on one token make one ingest (MUTATION: drop the `status = 'issued'` term);
- *  - the migration's checks, the mint route's audit row, and that a member cannot mint.
+ *  - the migration's checks, the mint route's audit row, and that a member cannot mint;
+ *  - the wire: the old header and the old body are refused, an unknown field of the document is refused,
+ *    an allocation string that cannot be read is refused and settles nothing, and the mapping from the
+ *    document to the stored rows is a table (MUTATION: break the allocation parse; break the schema check).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
+import dailyFixture from "../../test/fixtures/compute-observation/daily.v1.json";
+import quickFixture from "../../test/fixtures/compute-observation/quick.v1.json";
 import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
 import {
   OBSERVER_ROWS_MAX,
-  OBSERVER_TOKEN_HEADER,
   expanseFigureMilli,
   isRoutineDifference,
   mintObserverRun,
+  observerBearerToken,
   settleObservedRows,
 } from "../src/services/compute-observer";
 import { listUnmatchedSacct } from "../src/services/compute-reporting";
@@ -65,24 +72,85 @@ afterAll(async () => {
 const env = (): Bindings => fx.env();
 const nextSlurm = () => String(++slurmSeq);
 
-const endedJob = (minutes = 30, over: Parameters<typeof makeJob>[1] = {}) =>
-  endedJobIn(fx, minutes, over);
+/**
+ * Slurm's job ids are numbers and the Tapis stand-in's are not (a random hex string), so a job that is to
+ * be matched by the observer's document is given the number the document will carry. The only seam used:
+ * the id is the one thing the document and the job must share.
+ */
+async function numberSlurm(e: Bindings, jobId: string): Promise<string> {
+  const slurm = nextSlurm();
+  await e.DB.prepare("UPDATE compute_jobs SET slurm_job_id = ?1 WHERE id = ?2")
+    .bind(slurm, jobId)
+    .run();
+  return slurm;
+}
 
-const sacctRow = (slurm: string, over: Record<string, unknown> = {}) => ({
-  slurm_job_id: slurm,
+const endedJob = async (minutes = 30, over: Parameters<typeof makeJob>[1] = {}) => {
+  const j = await endedJobIn(fx, minutes, over);
+  await numberSlurm(j.env, j.job.id);
+  return { ...j, job: await reread(j.env, j.job.id) };
+};
+
+type Doc = Record<string, unknown>;
+type Job = Record<string, unknown>;
+
+/** What Slurm prints for four cores and 8,000 MB on one node: 1,800 seconds of it is 2 SU (2,000 milli-SU). */
+const tres = (cpu = 4, over: Record<string, string> = {}) => ({
+  billing: String(cpu),
+  cpu: String(cpu),
+  mem: "8000M",
+  node: "1",
+  ...over,
+});
+
+/** One `accounting.jobs` entry of the observer's document. */
+const acct = (slurm: string, over: Job = {}): Job => ({
+  job_id: slurm,
   partition: "shared",
   state: "COMPLETED",
   elapsed_seconds: 1800,
-  alloc_nodes: 1,
-  alloc_cpus: 4,
-  alloc_gpus: 0,
-  alloc_mem_mb: 8000,
-  submit_time: "2026-11-05T10:00:00Z",
-  start_time: "2026-11-05T10:01:00Z",
-  end_time: "2026-11-05T10:31:00Z",
-  charged_milli: null,
+  alloc_tres: tres(),
+  submit: "2026-11-05T10:00:00",
+  start: "2026-11-05T10:01:00",
+  end: "2026-11-05T10:31:00",
   ...over,
 });
+
+/** The observer's own daily document with its partitions and jobs replaced. */
+const daily = (jobs: Job[], partitions: Doc = {}): Doc => ({
+  ...dailyFixture,
+  partitions,
+  accounting: {
+    ...dailyFixture.accounting,
+    rows_total: jobs.length,
+    rows_included: jobs.length,
+    jobs,
+  },
+});
+
+/** The observer's own quick document with its partitions replaced. */
+const quick = (partitions: Doc): Doc => ({ ...quickFixture, partitions });
+
+const queue = (pending: number, running: number): Doc => ({
+  available: "up",
+  nodes: {},
+  jobs: {
+    ...(pending ? { PENDING: { jobs: pending, nodes: pending, cpus: pending } } : {}),
+    ...(running ? { RUNNING: { jobs: running, nodes: running, cpus: running } } : {}),
+  },
+  pending_reasons: {},
+});
+
+/** A name the Worker stores for partition number `i` (letters only, all different). */
+const partitionName = (i: number) => {
+  let name = "";
+  let n = i;
+  do {
+    name = String.fromCharCode(97 + (n % 26)) + name;
+    n = Math.floor(n / 26);
+  } while (n > 0);
+  return `p${name}`;
+};
 
 async function mint(): Promise<{ runId: string; token: string }> {
   const owner = fx.ownerId;
@@ -91,13 +159,16 @@ async function mint(): Promise<{ runId: string; token: string }> {
   return { runId: minted.runId, token: minted.token };
 }
 
+/** Post as the observer does: `Authorization: Bearer <token>` (none when `token` is null). */
 async function post(token: string | null, body: unknown, raw?: string) {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (token !== null) headers[OBSERVER_TOKEN_HEADER] = token;
+  return postHeaders(token === null ? {} : { Authorization: `Bearer ${token}` }, body, raw);
+}
+
+async function postHeaders(extra: Record<string, string>, body: unknown, raw?: string) {
   const res = await routes(
     new Request("http://worker.test/compute/observer", {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/json", ...extra },
       body: raw ?? JSON.stringify(body),
     }),
     env(),
@@ -105,11 +176,11 @@ async function post(token: string | null, body: unknown, raw?: string) {
   return { status: res.status, text: await res.text() };
 }
 
-const empty = { snapshots: [], sacct: [] };
+/** A valid document that stores one snapshot per partition of the observer's quick fixture and no job. */
+const empty = quickFixture;
 
-/** The shortest valid row, so 5,000 of them fit in 1 MiB (the bound the route documents). */
-const minimalRow = (slurm: string) =>
-  sacctRow(slurm, { submit_time: null, start_time: null, end_time: null, charged_milli: null });
+/** The shortest valid job, so thousands of them fit in 1 MiB (the bound the route documents). */
+const minimalRow = (slurm: string) => acct(slurm, { submit: null, start: null, end: null });
 
 async function counts() {
   const one = async (sql: string) =>
@@ -184,7 +255,7 @@ describe("the token", () => {
   test("the token is checked BEFORE the body is read: a wrong or spent token with a body over 1 MiB gets the refusal, not 413 (MUTATION: accept a spent run at the door)", async () => {
     const run = await mint();
     expect((await post(run.token, empty)).status).toBe(200);
-    const huge = `{"snapshots":[],"sacct":[],"pad":"${"x".repeat(1_100_000)}"}`;
+    const huge = JSON.stringify({ ...quickFixture, pad: "x".repeat(1_100_000) });
     const spent = await post(run.token, null, huge);
     const wrong = await post("garbage", null, huge);
     expect(spent).toEqual(wrong);
@@ -193,67 +264,459 @@ describe("the token", () => {
 
   test("two posts racing on one token make one ingest (MUTATION: drop the `status = 'issued'` term)", async () => {
     const run = await mint();
-    const body = { snapshots: [], sacct: [sacctRow(nextSlurm())] };
+    const body = daily([acct(nextSlurm())]);
     const [a, b] = await Promise.all([post(run.token, body), post(run.token, body)]);
     expect([a.status, b.status].sort()).toEqual([200, 403]);
     expect((await counts()).rows).toBe(1);
   });
 });
 
-describe("the body", () => {
+describe("the wire", () => {
+  test("the token is read from `Authorization: Bearer` only: the old header, other schemes and a bare token are the one refusal and spend nothing (MUTATION: read X-Compute-Observer-Token again)", async () => {
+    const good = await mint();
+    const refusal = await post("garbage", empty);
+    expect(refusal.status).toBe(403);
+    const before = await counts();
+    const attempts: Array<Record<string, string>> = [
+      { "X-Compute-Observer-Token": good.token },
+      { "X-Compute-Observer-Token": good.token, Authorization: "Bearer garbage" },
+      { Authorization: good.token },
+      { Authorization: `Basic ${good.token}` },
+      { Authorization: `Token ${good.token}` },
+      { Authorization: `Bearer  ${good.token}` },
+      { Authorization: `Bearer ${good.token} extra` },
+      { Authorization: "Bearer " },
+      { Authorization: "Bearer" },
+    ];
+    for (const headers of attempts) {
+      expect([JSON.stringify(Object.keys(headers)), await postHeaders(headers, empty)]).toEqual([
+        JSON.stringify(Object.keys(headers)),
+        refusal,
+      ]);
+    }
+    expect(await counts()).toEqual(before);
+    // The scheme is not case sensitive (RFC 9110, 11.1), and the unspent token still posts.
+    expect((await postHeaders({ Authorization: `bearer ${good.token}` }, empty)).status).toBe(200);
+  });
+
+  test("observerBearerToken takes `Bearer <one token>` and nothing else", () => {
+    expect(observerBearerToken("Bearer abc.def")).toBe("abc.def");
+    expect(observerBearerToken("bearer abc")).toBe("abc");
+    for (const bad of [
+      undefined,
+      "",
+      "Bearer",
+      "Bearer ",
+      "Bearer a b",
+      "Basic abc",
+      "abc",
+      " Bearer abc",
+    ]) {
+      expect([bad, observerBearerToken(bad)]).toEqual([bad, ""]);
+    }
+    expect(observerBearerToken(`Bearer ${"a".repeat(201)}`)).toBe("");
+    expect(observerBearerToken(`Bearer ${"a".repeat(200)}`)).toBe("a".repeat(200));
+  });
+
+  test("the old body, {snapshots, sacct}, is not the document: 400, the run is not spent", async () => {
+    const run = await mint();
+    const old = await post(run.token, { snapshots: [], sacct: [] });
+    expect(old.status).toBe(400);
+    expect(JSON.parse(old.text).code).toBe("invalid_post");
+    expect((await post(run.token, empty)).status).toBe(200);
+  });
+
+  test("a document whose `schema` is not exactly nemar.observation.v1 is the refusal of any malformed body, and the run is not spent", async () => {
+    const run = await mint();
+    for (const word of [
+      "nemar.observation.v2",
+      "nemar.observation.v1 ",
+      "NEMAR.observation.v1",
+      "",
+    ]) {
+      const bad = await post(run.token, { ...daily([acct(nextSlurm())]), schema: word });
+      expect([word, bad.status]).toEqual([word, 400]);
+      const answer = JSON.parse(bad.text);
+      expect(answer).toEqual({
+        error: "The post is not valid.",
+        code: "invalid_post",
+        fields: ["schema: invalid_literal"],
+      });
+    }
+    const { schema: _omitted, ...none } = daily([acct(nextSlurm())]);
+    expect((await post(run.token, none)).status).toBe(400);
+    expect((await counts()).rows).toBe(0);
+    expect((await post(run.token, daily([acct(nextSlurm())]))).status).toBe(200);
+  });
+
+  test("a mode the observer does not define is refused (there is no dry run): quick and daily are both live", async () => {
+    const run = await mint();
+    for (const mode of ["dry_run", "Daily", "weekly", ""]) {
+      expect([mode, (await post(run.token, { ...quickFixture, mode })).status]).toEqual([
+        mode,
+        400,
+      ]);
+    }
+    expect((await counts()).snaps).toBe(0);
+    const quickPost = await post(run.token, quickFixture);
+    expect(quickPost.status).toBe(200);
+    expect(JSON.parse(quickPost.text)).toMatchObject({ snapshots: 4, sacctRows: 0 });
+    expect((await counts()).snaps).toBe(4);
+    const dailyPost = await post((await mint()).token, dailyFixture);
+    expect(JSON.parse(dailyPost.text)).toMatchObject({ snapshots: 4, sacctRows: 3 });
+  });
+
+  test("a v1 document with a field the observer does not write is refused, at every level, and names the path, never the value", async () => {
+    const withExtra = (path: string[], value: unknown = "secret-value"): Doc => {
+      const doc = structuredClone(dailyFixture) as Record<string, any>;
+      let cur = doc;
+      for (const key of path) cur = cur[key];
+      cur.surprise = value;
+      return doc;
+    };
+    const bad: Array<[string, Doc, string]> = [
+      ["top", withExtra([]), "body: unrecognized_keys"],
+      ["partition", withExtra(["partitions", "shared"]), "partitions.shared: unrecognized_keys"],
+      ["sources", withExtra(["sources"]), "sources: unrecognized_keys"],
+      ["accounting", withExtra(["accounting"]), "accounting: unrecognized_keys"],
+      ["job", withExtra(["accounting", "jobs", "0"]), "accounting.jobs.0: unrecognized_keys"],
+      ["balance", withExtra(["balance", "expanse"]), "balance.expanse"],
+    ];
+    for (const [label, doc, field] of bad) {
+      const run = await mint();
+      const res = await post(run.token, doc);
+      expect([label, res.status]).toEqual([label, 400]);
+      expect(res.text).not.toContain("secret-value");
+      expect(res.text).not.toContain("surprise");
+      expect(JSON.parse(res.text).fields.join(" ")).toContain(field.split(":")[0] as string);
+      expect((await post(run.token, daily([acct(nextSlurm())]))).status).toBe(200);
+    }
+    expect(
+      JSON.parse((await post((await mint()).token, { ...dailyFixture, snapshots: [] })).text).code,
+    ).toBe("invalid_post");
+  });
+
+  test("a wrong type, a negative number and a state with a trailing note are each refused", async () => {
+    const jobs: Job[] = [
+      acct(nextSlurm(), { elapsed_seconds: "600" }),
+      acct(nextSlurm(), { elapsed_seconds: -1 }),
+      acct(nextSlurm(), { elapsed_seconds: 1.5 }),
+      acct(nextSlurm(), { state: "CANCELLED by 1234" }),
+      acct(nextSlurm(), { state: "A".repeat(33) }),
+      acct(nextSlurm(), { state: "RUNNING;DROP" }),
+      acct(nextSlurm(), { state: "" }),
+      acct(nextSlurm(), { job_id: "12;DROP" }),
+      acct(nextSlurm(), { alloc_tres: { cpu: 4 } }),
+      acct(nextSlurm(), { alloc_tres: "cpu=4,mem=8G" }),
+      acct(nextSlurm(), { submit: "yesterday" }),
+    ];
+    for (const job of jobs) {
+      const run = await mint();
+      const res = await post(run.token, daily([job]));
+      expect([JSON.stringify(job), res.status]).toEqual([JSON.stringify(job), 400]);
+      expect(res.text).not.toContain("DROP");
+    }
+    expect((await counts()).rows).toBe(0);
+  });
+
   test("a body that fails validation does not spend the run, and names the field, never the value", async () => {
     const run = await mint();
-    const bad = await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow("12;DROP", { partition: "Shared!" })],
-    });
+    const bad = await post(run.token, daily([acct("12;DROP", { partition: "Shared!" })]));
     expect(bad.status).toBe(400);
     expect(bad.text).not.toContain("DROP");
     expect(JSON.parse(bad.text).code).toBe("invalid_post");
     expect((await counts()).rows).toBe(0);
     // Still unspent.
-    expect((await post(run.token, { snapshots: [], sacct: [sacctRow(nextSlurm())] })).status).toBe(
-      200,
-    );
+    expect((await post(run.token, daily([acct(nextSlurm())]))).status).toBe(200);
   });
+});
 
-  test("an unknown key, a wrong type and a negative number are each refused", async () => {
-    for (const row of [
-      { ...sacctRow(nextSlurm()), extra: 1 },
-      sacctRow(nextSlurm(), { elapsed_seconds: "600" }),
-      sacctRow(nextSlurm(), { alloc_cpus: -1 }),
-      sacctRow(nextSlurm(), { charged_milli: 1.5 }),
-      sacctRow(nextSlurm(), { state: "completed" }),
+describe("the allocation string", () => {
+  const refusedFor = async (job: Job, field = "accounting.jobs.0.alloc_tres: malformed_tres") => {
+    const run = await mint();
+    const before = await counts();
+    const res = await post(run.token, daily([job, acct(nextSlurm())]));
+    expect([JSON.stringify(job.alloc_tres), res.status]).toEqual([
+      JSON.stringify(job.alloc_tres),
+      400,
+    ]);
+    expect(JSON.parse(res.text)).toEqual({
+      error: "The post is not valid.",
+      code: "invalid_post",
+      fields: [field],
+    });
+    // Nothing of the post is stored, not the good job beside it either, and the run is unspent.
+    expect(await counts()).toEqual(before);
+    expect(
+      (
+        fx.harness.db
+          .query("SELECT status FROM compute_observer_runs WHERE id = ?")
+          .get(run.runId) as { status: string }
+      ).status,
+    ).toBe("issued");
+    return res;
+  };
+
+  test("a malformed alloc_tres is refused, settles nothing, and does not spend the run (MUTATION: make parseAllocTres guess)", async () => {
+    const j = await endedJob(30);
+    const slurm = j.job.slurm_job_id as string;
+    const before = await reread(j.env, j.job.id);
+    for (const bad of [
+      tres(4, { cpu: "four" }),
+      tres(4, { cpu: "4.5" }),
+      tres(4, { cpu: "-1" }),
+      tres(4, { mem: "8000" }),
+      tres(4, { mem: "8 GB" }),
+      tres(4, { mem: "lots" }),
+      tres(4, { node: "one" }),
+      tres(4, { "gres/gpu": "x" }),
+      tres(4, { cpu: "99999999999999" }),
     ]) {
-      const run = await mint();
-      expect([(await post(run.token, { snapshots: [], sacct: [row] })).status, row]).toEqual([
-        400,
-        row,
-      ]);
+      const res = await refusedFor(acct(slurm, { alloc_tres: bad, state: "COMPLETED" }));
+      for (const text of Object.values(bad)) expect(res.text).not.toContain(`"${text}"`);
     }
+    expect(await reread(j.env, j.job.id)).toEqual(before);
   });
 
+  test("elapsed time with no cpu item is refused, and so is any item past a column's bound; no allocation at all with no elapsed time is stored", async () => {
+    await refusedFor(
+      acct(nextSlurm(), { alloc_tres: { billing: "4", mem: "8000M", node: "1" } }),
+      "accounting.jobs.0.alloc_tres: missing_cpu",
+    );
+    await refusedFor(
+      acct(nextSlurm(), { alloc_tres: {} }),
+      "accounting.jobs.0.alloc_tres: missing_cpu",
+    );
+    // A job that was cancelled before it started has no allocation and no time: Slurm's own empty string.
+    const run = await mint();
+    const slurm = nextSlurm();
+    const res = await post(
+      run.token,
+      daily([acct(slurm, { state: "CANCELLED", elapsed_seconds: 0, alloc_tres: {} })]),
+    );
+    expect(res.status).toBe(200);
+    expect(
+      fx.harness.db
+        .query(
+          "SELECT alloc_cpus, alloc_mem_mb, alloc_gpus, alloc_nodes FROM compute_sacct_rows WHERE slurm_job_id = ?",
+        )
+        .get(slurm),
+    ).toEqual({ alloc_cpus: 0, alloc_mem_mb: 0, alloc_gpus: 0, alloc_nodes: 0 });
+  });
+
+  test("only a row of ours is read: a malformed allocation on a row that is skipped anyway is not a refusal", async () => {
+    const run = await mint();
+    const res = await post(
+      run.token,
+      daily([acct("123_[1-5]", { alloc_tres: { cpu: "four" } }), acct(nextSlurm())]),
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toMatchObject({ sacctRows: 1, skipped: 1 });
+  });
+});
+
+describe("the mapping from the document to the rows", () => {
+  test("the observer's own daily document is stored as this table says, and charged_milli is NULL", async () => {
+    const run = await mint();
+    const res = await post(run.token, dailyFixture);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toMatchObject({
+      snapshots: 4,
+      sacctRows: 3,
+      skipped: 0,
+      unmatched: 3,
+    });
+    expect(
+      fx.harness.db
+        .query(
+          `SELECT slurm_job_id, partition, state, elapsed_seconds, alloc_nodes, alloc_cpus, alloc_gpus,
+                  alloc_mem_mb, submit_time, start_time, end_time, charged_milli
+             FROM compute_sacct_rows ORDER BY slurm_job_id`,
+        )
+        .all(),
+    ).toEqual([
+      // cpu=8 mem=16G node=1; "5002" below is "CANCELLED by 1234" reduced to its first word by the observer
+      {
+        slurm_job_id: "5001",
+        partition: "shared",
+        state: "COMPLETED",
+        elapsed_seconds: 3723,
+        alloc_nodes: 1,
+        alloc_cpus: 8,
+        alloc_gpus: 0,
+        alloc_mem_mb: 16384,
+        submit_time: "2026-11-03T10:00:00",
+        start_time: "2026-11-03T10:05:00",
+        end_time: "2026-11-03T11:07:03",
+        charged_milli: null,
+      },
+      // cpu=10 gres/gpu=1 mem=92G node=1
+      {
+        slurm_job_id: "5002",
+        partition: "gpu",
+        state: "CANCELLED",
+        elapsed_seconds: 10,
+        alloc_nodes: 1,
+        alloc_cpus: 10,
+        alloc_gpus: 1,
+        alloc_mem_mb: 94208,
+        submit_time: "2026-11-03T12:00:00",
+        start_time: "2026-11-03T12:01:00",
+        end_time: "2026-11-03T12:01:10",
+        charged_milli: null,
+      },
+      // cpu=256 mem=500G node=2; Slurm printed Unknown for the start and the end
+      {
+        slurm_job_id: "5003",
+        partition: "compute",
+        state: "FAILED",
+        elapsed_seconds: 93600,
+        alloc_nodes: 2,
+        alloc_cpus: 256,
+        alloc_gpus: 0,
+        alloc_mem_mb: 512000,
+        submit_time: "2026-11-03T13:00:00",
+        start_time: null,
+        end_time: null,
+        charged_milli: null,
+      },
+    ]);
+    // The queue: the fixture's squeue gave shared 3 pending 2 running, gpu 1 pending, compute 1 running.
+    expect(
+      fx.harness.db
+        .query("SELECT partition, pending, running FROM compute_queue_snapshots ORDER BY partition")
+        .all(),
+    ).toEqual([
+      { partition: "compute", pending: 0, running: 1 },
+      { partition: "debug", pending: 0, running: 0 },
+      { partition: "gpu", pending: 1, running: 0 },
+      { partition: "shared", pending: 3, running: 2 },
+    ]);
+  });
+
+  test("queue snapshots are stored once per partition for the run: PENDING and RUNNING job counts, zero for a state that is absent", async () => {
+    const run = await mint();
+    const res = await post(
+      run.token,
+      quick({ shared: queue(3, 9), "gpu-shared": queue(0, 2), "large-shared": queue(0, 0) }),
+    );
+    expect(res.status).toBe(200);
+    const rows = fx.harness.db
+      .query("SELECT partition, pending, running FROM compute_queue_snapshots ORDER BY partition")
+      .all();
+    expect(rows).toEqual([
+      { partition: "gpu-shared", pending: 0, running: 2 },
+      { partition: "large-shared", pending: 0, running: 0 },
+      { partition: "shared", pending: 3, running: 9 },
+    ]);
+    expect(JSON.parse(res.text)).toMatchObject({ snapshots: 3, skipped: 0 });
+  });
+
+  test("a partition whose queue was not read is skipped and counted, never stored as zero; so is a name the table cannot hold (MUTATION: store null as 0)", async () => {
+    const run = await mint();
+    const res = await post(
+      run.token,
+      quick({
+        shared: queue(1, 1),
+        gpu: { available: null, nodes: null, jobs: null, pending_reasons: null },
+        Shared2: queue(1, 1),
+        "a,b": queue(1, 1),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toMatchObject({ snapshots: 1, skipped: 3 });
+    expect(fx.harness.db.query("SELECT partition FROM compute_queue_snapshots").all()).toEqual([
+      { partition: "shared" },
+    ]);
+  });
+
+  test("a valid row that no table of ours can hold is skipped and counted, and the rest of the day still lands", async () => {
+    const good = nextSlurm();
+    const run = await mint();
+    const res = await post(
+      run.token,
+      daily([
+        acct("123_[1-5]"),
+        acct("123_4", { state: "RUNNING", elapsed_seconds: 5 }),
+        acct(nextSlurm(), { partition: null }),
+        acct(nextSlurm(), { state: null }),
+        acct(nextSlurm(), { elapsed_seconds: null }),
+        acct(nextSlurm(), { state: "completed" }),
+        acct(nextSlurm(), { partition: "Shared" }),
+        acct(nextSlurm(), { elapsed_seconds: 31_536_001 }),
+        acct(good),
+      ]),
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toMatchObject({ sacctRows: 2, skipped: 7 });
+    expect(
+      fx.harness.db
+        .query("SELECT slurm_job_id FROM compute_sacct_rows ORDER BY slurm_job_id")
+        .all(),
+    ).toEqual([{ slurm_job_id: "123_4" }, { slurm_job_id: good }]);
+  });
+
+  test("a truncated export says so in the answer", async () => {
+    const doc = daily([acct(nextSlurm())]) as { accounting: Record<string, unknown> };
+    doc.accounting.truncated = true;
+    doc.accounting.rows_total = 9000;
+    const res = await post((await mint()).token, doc);
+    expect(JSON.parse(res.text)).toMatchObject({ ok: true, truncated: true, sacctRows: 1 });
+    const plain = await post((await mint()).token, daily([acct(nextSlurm())]));
+    expect(JSON.parse(plain.text).truncated).toBeUndefined();
+  });
+
+  test("a daily document whose sacct was not read has no jobs and still stores the queue", async () => {
+    const doc = {
+      ...dailyFixture,
+      accounting: null,
+      sources: { ...dailyFixture.sources, sacct: { status: "failed", detail: "exit_1" } },
+    };
+    const res = await post((await mint()).token, doc);
+    expect(JSON.parse(res.text)).toMatchObject({ snapshots: 4, sacctRows: 0 });
+  });
+
+  test("nothing of the token or the document's text reaches the logs", async () => {
+    const lines: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    const record = (...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    };
+    console.log = record;
+    console.error = record;
+    try {
+      const run = await mint();
+      await post(run.token, dailyFixture);
+      await post(run.token, dailyFixture);
+      await post("garbage", dailyFixture);
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+    const all = lines.join("\n");
+    expect(all).toContain("[compute-observer] ingested mode=daily");
+    for (const secret of ["Bearer", "5001", "prj001", "shared"]) expect(all).not.toContain(secret);
+  });
+});
+
+describe("the body", () => {
   test("more than 5,000 rows is refused, and so is a body over 1 MiB; neither spends the run", async () => {
     const run = await mint();
-    // Snapshots are small enough to count past the row bound inside the byte bound.
-    const snapshot = { partition: "shared", pending: 1, running: 1 };
-    const many = {
-      snapshots: Array.from({ length: OBSERVER_ROWS_MAX + 1 }, () => snapshot),
-      sacct: [],
-    };
-    const tooMany = await post(run.token, many);
+    const many = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [partitionName(i), queue(1, 1)]));
+    const tooMany = await post(run.token, quick(many(OBSERVER_ROWS_MAX + 1)));
     expect(tooMany.status).toBe(400);
-    expect(JSON.parse(tooMany.text).fields.join(" ")).toContain("snapshots");
-    // Rows of the two kinds count together.
-    const mixed = {
-      snapshots: Array.from({ length: OBSERVER_ROWS_MAX - 1 }, () => snapshot),
-      sacct: [minimalRow("1"), minimalRow("2")],
-    };
-    expect((await post(run.token, mixed)).status).toBe(400);
+    expect(JSON.parse(tooMany.text).fields.join(" ")).toContain("partitions");
+    // Partitions and jobs count together.
+    const mixed = daily([minimalRow("1"), minimalRow("2")], many(OBSERVER_ROWS_MAX - 1));
+    const together = await post(run.token, mixed);
+    expect(together.status).toBe(400);
+    expect(JSON.parse(together.text).fields).toEqual(["body: too_big"]);
     const huge = await post(
       run.token,
       null,
-      `{"snapshots":[],"sacct":[],"pad":"${"x".repeat(1_100_000)}"}`,
+      JSON.stringify({ ...quickFixture, pad: "x".repeat(1_100_000) }),
     );
     expect(huge.status).toBe(413);
     expect((await counts()).rows).toBe(0);
@@ -261,47 +724,29 @@ describe("the body", () => {
   });
 
   test("exactly 5,000 rows is accepted; thousands of Slurm rows are stored; a repeated Slurm id keeps the first", async () => {
-    const snapshot = { partition: "shared", pending: 1, running: 1 };
-    const exact = await post((await mint()).token, {
-      snapshots: Array.from({ length: OBSERVER_ROWS_MAX }, () => snapshot),
-      sacct: [],
-    });
+    const exact = await post(
+      (await mint()).token,
+      quick(
+        Object.fromEntries(
+          Array.from({ length: OBSERVER_ROWS_MAX }, (_, i) => [partitionName(i), queue(1, 1)]),
+        ),
+      ),
+    );
     expect(exact.status).toBe(200);
-    // 1 MiB admits about 4,500 of the longest rows (231 bytes each), so 4,000 is the volume tested.
+    expect((await counts()).snaps).toBe(OBSERVER_ROWS_MAX);
+    // 1 MiB admits about 5,000 of the shortest jobs, so 4,000 is the volume tested.
     const rows = Array.from({ length: 4000 }, (_, i) =>
       minimalRow(`9${String(i).padStart(7, "0")}`),
     );
-    expect((await post((await mint()).token, { snapshots: [], sacct: rows })).status).toBe(200);
+    expect((await post((await mint()).token, daily(rows))).status).toBe(200);
     expect((await counts()).rows).toBe(4000);
     const again = await mint();
-    await post(again.token, {
-      snapshots: [],
-      sacct: [sacctRow("90000000", { elapsed_seconds: 5 })],
-    });
+    await post(again.token, daily([acct("90000000", { elapsed_seconds: 5 })]));
     const kept = fx.harness.db
       .query("SELECT elapsed_seconds FROM compute_sacct_rows WHERE slurm_job_id = '90000000'")
       .get() as { elapsed_seconds: number };
     expect(kept.elapsed_seconds).toBe(1800);
   }, 60_000);
-
-  test("queue snapshots are stored once per partition for the run", async () => {
-    const run = await mint();
-    const res = await post(run.token, {
-      snapshots: [
-        { partition: "shared", pending: 3, running: 9 },
-        { partition: "gpu-shared", pending: 0, running: 2 },
-      ],
-      sacct: [],
-    });
-    expect(res.status).toBe(200);
-    const rows = fx.harness.db
-      .query("SELECT partition, pending, running FROM compute_queue_snapshots ORDER BY partition")
-      .all();
-    expect(rows).toEqual([
-      { partition: "gpu-shared", pending: 0, running: 2 },
-      { partition: "shared", pending: 3, running: 9 },
-    ]);
-  });
 });
 
 describe("final settlement", () => {
@@ -309,10 +754,12 @@ describe("final settlement", () => {
     const j = await endedJob(30);
     expect(j.job.charged_milli).toBe(2000);
     const run = await mint();
-    const res = await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 2500 })],
-    });
+    // Four cores for 37.5 minutes is 2.5 SU: the document carries the allocation and the time, and the
+    // Worker prices them.
+    const res = await post(
+      run.token,
+      daily([acct(j.job.slurm_job_id as string, { elapsed_seconds: 2250 })]),
+    );
     expect(res.status).toBe(200);
     const after = await reread(j.env, j.job.id);
     expect(after.settled_final_at).not.toBeNull();
@@ -331,10 +778,8 @@ describe("final settlement", () => {
   test("a row beyond tolerance sets flag_mismatch and STILL settles to Expanse's figure (MUTATION: the tolerance test always true)", async () => {
     const j = await endedJob(30);
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 6000 })],
-    });
+    // Twelve cores for half an hour is 6 SU.
+    await post(run.token, daily([acct(j.job.slurm_job_id as string, { alloc_tres: tres(12) })]));
     const after = await reread(j.env, j.job.id);
     expect(after.charged_milli).toBe(6000);
     expect(after.settled_final_at).not.toBeNull();
@@ -355,54 +800,46 @@ describe("final settlement", () => {
     expect(isRoutineDifference(1001, 0, settle)).toBe(false);
   });
 
-  test("without a figure of its own the Worker prices the allocation the row reports", async () => {
+  test("the Worker prices the allocation the row reports, whatever Tapis said", async () => {
     const j = await endedJob(30);
     const run = await mint();
-    // 8 cores for an hour is 8 SU, whatever Tapis said.
-    await post(run.token, {
-      snapshots: [],
-      sacct: [
-        sacctRow(j.job.slurm_job_id as string, {
-          alloc_cpus: 8,
-          elapsed_seconds: 3600,
-          charged_milli: null,
-        }),
-      ],
-    });
+    // 8 cores for an hour is 8 SU.
+    await post(
+      run.token,
+      daily([acct(j.job.slurm_job_id as string, { alloc_tres: tres(8), elapsed_seconds: 3600 })]),
+    );
     const after = await reread(j.env, j.job.id);
     expect(after.charged_milli).toBe(8000);
     expect(after.flag_mismatch).toBe(1);
   });
 
-  test('a state with a trailing note ("CANCELLED by 1234", "CANCELLED+") is the first word, and settles (MUTATION: match the whole state)', async () => {
-    for (const note of ["CANCELLED by 1234", "CANCELLED+", "COMPLETED"]) {
+  test("every state in which a job has ended settles it, and the first word of Slurm's state is all the document carries (MUTATION: drop a state from the ended list)", async () => {
+    for (const state of [
+      "COMPLETED",
+      "FAILED",
+      "CANCELLED",
+      "TIMEOUT",
+      "OUT_OF_MEMORY",
+      "NODE_FAIL",
+    ]) {
       await fx.reset();
       const j = await endedJob(30);
       const run = await mint();
-      const res = await post(run.token, {
-        snapshots: [],
-        sacct: [sacctRow(j.job.slurm_job_id as string, { state: note, charged_milli: 2100 })],
-      });
-      expect([note, res.status]).toEqual([note, 200]);
-      expect([note, (await reread(j.env, j.job.id)).settled_final_at !== null]).toEqual([
-        note,
+      const res = await post(
+        run.token,
+        daily([acct(j.job.slurm_job_id as string, { state, elapsed_seconds: 2070 })]),
+      );
+      expect([state, res.status]).toEqual([state, 200]);
+      const after = await reread(j.env, j.job.id);
+      expect([state, after.settled_final_at !== null, after.charged_milli]).toEqual([
+        state,
         true,
+        2300,
       ]);
       const stored = fx.harness.db.query("SELECT state FROM compute_sacct_rows").get() as {
         state: string;
       };
-      expect(stored.state).toBe(note.split(/[ +]/)[0] as string);
-    }
-  });
-
-  test("a state that is not shaped like one is still refused", async () => {
-    for (const state of ["cancelled", "CANCELLED by \u0007", "", "A".repeat(33), "RUNNING;DROP"]) {
-      const run = await mint();
-      const res = await post(run.token, {
-        snapshots: [],
-        sacct: [sacctRow(nextSlurm(), { state })],
-      });
-      expect([state, res.status]).toEqual([state, 400]);
+      expect(stored.state).toBe(state);
     }
   });
 
@@ -447,10 +884,8 @@ describe("final settlement", () => {
       "SELECT holder_kind, holder_ref, charged_milli FROM compute_pools ORDER BY id",
     ).all<{ holder_kind: string; holder_ref: string; charged_milli: number }>();
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 1500 })],
-    });
+    // Four cores for 22.5 minutes is 1.5 SU.
+    await post(run.token, daily([acct(j.job.slurm_job_id as string, { elapsed_seconds: 1350 })]));
     const after = await j.env.DB.prepare(
       "SELECT holder_kind, holder_ref, charged_milli FROM compute_pools ORDER BY id",
     ).all<{ holder_kind: string; holder_ref: string; charged_milli: number }>();
@@ -473,12 +908,9 @@ describe("final settlement", () => {
     fx.tapis.advance(uuid, "QUEUED");
     fx.tapis.advance(uuid, "RUNNING");
     await advanceComputeJob(made.env, made.job.id);
-    const slurm = (await reread(made.env, made.job.id)).slurm_job_id as string;
+    const slurm = await numberSlurm(made.env, made.job.id);
     const run = await mint();
-    const res = await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(slurm, { charged_milli: 2000 })],
-    });
+    const res = await post(run.token, daily([acct(slurm)]));
     expect(JSON.parse(res.text)).toMatchObject({ matched: 1, settled: 0 });
     expect((await reread(made.env, made.job.id)).settled_final_at).toBeNull();
     // The job ends afterwards.
@@ -497,33 +929,30 @@ describe("final settlement", () => {
     const j = await endedJob(30);
     const slurm = j.job.slurm_job_id as string;
     const first = await mint();
-    await post(first.token, {
-      snapshots: [],
-      sacct: [sacctRow(slurm, { state: "RUNNING", elapsed_seconds: 60, charged_milli: 99_000 })],
-    });
+    await post(first.token, daily([acct(slurm, { state: "RUNNING", elapsed_seconds: 60 })]));
     expect((await reread(j.env, j.job.id)).settled_final_at).toBeNull();
     const second = await mint();
-    const res = await post(second.token, {
-      snapshots: [],
-      sacct: [sacctRow(slurm, { state: "COMPLETED", charged_milli: 2300 })],
-    });
+    const res = await post(
+      second.token,
+      daily([acct(slurm, { state: "COMPLETED", elapsed_seconds: 2070 })]),
+    );
     expect(JSON.parse(res.text)).toMatchObject({ settled: 1 });
     const after = await reread(j.env, j.job.id);
     expect(after.settled_final_at).not.toBeNull();
     expect(after.charged_milli).toBe(2300);
     // And a later export does not rewrite a row that is ended and applied.
     const third = await mint();
-    await post(third.token, { snapshots: [], sacct: [sacctRow(slurm, { charged_milli: 9999 })] });
+    await post(third.token, daily([acct(slurm, { elapsed_seconds: 9000 })]));
     expect((await reread(j.env, j.job.id)).charged_milli).toBe(2300);
   });
 
   test("a row for a job still pending or running at Slurm is not Expanse's figure yet", async () => {
     const j = await endedJob(30);
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { state: "RUNNING", charged_milli: 99_000 })],
-    });
+    await post(
+      run.token,
+      daily([acct(j.job.slurm_job_id as string, { state: "RUNNING", alloc_tres: tres(100) })]),
+    );
     expect((await reread(j.env, j.job.id)).settled_final_at).toBeNull();
   });
 
@@ -533,10 +962,7 @@ describe("final settlement", () => {
       .bind(j.job.id)
       .run();
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 9000 })],
-    });
+    await post(run.token, daily([acct(j.job.slurm_job_id as string, { alloc_tres: tres(18) })]));
     const after = await reread(j.env, j.job.id);
     expect(after.settled_final_at).toBeNull();
     const row = fx.harness.db
@@ -549,17 +975,16 @@ describe("final settlement", () => {
   test("an unpriceable row is flagged once and judged, so it is not tried for ever", async () => {
     const j = await endedJob(30);
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [
-        sacctRow(j.job.slurm_job_id as string, {
+    // An allocation of no cores and no memory: Slurm printed the items, and both are zero.
+    await post(
+      run.token,
+      daily([
+        acct(j.job.slurm_job_id as string, {
           partition: "weird",
-          alloc_cpus: 0,
-          alloc_mem_mb: 0,
-          charged_milli: null,
+          alloc_tres: { cpu: "0", mem: "0", node: "1" },
         }),
-      ],
-    });
+      ]),
+    );
     // The job's own partition prices (shared) but with no cores or memory the rate needs one: unpriceable.
     const after = await reread(j.env, j.job.id);
     expect(after.flag_mismatch).toBe(1);
@@ -600,7 +1025,7 @@ describe("a failure partway through a post", () => {
     const res = await routes(
       new Request("http://worker.test/compute/observer", {
         method: "POST",
-        headers: { "Content-Type": "application/json", [OBSERVER_TOKEN_HEADER]: token },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(body),
       }),
       e,
@@ -610,7 +1035,7 @@ describe("a failure partway through a post", () => {
 
   test("a store that fails leaves the run re-postable, and the same token then posts once (MUTATION: leave the run spent)", async () => {
     const run = await mint();
-    const body = { snapshots: [], sacct: [sacctRow(nextSlurm()), sacctRow(nextSlurm())] };
+    const body = daily([acct(nextSlurm()), acct(nextSlurm())]);
     const failed = await postWith(failingBatch(), run.token, body);
     expect(failed.status).toBe(500);
     const status = () =>
@@ -650,10 +1075,12 @@ describe("a failure partway through a post", () => {
         };
       },
     });
-    const res = await postWith(fx.env({ DB: db }), run.token, {
-      snapshots: [],
-      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 2200 })],
-    });
+    // Four cores for 33 minutes is 2.2 SU.
+    const res = await postWith(
+      fx.env({ DB: db }),
+      run.token,
+      daily([acct(j.job.slurm_job_id as string, { elapsed_seconds: 1980 })]),
+    );
     expect(res.status).toBe(200);
     expect(JSON.parse(res.text)).toMatchObject({
       settlementFailed: true,
@@ -670,10 +1097,7 @@ describe("a failure partway through a post", () => {
 describe("rows that match no job", () => {
   test("are stored with no match and listed, with a total", async () => {
     const run = await mint();
-    await post(run.token, {
-      snapshots: [],
-      sacct: [sacctRow("77001"), sacctRow("77002", { state: "FAILED" })],
-    });
+    await post(run.token, daily([acct("77001"), acct("77002", { state: "FAILED" })]));
     const listed = await listUnmatchedSacct(env().DB, 50);
     expect(listed.total).toBe(2);
     expect(listed.rows.map((r) => r.slurm_job_id).sort()).toEqual(["77001", "77002"]);
@@ -685,7 +1109,7 @@ describe("rows that match no job", () => {
   test("the admin list shows them through the route, to an administrator and to no member", async () => {
     await seedComputeUsers(fx.harness.db);
     const run = await mint();
-    await post(run.token, { snapshots: [], sacct: [sacctRow("77003")] });
+    await post(run.token, daily([acct("77003")]));
     const ask = (key: string) =>
       adminApp(
         new Request("http://worker.test/admin/compute/jobs?unmatched=1", {

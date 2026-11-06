@@ -30,8 +30,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { LAUNCHER_FILES } from "../../shared/contract/compute";
+import { LAUNCHER_FILES, type PartitionName, suMilliFor } from "../../shared/contract/compute";
 import { LaunchSpecSchema } from "../../shared/contract/compute-launch";
+import dailyObservation from "../../test/fixtures/compute-observation/daily.v1.json";
 import { runAccessReportCron } from "../src/services/access-attributes";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import { advanceComputeJob } from "../src/services/compute-lifecycle";
@@ -327,60 +328,95 @@ describe("an administrator's pipeline run, to a record anyone can read", () => {
     await runAccessReportCron(workerEnv);
     expect(access.requests).toHaveLength(1);
 
-    // 10. The observer: an administrator mints the token, the observer posts Expanse's figure, within tolerance.
+    // 10. The observer: an administrator mints the token, the observer posts its own document with the
+    // token as a bearer, and the Worker prices the allocation it reports, within tolerance. Slurm's ids
+    // are numbers and the Tapis stand-in's are not, so the job is given the number the document carries.
+    const observed = "424242";
+    await workerEnv.DB.prepare("UPDATE compute_jobs SET slurm_job_id = ?1 WHERE id = ?2")
+      .bind(observed, id)
+      .run();
     const minted = await adminCall("admin", "POST", "/compute/observer-runs");
     expect(minted.status).toBe(201);
-    const expanse = job.charged_milli + 400;
+    const token = minted.body.token as string;
+    const seconds = 1860;
     const posted = await fetch(`${base}/compute/observer`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Compute-Observer-Token": minted.body.token as string,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({
-        snapshots: [{ partition: job.partition, pending: 2, running: 5 }],
-        sacct: [
-          {
-            slurm_job_id: slurm,
-            partition: job.partition,
-            state: "COMPLETED",
-            elapsed_seconds: 1800,
-            alloc_nodes: job.nodes,
-            alloc_cpus: job.nodes * job.cores_per_node,
-            alloc_gpus: 0,
-            alloc_mem_mb: 8000,
-            charged_milli: expanse,
+        ...dailyObservation,
+        partitions: {
+          [job.partition]: {
+            available: "up",
+            nodes: { idle: 2 },
+            jobs: {
+              PENDING: { jobs: 2, nodes: 2, cpus: 8 },
+              RUNNING: { jobs: 5, nodes: 5, cpus: 20 },
+            },
+            pending_reasons: { Priority: 2 },
           },
-        ],
+        },
+        accounting: {
+          ...dailyObservation.accounting,
+          rows_total: 1,
+          rows_included: 1,
+          jobs: [
+            {
+              ...dailyObservation.accounting.jobs[0],
+              job_id: observed,
+              partition: job.partition,
+              state: "COMPLETED",
+              elapsed_seconds: seconds,
+              alloc_tres: {
+                cpu: String(job.nodes * job.cores_per_node),
+                mem: `${job.memory_mb * job.nodes}M`,
+                node: String(job.nodes),
+              },
+            },
+          ],
+        },
       }),
     });
     expect(posted.status).toBe(200);
-    expect(await posted.json()).toMatchObject({ settled: 1, mismatched: 0, unmatched: 0 });
+    expect(await posted.json()).toMatchObject({
+      snapshots: 1,
+      sacctRows: 1,
+      skipped: 0,
+      settled: 1,
+      mismatched: 0,
+      unmatched: 0,
+    });
+    // Expanse's figure is the rate table's for what the document reports (per node), a little over the provisional one.
+    const expanse = suMilliFor(
+      job.partition as PartitionName,
+      { nodes: job.nodes, cores: job.cores_per_node, memory_mb: job.memory_mb, gpus: 0 },
+      seconds,
+    );
+    expect(expanse).toBeGreaterThan(job.charged_milli);
+    expect(expanse - job.charged_milli).toBeLessThanOrEqual(1000);
     const final = await reread(workerEnv, id);
     expect(final.settled_final_at).not.toBeNull();
     expect(final.charged_milli).toBe(expanse);
     expect(final.flag_mismatch).toBe(0);
     expect(await ledgerKinds(id)).toEqual(["hold", "charge", "adjust"]);
-    // One post per token.
-    expect(
-      (
-        await fetch(`${base}/compute/observer`, {
-          method: "POST",
-          headers: { "X-Compute-Observer-Token": minted.body.token as string },
-          body: "{}",
-        })
-      ).status,
-    ).toBe(403);
+    // One post per token, and the old header is not a way in.
+    for (const headers of [
+      { Authorization: `Bearer ${token}` },
+      { "X-Compute-Observer-Token": token },
+    ]) {
+      expect(
+        (await fetch(`${base}/compute/observer`, { method: "POST", headers, body: "{}" })).status,
+      ).toBe(403);
+    }
 
     // 11. The REAL CLI reads the chain by the Slurm id.
-    const record = await cli("admin", ["jobs", "record", slurm]);
+    const record = await cli("admin", ["jobs", "record", observed]);
     expect(record.exitCode).toBe(0);
     expect(record.stdout).toContain(`job ${id}`);
     expect(record.stdout).toContain("state: finished");
     expect(record.stdout).toMatch(/hold\s+held \d+/);
     expect(record.stdout).toMatch(/charge\s/);
     expect(record.stdout).toMatch(/adjust\s/);
-    expect(record.stdout).toContain(`slurm ${slurm}`);
+    expect(record.stdout).toContain(`slurm ${observed}`);
     expect(record.stdout).toContain("provenance: {");
     expect(record.stdout).toContain("manifest: 2 file(s)");
     // And the same by the NEMAR id and the Tapis uuid, with no identity in any.

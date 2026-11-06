@@ -14,7 +14,7 @@
  *                      URL) to the bundle, outputs and complete routes. It stops working the moment the
  *                      job is terminal, whatever the nonce says (the routes read the state).
  *   `compute-observer` (phase A7) the observer's token for ONE run, in the header
- *                      `X-Compute-Observer-Token` as `<run id>.<digest>`. Here the "job id" field of the
+ *                      `Authorization: Bearer <run id>.<digest>`. Here the "job id" field of the
  *                      payload is the RUN id and the nonce is the run's own: the run row, not a clock in
  *                      the token, says whether it is unspent and within its hour.
  *

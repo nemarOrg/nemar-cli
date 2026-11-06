@@ -26,7 +26,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /jobs/:id/cancel": 3,
   "POST /jobs/:id/links": 3,
   // The observer (phase A7, #2012): one handler, no session, authenticated inline by the
-  // `X-Compute-Observer-Token` header (an HMAC over a run id and the run's own nonce, one run, one post),
+  // `Authorization: Bearer` header (an HMAC over a run id and the run's own nonce, one run, one post),
   // with one refusal for every failure.
   "POST /observer": 1,
 };
