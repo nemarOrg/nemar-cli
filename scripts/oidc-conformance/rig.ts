@@ -56,7 +56,7 @@ import {
   OIDC_AUTHORIZE_CONSENT_PATH,
   type OidcAuthorizeAnswer,
 } from "../../shared/contract/oidc-authorize";
-import { authorizationLogLine, carriesChallenge } from "./authz-log";
+import { answerError, authorizationLogLine, carriesChallenge } from "./authz-log";
 import {
   RIG_ACCOUNT_EMAIL,
   RIG_TEXT,
@@ -311,13 +311,6 @@ const ERROR_PAGE_TEXT: Record<string, string> = {
     "NEMAR could not confirm that you saw this request. Start again from the application.",
   unavailable: "NEMAR could not complete this sign-in. Start again from the application.",
 };
-
-/** The error an answer carries, as the run's check names it: a redirect's `error`, or `page:<code>`. */
-function answerError(answer: OidcAuthorizeAnswer): string | null {
-  if (answer.kind === "redirect") return new URL(answer.location).searchParams.get("error");
-  if (answer.kind === "error_page") return `page:${answer.code}`;
-  return null;
-}
 
 /** Render what the check or the consent route answered. */
 function follow(answer: OidcAuthorizeAnswer, request: string): Response {

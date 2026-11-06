@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import {
   ALLOWED_AUTHORIZATION_ERRORS,
+  answerError,
   authorizationLogLine,
   carriesChallenge,
   checkAuthorizationLog,
@@ -211,6 +212,62 @@ describe("the authorization log and its check", () => {
     const log = authorizationLogLine("redirect", "invalid_request", true);
     expect(checkAuthorizationLog(log).violations).toEqual([
       "invalid_request answered a request that carried a code_challenge, so it is not the PKCE deviation",
+    ]);
+  });
+
+  test("a malformed authorization line is a violation, never skipped", () => {
+    const shapes: Record<string, string> = {
+      "an empty value": "[rig] authz kind=redirect error= pkce=no",
+      "a value with a space": "[rig] authz kind=redirect error=a b pkce=no",
+      "a trailing field": "[rig] authz kind=redirect error=invalid_request pkce=no extra=1",
+      "an unknown kind": "[rig] authz kind=somewhere error=none pkce=no",
+      "no challenge field": "[rig] authz kind=redirect error=invalid_request",
+      "an upper-case value": "[rig] authz kind=redirect error=Invalid pkce=no",
+    };
+    for (const [shape, line] of Object.entries(shapes)) {
+      const report = checkAuthorizationLog(`${authorizationLogLine("login", null, true)}\n${line}`);
+      expect({ shape, violations: report.violations }).toEqual({
+        shape,
+        violations: ["unparseable authorization line 2"],
+      });
+    }
+  });
+
+  test("a newline inside a value splits the line, and the first half is a violation", () => {
+    const log = "[rig] authz kind=redirect error=bad\nvalue pkce=no\n";
+    expect(checkAuthorizationLog(log).violations).toContain("unparseable authorization line 1");
+  });
+
+  test("answerError names a well-formed error word and flags every other spelling", () => {
+    const redirect = (query: string) => ({
+      kind: "redirect" as const,
+      location: `https://client.example.org/cb?${query}`,
+    });
+    expect(answerError(redirect("code=abc&state=s&iss=x"))).toBeNull();
+    expect(answerError(redirect("error=invalid_request&state=s"))).toBe("invalid_request");
+    for (const query of [
+      "error=",
+      "error=a%20b",
+      "error=a%0Ab",
+      "error=A",
+      "error=a&error=b",
+      "error=a-b",
+    ]) {
+      expect({ query, error: answerError(redirect(query)) }).toEqual({
+        query,
+        error: "malformed_error",
+      });
+    }
+    expect(answerError({ kind: "redirect", location: "not an address" })).toBe("malformed_error");
+    expect(answerError({ kind: "error_page", code: "invalid_redirect_uri" })).toBe(
+      "page:invalid_redirect_uri",
+    );
+    expect(answerError({ kind: "error_page", code: "Bad Code" })).toBe("malformed_error");
+    expect(answerError({ kind: "login" })).toBeNull();
+    // A malformed error is not in the allowed set, so the check fails the run.
+    const line = authorizationLogLine("redirect", answerError(redirect("error=")), false);
+    expect(checkAuthorizationLog(line).violations).toEqual([
+      "an authorization response (redirect) carried the error malformed_error, which no approved deviation produces",
     ]);
   });
 

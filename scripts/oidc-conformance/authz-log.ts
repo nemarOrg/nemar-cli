@@ -34,6 +34,44 @@ export const ALLOWED_AUTHORIZATION_ERRORS = [
   "page:invalid_redirect_uri",
 ] as const;
 
+/** An error word: lower-case letters and underscores, nothing else. */
+const ERROR_WORD = /^[a-z_]+$/;
+
+/** The answer to an authorization request, as far as the log needs it. */
+export type LoggedAnswer =
+  | { readonly kind: "redirect"; readonly location: string }
+  | { readonly kind: "error_page"; readonly code: string }
+  | { readonly kind: "rule_refused"; readonly location: string }
+  | { readonly kind: "login" | "reauth" | "consent" };
+
+/**
+ * The error a redirect location carries: null when it has no `error` key at all, the word when it has
+ * exactly one and it is {@link ERROR_WORD}, and `malformed_error` for everything else (an empty value, a
+ * value with a space or a newline, a repeated key, a location that is not an address). Only "no key"
+ * reads as no error, so a refusal cannot hide behind an odd spelling.
+ */
+function locationError(location: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(location);
+  } catch {
+    return "malformed_error";
+  }
+  const values = url.searchParams.getAll("error");
+  if (values.length === 0) return null;
+  const only = values[0] as string;
+  return values.length === 1 && ERROR_WORD.test(only) ? only : "malformed_error";
+}
+
+/** The error an answer carries, as the run's check names it: a redirect's `error`, or `page:<code>`. */
+export function answerError(answer: LoggedAnswer): string | null {
+  if (answer.kind === "redirect") return locationError(answer.location);
+  if (answer.kind === "error_page") {
+    return ERROR_WORD.test(answer.code) ? `page:${answer.code}` : "malformed_error";
+  }
+  return null;
+}
+
 export type AuthorizationKind =
   | "redirect"
   | "error_page"
@@ -66,15 +104,22 @@ export interface AuthorizationLogReport {
   violations: string[];
 }
 
-const LINE = /^\[rig\] authz kind=(\S+) error=(\S+) pkce=(yes|no)$/;
+/** The one shape an authorization line may have. A line that names itself `[rig] authz` and is not this is a violation. */
+const LINE =
+  /^\[rig\] authz kind=(redirect|error_page|login|reauth|rule_refused|consent|check_failed) error=([a-z0-9_:]+) pkce=(yes|no)$/;
 
 /** Read the rig's log and report what the check needs. */
 export function checkAuthorizationLog(log: string): AuthorizationLogReport {
   const report: AuthorizationLogReport = { responses: 0, byError: {}, violations: [] };
   const allowed = new Set<string>(ALLOWED_AUTHORIZATION_ERRORS);
-  for (const raw of log.split("\n")) {
-    const match = LINE.exec(raw.trim());
-    if (!match) continue;
+  const lines = log.split("\n");
+  for (const [index, raw] of lines.entries()) {
+    if (!raw.includes("[rig] authz")) continue;
+    const match = LINE.exec(raw);
+    if (!match) {
+      report.violations.push(`unparseable authorization line ${index + 1}`);
+      continue;
+    }
     const [, kind, error, pkce] = match as unknown as [string, string, string, string];
     report.responses += 1;
     report.byError[error] = (report.byError[error] ?? 0) + 1;
