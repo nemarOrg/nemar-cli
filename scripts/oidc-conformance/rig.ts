@@ -22,8 +22,11 @@
  * here and says nothing about the page. The real page is the later slice's run.
  *
  * ENVIRONMENT (all optional except RIG_OUT_DIR):
- *   RIG_OUT_DIR   where the plan configurations are written (they hold throwaway client secrets and are
- *                 never uploaded or logged)
+ *   RIG_OUT_DIR   where the plan configurations are written (they hold the throwaway clients' secrets,
+ *                 are never uploaded or logged, and live outside the artifact paths; the result files
+ *                 the suite exports DO copy the three plan clients' secrets, but they belong to a
+ *                 database that lives in the rig's memory and dies when the job ends, so nothing live
+ *                 is uploaded)
  *   RIG_HOST      the host name the suite reaches the rig by (default rig.example.org)
  *   RIG_PORT      the TLS port (default 9443)
  *   SUITE_ORIGIN  the suite's public origin (default https://localhost.emobix.co.uk:8443)
