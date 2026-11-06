@@ -66,6 +66,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // middleware is the whole gate.
   "POST /compute/jobs/:id/cancel": 1,
   "POST /compute/jobs/:id/advance": 1,
+  // Epic #2005 phase A6 (ADR 0118): NEMAR's own pipelines. Admin-only through the router's middleware;
+  // one handler each.
+  "POST /compute/pipeline/run": 1,
+  "GET /compute/pipeline/status": 1,
 
   // Users / accounts
   "GET /users": 1,
@@ -328,7 +332,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(215);
+    expect(adminRoutes.routes.length).toBe(217);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware
