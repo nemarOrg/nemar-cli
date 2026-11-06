@@ -58,6 +58,12 @@ export interface RetentionResult {
   logsDeleted: number;
   /** Objects deleted from the two private buckets, records and logs and results together. */
   objectsDeleted: number;
+  /**
+   * The class of the first refusal of a delete in the run (never its text), and how many refused jobs are
+   * more than a day past `retention_until`: a lock that should have lapsed and has not, which needs a person.
+   */
+  lockClass: string | null;
+  overdueLocked: number;
   /** Jobs whose prefix was bigger than one run's page bound: left whole and finished by the next run. */
   incomplete: number;
   /** Jobs the bucket refused to delete for (a lock that has not lapsed), left whole and retried tomorrow. */
@@ -79,6 +85,8 @@ const emptyResult = (): RetentionResult => ({
   recordsDeleted: 0,
   logsDeleted: 0,
   objectsDeleted: 0,
+  lockClass: null,
+  overdueLocked: 0,
   incomplete: 0,
   locked: 0,
   late: 0,
@@ -93,7 +101,8 @@ const emptyResult = (): RetentionResult => ({
 // --- Statements ------------------------------------------------------------------------------------
 
 /** Terminal jobs whose records are due: past `retention_until`, not held, in rotation. `?1` the limit. */
-export const RECORDS_DUE_SQL = `SELECT j.id AS id FROM compute_jobs j
+export const RECORDS_DUE_SQL = `SELECT j.id AS id,
+    (j.retention_until < datetime('now', '-1 day')) AS overdue FROM compute_jobs j
   WHERE j.state IN (${TERMINAL_STATES_SQL}) AND j.records_deleted_at IS NULL
     AND j.retention_until IS NOT NULL AND j.retention_until < datetime('now')
     AND NOT ${heldSql("j")}
@@ -183,6 +192,8 @@ export const TRIM_SNAPSHOTS_SQL = `DELETE FROM compute_queue_snapshots
 
 // --- Deleting under a prefix -----------------------------------------------------------------------
 
+const PROGRAMMING_ERRORS = [TypeError, RangeError, ReferenceError, SyntaxError] as const;
+
 /** Pages of objects one call deletes at most, and the objects in a page. */
 export const PREFIX_MAX_PAGES = 20;
 export const PREFIX_PAGE_SIZE = 1000;
@@ -191,6 +202,8 @@ export interface PrefixDeletion {
   deleted: number;
   /** The bucket refused to delete (any throw from `delete`): the rest of the prefix is left for tomorrow. */
   locked: boolean;
+  /** The class of the first throw, when `locked` (the text is never kept). */
+  lockClass?: string;
   /** Nothing is left under the prefix. False after the page bound: the caller must NOT treat the prefix as gone. */
   complete: boolean;
 }
@@ -215,8 +228,11 @@ export async function deletePrefix(
     if (keys.length === 0) return { deleted, locked: false, complete: true };
     try {
       await bucket.delete(keys);
-    } catch {
-      return { deleted, locked: true, complete: false };
+    } catch (err) {
+      // A programming error (a wrong argument, a missing name) is not a refusal of a lock: it is the
+      // sweep's own fault and is reported as a failed stage, not hidden as a lock for a day.
+      if (PROGRAMMING_ERRORS.some((c) => err instanceof c)) throw err;
+      return { deleted, locked: true, complete: false, lockClass: errorClassName(err) };
     }
     deleted += keys.length;
     if (!listed.truncated) return { deleted, locked: false, complete: true };
@@ -250,9 +266,15 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
   const resultsBucket = env.COMPUTE_RESULTS;
   // A job the bucket refused is counted once, whichever stage met the refusal first.
   const lockedJobs = new Set<string>();
-  const locked = (id: string) => {
+  const overdueJobs = new Set<string>();
+  const locked = (id: string, lockClass?: string, overdue = false) => {
     lockedJobs.add(id);
     r.locked = lockedJobs.size;
+    r.lockClass ??= lockClass ?? null;
+    if (overdue) {
+      overdueJobs.add(id);
+      r.overdueLocked = overdueJobs.size;
+    }
   };
 
   const stage = async (word: string, body: () => Promise<void>) => {
@@ -271,15 +293,18 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
       return;
     }
     const due = (
-      await db.prepare(RECORDS_DUE_SQL).bind(RETENTION_JOBS_PER_STAGE).all<{ id: string }>()
+      await db
+        .prepare(RECORDS_DUE_SQL)
+        .bind(RETENTION_JOBS_PER_STAGE)
+        .all<{ id: string; overdue: number }>()
     ).results;
-    for (const { id } of due) {
+    for (const { id, overdue } of due) {
       await db.prepare(STAMP_RETENTION_ATTEMPT_SQL).bind(id).run();
       if (await isHeld(db, id)) continue;
       const a = await deletePrefix(records, `records/${id}/`);
       r.objectsDeleted += a.deleted;
       if (a.locked) {
-        locked(id);
+        locked(id, a.lockClass, overdue === 1);
         continue;
       }
       if (!a.complete) {
@@ -289,7 +314,7 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
       const b = await deletePrefix(records, `logs/${id}/`);
       r.objectsDeleted += b.deleted;
       if (b.locked) {
-        locked(id);
+        locked(id, b.lockClass, overdue === 1);
         continue;
       }
       if (!b.complete) {
@@ -316,7 +341,7 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
       const a = await deletePrefix(records, `logs/${id}/`);
       r.objectsDeleted += a.deleted;
       if (a.locked) {
-        locked(id);
+        locked(id, a.lockClass);
         continue;
       }
       if (!a.complete) {
@@ -423,6 +448,8 @@ export function retentionLogLine(
     `objects=${r.objectsDeleted}`,
     `incomplete=${r.incomplete}`,
     `locked=${r.locked}`,
+    `overdue_locked=${r.overdueLocked}`,
+    ...(r.lockClass === null ? [] : [`lock_class=${r.lockClass}`]),
     `late=${r.late}`,
     `pools_anonymised=${r.poolsAnonymised}`,
     `entries_anonymised=${r.entriesAnonymised}`,
@@ -431,5 +458,5 @@ export function retentionLogLine(
     `errors=${r.errors.length > 0 ? [...new Set(r.errors)].join(",") : "none"}`,
     ...(r.errorClass === null ? [] : [`class=${r.errorClass}`]),
   ].join(" ");
-  return { level: r.errors.length > 0 ? "error" : "info", line };
+  return { level: r.errors.length > 0 || r.overdueLocked > 0 ? "error" : "info", line };
 }

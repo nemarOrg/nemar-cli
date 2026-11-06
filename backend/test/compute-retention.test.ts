@@ -505,6 +505,51 @@ describe("a bucket lock", () => {
     expect(jobRow(late.id).results_reconciled_at).not.toBeNull();
   });
 
+  test("a programming error from delete is a failed stage, not a lock (MUTATION: catch everything as a lock)", async () => {
+    const job = await oldJob();
+    const broken = new Proxy(fx.harness.records, {
+      get(target, prop) {
+        if (prop === "delete") {
+          return async () => {
+            throw new TypeError("keys.map is not a function");
+          };
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await runComputeRetentionSweep(env({ COMPUTE_RECORDS: broken }));
+    expect(result?.locked).toBe(0);
+    expect(result?.errors).toContain("records_failed");
+    expect(result?.errorClass).toBe("TypeError");
+    expect(JSON.stringify(result)).not.toContain("keys.map");
+    expect(jobRow(job.id).account_id).toBe(job.accountId);
+  });
+
+  test("the class of the first refusal is kept, and a job more than a day past retention that is still refused logs at error level", async () => {
+    const overdue = await oldJob({ endedDaysAgo: 100, retentionDaysFromNow: -3 });
+    const bound = env({
+      COMPUTE_RECORDS: lockedBucket(fx.harness.records, (k) => k.includes(overdue.id), "locked"),
+    });
+    const result = await runComputeRetentionSweep(bound);
+    expect(result).toMatchObject({ locked: 1, overdueLocked: 1, lockClass: "Error" });
+    const log = result ? retentionLogLine(result) : null;
+    expect(log?.level).toBe("error");
+    expect(log?.line).toContain("overdue_locked=1");
+    expect(log?.line).toContain("lock_class=Error");
+    expect(log?.line).not.toContain("locked,");
+  });
+
+  test("a refusal inside its first day past retention is a lock that is expected to lapse: info, not an alarm", async () => {
+    const fresh = await oldJob({ endedDaysAgo: 100, retentionDaysFromNow: -0.5 });
+    const bound = env({
+      COMPUTE_RECORDS: lockedBucket(fx.harness.records, (k) => k.includes(fresh.id), "locked"),
+    });
+    const result = await runComputeRetentionSweep(bound);
+    expect(result).toMatchObject({ locked: 1, overdueLocked: 0 });
+    expect(result && retentionLogLine(result)?.level).toBe("info");
+  });
+
   test("deletePrefix reports the refusal and the count, and deletes nothing it was not asked to", async () => {
     await fx.harness.records.put("p/one", "1");
     await fx.harness.records.put("p/two", "2");
@@ -513,7 +558,7 @@ describe("a bucket lock", () => {
       lockedBucket(fx.harness.records, (k) => k === "p/two", "locked"),
       "p/",
     );
-    expect(refused).toEqual({ deleted: 0, locked: true, complete: false });
+    expect(refused).toEqual({ deleted: 0, locked: true, complete: false, lockClass: "Error" });
     expect(await deletePrefix(fx.harness.records, "p/")).toEqual({
       deleted: 2,
       locked: false,
