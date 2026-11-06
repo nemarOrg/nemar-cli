@@ -294,6 +294,25 @@ describe("a job that skipped the reservation", () => {
     expect(row(uuid)?.state).toBe("running");
   });
 
+  test("a row another run closed first is not counted as finished (MUTATION: count every close)", async () => {
+    const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);
+    await sweepTenantJobs(env(), "live");
+    const id = row(uuid)?.id as string;
+    expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+    const hook = hookedDb(env().DB);
+    // Another writer closes the row after this run read it and before it writes.
+    hook.armAfterFirst("FROM compute_policy", () => {
+      fx.harness.db.run(
+        "UPDATE compute_jobs SET state = 'cancelled', ended_at = datetime('now'), settled_provisional_at = datetime('now') WHERE id = ?",
+        [id],
+      );
+    });
+    const result = await sweepTenantJobs(env({ DB: hook.db }), "live");
+    expect(result?.finished).toBe(0);
+    expect(total("compute_ledger WHERE job_id IS NOT NULL")).toBe(0);
+  });
+
   test("whose Tapis record is gone is closed after the sweep reads it: flagged, charged nothing", async () => {
     const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);

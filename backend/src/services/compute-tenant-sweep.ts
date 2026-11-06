@@ -480,8 +480,7 @@ async function followRow(
     const age = nowMs - (parseMs(job.created_at) ?? nowMs);
     const gone = err instanceof TapisError && err.kind === "not_found";
     if (gone || age > TENANT_GIVE_UP_DAYS * 86_400_000) {
-      await closeRow(env, job.id, job.state, "cancelled", null, null, true);
-      r.gaveUp++;
+      if (await closeRow(env, job.id, job.state, "cancelled", null, null, true)) r.gaveUp++;
       return;
     }
     throw err;
@@ -495,7 +494,7 @@ async function followRow(
   const milli = settlement.kind === "charge" ? settlement.milli : 0;
   const mismatch = settlement.kind === "charge" && settlement.fallback;
   const fields = rowFieldsOf(rec);
-  await closeRow(
+  const closed = await closeRow(
     env,
     job.id,
     job.state,
@@ -513,7 +512,7 @@ async function followRow(
     },
     false,
   );
-  r.finished++;
+  if (closed) r.finished++;
 }
 
 interface CloseFacts {
@@ -527,7 +526,7 @@ interface CloseFacts {
   mismatch: boolean;
 }
 
-/** The terminal write, the tenant-pool charge and the stamp, one batch. */
+/** The terminal write, the tenant-pool charge and the stamp, one batch. True when this call moved the row. */
 async function closeRow(
   env: Bindings,
   id: string,
@@ -536,7 +535,7 @@ async function closeRow(
   failureCode: string | null,
   facts: CloseFacts | null,
   mismatch: boolean,
-): Promise<void> {
+): Promise<boolean> {
   const db = env.DB;
   const policy = (await getPolicy(db)).policy;
   const pool = facts?.pool ?? "cpu";
@@ -553,7 +552,7 @@ async function closeRow(
           { sql: UNRESERVED_GATE_SQL, binds: [id, to] },
         )
       : [];
-  await db.batch([
+  const results = await db.batch([
     db
       .prepare(TERMINAL_TRANSITION_SQL)
       .bind(
@@ -577,6 +576,8 @@ async function closeRow(
     ...charge,
     db.prepare(STAMP_UNRESERVED_SQL).bind(id, to),
   ]);
+  // True only when THIS call moved the row: a no-op transition (another run closed it) is not counted.
+  return (results[0]?.meta?.changes ?? 0) > 0;
 }
 
 function failMissing(): never {
