@@ -629,10 +629,12 @@ jobs:
           log="$RUNNER_TEMP/scrub-shard.log"
 
           # pipefail keeps bun's own exit status: a failing test fails this step.
-          # --parallel=$(nproc): one worker process per core. These suites use ephemeral ports and
-          # per-process temp directories, so workers do not share state. Local shard 1/5, 4 workers:
-          # 90 s, 653 pass, 0 fail.
-          bun run test:scrub --shard="$shard/$SHARD_TOTAL" --timings "$timings" --update-timings --parallel="$(nproc)" 2>&1 | tee "$log"
+          # --parallel=2, not one worker per core. These suites use ephemeral ports and per-process
+          # temp directories, so workers do not share state, but they spawn the real aws CLI, whose
+          # startup is slow under load: with 4 workers on the 4-vCPU runner, listing.test.ts's
+          # 4 s per-call limit was missed on the first dev push (passed in the PR run). Local shard
+          # 1/5: 256 s serial, 90 s at 4 workers, 653 pass, 0 fail.
+          bun run test:scrub --shard="$shard/$SHARD_TOTAL" --timings "$timings" --update-timings --parallel=2 2>&1 | tee "$log"
 
           esc=$(printf '\033')
           plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
