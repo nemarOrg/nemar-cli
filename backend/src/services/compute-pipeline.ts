@@ -121,6 +121,7 @@ export type PipelineRefusal =
   | "too_many_files"
   | "recipe_not_automatic"
   | "recipe_placeholder"
+  | "run_failed"
   | "create_failed"
   | CreateJobRefusal;
 
@@ -534,6 +535,9 @@ interface JobEnd {
   failure_code: string | null;
 }
 
+const TOUCH_STAMP_SQL = `UPDATE compute_pipeline_stamps SET updated_at = datetime('now')
+ WHERE id = ?1 AND state = 'dispatched'`;
+
 const JOB_END_SQL = "SELECT id, state, failure_code FROM compute_jobs WHERE id = ?1";
 
 /** A job's failure word, or `job_failed`; the shape is checked because the stamp's column is. */
@@ -550,7 +554,7 @@ const RECORD_READ_MAX_BYTES = 512 * 1024;
 type RecordRead =
   | { kind: "ok"; version: string; engine: string }
   | { kind: "failed"; word: "outputs_missing" | "record_unreadable" | "record_mismatch" }
-  | { kind: "later" };
+  | { kind: "later"; reason: "results_unbound" | "read_failed" };
 
 /**
  * Read the recipe's own record of a finished job, and check the files a run must have written. A results
@@ -563,7 +567,7 @@ async function readFinishedRecord(
   jobId: string,
 ): Promise<RecordRead> {
   const bucket = env.COMPUTE_RESULTS;
-  if (!bucket) return { kind: "later" };
+  if (!bucket) return { kind: "later", reason: "results_unbound" };
   const wanted = recipeRequiredOutputs(recipe);
   try {
     const table = await bucket.head(resultsOutputKey(jobId, wanted.table));
@@ -583,7 +587,7 @@ async function readFinishedRecord(
     if (record.recipe !== recipe.name) return { kind: "failed", word: "record_mismatch" };
     return { kind: "ok", version: record.version, engine: record.engine };
   } catch {
-    return { kind: "later" };
+    return { kind: "later", reason: "read_failed" };
   }
 }
 
@@ -602,14 +606,19 @@ async function ageMinutes(db: D1Database, timestamp: string): Promise<number> {
  * the job). At most {@link SYNC_STAMPS_PER_CALL} stamps a call, oldest first, each in its own try so one
  * bad row cannot hold the rest. Runs before every dispatch and every status read.
  */
-export async function syncPipelineStamps(env: Bindings): Promise<SyncResult> {
+export async function syncPipelineStamps(
+  env: Bindings,
+  limit: number = SYNC_STAMPS_PER_CALL,
+): Promise<SyncResult> {
   const db = env.DB;
   const result: SyncResult = { examined: 0, succeeded: 0, failed: 0, linked: 0 };
-  const open = (await db.prepare(OPEN_STAMPS_SQL).bind(SYNC_STAMPS_PER_CALL).all<StampRow>())
-    .results;
+  const open = (await db.prepare(OPEN_STAMPS_SQL).bind(limit).all<StampRow>()).results;
   for (const stamp of open) {
     result.examined++;
     try {
+      // Every stamp visited goes to the back of the line (the open list is ordered by `updated_at`), so
+      // a stamp that cannot move on cannot starve the ones behind it. The state is not touched.
+      await db.prepare(TOUCH_STAMP_SQL).bind(stamp.id).run();
       let jobId = stamp.job_id;
       if (jobId === null) {
         const account = await pipelinesAccountId(db);
@@ -650,7 +659,13 @@ export async function syncPipelineStamps(env: Bindings): Promise<SyncResult> {
         continue;
       }
       const read = await readFinishedRecord(env, recipe, job.id);
-      if (read.kind === "later") continue;
+      if (read.kind === "later") {
+        // Nothing is decided from what could not be read; say so, with ids and the reason only.
+        console.error(
+          `[compute-pipeline] sync_later stamp=${stamp.id} dataset=${stamp.dataset_id} reason=${read.reason}`,
+        );
+        continue;
+      }
       if (read.kind === "failed") {
         await finishStamp(db, stamp.id, "failed", read.word);
         result.failed++;
@@ -975,21 +990,30 @@ export async function dispatchEligible(
     return run;
   }
   await syncPipelineStamps(env);
-  for (const candidate of await pipelineCandidates(env.DB, recipe, input.limit, input.after)) {
-    if (run.dispatched >= input.limit) break;
-    const result = await dispatchPipelineJob(env, {
-      recipe: recipe.name,
-      datasetId: candidate.dataset_id,
-      version: candidate.tag,
-      actor: input.actor,
-    });
-    run.results.push(result);
-    if (result.ok) {
-      run.dispatched++;
-    } else if (STOPS_A_RUN.has(result.code)) {
-      run.stoppedBy = result.code;
-      break;
+  try {
+    for (const candidate of await pipelineCandidates(env.DB, recipe, input.limit, input.after)) {
+      if (run.dispatched >= input.limit) break;
+      const result = await dispatchPipelineJob(env, {
+        recipe: recipe.name,
+        datasetId: candidate.dataset_id,
+        version: candidate.tag,
+        actor: input.actor,
+      });
+      run.results.push(result);
+      if (result.ok) {
+        run.dispatched++;
+      } else if (STOPS_A_RUN.has(result.code)) {
+        run.stoppedBy = result.code;
+        break;
+      }
     }
+  } catch (err) {
+    // What was dispatched before the throw is real (jobs exist, holds are taken): the run reports it
+    // instead of losing the count to the exception, and says it was cut short.
+    console.error(
+      `[compute-pipeline] run_failed recipe=${recipe.name} dispatched=${run.dispatched} error=${err instanceof Error ? err.name : "unknown"}`,
+    );
+    run.stoppedBy = "run_failed";
   }
   return run;
 }

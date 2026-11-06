@@ -17,7 +17,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_RECIPES, findRecipe } from "../../shared/compute-recipes";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
-import { dispatchPipelineJob } from "../src/services/compute-pipeline";
+import { CLAIM_STAMP_SQL, dispatchPipelineJob } from "../src/services/compute-pipeline";
 import {
   CRON_DISPATCH_PER_TICK,
   type PipelineCronResult,
@@ -34,6 +34,7 @@ import {
   seedPipelinesAccount,
 } from "./helpers/compute-pipeline-fixture";
 import { setPolicy } from "./helpers/compute-seed";
+import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
 
@@ -309,6 +310,48 @@ describe("a refusal", () => {
     expect(result).toMatchObject({ outcome: "ran", dispatched: 0, errors: [] });
     expect(result?.recipes[0]).toMatchObject({ stopped_by: "invalid_spec" });
     expect(await stampCount(env)).toBe(0);
+  });
+
+  test("a throw in the middle of a run keeps the count of what was dispatched, ends the run, and says so", async () => {
+    const env = await world(ids(3));
+    let claims = 0;
+    const db = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql === CLAIM_STAMP_SQL && ++claims === 2)
+              throw new Error("injected: claim failed");
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    let result: PipelineCronResult | null = null;
+    const lines = await logged(async () => {
+      result = await runComputePipelineDispatchCron({ ...env, DB: db });
+    });
+    const got = result as unknown as PipelineCronResult;
+    expect(got).toMatchObject({ dispatched: 1, errors: ["run_failed"] });
+    expect(got.recipes[0]).toMatchObject({ dispatched: 1, stopped_by: "run_failed" });
+    expect(lines.join("\n")).toContain("run_failed recipe=nemar-floor dispatched=1");
+    expect(pipelineDispatchLogLine(got)?.level).toBe("error");
+    // The claim that threw never wrote, and the third dataset was never asked.
+    expect(await stampCount(env)).toBe(1);
+  });
+
+  test("a failure outside a run (an unreadable policy) logs the partial count too", async () => {
+    const env = await world(ids(1));
+    await env.DB.prepare(
+      "INSERT INTO compute_policy (policy_json, set_by, note) VALUES ('{\"nope\":1}', ?1, 'bad')",
+    )
+      .bind(fx.ownerId)
+      .run();
+    const lines = await logged(async () => {
+      await runComputePipelineDispatchCron(env);
+    });
+    expect(lines.join("\n")).toContain("failed dispatched=0 error=ComputePolicyUnreadable");
   });
 
   test("no service account ends the run before any stamp is claimed", async () => {

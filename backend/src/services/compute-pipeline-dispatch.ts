@@ -193,7 +193,10 @@ export async function runComputePipelineDispatchCron(
       result.dispatched += run.dispatched;
       dailyLeft -= run.dispatched;
       tickLeft -= run.dispatched;
-      if (run.stoppedBy !== null) {
+      if (run.stoppedBy === "run_failed") {
+        result.errors.push("run_failed");
+        ended = true;
+      } else if (run.stoppedBy !== null) {
         if (ENDS_THE_RUN.has(run.stoppedBy)) ended = true;
         else refusedPools.add(pool);
       }
@@ -201,7 +204,7 @@ export async function runComputePipelineDispatchCron(
   } catch (err) {
     result.errors.push(err instanceof ComputePolicyUnreadable ? "policy_unreadable" : "run_failed");
     console.error(
-      `[compute-pipeline-dispatch] failed error=${err instanceof Error ? err.name : typeof err}`,
+      `[compute-pipeline-dispatch] failed dispatched=${result.dispatched} error=${err instanceof Error ? err.name : typeof err}`,
     );
   }
   return result;

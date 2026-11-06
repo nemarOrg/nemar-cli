@@ -809,6 +809,58 @@ describe("the stamp follows its job to the end", () => {
     });
   });
 
+  test("a stuck stamp does not starve a newer one: every visited stamp goes to the back of the line", async () => {
+    const { env, jobId, stampId } = await dispatched();
+    await finishAtTapis(fx, env, jobId, { outputs: floorOutputs() });
+    await seedEegDataset(env, "nm000105");
+    const second = await run(env, { datasetId: "nm000105" });
+    if (!second.ok) throw new Error("not dispatched");
+    const uuid = (await reread(env, second.jobId)).tapis_uuid as string;
+    await drive(fx, env, second.jobId, uuid, "FAILED", "JOB_LAUNCH_FAILURE");
+    // The older stamp is stuck (its results cannot be read); the newer one is ready to end.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', '-2 hours') WHERE id = ?1",
+    )
+      .bind(stampId)
+      .run();
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', '-1 hours') WHERE id = ?1",
+    )
+      .bind(second.stampId)
+      .run();
+    const noBucket = fx.env({ COMPUTE_RESULTS: undefined });
+    await syncPipelineStamps(noBucket, 1);
+    expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
+    expect((await getStamp(env.DB, second.stampId))?.state).toBe("dispatched");
+    await syncPipelineStamps(noBucket, 1);
+    expect((await getStamp(env.DB, second.stampId))?.state).toBe("failed");
+    expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
+  });
+
+  test("every outcome that leaves a stamp open for later writes a log line with ids and a reason, and no secret", async () => {
+    const { env, jobId, stampId } = await dispatched();
+    await finishAtTapis(fx, env, jobId, { outputs: floorOutputs() });
+    const unbound = await logged(async () => {
+      await syncPipelineStamps(fx.env({ COMPUTE_RESULTS: undefined }));
+    });
+    expect(unbound).toEqual([
+      `[compute-pipeline] sync_later stamp=${stampId} dataset=nm000104 reason=results_unbound`,
+    ]);
+    // A bucket whose read throws.
+    const throwing = {
+      head: async () => {
+        throw new Error("injected: R2 unavailable");
+      },
+    } as unknown as R2Bucket;
+    const failing = await logged(async () => {
+      await syncPipelineStamps(fx.env({ COMPUTE_RESULTS: throwing }));
+    });
+    expect(failing).toEqual([
+      `[compute-pipeline] sync_later stamp=${stampId} dataset=nm000104 reason=read_failed`,
+    ]);
+    expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
+  });
+
   test("a claim never followed by a job is failed after the grace period, and not before", async () => {
     const { env } = await world();
     await env.DB.prepare(
