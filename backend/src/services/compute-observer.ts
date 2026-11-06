@@ -147,6 +147,10 @@ export const RUN_BY_ID_SQL =
 export const CLAIM_RUN_SQL = `UPDATE compute_observer_runs SET status = 'ingested'
   WHERE id = ?1 AND status = 'issued' AND expires_at > datetime('now')`;
 
+/** Give back a run whose store failed: `?1` the run. Only a run that was spent, and only within its hour. */
+export const REOPEN_RUN_SQL = `UPDATE compute_observer_runs SET status = 'issued'
+  WHERE id = ?1 AND status = 'ingested' AND expires_at > datetime('now')`;
+
 /** Match stored rows to the jobs that carry their Slurm id. */
 export const MATCH_ROWS_SQL = `UPDATE compute_sacct_rows SET matched_job_id =
     (SELECT j.id FROM compute_jobs j WHERE j.slurm_job_id = compute_sacct_rows.slurm_job_id LIMIT 1)
@@ -258,6 +262,8 @@ export interface IngestResult {
   settled: number;
   mismatched: number;
   unmatched: number;
+  /** The rows are stored but the settlement failed; the daily sweep settles them. */
+  settlementFailed?: true;
 }
 
 /**
@@ -323,11 +329,33 @@ export async function ingestObserverPost(
       ),
     );
   }
-  for (let i = 0; i < statements.length; i += STATEMENTS_PER_BATCH) {
-    await env.DB.batch(statements.slice(i, i + STATEMENTS_PER_BATCH));
+  try {
+    for (let i = 0; i < statements.length; i += STATEMENTS_PER_BATCH) {
+      await env.DB.batch(statements.slice(i, i + STATEMENTS_PER_BATCH));
+    }
+  } catch (err) {
+    // The run was spent before anything was stored; a store that failed partway must not leave a spent
+    // token and half a post. The rows are idempotent (an upsert on the Slurm id, the snapshots ignore a
+    // repeat), so the same token may post again. If even this fails, the run stays spent and an
+    // administrator mints another.
+    await env.DB.prepare(REOPEN_RUN_SQL)
+      .bind(runId)
+      .run()
+      .catch(() => undefined);
+    throw err;
   }
 
-  const settled = await settleObservedRows(env);
+  // The rows are stored, so the post stands; a settlement that fails is the daily sweep's to do again.
+  let settled: SettlePassResult = { matched: 0, settled: 0, mismatched: 0 };
+  let settlementFailed = false;
+  try {
+    settled = await settleObservedRows(env);
+  } catch (err) {
+    settlementFailed = true;
+    console.error(
+      `[compute-observer] settlement_failed class=${err instanceof Error ? err.name : typeof err}`,
+    );
+  }
   const unmatched = await env.DB.prepare(
     "SELECT COUNT(*) AS n FROM compute_sacct_rows WHERE run_id = ?1 AND matched_job_id IS NULL",
   )
@@ -340,6 +368,7 @@ export async function ingestObserverPost(
     settled: settled.settled,
     mismatched: settled.mismatched,
     unmatched: unmatched?.n ?? 0,
+    ...(settlementFailed ? { settlementFailed: true } : {}),
   };
 }
 

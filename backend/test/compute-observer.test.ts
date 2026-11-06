@@ -571,6 +571,102 @@ describe("final settlement", () => {
   });
 });
 
+describe("a failure partway through a post", () => {
+  /** The database with its `batch` failing once (a store that dies after the run was spent). */
+  function failingBatch(): Bindings {
+    const real = env().DB;
+    let failed = false;
+    const db = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (statements: unknown[]) => {
+            if (!failed) {
+              failed = true;
+              throw new Error("D1 went away");
+            }
+            return (target as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(
+              statements,
+            );
+          };
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return fx.env({ DB: db });
+  }
+
+  const postWith = async (e: Bindings, token: string, body: unknown) => {
+    const res = await routes(
+      new Request("http://worker.test/compute/observer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", [OBSERVER_TOKEN_HEADER]: token },
+        body: JSON.stringify(body),
+      }),
+      e,
+    );
+    return { status: res.status, text: await res.text() };
+  };
+
+  test("a store that fails leaves the run re-postable, and the same token then posts once (MUTATION: leave the run spent)", async () => {
+    const run = await mint();
+    const body = { snapshots: [], sacct: [sacctRow(nextSlurm()), sacctRow(nextSlurm())] };
+    const failed = await postWith(failingBatch(), run.token, body);
+    expect(failed.status).toBe(500);
+    const status = () =>
+      (
+        fx.harness.db
+          .query("SELECT status FROM compute_observer_runs WHERE id = ?")
+          .get(run.runId) as { status: string }
+      ).status;
+    expect(status()).toBe("issued");
+    expect((await postWith(env(), run.token, body)).status).toBe(200);
+    expect(status()).toBe("ingested");
+    expect((await counts()).rows).toBe(2);
+    // And it is spent now.
+    expect((await postWith(env(), run.token, body)).status).toBe(403);
+  });
+
+  test("a settlement that fails after the rows are stored does not fail the post; the daily pass settles them", async () => {
+    const j = await endedJob(30);
+    const run = await mint();
+    const real = env().DB;
+    const db = new Proxy(real, {
+      get(target, prop) {
+        if (prop !== "prepare") {
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          if (!sql.includes("FROM compute_sacct_rows s JOIN compute_jobs j"))
+            return target.prepare(sql);
+          const broken: Record<string, unknown> = {
+            bind: () => broken,
+            all: async () => {
+              throw new Error("settlement store down");
+            },
+          };
+          return broken;
+        };
+      },
+    });
+    const res = await postWith(fx.env({ DB: db }), run.token, {
+      snapshots: [],
+      sacct: [sacctRow(j.job.slurm_job_id as string, { charged_milli: 2200 })],
+    });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.text)).toMatchObject({
+      settlementFailed: true,
+      sacctRows: 1,
+      settled: 0,
+    });
+    expect(res.text).not.toContain("store down");
+    expect((await counts()).rows).toBe(1);
+    expect((await reread(j.env, j.job.id)).settled_final_at).toBeNull();
+    expect((await settleObservedRows(j.env)).settled).toBe(1);
+  });
+});
+
 describe("rows that match no job", () => {
   test("are stored with no match and listed, with a total", async () => {
     const run = await mint();
