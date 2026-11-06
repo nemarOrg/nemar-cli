@@ -26,7 +26,10 @@
  *  - the loser of a manual merge keeps the merge as the reason when the owner ends it first, and records
  *    the revocation when the order is reversed.
  *
- * CI TIER: integration, like `admin-oidc-cli.test.ts`.
+ * CI TIER: unit-pure. It holds none of the markers that route a file to the integration tier, and it needs
+ * none of what that tier is for: the Worker, the partner stand-in and the library's calls all stay on
+ * loopback addresses (the stand-in makes its own throwaway certificate with `openssl`), and every test
+ * finishes well inside the default five seconds.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
