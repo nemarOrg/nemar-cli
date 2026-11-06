@@ -25,11 +25,12 @@ runs:
             # A fresh `apt-get update` first, because a cached git-annex install runs none.
             setsid bash -c '
               for attempt in 1 2 3 4 5; do
-                limit=60; [ "$attempt" -eq 5 ] && limit=1800
-                if sudo timeout "$limit" apt-get update && sudo timeout "$limit" apt-get install -y language-pack-de-base; then
+                limit=60; [ "$attempt" -eq 5 ] && limit=600
+                if sudo timeout "$limit" apt-get -o DPkg::Lock::Timeout=60 update && sudo timeout "$limit" apt-get -o DPkg::Lock::Timeout=60 install -y language-pack-de-base; then
                   echo ok > "$0"; exit 0
                 fi
                 echo "apt attempt $attempt failed or timed out" >&2
+                sleep 5
               done
               echo failed > "$0"
             ' "$status" > "$RUNNER_TEMP/german-locale.log" 2>&1 < /dev/null &
@@ -37,7 +38,7 @@ runs:
             ;;
           wait)
             # Bounded, so a lost background process fails the job instead of hanging it.
-            for _ in $(seq 1 2400); do
+            for _ in $(seq 1 900); do
               [ -f "$status" ] && break
               sleep 1
             done

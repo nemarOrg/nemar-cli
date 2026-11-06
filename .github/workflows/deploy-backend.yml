@@ -12,6 +12,7 @@ on:
       - 'shared/**'
       - 'validator-version.json'
       - '.github/workflows/deploy-backend.yml'
+      - '.github/actions/**'
   # The dev worker: called by auto-bump-dev.yml, ONCE per push to dev, after it has
   # pushed the version bump, with the commit to deploy (the bump). Until 2026-10, a
   # push to dev deployed itself here, so a merge touching backend/ or shared/
@@ -30,6 +31,8 @@ on:
         type: string
         required: true
   # By hand, to redeploy dev: gh workflow run deploy-backend.yml --ref dev
+  # (a `sha` older than .github/actions/ fails the gate: the checkout at that sha has no composite
+  # actions, so redeploy an older commit from a branch that carries them).
   # [-f sha=<commit on dev>]. A call or dispatch from any other ref deploys nothing
   # (see detect-environment), so neither adds a way to reach production.
   workflow_dispatch:
@@ -169,7 +172,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts,
     # test/helpers/in-german.ts). This job installs git-annex ("Install git-annex"), the German
-    # locale ("Install the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
+    # locale ("Start/Wait for the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
     # comes with the runner image; "Tool versions" names each before the tests.
     env:
       NEMAR_REQUIRE_SCRUB_TOOLS: "1"

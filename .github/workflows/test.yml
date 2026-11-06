@@ -240,6 +240,9 @@ jobs:
             workflows:
               - '.github/workflows/**'
               - '.github/dataset-workflows/**'
+              # The composite actions every test job calls (git-annex, German locale). Without
+              # this a PR that edits only an action would skip every job and merge unverified.
+              - '.github/actions/**'
             # Zarr conversion engine (epic #1108 Phase 1 / #1109). Repatriated
             # from nemarDatasets/.github, where test-generate-zarr.yml used to
             # run these; that workflow is retired and this filter replaces it.
@@ -576,17 +579,8 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
-      # git-annex comes from the Ubuntu mirror, which is sometimes slow for this one package for
-      # minutes at a time: in two runs, 3 of 14 shards spent 5 to 7 minutes on a 16.6 MB download
-      # at 40 to 60 kB/s, and a retry hit the same stall. With five runners that stall is still likely
-      # in any one run and sets its wall time, so the three packages (the other dependencies are
-      # on the runner image already) are cached and installed from the cache when it is there.
-      # A cache is readable by the ref that wrote it and the refs it was cut from, so the first
-      # run on a new branch still uses the mirror. On a miss, or when the cached packages do not
-      # install, they come from the mirror: downloaded first with a limit per attempt so a stall
-      # is retried (a retry resumes the partial file), and the last attempt has none, so a slow
-      # mirror still ends in an install and not a failure. The download-only step also leaves the
-      # .deb files this job caches for the next run.
+      # git-annex comes from cached packages when the cache has them, else from the mirror with a
+      # bounded retry: see .github/actions/install-git-annex/action.yml.
       - name: Install git-annex
         uses: ./.github/actions/install-git-annex
 
@@ -841,7 +835,7 @@ jobs:
     if: needs.changes.outputs.unit_pure_due == 'true'
     # A missing tool fails instead of skipping (test/scrub/helpers/require-tools.ts,
     # test/helpers/in-german.ts). This job installs git-annex ("Install git-annex"), the German
-    # locale ("Install the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
+    # locale ("Start/Wait for the German locale"), Python and uv ("Setup Python", "Setup uv"); the aws CLI
     # comes with the runner image; "Tool versions" names each before a suite runs.
     env:
       NEMAR_REQUIRE_SCRUB_TOOLS: "1"

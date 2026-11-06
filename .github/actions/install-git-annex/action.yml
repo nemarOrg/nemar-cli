@@ -29,17 +29,18 @@ runs:
         fi
         echo "no usable cached packages; installing from the mirror"
         # The first four attempts are cut off after a minute, because a healthy mirror answers in
-        # seconds and a stalled one does not recover by waiting; the last may take half an hour.
+        # seconds and a stalled one does not recover by waiting; the last may take ten minutes, inside the shortest job limit.
         for attempt in 1 2 3 4 5; do
           limit=60
-          [ "$attempt" -eq 5 ] && limit=1800
-          if sudo timeout "$limit" apt-get update \
-            && sudo timeout "$limit" apt-get install -y --download-only git-annex; then
+          [ "$attempt" -eq 5 ] && limit=600
+          if sudo timeout "$limit" apt-get -o DPkg::Lock::Timeout=60 update \
+            && sudo timeout "$limit" apt-get -o DPkg::Lock::Timeout=60 install -y --download-only git-annex; then
             break
           fi
           echo "::warning::apt attempt $attempt failed or timed out"
+          sleep 5
         done
-        sudo apt-get install -y git-annex
+        sudo apt-get -o DPkg::Lock::Timeout=60 install -y git-annex
         mkdir -p "$HOME/annex-debs"
         # The cache is an optimization. A package the runner image already carries is not in
         # apt's cache, and its missing file must not fail a job whose install just succeeded.
