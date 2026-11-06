@@ -305,6 +305,30 @@ describe("a job that skipped the reservation", () => {
   });
 });
 
+describe("a cancel that fails", () => {
+  const cancelLines = async (status: number) => {
+    await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", status, 1);
+    return logged(async () => {
+      await sweepTenantJobs(env(), "live");
+    });
+  };
+
+  test("a 400 and a 403 are failures, logged, not `over` (MUTATION: treat every `rejected` as over)", async () => {
+    expect((await cancelLines(400)).some((l) => l.includes("cancel_failed kind=rejected"))).toBe(
+      true,
+    );
+    await fx.reset();
+    expect(
+      (await cancelLines(403)).some((l) => l.includes("cancel_failed kind=unauthorized")),
+    ).toBe(true);
+  });
+
+  test("only a 409 means the job is over, and says nothing", async () => {
+    expect((await cancelLines(409)).some((l) => l.includes("cancel_failed"))).toBe(false);
+  });
+});
+
 describe("a job that NEMAR made", () => {
   test("tagged for a row with no Tapis job yet is bound to it, not cancelled, and not indexed (the submit race)", async () => {
     const made = await makeJob(fx);

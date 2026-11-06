@@ -346,9 +346,10 @@ async function cancelAtTapis(ctx: TapisContext, uuid: string, r: TenantSweepResu
     await cancelJob(ctx, uuid);
     r.cancelled++;
   } catch (err) {
-    // A 409 means it is over; anything else is asked again by the next run (the job is still listed or
-    // its row is followed). Never a message.
-    if (!(err instanceof TapisError && err.kind === "rejected")) {
+    // Only a 409 means it is over. Any other refusal (a 400, a 403) or an unclear answer is a failure,
+    // logged, and asked again by the next run (the job is still listed or its row is followed). Never
+    // a message.
+    if (!(err instanceof TapisError && err.status === 409)) {
       console.warn(`[compute-tenant] cancel_failed kind=${tapisWord(err)}`);
     }
   }
