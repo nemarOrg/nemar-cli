@@ -302,6 +302,15 @@ describe("a refusal", () => {
     expect(await stampCount(env)).toBe(0);
   });
 
+  test("a specification that cannot be built stops the run with a word, claims nothing, and does not abort the tick", async () => {
+    const long = `ghcr.io/${"a".repeat(600)}/nemar-python@sha256:${"b".repeat(64)}`;
+    const env = await world(ids(3), { COMPUTE_RUNTIME_IMAGE: long });
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ outcome: "ran", dispatched: 0, errors: [] });
+    expect(result?.recipes[0]).toMatchObject({ stopped_by: "invalid_spec" });
+    expect(await stampCount(env)).toBe(0);
+  });
+
   test("no service account ends the run before any stamp is claimed", async () => {
     const env = fx.env(ON);
     await fundPipelines(env);

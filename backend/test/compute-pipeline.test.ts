@@ -479,6 +479,15 @@ describe("what a run refuses, before it writes anything", () => {
     await nothingWritten(env);
   });
 
+  test("a specification that cannot be built leaves no claimed stamp, and is a word, not a throw", async () => {
+    const { env } = await world();
+    // A digest-pinned reference the runtime-image reader takes and the job schema (512 characters) refuses.
+    const long = `ghcr.io/${"a".repeat(600)}/nemar-python@${RUNTIME_IMAGE_DIGEST}`;
+    const result = await run(fx.env({ COMPUTE_RUNTIME_IMAGE: long }));
+    expect(result).toMatchObject({ ok: false, code: "invalid_spec" });
+    await nothingWritten(env);
+  });
+
   test("compute off is compute_disabled, and a recipe is refused before a dataset is even read", async () => {
     const { env } = await world();
     const off = fx.env({ COMPUTE_ENABLED: undefined });

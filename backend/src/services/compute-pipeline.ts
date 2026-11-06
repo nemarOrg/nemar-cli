@@ -385,6 +385,18 @@ export async function dispatchPipelineJob(
   const accountId = await pipelinesAccountId(db);
   if (accountId === null) return fail("pipelines_account_missing", datasetId, { version: tag });
 
+  // The specification, BEFORE the claim: a registry entry or an image the job schema refuses is a word
+  // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
+  let spec: ReturnType<typeof recipeJobSpec>;
+  try {
+    spec = recipeJobSpec(recipe, { datasetId, tag, image });
+  } catch (err) {
+    console.error(
+      `[compute-pipeline] spec_unbuildable recipe=${recipe.name} error=${err instanceof Error ? err.name : "unknown"}`,
+    );
+    return fail("invalid_spec", datasetId, { version: tag });
+  }
+
   // The claim, first: a live or succeeded stamp for the tuple refuses it.
   let stampId: number;
   try {
@@ -402,8 +414,7 @@ export async function dispatchPipelineJob(
   const stamp = (await getStamp(db, stampId)) as StampRow;
   const key = await pipelineKey(stamp);
 
-  // The job, from a complete specification. The stamp is ended whatever happens next.
-  const spec = recipeJobSpec(recipe, { datasetId, tag, image });
+  // The job, from the specification built above. The stamp is ended whatever happens next.
   let created: Awaited<ReturnType<typeof createJob>>;
   try {
     created = await createJob(env, {
@@ -915,6 +926,7 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   "runtime_unavailable",
   "pipelines_account_missing",
   "recipe_placeholder",
+  "invalid_spec",
   "insufficient_balance",
   "platform_budget_exhausted",
   "suspended",
