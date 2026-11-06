@@ -14,7 +14,7 @@
  *
  * CI TIER: unit-pure. It holds none of the markers that route a file to the integration tier. It spawns
  * the rig and the pre-flight as child processes on a loopback port and needs `openssl`, so it sets its own
- * 60 second timeout (`setDefaultTimeout`) instead of relying on the tier's five seconds.
+ * 60-second timeout (`setDefaultTimeout`) instead of relying on the tier's five seconds.
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
