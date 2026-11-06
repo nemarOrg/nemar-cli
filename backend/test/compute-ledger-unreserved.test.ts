@@ -18,6 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   UNRESERVED_CHARGE_INSERT_SQL,
+  availableMilli,
   ensurePool,
   platformPool,
   unreservedChargeStatements,
@@ -45,7 +46,7 @@ const entriesOf = (db: ReturnType<typeof freshDb>, job: string) =>
     .all(job) as Array<Record<string, unknown>>;
 
 describe("an unreserved charge", () => {
-  test("is an overrun on the partner pool, counted against the people budget, with no hold and nothing negative refused", async () => {
+  test("is an overrun on the partner pool, counted against the people budget, with no hold, and the pool's available goes negative", async () => {
     const w = await world();
     const job = jobId(1);
     const [statement] = unreservedChargeStatements(w.d1, {
@@ -76,6 +77,10 @@ describe("an unreserved charge", () => {
       { id: w.tenant.id, granted_milli: 0, held_milli: 0, charged_milli: 2000 },
     ]);
     // Available is negative: an overrun is a fact that already happened, and the pool had nothing.
+    const tenant = w.db
+      .query("SELECT granted_milli, held_milli, charged_milli FROM compute_pools WHERE id = ?")
+      .get(w.tenant.id) as { granted_milli: number; held_milli: number; charged_milli: number };
+    expect(availableMilli(tenant)).toBe(-2000);
     expect(await totalsDisagreements(w.d1)).toEqual([]);
   });
 

@@ -156,7 +156,6 @@ const poolCharges = () =>
 
 describe("a job that skipped the reservation", () => {
   test("is cancelled, indexed `unreserved` and charged to the tenant pool, never to an account pool", async () => {
-    const person = await seedUser(env().DB);
     const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
     const result = await sweepTenantJobs(env(), "live");
     expect(result).toMatchObject({ indexed: 1, unattributed: 1, cancelled: 1, finished: 1 });
@@ -197,7 +196,6 @@ describe("a job that skipped the reservation", () => {
         charged_delta_milli: r?.charged_milli as number,
       },
     ]);
-    expect(person).toBeGreaterThan(0);
   });
 
   test("whose owner maps to an active account is `unreserved`, carries the account for the record, and STILL charges the tenant pool", async () => {
