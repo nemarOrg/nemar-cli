@@ -18,6 +18,7 @@ import {
 import { join } from "node:path";
 import { spawn } from "bun";
 import { countPendingDownload } from "../src/lib/git-annex/transfer";
+import { useTestGitIdentity } from "./helpers/git-identity";
 
 const TMP_DIR = join(import.meta.dir, ".test-precount");
 
@@ -71,7 +72,11 @@ async function annexFile(repo: string, name: string, contents: string): Promise<
   await runCmd(["git", "commit", "-q", "-m", `add ${name}`], repo);
 }
 
+let restoreGitIdentity: () => void;
+
 beforeAll(() => {
+  // The clones run `git annex init`, which commits and needs an identity (CI runners have none).
+  restoreGitIdentity = useTestGitIdentity();
   // git-annex required; skip cleanly if not installed
   if (!existsSync("/opt/homebrew/bin/git-annex") && !existsSync("/usr/local/bin/git-annex")) {
     // Best-effort: bun test still runs, individual tests detect via runCmd
@@ -83,6 +88,7 @@ afterAll(() => {
     chmodTreeWritable(TMP_DIR);
     rmSync(TMP_DIR, { recursive: true, force: true });
   }
+  restoreGitIdentity();
 });
 
 describe("countPendingDownload", () => {
