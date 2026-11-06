@@ -47,7 +47,8 @@ export type LoggedAnswer =
 /**
  * The error a redirect location carries: null when it has no `error` key at all, the word when it has
  * exactly one and it is {@link ERROR_WORD}, and `malformed_error` for everything else (an empty value, a
- * value with a space or a newline, a repeated key, a location that is not an address). Only "no key"
+ * value with a space or a newline, a repeated key in the query or the fragment, a location that is not an
+ * address). The fragment is read as well as the query. Only "no key"
  * reads as no error, so a refusal cannot hide behind an odd spelling.
  */
 function locationError(location: string): string | null {
@@ -57,7 +58,12 @@ function locationError(location: string): string | null {
   } catch {
     return "malformed_error";
   }
-  const values = url.searchParams.getAll("error");
+  // The query and the fragment are both places a response can carry an error; read both, so one in the
+  // fragment is not invisible.
+  const values = [
+    ...url.searchParams.getAll("error"),
+    ...new URLSearchParams(url.hash.replace(/^#/, "")).getAll("error"),
+  ];
   if (values.length === 0) return null;
   const only = values[0] as string;
   return values.length === 1 && ERROR_WORD.test(only) ? only : "malformed_error";

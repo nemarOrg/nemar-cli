@@ -283,6 +283,26 @@ describe("the authorization log and its check", () => {
     }
   });
 
+  test("an error in the fragment is seen, and so is one in both places", () => {
+    const back = "https://client.example.org/cb";
+    expect(
+      answerError({ kind: "redirect", location: `${back}#error=invalid_request&state=s` }),
+    ).toBe("invalid_request");
+    expect(answerError({ kind: "redirect", location: `${back}#error=` })).toBe("malformed_error");
+    expect(answerError({ kind: "redirect", location: `${back}?error=a#error=b` })).toBe(
+      "malformed_error",
+    );
+    expect(answerError({ kind: "redirect", location: `${back}#code=abc` })).toBeNull();
+    const line = authorizationLogLine(
+      "redirect",
+      answerError({ kind: "redirect", location: `${back}#error=server_error` }),
+      true,
+    );
+    expect(checkAuthorizationLog(line).violations).toEqual([
+      "an authorization response (redirect) carried the error server_error, which no approved deviation produces",
+    ]);
+  });
+
   test("a rule refusal logs access_denied, which the check then flags", () => {
     const back = "https://client.example.org/cb";
     expect(
