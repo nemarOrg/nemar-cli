@@ -444,15 +444,26 @@ export async function dispatchPipelineJob(
     // key that was used for ANOTHER request (`idempotency_conflict`) names a job that is not this one's
     // and is never linked.
     const conflict = err instanceof ComputeJobError && err.code === "idempotency_conflict";
-    const existing = conflict
-      ? null
-      : await db
-          .prepare(JOB_BY_KEY_SQL)
-          .bind(accountId, key)
-          .first<ComputeJobRow>()
-          .catch(() => null);
+    let lookupFailed = false;
+    let existing: ComputeJobRow | null = null;
+    if (!conflict) {
+      try {
+        existing = await db.prepare(JOB_BY_KEY_SQL).bind(accountId, key).first<ComputeJobRow>();
+      } catch {
+        lookupFailed = true;
+      }
+    }
     const cause =
       err instanceof ComputeJobError ? err.code : err instanceof Error ? err.name : "unknown";
+    if (lookupFailed) {
+      // The job may exist and the database could not say: ending the stamp would let a later attempt
+      // make a second job. It stays `dispatched`; the sync finds the job by its key, or fails the claim
+      // after the grace period when there is none.
+      console.error(
+        `[compute-pipeline] create_threw stamp=${stampId} lookup_failed error=${cause}`,
+      );
+      return fail("create_failed", datasetId, { version: tag, stampId });
+    }
     if (existing) {
       await db.prepare(LINK_STAMP_SQL).bind(stampId, existing.id).run();
       console.error(`[compute-pipeline] create_threw job=${existing.id} error=${cause}`);

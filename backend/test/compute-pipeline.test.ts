@@ -23,7 +23,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { findRecipe, recipeImageDigestArg } from "../../shared/compute-recipes";
 import { LAUNCHER_FILES } from "../../shared/contract/compute";
 import { MAX_MANIFEST_JSON_ENTRIES } from "../src/routes/data";
-import { JOB_BY_ID_SQL, createJob } from "../src/services/compute-jobs";
+import { JOB_BY_ID_SQL, JOB_BY_KEY_SQL, createJob } from "../src/services/compute-jobs";
 import { advanceComputeJob } from "../src/services/compute-lifecycle";
 import {
   PIPELINES_ACCOUNT_USERNAME,
@@ -373,6 +373,44 @@ describe("a run", () => {
     // The job is a created job for the tick; the stamp holds the tuple.
     expect((await reread(env, result.jobId)).state).toBe("created");
     expect(await run(env)).toMatchObject({ ok: false, code: "live_attempt_exists" });
+  });
+
+  test("a read that fails after the commit AND a key lookup that fails leave the stamp dispatched, and the sync links the job", async () => {
+    const { env } = await world();
+    let armed = false;
+    const db = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (...args: Parameters<D1Database["batch"]>) => {
+            const out = await target.batch(...args);
+            armed = true;
+            return out;
+          };
+        }
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (armed && (sql === JOB_BY_ID_SQL || sql === JOB_BY_KEY_SQL)) {
+              throw new Error("injected: the database could not be read");
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await run({ ...env, DB: db });
+    expect(result).toMatchObject({ ok: false, code: "create_failed" });
+    // The job was committed; the stamp must not be ended, or a later attempt would make a second job.
+    expect(await jobCount(env)).toBe(1);
+    expect((await stampsOf(env))[0]).toMatchObject({ state: "dispatched", job_id: null });
+    expect(await run(env)).toMatchObject({ ok: false, code: "live_attempt_exists" });
+
+    const sync = await syncPipelineStamps(env);
+    expect(sync).toMatchObject({ linked: 1, failed: 0 });
+    const job = (await env.DB.prepare("SELECT id FROM compute_jobs").first<{ id: string }>())?.id;
+    expect((await stampsOf(env))[0]).toMatchObject({ state: "dispatched", job_id: job });
+    expect(await jobCount(env)).toBe(1);
   });
 
   test("the immediate submit not going through leaves a created job for the tick, with the stamp linked", async () => {
