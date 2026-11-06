@@ -242,6 +242,18 @@ describe("the process tier is its own job and no unit-pure shard runs a process 
     expect(scripts).not.toContain("unit-pure-files.sh");
   });
 
+  test("the deploy gate also runs the process list, and refuses an empty one", () => {
+    // The pure list skips process files, so without this step a deploy would not run them.
+    const deploy = parse(readFileSync(`${ROOT}.github/workflows/deploy-backend.yml`, "utf8")) as {
+      jobs: Record<string, Job>;
+    };
+    const steps = (deploy.jobs["test-gate"]?.steps ?? []).flatMap((s) => (s.run ? [s.run] : []));
+    const runners = steps.filter((s) => s.includes("scripts/ci/process-files.sh"));
+    expect(runners.length).toBe(1);
+    expect(runners[0]).toMatch(/\$\{#files\[@\]\}" -gt 0/);
+    expect(runners[0]).toMatch(/bun test "\$\{files\[@\]\}"/);
+  });
+
   test("no unit-pure shard runs the process lister, and the process job is not a shard", () => {
     expect(scriptsOf("unit-pure-shard").join("\n")).not.toContain("process-files.sh");
     expect(workflow.jobs["process-tier"]?.strategy).toBeUndefined();

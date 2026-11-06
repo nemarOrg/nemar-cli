@@ -249,6 +249,19 @@ jobs:
           echo "Running ${#files[@]} pure test files"
           bun test "${files[@]}"
 
+      # The process tier (files whose header says `CI TIER: process`) is not in the list above,
+      # so the gate runs it here: the same files as test.yml's `process-tier` job, from the same
+      # lister, with the same refusal of an empty list. They are skipped by the pure list because
+      # they spawn processes or listen on a port; they still gate a deploy.
+      - name: Run process-tier tests (no live backend)
+        run: |
+          set -euo pipefail
+          scripts/ci/process-files.sh > "$RUNNER_TEMP/process-files.txt"
+          mapfile -t files < "$RUNNER_TEMP/process-files.txt"
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no test file claims CI TIER: process"; exit 1; }
+          echo "Running ${#files[@]} process-tier test files"
+          bun test "${files[@]}"
+
   deploy-dev:
     needs: [detect-environment, test-gate]
     # Must check test-gate.result explicitly: a job with its OWN `if:` loses the
