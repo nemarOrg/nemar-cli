@@ -56,6 +56,14 @@ export const RELEASE_HOLD_AUDIT_SQL = `INSERT INTO audit_log (user_id, action, r
          json_object('scope', h.scope, 'ref', h.ref)
     FROM compute_legal_holds h WHERE h.id = ?2 AND changes() > 0`;
 
+/**
+ * Whether a user is an owner who may act: the role, not deleted, in an active status. The same terms the
+ * placing and releasing statements carry, so a refusal is classified by the rule that made it (a suspended
+ * or deleted owner is `not_owner`, never `target_not_found`). `?1` the user.
+ */
+export const ACTIVE_OWNER_SQL = `SELECT 1 AS ok FROM users u WHERE u.id = ?1 AND u.role = 'owner'
+  AND u.deleted_at IS NULL AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}`;
+
 export interface HoldRow {
   id: number;
   scope: ComputeHoldScope;
@@ -91,10 +99,7 @@ export async function placeHold(
     throw err;
   }
   if (changes === 0) {
-    const owner = await db
-      .prepare(`SELECT 1 AS ok FROM users u WHERE u.id = ?1 AND u.role = 'owner'`)
-      .bind(input.ownerId)
-      .first();
+    const owner = await db.prepare(ACTIVE_OWNER_SQL).bind(input.ownerId).first();
     return { ok: false, code: owner === null ? "not_owner" : "target_not_found" };
   }
   const hold = await db
@@ -126,10 +131,7 @@ export async function releaseHold(
     .bind(input.id)
     .first<HoldRow>();
   if (changes === 0 || hold === null) {
-    const owner = await db
-      .prepare(`SELECT 1 AS ok FROM users u WHERE u.id = ?1 AND u.role = 'owner'`)
-      .bind(input.ownerId)
-      .first();
+    const owner = await db.prepare(ACTIVE_OWNER_SQL).bind(input.ownerId).first();
     return { ok: false, code: owner === null ? "not_owner" : "hold_not_found" };
   }
   return { ok: true, hold };

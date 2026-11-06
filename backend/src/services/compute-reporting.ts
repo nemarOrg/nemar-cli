@@ -33,7 +33,7 @@ import { LAUNCHER_FILES, RECORDS_RESULT_MANIFEST_FILE } from "../../../shared/co
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
-import { heldSql } from "./compute-legal-holds.js";
+import { ACTIVE_OWNER_SQL, heldSql } from "./compute-legal-holds.js";
 import { jobView } from "./compute-lifecycle.js";
 import { recordKey } from "./compute-records.js";
 
@@ -503,9 +503,6 @@ export async function requeueAccessReport(
   if ((results[0]?.meta?.changes ?? 0) === 1) {
     return { ok: true, previous: before?.last_error_code ?? null };
   }
-  const owner = await db
-    .prepare("SELECT 1 AS ok FROM users u WHERE u.id = ?1 AND u.role = 'owner'")
-    .bind(input.ownerId)
-    .first();
+  const owner = await db.prepare(ACTIVE_OWNER_SQL).bind(input.ownerId).first();
   return { ok: false, code: owner === null ? "not_owner" : "report_not_found" };
 }

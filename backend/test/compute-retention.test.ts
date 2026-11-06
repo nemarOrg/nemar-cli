@@ -332,6 +332,30 @@ describe("legal holds", () => {
     expect(jobRow(job.id).records_deleted_at).toBeNull();
   });
 
+  test("a suspended or deleted owner is `not_owner`, not `target_not_found` (MUTATION: classify by role alone)", async () => {
+    const job = await oldJob();
+    const suspended = await seedUser(env().DB, { role: "owner", status: "revoked" });
+    const deleted = await seedUser(env().DB, { role: "owner", deleted_at: "2026-01-01 00:00:00" });
+    for (const ownerId of [suspended, deleted]) {
+      expect(
+        await placeHold(env().DB, { scope: "job", ref: job.id, reason: "legal_request", ownerId }),
+      ).toEqual({ ok: false, code: "not_owner" });
+      expect(await releaseHold(env().DB, { id: 1, ownerId })).toEqual({
+        ok: false,
+        code: "not_owner",
+      });
+    }
+    // A live owner naming a target that is not there is still target_not_found.
+    expect(
+      await placeHold(env().DB, {
+        scope: "job",
+        ref: "job_ffffffffffffffffffffffff",
+        reason: "legal_request",
+        ownerId: ownerId(),
+      }),
+    ).toEqual({ ok: false, code: "target_not_found" });
+  });
+
   test("a hold is placed and released by the owner only, with an audit row each, and a second hold on the same target is a conflict", async () => {
     const job = await oldJob();
     const admin = await seedUser(env().DB, { role: "admin" });
