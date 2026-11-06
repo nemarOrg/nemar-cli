@@ -636,7 +636,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
    * those files but are OPEN (`.passthrough()`): a launcher that runs for 48 hours must survive the
    * Worker adding a key. The next two tests keep that line where it is, by behaviour and by import.
    */
-  const STRICT_BY_DESIGN = new Set(["compute.ts", "compute-launch.ts"]);
+  const STRICT_BY_DESIGN = new Set(["compute.ts", "compute-launch.ts", "compute-observation.ts"]);
 
   const HEX = "a".repeat(64);
   const JOB = "job_0123456789abcdef01234567";
