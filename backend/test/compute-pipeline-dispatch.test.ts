@@ -17,7 +17,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_RECIPES, findRecipe } from "../../shared/compute-recipes";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
-import { CLAIM_STAMP_SQL, dispatchPipelineJob } from "../src/services/compute-pipeline";
+import {
+  CLAIM_STAMP_SQL,
+  OPEN_STAMPS_SQL,
+  dispatchPipelineJob,
+} from "../src/services/compute-pipeline";
 import {
   CRON_DISPATCH_PER_TICK,
   type PipelineCronResult,
@@ -185,6 +189,25 @@ describe("what it dispatches", () => {
         }>()
       )?.n,
     ).toBe(0);
+  });
+
+  test("a tick syncs the stamps once, however many recipes it dispatches", async () => {
+    const env = await world(ids(2));
+    let opens = 0;
+    const db = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql === OPEN_STAMPS_SQL) opens++;
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await runComputePipelineDispatchCron({ ...env, DB: db });
+    expect(opens).toBe(1);
   });
 
   test("a second run dispatches nothing: every dataset is stamped", async () => {

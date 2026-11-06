@@ -979,7 +979,14 @@ export interface EligibleRun {
  */
 export async function dispatchEligible(
   env: Bindings,
-  input: { recipe: string; limit: number; actor: PipelineActor; after?: string },
+  input: {
+    recipe: string;
+    limit: number;
+    actor: PipelineActor;
+    after?: string;
+    /** False when the caller has just synced the stamps itself (the cron, once for all its recipes). */
+    sync?: boolean;
+  },
 ): Promise<EligibleRun> {
   const run: EligibleRun = { results: [], dispatched: 0, stoppedBy: null };
   const recipe = findRecipe(input.recipe);
@@ -989,7 +996,7 @@ export async function dispatchEligible(
     run.stoppedBy = code;
     return run;
   }
-  await syncPipelineStamps(env);
+  if (input.sync !== false) await syncPipelineStamps(env);
   try {
     for (const candidate of await pipelineCandidates(env.DB, recipe, input.limit, input.after)) {
       if (run.dispatched >= input.limit) break;

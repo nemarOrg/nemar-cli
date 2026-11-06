@@ -29,12 +29,14 @@
  * would run the same dataset over and over, each run stamped with the version the table does not name. It
  * is not dispatched until the table is fixed, and the result says so.
  *
- * COST. The daily tick shares one subrequest allowance with every daily job. One dispatch is about 25
- * statements and calls (the dataset and version reads, the claim, the job's batch and records, the submit),
- * counting every D1 and R2 binding call as a subrequest although whether they count is UNVERIFIED, and a
- * sync costs about 4 per open stamp, at most 50. So a tick dispatches at most 10 jobs, about 250, whatever the
- * owner's daily cap says; the cap is a ceiling, and the pilot of twenty datasets takes two days. Raising
- * the bound needs a measurement first.
+ * COST. The daily tick shares one subrequest allowance with every daily job. The tick syncs the stamps ONCE
+ * (each run over the queue is told not to sync again): at most 50 open stamps at about 5 statements and calls
+ * each, so 250. One dispatch is about 25 (the dataset and version reads, the claim, the job's batch and
+ * records, the submit), and the tick dispatches at most 10, so 250, whatever the owner's daily cap says; the
+ * queue and cap reads add about 10. The true bound is therefore about 510, counting every D1 and R2 binding
+ * call as a subrequest although whether they count is UNVERIFIED, against an allowance of 1,000 that the
+ * other daily jobs share. The cap is a ceiling and not a rate, and the pilot of twenty datasets takes two
+ * days. Raising the bound needs a measurement first.
  *
  * NO MAIL, NO GITHUB. Nothing here imports a mail service or reaches GitHub; the only network is Tapis,
  * through the gateway's own submit.
@@ -187,6 +189,7 @@ export async function runComputePipelineDispatchCron(
         recipe: recipe.name,
         limit: room,
         actor: { kind: "cron" },
+        sync: false,
       });
       outcome.dispatched = run.dispatched;
       outcome.stopped_by = run.stoppedBy;
