@@ -182,9 +182,17 @@ jobs:
       - name: Stop the rig and the suite
         if: ${{ always() }}
         run: |
-          kill "$(cat "$RUNNER_TEMP/rig.pid")" 2>/dev/null || true
+          pid="$(cat "$RUNNER_TEMP/rig.pid")"
+          kill "$pid" 2>/dev/null || true
           cd "$RUNNER_TEMP/suite"
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" down --timeout 10 || true
+          # The upload must not start while the rig can still write: wait up to 10 seconds for it to exit.
+          for _ in $(seq 1 20); do
+            kill -0 "$pid" 2>/dev/null || exit 0
+            sleep 0.5
+          done
+          echo "::error::the rig is still running 10 seconds after it was told to stop"
+          exit 1
 
       - name: Check the authorization errors
         if: ${{ always() }}
