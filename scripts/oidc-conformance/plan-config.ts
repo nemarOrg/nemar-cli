@@ -12,7 +12,9 @@
  * when no such page appears. A command that ends in `update-image-placeholder` stands in for the
  * screenshot a human certifier would upload.
  *
- * A configuration holds client secrets, so the rig writes it to a directory that is never uploaded.
+ * A configuration holds the throwaway clients' secrets, so the rig writes it to a directory that is never
+ * uploaded. (The logs and results that ARE uploaded also show such secrets and codes, which die with the
+ * rig's in-memory database when the job ends.)
  */
 
 /** The text each stand-in page shows, which the suite's `wait` commands look for. */
@@ -98,6 +100,32 @@ function standardBrowser(issuer: string, withPlaceholder = false): BrowserBlock[
   ];
 }
 
+/** The browser script for a test that expects NEMAR's error page for an unregistered redirect address. */
+function redirectErrorBrowser(issuer: string): BrowserBlock[] {
+  return [
+    {
+      comment: "expect an immediate error page",
+      match: `${issuer}/oauth/authorize*`,
+      tasks: [
+        {
+          task: "Expect redirect uri mismatch error page",
+          match: `${issuer}/oauth/authorize*`,
+          commands: [
+            [
+              "wait",
+              "xpath",
+              "//*",
+              10,
+              RIG_TEXT.redirectNotRegistered,
+              "update-image-placeholder",
+            ],
+          ],
+        },
+      ],
+    },
+  ];
+}
+
 /** The configuration plan reads the discovery document and nothing else: no client, no browser. */
 export function buildConfigPlanConfig(addr: PlanAddresses): Record<string, unknown> {
   return {
@@ -107,10 +135,15 @@ export function buildConfigPlanConfig(addr: PlanAddresses): Record<string, unkno
   };
 }
 
-/** The Basic plan: two static clients, the scripted sign-in and consent, and the four overrides. */
+/** The Basic plan: the static clients, the scripted sign-in and consent, and the four overrides. */
 export function buildBasicPlanConfig(
   addr: PlanAddresses,
-  clients: { client: ClientCredentials; client2: ClientCredentials },
+  clients: {
+    client: ClientCredentials;
+    client2: ClientCredentials;
+    /** The client the suite's client_secret_post module reads (`client_secret_post` in the plan). */
+    clientPost: ClientCredentials;
+  },
 ): Record<string, unknown> {
   const { issuer } = addr;
   return {
@@ -119,36 +152,16 @@ export function buildBasicPlanConfig(
     server: { discoveryUrl: `${issuer}/.well-known/openid-configuration` },
     client: { ...clients.client },
     client2: { ...clients.client2 },
+    client_secret_post: { ...clients.clientPost },
     browser: standardBrowser(issuer),
     override: {
       // Both sign in a second time; the sign-in page is what a certifier would screenshot.
       "oidcc-prompt-login": { browser: standardBrowser(issuer, true) },
       "oidcc-max-age-1": { browser: standardBrowser(issuer, true) },
-      // An unregistered redirect address is an error page, never a redirect.
-      "oidcc-ensure-registered-redirect-uri": {
-        browser: [
-          {
-            comment: "expect an immediate error page",
-            match: `${issuer}/oauth/authorize*`,
-            tasks: [
-              {
-                task: "Expect redirect uri mismatch error page",
-                match: `${issuer}/oauth/authorize*`,
-                commands: [
-                  [
-                    "wait",
-                    "xpath",
-                    "//*",
-                    10,
-                    RIG_TEXT.redirectNotRegistered,
-                    "update-image-placeholder",
-                  ],
-                ],
-              },
-            ],
-          },
-        ],
-      },
+      // An unregistered redirect address is an error page, never a redirect. The second test passes the
+      // address through a request object and expects the same page.
+      "oidcc-ensure-registered-redirect-uri": { browser: redirectErrorBrowser(issuer) },
+      "oidcc-ensure-request-object-with-redirect-uri": { browser: redirectErrorBrowser(issuer) },
     },
   };
 }

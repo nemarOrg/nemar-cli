@@ -3,7 +3,7 @@
  * the suite's browser will, with plain HTTP and no library, and fail in seconds with a plain sentence
  * if the rig is not ready, instead of 30 minutes into a plan.
  *
- * It reads the Basic plan's configuration for the first client's credentials (never printing them),
+ * It reads the credentials of a client the rig registered for it alone (never printing them),
  * follows the stand-in pages (authorize, sign in, consent), receives a code at the suite's callback
  * address WITHOUT following it, redeems it with PKCE and checks the identity token's shape.
  *
@@ -22,8 +22,12 @@ const ISSUER = `https://${HOST}:${PORT}`;
 const OUT_DIR = process.env.RIG_OUT_DIR;
 if (!OUT_DIR) throw new Error("RIG_OUT_DIR is required");
 
-const plan = JSON.parse(readFileSync(join(OUT_DIR, "basic-plan.json"), "utf8")) as {
-  client: { client_id: string; client_secret: string };
+// The pre-flight has a client of its own, so the first plan client's consent and grant stay unspent.
+const plan = {
+  client: JSON.parse(readFileSync(join(OUT_DIR, "smoke-client.json"), "utf8")) as {
+    client_id: string;
+    client_secret: string;
+  },
 };
 const REDIRECT = `${process.env.SUITE_ORIGIN ?? "https://localhost.emobix.co.uk:8443"}/test/a/${process.env.RIG_ALIAS ?? "nemar"}/callback`;
 

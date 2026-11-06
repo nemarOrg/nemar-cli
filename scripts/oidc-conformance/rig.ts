@@ -29,6 +29,11 @@
  *   SUITE_ORIGIN  the suite's public origin (default https://localhost.emobix.co.uk:8443)
  *   RIG_ALIAS     the suite alias, which fixes its callback address (default nemar)
  *
+ * NETWORK. The listener binds all interfaces because on a GitHub-hosted runner the suite's container
+ * reaches the host through Docker's `host-gateway`. A move to the shared application host must NOT
+ * keep that: bind the Docker gateway address only (or a user-defined bridge), so the rig is not
+ * reachable from the host's other networks.
+ *
  * The certificate is self-signed, made by `openssl` into a temporary directory when the rig starts, held
  * in memory and removed at once. It is stored nowhere.
  */
@@ -141,7 +146,7 @@ async function registerClient(name: string): Promise<{ client_id: string; client
     json: {
       name,
       redirect_uris: [callbackAddress(SUITE_ORIGIN, ALIAS)],
-      allowed_scopes: ["openid", "profile", "email", "orcid", "nemar.account", "offline_access"],
+      allowed_scopes: ["openid", "profile", "email", "offline_access"],
       allowed_grants: ["authorization_code", "refresh_token"],
       sign_in_rule: "person_proven_orcid",
       audience: "https://api.example.org",
@@ -177,6 +182,10 @@ async function seed(): Promise<void> {
 
   const client = await registerClient("Conformance client one");
   const client2 = await registerClient("Conformance client two");
+  // The suite's client_secret_post module reads its own client; NEMAR refuses a secret in the body.
+  const clientPost = await registerClient("Conformance client post");
+  // The pre-flight signs in at a client of its own, so client one's consent and grant are not spent.
+  const smokeClient = await registerClient("Conformance pre-flight");
 
   mkdirSync(OUT_DIR as string, { recursive: true });
   const addr = { issuer: ISSUER, alias: ALIAS };
@@ -186,8 +195,9 @@ async function seed(): Promise<void> {
   );
   writeFileSync(
     join(OUT_DIR as string, "basic-plan.json"),
-    JSON.stringify(buildBasicPlanConfig(addr, { client, client2 }), null, 2),
+    JSON.stringify(buildBasicPlanConfig(addr, { client, client2, clientPost }), null, 2),
   );
+  writeFileSync(join(OUT_DIR as string, "smoke-client.json"), JSON.stringify(smokeClient));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -249,8 +259,13 @@ async function login(req: Request): Promise<Response> {
   const fail = (what: string) =>
     html(500, "Sign-in failed", `<h1>Sign-in failed</h1><p>${esc(what)}</p>`);
 
+  // Only the rig's own account may sign in here: the next statement deletes auth codes, and it must
+  // never be reachable for any other address.
+  if (email !== RIG_ACCOUNT_EMAIL) {
+    return html(400, "Sign-in refused", "<h1>Sign-in refused</h1><p>Unknown account.</p>");
+  }
   // The abuse counter of a real mailbox is not under test: clear it for this throwaway account.
-  db.query("DELETE FROM auth_codes WHERE email = ?").run(email);
+  db.query("DELETE FROM auth_codes WHERE email = ?").run(RIG_ACCOUNT_EMAIL);
   const requested = await api("POST", "/auth/code/request", { json: { email } });
   const code = requested.json?.dev_code;
   if (requested.status !== 200 || typeof code !== "string") {
