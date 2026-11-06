@@ -41,8 +41,10 @@ env:
   SUITE_TAG: release-v5.3.3
   # The commit the tag must point at; a moved tag fails the run instead of changing what is tested.
   SUITE_COMMIT: 7d420f716e49d44f8a6b04f0a3e240ad6d68ab55
-  CONFORMANCE_SERVER: https://localhost.emobix.co.uk:8443/
-  CONFORMANCE_SERVER_MTLS: https://localhost.emobix.co.uk:8444/
+  # The suite's own address. run-test-plan.py is NOT given CONFORMANCE_SERVER: left unset, it takes this
+  # same address and runs in its local mode (no API token, certificates unchecked); set, it would ask
+  # for a token a local suite does not have.
+  SUITE_URL: https://localhost.emobix.co.uk:8443/
   RIG_HOST: rig.example.org
   RIG_PORT: "9443"
   # The exported results go under the directory that is uploaded. The plan configurations (throwaway
@@ -102,7 +104,7 @@ jobs:
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" up -d
           for _ in $(seq 1 90); do
             # The suite's front page answers 302 (to its sign-in page); a 502 is its TLS front without the server.
-            if curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$CONFORMANCE_SERVER" | grep -qE '^(200|30[0-9])$'; then echo "suite is up"; exit 0; fi
+            if curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$SUITE_URL" | grep -qE '^(200|30[0-9])$'; then echo "suite is up"; exit 0; fi
             sleep 5
           done
           echo "::error::the suite did not come up in 7 minutes"
