@@ -34,13 +34,15 @@
  * exposed are the jobs already in flight when a mismatch first appears: they finish under the same mismatch.
  *
  * COST. The daily tick shares one subrequest allowance with every daily job. The tick syncs the stamps ONCE
- * (each run over the queue is told not to sync again): at most 50 open stamps at about 5 statements and calls
- * each, so 250. One dispatch is about 25 (the dataset and version reads, the claim, the job's batch and
- * records, the submit), and the tick dispatches at most 10, so 250, whatever the owner's daily cap says; the
- * queue and cap reads add about 10. The true bound is therefore about 510, counting every D1 and R2 binding
- * call as a subrequest although whether they count is UNVERIFIED, against an allowance of 1,000 that the
- * other daily jobs share. The cap is a ceiling and not a rate, and the pilot of twenty datasets takes two
- * days. Raising the bound needs a measurement first.
+ * (each run over the queue is told not to sync again): at most 50 open stamps at 5 to 9 statements and calls
+ * each (5 for a stamp whose job is still live: the touch, the job read, and the record reads of a finished
+ * one; up to 9 when it also looks a job up by its key, rewrites its tuple and writes a hold), so 250 to
+ * 450. One dispatch is about 25 (the dataset and version reads, the claim, the job's batch and records, the
+ * submit), and the tick dispatches at most 10, so 250, whatever the owner's daily cap says; the queue and
+ * cap reads add about 10. The bound is therefore about 510 in the usual case and 710 at the worst, counting
+ * every D1 and R2 binding call as a subrequest although whether they count is UNVERIFIED, against an
+ * allowance of 1,000 that the other daily jobs share. The cap is a ceiling and not a rate, and the pilot of
+ * twenty datasets takes two days. Raising the bound needs a measurement first.
  *
  * NO MAIL, NO GITHUB. Nothing here imports a mail service or reaches GitHub; the only network is Tapis,
  * through the gateway's own submit.

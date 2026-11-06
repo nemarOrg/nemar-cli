@@ -427,7 +427,7 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
 6. **The daily dispatcher is dark three times over.**
    It returns null outside exact production, does nothing and touches no table until `COMPUTE_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED` are both exactly `1`, and is wired only into the production-only daily block.
    It dispatches `autoDispatch` recipes only, within `policy.pipelines.dailyJobCap` less today's pipeline jobs (an administrator's included) and `policy.pipelines.maxLiveJobs` per pool, and a refused hold stops the run for that pool.
-   It also stops at 10 jobs a tick, a bound of its own: one dispatch costs about 25 statements and calls and the one sync of the tick about 250 at most (50 open stamps at about 5 each), so a tick is bounded at about 510 against the allowance the daily jobs share, and the owner's cap is a ceiling and not a rate.
+   It also stops at 10 jobs a tick, a bound of its own: one dispatch costs about 25 statements and calls and the one sync of the tick 250 to 450 (50 open stamps at 5 to 9 statements and calls each), so a tick is bounded at about 510 in the usual case and 710 at the worst, against the allowance of 1,000 that the daily jobs share, and the owner's cap is a ceiling and not a rate.
 7. **A dry run reads only** and works in every environment: it makes no stamp, job, hold or audit row and calls neither Tapis nor a bucket.
    The compute switch is read where new pipeline work would start (the dispatch, the route's live run) and reported by the dry run; the lifecycle still gates in `submitLeased` alone, so a job already on a cluster is never stranded.
 
