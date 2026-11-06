@@ -568,6 +568,28 @@ describe("a bucket lock", () => {
   });
 });
 
+describe("a backlog", () => {
+  test("a run that hits the cap counts the due rows it left, and logs at error level while any is left (MUTATION: do not count)", async () => {
+    for (let i = 0; i < RETENTION_JOBS_PER_STAGE + 3; i++) await oldJob({ endedDaysAgo: 100 });
+    const first = await runComputeRetentionSweep(env());
+    expect(first?.recordsDeleted).toBe(RETENTION_JOBS_PER_STAGE);
+    expect(first?.backlog.records).toBe(3);
+    const log = first ? retentionLogLine(first) : null;
+    expect(log?.level).toBe("error");
+    expect(log?.line).toContain("backlog_records=3");
+    // The next run takes the three, and has no backlog.
+    const second = await runComputeRetentionSweep(env());
+    expect(second).toMatchObject({ recordsDeleted: 3, backlog: { records: 0 } });
+    expect(second && retentionLogLine(second)?.level).toBe("info");
+  }, 60_000);
+
+  test("a run under the cap has none", async () => {
+    await oldJob({ endedDaysAgo: 100 });
+    const result = await runComputeRetentionSweep(env());
+    expect(result?.backlog).toEqual({ records: 0, logs: 0, results: 0 });
+  });
+});
+
 describe("logs early, results late", () => {
   test("an unflagged, unheld job loses its logs after logsDays and keeps its records; a flagged job keeps its logs", async () => {
     const plain = await oldJob({ endedDaysAgo: 400, retentionDaysFromNow: 2000 });

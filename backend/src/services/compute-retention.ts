@@ -64,6 +64,11 @@ export interface RetentionResult {
    */
   lockClass: string | null;
   overdueLocked: number;
+  /**
+   * Due jobs the cap of a stage left for tomorrow, by stage: a backlog that grows is a sweep that cannot
+   * keep up, and needs a person (the log line is at error level while any is above 0).
+   */
+  backlog: { records: number; logs: number; results: number };
   /** Jobs whose prefix was bigger than one run's page bound: left whole and finished by the next run. */
   incomplete: number;
   /** Jobs the bucket refused to delete for (a lock that has not lapsed), left whole and retried tomorrow. */
@@ -85,6 +90,7 @@ const emptyResult = (): RetentionResult => ({
   recordsDeleted: 0,
   logsDeleted: 0,
   objectsDeleted: 0,
+  backlog: { records: 0, logs: 0, results: 0 },
   lockClass: null,
   overdueLocked: 0,
   incomplete: 0,
@@ -126,6 +132,12 @@ export const RESULTS_DUE_SQL = `SELECT j.id AS id FROM compute_jobs j
   WHERE j.state IN (${TERMINAL_STATES_SQL}) AND j.results_reconciled_at IS NULL
     AND j.ended_at IS NOT NULL AND j.ended_at < datetime('now', '-' || ?1 || ' days')
   ORDER BY j.ended_at ASC LIMIT ?2`;
+
+/**
+ * How many rows a due-list has beyond the cap: the same statement counted with a very large limit. The
+ * limit is the LAST bound value of every due statement.
+ */
+export const BACKLOG_COUNT_LIMIT = 1_000_000;
 
 /** The job is held now: `?1` the job. */
 export const IS_HELD_SQL = `SELECT CASE WHEN ${heldSql("j")} THEN 1 ELSE 0 END AS held
@@ -277,6 +289,16 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
     }
   };
 
+  /** The due rows beyond the cap, when a stage's list came back full; 0 otherwise. */
+  const leftover = async (sql: string, binds: unknown[], got: number): Promise<number> => {
+    if (got < RETENTION_JOBS_PER_STAGE) return 0;
+    const counted = await db
+      .prepare(`SELECT COUNT(*) AS n FROM (${sql})`)
+      .bind(...binds.slice(0, -1), BACKLOG_COUNT_LIMIT)
+      .first<{ n: number }>();
+    return Math.max(0, (counted?.n ?? 0) - got);
+  };
+
   const stage = async (word: string, body: () => Promise<void>) => {
     try {
       await body();
@@ -298,6 +320,7 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
         .bind(RETENTION_JOBS_PER_STAGE)
         .all<{ id: string; overdue: number }>()
     ).results;
+    r.backlog.records = await leftover(RECORDS_DUE_SQL, [RETENTION_JOBS_PER_STAGE], due.length);
     for (const { id, overdue } of due) {
       await db.prepare(STAMP_RETENTION_ATTEMPT_SQL).bind(id).run();
       if (await isHeld(db, id)) continue;
@@ -329,12 +352,14 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
   // 2. Logs alone, for an unflagged job past the shorter period.
   await stage("logs_failed", async () => {
     if (!records) return;
+    const logsBinds = [policy.retention.logsDays, RETENTION_JOBS_PER_STAGE];
     const due = (
       await db
         .prepare(LOGS_DUE_SQL)
-        .bind(policy.retention.logsDays, RETENTION_JOBS_PER_STAGE)
+        .bind(...logsBinds)
         .all<{ id: string }>()
     ).results;
+    r.backlog.logs = await leftover(LOGS_DUE_SQL, logsBinds, due.length);
     for (const { id } of due) {
       await db.prepare(STAMP_RETENTION_ATTEMPT_SQL).bind(id).run();
       if (await isHeld(db, id)) continue;
@@ -356,12 +381,14 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
   // 3. Results the lifecycle rule did not take. A hold never keeps a result.
   await stage("results_failed", async () => {
     if (!resultsBucket) return;
+    const resultsBinds = [policy.retention.resultsDays + 1, RETENTION_JOBS_PER_STAGE];
     const due = (
       await db
         .prepare(RESULTS_DUE_SQL)
-        .bind(policy.retention.resultsDays + 1, RETENTION_JOBS_PER_STAGE)
+        .bind(...resultsBinds)
         .all<{ id: string }>()
     ).results;
+    r.backlog.results = await leftover(RESULTS_DUE_SQL, resultsBinds, due.length);
     for (const { id } of due) {
       const a = await deletePrefix(resultsBucket, `jobs/${id}/`);
       r.objectsDeleted += a.deleted;
@@ -436,6 +463,9 @@ export function retentionLogLine(
     r.late +
     r.incomplete +
     r.locked +
+    r.backlog.records +
+    r.backlog.logs +
+    r.backlog.results +
     r.poolsAnonymised +
     r.entriesAnonymised +
     r.runsExpired +
@@ -446,6 +476,9 @@ export function retentionLogLine(
     `records=${r.recordsDeleted}`,
     `logs=${r.logsDeleted}`,
     `objects=${r.objectsDeleted}`,
+    `backlog_records=${r.backlog.records}`,
+    `backlog_logs=${r.backlog.logs}`,
+    `backlog_results=${r.backlog.results}`,
     `incomplete=${r.incomplete}`,
     `locked=${r.locked}`,
     `overdue_locked=${r.overdueLocked}`,
@@ -458,5 +491,9 @@ export function retentionLogLine(
     `errors=${r.errors.length > 0 ? [...new Set(r.errors)].join(",") : "none"}`,
     ...(r.errorClass === null ? [] : [`class=${r.errorClass}`]),
   ].join(" ");
-  return { level: r.errors.length > 0 || r.overdueLocked > 0 ? "error" : "info", line };
+  const behind = r.backlog.records + r.backlog.logs + r.backlog.results > 0;
+  return {
+    level: r.errors.length > 0 || r.overdueLocked > 0 || behind ? "error" : "info",
+    line,
+  };
 }
