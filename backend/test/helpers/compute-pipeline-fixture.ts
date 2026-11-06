@@ -21,11 +21,20 @@ import {
 } from "./compute-lifecycle-fixture";
 import { fundPlatform, seedUser } from "./compute-seed";
 
-/** The service account `nemar-pipelines`, made the way the owner's runbook makes it (kind `service`). */
+/**
+ * The service account `nemar-pipelines`, made the way the owner's runbook makes it (kind `service`).
+ * With `reuse` an account that is already there (a database that is never reset) is returned.
+ */
 export async function seedPipelinesAccount(
   env: Bindings,
-  over: { kind?: string; status?: string; deleted?: boolean } = {},
+  over: { kind?: string; status?: string; deleted?: boolean; reuse?: boolean } = {},
 ): Promise<number> {
+  if (over.reuse) {
+    const there = await env.DB.prepare("SELECT id FROM users WHERE username = ?1")
+      .bind(PIPELINES_TAPIS_OWNER)
+      .first<{ id: number }>();
+    if (there) return there.id;
+  }
   const id = await seedUser(env.DB, {
     username: PIPELINES_TAPIS_OWNER,
     email: "nemar-pipelines@example.org",
@@ -45,6 +54,8 @@ export async function fundPipelines(env: Bindings, milli = 10_000_000, gpu = fal
 }
 
 export interface DatasetOver {
+  /** The owning user's id; -1 (the catalog sentinel) is right only where foreign keys are not enforced. */
+  owner?: number;
   status?: string;
   visibility?: string;
   anonymous?: number;
@@ -64,7 +75,7 @@ export async function seedEegDataset(
   await env.DB.prepare(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, anonymous,
                            first_published_at, withdrawn_at, ezid_status, modalities)
-     VALUES (?1, ?2, -1, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+     VALUES (?1, ?2, ?10, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
   )
     .bind(
       id,
@@ -76,6 +87,7 @@ export async function seedEegDataset(
       over.withdrawnAt ?? null,
       over.ezidStatus ?? null,
       over.modalities === undefined ? "eeg" : over.modalities,
+      over.owner ?? -1,
     )
     .run();
   for (const [version, createdAt, totalFiles] of over.versions ?? [
