@@ -60,6 +60,8 @@ import {
   pipelineDispatchLogLine,
   runComputePipelineDispatchCron,
 } from "./services/compute-pipeline-dispatch";
+import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
+import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
@@ -1227,6 +1229,28 @@ export default {
               ),
             ),
         );
+        // #2012 (epic #2005 phase A7, ADR 0118): the tenant sweep, "live" mode. It lists the jobs in
+        // the Tapis tenant that have not ended, and any that no row owns (one that skipped the
+        // reservation) is indexed, cancelled and charged to the partner pool `tenant`, never to a
+        // person; a job tagged for a row is bound to it (the submit race) or, if the row has another
+        // job, cancelled as a duplicate. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST:
+        // it cancels jobs in a tenant and moves the ledger. It also refuses outside exact production
+        // on its own, and acts only while COMPUTE_ENABLED is exactly "1". A listing that fails
+        // changes nothing. One log line, only when it acted or something needs a person.
+        ctx.waitUntil(
+          sweepTenantJobs(env, "live")
+            .then((r) => {
+              const log = r ? tenantLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-tenant] sweep failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
       }
       return;
     }
@@ -1356,6 +1380,46 @@ export default {
           .catch((err) =>
             console.error(
               "[compute-pipeline-dispatch] tick failed:",
+              err instanceof Error ? err.name : typeof err,
+            ),
+          ),
+      );
+      // #2012 (epic #2005 phase A7, ADR 0118): the tenant sweep, "week" mode, once a day: every job of
+      // the last seven days, then the day's reconciliation (Expanse's own figures from the observer
+      // against the ledger, and the ACCESS reports in `failed` that a person has to look at).
+      // PRODUCTION-ONLY, NOT in DEV_CRON_ALLOWLIST, self-fenced, and it acts only while COMPUTE_ENABLED
+      // is exactly "1". A listing that fails changes nothing.
+      ctx.waitUntil(
+        sweepTenantJobs(env, "week")
+          .then((r) => {
+            const log = r ? tenantLogLine(r) : null;
+            if (log?.level === "error") console.error(log.line);
+            else if (log) console.log(log.line);
+          })
+          .catch((err) =>
+            console.error(
+              "[compute-tenant] week sweep failed:",
+              err instanceof Error ? err.name : typeof err,
+            ),
+          ),
+      );
+      // #2012 (epic #2005 phase A7, ADR 0118, decision 9): the compute retention sweep. Deletes
+      // `records/<id>/` and `logs/<id>/` of terminal jobs past their retention (honoring a job or
+      // account legal hold, counting any refusal of the bucket's lock as `locked` and asking again
+      // tomorrow), reconciles the results bucket, and anonymizes a deleted account's pools and ledger
+      // actors. By count, never per job. PRODUCTION-ONLY, NOT in DEV_CRON_ALLOWLIST: it deletes from
+      // the private compute buckets. It also refuses outside exact production on its own and reads no
+      // compute switch (a record that is due goes whether or not compute is on).
+      ctx.waitUntil(
+        runComputeRetentionSweep(env)
+          .then((r) => {
+            const log = r ? retentionLogLine(r) : null;
+            if (log?.level === "error") console.error(log.line);
+            else if (log) console.log(log.line);
+          })
+          .catch((err) =>
+            console.error(
+              "[compute-retention] sweep failed:",
               err instanceof Error ? err.name : typeof err,
             ),
           ),

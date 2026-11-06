@@ -520,16 +520,19 @@ export async function searchJobsByTag(
 /** `GET /v3/jobs/list`: a page of jobs, without the fields a full record has. */
 export async function listJobs(
   ctx: TapisContext,
-  options: { listType: TapisListType; limit: number; skip: number },
+  options: { listType: TapisListType; limit: number; skip: number; orderBy?: string },
 ): Promise<TapisJob[]> {
   assertListType(options.listType);
   assertPage(options.limit, options.skip);
+  if (options.orderBy !== undefined && !/^[A-Za-z]{1,32}\((asc|desc)\)$/.test(options.orderBy)) {
+    throw new RangeError("orderBy is a field and a direction, such as created(desc)");
+  }
   const answer = await performJson(
     ctx,
     {
       what: "list jobs",
       method: "GET",
-      path: `/jobs/list${query({ listType: options.listType, limit: options.limit, skip: options.skip })}`,
+      path: `/jobs/list${query({ listType: options.listType, limit: options.limit, skip: options.skip, orderBy: options.orderBy })}`,
       retry: true,
       mutates: false,
     },

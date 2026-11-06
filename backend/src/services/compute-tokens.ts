@@ -13,6 +13,10 @@
  *   `compute-job`      the launcher's `job_token`, sent in the `X-Compute-Job-Token` header (never a
  *                      URL) to the bundle, outputs and complete routes. It stops working the moment the
  *                      job is terminal, whatever the nonce says (the routes read the state).
+ *   `compute-observer` (phase A7) the observer's token for ONE run, in the header
+ *                      `X-Compute-Observer-Token` as `<run id>.<digest>`. Here the "job id" field of the
+ *                      payload is the RUN id and the nonce is the run's own: the run row, not a clock in
+ *                      the token, says whether it is unspent and within its hour.
  *
  * There is NO clock inside either token: validity is the row's (a non-null nonce, and for the job
  * token a job that is not terminal), so a replay after the end has nothing to verify against. The
@@ -28,7 +32,10 @@ export const COMPUTE_WEBHOOK_TOKEN_DOMAIN = "compute-webhook";
 /** The first line of every job-token message. Never shared with another token kind. */
 export const COMPUTE_JOB_TOKEN_DOMAIN = "compute-job";
 
-export type ComputeTokenKind = "webhook" | "job";
+/** The first line of every observer-run message. Never shared with another token kind. */
+export const COMPUTE_OBSERVER_TOKEN_DOMAIN = "compute-observer";
+
+export type ComputeTokenKind = "webhook" | "job" | "observer";
 
 /**
  * The nonce a verification uses when the job has none (no such job, or its nonce was cleared): a value
@@ -39,6 +46,7 @@ export const NO_NONCE = "00000000-0000-0000-0000-000000000000";
 const DOMAIN: Readonly<Record<ComputeTokenKind, string>> = {
   webhook: COMPUTE_WEBHOOK_TOKEN_DOMAIN,
   job: COMPUTE_JOB_TOKEN_DOMAIN,
+  observer: COMPUTE_OBSERVER_TOKEN_DOMAIN,
 };
 
 export interface ComputeTokenPayload {

@@ -1570,11 +1570,28 @@ describe("no path writes a pool's totals except a ledger entry", () => {
     expect(offences).toEqual([]);
   });
 
-  test("migration 0114 is the only file that creates a trigger on compute_pools", () => {
+  test("migration 0114 creates the triggers on compute_pools, and migration 0130 only replaces the identity one with its anonymizing exception", () => {
     const files = sources().filter((s) => triggersOnPools(s.text) > 0);
-    expect(files.map((f) => f.path)).toEqual([expect.stringContaining(TRIGGER_FILE)]);
+    expect(files.map((f) => f.path)).toEqual([
+      expect.stringContaining(TRIGGER_FILE),
+      expect.stringContaining("0130_compute_anonymise.sql"),
+    ]);
     // The count it sees in the migration is the two it creates, and a planted one is seen.
     expect(triggersOnPools(files[0]?.text ?? "")).toBe(2);
+    // Phase A7's replacement is the one identity trigger, which only ever RAISES: it writes no total.
+    expect(triggersOnPools(files[1]?.text ?? "")).toBe(1);
+    expect(files[1]?.text).toContain("CREATE TRIGGER compute_pools_identity_fixed");
+    expect(files[1]?.text).not.toContain("CREATE TRIGGER compute_ledger_apply");
+    // The A2 guard is NOT loosened to "any trigger on the pools": the one trigger 0130 may create on them
+    // is BEFORE UPDATE, and its body only raises. A body that writes anything is a writer of a total.
+    const created =
+      /CREATE TRIGGER compute_pools_identity_fixed BEFORE UPDATE OF[\s\S]*?\bEND;/.exec(
+        files[1]?.text ?? "",
+      )?.[0];
+    expect(created).toBeDefined();
+    const body = /\bBEGIN([\s\S]*)\bEND;/.exec(created ?? "")?.[1] ?? "";
+    expect(body.trim()).toMatch(/^SELECT RAISE\(ABORT, '[^']*(?:''[^']*)*'\);$/);
+    expect(body).not.toMatch(/\b(?:UPDATE|INSERT|DELETE|REPLACE)\b/i);
     expect(
       triggersOnPools("CREATE TRIGGER t AFTER INSERT ON compute_pools BEGIN SELECT 1; END;"),
     ).toBe(1);

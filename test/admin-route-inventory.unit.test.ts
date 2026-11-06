@@ -68,6 +68,20 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /compute/jobs/:id/advance": 1,
   // Epic #2005 phase A6 (ADR 0118): NEMAR's own pipelines. Admin-only through the router's middleware;
   // one handler each.
+  // Epic #2005 phase A7 (ADR 0118): reporting, legal holds, the observer's token and the ACCESS report
+  // re-queue. Admin-only through the router's middleware; the owner-only ones are two handlers (the
+  // owner check, then the handler), an admin's are one.
+  "GET /compute/jobs": 1,
+  "GET /compute/records/:ref": 1,
+  "POST /compute/records/:ref/read": 2,
+  "GET /compute/report": 1,
+  "GET /compute/access-report": 1,
+  "GET /compute/holds": 1,
+  "POST /compute/holds": 2,
+  "DELETE /compute/holds/:id": 2,
+  "GET /compute/access-reports": 1,
+  "POST /compute/access-reports/:jobId/requeue": 2,
+  "POST /compute/observer-runs": 1,
   "POST /compute/pipeline/run": 1,
   "GET /compute/pipeline/status": 1,
 
@@ -332,7 +346,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(217);
+    expect(adminRoutes.routes.length).toBe(232);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

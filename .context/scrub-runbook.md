@@ -533,7 +533,7 @@ ssh $H "cd scrub-work/$D && python3 hash_stage.py compute --plan plan.json --pat
 scp $H:scrub-work/$D/hashes.json $W/hashes.json
 ```
 
-For a run longer than a session, launch it detached on the host (the form is in the maintainers' memory `hallu-launch-and-self-deploy-lag`), and later run the foreground command again: `hashes.json` is resumed, so it reads nothing more and exits 0 exactly when every key is in it.
+For a run longer than a session, launch it detached on the host (the form is in the maintainers' memory `remote-launch-and-self-deploy-lag`), and later run the foreground command again: `hashes.json` is resumed, so it reads nothing more and exits 0 exactly when every key is in it.
 Each entry is bound to its patch, so a re-plan with different scanner rules recomputes rather than reusing a stale digest.
 `--limit N` reads at most N keys and exits 4 when keys remain; `--timeout`, `--retries`, `--retry-backoff`, `--checkpoint-every` and `--source-cmd` are in `--help`.
 Continue only on exit 0.

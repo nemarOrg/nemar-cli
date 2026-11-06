@@ -100,8 +100,91 @@ const pipelineStamp = {
   updated_at: "2026-11-05 10:00:00",
 };
 
+const hold = {
+  id: 3,
+  scope: "job",
+  ref: "job_0123456789abcdef01234567",
+  reason: "legal_request",
+  placed_by: 1,
+  placed_at: "2026-11-05 10:00:00",
+  released_at: null,
+};
+
 /** A valid document for each exported schema. */
 const VALID: Record<string, unknown> = {
+  ComputeJobsListResponseSchema: { jobs: [job, job], next_after: 41 },
+  ComputeUnmatchedResponseSchema: {
+    rows: [
+      {
+        slurm_job_id: "12345",
+        partition: "shared",
+        state: "COMPLETED",
+        elapsed_seconds: 600,
+        alloc_nodes: 1,
+        alloc_cpus: 4,
+        alloc_gpus: 0,
+        charged_milli: null,
+        ingested_at: "2026-11-05 03:00:00",
+      },
+    ],
+    total: 1,
+  },
+  ComputeRecordResponseSchema: {
+    job,
+    identifiers: { tapis_uuid: "u-1", slurm_job_id: "12345" },
+    ledger: [{ id: 1, kind: "hold" }],
+    provenance: { image: { digest: "sha256:abc" } },
+    manifest: { files: 2, bytes: 100 },
+    legal_hold: false,
+  },
+  ComputeRecordReadResponseSchema: {
+    job_id: "job_0123456789abcdef01234567",
+    name: "spec.json",
+    kind: "bytes",
+    content: { name: "x" },
+  },
+  ComputeAccountReportResponseSchema: {
+    account_id: 12,
+    from: "2026-10-01",
+    to: "2026-10-31",
+    totals: { jobs: 2, charged_milli: 5000 },
+    by_pool: { cpu: { jobs: 2, charged_milli: 5000 } },
+    jobs: [{ id: "job_0123456789abcdef01234567" }],
+    truncated: false,
+  },
+  ComputeAccessReportResponseSchema: {
+    quarter: "2026Q4",
+    rows: [{ partition: "shared", source: "cli", distinct_users: 2, jobs: 5 }],
+    totals: { distinct_users: 2, jobs: 5 },
+  },
+  ComputeHoldViewSchema: hold,
+  ComputeHoldsResponseSchema: { holds: [hold] },
+  ComputeHoldResponseSchema: { hold },
+  ComputeAccessReportsResponseSchema: {
+    rows: [
+      {
+        job_id: "job_0123456789abcdef01234567",
+        state: "failed",
+        attempts: 1,
+        last_error_code: "outcome_unknown",
+        next_attempt_at: "2026-11-05 10:00:00",
+        sent_at: null,
+        created_at: "2026-11-05 09:00:00",
+      },
+    ],
+    failed_by_word: { outcome_unknown: 1 },
+    next_after: null,
+  },
+  ComputeRequeueResponseSchema: {
+    ok: true,
+    job_id: "job_0123456789abcdef01234567",
+    previous: "outcome_unknown",
+  },
+  ComputeObserverRunResponseSchema: {
+    run_id: "11111111-2222-3333-4444-555555555555",
+    token: "x.y",
+    expires_in_minutes: 60,
+  },
   ComputePipelineResultSchema: pipelineResult,
   ComputePipelineStampViewSchema: pipelineStamp,
   ComputePipelineStatusResponseSchema: { stamps: [pipelineStamp], next_before: null },

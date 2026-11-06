@@ -111,6 +111,7 @@ const REASON = {
   released: "released",
   expired: "expired",
   final: "final_settlement",
+  unreserved: "unreserved_usage",
 } as const satisfies Record<string, (typeof COMPUTE_LEDGER_REASONS)[number]>;
 
 export interface PoolRow {
@@ -666,6 +667,53 @@ export function settleStatements(
     invalid("a gate binds one value for each ? it has");
   }
   return [db.prepare(settleInsertSql(gate?.sql)).bind(job, used, ...values)];
+}
+
+// --- Use that skipped the reservation (phase A7, #2012) ----------------------------------------
+
+/** The key of the entry that records a job's use that skipped the reservation, once. */
+export const unreservedKey = (jobId: string): string => `job:${jobId}:unreserved`;
+
+/**
+ * THE CHARGE OF A JOB THAT SKIPPED THE RESERVATION (design section 6): `?1` the job, `?2` the tenant
+ * partner pool, `?3` the platform `people` budget of the pool's word, `?4` what the job used, `?5` the
+ * entry's reason. There is no hold, and the table refuses a `charge` that does not close one
+ * (`compute_ledger_closes_its_hold`), so the entry is an `overrun`: use beyond (here, without) a hold,
+ * charged to the pool and counted against the budget, with the balance free to go negative. It is
+ * written once per job (the key), only for a figure above 0, and never to a person: the pool is the
+ * partner's. A gate (see `releaseInsertSql`) ANDs into the WHERE, numbered after the five.
+ */
+export function unreservedChargeInsertSql(gate?: string): string {
+  const and = gate === undefined ? "" : `\n     AND (${numberedGuard(gate, 6).sql})`;
+  return `INSERT INTO compute_ledger
+  (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key)
+  SELECT 'overrun', p.id, ?3, ?4, ?1, ?5, 'job:' || ?1 || ':unreserved'
+    FROM compute_pools p
+   WHERE p.id = ?2 AND p.holder_kind = 'partner' AND ?4 > 0
+     AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'job:' || ?1 || ':unreserved')${and}`;
+}
+
+export const UNRESERVED_CHARGE_INSERT_SQL = unreservedChargeInsertSql();
+
+/** The statement of an unreserved job's charge, for a batch of the caller's own, gated by `gate`. */
+export function unreservedChargeStatements(
+  db: D1Database,
+  input: { jobId: string; poolId: number; budgetPoolId: number; chargeMilli: number },
+  gate?: HoldGuard,
+): D1PreparedStatement[] {
+  const job = jobIdArg(input.jobId);
+  const pool = positiveId("a pool", input.poolId);
+  const budget = positiveId("a budget pool", input.budgetPoolId);
+  const used = amount("a charge", input.chargeMilli, 0);
+  const values = gate?.binds ?? [];
+  if (gate !== undefined && values.length !== numberedGuard(gate.sql, 6).count) {
+    invalid("a gate binds one value for each ? it has");
+  }
+  return [
+    db
+      .prepare(unreservedChargeInsertSql(gate?.sql))
+      .bind(job, pool, budget, used, REASON.unreserved, ...values),
+  ];
 }
 
 export type CloseRefusal =

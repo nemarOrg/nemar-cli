@@ -12,6 +12,7 @@ import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../../middle
 import { registerComputeAdminRoutes } from "./compute";
 import { registerComputeJobAdminRoutes } from "./compute-jobs";
 import { registerComputePipelineAdminRoutes } from "./compute-pipeline";
+import { registerComputeReportingRoutes } from "./compute-reporting";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerExemplarRoutes } from "./exemplar";
@@ -92,3 +93,4 @@ registerMailRoutes(adminRoutes);
 registerComputeAdminRoutes(adminRoutes);
 registerComputeJobAdminRoutes(adminRoutes);
 registerComputePipelineAdminRoutes(adminRoutes);
+registerComputeReportingRoutes(adminRoutes);

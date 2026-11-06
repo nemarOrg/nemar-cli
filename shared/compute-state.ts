@@ -614,6 +614,7 @@ export const COMPUTE_LEDGER_REASONS = [
   "refund",
   "expired",
   "final_settlement",
+  "unreserved_usage",
 ] as const;
 
 export type ComputeLedgerReason = (typeof COMPUTE_LEDGER_REASONS)[number];
@@ -677,3 +678,38 @@ export const COMPUTE_ACCESS_REPORT_ERRORS = [
 ] as const;
 
 export type ComputeAccessReportError = (typeof COMPUTE_ACCESS_REPORT_ERRORS)[number];
+
+// --- Phase A7: observer, holds, retention and anonymization (#2012) ---------------------------------
+
+/** What a legal hold is placed on: one job, or every job of one account. */
+export const COMPUTE_HOLD_SCOPES = ["job", "account"] as const;
+
+export type ComputeHoldScope = (typeof COMPUTE_HOLD_SCOPES)[number];
+
+/** Where an observer run is: its token is unused (`issued`), spent (`ingested`) or past its hour (`expired`). */
+export const COMPUTE_OBSERVER_RUN_STATUSES = ["issued", "ingested", "expired"] as const;
+
+export type ComputeObserverRunStatus = (typeof COMPUTE_OBSERVER_RUN_STATUSES)[number];
+
+/**
+ * The partner pool every job that skipped the reservation is charged to (design section 6): never to
+ * a person. A partner pool's holder reference is a client id; this one belongs to no client.
+ */
+export const COMPUTE_TENANT_POOL_REF = "tenant";
+
+/**
+ * The actor a deleted account's ledger entries are anonymized to (migration 0130): 2^53 - 1, which no
+ * account has. A fixed token, so an anonymized entry says only that its actor is gone.
+ */
+export const COMPUTE_ANONYMOUS_ACTOR_ID = 9007199254740991;
+
+/**
+ * The holder reference a deleted account's pool is anonymized to (migration 0130): `9` and the pool's
+ * own id padded to 15 digits. It is derived from the pool, never from the account, so it identifies
+ * nobody, and it is unique per pool, which the table's UNIQUE key needs.
+ */
+export function anonymousPoolRef(poolId: number): string {
+  if (!Number.isSafeInteger(poolId) || poolId < 1)
+    throw new RangeError("a pool id is a positive whole number");
+  return `9${String(poolId).padStart(15, "0")}`;
+}

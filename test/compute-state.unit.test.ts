@@ -446,6 +446,7 @@ describe("ledger reasons", () => {
       "refund",
       "expired",
       "final_settlement",
+      "unreserved_usage",
     ]);
     expect(new Set(COMPUTE_LEDGER_REASONS).size).toBe(COMPUTE_LEDGER_REASONS.length);
     for (const w of COMPUTE_LEDGER_REASONS) expect(COMPUTE_WORD_RE.test(w), w).toBe(true);

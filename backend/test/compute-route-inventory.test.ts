@@ -25,6 +25,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // handler. Any account that is not the owner is answered `job_not_found`.
   "POST /jobs/:id/cancel": 3,
   "POST /jobs/:id/links": 3,
+  // The observer (phase A7, #2012): one handler, no session, authenticated inline by the
+  // `X-Compute-Observer-Token` header (an HMAC over a run id and the run's own nonce, one run, one post),
+  // with one refusal for every failure.
+  "POST /observer": 1,
 };
 
 const tableOf = () => {
@@ -42,7 +46,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(9);
+    expect(computeRoutes.routes.length).toBe(10);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -55,7 +59,12 @@ describe("compute route inventory", () => {
     for (const path of ["/jobs/:id/cancel", "/jobs/:id/links"]) {
       expect(handlersOf(path)).toEqual(["authMiddleware", "cookieOriginGuard", "handler"]);
     }
-    for (const path of ["/jobs/:id/bundle", "/jobs/:id/outputs", "/jobs/:id/outputs/complete"]) {
+    for (const path of [
+      "/jobs/:id/bundle",
+      "/jobs/:id/outputs",
+      "/jobs/:id/outputs/complete",
+      "/observer",
+    ]) {
       expect(handlersOf(path)).toHaveLength(1);
       expect(handlersOf(path)).not.toContain("authMiddleware");
     }
