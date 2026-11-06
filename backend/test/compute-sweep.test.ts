@@ -40,6 +40,7 @@ import {
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
 import { fundPlatform, seedUser } from "./helpers/compute-seed";
+import { hookedDb } from "./helpers/db-hooks";
 import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
@@ -373,6 +374,59 @@ describe("a job that NEMAR made", () => {
     expect(total("compute_jobs")).toBe(1);
     expect((await reread(made.env, made.job.id)).flag_mismatch).toBe(1);
     expect(poolCharges()["partner:tenant:cpu"]).toBeUndefined();
+  });
+
+  test("a job the submitter binds AFTER the sweep took its snapshot is neither flagged nor cancelled (MUTATION: skip the check of the row's uuid)", async () => {
+    const made = await makeJob(fx);
+    const uuid = await foreign({ tags: [`nemar_job:${made.job.id}`] });
+    const hook = hookedDb(env().DB);
+    // Between the sweep's read of which Tapis jobs are bound and its read of this one, the submitter binds it.
+    hook.armAfterAll("SELECT tapis_uuid FROM compute_jobs WHERE tapis_uuid IN", () => {
+      fx.harness.db.run(
+        "UPDATE compute_jobs SET tapis_uuid = ?, state = 'submitted', tapis_status = 'PENDING' WHERE id = ?",
+        [uuid, made.job.id],
+      );
+    });
+    const result = await sweepTenantJobs(env({ DB: hook.db }), "live");
+    expect(result).toMatchObject({ bound: 1, duplicates: 0, indexed: 0, cancelled: 0 });
+    expect(cancels()).toHaveLength(0);
+    expect(fx.tapis.jobs.get(uuid)?.status).not.toBe("CANCELLED");
+    expect((await reread(made.env, made.job.id)).flag_mismatch).toBe(0);
+  });
+
+  test("an insert that does nothing because a row has the job cancels it only if the row is the sweep's own (MUTATION: cancel after a conflicting insert)", async () => {
+    const mine = await makeJob(fx);
+    const untagged = await foreign({});
+    const hook = hookedDb(env().DB);
+    // A NEMAR row takes the job between the snapshot and the sweep's insert.
+    hook.armAfterAll("SELECT tapis_uuid FROM compute_jobs WHERE tapis_uuid IN", () => {
+      fx.harness.db.run(
+        "UPDATE compute_jobs SET tapis_uuid = ?, state = 'submitted' WHERE id = ?",
+        [untagged, mine.job.id],
+      );
+    });
+    const first = await sweepTenantJobs(env({ DB: hook.db }), "live");
+    expect(first).toMatchObject({ indexed: 0, cancelled: 0 });
+    expect(cancels()).toHaveLength(0);
+    expect(total("compute_jobs")).toBe(1);
+    expect((await reread(mine.env, mine.job.id)).state).toBe("submitted");
+  });
+
+  test("the sweep's own row, found again by a second run's conflicting insert, is still cancelled", async () => {
+    const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
+    await sweepTenantJobs(env(), "live");
+    expect(cancels()).toHaveLength(2);
+    const hook = hookedDb(env().DB);
+    // A second run took its snapshot before the first run's row existed: the snapshot it gets is empty.
+    hook.armAfterAll("SELECT tapis_uuid FROM compute_jobs WHERE tapis_uuid IN", () => ({
+      results: [],
+    }));
+    const again = await sweepTenantJobs(env({ DB: hook.db }), "live");
+    expect(again?.indexed).toBe(0);
+    expect(total("compute_jobs")).toBe(1);
+    expect(row(uuid)?.flag_unreserved).toBe(1);
+    expect(cancels()).toHaveLength(3);
   });
 
   test("a foreign job that carries a NEMAR-looking tag is not a duplicate: it is unreserved, recorded and charged (MUTATION: trust the tag on any owner)", async () => {

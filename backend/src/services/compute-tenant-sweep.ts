@@ -374,12 +374,23 @@ async function handleUnbound(
   for (const id of rec.owner === ctx.owner ? nemarTagIds(rec) : []) {
     const row = await getJob(env.DB, id);
     if (row === null) continue;
+    // The bound-uuid snapshot was taken before this read: the submitter may have bound this very job
+    // since. Then it is the row's own, and nothing is flagged or cancelled.
+    if (row.tapis_uuid === rec.uuid) {
+      r.bound++;
+      return;
+    }
     if (row.tapis_uuid === null && row.cancel_requested_at === null) {
       const took = await env.DB.prepare(BIND_TAPIS_JOB_SQL)
         .bind(row.id, rec.uuid, rec.status, sqliteTime(rec.remoteSubmitted))
         .run();
       if ((took.meta?.changes ?? 0) === 1) {
         r.raced++;
+        return;
+      }
+      // The bind lost a race: read the row again before judging it a duplicate.
+      if ((await getJob(env.DB, id))?.tapis_uuid === rec.uuid) {
+        r.bound++;
         return;
       }
     }
@@ -429,6 +440,19 @@ async function handleUnbound(
   if ((wrote.meta?.changes ?? 0) === 1) {
     r.indexed++;
     if (unattributed) r.unattributed++;
+  } else {
+    // The insert did nothing: a row already has this Tapis job (another run of this sweep, or the
+    // submitter, bound it since the snapshot). It is cancelled only if the row is the sweep's own;
+    // a NEMAR job that a row owns is never cancelled here.
+    const existing = await env.DB.prepare(
+      "SELECT flag_unreserved FROM compute_jobs WHERE tapis_uuid = ?1",
+    )
+      .bind(rec.uuid)
+      .first<{ flag_unreserved: number }>();
+    if (existing === null || existing.flag_unreserved !== 1) {
+      r.bound++;
+      return;
+    }
   }
   if (!tapisEnded(rec.status)) await cancelAtTapis(ctx, rec.uuid, r);
 }
