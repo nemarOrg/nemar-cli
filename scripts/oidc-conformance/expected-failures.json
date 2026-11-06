@@ -240,7 +240,7 @@
     "current-block": "",
     "condition": "EnsureServerConfigurationSupportsClientSecretPost",
     "expected-result": "failure",
-    "comment": "Decision 3b (B6 conformance run, owner-approved): NEMAR refuses client_secret_post, and discovery lists only client_secret_basic, so the suite stops this module on that check before it sends any request."
+    "comment": "Decision 3b (B6 conformance run, owner-approved): NEMAR refuses client_secret_post, and discovery lists only client_secret_basic, so the suite records this failure and goes on with the module."
   },
   {
     "test-name": "oidcc-server-client-secret-post",
