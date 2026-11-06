@@ -52,7 +52,10 @@ async function emptyBucket(bucket: R2Bucket): Promise<void> {
   let cursor: string | undefined;
   do {
     const listed = await bucket.list({ cursor });
-    for (const o of listed.objects) await bucket.delete(o.key);
+    // One call per 1000 keys (the R2 bound), not one per object: a bucket holding the 2500-output
+    // test's records otherwise outlasts the hook timeout and takes the workerd process with it.
+    const keys = listed.objects.map((o) => o.key);
+    for (let i = 0; i < keys.length; i += 1000) await bucket.delete(keys.slice(i, i + 1000));
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor);
 }
