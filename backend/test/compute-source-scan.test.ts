@@ -157,10 +157,19 @@ function switchFindings(tree: Tree) {
 }
 
 describe("the compute switch is read in one place that gates", () => {
-  test("only submitLeased gates on it, computeStatus only reports it, and nothing else reads it", () => {
+  // The lifecycle gates in ONE place, `submitLeased`: a job already on a cluster is never stranded by
+  // turning compute off. Phase A6 (#2011) adds the reads that stop NEW pipeline work being started with
+  // compute off, each before anything is written: the dispatch refuses before it claims a stamp or takes
+  // a hold (a hold taken with compute off would sit on a job `submitLeased` would then refuse to submit),
+  // the admin route refuses a live run with `compute_disabled`, and the dry run only REPORTS the switch.
+  // Nothing that moves a job already made reads it.
+  test("only submitLeased gates the lifecycle on it; the pipeline dispatch and its route refuse new work, the two reports only report it, and nothing else reads it", () => {
     expect(switchFindings(real)).toEqual({
       calls: [
+        "routes/admin/compute-pipeline.ts:registerComputePipelineAdminRoutes",
         "services/compute-lifecycle.ts:submitLeased",
+        "services/compute-pipeline.ts:dispatchPipelineJob",
+        "services/compute-pipeline.ts:pipelineDryRun",
         "services/compute-status.ts:computeStatus",
       ],
       otherMentions: [],
