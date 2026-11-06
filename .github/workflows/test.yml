@@ -587,43 +587,8 @@ jobs:
       # is retried (a retry resumes the partial file), and the last attempt has none, so a slow
       # mirror still ends in an install and not a failure. The download-only step also leaves the
       # .deb files this job caches for the next run.
-      - name: Ubuntu release
-        id: ubuntu
-        run: echo "release=$(lsb_release -rs)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the git-annex packages
-        uses: actions/cache@v4
-        with:
-          path: ~/annex-debs
-          key: git-annex-debs-${{ runner.arch }}-${{ steps.ubuntu.outputs.release }}-v1
-
-      # The last mirror attempt below may take 30 minutes by design; this step limit
-      # still stops it at 20 so the failure names this step, not the whole job.
       - name: Install git-annex
-        timeout-minutes: 20
-        run: |
-          if compgen -G "$HOME/annex-debs/git-annex_*.deb" > /dev/null \
-            && sudo dpkg -i "$HOME"/annex-debs/*.deb && git annex version > /dev/null; then
-            echo "installed git-annex from the cached packages"
-            exit 0
-          fi
-          echo "no usable cached packages; installing from the mirror"
-          for attempt in 1 2 3 4 5; do
-            limit=60
-            [ "$attempt" -eq 5 ] && limit=1800
-            if sudo timeout "$limit" apt-get update \
-              && sudo timeout "$limit" apt-get install -y --download-only git-annex; then
-              break
-            fi
-            echo "::warning::apt attempt $attempt failed or timed out"
-          done
-          sudo apt-get install -y git-annex
-          mkdir -p "$HOME/annex-debs"
-          # The cache is an optimization. A package the runner image already carries is not in
-          # apt's cache, and its missing file must not fail a job whose install just succeeded.
-          cp /var/cache/apt/archives/git-annex_*.deb /var/cache/apt/archives/git-remote-gcrypt_*.deb \
-            /var/cache/apt/archives/nocache_*.deb "$HOME/annex-debs/" \
-            || echo "::warning::not every git-annex package could be cached"
+        uses: ./.github/actions/install-git-annex
 
       - name: Install dependencies
         run: bun install
@@ -902,10 +867,7 @@ jobs:
       # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes
       # (see scrub-tools-shard), and #1667 saw it hang for an hour.
       - name: Install git-annex
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-annex
+        uses: ./.github/actions/install-git-annex
 
       # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
       # in German, to show an outcome is read from a status and not from git's message. Without the
@@ -1340,10 +1302,7 @@ jobs:
       # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes
       # (see scrub-tools-shard), and #1667 saw it hang for an hour.
       - name: Install git-annex
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-annex
+        uses: ./.github/actions/install-git-annex
 
       # Under this job's NEMAR_REQUIRE_SCRUB_TOOLS=1 the live suites that drive the real aws CLI
       # against a loopback S3 stand-in fail instead of skipping. The aws CLI comes with the runner
@@ -1555,12 +1514,12 @@ jobs:
           deno-version: v2.x
 
       # Same mirror stall as git-annex elsewhere; inside this job's 10-minute limit.
-      - name: Install DataLad and git-annex
+      - name: Install git-annex
+        uses: ./.github/actions/install-git-annex
+
+      - name: Install DataLad
         timeout-minutes: 8
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-annex
-          pip install datalad
+        run: pip install datalad
 
       - name: Configure git
         run: |

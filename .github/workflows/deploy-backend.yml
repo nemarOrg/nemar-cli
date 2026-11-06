@@ -188,10 +188,7 @@ jobs:
       # Under 30 s at p95, but the Ubuntu mirror can stall on this one package for minutes,
       # and #1667 saw the same install hang for an hour.
       - name: Install git-annex
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git-annex
+        uses: ./.github/actions/install-git-annex
 
       # test/import-annex-uuid-preflight.test.ts and test/import-upstream-moved-guard.test.ts run git
       # in German, to show an outcome is read from a status and not from git's message. Without the
