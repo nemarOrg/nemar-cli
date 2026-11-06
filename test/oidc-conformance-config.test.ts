@@ -128,8 +128,11 @@ describe("the expected-failures and expected-skips files", () => {
     ]);
     expect(configFailures[0]?.comment).toMatch(/Decision 3c/);
     const post = failures.filter((f) => f["test-name"] === "oidcc-server-client-secret-post");
-    expect(post).toHaveLength(1);
-    expect(post[0]?.comment).toMatch(/Decision 3b/);
+    expect(post.map((f) => f.condition).sort()).toEqual([
+      "CheckIfAuthorizationEndpointError",
+      "EnsureServerConfigurationSupportsClientSecretPost",
+    ]);
+    for (const f of post) expect(f.comment).toMatch(/Decisions? 3b/);
     const pkce = failures.filter((f) => f.condition === "CheckIfAuthorizationEndpointError");
     expect(pkce.length).toBeGreaterThan(20);
     for (const f of pkce) expect(f.comment).toMatch(/Decision 3a/);
