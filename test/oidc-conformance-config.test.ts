@@ -33,6 +33,7 @@ const ADDR = { issuer: "https://rig.example.org:9443", alias: "nemar" };
 const CLIENTS = {
   client: { client_id: "client-one", client_secret: "secret-one" },
   client2: { client_id: "client-two", client_secret: "secret-two" },
+  clientPost: { client_id: "client-post", client_secret: "secret-post" },
 };
 
 describe("the plan configurations", () => {
@@ -50,7 +51,7 @@ describe("the plan configurations", () => {
     expect(Object.keys(config).sort()).toEqual(["alias", "description", "server"]);
   });
 
-  test("the Basic plan has two clients, the sign-in and consent tasks, and the four overrides' pages", () => {
+  test("the Basic plan has the clients, the sign-in and consent tasks, and the overrides", () => {
     const config = buildBasicPlanConfig(ADDR, CLIENTS) as {
       client: unknown;
       client2: unknown;
@@ -62,6 +63,11 @@ describe("the plan configurations", () => {
     };
     expect(config.client).toEqual(CLIENTS.client);
     expect(config.client2).toEqual(CLIENTS.client2);
+    // The suite's client_secret_post module reads this client; without it the module stops on the
+    // configuration instead of on what NEMAR does.
+    expect((config as { client_secret_post?: unknown }).client_secret_post).toEqual(
+      CLIENTS.clientPost,
+    );
     const block = config.browser[0];
     expect(block?.match).toBe("https://rig.example.org:9443/oauth/authorize*");
     expect(block?.tasks.map((t) => t.task)).toEqual(["Login", "Consent", "Verify Complete"]);
@@ -69,9 +75,14 @@ describe("the plan configurations", () => {
     expect(block?.tasks.map((t) => t.optional === true)).toEqual([true, true, false]);
     expect(Object.keys(config.override).sort()).toEqual([
       "oidcc-ensure-registered-redirect-uri",
+      "oidcc-ensure-request-object-with-redirect-uri",
       "oidcc-max-age-1",
       "oidcc-prompt-login",
     ]);
+    // Both redirect-address tests expect the same error page.
+    expect(config.override["oidcc-ensure-request-object-with-redirect-uri"]).toEqual(
+      config.override["oidcc-ensure-registered-redirect-uri"],
+    );
   });
 
   test("the browser signs in with the rig's account and chooses Allow by its value", () => {
@@ -79,6 +90,63 @@ describe("the plan configurations", () => {
     expect(text).toContain(RIG_ACCOUNT_EMAIL);
     expect(text).toContain("//button[@value='allow']");
     expect(text).toContain(RIG_TEXT.redirectNotRegistered);
+  });
+});
+
+describe("the expected-failures and expected-skips files", () => {
+  interface Entry {
+    "test-name": string;
+    "configuration-filename": string;
+    "expected-result"?: string;
+    condition?: string;
+    comment: string;
+  }
+  const failures = JSON.parse(read("scripts/oidc-conformance/expected-failures.json")) as Entry[];
+  const skips = JSON.parse(read("scripts/oidc-conformance/expected-skips.json")) as Entry[];
+
+  test("neither is empty, so the workflow's claim that deviations are recorded is true", () => {
+    expect(failures.length).toBeGreaterThan(0);
+    expect(skips.length).toBeGreaterThan(0);
+  });
+
+  test("every entry names the decision that approved it", () => {
+    for (const entry of [...failures, ...skips]) {
+      expect({
+        test: entry["test-name"],
+        named: /\bDecisions? \d[a-z]?\b/.test(entry.comment),
+      }).toEqual({
+        test: entry["test-name"],
+        named: true,
+      });
+    }
+  });
+
+  test("covers the three deviations: RS256, client_secret_post and mandatory PKCE", () => {
+    const comments = failures.map((f) => f.comment).join("\n");
+    expect(comments).toMatch(/Decision 3c/);
+    expect(comments).toMatch(/Decisions 3b and 3a/);
+    expect(comments).toMatch(/Decision 3a/);
+    expect(
+      failures.some(
+        (f) => f.condition === "OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported",
+      ),
+    ).toBe(true);
+    expect(failures.some((f) => f["test-name"] === "oidcc-server-client-secret-post")).toBe(true);
+  });
+
+  test("the skips are the scope tests the discovery document rules out and the request object", () => {
+    expect(skips.map((s) => s["test-name"]).sort()).toEqual([
+      "oidcc-scope-address",
+      "oidcc-scope-all",
+      "oidcc-scope-phone",
+      "oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported",
+    ]);
+  });
+
+  test("each entry names a plan configuration by pattern, never a runner path", () => {
+    for (const entry of [...failures, ...skips]) {
+      expect(entry["configuration-filename"]).toMatch(/^\*(basic|config)-plan\.json$/);
+    }
   });
 });
 
@@ -111,6 +179,7 @@ describe("the workflow", () => {
   interface Step {
     name?: string;
     uses?: string;
+    run?: string;
     with?: { path: string };
   }
   const workflow = parse(text) as {
@@ -151,8 +220,31 @@ describe("the workflow", () => {
     expect(text).toContain('"oidcc-config-certification-test-plan"');
   });
 
-  test("pins the Python packages exactly", () => {
+  test("pins the Python packages exactly, and nothing newer than the pin date can be resolved", () => {
     expect(text).toContain("--with httpx==0.28.1 --with pyparsing==3.3.3");
+    const runs = text.match(/uv run [^\n]*/g) ?? [];
+    expect(runs).toHaveLength(2);
+    for (const run of runs) expect(run).toContain("--exclude-newer 2026-11-05");
+    const setup = steps.find((s) => String(s.uses).startsWith("astral-sh/setup-uv@"));
+    expect((setup as { with?: { "enable-cache"?: boolean } }).with?.["enable-cache"]).toBe(false);
+  });
+
+  test("bounds the Basic plan at 35 minutes inside the 60 minute job", () => {
+    const basic = steps.find((s) => s.name === "Basic plan") as { "timeout-minutes"?: number };
+    expect(basic["timeout-minutes"]).toBe(35);
+  });
+
+  test("stops the rig and the suite before it uploads anything", () => {
+    const names = steps.map((s) => s.name);
+    const stop = names.indexOf("Stop the rig and the suite");
+    expect(stop).toBeGreaterThan(-1);
+    expect(stop).toBeLessThan(names.indexOf("Upload results and logs"));
+    const body = String(steps[stop]?.run);
+    expect(body).toContain("kill");
+    expect(body).toContain("docker compose");
+    expect(body).toContain("down");
+    // The header says what the uploaded files do and do not hold.
+    expect(text).toContain("nothing live is uploaded");
   });
 
   test("checks the suite's commit, so a moved tag fails the run", () => {
