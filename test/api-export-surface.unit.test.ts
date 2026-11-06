@@ -241,13 +241,16 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "adjustPlatformComputePool",
     "advanceComputeJobAsAdmin",
     "cancelComputeJobAsAdmin",
+    "computeRefusalCode",
     "getAccountComputePools",
+    "getComputePipelineStatus",
     "getComputePolicy",
     "getComputeStatus",
     "grantAccountComputePool",
     "grantPlatformComputePool",
     "listComputePools",
     "putComputePolicy",
+    "runComputePipeline",
   ],
 };
 
@@ -375,6 +378,9 @@ const POST_SPLIT_ADDITIONS = [
   "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status
   "cancelComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/cancel
   "advanceComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/advance
+  "runComputePipeline", // epic #2005 phase A6: POST /admin/compute/pipeline/run
+  "getComputePipelineStatus", // epic #2005 phase A6: GET /admin/compute/pipeline/status
+  "computeRefusalCode", // epic #2005 phase A6: reads a compute refusal's word (no request)
   "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
   "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
   "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant

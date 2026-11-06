@@ -16,6 +16,11 @@ import {
   ComputeAccountPoolsResponseSchema,
   type ComputeJobAdminResponse,
   ComputeJobAdminResponseSchema,
+  type ComputePipelineRunRequest,
+  type ComputePipelineRunResponse,
+  ComputePipelineRunResponseSchema,
+  type ComputePipelineStatusResponse,
+  ComputePipelineStatusResponseSchema,
   type ComputePolicyResponse,
   ComputePolicyResponseSchema,
   type ComputePoolAdjustRequest,
@@ -29,6 +34,7 @@ import {
   ComputeStatusResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
 import { request } from "./client.js";
+import { ApiError } from "./errors.js";
 
 /** `GET /admin/compute/policy` (owner): the policy in force, or the default while none is set. */
 export async function getComputePolicy(): Promise<ComputePolicyResponse> {
@@ -168,4 +174,71 @@ export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJo
     true,
     ComputeJobAdminResponseSchema,
   );
+}
+
+/**
+ * `POST /admin/compute/pipeline/run` (admin): run a recipe over one dataset version, or over the next
+ * datasets it has not been run over (`eligible` with a `limit`), or say what that would do (`dry_run`,
+ * which reads only). A refusal about the one named dataset answers an error with its word in
+ * `rawBody.code` (see {@link computeRefusalCode}); a run over the queue answers 200 with each dataset's
+ * outcome and the word that stopped it, if one did (epic #2005 phase A6, #2011).
+ */
+export async function runComputePipeline(
+  body: ComputePipelineRunRequest,
+): Promise<ComputePipelineRunResponse> {
+  return request(
+    "/admin/compute/pipeline/run",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+    ComputePipelineRunResponseSchema,
+  );
+}
+
+/** What `GET /admin/compute/pipeline/status` filters by; `before` continues a page. */
+export interface ComputePipelineStatusQuery {
+  recipe?: string;
+  dataset?: string;
+  state?: string;
+  before?: number;
+  limit?: number;
+}
+
+/**
+ * `GET /admin/compute/pipeline/status` (admin): the stamps, newest first, after the Worker synced them
+ * with their jobs. `next_before` continues the page.
+ */
+export async function getComputePipelineStatus(
+  q: ComputePipelineStatusQuery = {},
+): Promise<ComputePipelineStatusResponse> {
+  const params = new URLSearchParams();
+  if (q.recipe) params.set("recipe", q.recipe);
+  if (q.dataset) params.set("dataset", q.dataset);
+  if (q.state) params.set("state", q.state);
+  if (q.before !== undefined) params.set("before", String(q.before));
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request(
+    `/admin/compute/pipeline/status${query}`,
+    {},
+    true,
+    ComputePipelineStatusResponseSchema,
+  );
+}
+
+/**
+ * The fixed word of a compute route's refusal (`rawBody.code`) and, for a refused dataset, the terms of
+ * the eligibility predicate that block it (`rawBody.blocked_by`); undefined for anything else.
+ */
+export function computeRefusalCode(
+  err: unknown,
+): { code: string; blockedBy: string[] } | undefined {
+  if (!(err instanceof ApiError)) return undefined;
+  const body = err.rawBody;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const { code, blocked_by: blocked } = body as Record<string, unknown>;
+  if (typeof code !== "string") return undefined;
+  const blockedBy = Array.isArray(blocked)
+    ? blocked.filter((t): t is string => typeof t === "string")
+    : [];
+  return { code, blockedBy };
 }
