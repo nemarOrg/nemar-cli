@@ -544,6 +544,17 @@ describe("the workflow", () => {
     expect(String(steps[stop]?.if)).toContain("always()");
     expect(body).toContain("kill -0");
     expect(body).toMatch(/seq 1 20[\s\S]*sleep 0\.5[\s\S]*exit 1/);
+    // The pid is read without failing the step when the file is missing, and an empty pid skips the wait.
+    expect(body).toContain('pid=$(cat "$RUNNER_TEMP/rig.pid" 2>/dev/null || true)');
+    expect(body).toContain('[ -n "$pid" ] || exit 0');
+    // Two waits, a kill -9 between them, and the failure only after the second wait.
+    const waits = [...body.matchAll(/seq 1 20/g)].map((m) => m.index as number);
+    expect(waits).toHaveLength(2);
+    const kill9 = body.indexOf("kill -9");
+    expect(kill9).toBeGreaterThan(waits[0] as number);
+    expect(kill9).toBeLessThan(waits[1] as number);
+    expect(body.indexOf("exit 1")).toBeGreaterThan(waits[1] as number);
+    expect(body.indexOf("exit 1")).toBe(body.lastIndexOf("exit 1"));
     // The header says what the uploaded files do and do not hold.
     expect(text).toContain("nothing live is uploaded");
   });
