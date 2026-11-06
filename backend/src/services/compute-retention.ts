@@ -177,10 +177,17 @@ export const POOLS_DUE_SQL = `SELECT p.id AS id FROM compute_pools p
 
 export const ANONYMISE_POOL_SQL = "UPDATE compute_pools SET holder_ref = ?2 WHERE id = ?1";
 
-/** Deleted accounts that acted on the ledger and have nothing left in it that is open or held. `?1` limit. */
+/**
+ * Deleted accounts with a ledger entry the update can change, and no job or hold. An account whose only
+ * entries are the entries of holds still open is NOT listed (the update leaves them alone, so it would sit
+ * at the head of the window every day and starve the rest). `?1` limit.
+ */
 export const ACTORS_DUE_SQL = `SELECT u.id AS id FROM users u
   WHERE u.deleted_at IS NOT NULL
-    AND EXISTS (SELECT 1 FROM compute_ledger l WHERE l.actor_user_id = u.id)
+    AND EXISTS (SELECT 1 FROM compute_ledger l WHERE l.actor_user_id = u.id
+                 AND (l.kind <> 'hold' OR EXISTS (SELECT 1 FROM compute_ledger c
+                                                   WHERE c.hold_ref = l.id
+                                                     AND c.kind IN ('release', 'charge'))))
     AND NOT EXISTS (SELECT 1 FROM compute_jobs j WHERE j.account_id = u.id)
     AND NOT EXISTS (SELECT 1 FROM compute_legal_holds h
                      WHERE h.released_at IS NULL AND h.scope = 'account' AND h.ref = CAST(u.id AS TEXT))

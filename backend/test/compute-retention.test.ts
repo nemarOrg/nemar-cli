@@ -27,6 +27,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { COMPUTE_ANONYMOUS_ACTOR_ID, anonymousPoolRef } from "../../shared/compute-state";
 import { placeHold, releaseHold } from "../src/services/compute-legal-holds";
 import {
+  ACTORS_DUE_SQL,
   RETENTION_AUDIT_ACTION,
   RETENTION_JOBS_PER_STAGE,
   deletePrefix,
@@ -41,7 +42,7 @@ import {
   makeJob,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
-import { fundAccount, seedUser } from "./helpers/compute-seed";
+import { fundAccount, fundPlatform, seedUser } from "./helpers/compute-seed";
 import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
@@ -742,6 +743,43 @@ describe("a deleted account", () => {
       { idempotency_key: "by-gone-2", actor_user_id: COMPUTE_ANONYMOUS_ACTOR_ID },
       { idempotency_key: "by-live-1", actor_user_id: live },
     ]);
+  });
+});
+
+describe("the window of deleted accounts' ledger actors", () => {
+  test("an account whose only entry is a hold still open is not listed, so it cannot starve the rest (MUTATION: list every actor)", async () => {
+    const stuck = await seedUser(env().DB, { deleted_at: "2026-01-01 00:00:00" });
+    const ready = await seedUser(env().DB, { deleted_at: "2026-01-01 00:00:00" });
+    const holder = await seedUser(env().DB);
+    const pool = await fundAccount(env().DB, holder, 5000);
+    await fundPlatform(env().DB, "people", 5000);
+    const budget = sql.one<{ id: number }>(
+      "SELECT id FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = 'people' AND pool = 'cpu'",
+    ).id;
+    // An open hold made by the account that is now gone, and a grant by the other.
+    sql.run(
+      "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, actor_user_id, idempotency_key) VALUES ('hold', ?, ?, 100, 'job_0000000000000000000000f1', ?, 'job:job_0000000000000000000000f1:hold')",
+      pool,
+      budget,
+      stuck,
+    );
+    sql.run(
+      "INSERT INTO compute_ledger (kind, pool_id, granted_delta_milli, actor_user_id, reason, idempotency_key) VALUES ('grant', ?, 7, ?, 'grant', 'by-ready')",
+      pool,
+      ready,
+    );
+    const listed = sql.all<{ id: number }>(ACTORS_DUE_SQL.replace("?1", "50")).map((u) => u.id);
+    expect(listed).toEqual([ready]);
+    // Once the hold is closed the account is listed too.
+    sql.run(
+      "INSERT INTO compute_ledger (kind, pool_id, budget_pool_id, held_delta_milli, job_id, hold_ref, idempotency_key) SELECT 'release', pool_id, budget_pool_id, -held_delta_milli, job_id, id, 'hold:' || id || ':release' FROM compute_ledger WHERE kind = 'hold' AND job_id = 'job_0000000000000000000000f1'",
+    );
+    expect(
+      sql
+        .all<{ id: number }>(ACTORS_DUE_SQL.replace("?1", "50"))
+        .map((u) => u.id)
+        .sort(),
+    ).toEqual([stuck, ready].sort());
   });
 });
 
