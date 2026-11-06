@@ -750,6 +750,18 @@ describe("the stamp follows its job to the end", () => {
     }
   });
 
+  test("an engine string over the stamp's 64 characters ends the stamp failed (record_unreadable), not open for ever", async () => {
+    const { env, jobId, stampId } = await dispatched();
+    const engine = { package: "e".repeat(64), version: "1".repeat(64) };
+    expect(`${engine.package}@${engine.version}`).toHaveLength(129);
+    await finishAtTapis(fx, env, jobId, { outputs: floorOutputs(recipeRecord({ engine })) });
+    await syncPipelineStamps(env);
+    expect(await getStamp(env.DB, stampId)).toMatchObject({
+      state: "failed",
+      refusal_code: "record_unreadable",
+    });
+  });
+
   test("a record over the bound is unreadable, and is not read", async () => {
     const { env, jobId, stampId } = await dispatched();
     await finishAtTapis(fx, env, jobId, {

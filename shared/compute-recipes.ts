@@ -194,6 +194,9 @@ export function recipeImageDigestArg(args: readonly string[]): string | null {
 
 // --- The recipe's own record ------------------------------------------------------------------------
 
+/** The most characters of `<package>@<version>`: the stamp's engine column. */
+const RECORD_ENGINE_MAX = 64;
+
 const RECORD_WORD_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
 /** What the Worker takes from the recipe's dataset record, and nothing more. */
@@ -244,5 +247,9 @@ export function readRecipeRecord(value: unknown): RecipeRecord | null {
   ) {
     return null;
   }
-  return { recipe: id, version, engine: `${pkg}@${engineVersion}`, succeeded };
+  // The stamp's engine column holds 64 characters (migration 0117): a longer value could never be
+  // written, so the record is not read rather than left to throw at the update.
+  const engineText = `${pkg}@${engineVersion}`;
+  if (engineText.length > RECORD_ENGINE_MAX) return null;
+  return { recipe: id, version, engine: engineText, succeeded };
 }

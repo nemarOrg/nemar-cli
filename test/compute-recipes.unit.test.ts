@@ -238,6 +238,14 @@ describe("the recipe's own record", () => {
     }
   });
 
+  test("is none when package@version would not fit the stamp's 64-character engine column", () => {
+    const engine = (version: number) =>
+      record({ engine: { package: "e".repeat(10), version: "1".repeat(version) } });
+    // package + "@" + version: 64 characters fit, 65 do not.
+    expect(readRecipeRecord(engine(53))?.engine).toHaveLength(64);
+    expect(readRecipeRecord(engine(54))).toBeNull();
+  });
+
   test("takes no text a record could use to put anything else into a stamp", () => {
     const hostile = record({ recipe: { id: "a".repeat(80), version: "1.0.0" } });
     expect(readRecipeRecord(hostile)).toBeNull();
