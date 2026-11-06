@@ -56,6 +56,7 @@ import {
   OIDC_AUTHORIZE_CONSENT_PATH,
   type OidcAuthorizeAnswer,
 } from "../../shared/contract/oidc-authorize";
+import { authorizationLogLine, carriesChallenge } from "./authz-log";
 import {
   RIG_ACCOUNT_EMAIL,
   RIG_TEXT,
@@ -311,8 +312,18 @@ const ERROR_PAGE_TEXT: Record<string, string> = {
   unavailable: "NEMAR could not complete this sign-in. Start again from the application.",
 };
 
+/** The error an answer carries, as the run's check names it: a redirect's `error`, or `page:<code>`. */
+function answerError(answer: OidcAuthorizeAnswer): string | null {
+  if (answer.kind === "redirect") return new URL(answer.location).searchParams.get("error");
+  if (answer.kind === "error_page") return `page:${answer.code}`;
+  return null;
+}
+
 /** Render what the check or the consent route answered. */
 function follow(answer: OidcAuthorizeAnswer, request: string): Response {
+  // One line per authorization response: its kind, its error code if any, and whether the request
+  // carried a code_challenge. No value is logged.
+  console.log(authorizationLogLine(answer.kind, answerError(answer), carriesChallenge(request)));
   switch (answer.kind) {
     case "redirect":
       return redirect(answer.location);
@@ -347,6 +358,9 @@ async function authorizePage(req: Request): Promise<Response> {
     headers: pageHeaders(req.headers.get("cookie") ?? ""),
   });
   if (res.status !== 200 || !res.json) {
+    console.log(
+      authorizationLogLine("check_failed", `check_status_${res.status}`, carriesChallenge(request)),
+    );
     return html(
       502,
       "Error",
@@ -367,6 +381,13 @@ async function consentDecision(req: Request): Promise<Response> {
     headers: pageHeaders(req.headers.get("cookie") ?? ""),
   });
   if (res.status !== 200 || !res.json) {
+    console.log(
+      authorizationLogLine(
+        "check_failed",
+        `consent_status_${res.status}`,
+        carriesChallenge(form.get("request") ?? ""),
+      ),
+    );
     return html(502, "Error", `<h1>Error</h1><p>The consent decision answered ${res.status}.</p>`);
   }
   return follow(res.json as unknown as OidcAuthorizeAnswer, form.get("request") ?? "");
