@@ -26,6 +26,7 @@ setDefaultTimeout(60_000);
 
 const ROOT = join(import.meta.dir, "..");
 let outDir: string;
+let rigLog: string;
 let rig: ReturnType<typeof spawn>;
 let origin: string;
 let port: number;
@@ -43,6 +44,7 @@ const readJson = (name: string) => JSON.parse(readFileSync(join(outDir, name), "
 
 beforeAll(async () => {
   outDir = mkdtempSync(join(tmpdir(), "nemar-rig-test-"));
+  rigLog = join(outDir, "rig.log");
   port = await freePort();
   origin = `https://localhost:${port}`;
   rig = spawn({
@@ -54,7 +56,7 @@ beforeAll(async () => {
       RIG_HOST: "localhost",
       RIG_PORT: String(port),
     } as Record<string, string>,
-    stdout: "ignore",
+    stdout: Bun.file(rigLog),
     stderr: "ignore",
   });
   for (let i = 0; i < 100; i++) {
@@ -137,7 +139,91 @@ describe("the clients", () => {
     expect(out).not.toContain(readJson("smoke-client.json").client_secret);
   });
 
-  test("register openid, profile, email and offline_access and no more: orcid is invalid_scope", async () => {
+  test("register openid, profile, email and offline_access and no more", async () => {
+    const smoke = readJson("smoke-client.json");
+    const request = (scope: string) =>
+      new URLSearchParams({
+        response_type: "code",
+        client_id: smoke.client_id,
+        redirect_uri: callbackAddress("https://localhost.emobix.co.uk:8443", "nemar"),
+        scope,
+        state: "s",
+        code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        code_challenge_method: "S256",
+      });
+    // Scopes the clients were not registered for are refused by redirect, before any sign-in is asked
+    // for: the narrowing is the registration's, not the page's.
+    for (const scope of [
+      "openid orcid",
+      "openid nemar.account",
+      "openid compute.read",
+      "openid compute.submit",
+    ]) {
+      const res = await fetch(`${origin}/oauth/authorize?${request(scope)}`, {
+        redirect: "manual",
+        ...insecure,
+      });
+      expect({ scope, status: res.status }).toEqual({ scope, status: 302 });
+      expect({
+        scope,
+        error: new URL(res.headers.get("location") as string).searchParams.get("error"),
+      }).toEqual({ scope, error: "invalid_scope" });
+    }
+    // And the ones that are registered are not refused.
+    for (const scope of ["openid profile email", "openid offline_access"]) {
+      const ok = await fetch(`${origin}/oauth/authorize?${request(scope)}`, {
+        redirect: "manual",
+        ...insecure,
+      });
+      expect(new URL(ok.headers.get("location") as string, origin).pathname).toBe("/login");
+    }
+  });
+
+  test("the pre-flight reads its own client's file and never the plan's", () => {
+    const text = readFileSync(join(ROOT, "scripts", "oidc-conformance", "smoke.ts"), "utf8");
+    expect(text).toContain("smoke-client.json");
+    expect(text).not.toContain("basic-plan.json");
+  });
+});
+
+describe("the authorization responses", () => {
+  const lines = () =>
+    readFileSync(rigLog, "utf8")
+      .split("\n")
+      .filter((l) => l.startsWith("[rig] authz "));
+
+  test("a request with no PKCE challenge gets exactly invalid_request, with state and iss and no description", async () => {
+    const smoke = readJson("smoke-client.json");
+    const query = new URLSearchParams({
+      response_type: "code",
+      client_id: smoke.client_id,
+      redirect_uri: callbackAddress("https://localhost.emobix.co.uk:8443", "nemar"),
+      scope: "openid",
+      state: "pkce-state",
+    });
+    const before = lines().length;
+    const res = await fetch(`${origin}/oauth/authorize?${query}`, {
+      redirect: "manual",
+      ...insecure,
+    });
+    expect(res.status).toBe(302);
+    const back = new URL(res.headers.get("location") as string);
+    expect(`${back.origin}${back.pathname}`).toBe(
+      callbackAddress("https://localhost.emobix.co.uk:8443", "nemar"),
+    );
+    expect([...back.searchParams.keys()].sort()).toEqual(["error", "iss", "state"]);
+    expect(back.searchParams.get("error")).toBe("invalid_request");
+    expect(back.searchParams.get("state")).toBe("pkce-state");
+    expect(back.searchParams.get("iss")).toBe(origin);
+    expect(back.searchParams.has("error_description")).toBe(false);
+    // The rig logged it as the PKCE case: the error code, and that no challenge came with the request.
+    await Bun.sleep(200);
+    expect(lines().slice(before)).toEqual([
+      "[rig] authz kind=redirect error=invalid_request pkce=no",
+    ]);
+  });
+
+  test("a refusal that is not about PKCE is logged with the challenge it carried", async () => {
     const smoke = readJson("smoke-client.json");
     const query = new URLSearchParams({
       response_type: "code",
@@ -148,22 +234,22 @@ describe("the clients", () => {
       code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
       code_challenge_method: "S256",
     });
-    const res = await fetch(`${origin}/oauth/authorize?${query}`, {
-      redirect: "manual",
-      ...insecure,
-    });
-    expect(res.status).toBe(302);
-    expect(new URL(res.headers.get("location") as string).searchParams.get("error")).toBe(
-      "invalid_scope",
-    );
-    // And the ones that are registered are not refused.
-    for (const scope of ["openid profile email", "openid offline_access"]) {
-      query.set("scope", scope);
-      const ok = await fetch(`${origin}/oauth/authorize?${query}`, {
-        redirect: "manual",
-        ...insecure,
-      });
-      expect(new URL(ok.headers.get("location") as string, origin).pathname).toBe("/login");
+    const before = lines().length;
+    await fetch(`${origin}/oauth/authorize?${query}`, { redirect: "manual", ...insecure });
+    await Bun.sleep(200);
+    expect(lines().slice(before)).toEqual([
+      "[rig] authz kind=redirect error=invalid_scope pkce=yes",
+    ]);
+  });
+
+  test("the log holds no value: no state, challenge, client id or address", async () => {
+    const text = readFileSync(rigLog, "utf8");
+    for (const value of [
+      "pkce-state",
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw",
+      readJson("smoke-client.json").client_id,
+    ]) {
+      expect(text).not.toContain(value);
     }
   });
 });
