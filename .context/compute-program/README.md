@@ -27,9 +27,10 @@ First party comes first: A and C together are what NEMAR's data-quality work wai
 B runs beside them because the partner's integration takes calendar time.
 
 **Reserved numbers**, so parallel epics never collide:
-migrations 0114 to 0119 for A, 0120 to 0124 for B, 0125 to 0129 for D;
+migrations 0114 to 0119 for A, 0120 to 0124 for B, and 0131 and up for D (0130 is A's anonymization migration, applied before D's range was used);
 ADR 0118 for the compute gateway (A) and ADR 0119 for the OIDC provider (B).
 If a phase needs more, take the next unreserved number and say so in the PR.
+A migration numbered below one that is already applied is a hazard, because deploy applies by name: production would apply the lower number after the higher one while a fresh replay applies it first, so reserve above the highest applied number.
 
 **Outside gates** that no phase can pass on its own:
 the Tapis tenant and the answers in the design's section 12 (the owner asks SDSC);

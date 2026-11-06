@@ -330,7 +330,7 @@ Call these; never write a second way to end an account's compute, to owe a repor
 Call these; never write a second way to bind, cancel or charge a job nobody reserved, to settle against Expanse's figure, or to delete a record.
 
 - **Migrations.** `0118_compute_observer.sql`: `compute_observer_runs`, `compute_queue_snapshots`, `compute_sacct_rows` (`applied_at` is when a row was applied or judged), `compute_legal_holds` (one active hold per target) and five columns of `compute_jobs` that are the sweeps' own state (`cancel_attempted_at`, `retention_attempted_at`, `records_deleted_at`, `logs_deleted_at`, `results_reconciled_at`), with the indexes the rotations use.
-  `0130_compute_anonymise.sql` (numbered 0130, after the ranges: 0114 to 0119 are used and 0120 to 0129 are reserved): the one exception to the pools' and the ledger's immutability, described in the amendment, item 8.
+  `0130_compute_anonymise.sql` (numbered 0130, after the ranges: 0114 to 0119 and 0120 to 0124 are used, and Epic D's range starts at 0131): the one exception to the pools' and the ledger's immutability, described in the amendment, item 8.
 - **The sweep** (`services/compute-tenant-sweep.ts`): `sweepTenantJobs(env, "live" | "week")`, null outside exact production and while compute is off.
   Tapis jobs: bound by uuid (left alone), tagged for a row (bound, or a cancelled duplicate), or unreserved (indexed, cancelled, charged to the partner pool `tenant` by `unreservedChargeStatements`, an `overrun`).
   `OWNER_ACCOUNT_SQL` is how a Tapis owner maps to an account: the stored gateway pseudonym of an active, undeleted account.

@@ -1,8 +1,9 @@
 -- The one change the compute ledger allows to an existing row: anonymizing a deleted account's
 -- identifiers (epic #2005 phase A7, #2012; ADR 0118, amendment of 2026-11-04 on retention).
 --
--- Numbered 0130 because 0114 to 0119 (this epic's reserved range) are used and 0120 to 0129 are
--- reserved for the OIDC provider and third-party compute epics.
+-- Numbered 0130 because 0114 to 0119 (this epic's reserved range) are used and 0120 to 0124 belong to
+-- the OIDC provider. The third-party compute epic's range starts at 0131, above this one, so no
+-- migration is numbered below an applied higher one.
 --
 -- WHY. Design sections 5 and 9 say a deleted account's records are reduced to anonymous usage counts at
 -- the end of the retention period. The ledger and the pools are append-only, and the triggers of
