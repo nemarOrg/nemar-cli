@@ -283,6 +283,26 @@ describe("the authorization log and its check", () => {
     }
   });
 
+  test("a rule refusal logs access_denied, which the check then flags", () => {
+    const back = "https://client.example.org/cb";
+    expect(
+      answerError({ kind: "rule_refused", location: `${back}?error=access_denied&state=s` }),
+    ).toBe("access_denied");
+    // Even a location that names no error is a refusal.
+    expect(answerError({ kind: "rule_refused", location: `${back}?state=s` })).toBe(
+      "access_denied",
+    );
+    // A malformed one stays malformed.
+    expect(answerError({ kind: "rule_refused", location: `${back}?error=` })).toBe(
+      "malformed_error",
+    );
+    const line = authorizationLogLine("rule_refused", "access_denied", true);
+    expect(line).toBe("[rig] authz kind=rule_refused error=access_denied pkce=yes");
+    expect(checkAuthorizationLog(line).violations).toEqual([
+      "an authorization response (rule_refused) carried the error access_denied, which no approved deviation produces",
+    ]);
+  });
+
   test("fails an empty log, which would check nothing", () => {
     expect(checkAuthorizationLog("").violations).toHaveLength(1);
     expect(checkAuthorizationLog("[rig] GET /login 200").responses).toBe(0);

@@ -66,6 +66,9 @@ function locationError(location: string): string | null {
 /** The error an answer carries, as the run's check names it: a redirect's `error`, or `page:<code>`. */
 export function answerError(answer: LoggedAnswer): string | null {
   if (answer.kind === "redirect") return locationError(answer.location);
+  // A refusal by the client's sign-in rule sends the person back with an error in the location; the
+  // contract says it is `access_denied`, and if the location names none the refusal still is one.
+  if (answer.kind === "rule_refused") return locationError(answer.location) ?? "access_denied";
   if (answer.kind === "error_page") {
     return ERROR_WORD.test(answer.code) ? `page:${answer.code}` : "malformed_error";
   }
