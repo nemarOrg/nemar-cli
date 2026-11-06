@@ -11,8 +11,9 @@
 #
 # WHAT IT CLAIMS. Nothing about certification. NEMAR deliberately differs from what certification
 # expects in three places (PKCE is required, client_secret_post is refused, ES256 is the only signing
-# algorithm), and scripts/oidc-conformance/expected-failures.json records each with the decision that
-# approved it. The results are an engineering check of the provider against the suite's tests.
+# algorithm), and scripts/oidc-conformance/expected-failures*.json record each with the decision that
+# approved it (one file per plan, because the suite counts an entry that no module of the run met as a
+# failure). The results are an engineering check of the provider against the suite's tests.
 #
 # SECRETS AND ARTIFACTS. No secret is used: the job has read access to the repository and nothing else.
 # The plan configurations hold the throwaway clients' secrets, so they live outside the artifact paths
@@ -142,8 +143,7 @@ jobs:
           uv run --no-project --python 3.12 --exclude-newer 2026-11-05 --with httpx==0.28.1 --with pyparsing==3.3.3 \
             python "$RUNNER_TEMP/suite/scripts/run-test-plan.py" \
             --export-dir "$RESULTS_DIR" --verbose \
-            --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures.json" \
-            --expected-skips-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-skips.json" \
+            --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures-config.json" \
             "oidcc-config-certification-test-plan" "$RIG_OUT_DIR/config-plan.json" \
             2>&1 | tee "$GITHUB_WORKSPACE/conformance-artifacts/config-plan.log"
           exit "${PIPESTATUS[0]}"

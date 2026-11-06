@@ -103,35 +103,36 @@ describe("the expected-failures and expected-skips files", () => {
   }
   const failures = JSON.parse(read("scripts/oidc-conformance/expected-failures.json")) as Entry[];
   const skips = JSON.parse(read("scripts/oidc-conformance/expected-skips.json")) as Entry[];
+  const configFailures = JSON.parse(
+    read("scripts/oidc-conformance/expected-failures-config.json"),
+  ) as Entry[];
 
-  test("neither is empty, so the workflow's claim that deviations are recorded is true", () => {
+  test("none is empty, so the workflow's claim that deviations are recorded is true", () => {
     expect(failures.length).toBeGreaterThan(0);
     expect(skips.length).toBeGreaterThan(0);
+    expect(configFailures.length).toBeGreaterThan(0);
   });
 
   test("every entry names the decision that approved it", () => {
-    for (const entry of [...failures, ...skips]) {
+    for (const entry of [...failures, ...skips, ...configFailures]) {
       expect({
         test: entry["test-name"],
         named: /\bDecisions? \d[a-z]?\b/.test(entry.comment),
-      }).toEqual({
-        test: entry["test-name"],
-        named: true,
-      });
+      }).toEqual({ test: entry["test-name"], named: true });
     }
   });
 
   test("covers the three deviations: RS256, client_secret_post and mandatory PKCE", () => {
-    const comments = failures.map((f) => f.comment).join("\n");
-    expect(comments).toMatch(/Decision 3c/);
-    expect(comments).toMatch(/Decisions 3b and 3a/);
-    expect(comments).toMatch(/Decision 3a/);
-    expect(
-      failures.some(
-        (f) => f.condition === "OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported",
-      ),
-    ).toBe(true);
-    expect(failures.some((f) => f["test-name"] === "oidcc-server-client-secret-post")).toBe(true);
+    expect(configFailures.map((f) => f.condition)).toEqual([
+      "OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported",
+    ]);
+    expect(configFailures[0]?.comment).toMatch(/Decision 3c/);
+    const post = failures.filter((f) => f["test-name"] === "oidcc-server-client-secret-post");
+    expect(post).toHaveLength(1);
+    expect(post[0]?.comment).toMatch(/Decision 3b/);
+    const pkce = failures.filter((f) => f.condition === "CheckIfAuthorizationEndpointError");
+    expect(pkce.length).toBeGreaterThan(20);
+    for (const f of pkce) expect(f.comment).toMatch(/Decision 3a/);
   });
 
   test("the skips are the scope tests the discovery document rules out and the request object", () => {
@@ -143,10 +144,12 @@ describe("the expected-failures and expected-skips files", () => {
     ]);
   });
 
-  test("each entry names a plan configuration by pattern, never a runner path", () => {
+  test("each entry names its plan's configuration by pattern, never a runner path", () => {
     for (const entry of [...failures, ...skips]) {
-      expect(entry["configuration-filename"]).toMatch(/^\*(basic|config)-plan\.json$/);
+      expect(entry["configuration-filename"]).toBe("*basic-plan.json");
     }
+    for (const entry of configFailures)
+      expect(entry["configuration-filename"]).toBe("*config-plan.json");
   });
 });
 

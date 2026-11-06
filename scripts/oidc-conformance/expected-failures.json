@@ -237,18 +237,9 @@
     "test-name": "oidcc-server-client-secret-post",
     "variant": "*",
     "configuration-filename": "*basic-plan.json",
-    "current-block": "Verify authorization endpoint response",
-    "condition": "CheckIfAuthorizationEndpointError",
-    "expected-result": "failure",
-    "comment": "Decisions 3b and 3a (B6 conformance run, owner-approved): NEMAR refuses client_secret_post (discovery lists only client_secret_basic), so this module cannot pass; it stops earlier still, at the missing PKCE challenge, so the refusal at the token endpoint is not reached here (NEMAR's own token endpoint tests hold it)."
-  },
-  {
-    "test-name": "oidcc-discovery-endpoint-verification",
-    "variant": "*",
-    "configuration-filename": "*config-plan.json",
     "current-block": "",
-    "condition": "OIDCCCheckDiscEndpointIdTokenSigningAlgValuesSupported",
+    "condition": "EnsureServerConfigurationSupportsClientSecretPost",
     "expected-result": "failure",
-    "comment": "Decision 3c (B6 conformance run, owner-approved): ES256 is the only signing algorithm NEMAR offers, and OpenID Connect Discovery expects RS256 to be listed."
+    "comment": "Decision 3b (B6 conformance run, owner-approved): NEMAR refuses client_secret_post, and discovery lists only client_secret_basic, so the suite stops this module on that check before it sends any request."
   }
 ]
