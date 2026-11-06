@@ -164,8 +164,8 @@ describe("the compute switch is read in one place that gates", () => {
   // the admin route refuses a live run with `compute_disabled`, and the dry run only REPORTS the switch.
   // Phase A7 (#2012) adds the tenant sweep: it cancels jobs in the tenant and charges the partner pool, so
   // it acts only while the owner has switched compute on, and refuses before it lists anything. It moves
-  // no job that NEMAR made (a job bound to a row is left alone). Nothing that moves a job already made
-  // reads it.
+  // no job that is bound to a row (a job a row owns is left alone), but it does cancel a duplicate of a
+  // NEMAR job and a job nobody reserved. Nothing that moves a job a row already owns reads it.
   test("only submitLeased gates the lifecycle on it; the pipeline dispatch and its route refuse new work, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
     expect(switchFindings(real)).toEqual({
       calls: [
