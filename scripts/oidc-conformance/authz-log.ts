@@ -107,6 +107,10 @@ export function carriesChallenge(request: string): boolean {
 export interface AuthorizationLogReport {
   /** How many authorization responses the log records. */
   responses: number;
+  /** How many lines name themselves an authorization line (well-formed or not). */
+  authorizationLines: number;
+  /** How many requests the rig answered at its two authorization pages (see {@link REQUEST_LINE}). */
+  requests: number;
   /** Responses by error code (`none` for a response with no error). */
   byError: Record<string, number>;
   /** One sentence per response that breaks a rule above. */
@@ -114,16 +118,31 @@ export interface AuthorizationLogReport {
 }
 
 /** The one shape an authorization line may have. A line that names itself `[rig] authz` and is not this is a violation. */
+/**
+ * The rig's own request line for a request that must have one authorization line: any method at
+ * `/oauth/authorize`, and a POST at `/oauth/consent`. A request with no line is a response the check
+ * never saw, so the two counts must be equal.
+ */
+const REQUEST_LINE = /^\[rig\] (?:[A-Z]+ \/oauth\/authorize|POST \/oauth\/consent) \d{3}$/;
+
 const LINE =
   /^\[rig\] authz kind=(redirect|error_page|login|reauth|rule_refused|consent|check_failed) error=([a-z0-9_:]+) pkce=(yes|no)$/;
 
 /** Read the rig's log and report what the check needs. */
 export function checkAuthorizationLog(log: string): AuthorizationLogReport {
-  const report: AuthorizationLogReport = { responses: 0, byError: {}, violations: [] };
+  const report: AuthorizationLogReport = {
+    responses: 0,
+    authorizationLines: 0,
+    requests: 0,
+    byError: {},
+    violations: [],
+  };
   const allowed = new Set<string>(ALLOWED_AUTHORIZATION_ERRORS);
   const lines = log.split("\n");
   for (const [index, raw] of lines.entries()) {
+    if (REQUEST_LINE.test(raw)) report.requests += 1;
     if (!raw.includes("[rig] authz")) continue;
+    report.authorizationLines += 1;
     const match = LINE.exec(raw);
     if (!match) {
       report.violations.push(`unparseable authorization line ${index + 1}`);
@@ -142,6 +161,11 @@ export function checkAuthorizationLog(log: string): AuthorizationLogReport {
         "invalid_request answered a request that carried a code_challenge, so it is not the PKCE deviation",
       );
     }
+  }
+  if (report.requests !== report.authorizationLines) {
+    report.violations.push(
+      `${report.requests} authorization requests but ${report.authorizationLines} authorization lines`,
+    );
   }
   if (report.responses === 0) {
     report.violations.push(

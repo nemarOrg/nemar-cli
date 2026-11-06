@@ -23,6 +23,8 @@ try {
 }
 
 const report = checkAuthorizationLog(log);
+console.log(`authorization requests: ${report.requests}`);
+console.log(`authorization lines: ${report.authorizationLines}`);
 console.log(`authorization responses: ${report.responses}`);
 for (const [error, count] of Object.entries(report.byError).sort()) {
   console.log(`  ${error}: ${count}`);

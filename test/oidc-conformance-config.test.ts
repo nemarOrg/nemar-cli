@@ -169,6 +169,12 @@ describe("the expected-failures and expected-skips files", () => {
   });
 });
 
+/** The rig's request line for each authorization line, as a run's log has them (one request, one line). */
+const withRequests = (...lines: string[]) =>
+  lines
+    .flatMap((l) => (l.includes("[rig] authz") ? ["[rig] GET /oauth/authorize 302", l] : [l]))
+    .join("\n");
+
 describe("the authorization log and its check", () => {
   test("the allowed set is the three codes the approved deviations and the REVIEW modules produce", () => {
     expect([...ALLOWED_AUTHORIZATION_ERRORS]).toEqual([
@@ -184,8 +190,10 @@ describe("the authorization log and its check", () => {
   test("a line holds a kind, an error and a yes or no, and reads back", () => {
     const line = authorizationLogLine("redirect", "invalid_request", false);
     expect(line).toBe("[rig] authz kind=redirect error=invalid_request pkce=no");
-    expect(checkAuthorizationLog(line)).toEqual({
+    expect(checkAuthorizationLog(withRequests(line))).toEqual({
       responses: 1,
+      authorizationLines: 1,
+      requests: 1,
       byError: { invalid_request: 1 },
       violations: [],
     });
@@ -194,26 +202,26 @@ describe("the authorization log and its check", () => {
   });
 
   test("passes a run made of the allowed answers", () => {
-    const log = [
+    const log = withRequests(
       authorizationLogLine("redirect", "invalid_request", false),
       authorizationLogLine("redirect", "request_not_supported", false),
       authorizationLogLine("error_page", "page:invalid_redirect_uri", false),
       authorizationLogLine("consent", null, true),
       authorizationLogLine("redirect", null, true),
-    ].join("\n");
+    );
     expect(checkAuthorizationLog(log).violations).toEqual([]);
   });
 
   test("fails a different error that the expected failure would have hidden", () => {
     const log = authorizationLogLine("redirect", "invalid_scope", true);
-    expect(checkAuthorizationLog(log).violations).toEqual([
+    expect(checkAuthorizationLog(withRequests(log)).violations).toEqual([
       "an authorization response (redirect) carried the error invalid_scope, which no approved deviation produces",
     ]);
   });
 
   test("fails an invalid_request that came to a request with a challenge", () => {
     const log = authorizationLogLine("redirect", "invalid_request", true);
-    expect(checkAuthorizationLog(log).violations).toEqual([
+    expect(checkAuthorizationLog(withRequests(log)).violations).toEqual([
       "invalid_request answered a request that carried a code_challenge, so it is not the PKCE deviation",
     ]);
   });
@@ -228,10 +236,13 @@ describe("the authorization log and its check", () => {
       "an upper-case value": "[rig] authz kind=redirect error=Invalid pkce=no",
     };
     for (const [shape, line] of Object.entries(shapes)) {
-      const report = checkAuthorizationLog(`${authorizationLogLine("login", null, true)}\n${line}`);
+      const report = checkAuthorizationLog(
+        withRequests(authorizationLogLine("login", null, true), line),
+      );
       expect({ shape, violations: report.violations }).toEqual({
         shape,
-        violations: ["unparseable authorization line 2"],
+        // request, login line, request, then the malformed one.
+        violations: ["unparseable authorization line 4"],
       });
     }
   });
@@ -269,7 +280,7 @@ describe("the authorization log and its check", () => {
     expect(answerError({ kind: "login" })).toBeNull();
     // A malformed error is not in the allowed set, so the check fails the run.
     const line = authorizationLogLine("redirect", answerError(redirect("error=")), false);
-    expect(checkAuthorizationLog(line).violations).toEqual([
+    expect(checkAuthorizationLog(withRequests(line)).violations).toEqual([
       "an authorization response (redirect) carried the error malformed_error, which no approved deviation produces",
     ]);
   });
@@ -277,8 +288,8 @@ describe("the authorization log and its check", () => {
   test("matches strictly: surrounding whitespace is a violation, not trimmed away", () => {
     const line = authorizationLogLine("login", null, true);
     for (const padded of [` ${line}`, `${line} `, `${line}\r`]) {
-      expect(checkAuthorizationLog(padded).violations).toContain(
-        "unparseable authorization line 1",
+      expect(checkAuthorizationLog(withRequests(padded)).violations).toContain(
+        "unparseable authorization line 2",
       );
     }
   });
@@ -298,7 +309,7 @@ describe("the authorization log and its check", () => {
       answerError({ kind: "redirect", location: `${back}#error=server_error` }),
       true,
     );
-    expect(checkAuthorizationLog(line).violations).toEqual([
+    expect(checkAuthorizationLog(withRequests(line)).violations).toEqual([
       "an authorization response (redirect) carried the error server_error, which no approved deviation produces",
     ]);
   });
@@ -318,9 +329,38 @@ describe("the authorization log and its check", () => {
     );
     const line = authorizationLogLine("rule_refused", "access_denied", true);
     expect(line).toBe("[rig] authz kind=rule_refused error=access_denied pkce=yes");
-    expect(checkAuthorizationLog(line).violations).toEqual([
+    expect(checkAuthorizationLog(withRequests(line)).violations).toEqual([
       "an authorization response (rule_refused) carried the error access_denied, which no approved deviation produces",
     ]);
+  });
+
+  test("fails when a request has no authorization line, and when a line has no request", () => {
+    const line = authorizationLogLine("redirect", "invalid_request", false);
+    const request = "[rig] GET /oauth/authorize 302";
+    // A request whose response was never logged: the check never saw it.
+    expect(checkAuthorizationLog([request, line, request].join("\n")).violations).toEqual([
+      "2 authorization requests but 1 authorization lines",
+    ]);
+    // A consent POST counts the same way.
+    expect(
+      checkAuthorizationLog([line, request, "[rig] POST /oauth/consent 302"].join("\n")).violations,
+    ).toEqual(["2 authorization requests but 1 authorization lines"]);
+    // A line with no request behind it.
+    expect(checkAuthorizationLog(line).violations).toEqual([
+      "0 authorization requests but 1 authorization lines",
+    ]);
+    // Counts that match pass; other routes and other consent methods are not authorization requests.
+    const matching = [
+      request,
+      line,
+      "[rig] GET /oauth/consent 404",
+      "[rig] POST /oauth/token 200",
+    ].join("\n");
+    expect(checkAuthorizationLog(matching)).toMatchObject({
+      requests: 1,
+      authorizationLines: 1,
+      violations: [],
+    });
   });
 
   test("fails an empty log, which would check nothing", () => {

@@ -443,6 +443,14 @@ Bun.serve({
       } else res = await call(req);
     } catch (err) {
       console.error("[rig] request failed:", err);
+      // A request the stand-in pages could not answer still gets its authorization line, so the run's
+      // check sees it (the line count must equal the request count).
+      if (
+        url.pathname === "/oauth/authorize" ||
+        (url.pathname === "/oauth/consent" && req.method === "POST")
+      ) {
+        console.log(authorizationLogLine("check_failed", "handler_failed", false));
+      }
       res = new Response("internal error", { status: 500 });
     }
     // Method, path and status only: never a query, a code, a token or a body.
