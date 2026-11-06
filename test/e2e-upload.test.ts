@@ -23,6 +23,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { useTestGitIdentity } from "./helpers/git-identity";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 /**
@@ -202,8 +203,11 @@ function cleanup() {
 describe("E2E Upload Tests", () => {
   let prereqs: Prerequisites;
   let allPrereqsMet: boolean;
+  let restoreGitIdentity: () => void;
 
   beforeAll(async () => {
+    // initDataset runs `git annex init` and a commit, which need an identity (CI runners have none).
+    restoreGitIdentity = useTestGitIdentity();
     prereqs = await checkPrerequisites();
     allPrereqsMet = prereqs.gitAnnex && prereqs.githubSSH && prereqs.apiKey;
 
@@ -220,7 +224,11 @@ describe("E2E Upload Tests", () => {
   });
 
   afterAll(() => {
-    cleanup();
+    try {
+      cleanup();
+    } finally {
+      restoreGitIdentity?.();
+    }
   });
 
   test("prerequisites check reports correct status", async () => {
