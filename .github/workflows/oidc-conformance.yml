@@ -45,6 +45,11 @@ env:
   # same address and runs in its local mode (no API token, certificates unchecked); set, it would ask
   # for a token a local suite does not have.
   SUITE_URL: https://localhost.emobix.co.uk:8443/
+  # run-test-plan.py aborts a run after three modules in a row end INTERRUPTED, on the reading that the
+  # suite's server is unhealthy. NEMAR requires PKCE and the suite's Basic modules send none, so most of
+  # them end INTERRUPTED at their first authorization request, by design; the breaker is set out of
+  # reach so every module runs and each outcome is recorded.
+  CONFORMANCE_MAX_CONSECUTIVE_FAILURES: "1000"
   RIG_HOST: rig.example.org
   RIG_PORT: "9443"
   # The exported results go under the directory that is uploaded. The plan configurations (throwaway
