@@ -171,6 +171,7 @@ describe("a job that skipped the reservation", () => {
       cancel_reason: "unattributed",
       flag_unreserved: 1,
       flag_unattributed: 1,
+      flag_overrun: 0,
       account_id: null,
       held_milli: 0,
     });
