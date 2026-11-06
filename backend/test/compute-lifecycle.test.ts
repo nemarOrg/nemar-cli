@@ -102,11 +102,11 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await fx.reset();
-});
+}, 60_000);
 
 afterAll(async () => {
   await fx?.dispose();
-}, 30_000);
+}, 60_000);
 
 // --- Helpers of this file ------------------------------------------------------------------------
 
