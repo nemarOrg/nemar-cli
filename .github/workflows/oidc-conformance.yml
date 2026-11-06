@@ -1,0 +1,171 @@
+# Runs the OpenID Foundation conformance suite against the NEMAR OpenID Connect provider (epic #2014
+# phase #2020, nemar-cli#2020).
+#
+# WHAT RUNS. The suite's own server, its MongoDB and its TLS front, as the foundation's public images
+# at a pinned release tag and digest (scripts/oidc-conformance/compose.override.yml), on the runner.
+# Beside them, on the runner's host, the RIG (scripts/oidc-conformance/rig.ts): the real Worker over a
+# throwaway SQLite database behind a self-signed certificate, with a stand-in for the website's
+# sign-in and authorization pages (the suite's scripted browser cannot run the website's scripts).
+# The certificate is made inside the run and stored nowhere. Two plans run, the configuration plan first
+# as a smoke test (it needs no browser) and then the Basic plan.
+#
+# WHAT IT CLAIMS. Nothing about certification. NEMAR deliberately differs from what certification
+# expects in three places (PKCE is required, client_secret_post is refused, ES256 is the only signing
+# algorithm), and scripts/oidc-conformance/expected-failures.json records each with the decision that
+# approved it. The results are an engineering check of the provider against the suite's tests.
+#
+# SECRETS AND ARTIFACTS. No secret is used: the job has read access to the repository and nothing else.
+# The plan configurations hold the throwaway clients' secrets, so they live outside the artifact paths
+# and are never uploaded; only the exported result files and the logs are.
+#
+# TRIGGERS. `workflow_dispatch` is the permanent one, but GitHub offers it only for a workflow file on
+# the default branch, so until this reaches it the `push` trigger below runs the workflow for branches
+# named `conformance/**`. THE PUSH TRIGGER IS TEMPORARY and is removed in the last commit of the phase.
+
+name: OIDC conformance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "conformance/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oidc-conformance
+  cancel-in-progress: false
+
+env:
+  SUITE_TAG: release-v5.3.3
+  # The commit the tag must point at; a moved tag fails the run instead of changing what is tested.
+  SUITE_COMMIT: 7d420f716e49d44f8a6b04f0a3e240ad6d68ab55
+  CONFORMANCE_SERVER: https://localhost.emobix.co.uk:8443/
+  CONFORMANCE_SERVER_MTLS: https://localhost.emobix.co.uk:8444/
+  RIG_HOST: rig.example.org
+  RIG_PORT: "9443"
+  # The exported results go under the directory that is uploaded. The plan configurations (throwaway
+  # client secrets) go to RIG_OUT_DIR, set below from the runner's temporary directory, and are not.
+  RESULTS_DIR: ${{ github.workspace }}/conformance-artifacts/results
+
+jobs:
+  conformance:
+    name: conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd backend && bun install --frozen-lockfile
+
+      - name: Fetch the suite at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$SUITE_TAG" https://gitlab.com/openid/conformance-suite.git "$RUNNER_TEMP/suite"
+          actual=$(git -C "$RUNNER_TEMP/suite" rev-parse HEAD)
+          if [ "$actual" != "$SUITE_COMMIT" ]; then
+            echo "::error::$SUITE_TAG is $actual, not $SUITE_COMMIT"
+            exit 1
+          fi
+          mkdir -p "$RESULTS_DIR" "$RUNNER_TEMP/rig-out"
+          echo "RIG_OUT_DIR=$RUNNER_TEMP/rig-out" >> "$GITHUB_ENV"
+
+      - name: Name the rig and the suite on this host
+        run: |
+          echo "127.0.0.1 rig.example.org localhost.emobix.co.uk" | sudo tee -a /etc/hosts >/dev/null
+
+      - name: Start the rig
+        run: |
+          nohup bun run scripts/oidc-conformance/rig.ts > conformance-artifacts/rig.log 2>&1 &
+
+      - name: Wait for the rig, then walk a sign-in
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -sk --max-time 3 -o /dev/null -w '%{http_code}' "https://$RIG_HOST:$RIG_PORT/.well-known/openid-configuration" | grep -q 200; then break; fi
+            sleep 2
+          done
+          NODE_TLS_REJECT_UNAUTHORIZED=0 bun run scripts/oidc-conformance/smoke.ts
+
+      - name: Start the suite
+        run: |
+          cd "$RUNNER_TEMP/suite"
+          docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" pull --quiet
+          docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" up -d
+          for _ in $(seq 1 90); do
+            if curl -sk --max-time 5 -o /dev/null -w '%{http_code}' "$CONFORMANCE_SERVER" | grep -q 200; then echo "suite is up"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::the suite did not come up in 7 minutes"
+          exit 1
+
+      - name: Record what ran
+        run: |
+          {
+            echo "### Conformance run"
+            echo "- NEMAR commit: \`$GITHUB_SHA\`"
+            echo "- Suite: \`$SUITE_TAG\` (\`$SUITE_COMMIT\`)"
+            echo "- Rig topology: C1 (stand-in sign-in and authorization pages)"
+            echo "- Images:"
+            for img in $(docker compose -f "$RUNNER_TEMP/suite/docker-compose-prebuilt.yml" -f scripts/oidc-conformance/compose.override.yml config --images); do
+              echo "  - \`$img\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Configuration plan (smoke test, no browser)
+        id: config_plan
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          uv run --no-project --python 3.12 --with httpx==0.28.1 --with pyparsing==3.3.3 \
+            python "$RUNNER_TEMP/suite/scripts/run-test-plan.py" \
+            --export-dir "$RESULTS_DIR" --verbose \
+            --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures.json" \
+            --expected-skips-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-skips.json" \
+            "oidcc-config-certification-test-plan" "$RIG_OUT_DIR/config-plan.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/conformance-artifacts/config-plan.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Basic plan
+        id: basic_plan
+        timeout-minutes: 40
+        continue-on-error: true
+        run: |
+          uv run --no-project --python 3.12 --with httpx==0.28.1 --with pyparsing==3.3.3 \
+            python "$RUNNER_TEMP/suite/scripts/run-test-plan.py" \
+            --export-dir "$RESULTS_DIR" --verbose \
+            --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures.json" \
+            --expected-skips-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-skips.json" \
+            "oidcc-basic-certification-test-plan[server_metadata=discovery][client_registration=static_client]" "$RIG_OUT_DIR/basic-plan.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/conformance-artifacts/basic-plan.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Collect the suite's logs
+        if: ${{ always() }}
+        run: |
+          cd "$RUNNER_TEMP/suite"
+          docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" logs --no-color > "$GITHUB_WORKSPACE/conformance-artifacts/suite-compose.log" 2>&1 || true
+
+      - name: Upload results and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: oidc-conformance-${{ github.run_id }}
+          # Results and logs only. The plan configurations are in RIG_OUT_DIR, outside this path.
+          path: conformance-artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail the job if a plan did
+        if: ${{ always() }}
+        run: |
+          echo "config plan: ${{ steps.config_plan.outcome }}; basic plan: ${{ steps.basic_plan.outcome }}"
+          [ "${{ steps.config_plan.outcome }}" = "success" ] && [ "${{ steps.basic_plan.outcome }}" = "success" ]
