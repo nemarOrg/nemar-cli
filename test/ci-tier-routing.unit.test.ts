@@ -248,7 +248,7 @@ describe("the process tier is its own job and no unit-pure shard runs a process 
     const deploy = parse(readFileSync(`${ROOT}.github/workflows/deploy-backend.yml`, "utf8")) as {
       jobs: Record<string, Job>;
     };
-    const steps = (deploy.jobs["test-gate"]?.steps ?? []).flatMap((s) => (s.run ? [s.run] : []));
+    const steps = (deploy.jobs["test-gate-static"]?.steps ?? []).flatMap((s) => (s.run ? [s.run] : []));
     const runners = steps.filter((s) => s.includes("scripts/ci/process-files.sh"));
     expect(runners.length).toBe(1);
     expect(runners[0]).toMatch(/\$\{#files\[@\]\}" -gt 0/);

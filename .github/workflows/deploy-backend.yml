@@ -287,7 +287,7 @@ jobs:
     needs: detect-environment
     if: needs.detect-environment.outputs.environment != '' && needs.detect-environment.outputs.gate_reused != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -311,6 +311,19 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      # The process tier (files whose header says `CI TIER: process`) is not in the list above,
+      # so the gate runs it here: the same files as test.yml's `process-tier` job, from the same
+      # lister, with the same refusal of an empty list. They are skipped by the pure list because
+      # they spawn processes or listen on a port; they still gate a deploy.
+      - name: Run process-tier tests (no live backend)
+        run: |
+          set -euo pipefail
+          scripts/ci/process-files.sh > "$RUNNER_TEMP/process-files.txt"
+          mapfile -t files < "$RUNNER_TEMP/process-files.txt"
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no test file claims CI TIER: process"; exit 1; }
+          echo "Running ${#files[@]} process-tier test files"
+          bun test "${files[@]}"
+
   # The check named `test-gate`: the name both deploy jobs and the gate-reuse lookup in
   # detect-environment read. `if: always()` so a failed or cancelled leg still reaches this job
   # and turns it red (a job skipped because its dependency failed reads as passing); it is
@@ -330,19 +343,6 @@ jobs:
             echo "::error::test-gate-shard finished as '$SHARDS_RESULT' and test-gate-static as '$STATIC_RESULT'; both must be 'success'"
             exit 1
           fi
-
-      # The process tier (files whose header says `CI TIER: process`) is not in the list above,
-      # so the gate runs it here: the same files as test.yml's `process-tier` job, from the same
-      # lister, with the same refusal of an empty list. They are skipped by the pure list because
-      # they spawn processes or listen on a port; they still gate a deploy.
-      - name: Run process-tier tests (no live backend)
-        run: |
-          set -euo pipefail
-          scripts/ci/process-files.sh > "$RUNNER_TEMP/process-files.txt"
-          mapfile -t files < "$RUNNER_TEMP/process-files.txt"
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::no test file claims CI TIER: process"; exit 1; }
-          echo "Running ${#files[@]} process-tier test files"
-          bun test "${files[@]}"
 
   deploy-dev:
     needs: [detect-environment, test-gate]
