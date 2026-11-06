@@ -491,3 +491,13 @@ Not verified: the figures in the registry (cores, memory, minutes), the 10-job t
    (h) Migration 0130 also pins a pool's `created_at` and `updated_at`.
 
 Not verified: the order of Tapis's job list (`orderBy`), whether the tenant credential lists more than its own and shared jobs (the sweep finds what the service identity can list, and the fallback is the issue's: NEMAR is the only submitter), the text of R2's refusal of a locked key, and the observer's real export (no response of the real posting service was recorded; the bounds and shapes are the issue's).
+
+## Owner decisions, 2026-11-06
+
+The owner approved these five decisions of phase A7 (#2012) as they stand in the code.
+
+1. **D1.** The unreserved usage entry is an `overrun` on the tenant pool, counted against the `people` budget.
+2. **D2.** The observer-runs mint stays admin-level, as the issue says. Accepted risk: an administrator who mints a token can post a charged amount that settles a pool without owner authority.
+3. **D3.** Migration 0130 keeps the account link (`compute_gateway_users.account_id`) and the `gw_` pseudonym for ever, and the migration 0115 triggers refuse change and delete. A deleted account's pools and ledger actors are anonymized (0130); the pseudonym mapping is not.
+4. **D4.** `TENANT_GIVE_UP_DAYS` stays at 7 days; a followed unreserved row closes with nothing charged.
+5. **D5.** The 30-minute tick stays equal to the default `reservationWaitMinutes` (30), so a `created` job gets one retry before `submit_timeout`.
