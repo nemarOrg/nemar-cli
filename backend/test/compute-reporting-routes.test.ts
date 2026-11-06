@@ -260,6 +260,21 @@ describe("an owner's read of an identity or a specification", () => {
     ).toBe(403);
   });
 
+  test("the owner check comes before the body is read: a non-owner with a body that is not valid gets 403, never 400 (MUTATION: validate the body first)", async () => {
+    const made = await makeJob(fx);
+    for (const [path, body] of [
+      [`/compute/records/${made.job.id}/read`, "not json {"],
+      [`/compute/records/${made.job.id}/read`, { nonsense: true }],
+      ["/compute/holds", { scope: "weird" }],
+      ["/compute/access-reports/job_00000000000000000000000a/requeue", "garbage"],
+    ] as const) {
+      for (const who of ["admin", "member"] as const) {
+        const r = await call("POST", path, who, body);
+        expect([path, who, r.status]).toEqual([path, who, 403]);
+      }
+    }
+  });
+
   test("an owner needs a reason of 8 to 200 characters; with one, the identity is read and the read is audited first", async () => {
     const made = await makeJob(fx);
     const path = `/compute/records/${made.job.id}/read`;
