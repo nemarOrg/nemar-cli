@@ -203,16 +203,26 @@ async function audit(
   mode: "dataset" | "eligible",
   counts: { dispatched: number; refused: number },
   stoppedBy: string | null,
-) {
-  await c.env.DB.prepare(AUDIT_LOG_INSERT_SQL)
-    .bind(
-      c.get("user").id,
-      PIPELINE_RUN_AUDIT_ACTION,
-      "compute_pipeline",
-      recipe,
-      JSON.stringify({ mode, ...counts, stopped_by: stoppedBy }),
-    )
-    .run();
+): Promise<boolean> {
+  // The run has happened by now: jobs are made and holds taken. A failed audit write must not turn that
+  // into a 500 that hides the job ids, so it is logged and the answer says the audit row is pending.
+  try {
+    await c.env.DB.prepare(AUDIT_LOG_INSERT_SQL)
+      .bind(
+        c.get("user").id,
+        PIPELINE_RUN_AUDIT_ACTION,
+        "compute_pipeline",
+        recipe,
+        JSON.stringify({ mode, ...counts, stopped_by: stoppedBy }),
+      )
+      .run();
+    return true;
+  } catch (err) {
+    console.error(
+      `[admin/compute-pipeline] audit_pending recipe=${recipe} mode=${mode} dispatched=${counts.dispatched} error=${err instanceof Error ? err.name : "unknown"}`,
+    );
+    return false;
+  }
 }
 
 function fail(c: Ctx, err: unknown) {
@@ -256,14 +266,15 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           version: body.version,
           actor,
         });
-        await audit(
+        const audited = await audit(
           c,
           body.recipe,
           "dataset",
           { dispatched: result.ok ? 1 : 0, refused: result.ok ? 0 : 1 },
           result.ok ? null : result.code,
         );
-        if (!result.ok) return refuse(c, result.code, resultView(result));
+        const pending = audited ? {} : { audit_pending: true };
+        if (!result.ok) return refuse(c, result.code, { ...resultView(result), ...pending });
         return c.json(
           {
             ok: true,
@@ -272,6 +283,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
             results: [resultView(result)],
             dispatched: 1,
             stopped_by: null,
+            ...pending,
           },
           201,
         );
@@ -282,7 +294,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         limit: body.limit ?? COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
         actor,
       });
-      await audit(
+      const audited = await audit(
         c,
         body.recipe,
         "eligible",
@@ -297,6 +309,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           results: run.results.map(resultView),
           dispatched: run.dispatched,
           stopped_by: run.stoppedBy,
+          ...(audited ? {} : { audit_pending: true }),
         },
         run.dispatched > 0 ? 201 : 200,
       );

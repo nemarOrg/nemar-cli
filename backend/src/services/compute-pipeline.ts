@@ -663,9 +663,13 @@ export async function syncPipelineStamps(env: Bindings): Promise<SyncResult> {
           .run();
         if ((moved.meta?.changes ?? 0) > 0) result.succeeded++;
       } catch (err) {
-        // The recipe's own tuple is already stamped: this run found nothing new to record.
+        // The tuple the recipe's own record names already holds a live or succeeded stamp. The RUN may
+        // be good; this stamp cannot carry its tuple, and the word says that and nothing else.
         if (!looksUnique(err)) throw err;
-        await finishStamp(db, stamp.id, "failed", "duplicate_stamp");
+        console.error(
+          `[compute-pipeline] tuple_already_stamped stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id}`,
+        );
+        await finishStamp(db, stamp.id, "failed", "tuple_already_stamped");
         result.failed++;
       }
     } catch (err) {

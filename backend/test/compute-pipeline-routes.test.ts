@@ -370,6 +370,68 @@ describe("a live run", () => {
   });
 });
 
+describe("an audit write that fails after the dispatch", () => {
+  /** The environment with a database that refuses the audit row and nothing else. */
+  function auditBroken(env: Bindings): Bindings {
+    const db = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.includes("INSERT INTO audit_log"))
+              throw new Error("injected: audit unavailable");
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return { ...env, DB: db };
+  }
+
+  test("one dataset: the job id comes back with audit_pending, not a 500", async () => {
+    const env = await world(["nm000104"]);
+    const res = await run(
+      "admin",
+      { recipe: "nemar-floor", dataset: "nm000104" },
+      auditBroken(env),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ ok: true, audit_pending: true, dispatched: 1 });
+    expect(res.body.results[0].job_id).toMatch(/^job_[0-9a-f]{24}$/);
+    expect(await n(env, "compute_jobs")).toBe(1);
+    expect(await n(env, "audit_log")).toBe(0);
+  });
+
+  test("eligible: the same, and a clean audit carries no audit_pending", async () => {
+    const env = await world(["nm000104", "nm000105"]);
+    const res = await run(
+      "admin",
+      { recipe: "nemar-floor", eligible: true, limit: 1 },
+      auditBroken(env),
+    );
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ audit_pending: true, dispatched: 1 });
+    const clean = await run("admin", { recipe: "nemar-floor", eligible: true, limit: 1 }, env);
+    expect(clean.body.audit_pending).toBeUndefined();
+  });
+
+  test("a refusal is still answered with its word when its audit write fails", async () => {
+    const env = await world(["nm000104"]);
+    await run("admin", { recipe: "nemar-floor", dataset: "nm000104" }, env);
+    const again = await run(
+      "admin",
+      { recipe: "nemar-floor", dataset: "nm000104" },
+      auditBroken(env),
+    );
+    expect([again.status, again.body.code, again.body.audit_pending]).toEqual([
+      409,
+      "live_attempt_exists",
+      true,
+    ]);
+  });
+});
+
 describe("the status", () => {
   async function stamped() {
     const env = await world();

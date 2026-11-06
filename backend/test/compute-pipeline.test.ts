@@ -60,6 +60,7 @@ import {
   seedPipelinesAccount,
 } from "./helpers/compute-pipeline-fixture";
 import { seedUser } from "./helpers/compute-seed";
+import { logged } from "./helpers/logs";
 
 let fx: LifecycleFixture;
 
@@ -780,7 +781,7 @@ describe("the stamp follows its job to the end", () => {
     expect(await syncPipelineStamps(env)).toMatchObject({ succeeded: 1 });
   });
 
-  test("a record that names a tuple already stamped fails the stamp as duplicate_stamp, never two successes", async () => {
+  test("a record that names a tuple already stamped ends the stamp failed as tuple_already_stamped (the run itself was good), never two successes", async () => {
     const { env, jobId, stampId } = await dispatched();
     // Another dispatched tuple (with a job) already holds what this record will name.
     await env.DB.prepare(
@@ -797,10 +798,14 @@ describe("the stamp follows its job to the end", () => {
         }),
       ),
     });
-    await syncPipelineStamps(env);
+    const lines = await logged(async () => {
+      await syncPipelineStamps(env);
+    });
+    expect(lines.join("\n")).toContain(`tuple_already_stamped stamp=${stampId}`);
+
     expect(await getStamp(env.DB, stampId)).toMatchObject({
       state: "failed",
-      refusal_code: "duplicate_stamp",
+      refusal_code: "tuple_already_stamped",
     });
   });
 

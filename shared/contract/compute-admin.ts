@@ -419,6 +419,8 @@ export const ComputePipelineRunResponseSchema = z
     results: z.array(ComputePipelineResultSchema).optional(),
     dispatched: z.number().int().optional(),
     stopped_by: z.string().nullable().optional(),
+    /** True when the run was made and the Worker could not write its audit row: nothing is lost but the row. */
+    audit_pending: z.boolean().optional(),
     estimate_milli_per_job: milli.optional(),
     estimate_milli_total: milli.optional(),
     config: z
