@@ -25,6 +25,11 @@
 -- the stamp says what actually ran and not what the Worker expected. The rewrite can meet the unique
 -- index (another run already stamped that tuple); the Worker then ends the stamp `failed`.
 --
+-- `updated_at` means "last examined" while a stamp is `dispatched`: the sync touches every open stamp it
+-- visits, so a stamp that cannot move on goes to the back of the line, and the column says when the Worker
+-- last looked and not when anything changed. On a `succeeded`, `failed` or `refused` stamp it is the time
+-- of the end, which the retry cooldown reads.
+--
 -- NO FOREIGN KEY, and deleting a dataset deletes its stamps (services/deletion.ts) while the job rows
 -- and the ledger stay, by design (design section 9). The table holds a dataset id, a version tag, fixed
 -- words and a job id: no person, no path, no text a job wrote.

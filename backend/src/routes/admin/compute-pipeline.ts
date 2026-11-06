@@ -181,6 +181,7 @@ function resultView(r: DispatchResult): ComputePipelineResult {
   };
 }
 
+/** `updated_at` of a `dispatched` stamp is when the sync last examined it, not when it changed. */
 function stampView(row: StampRow): ComputePipelineStampView {
   return {
     id: row.id,

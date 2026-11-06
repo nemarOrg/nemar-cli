@@ -459,6 +459,7 @@ export const ComputePipelineStampViewSchema = z
     job_id: nullableString,
     refusal_code: nullableString,
     created_at: z.string(),
+    /** While `dispatched`: when the Worker last examined the stamp. Once ended: when it ended. */
     updated_at: z.string(),
   })
   .passthrough();
