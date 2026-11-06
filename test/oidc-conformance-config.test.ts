@@ -9,7 +9,7 @@
  *    agree;
  *  - the workflow uses no secret, has read-only permissions, uploads only the results and logs (never
  *    the plan configurations, which hold the throwaway clients' secrets), runs the Basic plan with the
- *    variants the phase approved, and its temporary push trigger is limited to `conformance/**`.
+ *    variants the phase approved, and is started by hand only (no push or schedule trigger).
  *
  * Nothing here replaces NEMAR logic; the rig and the suite are exercised by the run.
  */
@@ -461,16 +461,14 @@ describe("the workflow", () => {
     with?: { path: string };
   }
   const workflow = parse(text) as {
-    on: { workflow_dispatch: unknown; push: { branches: string[] } };
+    on: Record<string, unknown>;
     permissions: Record<string, string>;
     jobs: { conformance: { "timeout-minutes": number; steps: Step[] } };
   };
   const steps = workflow.jobs.conformance.steps;
 
-  test("is dispatched by hand, and by a push only to conformance branches", () => {
-    expect("workflow_dispatch" in workflow.on).toBe(true);
-    expect(Object.keys(workflow.on).sort()).toEqual(["push", "workflow_dispatch"]);
-    expect(workflow.on.push.branches).toEqual(["conformance/**"]);
+  test("is dispatched by hand and by nothing else", () => {
+    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
   });
 
   test("reads the repository and nothing else, uses no secret, and is bounded", () => {

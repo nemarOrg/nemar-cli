@@ -33,17 +33,14 @@
 #   request_not_supported      the unsigned request object module, skipped on this answer (decision 4)
 #   page:invalid_redirect_uri  the error page the two REVIEW modules expect
 #
-# TRIGGERS. `workflow_dispatch` is the permanent one, but GitHub offers it only for a workflow file on
-# the default branch, so until this reaches it the `push` trigger below runs the workflow for branches
-# named `conformance/**`. THE PUSH TRIGGER IS TEMPORARY and is removed in the last commit of the phase.
+# TRIGGER. Manual only (`workflow_dispatch`, from the Actions tab or `gh workflow run`). GitHub offers
+# it for a workflow file on the default branch, so it is available once this file reaches `dev`.
+# During the phase a temporary `push` trigger on `conformance/**` branches ran it earlier; it is gone.
 
 name: OIDC conformance
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "conformance/**"
 
 permissions:
   contents: read
