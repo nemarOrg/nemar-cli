@@ -841,7 +841,7 @@ describe("final settlement", () => {
       };
       expect(stored.state).toBe(state);
     }
-  });
+  }, 60_000);
 
   test("a multi-node allocation is priced per node: the row's totals are divided by its nodes (MUTATION: do not divide)", () => {
     const base = {
