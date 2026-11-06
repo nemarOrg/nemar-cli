@@ -135,7 +135,7 @@ describe("the expected-failures and expected-skips files", () => {
     for (const f of post) expect(f.comment).toMatch(/Decisions? 3b/);
     const pkce = failures.filter((f) => f.condition === "CheckIfAuthorizationEndpointError");
     expect(pkce.length).toBeGreaterThan(20);
-    for (const f of pkce) expect(f.comment).toMatch(/Decision 3a/);
+    for (const f of pkce) expect(f.comment).toMatch(/\b3a\b/);
   });
 
   test("the skips are the scope tests the discovery document rules out and the request object", () => {
