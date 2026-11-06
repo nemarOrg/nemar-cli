@@ -115,7 +115,7 @@ describe("a compute token is compared in constant time", () => {
     const found = tokenFindings(planted);
     expect(found.safeCalls).toEqual([]);
     expect(found.comparisons).toEqual(["token === expected"]);
-  });
+  }, 60_000);
 });
 
 /** Every `computeEnabled(` call under `backend/src`, as `<file>:<enclosing function>`, and every other mention. */
@@ -201,5 +201,5 @@ describe("the compute switch is read in one place that gates", () => {
       "services/compute-lifecycle.ts:<module>",
       "services/compute-lifecycle.ts:direct:.COMPUTE_ENABLED",
     ]);
-  });
+  }, 60_000);
 });

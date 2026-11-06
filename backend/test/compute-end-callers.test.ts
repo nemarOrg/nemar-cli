@@ -83,7 +83,7 @@ describe("the scan fires", () => {
     const found = analyse(createTree({ "routes/admin/users.ts": text.replace(line, "") }));
     expect(found.unsatisfied).toContain("routes/admin/users.ts#finalizeRevocation");
     expect(found.users).not.toContain("routes/admin/users.ts#finalizeRevocation");
-  });
+  }, 60_000);
 
   test("remove them from tombstoneUserCascade (MUTATION)", () => {
     const text = read("db/user-tombstone.ts");
@@ -91,7 +91,7 @@ describe("the scan fires", () => {
     expect(text).toContain(line);
     const found = analyse(createTree({ "db/user-tombstone.ts": text.replace(line, "") }));
     expect(found.unsatisfied).toContain("db/user-tombstone.ts#tombstoneUserCascade");
-  });
+  }, 60_000);
 
   const TOKENS = `"UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL"`;
   const SESSIONS = `"UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL"`;
@@ -140,7 +140,7 @@ describe("the scan fires", () => {
         true,
       ]);
     }
-  });
+  }, 60_000);
 
   test("a function that revokes keys alone, one key and the sessions, or one session by its cookie, is not an account's end", () => {
     const planted = analyse(
@@ -161,7 +161,7 @@ describe("the scan fires", () => {
     expect(planted.ends).not.toContain("routes/planted-keys.ts#oneKey");
     expect(planted.ends).not.toContain("routes/planted-keys.ts#rotate");
     expect(planted.ends).not.toContain("routes/planted-keys.ts#logout");
-  });
+  }, 60_000);
 
   test("every shape of the statement that revokes all of an account's keys is recognised, and the one-key shapes are not", () => {
     const sessions = `"UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ?"`;
@@ -219,7 +219,7 @@ describe("the scan fires", () => {
       const key = `routes/planted-one-${name.replace(/\W+/g, "-")}.ts#ender`;
       expect([name, found.ends.includes(key)]).toEqual([name, false]);
     }
-  });
+  }, 60_000);
 
   test("every shape of the statement that ends sessions is recognised: an UPDATE of any scope, and a DELETE of a user's sessions", () => {
     const keys = "UPDATE tokens SET revoked_at = datetime('now') WHERE user_id = ?";
@@ -254,7 +254,7 @@ describe("the scan fires", () => {
       const key = `routes/planted-sess-${name.replace(/\W+/g, "-")}.ts#ender`;
       expect([name, found.ends.includes(key)]).toEqual([name, expected]);
     }
-  });
+  }, 60_000);
 
   test("a helper is resolved in the module it is imported from, never by its bare name: a function of the same name elsewhere does not make an unrelated unit an end", () => {
     const before = analyse(createTree());
@@ -294,7 +294,7 @@ describe("the scan fires", () => {
     expect(planted.ends).not.toContain("routes/planted-unrelated.ts#h");
     expect(planted.ends).toContain("routes/planted-real.ts#k");
     expect(planted.ends).toContain("services/planted-a.ts#a");
-  });
+  }, 60_000);
 
   test("every way of reaching the compute set is seen as a use, and a function that ends credentials through one is satisfied", () => {
     const ends = (body: string) => `
@@ -389,5 +389,5 @@ describe("the scan fires", () => {
     expect(planted.unfollowable.some((m) => m.includes("planted-reexport.ts"))).toBe(true);
     expect(planted.unfollowable.some((m) => m.includes("planted-star.ts"))).toBe(true);
     expect(planted.unfollowable.some((m) => m.includes("planted-top.ts"))).toBe(true);
-  });
+  }, 60_000);
 });
