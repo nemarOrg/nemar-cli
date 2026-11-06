@@ -69,7 +69,13 @@ const ENDS_THE_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   "pipelines_account_missing",
 ]);
 
-export type RecipeSkip = "daily_cap" | "live_cap" | "pool_refused" | "registry_drift" | "run_ended";
+export type RecipeSkip =
+  | "daily_cap"
+  | "live_cap"
+  | "tick_cap"
+  | "pool_refused"
+  | "registry_drift"
+  | "run_ended";
 
 export interface RecipeOutcome {
   recipe: string;
@@ -169,8 +175,13 @@ export async function runComputePipelineDispatchCron(
         outcome.skipped = "live_cap";
         continue;
       }
+      if (tickLeft <= 0) {
+        outcome.skipped = "tick_cap";
+        continue;
+      }
       const room = Math.min(dailyLeft, liveLeft, tickLeft);
-      if (room <= 0) continue;
+      // The bound of this file's own is what limits the run, and it was used up: more may be waiting.
+      const cutByTick = tickLeft < dailyLeft && tickLeft < liveLeft;
 
       const run = await dispatchEligible(env, {
         recipe: recipe.name,
@@ -183,6 +194,9 @@ export async function runComputePipelineDispatchCron(
       result.dispatched += run.dispatched;
       dailyLeft -= run.dispatched;
       tickLeft -= run.dispatched;
+      if (cutByTick && run.dispatched >= room && run.stoppedBy === null) {
+        outcome.skipped = "tick_cap";
+      }
       if (run.stoppedBy === "registry_drift") {
         outcome.skipped = "registry_drift";
       } else if (run.stoppedBy === "run_failed") {

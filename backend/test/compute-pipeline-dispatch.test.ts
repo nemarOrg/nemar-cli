@@ -293,9 +293,25 @@ describe("the caps", () => {
     await policy(pipelinesPolicy(100, 100));
     const result = await runComputePipelineDispatchCron(env);
     expect(result?.dispatched).toBe(CRON_DISPATCH_PER_TICK);
+    // Said, so a recipe cut by the bound is not read as having nothing eligible.
+    expect(result?.recipes[0]).toMatchObject({
+      dispatched: CRON_DISPATCH_PER_TICK,
+      skipped: "tick_cap",
+    });
+    expect(pipelineDispatchLogLine(result as PipelineCronResult)?.line).toContain(
+      "nemar-floor_skipped=tick_cap",
+    );
     expect(await stampCount(env)).toBe(CRON_DISPATCH_PER_TICK);
     // The next day's tick takes the rest.
     expect((await runComputePipelineDispatchCron(env))?.dispatched).toBe(3);
+  });
+
+  test("a run that ends below the bound is not reported as cut by it", async () => {
+    const env = await world(ids(3));
+    await policy(pipelinesPolicy(100, 100));
+    const result = await runComputePipelineDispatchCron(env);
+    expect(result).toMatchObject({ dispatched: 3 });
+    expect(result?.recipes[0]?.skipped).toBeNull();
   });
 
   test("a daily cap of 0 dispatches nothing", async () => {
