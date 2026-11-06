@@ -480,6 +480,25 @@ describe("a job that NEMAR made", () => {
     expect((await reread(made.env, made.job.id)).flag_mismatch).toBe(0);
   });
 
+  test("each bound job is counted once: one bound at the snapshot and one bound after it make `bound` 2, and the log line says so", async () => {
+    const early = await makeJob(fx);
+    await submitComputeJob(early.env, early.job.id);
+    const late = await makeJob(fx);
+    const lateUuid = await foreign({ tags: [`nemar_job:${late.job.id}`] });
+    const hook = hookedDb(env().DB);
+    hook.armAfterAll("SELECT tapis_uuid FROM compute_jobs WHERE tapis_uuid IN", () => {
+      fx.harness.db.run(
+        "UPDATE compute_jobs SET tapis_uuid = ?, state = 'submitted', tapis_status = 'PENDING' WHERE id = ?",
+        [lateUuid, late.job.id],
+      );
+    });
+    const result = await sweepTenantJobs(env({ DB: hook.db }), "live");
+    expect(result).toMatchObject({ listed: 2, bound: 2, duplicates: 0, indexed: 0, cancelled: 0 });
+    expect(result && tenantLogLine(result)).toBeNull();
+    const withOne = result && tenantLogLine({ ...result, indexed: 1 });
+    expect(withOne?.line).toContain("bound=2");
+  });
+
   test("an insert that does nothing because a row has the job cancels it only if the row is the sweep's own (MUTATION: cancel after a conflicting insert)", async () => {
     const mine = await makeJob(fx);
     const untagged = await foreign({});
