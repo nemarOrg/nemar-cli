@@ -14,7 +14,15 @@ if (!path) {
   process.exit(2);
 }
 
-const report = checkAuthorizationLog(readFileSync(path, "utf8"));
+let log: string;
+try {
+  log = readFileSync(path, "utf8");
+} catch (err) {
+  console.error(`::error::cannot read the rig's log at ${path}: ${(err as Error).message}`);
+  process.exit(1);
+}
+
+const report = checkAuthorizationLog(log);
 console.log(`authorization responses: ${report.responses}`);
 for (const [error, count] of Object.entries(report.byError).sort()) {
   console.log(`  ${error}: ${count}`);

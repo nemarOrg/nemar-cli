@@ -271,6 +271,15 @@ describe("the authorization log and its check", () => {
     ]);
   });
 
+  test("matches strictly: surrounding whitespace is a violation, not trimmed away", () => {
+    const line = authorizationLogLine("login", null, true);
+    for (const padded of [` ${line}`, `${line} `, `${line}\r`]) {
+      expect(checkAuthorizationLog(padded).violations).toContain(
+        "unparseable authorization line 1",
+      );
+    }
+  });
+
   test("fails an empty log, which would check nothing", () => {
     expect(checkAuthorizationLog("").violations).toHaveLength(1);
     expect(checkAuthorizationLog("[rig] GET /login 200").responses).toBe(0);
