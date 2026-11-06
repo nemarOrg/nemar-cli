@@ -75,8 +75,50 @@ const job = {
   records_copied: true,
 };
 
+const pipelineResult = {
+  dataset_id: "nm000104",
+  ok: true,
+  version: "v1.0.0",
+  job_id: "job_0123456789abcdef01234567",
+  stamp_id: 4,
+  attempt: 1,
+  submit: "submitted",
+};
+
+const pipelineStamp = {
+  id: 4,
+  dataset_id: "nm000104",
+  version: "v1.0.0",
+  recipe: "nemar-floor",
+  recipe_version: "1.0.0",
+  engine: "eegprep@0.5.0",
+  attempt: 1,
+  state: "dispatched",
+  job_id: "job_0123456789abcdef01234567",
+  refusal_code: null,
+  created_at: "2026-11-05 10:00:00",
+  updated_at: "2026-11-05 10:00:00",
+};
+
 /** A valid document for each exported schema. */
 const VALID: Record<string, unknown> = {
+  ComputePipelineResultSchema: pipelineResult,
+  ComputePipelineStampViewSchema: pipelineStamp,
+  ComputePipelineStatusResponseSchema: { stamps: [pipelineStamp], next_before: null },
+  ComputePipelineRunResponseSchema: {
+    ok: true,
+    dry_run: false,
+    recipe: "nemar-floor",
+    results: [pipelineResult, { dataset_id: "nm000105", ok: false, code: "live_attempt_exists" }],
+    dispatched: 1,
+    stopped_by: null,
+    estimate_milli_per_job: 48000,
+    estimate_milli_total: 96000,
+    config: { compute_enabled: true, runtime_image: true, pipelines_account: true },
+    would_dispatch: [{ dataset_id: "nm000104", version: "v1.0.0" }],
+    blocked: { code: "dataset_not_eligible", blocked_by: ["public"], version: "v1.0.0" },
+    blocked_by_term: { public: 3, eeg: 1 },
+  },
   ComputeStatusResponseSchema: {
     switches: {
       environment: "production",

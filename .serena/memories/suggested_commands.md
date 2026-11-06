@@ -24,11 +24,11 @@ bun build src/index.ts --outdir dist --target bun --minify
 ## Testing
 
 ```bash
-# Run all tests
-bun test
-
-# Run specific test file
+# Run specific test files (the default: targeted tests per change, see .rules/testing.md)
 bun test test/auth.test.ts
+
+# Run all tests: about 80 minutes under load, only at epic -> dev (the full CI run)
+bun test
 
 # Run tests with coverage
 bun test --coverage
@@ -52,13 +52,8 @@ bun run typecheck
 
 ## Version Management
 
-```bash
-# Never edit package.json version manually!
-./scripts/bump-version.sh patch    # Bug fixes (0.2.7 -> 0.2.8)
-./scripts/bump-version.sh minor    # New features (0.2.7 -> 0.3.0)
-./scripts/bump-version.sh major    # Breaking changes (0.2.7 -> 1.0.0)
-./scripts/bump-version.sh dev      # Pre-release (0.2.7 -> 0.2.8-dev)
-```
+The version is owned by CI (ADR 0016): never edit `package.json` version and never run `./scripts/bump-version.sh` by hand.
+See `.rules/release-and-repull.md`.
 
 ## Documentation
 

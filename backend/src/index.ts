@@ -56,6 +56,10 @@ import {
   runComputeAdvanceCron,
   sweepComputeCancellations,
 } from "./services/compute-advance";
+import {
+  pipelineDispatchLogLine,
+  runComputePipelineDispatchCron,
+} from "./services/compute-pipeline-dispatch";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
@@ -1331,6 +1335,28 @@ export default {
             console.error(
               "[repull-scheduler] tick failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+      // #2011 (epic #2005 phase A6, ADR 0118): NEMAR's own pipelines. Dispatches the automatic recipes
+      // over the datasets they have not been run over, within the owner's daily and live caps, and
+      // syncs the stamps first. PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it makes
+      // jobs that take the allocation ledger's holds and reach a Tapis tenant. It also refuses outside
+      // exact production on its own, and does NOTHING (it touches no table) until the owner has turned
+      // on both COMPUTE_ENABLED and COMPUTE_PIPELINES_DISPATCH_ENABLED. It sends no mail and reaches no
+      // GitHub. One log line, only when it dispatched, skipped for a reason or failed.
+      ctx.waitUntil(
+        runComputePipelineDispatchCron(env)
+          .then((r) => {
+            const log = r ? pipelineDispatchLogLine(r) : null;
+            if (log?.level === "error") console.error(log.line);
+            else if (log?.level === "warn") console.warn(log.line);
+            else if (log) console.log(log.line);
+          })
+          .catch((err) =>
+            console.error(
+              "[compute-pipeline-dispatch] tick failed:",
+              err instanceof Error ? err.name : typeof err,
             ),
           ),
       );

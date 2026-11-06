@@ -103,6 +103,34 @@ synthetic fixture is the only thing standing between a transposed rule and silen
 corruption. Write that in the comment, or the next reader deletes the "redundant"
 fixture.
 
+**Scratch scripts get unique names in a private subfolder.**
+Mutation and probe scripts are throwaway, and agents that wrote scripts of the same name into one shared scratch directory overwrote each other's mutation scripts, so a verification could run the wrong mutation.
+Never put two scripts with the same name in a shared scratch directory: give each agent or phase its own subfolder and name every file for what it does (`mutate-<test>-<line>.sh`).
+
+## [STRICT] Test cost: targeted by default, the full suite only at epic -> dev
+
+The full `bun test` takes about 80 minutes under load and has three known baseline failures on a developer machine (`.memory/full-suite-80-minutes-and-three-baseline-failures.md`).
+It is the epic -> `dev` gate, and it runs there as the full CI run; nothing before that point waits on it.
+
+**Every phase, fix and review round runs only targeted tests**: the services the change likely affects (the files and routers touched, and their neighbours), plus the quick gates:
+
+- `bun run typecheck`;
+- `bun run lint`, and `bunx biome check <touched files>` (never the whole tree: it carries existing errors in untouched files, see the memory above);
+- `bun run migrations:d1-check`;
+- the new and changed test files, run by path (`bun test backend/test/<file>.test.ts test/<file>.test.ts`).
+
+The root `bun test` runs `test/` and `backend/test/` in one process (`.memory/bun-test-shared-process-root-and-backend.md`), so a targeted run can pass where the full run leaks state; when a change touches shared process state (`process.env`, module-level caches), name the neighbours that share it in the targeted set.
+
+**Implementer and fixer agents never wait on a long job.**
+A full test run and a CI watch are long jobs.
+The agent pushes, runs only the targeted set above, and reports what it did not run in one line each: "not run, would check: X because Y".
+The driver (the orchestrating session) reads those lines and decides whether a long run is needed, and runs it.
+CI-only checks (for example container tests that need Linux) are watched by the driver, who resumes the agent only if something is red (`.rules/ci_cd.md`).
+
+**Kill stray background test runs before running gates.**
+A test run left in a worktree by an earlier agent or an earlier round holds ports and files, and makes a gate fail or pass for the wrong reason.
+List them (`pgrep -fl "bun test"`), check where each one runs (`lsof -a -d cwd -p <pid>`), and stop only the ones whose working directory is your own worktree; another session's run is not yours to kill.
+
 ## Test Data Management
 - **Sample data:** Request from user or use production samples
 - **Test databases:** Use Docker containers or test instances

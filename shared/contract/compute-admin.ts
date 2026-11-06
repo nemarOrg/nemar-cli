@@ -330,3 +330,148 @@ export const ComputeJobAdminResponseSchema = z
   .passthrough();
 
 export type ComputeJobAdminResponse = z.infer<typeof ComputeJobAdminResponseSchema>;
+
+// --- NEMAR's own pipelines (epic #2005 phase A6, #2011) ---------------------------------------------------
+
+/** The most datasets one `--eligible` run may dispatch: the policy's daily cap is the real ceiling. */
+export const COMPUTE_PIPELINE_RUN_LIMIT_MAX = 100;
+
+/** The default number of datasets an `--eligible` run takes when none is named. */
+export const COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT = 10;
+
+/** The states a stamp is filtered by, as the registry declares them. */
+export const COMPUTE_PIPELINE_STAMP_STATES = [
+  "dispatched",
+  "succeeded",
+  "failed",
+  "refused",
+] as const;
+
+/** The most stamps one status page answers with. */
+export const COMPUTE_PIPELINE_STATUS_PAGE_MAX = 200;
+
+/**
+ * `POST /admin/compute/pipeline/run`: a recipe, then ONE dataset (with an optional version) or the
+ * queue (`eligible`, with a `limit`), and `dry_run`. The Worker validates it strictly; the request
+ * names nothing else, because the dataset row, the version row, the account and the pool are the
+ * Worker's own.
+ */
+export interface ComputePipelineRunRequest {
+  recipe: string;
+  dataset?: string;
+  version?: string;
+  eligible?: boolean;
+  limit?: number;
+  dry_run?: boolean;
+}
+
+/**
+ * The HTTP status of each word a pipeline run is refused with, declared once so no route picks its own
+ * (the ledger's words keep the statuses `shared/compute-state.ts` gives them).
+ */
+export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<string, number>> = {
+  recipe_unknown: 422,
+  recipe_not_automatic: 422,
+  recipe_placeholder: 422,
+  registry_drift: 409,
+  dataset_not_eligible: 422,
+  version_not_found: 404,
+  version_untagged: 422,
+  too_many_files: 422,
+  runtime_unavailable: 422,
+  pipelines_account_missing: 503,
+  compute_disabled: 503,
+  live_attempt_exists: 409,
+  insufficient_balance: 409,
+  platform_budget_exhausted: 409,
+  suspended: 403,
+  over_concurrency: 409,
+  invalid_spec: 400,
+  create_failed: 502,
+};
+
+/** One dataset's outcome in a run: dispatched (a job and a stamp) or refused (a word). Words are strings. */
+export const ComputePipelineResultSchema = z
+  .object({
+    dataset_id: z.string(),
+    ok: z.boolean(),
+    version: z.string().optional(),
+    job_id: z.string().optional(),
+    stamp_id: z.number().int().optional(),
+    attempt: z.number().int().optional(),
+    submit: z.string().optional(),
+    code: z.string().optional(),
+    blocked_by: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+export type ComputePipelineResult = z.infer<typeof ComputePipelineResultSchema>;
+
+/**
+ * The answer of a pipeline run, live or dry. A live run has `results`, `dispatched` and `stopped_by`;
+ * a dry run has the estimate, the config a real run needs, what would be dispatched and what blocks the
+ * rest. Every field of the other kind is optional, so one schema reads both, and the response is open.
+ */
+export const ComputePipelineRunResponseSchema = z
+  .object({
+    ok: z.boolean(),
+    dry_run: z.boolean(),
+    recipe: z.string(),
+    results: z.array(ComputePipelineResultSchema).optional(),
+    dispatched: z.number().int().optional(),
+    stopped_by: z.string().nullable().optional(),
+    /** True when the run was made and the Worker could not write its audit row: nothing is lost but the row. */
+    audit_pending: z.boolean().optional(),
+    estimate_milli_per_job: milli.optional(),
+    estimate_milli_total: milli.optional(),
+    config: z
+      .object({
+        compute_enabled: z.boolean(),
+        runtime_image: z.boolean(),
+        pipelines_account: z.boolean(),
+      })
+      .passthrough()
+      .optional(),
+    would_dispatch: z
+      .array(z.object({ dataset_id: z.string(), version: z.string() }).passthrough())
+      .optional(),
+    blocked: z
+      .object({ code: z.string(), blocked_by: z.array(z.string()), version: z.string().optional() })
+      .passthrough()
+      .optional(),
+    blocked_by_term: z.record(z.unknown()).optional(),
+  })
+  .passthrough();
+
+export type ComputePipelineRunResponse = z.infer<typeof ComputePipelineRunResponseSchema>;
+
+/** A stamp as an administrator is shown it: a tuple, a state, a job and a fixed word. */
+export const ComputePipelineStampViewSchema = z
+  .object({
+    id: z.number().int(),
+    dataset_id: z.string(),
+    version: z.string(),
+    recipe: z.string(),
+    recipe_version: z.string(),
+    engine: z.string(),
+    attempt: z.number().int(),
+    state: z.string(),
+    job_id: nullableString,
+    refusal_code: nullableString,
+    created_at: z.string(),
+    /** While `dispatched`: when the Worker last examined the stamp. Once ended: when it ended. */
+    updated_at: z.string(),
+  })
+  .passthrough();
+
+export type ComputePipelineStampView = z.infer<typeof ComputePipelineStampViewSchema>;
+
+/** `GET /admin/compute/pipeline/status`: a page of stamps, newest first, after the stamps were synced. */
+export const ComputePipelineStatusResponseSchema = z
+  .object({
+    stamps: z.array(ComputePipelineStampViewSchema),
+    next_before: z.number().int().nullable(),
+  })
+  .passthrough();
+
+export type ComputePipelineStatusResponse = z.infer<typeof ComputePipelineStatusResponseSchema>;

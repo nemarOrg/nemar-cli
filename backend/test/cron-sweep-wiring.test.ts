@@ -159,6 +159,11 @@ const SWEEP_WIRING: Record<
   // 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
   // exact production on its own, and reads no switch (a job that ran is owed its report).
   runAccessReportCron: "tick-prod-only",
+  // Epic #2005 phase A6 (#2011, ADR 0118): NEMAR's own pipelines. The daily dispatcher makes jobs that
+  // take the allocation ledger's holds and reach a Tapis tenant, so it is production-only and absent
+  // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and does nothing
+  // (it touches no table) until compute and COMPUTE_PIPELINES_DISPATCH_ENABLED are both "1".
+  runComputePipelineDispatchCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1789: tombstones the live integration tests' accounts. It runs ONLY outside production,
   // from a section of scheduledCleanup (`cleanUpLiveTestAccounts`); the dedicated block at the
@@ -410,8 +415,8 @@ describe("every sweep service is declared and driven", () => {
         // the prod EZID shoulder, so a call site outside the guard would run
         // them from the dev worker against that same shared org. The D1 and S3
         // halves are NOT the risk anywhere: S3_BUCKET is env-scoped to
-        // nemar-dev, and per AGENTS.md the dev catalog was purged to fixtures
-        // and is no longer a production mirror.
+        // nemar-dev, and per .rules/environments.md the dev catalog was purged
+        // to fixtures and is no longer a production mirror.
         //
         // `runRecordingStatsSweepCron` is the exception and this assertion is
         // weaker for it: that sweep touches ONLY S3 and D1 (index.ts says so

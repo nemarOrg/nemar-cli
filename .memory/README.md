@@ -41,13 +41,21 @@ name: <short-kebab-case-slug>
 description: <one line, used to decide whether this entry is relevant>
 metadata:
   type: project | feedback | reference | user
+  recorded: <ISO date the fact was verified>
+  revalidate_after: <ISO date, for a fact that depends on a changing surface>
 ---
 
 <the fact, then why it matters, then what to do about it>
 ```
 
+`recorded` and `revalidate_after` are optional on entries that predate them and expected on new ones
+(the project plugin's memory template calls for both); set `revalidate_after` whenever the fact
+depends on a file, flag, workflow, dependency or service.
+
 `MEMORY.md` is the index: one line per entry, so a reader can find the relevant one without
 loading all of them. Keep it in step with the files; an index that lies is worse than none.
+The project plugin's template names this file `INDEX.md`; this repository keeps `MEMORY.md`, the name its
+entries were seeded with, rather than carry two indexes.
 
 Deliberately dull markdown, so an agent that did not write an entry can still read it.
 

@@ -9,7 +9,7 @@ The design is the gated docs page `admin/design/compute-gateway` in `nemarOrg/do
 Where the patterns live in this codebase is in [`implementation-notes.md`](implementation-notes.md).
 Each phase issue is the implementer's complete brief: goal, routing, scope, changes, tests, acceptance criteria, gates, rules, escalation triggers.
 
-Where this file, an issue and an ADR disagree, the ADR wins, then the issue, then this file.
+Where this file, an issue and an ADR disagree, the ADR wins, then the issue, then this file, except on the full-suite gate (section 3, step 6), where this file wins.
 When implementation shows the plan was wrong, change the issue and the design page in the same pull request that changes the behaviour; plans are expected to move.
 
 ## 1. Roadmap
@@ -60,8 +60,12 @@ Everything else is built and tested against local stand-ins first.
    `git -C <primary checkout> worktree add <worktrees dir>/<epic-slug>-<phase> -b feature/issue-<N>-<phase-slug> origin/<epic branch>`.
    Never edit the primary checkout.
 5. **Delegate** with the brief in section 4, verbatim, to the model the issue names.
-6. **Verify.** When the implementer reports, run the issue's Gates yourself in the worktree.
+6. **Verify.** When the implementer reports, run the issue's Gates yourself in the worktree: the targeted tests and the quick gates, not the full suite (`.rules/testing.md`, "Test cost").
    A report is not a result; a gate you did not run did not pass.
+   Read the implementer's "not run, would check: X because Y" lines and decide whether a long run is needed; you run it, the implementer does not wait for it.
+   Watch CI-only checks yourself and resume the implementer only if something is red.
+   A bare or full `bun test` in an issue's Gates is the epic -> `dev` gate and is not run in a phase: report it as "not run, would check: full suite because it is the epic gate".
+   On this point this file wins over the issue.
 7. **Review.** Run the project plugin's `pr-review-toolkit` on the PR with Sonnet reviewers.
    Every finding is fixed (no debt carried forward) except a false positive or a deliberate design choice, each answered with a one-line reason on the PR.
    Send security, concurrency, authorization, data-integrity and architecture findings to the Opus advisor before the implementer fixes them.
@@ -94,7 +98,11 @@ Stay inside the issue's scope. If the issue is wrong or a decision is missing, s
 This repository is public: no tenant names, allocation ids, account names, host details, spend figures or real home paths anywhere.
 Never mock NEMAR logic. Never hand-bump a version. Never set a secret or touch production.
 Commit atomically with short messages (under 50 characters, no emojis, no AI or co-author attribution).
-Run every command in the issue's Gates section and paste their final lines in your report.
+Run every command in the issue's Gates section with targeted tests only, and paste their final lines in your report.
+Never wait on a long job (a full test run, a CI watch): push, and report what you did not run as "not run, would check: X because Y".
+A bare or full `bun test` in an issue's Gates is the epic -> `dev` gate and is not run in a phase: report it as "not run, would check: full suite because it is the epic gate".
+On this point this brief wins over the issue.
+Kill stray background test runs in your worktree before running gates, and give every scratch script a unique name in a private subfolder.
 Push and open a PR into <epic branch> titled "Phase <key>: <title>" whose body lists what changed, the gates you ran with results, and anything you could not do. GitHub bodies keep each paragraph on one line.
 Report: the PR URL, the gates and their results, and every deviation from the issue.
 ```
@@ -175,7 +183,19 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
 
 - [ ] Send the design page to the SDSC colleague and collect answers to its section 12; ask for the dev and production tenants.
 - [x] The four private Cloudflare R2 buckets exist (created 2026-11-04, location hint western North America; compute storage is R2, not AWS): `nemar-compute-records` and `nemar-compute-results` for production, `nemar-compute-records-dev` and `nemar-compute-results-dev` for dev. Records: bucket lock rules `records/` 2,557 days (7 years) and `logs/` 366 days in production, 1 day each in dev so tests can clean up; lifecycle rules deleting `incoming/` after 2 days and aborting incomplete multipart uploads after 1 day. Results: lifecycle rule deleting objects after 30 days and aborting incomplete multipart uploads after 1 day. Check them with `bunx cfman wrangler --account sccn -- r2 bucket lock list <bucket>` and `... r2 bucket lifecycle list <bucket>`.
-- [ ] Create one R2 API token with Object Read & Write on the four compute buckets (the dashboard's R2 API tokens page; wrangler cannot make one) and store it in Infisical (project `nemar`, folder `/backend/compute`, environments `dev` and `prod`; the folder exists and already holds `COMPUTE_R2_S3_ENDPOINT`) as `COMPUTE_R2_ACCESS_KEY_ID` and `COMPUTE_R2_SECRET_ACCESS_KEY`. Then copy all three into the Worker secrets of production and dev, for example `infisical secrets get COMPUTE_R2_ACCESS_KEY_ID --env prod --path /backend/compute --plain --silent | tr -d '\n' | bunx cfman wrangler --account sccn secret put COMPUTE_R2_ACCESS_KEY_ID -c wrangler-sccn.toml` from `backend/` (add `--env dev` for dev). Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder. No AWS bucket or IAM user is needed for compute.
+- [ ] Create two R2 API tokens in the Cloudflare dashboard (R2, Manage API tokens), each with Object Read & Write: one on `nemar-compute-records` and `nemar-compute-results` for production, one on the two `-dev` buckets for dev, so dev and production never share a credential. Store each pair in Infisical (project `nemar`, folder `/backend/compute`; the folder exists in `dev` and `prod` and already holds `COMPUTE_R2_S3_ENDPOINT`) as `COMPUTE_R2_ACCESS_KEY_ID` and `COMPUTE_R2_SECRET_ACCESS_KEY`, using the web interface so the values never reach shell history. Then copy the three values into the Worker secrets. Two traps: `wrangler secret put` without `--env dev` writes to the production Worker, whatever Infisical environment was read; and a pipe from an `infisical` call that found nothing uploads an empty secret and still reports success, so refuse an empty value:
+
+  ```bash
+  # from nemar-cli/backend; set E=prod (production Worker) or E=dev (dev Worker)
+  for n in COMPUTE_R2_ACCESS_KEY_ID COMPUTE_R2_SECRET_ACCESS_KEY COMPUTE_R2_S3_ENDPOINT; do
+    v=$(infisical secrets get "$n" --env "$E" --path /backend/compute --plain --silent | tr -d '\n')
+    if [ -z "$v" ]; then echo "$n is missing in Infisical $E"; continue; fi
+    if [ "$E" = dev ]; then printf %s "$v" | bunx cfman wrangler --account sccn secret put "$n" -c wrangler-sccn.toml --env dev
+    else printf %s "$v" | bunx cfman wrangler --account sccn secret put "$n" -c wrangler-sccn.toml; fi
+  done; unset v
+  ```
+
+  Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder and are copied the same way. No AWS bucket or IAM user is needed for compute.
 - [ ] Set the Tapis credentials as Worker secrets for dev and production once the tenant exists.
 - [ ] Generate the ACCESS gateway attributes key for the community account and set it as the Worker secret `ACCESS_GATEWAY_ATTRIBUTES_KEY`, and set the name ACCESS knows the cluster by as `ACCESS_RESOURCE_NAME` (design question 14). Confirm the header that carries the key and the body's spelling against the real interface: both are unverified constants in `backend/src/services/access-attributes.ts`.
 - [ ] Take the policies and the official-request procedure (Epic D, phase 5) to UC San Diego counsel.

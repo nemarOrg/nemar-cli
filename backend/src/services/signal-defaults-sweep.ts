@@ -50,16 +50,16 @@ import { getDatasetsToken } from "./github-auth";
  * Candidates: active datasets with a GitHub repo whose signal defaults have
  * never been computed. `is_sandbox` excluded (matches channel-montage-sweep
  * / hed-sweep, both cited as this sweep's model): prod sandbox (`xx*`)
- * datasets churn continuously (14-day cron cleanup, AGENTS.md's dataset ID
- * bands), and unlike recording-stats-sweep's one cheap signed S3 GET, a
+ * datasets churn continuously (14-day cron cleanup, see the dataset ID bands
+ * in .rules/datasets-and-fixtures.md), and unlike recording-stats-sweep's one cheap signed S3 GET, a
  * candidate here costs a full GitHub tree walk (root tree + up to 25
  * subject subtrees + up to 2 blobs) against a tight 15/30 budget --
  * burning that budget on rows that will be deleted before anyone reads
  * their signal_defaults is wasted work recording-stats-sweep's own
  * documented exception doesn't have to worry about. The curated exemplar
  * fleet (`is_exemplar = 1`) is the one `is_sandbox = 1` cohort that does NOT
- * churn -- it is permanent (AGENTS.md's dataset ID bands, "never" cleaned)
- * -- so `exemplarOrFragment()` carves it back in (issue #1168), matching the
+ * churn -- it is permanent (the dataset ID bands in
+ * .rules/datasets-and-fixtures.md, "never" cleaned) -- so `exemplarOrFragment()` carves it back in (issue #1168), matching the
  * visibility predicates in dataset-search.ts / catalog.ts. No modality
  * filter (unlike channel-montage-sweep, which restricts to `modalities LIKE
  * '%eeg%'`): getBidsTreeStats's `*_eeg.json` probe is itself the modality

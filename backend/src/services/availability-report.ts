@@ -335,9 +335,9 @@ export async function writeAvailabilityReport(
  *  (`github_repo IS NOT NULL`; catalog `ds*` rows have none), not sandbox, with
  *  a version, and not yet stamped. The curated exemplar fleet
  *  (`is_exemplar = 1`) is inserted `is_sandbox = 1` but is permanent, not
- *  churning (AGENTS.md's dataset ID bands, "never" cleaned), so
- *  `exemplarOrFragment()` carves it back into candidacy (issue #1168), matching
- *  the visibility predicates in dataset-search.ts / catalog.ts.
+ *  churning (the dataset ID bands in .rules/datasets-and-fixtures.md, "never"
+ *  cleaned), so `exemplarOrFragment()` carves it back into candidacy (issue
+ *  #1168), matching the visibility predicates in dataset-search.ts / catalog.ts.
  *
  *  A dataset with no version yet (no version DOI, no dataset_versions row) is
  *  not a candidate: its report has nothing to compare against, and its

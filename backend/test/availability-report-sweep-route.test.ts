@@ -323,8 +323,8 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
   });
 
   // Issue #1168: the curated exemplar fleet is inserted `is_sandbox = 1`
-  // (AGENTS.md's dataset ID bands) but is permanent, not churning -- the
-  // base WHERE's exemplarOrFragment() carve-out must still admit it.
+  // (see the dataset ID bands in .rules/datasets-and-fixtures.md) but is
+  // permanent, not churning -- the base WHERE's exemplarOrFragment() carve-out must still admit it.
   test("an is_exemplar=1 sandbox-band row is a candidate, unlike a plain sandbox row (#1168)", () => {
     seedDataset("xx090001", { isSandbox: 1 }); // excluded: plain sandbox
     seedDataset("xx099901", { isSandbox: 1, isExemplar: 1 }); // included: exemplar carve-out
