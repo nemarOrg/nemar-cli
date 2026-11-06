@@ -3,7 +3,7 @@
  *
  * `.github/workflows/test.yml` routes a file by text, not by header: a file whose text holds one
  * of three marker names (read from the workflow below, never spelled here) goes to the
- * `integration-dev` job, which runs with `--retry=2 --timeout 30000` and is not required on dev;
+ * `integration-dev-shard` matrix (gated by `integration-dev`), which runs with `--retry=2 --timeout 30000` and is not required on dev;
  * every other file goes to the required `unit-pure` job (sharded as `unit-pure-shard`; its file list comes
  * from `scripts/ci/unit-pure-files.sh`, shared with the deploy gate), which runs `bun test` with the default
  * five-second timeout and no retry; a file named `*.integration.test.ts` goes to the integration
@@ -87,7 +87,8 @@ function routingOfScripts(label: string, scripts: string[]): Routing {
 const unitPure = routingOfScripts("scripts/ci/unit-pure-files.sh", [
   readFileSync(`${ROOT}scripts/ci/unit-pure-files.sh`, "utf8"),
 ]);
-const integrationDev = routingOf("integration-dev");
+// The gate `integration-dev` runs nothing; its shards (`integration-dev-shard`) route the files.
+const integrationDev = routingOf("integration-dev-shard");
 
 const PROCESS_LISTER = readFileSync(`${ROOT}scripts/ci/process-files.sh`, "utf8");
 const UNIT_PURE_LISTER = readFileSync(`${ROOT}scripts/ci/unit-pure-files.sh`, "utf8");
@@ -303,7 +304,7 @@ describe("the pure tier has one classifier, used by both gates", () => {
     jobs: Record<string, Job>;
   };
   const shardScripts = scriptsOf("unit-pure-shard");
-  const gateScripts = (deploy.jobs["test-gate"]?.steps ?? []).flatMap((s) =>
+  const gateScripts = (deploy.jobs["test-gate-shard"]?.steps ?? []).flatMap((s) =>
     s.run ? [s.run] : [],
   );
   const INLINE_LOOP = /for f in [^;]*\*\.test\.ts/;
