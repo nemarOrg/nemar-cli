@@ -21,7 +21,7 @@
  * The routes exist only on a Worker whose provider is on (`OIDC_SECRET`) and only on the issuer's
  * own host, so a 404 here is said plainly (`hintsFor`), and not as "this backend does not support
  * this command yet". The numbers and lists the help and the messages state (the grace, the 24 hours,
- * the scope catalogue) are interpolated from `shared/oidc.ts`, where they are declared once.
+ * the scope catalog) are interpolated from `shared/oidc.ts`, where they are declared once.
  */
 
 import chalk from "chalk";
@@ -259,7 +259,7 @@ which names the field and never repeats what was typed.
                      address may use http outside production; no wildcard, no fragment, no user
                      information. Each must be written as a browser would navigate to it (lower-case,
                      with a path, no dot segments, no default port): one that is not is refused.
-  --scopes           A comma-separated list from the catalogue: ${OIDC_SCOPE_NAMES.join(", ")}.
+  --scopes           A comma-separated list from the catalog: ${OIDC_SCOPE_NAMES.join(", ")}.
                      A scope a person grants needs the authorization_code grant; ${MACHINE_SCOPES.join(", ")} is
                      for a machine and needs client_credentials; offline_access and refresh_token
                      come together.
