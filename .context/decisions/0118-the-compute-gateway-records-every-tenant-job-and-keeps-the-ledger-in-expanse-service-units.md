@@ -408,7 +408,9 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    When a job finishes, the sync compares the tuple its record names with the tuple its stamp claimed.
    A difference holds the CLAIMED tuple (a `failed` stamp with the word `tuple_mismatch`, written once per job, before the stamp is rewritten): the registry is out of date or the image is, and dispatching again would run the same datasets over and over under a tuple the table does not name.
    The hold is checked in the shared dispatch path, so a single dispatch, the queue, the daily dispatcher and the dry run all refuse with `registry_drift`, writing nothing.
-   It clears when the registry declares another tuple, which is what a version bump is, and in no other way; a bump is never held, because the hold names the old tuple.
+   The hold does not clear by time.
+   It clears when the registry declares another tuple, which is what a version bump is (a bump is never held, because the hold names the old tuple), or when its mismatch rows are deleted: deleting the dataset a row names deletes the row too, because the dataset cascade removes every stamp of the dataset, and the cascade is the rule.
+   The next mismatch on any dataset holds the tuple again, so the exposure that a deletion lifts is bounded by the live cap.
    What stays exposed are the jobs already in flight when a mismatch first appears: they were dispatched under the claimed tuple and finish under the same mismatch, so the first mismatch can cost up to the live cap of jobs, each of which is stamped with what it ran.
    A record whose `<package>@<version>` is longer than the stamp's 64-character engine column is unreadable and ends the stamp `failed`.
    A rewritten tuple that is already stamped ends the stamp `failed` as `tuple_already_stamped`: the run may be good and the word says only that this stamp cannot carry its tuple.

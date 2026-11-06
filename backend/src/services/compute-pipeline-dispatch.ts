@@ -28,9 +28,10 @@
  * claimed. A difference holds the CLAIMED tuple (a `tuple_mismatch` stamp, `tupleHeld`): the registry is out
  * of date or the image is, and dispatching again would run the same datasets over and over under a tuple the
  * table does not name. The hold is checked on every path (`dispatchPipelineJob`, the queue, the dry run), so
- * this cron skips the recipe (`registry_drift`) and says so. It clears when the registry declares another
- * tuple, which is what a version bump is: a bump is never held. What remains exposed are the jobs already in
- * flight when a mismatch first appears: they finish under the same mismatch.
+ * this cron skips the recipe (`registry_drift`) and says so. It does not clear by time. It clears when the
+ * registry declares another tuple (a version bump, which is never held) or when its rows are deleted, which
+ * deleting the dataset they name does; the next mismatch on any dataset holds the tuple again. What remains
+ * exposed are the jobs already in flight when a mismatch first appears: they finish under the same mismatch.
  *
  * COST. The daily tick shares one subrequest allowance with every daily job. The tick syncs the stamps ONCE
  * (each run over the queue is told not to sync again): at most 50 open stamps at about 5 statements and calls

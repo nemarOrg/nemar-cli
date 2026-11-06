@@ -382,8 +382,9 @@ export const TUPLE_HELD_SQL = `SELECT 1 FROM compute_pipeline_stamps
 /**
  * Hold the tuple a stamp CLAIMED (`?1` dataset, `?2` version, `?3` recipe, `?4` claimed version, `?5`
  * claimed engine, `?6` the job). The hold is a `failed` stamp of the claimed tuple with the job that
- * showed the mismatch, and is written once per job. It clears when the registry declares another tuple,
- * which is what a version bump is, and in no other way.
+ * showed the mismatch, and is written once per job. It does not clear by time. It clears when the registry
+ * declares another tuple (a version bump), or when its rows are deleted, which deleting the dataset they
+ * name does (the cascade is the rule); the next mismatch on any dataset holds the tuple again.
  */
 export const HOLD_TUPLE_SQL = `INSERT INTO compute_pipeline_stamps
   (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, refusal_code)
