@@ -11,7 +11,8 @@ metadata:
 Running `bun test` from the nemar-cli repo root (no `bunfig.toml` at either
 level) picks up every `*.test.ts` recursively, so root `test/` and
 `backend/test/` execute sequentially in the SAME process — confirmed via a
-full run: 3975 tests across 270 files, ~207s.
+full run: 3975 tests across 270 files, ~207s (2026-09-01; the suite has grown since, and a full run
+is about 80 minutes under load as of 2026-11-04, see `full-suite-80-minutes-and-three-baseline-failures.md`).
 
 **Why:** this is the root cause behind cross-file test-isolation bugs like
 issue #1175 (`test/maintenance-client.test.ts` assigns `undefined` to

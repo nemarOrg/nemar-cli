@@ -64,6 +64,13 @@ binding ADR that is wrong.
 applied to N sibling facets, N wrappers, N call sites. Structural repetition is
 where a justification stops being re-read, so verify per instance, not per pattern.
 
+## [STRICT] Account copy and the profile-gap matrix are declared once
+
+Every sentence about tiers, upload access or a missing field comes from `shared/contract/account-copy.ts`.
+`computeProfileGaps` in `shared/contract/profile-gaps.ts` is the ONE rule behind `profile_gaps` on `GET /users/me`, `profile_gaps` on `GET /auth/me`, and the `missing` array a refused upload-access request carries (ADR 0045, ADR 0048).
+`nemarOrg/website` transcribes both files, and a drift test on each side compares them when both checkouts are present.
+Change a sentence or a rule in those two files, never at a call site; `cli.`-prefixed keys are the CLI's own and the website ignores them.
+
 ## Core Philosophy: Write for Your Future Self
 **Good docs** answer questions before they're asked.
 **Think:** What would confuse me in 6 months?

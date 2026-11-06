@@ -93,6 +93,22 @@ Never use it:
   blocks `npm-publish.yml`);
 - in a pull request title or body.
 
+## Long jobs: agents push and report, the driver watches
+
+A full test run (about 80 minutes under load) and a CI watch are long jobs.
+The full run belongs to the epic -> `dev` gate, as the full CI run; phases, fixes and review rounds run only targeted tests (`.rules/testing.md`, "Test cost").
+
+- **An implementer or fixer agent never waits on a long job.**
+  It pushes, then reports "not run, would check: X because Y" for what it did not run.
+- **The driver decides.**
+  The orchestrating session reads those lines and runs a long job only when one is needed.
+- **CI-only checks are the driver's to watch.**
+  Checks the agent cannot run locally (for example container tests that need Linux) are watched by the driver, who resumes the agent only if something is red.
+- **Watch unpiped.**
+  Run `gh pr checks <n> --watch` standalone and branch on its own exit status; a pipe into `grep` or `tail` replaces it (`.memory/ci-tier-grep-and-checks-exit-code.md`).
+- **Do not trust a merge response blindly.**
+  A squash merge sometimes answers 502 and has merged; check `gh pr view <n> --json state,mergeCommit` (`.memory/squash-merge-502-may-have-merged.md`).
+
 ## Pipeline Philosophy
 **Fast feedback:** Developers should know in <5 min
 **Clear failures:** Error messages should guide fixes
