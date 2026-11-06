@@ -22,6 +22,17 @@
 # database that lives in the rig's memory and dies when the job ends, so nothing live is uploaded. The
 # rig and the suite are stopped before the upload to make that true at the moment the files are read.
 #
+# THE AUTHORIZATION CHECK. The expected-failures entries match a module by test name, condition and
+# block, so on their own they would accept ANY error from the authorization endpoint as the approved PKCE
+# deviation. The rig therefore logs, for every authorization response, its error code and whether the
+# request carried a code_challenge, and the step "Check the authorization errors" fails the run if an
+# error code is outside this allowed set, or if invalid_request answered a request that DID carry a
+# code_challenge. The allowed set (scripts/oidc-conformance/authz-log.ts) is exactly what the approved
+# deviations and the two REVIEW modules produce:
+#   invalid_request            no code_challenge (decision 3a), and the missing-response-type module
+#   request_not_supported      the unsigned request object module, skipped on this answer (decision 4)
+#   page:invalid_redirect_uri  the error page the two REVIEW modules expect
+#
 # TRIGGERS. `workflow_dispatch` is the permanent one, but GitHub offers it only for a workflow file on
 # the default branch, so until this reaches it the `push` trigger below runs the workflow for branches
 # named `conformance/**`. THE PUSH TRIGGER IS TEMPORARY and is removed in the last commit of the phase.
@@ -174,6 +185,10 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/rig.pid")" 2>/dev/null || true
           cd "$RUNNER_TEMP/suite"
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" down --timeout 10 || true
+
+      - name: Check the authorization errors
+        if: ${{ always() }}
+        run: bun run scripts/oidc-conformance/check-authz.ts conformance-artifacts/rig.log
 
       - name: Upload results and logs
         if: ${{ always() }}
