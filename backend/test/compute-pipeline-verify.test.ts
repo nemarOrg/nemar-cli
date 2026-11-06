@@ -49,9 +49,22 @@ const recipeSpec = (args: string[]) => ({
   args,
 });
 
-async function run(args: string[], plan: Parameters<typeof finishAtTapis>[3] = {}) {
+async function run(
+  args: string[],
+  plan: Parameters<typeof finishAtTapis>[3] = {},
+  opts: { withoutRowDigest?: boolean } = {},
+) {
   const made = await makeJob(fx, { spec: recipeSpec(args) });
   expect(await submitComputeJob(made.env, made.job.id)).toEqual({ ok: true, outcome: "submitted" });
+  if (opts.withoutRowDigest) {
+    // The submit records the image digest on the job row, and `verifyResults` compares the provenance
+    // with THAT first. Take it away, so the only check left to refuse a provenance that names another
+    // image than the argument is the recipe's own.
+    expect((await reread(made.env, made.job.id)).image_digest).toBe(RUNTIME_IMAGE_DIGEST);
+    await made.env.DB.prepare("UPDATE compute_jobs SET image_digest = NULL WHERE id = ?1")
+      .bind(made.job.id)
+      .run();
+  }
   await finishAtTapis(fx, made.env, made.job.id, { outputs: floorOutputs(), ...plan });
   return reread(made.env, made.job.id);
 }
@@ -81,7 +94,8 @@ describe("a recipe job's image digest argument against the launcher's provenance
   });
 
   test("a provenance that names another image than the argument fails too", async () => {
-    const job = await run(goodArgs, { imageDigest: OTHER });
+    const job = await run(goodArgs, { imageDigest: OTHER }, { withoutRowDigest: true });
+    expect(job.image_digest).toBeNull();
     expect(job.state).toBe("failed");
     expect(job.failure_detail).toBe("image_digest_mismatch");
   });
