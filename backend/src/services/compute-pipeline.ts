@@ -112,8 +112,8 @@ export const MAX_FAILED_ATTEMPTS = 3;
  * verification, records, and the launcher's fetch and upload codes, whose detail is not kept on the
  * stamp), a cancel, and the words this file writes for its own faults and the registry's: the claim never
  * followed by a job (`no_job`), a job row that is gone (`job_missing`), a creation that threw
- * (`create_failed`), a recipe the table no longer names (`recipe_unknown`), and the two tuple words
- * (`tuple_mismatch`, a hold; `tuple_already_stamped`, a run that was good). Three transient database errors
+ * (`create_failed`), a recipe the table no longer names (`recipe_unknown`), and the tuple words
+ * (`tuple_mismatch`, a hold; `tuple_already_stamped` and `tuple_attempt_taken`, a run that was good). Three transient database errors
  * on three days must not shut a dataset out until its version changes. What remains counts: the
  * submitter-side launcher codes (`runtime_error`, `time_limit`, `out_of_memory`, `entry_not_found`), a
  * job that failed with no word we know (`job_failed`), and the recipe's own output faults
@@ -128,6 +128,7 @@ export const NON_DATASET_FAILURE_WORDS: readonly string[] = [
   "recipe_unknown",
   "tuple_mismatch",
   "tuple_already_stamped",
+  "tuple_attempt_taken",
 ];
 
 /** The list as SQL: fixed words of this tree, never a caller's. */
@@ -763,13 +764,19 @@ export async function syncPipelineStamps(
           .run();
         if ((moved.meta?.changes ?? 0) > 0) result.succeeded++;
       } catch (err) {
-        // The tuple the recipe's own record names already holds a live or succeeded stamp. The RUN may
-        // be good; this stamp cannot carry its tuple, and the word says that and nothing else.
+        // The RUN may be good; this stamp cannot carry the tuple its record names, and the word says why.
+        // Two unique indexes can refuse the rewrite, and they mean different things: the live index (the
+        // tuple already holds a live or succeeded stamp) and the attempt index (the tuple has a row with
+        // this attempt number, history only). The message names the columns of the one that refused, and
+        // only the attempt index names the attempt column.
         if (!looksUnique(err)) throw err;
+        const word = String(err).includes("compute_pipeline_stamps.attempt")
+          ? "tuple_attempt_taken"
+          : "tuple_already_stamped";
         console.error(
-          `[compute-pipeline] tuple_already_stamped stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id}`,
+          `[compute-pipeline] ${word} stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id}`,
         );
-        await finishStamp(db, stamp.id, "failed", "tuple_already_stamped");
+        await finishStamp(db, stamp.id, "failed", word);
         result.failed++;
       }
     } catch (err) {

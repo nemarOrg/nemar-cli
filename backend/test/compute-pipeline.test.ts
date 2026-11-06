@@ -793,7 +793,7 @@ describe("the stamp follows its job to the end", () => {
     // Another dispatched tuple (with a job) already holds what this record will name.
     await env.DB.prepare(
       `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id)
-       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', '1.0.1', 'eegprep@0.5.1', 1, 'succeeded', ?1)`,
+       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', '1.0.1', 'eegprep@0.5.1', 2, 'succeeded', ?1)`,
     )
       .bind(jobId)
       .run();
@@ -866,6 +866,31 @@ describe("the stamp follows its job to the end", () => {
       `[compute-pipeline] sync_later stamp=${stampId} dataset=nm000104 reason=read_failed`,
     ]);
     expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
+  });
+
+  test("a rewritten tuple whose ATTEMPT number is taken (no live stamp holds it) is tuple_attempt_taken, not tuple_already_stamped", async () => {
+    const { env, jobId, stampId } = await dispatched();
+    // History only: a failed stamp of the tuple the record will name, with this stamp's attempt number.
+    await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, refusal_code)
+       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', '1.0.1', 'eegprep@0.5.1', 1, 'failed', 'job_failed')`,
+    ).run();
+    await finishAtTapis(fx, env, jobId, {
+      outputs: floorOutputs(
+        recipeRecord({
+          recipe: { id: "nemar-floor", version: "1.0.1" },
+          engine: { package: "eegprep", version: "0.5.1" },
+        }),
+      ),
+    });
+    const lines = await logged(async () => {
+      await syncPipelineStamps(env);
+    });
+    expect(lines.join("\n")).toContain(`tuple_attempt_taken stamp=${stampId}`);
+    expect(await getStamp(env.DB, stampId)).toMatchObject({
+      state: "failed",
+      refusal_code: "tuple_attempt_taken",
+    });
   });
 
   test("a claim never followed by a job is failed after the grace period, and not before", async () => {
