@@ -449,6 +449,62 @@ describe("a bucket lock", () => {
     expect(await keysUnder(fx.harness.records, `records/${fine.id}/`)).toEqual([]);
   }, 60_000);
 
+  test("a prefix bigger than the page bound is left whole: the row is not reduced and the job is `incomplete`, until a run finishes it (MUTATION: report a cut-off prefix as complete)", async () => {
+    const job = await oldJob();
+    for (let i = 0; i < 25; i++)
+      await fx.harness.records.put(`records/${job.id}/extra/${i}.bin`, "x");
+    // A bucket whose list returns one object a page: 25 objects take more than the 20 pages of a run.
+    const paged = new Proxy(fx.harness.records, {
+      get(target, prop) {
+        if (prop === "list") {
+          return (options: Record<string, unknown> = {}) =>
+            target.list({ ...options, limit: 1 } as never);
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const first = await runComputeRetentionSweep(env({ COMPUTE_RECORDS: paged }));
+    expect(first).toMatchObject({ incomplete: 1, recordsDeleted: 0, locked: 0 });
+    expect(jobRow(job.id).account_id).toBe(job.accountId);
+    expect(jobRow(job.id).records_deleted_at).toBeNull();
+    expect((await keysUnder(fx.harness.records, `records/${job.id}/`)).length).toBeGreaterThan(0);
+    // The next run finishes it.
+    const second = await runComputeRetentionSweep(env({ COMPUTE_RECORDS: paged }));
+    expect(second).toMatchObject({ recordsDeleted: 1, incomplete: 0 });
+    expect(await keysUnder(fx.harness.records, `records/${job.id}/`)).toEqual([]);
+  });
+
+  test("deletePrefix says a cut-off prefix is not complete, and a result is not marked reconciled", async () => {
+    for (let i = 0; i < 5; i++) await fx.harness.records.put(`p/${i}`, "x");
+    expect(await deletePrefix(fx.harness.records, "p/", { maxPages: 2, pageSize: 2 })).toEqual({
+      deleted: 4,
+      locked: false,
+      complete: false,
+    });
+    expect(await deletePrefix(fx.harness.records, "p/", { maxPages: 2, pageSize: 2 })).toEqual({
+      deleted: 1,
+      locked: false,
+      complete: true,
+    });
+    const late = await oldJob({ endedDaysAgo: 32, retentionDaysFromNow: 2000 });
+    for (let i = 0; i < 25; i++)
+      await fx.harness.results.put(`jobs/${late.id}/outputs/${i}.bin`, "x");
+    const pagedResults = new Proxy(fx.harness.results, {
+      get(target, prop) {
+        if (prop === "list")
+          return (options: Record<string, unknown> = {}) =>
+            target.list({ ...options, limit: 1 } as never);
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await runComputeRetentionSweep(env({ COMPUTE_RESULTS: pagedResults }));
+    expect(jobRow(late.id).results_reconciled_at).toBeNull();
+    await runComputeRetentionSweep(env({ COMPUTE_RESULTS: pagedResults }));
+    expect(jobRow(late.id).results_reconciled_at).not.toBeNull();
+  });
+
   test("deletePrefix reports the refusal and the count, and deletes nothing it was not asked to", async () => {
     await fx.harness.records.put("p/one", "1");
     await fx.harness.records.put("p/two", "2");
@@ -457,8 +513,12 @@ describe("a bucket lock", () => {
       lockedBucket(fx.harness.records, (k) => k === "p/two", "locked"),
       "p/",
     );
-    expect(refused).toEqual({ deleted: 0, locked: true });
-    expect(await deletePrefix(fx.harness.records, "p/")).toEqual({ deleted: 2, locked: false });
+    expect(refused).toEqual({ deleted: 0, locked: true, complete: false });
+    expect(await deletePrefix(fx.harness.records, "p/")).toEqual({
+      deleted: 2,
+      locked: false,
+      complete: true,
+    });
     expect(await keysUnder(fx.harness.records, "q/")).toEqual(["q/three"]);
   });
 });

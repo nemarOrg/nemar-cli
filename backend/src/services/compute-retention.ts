@@ -58,6 +58,8 @@ export interface RetentionResult {
   logsDeleted: number;
   /** Objects deleted from the two private buckets, records and logs and results together. */
   objectsDeleted: number;
+  /** Jobs whose prefix was bigger than one run's page bound: left whole and finished by the next run. */
+  incomplete: number;
   /** Jobs the bucket refused to delete for (a lock that has not lapsed), left whole and retried tomorrow. */
   locked: number;
   /** Jobs whose results were still present a day after the window, deleted. */
@@ -77,6 +79,7 @@ const emptyResult = (): RetentionResult => ({
   recordsDeleted: 0,
   logsDeleted: 0,
   objectsDeleted: 0,
+  incomplete: 0,
   locked: 0,
   late: 0,
   poolsAnonymised: 0,
@@ -180,29 +183,45 @@ export const TRIM_SNAPSHOTS_SQL = `DELETE FROM compute_queue_snapshots
 
 // --- Deleting under a prefix -----------------------------------------------------------------------
 
+/** Pages of objects one call deletes at most, and the objects in a page. */
+export const PREFIX_MAX_PAGES = 20;
+export const PREFIX_PAGE_SIZE = 1000;
+
+export interface PrefixDeletion {
+  deleted: number;
+  /** The bucket refused to delete (any throw from `delete`): the rest of the prefix is left for tomorrow. */
+  locked: boolean;
+  /** Nothing is left under the prefix. False after the page bound: the caller must NOT treat the prefix as gone. */
+  complete: boolean;
+}
+
 /**
- * Delete every object under `prefix`. Returns how many were deleted, and `locked` when the bucket refused
- * (any throw from `delete`, whatever its text): the rest of the prefix is left for tomorrow. Lists a page
- * at a time and deletes the page, so a prefix of any size is bounded by the list's own page.
+ * Delete every object under `prefix`, a page at a time, for at most `maxPages` pages. Returns how many
+ * were deleted, whether the bucket refused (`locked`) and whether the prefix is `complete`: a prefix
+ * bigger than the page bound is left for the next run, and a caller that reduces a row or marks a result
+ * reconciled must see `complete` first.
  */
 export async function deletePrefix(
   bucket: R2Bucket,
   prefix: string,
-): Promise<{ deleted: number; locked: boolean }> {
+  options: { maxPages?: number; pageSize?: number } = {},
+): Promise<PrefixDeletion> {
+  const maxPages = options.maxPages ?? PREFIX_MAX_PAGES;
+  const limit = options.pageSize ?? PREFIX_PAGE_SIZE;
   let deleted = 0;
-  for (let page = 0; page < 20; page++) {
-    const listed = await bucket.list({ prefix, limit: 1000 });
+  for (let page = 0; page < maxPages; page++) {
+    const listed = await bucket.list({ prefix, limit });
     const keys = listed.objects.map((o) => o.key);
-    if (keys.length === 0) return { deleted, locked: false };
+    if (keys.length === 0) return { deleted, locked: false, complete: true };
     try {
       await bucket.delete(keys);
     } catch {
-      return { deleted, locked: true };
+      return { deleted, locked: true, complete: false };
     }
     deleted += keys.length;
-    if (!listed.truncated) return { deleted, locked: false };
+    if (!listed.truncated) return { deleted, locked: false, complete: true };
   }
-  return { deleted, locked: false };
+  return { deleted, locked: false, complete: false };
 }
 
 // --- The sweep --------------------------------------------------------------------------------------
@@ -263,10 +282,18 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
         locked(id);
         continue;
       }
+      if (!a.complete) {
+        r.incomplete++;
+        continue;
+      }
       const b = await deletePrefix(records, `logs/${id}/`);
       r.objectsDeleted += b.deleted;
       if (b.locked) {
         locked(id);
+        continue;
+      }
+      if (!b.complete) {
+        r.incomplete++;
         continue;
       }
       const reduced = await db.prepare(REDUCE_JOB_SQL).bind(id).run();
@@ -292,6 +319,10 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
         locked(id);
         continue;
       }
+      if (!a.complete) {
+        r.incomplete++;
+        continue;
+      }
       const marked = await db.prepare(MARK_LOGS_SQL).bind(id).run();
       if ((marked.meta?.changes ?? 0) === 1) r.logsDeleted++;
     }
@@ -310,8 +341,13 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
       const a = await deletePrefix(resultsBucket, `jobs/${id}/`);
       r.objectsDeleted += a.deleted;
       if (a.deleted > 0) r.late++;
-      // A refusal here is not a lock (the results bucket has none): leave the row to be tried again.
-      if (!a.locked) await db.prepare(MARK_RESULTS_SQL).bind(id).run();
+      // A refusal here is not a lock (the results bucket has none), and a prefix left over the page bound
+      // is not gone: leave the row to be tried again.
+      if (a.locked || !a.complete) {
+        if (!a.locked) r.incomplete++;
+        continue;
+      }
+      await db.prepare(MARK_RESULTS_SQL).bind(id).run();
     }
   });
 
@@ -373,6 +409,7 @@ export function retentionLogLine(
     r.recordsDeleted +
     r.logsDeleted +
     r.late +
+    r.incomplete +
     r.locked +
     r.poolsAnonymised +
     r.entriesAnonymised +
@@ -384,6 +421,7 @@ export function retentionLogLine(
     `records=${r.recordsDeleted}`,
     `logs=${r.logsDeleted}`,
     `objects=${r.objectsDeleted}`,
+    `incomplete=${r.incomplete}`,
     `locked=${r.locked}`,
     `late=${r.late}`,
     `pools_anonymised=${r.poolsAnonymised}`,
