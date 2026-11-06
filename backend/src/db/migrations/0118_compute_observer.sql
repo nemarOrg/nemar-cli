@@ -4,7 +4,7 @@
 -- WHAT THIS IS FOR. Expanse's own accounting arrives by a small posting service (the observer, design
 -- section 8) that is an UNSIGNED SENDER: it carries a token valid for one run, minted by an administrator,
 -- and what it posts is data to be bounded and compared, never trusted. Four tables carry that and the
--- legal holds the retention sweep honours; five columns of `compute_jobs` carry the sweeps' own
+-- legal holds the retention sweep honors; five columns of `compute_jobs` carry the sweeps' own
 -- bookkeeping. No foreign key, and nothing here names a person: a table of this migration holds
 -- fixed words, numbers, times and pseudonymous account ids only.
 --

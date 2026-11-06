@@ -1570,7 +1570,7 @@ describe("no path writes a pool's totals except a ledger entry", () => {
     expect(offences).toEqual([]);
   });
 
-  test("migration 0114 creates the triggers on compute_pools, and migration 0130 only replaces the identity one with its anonymising exception", () => {
+  test("migration 0114 creates the triggers on compute_pools, and migration 0130 only replaces the identity one with its anonymizing exception", () => {
     const files = sources().filter((s) => triggersOnPools(s.text) > 0);
     expect(files.map((f) => f.path)).toEqual([
       expect.stringContaining(TRIGGER_FILE),

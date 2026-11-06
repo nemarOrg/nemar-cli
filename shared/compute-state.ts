@@ -679,7 +679,7 @@ export const COMPUTE_ACCESS_REPORT_ERRORS = [
 
 export type ComputeAccessReportError = (typeof COMPUTE_ACCESS_REPORT_ERRORS)[number];
 
-// --- Phase A7: observer, holds, retention and anonymisation (#2012) ---------------------------------
+// --- Phase A7: observer, holds, retention and anonymization (#2012) ---------------------------------
 
 /** What a legal hold is placed on: one job, or every job of one account. */
 export const COMPUTE_HOLD_SCOPES = ["job", "account"] as const;
@@ -698,13 +698,13 @@ export type ComputeObserverRunStatus = (typeof COMPUTE_OBSERVER_RUN_STATUSES)[nu
 export const COMPUTE_TENANT_POOL_REF = "tenant";
 
 /**
- * The actor a deleted account's ledger entries are anonymised to (migration 0130): 2^53 - 1, which no
- * account has. A fixed token, so an anonymised entry says only that its actor is gone.
+ * The actor a deleted account's ledger entries are anonymized to (migration 0130): 2^53 - 1, which no
+ * account has. A fixed token, so an anonymized entry says only that its actor is gone.
  */
 export const COMPUTE_ANONYMOUS_ACTOR_ID = 9007199254740991;
 
 /**
- * The holder reference a deleted account's pool is anonymised to (migration 0130): `9` and the pool's
+ * The holder reference a deleted account's pool is anonymized to (migration 0130): `9` and the pool's
  * own id padded to 15 digits. It is derived from the pool, never from the account, so it identifies
  * nobody, and it is unique per pool, which the table's UNIQUE key needs.
  */

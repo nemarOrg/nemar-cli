@@ -1,6 +1,6 @@
 /**
  * The five points phase A5 left open for phase A7 (epic #2005 phase A7, #2012; ADR 0118), each with a test
- * that fails on the old behaviour. Real migrations, the real ledger, Miniflare's R2 and the Tapis
+ * that fails on the old behavior. Real migrations, the real ledger, Miniflare's R2 and the Tapis
  * stand-in (nothing from which was recorded from a real tenant).
  *
  *  - the two terminal repair lists, the orphan list and the cancel list ROTATE: a row that cannot make

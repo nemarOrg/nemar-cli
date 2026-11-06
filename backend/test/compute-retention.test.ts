@@ -1,5 +1,5 @@
 /**
- * The retention sweep, legal holds and the anonymising update (epic #2005 phase A7, #2012; ADR 0118, the
+ * The retention sweep, legal holds and the anonymizing update (epic #2005 phase A7, #2012; ADR 0118, the
  * amendment of 2026-11-04; design section 9). Real migrations (0118 and 0130 included), the real ledger
  * with its triggers, and Miniflare's R2 reached through the Worker's own bindings.
  *
@@ -18,7 +18,7 @@
  *  - logs go early for an unflagged, unheld job, and a flagged job keeps them with its records;
  *  - a results object still present a day after the window is deleted and counted `late`, and a hold
  *    never keeps a result;
- *  - a deleted account's pools and ledger actors are anonymised through migration 0130's one exception
+ *  - a deleted account's pools and ledger actors are anonymized through migration 0130's one exception
  *    and nothing else is: a total does not move, a live account's rows are refused, an open hold waits;
  *  - only exact production runs it, the audit row is one row of counts, and the log line has counts only.
  */
@@ -670,7 +670,7 @@ describe("logs early, results late", () => {
 });
 
 describe("a deleted account", () => {
-  test("its pool's holder is anonymised and no total moves; a live account's pool is not touched", async () => {
+  test("its pool's holder is anonymized and no total moves; a live account's pool is not touched", async () => {
     const gone = await seedUser(env().DB, { deleted_at: "2026-01-01 00:00:00" });
     const live = await seedUser(env().DB);
     const gonePool = await fundAccount(env().DB, gone, 5000);
@@ -918,7 +918,7 @@ describe("migration 0130, on both engines", () => {
     },
   );
 
-  // Each column changed ALONE, in the same statement as the anonymising change: every one is refused, so
+  // Each column changed ALONE, in the same statement as the anonymizing change: every one is refused, so
   // a single term of the trigger cannot be dropped without one of these failing.
   each("changing any ONE column of a pool beside the holder reference is refused", async (e) => {
     const columns: Array<[string, string, unknown]> = [
@@ -1090,7 +1090,7 @@ describe("migration 0130, on both engines", () => {
   });
 
   each(
-    "a ledger entry's actor may be anonymised for a deleted account, and nothing else about the entry",
+    "a ledger entry's actor may be anonymized for a deleted account, and nothing else about the entry",
     async (e) => {
       const gone = await user(e, true);
       const live = await user(e, false);
@@ -1169,7 +1169,7 @@ describe("migration 0130, on both engines", () => {
           goneKey,
         ),
       ).toBeNull();
-      // Once anonymised it is not "a deleted account's" any more: a second change is refused.
+      // Once anonymized it is not "a deleted account's" any more: a second change is refused.
       expect(
         await e.run(
           "UPDATE compute_ledger SET actor_user_id = ? WHERE idempotency_key = ?",

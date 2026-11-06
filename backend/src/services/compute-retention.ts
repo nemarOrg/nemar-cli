@@ -25,7 +25,7 @@
  *    a job that was refused is stamped (`retention_attempted_at`) and goes to the back of the line, so ten
  *    jobs whose locks have not lapsed cannot hold every newer one.
  *  - A LIVE JOB IS NEVER TOUCHED: only terminal states are listed.
- *  - A HOLD IS A D1 FLAG THE SWEEP HONOURS (R2 has no per-object hold), read in the candidate query AND
+ *  - A HOLD IS A D1 FLAG THE SWEEP HONORS (R2 has no per-object hold), read in the candidate query AND
  *    again immediately before a job's objects are deleted.
  *  - DELETION AT PERIOD END IS BY COUNT, LOGGED, NEVER PER JOB: one audit row of counts and one log line.
  *    The sweep never logs a job id, an account or a key.
@@ -44,7 +44,7 @@ import { isExactProduction } from "./repull-switches.js";
 
 /** Jobs a stage handles at most in one run. */
 export const RETENTION_JOBS_PER_STAGE = 20;
-/** Pools, and deleted accounts' ledger entries, one run anonymises at most. */
+/** Pools, and deleted accounts' ledger entries, one run anonymizes at most. */
 export const RETENTION_ANON_PER_RUN = 50;
 /** Days a queue snapshot is kept. */
 export const SNAPSHOT_KEEP_DAYS = 90;
@@ -75,7 +75,7 @@ export interface RetentionResult {
   locked: number;
   /** Jobs whose results were still present a day after the window, deleted. */
   late: number;
-  /** A deleted account's pools and ledger entries anonymised. */
+  /** A deleted account's pools and ledger entries anonymized. */
   poolsAnonymised: number;
   entriesAnonymised: number;
   /** Observer runs expired and snapshots trimmed. */
@@ -166,7 +166,7 @@ export const MARK_LOGS_SQL = `UPDATE compute_jobs SET
 export const MARK_RESULTS_SQL =
   "UPDATE compute_jobs SET results_reconciled_at = datetime('now') WHERE id = ?1 AND results_reconciled_at IS NULL";
 
-/** Pools of deleted accounts that can be anonymised: nothing held, no job still carries the number, no hold. `?1` limit. */
+/** Pools of deleted accounts that can be anonymized: nothing held, no job still carries the number, no hold. `?1` limit. */
 export const POOLS_DUE_SQL = `SELECT p.id AS id FROM compute_pools p
   JOIN users u ON u.id = CAST(p.holder_ref AS INTEGER)
   WHERE p.holder_kind = 'account' AND p.held_milli = 0 AND u.deleted_at IS NOT NULL
@@ -194,7 +194,7 @@ export const ACTORS_DUE_SQL = `SELECT u.id AS id FROM users u
   ORDER BY u.id ASC LIMIT ?1`;
 
 /**
- * The anonymising update of one deleted account's ledger entries: `?1` the account. It leaves an open
+ * The anonymizing update of one deleted account's ledger entries: `?1` the account. It leaves an open
  * hold's own entry alone, exactly as migration 0130's trigger requires.
  */
 export const ANONYMISE_ACTOR_SQL = `UPDATE compute_ledger SET actor_user_id = ${COMPUTE_ANONYMOUS_ACTOR_ID}

@@ -2,7 +2,7 @@
  * The observer: Expanse's own accounting, posted to NEMAR, and the final settlement it makes possible
  * (epic #2005 phase A7, #2012; ADR 0118, decision 8; design sections 5 and 8).
  *
- * A small posting service runs on the cluster once a day, summarises the queue per partition and
+ * A small posting service runs on the cluster once a day, summarizes the queue per partition and
  * exports `sacct` for the community account, and posts both to `POST /compute/observer` with a token
  * valid for ONE run. This module mints that token, takes the post, and settles jobs against it.
  *

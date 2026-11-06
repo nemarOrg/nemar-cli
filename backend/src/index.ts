@@ -1404,9 +1404,9 @@ export default {
           ),
       );
       // #2012 (epic #2005 phase A7, ADR 0118, decision 9): the compute retention sweep. Deletes
-      // `records/<id>/` and `logs/<id>/` of terminal jobs past their retention (honouring a job or
+      // `records/<id>/` and `logs/<id>/` of terminal jobs past their retention (honoring a job or
       // account legal hold, counting any refusal of the bucket's lock as `locked` and asking again
-      // tomorrow), reconciles the results bucket, and anonymises a deleted account's pools and ledger
+      // tomorrow), reconciles the results bucket, and anonymizes a deleted account's pools and ledger
       // actors. By count, never per job. PRODUCTION-ONLY, NOT in DEV_CRON_ALLOWLIST: it deletes from
       // the private compute buckets. It also refuses outside exact production on its own and reads no
       // compute switch (a record that is due goes whether or not compute is on).

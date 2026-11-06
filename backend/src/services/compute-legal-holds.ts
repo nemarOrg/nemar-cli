@@ -1,6 +1,6 @@
 /**
  * Legal holds on compute records (epic #2005 phase A7, #2012; ADR 0118; design section 9): a hold on
- * one job, or on every job of one account, that the retention sweep honours.
+ * one job, or on every job of one account, that the retention sweep honors.
  *
  * A hold is a row of `compute_legal_holds` (migration 0118): a D1 flag, because R2 has no versioning and
  * no per-object hold, and the records bucket's own lock covers only the retention period. Placing and

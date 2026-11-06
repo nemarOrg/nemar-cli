@@ -1,4 +1,4 @@
--- The one change the compute ledger allows to an existing row: anonymising a deleted account's
+-- The one change the compute ledger allows to an existing row: anonymizing a deleted account's
 -- identifiers (epic #2005 phase A7, #2012; ADR 0118, amendment of 2026-11-04 on retention).
 --
 -- Numbered 0130 because 0114 to 0119 (this epic's reserved range) are used and 0120 to 0129 are
@@ -30,7 +30,7 @@
 -- THE TOTALS INVARIANT (a pool's totals equal the sums of the ledger's deltas) therefore holds by
 -- construction: the exception cannot change a delta, a total, a kind or a hold, and removes no row,
 -- so every sum is what it was. `compute_ledger_apply` is the one writer of a total and fires on
--- INSERT only; the anonymising UPDATE neither fires it nor moves a total. A test sums every pool
+-- INSERT only; the anonymizing UPDATE neither fires it nor moves a total. A test sums every pool
 -- before and after.
 --
 -- WHAT IS NOT CHANGED. An administrator's idempotency key embeds the actor's number
@@ -54,7 +54,7 @@ WHEN NOT (
   AND EXISTS (SELECT 1 FROM users u
                WHERE u.id = CAST(OLD.holder_ref AS INTEGER) AND u.deleted_at IS NOT NULL))
 BEGIN
-  SELECT RAISE(ABORT, 'a compute pool''s identity never changes, except a deleted account''s holder_ref, anonymised');
+  SELECT RAISE(ABORT, 'a compute pool''s identity never changes, except a deleted account''s holder_ref, anonymized');
 END;
 
 DROP TRIGGER compute_ledger_no_update;
@@ -74,7 +74,7 @@ WHEN NOT (
   AND (OLD.kind <> 'hold' OR EXISTS (SELECT 1 FROM compute_ledger c
                                       WHERE c.hold_ref = OLD.id AND c.kind IN ('release', 'charge'))))
 BEGIN
-  SELECT RAISE(ABORT, 'compute_ledger is append-only: an entry is never changed, except a deleted account''s actor, anonymised');
+  SELECT RAISE(ABORT, 'compute_ledger is append-only: an entry is never changed, except a deleted account''s actor, anonymized');
 END;
 
 -- The retention sweep finds a deleted account's ledger entries by the actor, so the actor needs an index
