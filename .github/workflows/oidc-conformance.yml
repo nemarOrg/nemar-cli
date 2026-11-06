@@ -16,7 +16,10 @@
 #
 # SECRETS AND ARTIFACTS. No secret is used: the job has read access to the repository and nothing else.
 # The plan configurations hold the throwaway clients' secrets, so they live outside the artifact paths
-# and are never uploaded; only the exported result files and the logs are.
+# and are never uploaded; only the exported result files and the logs are. Those do contain throwaway
+# secrets, authorization codes and tokens (the suite logs every request it makes), but they belong to a
+# database that lives in the rig's memory and dies when the job ends, so nothing live is uploaded. The
+# rig and the suite are stopped before the upload to make that true at the moment the files are read.
 #
 # TRIGGERS. `workflow_dispatch` is the permanent one, but GitHub offers it only for a workflow file on
 # the default branch, so until this reaches it the `push` trigger below runs the workflow for branches
@@ -69,6 +72,8 @@ jobs:
           bun-version: 1.4.3
 
       - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
 
       - name: Install dependencies
         run: |
@@ -93,6 +98,7 @@ jobs:
       - name: Start the rig
         run: |
           nohup bun run scripts/oidc-conformance/rig.ts > conformance-artifacts/rig.log 2>&1 &
+          echo $! > "$RUNNER_TEMP/rig.pid"
 
       - name: Wait for the rig, then walk a sign-in
         run: |
@@ -133,7 +139,7 @@ jobs:
         timeout-minutes: 10
         continue-on-error: true
         run: |
-          uv run --no-project --python 3.12 --with httpx==0.28.1 --with pyparsing==3.3.3 \
+          uv run --no-project --python 3.12 --exclude-newer 2026-11-05 --with httpx==0.28.1 --with pyparsing==3.3.3 \
             python "$RUNNER_TEMP/suite/scripts/run-test-plan.py" \
             --export-dir "$RESULTS_DIR" --verbose \
             --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures.json" \
@@ -144,10 +150,10 @@ jobs:
 
       - name: Basic plan
         id: basic_plan
-        timeout-minutes: 40
+        timeout-minutes: 35
         continue-on-error: true
         run: |
-          uv run --no-project --python 3.12 --with httpx==0.28.1 --with pyparsing==3.3.3 \
+          uv run --no-project --python 3.12 --exclude-newer 2026-11-05 --with httpx==0.28.1 --with pyparsing==3.3.3 \
             python "$RUNNER_TEMP/suite/scripts/run-test-plan.py" \
             --export-dir "$RESULTS_DIR" --verbose \
             --expected-failures-file "$GITHUB_WORKSPACE/scripts/oidc-conformance/expected-failures.json" \
@@ -161,6 +167,13 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/suite"
           docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" logs --no-color > "$GITHUB_WORKSPACE/conformance-artifacts/suite-compose.log" 2>&1 || true
+
+      - name: Stop the rig and the suite
+        if: ${{ always() }}
+        run: |
+          kill "$(cat "$RUNNER_TEMP/rig.pid")" 2>/dev/null || true
+          cd "$RUNNER_TEMP/suite"
+          docker compose -f docker-compose-prebuilt.yml -f "$GITHUB_WORKSPACE/scripts/oidc-conformance/compose.override.yml" down --timeout 10 || true
 
       - name: Upload results and logs
         if: ${{ always() }}
