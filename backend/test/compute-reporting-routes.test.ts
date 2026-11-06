@@ -30,6 +30,7 @@ import {
   ComputeRecordResponseSchema,
   ComputeRequeueResponseSchema,
 } from "../../shared/contract/compute-admin";
+import { requeueAccessReport } from "../src/services/compute-reporting";
 import type { Bindings } from "../src/types/bindings";
 import {
   COMPUTE_KEYS,
@@ -43,6 +44,7 @@ import {
   makeJob,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
+import { seedUser } from "./helpers/compute-seed";
 
 let fx: LifecycleFixture;
 const handle = makeComputeApp();
@@ -645,6 +647,29 @@ describe("ACCESS reports that failed", () => {
     expect(audit).toEqual([
       { resource_id: JOBS[0] as string, details: JSON.stringify({ previous: "outcome_unknown" }) },
     ]);
+  });
+
+  test("a suspended or deleted owner gets not_owner from the re-queue, and the row is untouched (MUTATION: classify by role alone)", async () => {
+    seed();
+    const suspended = await seedUser(fx.env().DB, { role: "owner", status: "revoked" });
+    const deleted = await seedUser(fx.env().DB, {
+      role: "owner",
+      deleted_at: "2026-01-01 00:00:00",
+    });
+    for (const ownerId of [suspended, deleted]) {
+      expect(await requeueAccessReport(fx.env().DB, { jobId: JOBS[0] as string, ownerId })).toEqual(
+        {
+          ok: false,
+          code: "not_owner",
+        },
+      );
+    }
+    expect(
+      sql.one<{ state: string }>(
+        "SELECT state FROM compute_access_reports WHERE job_id = ?",
+        JOBS[0],
+      ).state,
+    ).toBe("failed");
   });
 
   test("only a failed row is re-queued: a pending, a sent and an unknown report are not found", async () => {
