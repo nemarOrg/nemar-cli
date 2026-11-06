@@ -367,8 +367,11 @@ async function handleUnbound(
 ): Promise<void> {
   const rec = await getTapisJob(ctx, listed.uuid);
 
-  // Tagged for a row that exists: NEMAR's own.
-  for (const id of nemarTagIds(rec)) {
+  // Tagged for a row that exists: NEMAR's own. A tag is TRUSTED only on a job the NEMAR service identity
+  // owns: NEMAR owns every Tapis job it submits, and anyone else can write any tag on a job of theirs, so
+  // a foreign job that carries a NEMAR-looking tag is a job that skipped the reservation, not a
+  // duplicate to be cancelled unrecorded.
+  for (const id of rec.owner === ctx.owner ? nemarTagIds(rec) : []) {
     const row = await getJob(env.DB, id);
     if (row === null) continue;
     if (row.tapis_uuid === null && row.cancel_requested_at === null) {

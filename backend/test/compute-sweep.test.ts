@@ -375,6 +375,24 @@ describe("a job that NEMAR made", () => {
     expect(poolCharges()["partner:tenant:cpu"]).toBeUndefined();
   });
 
+  test("a foreign job that carries a NEMAR-looking tag is not a duplicate: it is unreserved, recorded and charged (MUTATION: trust the tag on any owner)", async () => {
+    const made = await makeJob(fx);
+    await submitComputeJob(made.env, made.job.id);
+    const mine = (await reread(made.env, made.job.id)).tapis_uuid as string;
+    const uuid = await foreign({
+      owner: "someone-else",
+      tags: [`nemar_job:${made.job.id}`],
+      startedMsAgo: 30 * MINUTE,
+    });
+    const result = await sweepTenantJobs(env(), "live");
+    expect(result).toMatchObject({ duplicates: 0, indexed: 1 });
+    expect(row(uuid)).toMatchObject({ flag_unreserved: 1, state: "cancelled" });
+    expect(near2000(row(uuid)?.charged_milli)).toBe(true);
+    // The NEMAR job the tag named is untouched, and not flagged by a stranger's tag.
+    expect((await reread(made.env, made.job.id)).flag_mismatch).toBe(0);
+    expect(fx.tapis.jobs.get(mine)?.status).not.toBe("CANCELLED");
+  });
+
   test("a tag for a row that does not exist is no reservation: the job is unreserved", async () => {
     const uuid = await foreign({ tags: ["nemar_job:job_0123456789abcdef01234567"] });
     await sweepTenantJobs(env(), "live");
