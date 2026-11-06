@@ -30,8 +30,10 @@ import {
   PIPELINE_MANIFEST_MAX_ENTRIES,
   STAMP_NO_JOB_MINUTES,
   type StampRow,
+  dispatchEligible,
   dispatchPipelineJob,
   getStamp,
+  pipelineDryRun,
   pipelineKey,
   syncPipelineStamps,
 } from "../src/services/compute-pipeline";
@@ -457,6 +459,22 @@ describe("what a run refuses, before it writes anything", () => {
     expect(await run(env, { recipe: "nemar-ica", actor: { kind: "cron" } })).toMatchObject({
       ok: false,
       code: "recipe_not_automatic",
+    });
+    await nothingWritten(env);
+  });
+
+  test("a placeholder recipe is refused on every path with recipe_placeholder, and nothing is written", async () => {
+    const { env } = await world();
+    await fundPipelines(env, 10_000_000, true);
+    expect(await run(env, { recipe: "nemar-ica" })).toMatchObject({
+      ok: false,
+      code: "recipe_placeholder",
+    });
+    const queue = await dispatchEligible(env, { recipe: "nemar-ica", limit: 3, actor: ADMIN });
+    expect(queue).toMatchObject({ dispatched: 0, stoppedBy: "recipe_placeholder" });
+    expect(await pipelineDryRun(env, { recipe: "nemar-ica", datasetId: "nm000104" })).toEqual({
+      ok: false,
+      code: "recipe_placeholder",
     });
     await nothingWritten(env);
   });

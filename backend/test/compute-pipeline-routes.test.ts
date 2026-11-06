@@ -216,6 +216,21 @@ describe("a dry run", () => {
     }).toEqual(before);
   });
 
+  test("a placeholder recipe is recipe_placeholder (422) on a live run of one dataset or the queue", async () => {
+    const env = await world(["nm000104"]);
+    for (const body of [
+      { recipe: "nemar-ica", dataset: "nm000104" },
+      { recipe: "nemar-ica", eligible: true },
+    ]) {
+      const res = await run("admin", body, env);
+      expect([res.status, res.body.code ?? res.body.stopped_by]).toEqual([
+        422,
+        "recipe_placeholder",
+      ]);
+    }
+    expect(await n(env, "compute_pipeline_stamps")).toBe(0);
+  });
+
   test("an unknown recipe is recipe_unknown, with or without dry_run", async () => {
     const env = await world(["nm000104"]);
     for (const dry_run of [true, false]) {

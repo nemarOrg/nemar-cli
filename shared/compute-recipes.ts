@@ -71,6 +71,12 @@ export interface ComputeRecipe {
   minutes: number;
   /** The daily dispatcher dispatches a recipe only while this is true. */
   autoDispatch: boolean;
+  /**
+   * The entry stands for a recipe that does not exist yet, or whose numbers nobody has verified. No
+   * path dispatches a placeholder (`recipe_placeholder`): the entry is here so the registry's shape is
+   * held, and the flag is removed in the change that makes the recipe real.
+   */
+  placeholder?: boolean;
   eligibility: RecipeEligibility;
 }
 
@@ -106,6 +112,7 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     gpus: 1,
     minutes: 720,
     autoDispatch: false,
+    placeholder: true,
     eligibility: "eeg",
   }),
 ]) as readonly ComputeRecipe[];

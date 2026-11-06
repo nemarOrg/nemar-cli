@@ -76,6 +76,11 @@ describe("the registry", () => {
     expect(ica?.gpus).toBeGreaterThanOrEqual(1);
   });
 
+  test("nemar-ica is a placeholder (its numbers are unverified) and nemar-floor is not", () => {
+    expect(findRecipe("nemar-ica")?.placeholder).toBe(true);
+    expect(findRecipe("nemar-floor")?.placeholder).toBeFalsy();
+  });
+
   test("findRecipe is exact: no case fold, no trim, and a non-string is none", () => {
     for (const bad of ["Nemar-Floor", " nemar-floor", "nemar-floor ", "", null, undefined, 7, {}]) {
       expect(findRecipe(bad)).toBeNull();

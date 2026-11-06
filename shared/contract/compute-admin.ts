@@ -372,6 +372,7 @@ export interface ComputePipelineRunRequest {
 export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<string, number>> = {
   recipe_unknown: 422,
   recipe_not_automatic: 422,
+  recipe_placeholder: 422,
   dataset_not_eligible: 422,
   version_not_found: 404,
   version_untagged: 422,

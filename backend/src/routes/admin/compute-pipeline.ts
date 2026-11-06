@@ -63,6 +63,7 @@ export const PIPELINE_RUN_AUDIT_ACTION = "compute.pipeline.run";
 const SENTENCES: Record<string, string> = {
   recipe_unknown: "There is no such recipe.",
   recipe_not_automatic: "That recipe is not run automatically.",
+  recipe_placeholder: "That recipe is a placeholder and cannot be run.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
   version_not_found: "That dataset has no such version.",
   version_untagged: "That version has no name the data plane serves.",
@@ -230,7 +231,9 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
     const parsed = runBody.safeParse(await readJson(c));
     if (!parsed.success) return invalid(c, "invalid_body", parsed.error);
     const body = parsed.data;
-    if (findRecipe(body.recipe) === null) return refuse(c, "recipe_unknown");
+    const recipe = findRecipe(body.recipe);
+    if (recipe === null) return refuse(c, "recipe_unknown");
+    if (recipe.placeholder === true) return refuse(c, "recipe_placeholder");
     try {
       if (body.dry_run === true) {
         const dry = await pipelineDryRun(c.env, {

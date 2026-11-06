@@ -120,6 +120,7 @@ export type PipelineRefusal =
   | "version_untagged"
   | "too_many_files"
   | "recipe_not_automatic"
+  | "recipe_placeholder"
   | "create_failed"
   | CreateJobRefusal;
 
@@ -371,6 +372,8 @@ export async function dispatchPipelineJob(
   if (input.actor.kind === "cron" && !recipe.autoDispatch) {
     return fail("recipe_not_automatic", datasetId);
   }
+  // A placeholder is on no path: not an administrator's run, not the queue, not the cron.
+  if (recipe.placeholder === true) return fail("recipe_placeholder", datasetId);
 
   // The dataset and its version, decided from the rows (ADR 0065): nothing a caller said is read.
   const resolved = await resolveRun(db, datasetId, input.version);
@@ -799,7 +802,7 @@ export interface DryRunConfig {
 }
 
 export type DryRunResult =
-  | { ok: false; code: "recipe_unknown" }
+  | { ok: false; code: "recipe_unknown" | "recipe_placeholder" }
   | {
       ok: true;
       recipe: string;
@@ -833,6 +836,7 @@ const DRY_RUN_SCAN_ROWS = 5000;
 export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise<DryRunResult> {
   const recipe = findRecipe(input.recipe);
   if (recipe === null) return { ok: false, code: "recipe_unknown" };
+  if (recipe.placeholder === true) return { ok: false, code: "recipe_placeholder" };
   const db = env.DB;
   const perJob = recipeEstimateMilli(recipe);
   const config: DryRunConfig = {
@@ -910,6 +914,7 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   "compute_disabled",
   "runtime_unavailable",
   "pipelines_account_missing",
+  "recipe_placeholder",
   "insufficient_balance",
   "platform_budget_exhausted",
   "suspended",
@@ -936,9 +941,10 @@ export async function dispatchEligible(
 ): Promise<EligibleRun> {
   const run: EligibleRun = { results: [], dispatched: 0, stoppedBy: null };
   const recipe = findRecipe(input.recipe);
-  if (recipe === null) {
-    run.results.push(fail("recipe_unknown", ""));
-    run.stoppedBy = "recipe_unknown";
+  if (recipe === null || recipe.placeholder === true) {
+    const code = recipe === null ? "recipe_unknown" : "recipe_placeholder";
+    run.results.push(fail(code, ""));
+    run.stoppedBy = code;
     return run;
   }
   await syncPipelineStamps(env);
