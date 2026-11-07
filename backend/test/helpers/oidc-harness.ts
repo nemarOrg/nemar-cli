@@ -22,7 +22,7 @@ export const ISSUER = "https://api.nemar.org";
 export const OWNER_KEY = "oidc-owner-key-0123456789abcdef0123456789abcdef";
 export const ADMIN_KEY = "oidc-admin-key-0123456789abcdef0123456789abcdef";
 export const MEMBER_KEY = "oidc-member-key-0123456789abcdef0123456789abcd";
-const BYPASS = "oidc-harness-bypass-token";
+export const BYPASS = "oidc-harness-bypass-token";
 
 /**
  * The platform's `ExecutionContext`, per harness: `waitUntil` keeps the promise it is given, so a
@@ -119,7 +119,19 @@ export async function startOidcHarness(over: Partial<Bindings> = {}): Promise<Oi
     TEST_BYPASS_TOKEN: BYPASS,
     ...over,
   } as unknown as Bindings;
+  return harnessOver(db, env, ids);
+}
 
+/**
+ * The same harness over a database and bindings the caller already has (the partner suites build theirs on
+ * the compute lifecycle fixture: the Tapis and storage stand-ins, with the REAL Worker in front). The env
+ * must carry `OIDC_SECRET`, `API_BASE_URL`, `TEST_BYPASS_TOKEN`, and the accounts in `ids` must exist.
+ */
+export function harnessOver(
+  db: Database,
+  env: Bindings,
+  ids: { owner: number; admin: number; member: number },
+): OidcHarness {
   const { ctx, settle } = executionContext();
   return {
     db,

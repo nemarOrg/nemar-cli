@@ -34,6 +34,11 @@ import {
   COMPUTE_USER_ERROR_STATUS,
   COMPUTE_USER_SENTENCES,
 } from "../../../../shared/contract/compute-user.js";
+import {
+  COMPUTE_PARTNER_ERROR_STATUS,
+  COMPUTE_PARTNER_SENTENCES,
+  COMPUTE_RESERVE_SCOPE,
+} from "../../../../shared/contract/compute-partner.js";
 import { OIDC_ACCESS_TOKEN_PREFIX } from "../../../../shared/oidc.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { oidcBearer } from "../../middleware/oidc-bearer.js";
@@ -52,6 +57,8 @@ type Env = { Bindings: Bindings; Variables: Variables };
 /** The two `oidcBearer` instances, exported so a test can pin their scopes by reference. */
 export const PERSON_OIDC = oidcBearer([COMPUTE_READ_SCOPE]);
 export const STATS_OIDC = oidcBearer([COMPUTE_STATS_SCOPE]);
+/** The partner's three routes (phase D4, #2025): reserve, report and release. */
+export const RESERVE_OIDC = oidcBearer([COMPUTE_RESERVE_SCOPE]);
 
 /** Every path under `/compute` that may accept an OpenID Connect access token, and the scope it needs. */
 export const COMPUTE_OIDC_ROUTES = {
@@ -60,6 +67,10 @@ export const COMPUTE_OIDC_ROUTES = {
   "GET /me/jobs": COMPUTE_READ_SCOPE,
   "GET /me/jobs/:id": COMPUTE_READ_SCOPE,
   "GET /stats": COMPUTE_STATS_SCOPE,
+  // The partner contract (phase D4, #2025): a person's token minted for the partner, WRITE routes.
+  "POST /holds": COMPUTE_RESERVE_SCOPE,
+  "POST /jobs/:id/report": COMPUTE_RESERVE_SCOPE,
+  "DELETE /holds/:id": COMPUTE_RESERVE_SCOPE,
 } as const;
 
 const NO_STORE = { "Cache-Control": "no-store", Pragma: "no-cache" } as const;
@@ -98,7 +109,7 @@ async function viaOidc(
   c: Context<Env>,
   next: () => Promise<void>,
   bearer: MiddlewareHandler<Env>,
-  accept: (token: OidcTokenContext) => ComputeCredential | null,
+  accept: (token: OidcTokenContext) => ComputeCredential | "wrong_audience" | null,
   /**
    * Asked when a live token lacks the scope: a route may name a more specific refusal than
    * `insufficient_scope` for a token of the wrong KIND (a response, or null to keep the scope refusal).
@@ -125,6 +136,7 @@ async function viaOidc(
   }
   const token = c.get("oidcToken");
   const credential = token ? accept(token) : null;
+  if (credential === "wrong_audience") return refusePartner(c, "wrong_audience");
   if (credential === null) return refuse(c, "forbidden_credential");
   c.set("computeCredential", credential);
   await next();
@@ -178,5 +190,74 @@ export const computeStatsCredential: MiddlewareHandler<Env> = async (c, next) =>
         ? refuse(c, "forbidden_credential")
         : null;
     },
+  );
+};
+
+// --- The partner's routes (phase D4, #2025) --------------------------------------------------------
+
+/** A refusal in the partner's own table (it holds `wrong_audience`, which a person's read routes never say). */
+function refusePartner(
+  c: Context<Env>,
+  code: keyof typeof COMPUTE_PARTNER_ERROR_STATUS,
+  headers: Record<string, string> = {},
+) {
+  return c.json(
+    { error: COMPUTE_PARTNER_SENTENCES[code], code },
+    COMPUTE_PARTNER_ERROR_STATUS[code] as 401 | 403,
+    { ...NO_STORE, ...headers },
+  );
+}
+
+/** Whether the request carries a session cookie, under either name (host-prefixed or not). */
+function carriesSessionCookie(header: string | undefined): boolean {
+  return header !== undefined && /(?:^|;\s*)(?:__Host-)?nemar_session=/.test(header);
+}
+
+/**
+ * Whether an access token's audience names the NEMAR API: an address on the same origin as this Worker's
+ * own issuer (`API_BASE_URL`). The audience is chosen by the owner when the client is registered, never by
+ * the client, so this refuses a client registered for another resource server (a token minted for that
+ * resource must not reserve compute here) and fails closed when the Worker has no issuer. The READ routes
+ * deliberately do not check it (ADR 0119, the addendum of phase D2, item 4); the WRITE routes do, because
+ * a reservation moves money and the scope names are shared by every resource server that may ever serve
+ * them (the addendum of phase D4).
+ */
+export function audienceNamesThisApi(audience: string, apiBaseUrl: string | undefined): boolean {
+  if (typeof apiBaseUrl !== "string" || apiBaseUrl === "") return false;
+  try {
+    return new URL(audience).origin === new URL(apiBaseUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The partner routes accept ONE credential: an OpenID Connect access token for a PERSON (an authorization
+ * code token) carrying `compute.reserve`, through Epic B's `oidcBearer`. A CLI key and the session cookie
+ * are `forbidden_credential` without a lookup (so a valid key and an invalid one are answered alike); no
+ * credential at all is `missing_credential`; a token that is not live is `invalid_token`; one without the
+ * scope is `insufficient_scope`; a client credentials token names no person and is `forbidden_credential`;
+ * a token whose audience does not name this API is `wrong_audience`. A disabled client, a revoked grant and
+ * an account that no longer passes its client's sign-in rule are refused by `oidcBearer` itself, at every
+ * call. The person is `c.get("computeCredential")`, the client is `c.get("oidcToken").client`.
+ */
+export const computePartnerCredential: MiddlewareHandler<Env> = async (c, next) => {
+  const header = c.req.header("Authorization");
+  if (header === undefined) {
+    return carriesSessionCookie(c.req.header("Cookie"))
+      ? refusePartner(c, "forbidden_credential")
+      : refusePartner(c, "missing_credential", { "WWW-Authenticate": "Bearer" });
+  }
+  const value = bearerValue(header);
+  if (value === null) {
+    return refusePartner(c, "invalid_token", { "WWW-Authenticate": 'Bearer error="invalid_token"' });
+  }
+  if (!isOidcValue(value)) return refusePartner(c, "forbidden_credential");
+  return viaOidc(c, next, RESERVE_OIDC, (token) =>
+    token.user === null
+      ? null
+      : audienceNamesThisApi(token.audience, c.env.API_BASE_URL)
+        ? { kind: "user", userId: token.user.id, via: "oidc", scopes: token.scopes }
+        : "wrong_audience",
   );
 };

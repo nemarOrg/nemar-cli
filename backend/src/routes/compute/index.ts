@@ -10,6 +10,9 @@
  *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
  *   POST /compute/jobs, /jobs/:id/finalize, GET /jobs/:id/logs, /jobs/:id/results, POST /jobs/:id/results/renew
  *                                             the person's submission, log and results (`./jobs.ts`, phase D3, #2024)
+ *   POST /compute/holds, /jobs/:id/report, DELETE /holds/:id
+ *                                             the partner's reserve, report and release (`./partner.ts`,
+ *                                             phase D4, #2025): an access token with `compute.reserve`
  *   POST /compute/observer                    the observer, with a token for one run (phase A7, #2012;
  *                                             no session: see `routes/callbacks/compute-observer.ts`)
  *   GET  /compute/me                          the caller's access, pools, limits and queue estimates
@@ -59,6 +62,7 @@ import { readBoundedJsonObject } from "../callbacks/bounded-json.js";
 import { registerComputeJobCallbackRoutes } from "../callbacks/compute-job-callbacks.js";
 import { registerComputeObserverRoute } from "../callbacks/compute-observer.js";
 import { registerComputeJobRoutes } from "./jobs.js";
+import { registerComputePartnerRoutes } from "./partner.js";
 import { registerComputeReadRoutes } from "./read.js";
 import { ownJob } from "./shared.js";
 
@@ -71,6 +75,7 @@ registerComputeJobCallbackRoutes(computeRoutes);
 registerComputeObserverRoute(computeRoutes);
 registerComputeReadRoutes(computeRoutes);
 registerComputeJobRoutes(computeRoutes);
+registerComputePartnerRoutes(computeRoutes);
 
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },
