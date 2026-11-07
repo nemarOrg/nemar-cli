@@ -139,7 +139,7 @@ export const ACCOUNT_COPY = {
   "compute_access.requested.body":
     "We’ll email you when there’s a decision. Everything else on your account keeps working in the meantime.",
   "compute_access.granted.body":
-    "Compute access is active. Your starting allocation is on your compute page, and you submit jobs with the `nemar compute` command line.",
+    "Compute access is active. Your balances are on your compute page, and you submit jobs with the `nemar compute` command line.",
   "compute_access.granted.link": "Open your compute page",
   "compute_access.closed.body":
     "This request has been answered and cannot be asked again. If you think that is a mistake, contact support and an admin will take another look.",
@@ -165,7 +165,7 @@ export const ACCOUNT_COPY = {
   "compute_page.usage_note":
     "Net charge by UTC day of the charge, not the day a job was created. A day with no charge has no bar.",
   "compute_page.unreported_note":
-    "NEMAR has not heard from the cluster about this job for a while. It may still finish; an administrator looks at jobs in this state.",
+    "NEMAR has not heard from the cluster about this job for a while. It may still finish.",
 
   // -------------------------------------------------------------------------
   // Profile gaps: the sentence, its two halves, and the vocabulary they use
