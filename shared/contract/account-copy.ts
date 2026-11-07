@@ -29,7 +29,10 @@
  * 2. *Placeholders are `{name}`, filled by {@link fillCopy}.* A sentence with a
  *    moving part is a template, not a function, so it stays comparable as a
  *    string. The whole placeholder vocabulary is `{label} {blocks} {web} {cli}
- *    {date} {client} {redirect_host}`, plus `{reason}` on the CLI-only keys below.
+ *    {date} {client} {redirect_host}`, plus `{reason}` on the CLI-only keys below and,
+ *    on the `compute_admin.` keys, the counts and fixed words of the admin Compute tab (`{kind}
+ *    {version} {id} {cpu} {gpu} {count} {max} {word} {what} {shown} {total} {state} {flag} {token}
+ *    {health}`).
  * 3. *Keys are stable and dotted.* They are the mirroring contract; renaming
  *    one is a change on both sides.
  * 4. *A `cli.` prefix means the website ignores it.* The mirroring is
@@ -166,6 +169,182 @@ export const ACCOUNT_COPY = {
     "Net charge by UTC day of the charge, not the day a job was created. A day with no charge has no bar.",
   "compute_page.unreported_note":
     "NEMAR has not heard from the cluster about this job for a while. It may still finish.",
+
+  // -------------------------------------------------------------------------
+  // Compute, administrator side (website#497, epic #2021): the admin Compute tab.
+  // Exact words for an administrator; the person-facing `compute_access.state.*`
+  // keys above soften denied and revoked and are not reused here. Refusal
+  // sentences are NOT keys: they come from the response `error`. The tab offers
+  // no owner-only or cost-bearing action; the lede says where those live.
+  // -------------------------------------------------------------------------
+  "compute_admin.page.title": "Compute",
+  "compute_admin.page.lede":
+    "Compute access requests, and a read-only view of pools, usage, flagged jobs and reconciliation. A grant opens an allocation the person can spend, so each request is decided by a person, one at a time.",
+  "compute_admin.page.cli_note":
+    "Owner policy, legal holds, record reads, moving a charge, pool grants and adjustments, and cancelling a job are done with `nemar admin compute` in the command line, not here.",
+  "compute_admin.page.order_note":
+    "Accounts are listed in the order they were created, not the order they asked in.",
+  "compute_admin.view.nav": "Compute views",
+  "compute_admin.view.requests": "Requests",
+  "compute_admin.view.pools": "Pools",
+  "compute_admin.view.usage": "Usage",
+  "compute_admin.view.flagged": "Flagged jobs",
+  "compute_admin.view.drift": "Reconciliation",
+  "compute_admin.state.nav": "Filter requests by state",
+  "compute_admin.state.requested": "Requested",
+  "compute_admin.state.active": "Active",
+  "compute_admin.state.suspended": "Suspended",
+  "compute_admin.state.denied": "Denied",
+  "compute_admin.state.revoked": "Revoked",
+  "compute_admin.state.all": "All",
+  "compute_admin.requests.none": "No accounts in this view.",
+  "compute_admin.pager.next": "Next page",
+  "compute_admin.pager.first": "First page",
+  "compute_admin.row.not_set": "not set",
+  "compute_admin.row.no_username": "no username",
+  "compute_admin.row.account_kind": "{kind} account",
+  "compute_admin.row.stated_country": "Stated country",
+  "compute_admin.row.stated_country_hint":
+    "Check this against the export-control rules before granting. This page does not rule on it.",
+  "compute_admin.row.city": "City",
+  "compute_admin.row.affiliation": "Affiliation",
+  "compute_admin.row.email": "Email",
+  "compute_admin.row.orcid": "ORCID iD",
+  "compute_admin.row.requested": "Requested",
+  "compute_admin.row.terms": "Terms accepted",
+  "compute_admin.row.terms_value": "{version}, {date}",
+  "compute_admin.row.purpose": "Stated purpose",
+  "compute_admin.row.show_full_purpose": "Show full purpose",
+  "compute_admin.row.granted": "Granted {date} by account #{id}",
+  "compute_admin.row.not_notified": "No administrator has been emailed about this request yet.",
+  "compute_admin.row.open_in_users": "Open in Users",
+  "compute_admin.action.grant": "Grant",
+  "compute_admin.action.grant_again": "Grant again",
+  "compute_admin.action.lift_suspension": "Lift suspension",
+  "compute_admin.action.deny": "Deny",
+  "compute_admin.action.suspend": "Suspend",
+  "compute_admin.action.revoke": "Revoke",
+  "compute_admin.self_grant.disabled":
+    "You cannot grant your own compute access. Ask another administrator or an owner.",
+  "compute_admin.dialog.title.grant": "Grant compute access?",
+  "compute_admin.dialog.title.deny": "Deny this request?",
+  "compute_admin.dialog.title.suspend": "Suspend compute access?",
+  "compute_admin.dialog.title.revoke": "Revoke compute access?",
+  "compute_admin.dialog.consequence.grant":
+    "Opens the owner’s default allocation once for this account (a repeat grant adds nothing), unfreezes the account’s pools, and lets the person run jobs. The person is emailed.",
+  "compute_admin.dialog.consequence.deny":
+    "Closes this request. The person is emailed and cannot ask again; only an administrator can grant later.",
+  "compute_admin.dialog.consequence.suspend":
+    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. A grant lifts the suspension. The person is emailed.",
+  "compute_admin.dialog.consequence.revoke":
+    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. Only a new grant restores access. The person is emailed.",
+  "compute_admin.dialog.reason_label": "Reason (optional)",
+  "compute_admin.dialog.reason_hint": "Recorded in the audit log. The person is not sent it.",
+  "compute_admin.dialog.reason_count": "{count} of {max}",
+  "compute_admin.dialog.ack_export_review":
+    "I reviewed this person’s name, affiliation and stated country against the export-control rules",
+  "compute_admin.dialog.type_word": "Type {word} to confirm",
+  "compute_admin.dialog.cancel": "Cancel",
+  "compute_admin.result.working": "Working",
+  "compute_admin.result.granted": "Granted.",
+  "compute_admin.result.granted_opened": "Granted. Opened {cpu} CPU SU and {gpu} GPU SU.",
+  "compute_admin.result.granted_zero_default":
+    "Granted. The owner’s default allocation is zero, so nothing was opened.",
+  "compute_admin.result.granted_already":
+    "Granted. An earlier grant already opened the default allocation, so nothing more was opened.",
+  "compute_admin.result.granted_other": "Granted. The allocation answered: {reason}.",
+  "compute_admin.result.denied": "Denied.",
+  "compute_admin.result.suspended":
+    "Suspended. The account’s pools are frozen and its live jobs are being cancelled.",
+  "compute_admin.result.revoked":
+    "Revoked. The account’s pools are frozen and its live jobs are being cancelled.",
+  "compute_admin.result.email_not_sent":
+    "The decision stands, but the person could not be emailed. Tell them.",
+  "compute_admin.result.state_changed":
+    "Someone else may have decided this first. The row shows the current state.",
+  "compute_admin.result.unconfirmed":
+    "The result is not confirmed. The row shows what the server says now.",
+  "compute_admin.result.stale": "This account was not found. Reload the page.",
+  "compute_admin.result.reread_failed":
+    "The current state could not be read. Reload the page before deciding again.",
+  "compute_admin.result.signed_out": "You are signed out. Sign in again, then retry.",
+  "compute_admin.section.failed": "Could not load {what}: {reason}",
+  "compute_admin.col.holder": "Holder",
+  "compute_admin.col.pool": "Pool",
+  "compute_admin.col.granted": "Granted (SU)",
+  "compute_admin.col.held": "Held (SU)",
+  "compute_admin.col.charged": "Charged (SU)",
+  "compute_admin.col.available": "Available (SU)",
+  "compute_admin.col.frozen": "Frozen",
+  "compute_admin.col.updated": "Updated",
+  "compute_admin.col.partition": "Partition",
+  "compute_admin.col.source": "Front door",
+  "compute_admin.col.users": "Distinct people",
+  "compute_admin.col.jobs": "Jobs",
+  "compute_admin.col.job": "Job",
+  "compute_admin.col.account": "Account",
+  "compute_admin.col.state": "State",
+  "compute_admin.col.flags": "Flags",
+  "compute_admin.col.failure": "Failure",
+  "compute_admin.col.created": "Created",
+  "compute_admin.col.ended": "Ended",
+  "compute_admin.col.slurm": "Scheduler job",
+  "compute_admin.col.elapsed": "Elapsed (s)",
+  "compute_admin.col.resources": "Nodes, CPUs, GPUs",
+  "compute_admin.col.ingested": "Ingested",
+  "compute_admin.ref.account": "account #{id}",
+  "compute_admin.ref.no_account": "no account",
+  "compute_admin.pools.platform": "Platform budgets",
+  "compute_admin.pools.partner": "Partner pools",
+  "compute_admin.pools.account": "Account pools",
+  "compute_admin.pools.none_platform": "No platform budgets are recorded.",
+  "compute_admin.pools.none": "No pools are recorded in this group.",
+  "compute_admin.pools.frozen": "Frozen",
+  "compute_admin.pools.open": "Open",
+  "compute_admin.usage.quarter": "Quarter",
+  "compute_admin.usage.counts_note":
+    "These are counts of people and jobs, not service units. A person is counted once however many jobs they ran, and jobs that skipped the reservation or could not be attributed are left out.",
+  "compute_admin.usage.totals": "Total",
+  "compute_admin.usage.none": "No jobs were recorded in this quarter.",
+  "compute_admin.flag.nav": "Filter jobs by flag",
+  "compute_admin.flag.unreserved": "Unreserved",
+  "compute_admin.flag.unattributed": "Unattributed",
+  "compute_admin.flag.mismatch": "Mismatch",
+  "compute_admin.flag.overrun": "Overrun",
+  "compute_admin.flag.meaning.unreserved":
+    "The job skipped the reservation. Its charge went to a partner pool and not to a person.",
+  "compute_admin.flag.meaning.unattributed":
+    "The job skipped the reservation and its owner maps to no active account.",
+  "compute_admin.flag.meaning.mismatch":
+    "NEMAR’s record and the scheduler’s accounting disagree for this job.",
+  "compute_admin.flag.meaning.overrun":
+    "The job used more than its hold, and the excess is recorded as an overrun in the ledger.",
+  "compute_admin.flag.followup":
+    "Moving the charge of an unreserved job to a person is an owner action in the command line.",
+  "compute_admin.flagged.none": "No jobs carry this flag. That is a fact about this read only.",
+  "compute_admin.flagged.platform_failure": "NEMAR’s fault",
+  "compute_admin.flagged.partner": "Partner: {state}, {flag}",
+  "compute_admin.drift.paused":
+    "Reconciliation is paused while compute is off. An empty list below does not mean nothing is unmatched.",
+  "compute_admin.drift.status": "Status",
+  "compute_admin.drift.compute_on": "Compute is on.",
+  "compute_admin.drift.compute_off": "Compute is off.",
+  "compute_admin.drift.tapis": "Scheduler gateway: token {token}, health {health}.",
+  "compute_admin.drift.attention": "Needs a person to look",
+  "compute_admin.drift.attention_none": "No attention count is positive.",
+  "compute_admin.drift.unmatched": "Accounting rows no job claims",
+  "compute_admin.drift.unmatched_shown": "Showing the newest {shown} of {total}.",
+  "compute_admin.drift.unmatched_none": "No accounting rows are waiting for a job.",
+  "compute_admin.drift.not_priced": "not priced",
+  "compute_admin.drift.mismatch": "Jobs flagged mismatch",
+  "compute_admin.drift.mismatch_more": "See the Flagged jobs view for the rest",
+  "compute_admin.unavailable.title": "Not available yet",
+  "compute_admin.unavailable.usage_by_day":
+    "Service units charged by day, partition and front door across the platform are not served by any admin read yet.",
+  "compute_admin.unavailable.drift_difference":
+    "The difference between NEMAR’s ledger and the supercomputer’s accounting, per job or per day, and the tolerance it is measured against are not served by any admin read yet. No row is marked over tolerance because this page has no tolerance to apply.",
+  "compute_admin.unavailable.link": "Tracking issue",
+  "compute_admin.badge.awaiting_decision": "awaiting decision",
 
   // -------------------------------------------------------------------------
   // Profile gaps: the sentence, its two halves, and the vocabulary they use

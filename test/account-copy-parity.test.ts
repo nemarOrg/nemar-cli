@@ -163,6 +163,22 @@ describe("the copy table's own rules", () => {
       "client",
       "redirect_host",
       "reason",
+      // The admin Compute tab's (website#497): the numbers and fixed words its sentences carry.
+      "kind",
+      "version",
+      "id",
+      "cpu",
+      "gpu",
+      "count",
+      "max",
+      "word",
+      "what",
+      "shown",
+      "total",
+      "state",
+      "flag",
+      "token",
+      "health",
     ]);
     for (const [key, value] of Object.entries(ACCOUNT_COPY)) {
       for (const [, name] of value.matchAll(/\{(\w+)\}/g)) {
