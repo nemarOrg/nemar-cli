@@ -659,7 +659,7 @@ const statusCommand = new Command("status")
   });
 
 export const computeCommand = new Command("compute").description(
-  "The compute gateway: the owner policy and the SU allocation pools (ADR 0118)",
+  "The compute gateway: the owner policy, the SU allocation pools, status, jobs and their reports, legal holds, the pipeline and the observer's token (ADR 0118)",
 );
 
 computeCommand.addCommand(policyCommand);

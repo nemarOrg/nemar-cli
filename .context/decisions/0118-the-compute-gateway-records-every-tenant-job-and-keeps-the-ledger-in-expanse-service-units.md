@@ -31,9 +31,17 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
 7. **Retention is a policy row, not a constant**: records 7 years, logs 1 year, results 30 days and never fewer than 14.
    Storage is two private Cloudflare R2 buckets, records (locked by prefix) and results (expiring), outside the Amazon Web Services (AWS) account that holds the Open Data buckets.
    Only the Worker reaches them, through bindings, and no storage credential reaches Tapis, a node or the launcher: uploads go to addresses the Worker signs for one file of one job.
-8. **`COMPUTE_ENABLED` is a dark switch**: exactly `1` and absent from the wrangler configuration. The switch and the test that pins it arrive in phase A4 (issue #2009); every compute cron runs in production only.
+8. **`COMPUTE_ENABLED` is a dark switch**: exactly `1` and absent from the wrangler configuration. The switch and the test that pins it landed in phase A4 (issue #2009); every compute cron runs in production only.
 9. **NEMAR reports ACCESS gateway attributes for every tenant job**, once, under a per-account pseudonym that is not the sign-in subject.
-10. **Every compute word is declared once**, in `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words), `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes) `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte) and `shared/contract/compute-admin.ts` (the allocation routes' error words, request shapes and open response schemas; a module of words and of open schemas only, never of a strict one).
+10. **Every compute word is declared once**, in one of these modules:
+   `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words);
+   `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes);
+   `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte);
+   `shared/contract/compute-admin.ts` (the allocation, reporting, status and pipeline routes' error words, request shapes and open response schemas; a module of words and of open schemas only, never of a strict one);
+   `shared/compute-header.ts` (the inline job header a script states its resources in, read by the CLI and the Worker alike);
+   `shared/compute-recipes.ts` (the pipeline recipe registry, the stamp states and the recipe's argument words);
+   `shared/contract/compute-observation.ts` (the observer's document, with its JSON Schema shared byte for byte with `nemarOrg/nemar-process`);
+   `shared/contract/compute-responses.ts` (the open response schemas of a person's cancel and links and of the observer's answer).
 11. **Two digests, named apart.** `spec_digest` is the job row's: the SHA-256 of the exact bytes of `records/<id>/spec.json`. `launch_spec_digest` is the launcher's: the SHA-256 of the exact raw bytes of the `NEMAR_LAUNCH_SPEC` value, which is ASCII-only JSON, hashed before parsing.
 12. **Responses are open, requests and documents are closed.** The two responses a launcher reads ignore unknown keys, so one that runs for 48 hours survives the Worker adding a key; the job specification, owner policy, launch specification and the launcher's own files refuse them.
 13. **Launcher details are declared and classified, in `shared/compute-state.ts`.**

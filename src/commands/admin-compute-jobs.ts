@@ -707,8 +707,9 @@ their fixed word:
   outcome_unknown   the request may or may not have been recorded; it is NEVER sent again by code
   no_gateway_user   the job has no pseudonym to report (a partner's job with no account)
   no_submit_time    the scheduler's submission time never showed
-  unconfigured, refused, busy, unavailable   the retry classes, once their attempts ran out
-A failed report is not retried. If you have confirmed with ACCESS that one was NOT recorded, the owner
+  refused, busy, unavailable   the retry classes, once their attempts ran out
+("unconfigured" is a word of a PENDING report that waits for the ACCESS key and resource name; a failed
+report never carries it.) A failed report is not retried. If you have confirmed with ACCESS that one was NOT recorded, the owner
 re-queues it with requeue-access-report.
 
 Exit codes:
