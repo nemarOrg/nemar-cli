@@ -61,6 +61,7 @@ import {
   checkReport,
   finishMismatch,
   isNemarsOwnJob,
+  pinOf,
   recordMismatch,
   verifyBoundJob,
 } from "./compute-report-verify.js";
@@ -188,7 +189,7 @@ export async function awaitingPartnerReports(
       if (Date.now() >= expiresMs + grace * 60_000) continue;
       const tagged = await searchJobsByTag(ctx, nemarJobTag(row.id));
       if (tagged.length !== 1 || tagged[0]?.uuid !== cand.uuid) continue;
-      if (checkReport(row, full, { execSystemId: pin?.execSystemId }).ok) awaiting.add(cand.uuid);
+      if (checkReport(row, full, pinOf(pin)).ok) awaiting.add(cand.uuid);
     } catch {
       // Not read: not deferred. The job goes through the sweep's own path, which reads it again.
     }

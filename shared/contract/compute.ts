@@ -950,6 +950,11 @@ export const ComputePolicySchema = z
      *    see the jobs).
      *  - `execSystemId`: the execution system a partner's job must run on; a record on another system is a
      *    `resources_mismatch`. Required while the confirmation is true.
+     *  - `allowedSchedulerArgs`: exact scheduler option strings (for example an account or a profile the app
+     *    or the system adds, which Tapis merges into the record) that are accepted IN ADDITION to at most one
+     *    `--gpus=N` within the hold. Default none; any other option is a `resources_mismatch`. The owner
+     *    reads ONE real job record of the tenant and copies the options it shows BEFORE turning
+     *    `tapisVisibilityConfirmed` on. A `--gpus` option can never be listed (the hold bounds GPUs).
      */
     partner: z
       .object({
@@ -957,6 +962,17 @@ export const ComputePolicySchema = z
         execSystemId: z
           .string()
           .regex(/^[A-Za-z0-9._-]{1,80}$/)
+          .optional(),
+        allowedSchedulerArgs: z
+          .array(
+            z
+              .string()
+              .regex(/^[-A-Za-z0-9=_.:,@/]{1,100}$/)
+              .refine((a) => !a.startsWith("--gpus") && !a.startsWith("--gres"), {
+                message: "GPUs are bounded by the hold, never allowed by name",
+              }),
+          )
+          .max(20)
           .optional(),
       })
       .strict()

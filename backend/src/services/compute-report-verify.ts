@@ -105,9 +105,11 @@ const whole = (value: unknown): number | null =>
  * partition, or the nodes, the cores per node, the memory, the minutes or the price of the record's
  * resources exceed the hold's; a figure the record does not carry cannot be shown within it, so it
  * fails). THE SCHEDULER OPTIONS are read through the narrow accessor `schedulerArgsOf` and held to an
- * ALLOWLIST: at most one `--gpus=N` with N no more than the hold's GPUs, and nothing else (a partner that
- * adds `--exclusive`, `--mem` or a second option is changing what the scheduler allocates and the
- * accounting charges, which the record's own figures do not show); a record whose options cannot be read is
+ * ALLOWLIST: at most one `--gpus=N` with N no more than the hold's GPUs, and the exact strings the owner
+ * listed (`policy.partner.allowedSchedulerArgs`, for options Tapis merges from the app or the system, such as
+ * an account), and nothing else (a partner that adds `--exclusive`, `--mem` or a second GPU option is
+ * changing what the scheduler allocates and the accounting charges, which the record's own figures do not
+ * show); a record whose options cannot be read is
  * never verified. When the owner pinned the execution system (`policy.partner.execSystemId`), a record on
  * another system is a `resources_mismatch`.
  */
@@ -138,7 +140,7 @@ export function checkReport(
     | "execSystemId"
     | "schedulerArgs"
   >,
-  pin: { execSystemId?: string | undefined } = {},
+  pin: SchedulerPin = {},
 ): ReportCheck {
   if (job.tapis_owner === null || rec.owner !== job.tapis_owner) {
     return { ok: false, flag: "owner_mismatch" };
@@ -153,7 +155,7 @@ export function checkReport(
   const resources = { ok: false, flag: "resources_mismatch" } as const;
   if (rec.execSystemLogicalQueue !== job.partition) return resources;
   if (pin.execSystemId !== undefined && rec.execSystemId !== pin.execSystemId) return resources;
-  if (!schedulerArgsWithin(rec.schedulerArgs, job.gpus)) return resources;
+  if (!schedulerArgsWithin(rec.schedulerArgs, job.gpus, pin.allowedSchedulerArgs)) return resources;
   if (nodes === null || cores === null || memory === null || minutes === null) return resources;
   if (nodes < 1 || nodes > job.nodes) return resources;
   if (cores > job.cores_per_node) return resources;
@@ -178,13 +180,38 @@ export function checkReport(
  * Whether a record's scheduler options are the ones a reservation allows: readable (`undefined` and `null`
  * are not), at most one, and that one `--gpus=N` with N no more than the hold's GPUs.
  */
-export function schedulerArgsWithin(args: string[] | null | undefined, holdGpus: number): boolean {
+export function schedulerArgsWithin(
+  args: string[] | null | undefined,
+  holdGpus: number,
+  allowed: readonly string[] = [],
+): boolean {
   if (!Array.isArray(args)) return false;
-  if (args.length > 1) return false;
-  if (args.length === 0) return true;
-  const m = /^--gpus=([0-9]{1,2})$/.exec(args[0] as string);
-  return m !== null && Number(m[1]) <= holdGpus;
+  let gpuOptions = 0;
+  for (const arg of args) {
+    if (allowed.includes(arg)) continue;
+    const m = /^--gpus=([0-9]{1,2})$/.exec(arg);
+    if (m === null || Number(m[1]) > holdGpus) return false;
+    gpuOptions += 1;
+    if (gpuOptions > 1) return false;
+  }
+  return true;
 }
+
+/** What the owner pinned about where and how a partner's job runs (`policy.partner`). */
+export interface SchedulerPin {
+  execSystemId?: string | undefined;
+  allowedSchedulerArgs?: readonly string[] | undefined;
+}
+
+/** The pin of a policy: the one place that reads `policy.partner` for the check. */
+export const pinOf = (
+  partner:
+    | { execSystemId?: string | undefined; allowedSchedulerArgs?: string[] | undefined }
+    | undefined,
+): SchedulerPin => ({
+  execSystemId: partner?.execSystemId,
+  allowedSchedulerArgs: partner?.allowedSchedulerArgs,
+});
 
 /** True when a Tapis record carries a `nemar_job:<id>` tag for a job other than `jobId`. */
 export function carriesForeignNemarTag(rec: Pick<TapisJob, "tags">, jobId: string): boolean {
@@ -300,7 +327,7 @@ export async function verifyBoundJob(
   }
 
   const pin = (await getPolicy(env.DB)).policy.partner;
-  const verdict = checkReport(job, rec, { execSystemId: pin?.execSystemId });
+  const verdict = checkReport(job, rec, pinOf(pin));
   if (verdict.ok) {
     const slurm =
       typeof rec.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
