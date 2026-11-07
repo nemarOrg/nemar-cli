@@ -204,7 +204,8 @@ function textViews(bytes: Uint8Array): string[] {
   const bom16be = bytes[0] === 0xfe && bytes[1] === 0xff;
   if (bom16le || bom16be || nuls / bytes.length >= 0.25) {
     const bigEndian = bom16be || (!bom16le && evenNuls > nuls / 2);
-    views.push(new TextDecoder((bigEndian ? "utf-16be" : "utf-16le") as "utf-16le").decode(bytes));
+    const even = Buffer.from(buffer.subarray(0, buffer.length - (buffer.length % 2)));
+    views.push((bigEndian ? even.swap16() : even).toString("utf16le"));
   }
   views.push(Buffer.from(bytes.filter((b) => b !== 0)).toString("latin1"));
   return views;
@@ -223,4 +224,4 @@ export function describeFinding(finding: Finding): string {
 
 /** What to do about a finding. Said once, after the list. */
 export const SECRET_REMEDY =
-  "Nothing was sent. Take the secret out of the file, or leave the file out of the bundle by adding its path to .nemarignore. A job cannot be given a secret this way; there is no override.";
+  "No job data left this machine. Take the secret out of the file, or leave the file out of the bundle by adding its path to .nemarignore. A job cannot be given a secret this way; there is no override.";

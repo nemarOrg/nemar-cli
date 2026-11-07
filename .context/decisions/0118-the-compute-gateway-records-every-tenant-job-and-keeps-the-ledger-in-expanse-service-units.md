@@ -822,7 +822,7 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
 `nemar compute submit|logs|results|cancel` (`src/commands/compute-submit.ts`, `compute-jobs.ts`; the library is `src/lib/compute/`) is the client of the routes of the amendment of 2026-11-06. "Item N" means the numbered item of THIS amendment.
 
 1. **Exit codes.**
-   0 done (submitted; with `--wait`, finished), 1 NEMAR refused or could not answer, the job failed or was canceled, or the person is not signed in, 2 refused on this machine before anything was sent, 3 `--wait` ended with the job still live (Ctrl-C, or NEMAR could not be reached five times running).
+   0 done (submitted; with `--wait`, finished), 1 NEMAR refused or could not answer, the job failed or was canceled, or the person is not signed in, 2 refused on this machine before any job data was sent, 3 `--wait` ended with the job still live (Ctrl-C, or NEMAR could not be reached five times running).
    Every failure sentence is on standard error; `--json` standard output is only the answer (the finalize answer, or the submit answer of an image job, or with `--wait` the last read of the job; for `--dry-run` the request that would be sent; for `results` every page of files in one document; for `logs` `{ job_id, truncated, text }`).
    Each command's help has an "Exit codes:" block.
 2. **What a job asks for.**
@@ -839,11 +839,14 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
 4. **The credential scan** (`secret-scan.ts`) reads the exact bytes that are packed, and the name, the arguments and the environment values, before any request, with no override.
    Its rules are `private_key_block`, `aws_access_key_id`, `aws_secret_access_key`, `google_api_key`, `azure_storage_key`, `github_token`, `gitlab_token`, `huggingface_token`, `slack_token`, `nemar_api_key` (`nm_` and 43 base64url characters, held by a test to `generateApiKey`), `nemar_oidc_token` (the prefixes of `shared/oidc.ts`) and `credential_file_name` (`.env` but not `.env.example`, `.netrc`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials` and the like).
    A finding is a rule name and `path:line`; the value, the matching text and the line are never in a finding, a message or a file.
+   A file is read as Latin-1, as UTF-16 (a byte-order mark, or mostly NUL bytes) and with its NUL bytes removed. Not caught, and said so in the help: a token wrapped across lines or assembled by the program, one inside an archive or an encrypted file, and a bare 40-character AWS secret with no field name near it. It is a net, not proof.
+   "Nothing was sent" is not claimed: a refusal means no job data left the machine; the optional notice poll and the update check can still run.
 5. **The upload.**
    `PUT upload.url` with exactly `upload.headers` and `Content-Length: upload.size`, no NEMAR credential, three retries on a 5xx or no answer (1, 2 and 4 seconds), no retry on a 4xx, a 403 is "expired or refused"; an address already past its time is not used.
    The address and the signed headers are never printed or logged (the debug log's presigned-parameter redaction covers a result link as well; a test reads the real log).
    The `Idempotency-Key` is one random UUID per run, kept across the run's own retries of `POST /compute/jobs` (a 503 `storage_unavailable` after the hold is retried with the same key and finishes the one job) and `finalize`.
    A late finalize is the Worker's `upload_expired` sentence and exit 1; the person submits again (a new run, a new key).
+   Running `submit` again is a SECOND job and a second hold: each run has its own key, an interrupted run is not resumed, and a job left waiting for its bundle ends by itself after the hour (or sooner with `cancel`). Only a 503 after the hold is finished by repeating the same key, which the command does itself.
 6. **`--wait`** (`wait.ts`) polls `GET /compute/me/jobs/:id` at once and then every 5 seconds, growing by half to 30 while nothing changes, starting over on a change; five consecutive 5xx or network failures end it (exit 3); a 4xx ends it at once (exit 1).
    Ctrl-C removes its listener, stops waiting and exits 3. It does not cancel, and the module has no way to.
 7. **Results.**

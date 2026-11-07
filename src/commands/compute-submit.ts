@@ -8,8 +8,8 @@
  * What it does, in this order, and what each step can refuse (`src/lib/compute/prepare.ts` is steps 1 to 3):
  *  1. reads the job from the flags, the script's `# /// nemar` header, the folder's `nemar-job.toml` and the
  *     defaults (flags win), checks it against the Worker's own specification schema, packs the code into one
- *     deterministic archive and scans every file for credentials. A refusal is EXIT 2, before any request;
- *  2. with `--dry-run`, prints what would be sent and stops: it sends NOTHING and needs no sign-in;
+ *     deterministic archive and scans every file for credentials. A refusal is EXIT 2, before any request about the job;
+ *  2. with `--dry-run`, prints what would be sent and stops: it sends NOTHING about the job and needs no sign-in;
  *  3. `POST /compute/jobs` with an `Idempotency-Key` (one random key per run, kept across its own retries);
  *  4. for a bundle, one PUT of the archive to the address it was given, then `POST .../finalize` with the
  *     manifest again; an image job is submitted at once;
@@ -170,7 +170,7 @@ function printDryRun(prepared: Prepared, json: boolean): void {
     return;
   }
   const out = (line: string) => console.log(line);
-  out(chalk.bold("Dry run: nothing was sent."));
+  out(chalk.bold("Dry run: nothing about the job was sent."));
   out(
     `  Job:        ${plain(spec.name)} (${spec.runtime}${spec.entry ? `, entry ${plain(spec.entry)}` : ""})`,
   );
@@ -262,7 +262,14 @@ Description:
   --image must be docker://<registry>/<repo>@sha256:<digest>; a tag is not accepted. The registry must be
   one NEMAR allows.
 
-  --dry-run packs and scans and prints what would be sent, and sends nothing (it needs no sign-in).
+  --dry-run packs and scans and prints what would be sent, and sends nothing about the job (it needs no sign-in).
+  In a dry run or a local refusal no job data leaves this machine; the command's routine notice and update
+  checks can still run.
+
+  Running submit again makes a SECOND job and a second hold: every run has its own Idempotency-Key. A 503
+  after the hold is finished by repeating the same key, which the command does itself (three retries); an
+  interrupted or failed run is not resumed, and a job left waiting for its bundle ends by itself after an
+  hour, or sooner with nemar compute cancel <job>.
   --wait follows the job until it ends. Ctrl-C stops waiting and does NOT cancel the job.
 
   With --json standard output is only the answer: NEMAR's answer to the submission (or, with --wait, the
@@ -272,7 +279,7 @@ Description:
 Exit codes:
   0  the job was submitted (with --wait: it finished); with --dry-run, what would be sent was printed.
   1  NEMAR refused or could not take the job, the job failed or was canceled, or you are not signed in.
-  2  refused on this machine before anything was sent: an invalid option or job, a file or folder that
+  2  refused on this machine before anything about the job was sent: an invalid option or job, a file or folder that
      cannot be packed, over a size limit, or a credential in the code.
   3  with --wait, the wait ended with the job still live (you pressed Ctrl-C, or NEMAR could not be
      reached); the job goes on.
@@ -312,7 +319,7 @@ export const submitCommand = new Command("submit")
     collect,
   )
   .option("--wait", "Follow the job until it ends")
-  .option("--dry-run", "Pack and check the job and print it; send nothing")
+  .option("--dry-run", "Pack and check the job and print it; send nothing about it")
   .option("--json", "Print only the answer, as JSON")
   .addHelpText("after", SUBMIT_HELP)
   .action(

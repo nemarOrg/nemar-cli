@@ -1,7 +1,7 @@
 /**
  * Everything `nemar compute submit` does BEFORE it asks NEMAR for anything (epic #2021 phase D3b, #2024):
  * read what the job asks for, build and check the specification, pack and scan the code, and make the
- * request. It sends nothing and prints nothing, so `--dry-run` is exactly this and a test can run it with
+ * request. It sends nothing about the job and prints nothing, so `--dry-run` is exactly this and a test can run it with
  * no server at all; a local refusal is a value (`refused`) that the command turns into exit 2.
  *
  * ORDER, each step refusing before the next begins (so the cheapest check comes first and no byte of code

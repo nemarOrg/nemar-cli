@@ -1,6 +1,6 @@
 /**
  * How the person-side compute commands fail (epic #2021 phase D3b, #2024). The exit codes are the issue's:
- * 0 done, 1 failed or refused by NEMAR, 2 refused LOCALLY (before anything was sent), 3 the wait ended
+ * 0 done, 1 failed or refused by NEMAR, 2 refused LOCALLY (before anything about the job was sent), 3 the wait ended
  * with the job still live. Every failure sentence goes to STANDARD ERROR, in human and in `--json` mode
  * alike, so standard output carries only an answer; every network string passes `plain()`.
  *
@@ -63,7 +63,7 @@ export function failText(message: string, opts: { answered: boolean; hint?: stri
   else unmarkReportedExit();
 }
 
-/** A refusal before anything was sent: the lines on standard error, exit 2. Never a bug. */
+/** A refusal before anything about the job was sent: the lines on standard error, exit 2. Never a bug. */
 export function refuseLocally(lines: readonly string[], detail: readonly string[] = []): void {
   const [first, ...rest] = lines;
   if (first !== undefined) console.error(chalk.red(plain(first)));

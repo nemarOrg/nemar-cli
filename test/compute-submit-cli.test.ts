@@ -115,7 +115,7 @@ describe("--dry-run", () => {
     put("lib/util.py", "x = 1\n");
     const r = await run(["submit", ".", "--entry", "run.py", "--dry-run"]);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Dry run: nothing was sent.");
+    expect(r.stdout).toContain("Dry run: nothing about the job was sent.");
     expect(r.stdout).toContain("2 files");
     expect(r.stdout).toContain("4 cores");
     expect(r.stdout).toContain("up to 1h 30m");

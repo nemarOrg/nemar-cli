@@ -29,7 +29,7 @@ export type UploadOutcome =
   | { ok: false; kind: "refused"; status: number; attempts: number }
   /** A 5xx or no answer on every attempt. */
   | { ok: false; kind: "failed"; status: number | null; attempts: number }
-  /** The archive is not the length the address was signed for: nothing was sent. */
+  /** The archive is not the length the address was signed for: nothing about the job was sent. */
   | { ok: false; kind: "wrong_size"; attempts: 0 }
   /** The address is not `https:` (or loopback): it is not used. */
   | { ok: false; kind: "insecure_address"; attempts: 0 };

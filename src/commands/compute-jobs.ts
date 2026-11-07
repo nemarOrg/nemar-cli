@@ -8,7 +8,7 @@
  *
  * Each takes `--json`: standard output is then ONLY the answer (for `results`, one document with every page
  * of files), and every sentence of failure is on standard error. Exit codes: 0 done, 1 NEMAR refused or
- * could not answer, or a file could not be downloaded and verified, 2 refused here before anything was sent.
+ * could not answer, or a file could not be downloaded and verified, 2 refused here before anything about the job was sent.
  *
  * RESULTS ARE BEARER LINKS. Each link downloads one file for anyone who holds it until it expires (seven
  * days after it was made). So the human listing prints no link; `--download` uses them without showing
@@ -92,7 +92,7 @@ Description:
 Exit codes:
   0  the log was printed.
   1  you are not signed in, there is no such job of yours, it has no log yet, or NEMAR could not answer.
-  2  the job id or --tail is not valid (nothing was sent).
+  2  the job id or --tail is not valid (nothing about the job was sent).
 
 Examples:
   $ nemar compute logs job_0123456789abcdef01234567
@@ -173,7 +173,7 @@ Exit codes:
   0  the files were listed (and, with --download, all were fetched and verified).
   1  you are not signed in, there is no such finished job of yours, its results have expired, NEMAR could
      not answer, or a file could not be downloaded and verified.
-  2  the job id is not valid (nothing was sent).
+  2  the job id is not valid (nothing about the job was sent).
 
 Examples:
   $ nemar compute results job_0123456789abcdef01234567
@@ -271,7 +271,7 @@ Description:
 Exit codes:
   0  the job was canceled, a cancel was recorded, or the job had already ended.
   1  you are not signed in, there is no such job of yours, you answered no, or NEMAR could not answer.
-  2  the job id is not valid, or there is no terminal to ask and --yes was not given (nothing was sent).
+  2  the job id is not valid, or there is no terminal to ask and --yes was not given (nothing about the job was sent).
 
 Examples:
   $ nemar compute cancel job_0123456789abcdef01234567
