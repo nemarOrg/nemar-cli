@@ -98,6 +98,9 @@ const BACKLOG_AHEAD_SQL = `SELECT COUNT(*) AS n FROM compute_jobs INDEXED BY com
   WHERE source = 'partner' AND tapis_uuid IS NULL AND state = 'created' AND partner_state IS NULL
     AND partner_expires_at < ?1 AND partner_expires_at < datetime('now')`;
 
+/** A Tapis status after which a job is over. */
+const ENDED_STATUSES = new Set(["FINISHED", "CANCELLED", "FAILED"]);
+
 const NEMAR_TAG_PREFIX = "nemar_job:";
 
 /** The ids of the NEMAR tags a record carries (every tag that begins with the prefix, valid or not). */
@@ -187,8 +190,17 @@ export async function awaitingPartnerReports(
         );
       }
       if (Date.now() >= expiresMs + grace * 60_000) continue;
-      const tagged = await searchJobsByTag(ctx, nemarJobTag(row.id));
-      if (tagged.length !== 1 || tagged[0]?.uuid !== cand.uuid) continue;
+      // The same rule as the reaper's ambiguity: only the jobs the reservation's Tapis username owns, that
+      // are not over and that no row accounts for, count. A failed first attempt that was resubmitted does
+      // not hide the retry, and a job another owner tagged does not unshelter the person's own.
+      const tagged = (await searchJobsByTag(ctx, nemarJobTag(row.id))).filter(
+        (t) => t.owner === row.tapis_owner && !ENDED_STATUSES.has(t.status),
+      );
+      const open: TapisJob[] = [];
+      for (const t of tagged) {
+        if ((await env.DB.prepare(ACCOUNTED_SQL).bind(t.uuid).first()) === null) open.push(t);
+      }
+      if (open.length !== 1 || open[0]?.uuid !== cand.uuid) continue;
       if (checkReport(row, full, pinOf(pin)).ok) awaiting.add(cand.uuid);
     } catch {
       // Not read: not deferred. The job goes through the sweep's own path, which reads it again.
@@ -370,7 +382,10 @@ async function resolveReservation(
   // not this person's and cannot keep a reservation open by being added (the sweep accounts for it); when
   // none is the person's, the tagged jobs are all there is.
   const own = unaccounted.filter((u) => u.owner === job.tapis_owner);
-  const candidates = own.length > 0 ? own : unaccounted;
+  // A first attempt that is over (failed, cancelled) and a retry under the same reservation are not
+  // ambiguous: the retry is the one the reservation is for. The sweep's shelter counts the same way.
+  const live = own.filter((u) => !ENDED_STATUSES.has(u.status));
+  const candidates = live.length > 0 ? live : own.length > 0 ? own : unaccounted;
   if (candidates.length > 1) {
     r.ambiguous++;
     await db.prepare(AMBIGUOUS_SQL).bind(job.id).run();

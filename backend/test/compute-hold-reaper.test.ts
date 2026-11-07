@@ -528,6 +528,61 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
       expect(row(w, mine.job_id).state).toBe("created");
     });
 
+    test("a first attempt that FAILED and was resubmitted under the same reservation: the retry is sheltered and its report binds (item 6, probe C)", async () => {
+      const hold = await reserve(w, person);
+      const first = await partnerLaunch(w, hold, person);
+      fx.tapis.advance(first, "FAILED");
+      const retry = await partnerLaunch(w, hold, person);
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept?.awaitingReport).toBe(1);
+      expect(fx.tapis.jobs.get(retry)?.status).toBe("PENDING");
+      const res = await partnerCall(w, "POST", `/compute/jobs/${hold.job_id}/report`, {
+        token: person.token,
+        json: { tapis_job_id: retry },
+      });
+      expect([res.status, res.json?.verification]).toEqual([200, "verified"]);
+    });
+
+    test("a foreign-owned job carrying the tag does not unshelter the person's own job (item 6, probe D)", async () => {
+      const hold = await reserve(w, person);
+      const foreign = await partnerLaunch(w, hold, person, { owner: "someone-else" });
+      const mine = await partnerLaunch(w, hold, person);
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept?.awaitingReport).toBe(1);
+      expect(fx.tapis.jobs.get(mine)?.status).toBe("PENDING");
+      // The foreign one skipped the reservation: it is cancelled, not sheltered.
+      expect(fx.tapis.jobs.get(foreign)?.status).toBe("CANCELLED");
+    });
+
+    test("a job some row already accounts for does not count against the reservation's own (item 6)", async () => {
+      const hold = await reserve(w, person);
+      const other = await reserve(w, person);
+      const accounted = await partnerLaunch(w, hold, person);
+      const mine = await partnerLaunch(w, hold, person);
+      w.h.db
+        .query(
+          "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'verified', state = 'submitted' WHERE id = ?",
+        )
+        .run(accounted, other.job_id);
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept?.awaitingReport).toBe(1);
+      expect(fx.tapis.jobs.get(mine)?.status).toBe("PENDING");
+    });
+
+    test("the reaper counts the same way: a failed first attempt and a live retry adopt the retry, not ambiguous", async () => {
+      const hold = await reserve(w, person);
+      const first = await partnerLaunch(w, hold, person);
+      fx.tapis.advance(first, "FAILED");
+      const retry = await partnerLaunch(w, hold, person);
+      age(hold, 31);
+      expect(await reapExpiredHolds(production())).toMatchObject({
+        ambiguous: 0,
+        adopted: 1,
+        verified: 1,
+      });
+      expect(row(w, hold.job_id).tapis_uuid).toBe(retry);
+    });
+
     test("the window is the stored expiry plus an hour: sheltered at 31 and 89 minutes old, not at 91", async () => {
       for (const [minutes, sheltered] of [
         [31, true],
