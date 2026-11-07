@@ -37,3 +37,6 @@ export * from "./compute-admin.js";
 // Compute access: a person's one request and an administrator's decisions (epic #2021 phase D1).
 export * from "./compute-access.js";
 export * from "./compute-terms.js";
+// A person's compute read routes and the partner's aggregate: bounds, error words and the OPEN response
+// schemas (epic #2021 phase D2).
+export * from "./compute-user.js";
