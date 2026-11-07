@@ -7,7 +7,8 @@
  * The figures are UNVERIFIED with the site (they come from the public user guide through the program's
  * Tapis execution system). They are pinned below as literals written out, and when a nemar-process
  * checkout is named in `NEMAR_PROCESS_DIR` they are compared with that file's `maxMemoryMB` for each
- * queue; without it that comparison SKIPS VISIBLY. THE LITERALS MUST MATCH
+ * queue; without it that comparison SKIPS VISIBLY, except that `NEMAR_REQUIRE_PROCESS_QUEUES=1` (set by
+ * the CI workflow, with the template in its sparse checkout) makes a missing checkout or file FAIL. THE LITERALS MUST MATCH
  * `deploy/tapis/systems/exec.json.tmpl` in nemarOrg/nemar-process (`batchLogicalQueues[].maxMemoryMB`).
  * MUTATION: drop the clamp and the cases below that name a 262,144 fail.
  */
@@ -41,17 +42,26 @@ describe("the queue maximums", () => {
     expect(Object.isFrozen(QUEUE_MAX_MEMORY_MB)).toBe(true);
   });
 
+  // A checkout is optional on a developer machine (the comparison skips VISIBLY) and REQUIRED in CI:
+  // `NEMAR_REQUIRE_PROCESS_QUEUES=1` turns a missing directory or template into a failure, because the
+  // workflow sets NEMAR_PROCESS_DIR and a checkout that quietly lacked the file disabled this check once.
   const DIR = process.env.NEMAR_PROCESS_DIR;
+  const required = process.env.NEMAR_REQUIRE_PROCESS_QUEUES === "1";
   const template = DIR ? join(DIR, "deploy/tapis/systems/exec.json.tmpl") : null;
-  test.skipIf(template === null)(
+  test.skipIf(template === null && !required)(
     "NEMAR_PROCESS_DIR names a checkout that holds the execution-system template",
     () => {
+      expect(
+        template,
+        "NEMAR_REQUIRE_PROCESS_QUEUES=1 needs NEMAR_PROCESS_DIR to name a nemar-process checkout",
+      ).not.toBeNull();
       expect(existsSync(template ?? ""), `${template} is not there`).toBe(true);
     },
   );
-  test.skipIf(template === null || !existsSync(template))(
+  test.skipIf(!required && (template === null || !existsSync(template)))(
     "match the maxMemoryMB of every logical queue in the nemar-process execution-system template",
     () => {
+      expect(template, "no template to compare with").not.toBeNull();
       const system = JSON.parse(readFileSync(template as string, "utf8")) as {
         batchLogicalQueues: Array<{ name: string; maxMemoryMB: number }>;
       };

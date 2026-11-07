@@ -517,6 +517,10 @@ describe("a job that NEMAR made", () => {
     expect((await reread(mine.env, mine.job.id)).state).toBe("submitted");
   });
 
+  // A SIMULATED interleaving, not a real one: the hook gives the second run the empty snapshot it would
+  // have taken before the first run's row existed. Two concurrent runs over the round-trip database
+  // would interleave differently on every execution, so the order this test needs cannot be forced from
+  // outside; what is real here is the second run's conflicting insert, and the decision it must make.
   test("the sweep's own row, found again by a second run's conflicting insert, is still cancelled", async () => {
     const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 2);
