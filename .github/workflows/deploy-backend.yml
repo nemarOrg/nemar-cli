@@ -262,8 +262,9 @@ jobs:
           [ "${#files[@]}" -gt 0 ] || { echo "::error::the classifier listed no pure test files"; exit 1; }
           echo "Running shard $shard/$SHARD_TOTAL of ${#files[@]} pure test files"
           log="$RUNNER_TEMP/test-gate-shard.log"
-          # --timings is read-only here: it only balances the shards.
-          bun test --timings test/unit-pure-timings.json --shard="$shard/$SHARD_TOTAL" --parallel="$(nproc)" "${files[@]}" 2>&1 | tee "$log"
+          # --timings is read-only here: it only balances the shards. Two workers, not one per
+          # core: see the same flag in test.yml's unit-pure-shard for why.
+          bun test --timings test/unit-pure-timings.json --shard="$shard/$SHARD_TOTAL" --parallel=2 "${files[@]}" 2>&1 | tee "$log"
 
           # An empty shard is not an error to bun ("Ran 0 tests across 0 files", exit 0), and the
           # classified list must match what bun found, so read the run's own header and summary.
