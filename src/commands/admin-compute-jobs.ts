@@ -487,7 +487,8 @@ jobsCommand
   );
 
 const ACCESS_REPORT_HELP = `
-For ACCESS, the jobs submitted to the scheduler in a quarter (--quarter 2026Q4): the distinct gateway
+For ACCESS, the jobs the scheduler took in a quarter (--quarter 2026Q4, by the scheduler's own submission
+time in UTC, and only jobs with a Slurm job id, as reported to ACCESS): the distinct gateway
 users (pseudonyms, counted and never listed) and the jobs, by partition and source. A person is counted
 once however many jobs they ran. A job that skipped the reservation or whose owner NEMAR could not
 attribute is left out. --csv prints quarter, partition, source, distinct users and jobs, then a total.

@@ -428,16 +428,17 @@ describe("access-report", () => {
     sql.run("UPDATE compute_jobs SET flag_unattributed = 1 WHERE id = ?", c.job.id);
     sql.run("UPDATE compute_jobs SET flag_unreserved = 1 WHERE id = ?", d.job.id);
     sql.run("UPDATE compute_jobs SET source = 'web' WHERE id = ?", a3.job.id);
-    for (const j of [a, a2, a3, b, c, d]) {
+    for (const [i, j] of [a, a2, a3, b, c, d].entries()) {
       sql.run(
-        "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        "UPDATE compute_jobs SET slurm_job_id = ?, remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        `${5000 + i}`,
         j.job.id,
       );
     }
     // Outside the quarter.
     const old = await makeJob(fx);
     sql.run(
-      "UPDATE compute_jobs SET submitted_at = '2026-09-30 23:59:59' WHERE id = ?",
+      "UPDATE compute_jobs SET slurm_job_id = '4999', remote_submitted_at = '2026-09-30 23:59:59' WHERE id = ?",
       old.job.id,
     );
     const neverSubmitted = await makeJob(fx);
@@ -457,6 +458,29 @@ describe("access-report", () => {
     expectNoIdentity(r.text);
     const q3 = await call("GET", "/compute/access-report?quarter=2026Q3", "admin");
     expect(q3.body.totals).toEqual({ distinct_users: 1, jobs: 1 });
+  });
+
+  test("counts what ACCESS is told: a Slurm id and the scheduler's own time, in UTC, not NEMAR's bind time", async () => {
+    // Accepted by Tapis (submitted_at set) and then failed in staging: no Slurm id, nothing was told to
+    // ACCESS, so the report must not count it.
+    const staged = await makeJob(fx);
+    sql.run(
+      "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00', remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+      staged.job.id,
+    );
+    // Bound to Tapis at 23:58 on 31 December, scheduled at 00:01 on 1 January: ACCESS was sent the
+    // January time, so the job belongs to Q1 and not to Q4.
+    const straddle = await makeJob(fx);
+    sql.run(
+      `UPDATE compute_jobs SET submitted_at = '2026-12-31 23:58:00', slurm_job_id = '7001',
+              remote_submitted_at = '2027-01-01 00:01:00' WHERE id = ?`,
+      straddle.job.id,
+    );
+    const q4 = await call("GET", "/compute/access-report?quarter=2026Q4", "admin");
+    expect(q4.status).toBe(200);
+    expect(q4.body.totals).toEqual({ distinct_users: 0, jobs: 0 });
+    const q1 = await call("GET", "/compute/access-report?quarter=2027Q1", "admin");
+    expect(q1.body.totals).toEqual({ distinct_users: 1, jobs: 1 });
   });
 
   test("a quarter that is not one is refused", async () => {

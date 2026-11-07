@@ -533,9 +533,10 @@ describe("report and access-report", () => {
       a.accountId,
       a2.job.id,
     );
-    for (const j of [a, a2, b])
+    for (const [i, j] of [a, a2, b].entries())
       sql.run(
-        "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        "UPDATE compute_jobs SET slurm_job_id = ?, remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        `${6000 + i}`,
         j.job.id,
       );
     const text = await runCli("admin", ["access-report", "--quarter", "2026Q4"]);

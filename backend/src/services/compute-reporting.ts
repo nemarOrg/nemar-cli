@@ -378,15 +378,19 @@ export interface AccessReport {
 }
 
 /**
- * For ACCESS, jobs submitted to the scheduler in the quarter: the distinct gateway users (pseudonyms,
- * counted and never listed) and the jobs, by partition and source. A job that skipped the reservation or
+ * For ACCESS, the jobs the scheduler took in the quarter: the distinct gateway users (pseudonyms,
+ * counted and never listed) and the jobs, by partition and source. A job counts when it has a Slurm id
+ * and its `remote_submitted_at` (the scheduler's own submission time, UTC) falls in the quarter, which
+ * is exactly what the ACCESS reporter sends; `submitted_at` (NEMAR's bind to Tapis) is not used, so a
+ * job Tapis accepted that never reached the scheduler is not counted, and one bound late on the last
+ * day of a quarter and scheduled in the next belongs to the next. A job that skipped the reservation or
  * whose owner NEMAR could not attribute is excluded: it has no gateway user to report, and ACCESS is
  * not told of use NEMAR did not authorise as the person's. A person is counted once however many jobs.
  */
 export async function accessReport(db: D1Database, quarter: string): Promise<AccessReport | null> {
   const bounds = quarterBounds(quarter);
   if (bounds === null) return null;
-  const where = `submitted_at IS NOT NULL AND submitted_at >= ?1 AND submitted_at < ?2
+  const where = `slurm_job_id IS NOT NULL AND remote_submitted_at >= ?1 AND remote_submitted_at < ?2
       AND flag_unattributed = 0 AND flag_unreserved = 0 AND gateway_user IS NOT NULL`;
   const rows = (
     await db
