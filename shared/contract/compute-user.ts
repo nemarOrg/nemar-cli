@@ -275,9 +275,21 @@ export type ComputeUserJobResponse = z.infer<typeof ComputeUserJobResponseSchema
 
 /**
  * `GET /compute/stats`: platform-wide aggregates for the partner, and nothing that names a person or an
- * account: no id, subject, name, email or per-person row. `active_people` counts the distinct people who
- * created a job in the window (NEMAR's own pipelines and unreserved jobs are not people);
- * `jobs_by_outcome` counts the jobs created in the window by terminal state, every terminal state listed.
+ * account: no id, subject, name, email or per-person row. No minimum cell size is applied (a count of 1 is
+ * served as 1): the route is machine-only, the figures are aggregates by day, partition and source, and
+ * the partner already sees the job records of its own people.
+ *
+ * The three figures have DIFFERENT BASES, on purpose, and a reader must not subtract one from another:
+ *  - `by_day_partition_source` is CHARGE: the ledger entries that move a charge and name a job (a
+ *    provisional charge, an overrun, a final settlement), summed by the UTC day of the ENTRY. It includes
+ *    NEMAR's own pipeline jobs and the partner's unreserved jobs charged to the partner's pool. `jobs`
+ *    is the number of distinct jobs with such an entry in that row.
+ *  - `jobs_by_outcome` is JOBS CREATED in the window (by creation day), by terminal state, every
+ *    terminal state listed with its zero. It counts ALL jobs: from every front door, NEMAR's pipelines and
+ *    the partner's swept (unreserved) jobs included.
+ *  - `active_people` is PEOPLE: the distinct accounts that created a job in the window, leaving out the
+ *    pipelines account (a service account, not a person) and swept jobs (matched to an account that did
+ *    not submit them). It is therefore not the number of accounts behind `jobs_by_outcome`.
  */
 export const ComputeStatsResponseSchema = z
   .object({
