@@ -123,15 +123,29 @@ export type TapisJob = z.infer<typeof TapisJobPublicSchema> & {
   schedulerArgs?: string[] | null;
 };
 
+/** The most characters of a `parameterSet` given as a JSON string that are parsed; a longer one is unreadable. */
+export const PARAMETER_SET_MAX_CHARS = 262_144;
+
 /**
  * The scheduler options of a record's `parameterSet`, through a narrow accessor: `undefined` when the record
- * has no `parameterSet`, `null` when `schedulerOptions` is present and is not a list of objects with a
- * string `arg`, else the list of `arg`s. Nothing else of `parameterSet` is read.
+ * has no `parameterSet`, `null` when it cannot be read (`schedulerOptions` present and not a list of objects
+ * with a string `arg`, a string that is not JSON or is over {@link PARAMETER_SET_MAX_CHARS}, any other
+ * type), else the list of `arg`s. BOTH wire forms are read: the Jobs specification types `parameterSet` as a
+ * JSON STRING and the documentation's examples show an object. Nothing else of it is read.
  */
 export function schedulerArgsOf(parameterSet: unknown): string[] | null | undefined {
   if (parameterSet === undefined || parameterSet === null) return undefined;
-  if (typeof parameterSet !== "object" || Array.isArray(parameterSet)) return null;
-  const options = (parameterSet as { schedulerOptions?: unknown }).schedulerOptions;
+  let set: unknown = parameterSet;
+  if (typeof parameterSet === "string") {
+    if (parameterSet.length > PARAMETER_SET_MAX_CHARS) return null;
+    try {
+      set = JSON.parse(parameterSet);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof set !== "object" || set === null || Array.isArray(set)) return null;
+  const options = (set as { schedulerOptions?: unknown }).schedulerOptions;
   if (options === undefined || options === null) return [];
   if (!Array.isArray(options)) return null;
   const args: string[] = [];
