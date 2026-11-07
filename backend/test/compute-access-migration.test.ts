@@ -160,9 +160,10 @@ function insertUser(e: Engine, columns: Record<string, unknown> = {}): Promise<s
 
 describe("the file says the shared words", () => {
   test("the state CHECK lists exactly the six states", () => {
-    const m = /compute_access TEXT NOT NULL DEFAULT 'none'\s+CHECK \(compute_access IN \(([^)]*)\)\)/.exec(
-      SQL,
-    );
+    const m =
+      /compute_access TEXT NOT NULL DEFAULT 'none'\s+CHECK \(compute_access IN \(([^)]*)\)\)/.exec(
+        SQL,
+      );
     const words = [...(m?.[1] ?? "").matchAll(/'([a-z]+)'/g)].map((x) => x[1] as string);
     expect(words.sort()).toEqual([...COMPUTE_ACCESS_STATES].sort());
   });

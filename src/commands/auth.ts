@@ -2456,6 +2456,31 @@ Examples:
   $ nemar auth profile set-location --city "San Diego" --country USA`,
 );
 
+// ---------------------------------------------------------- set-affiliation
+
+const profileSetAffiliationCmd = profileCmd
+  .command("set-affiliation <text>")
+  .description("Set the institution on your account")
+  .action(async (text: string) => {
+    await applyProfilePatch(
+      { affiliation: text },
+      "Setting your affiliation...",
+      "Affiliation updated",
+    );
+  });
+
+addVerboseHelp(
+  profileSetAffiliationCmd,
+  `
+Description:
+  The institution you work at. A compute-access request is refused without
+  it (the review reads it beside your name and location); upload access does
+  not ask for it. An empty value clears it.
+
+Examples:
+  $ nemar auth profile set-affiliation "Swartz Center for Computational Neuroscience"`,
+);
+
 // ------------------------------------------------------------------- orcid
 
 /** How often the link flow re-checks whether the iD has landed. */

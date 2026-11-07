@@ -78,6 +78,8 @@ interface Overrides {
   github_username?: string | null;
   city?: string | null;
   country?: string | null;
+  /** 'Swartz Center' by default; the compute-access gap is about this one (epic #2021 phase D1). */
+  affiliation?: string | null;
   email_verified?: number;
   orcid_verified?: number;
   status?: string;
@@ -106,6 +108,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     github_username: "adarivers",
     city: "San Diego",
     country: "USA",
+    affiliation: "Swartz Center" as string | null,
     email_verified: 1,
     orcid_verified: 1,
     status: "verified",
@@ -120,7 +123,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
                         given_name, family_name, github_username, city, country, affiliation,
                         orcid, orcid_verified, signup_source, service_access,
                         username_auto_assigned, account_kind)
-     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, 'Swartz Center',
+     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?,
              '0000-0002-1825-0097', ?, 'web', ?, ?, ?)`,
   ).run(
     row.username,
@@ -133,6 +136,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     row.github_username,
     row.city,
     row.country,
+    row.affiliation,
     row.orcid_verified,
     row.service_access,
     row.username_auto_assigned,
@@ -217,8 +221,21 @@ describe("GET /users/me carries profile_gaps", () => {
     await seedUser({ city: null });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual([
-      { field: "city", blocks: ["upload_access"], set_on: ["web", "cli"] },
+      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
     ]);
+  });
+
+  test("a missing affiliation is a gap that blocks compute access alone, on every payload", async () => {
+    // Epic #2021 phase D1. MUTATION: drop `affiliation` from the `/users/me` SELECT and EVERY
+    // account reports this gap (an absent value reads as blank); the "complete account" test
+    // above is what catches that, and this one pins the row that should raise it.
+    const id = await seedUser({ affiliation: null });
+    const cli = userMeResponseSchema.parse(await (await usersMe()).json());
+    expect(cli.user.profile_gaps).toEqual([
+      { field: "affiliation", blocks: ["compute_access"], set_on: ["web", "cli"] },
+    ]);
+    const web = webUserSchema.parse((await (await authMe(id)).json()).user);
+    expect(web.profile_gaps).toEqual(cli.user.profile_gaps ?? []);
   });
 
   test("a complete account gets an EMPTY list, which is not the same as none", async () => {
@@ -242,7 +259,11 @@ describe("GET /users/me carries profile_gaps", () => {
     await seedUser({ given_name: null, orcid_verified: 1 });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual([
-      { field: "given_name", blocks: ["upload_access", "publication"], set_on: ["web"] },
+      {
+        field: "given_name",
+        blocks: ["upload_access", "compute_access", "publication"],
+        set_on: ["web"],
+      },
     ]);
   });
 
@@ -392,7 +413,7 @@ describe("one row, three answers", () => {
     // route, not from allThree()'s defaulting.
     const cli = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(cli.user.profile_gaps).toEqual([
-      { field: "city", blocks: ["upload_access"], set_on: ["web", "cli"] },
+      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
     ]);
     const answers = await allThree(id);
     expect(answers.missing).toEqual(["city"]);
@@ -441,11 +462,12 @@ describe("one row, three answers", () => {
           github_username: string | null;
           city: string | null;
           country: string | null;
+          affiliation: string | null;
         },
         [string]
       >(
         `SELECT status, account_kind, email_verified, orcid_verified, username, given_name, family_name,
-                github_username, city, country FROM users WHERE email = ?`,
+                github_username, city, country, affiliation FROM users WHERE email = ?`,
       )
       .get(USER_EMAIL);
     if (!row) throw new Error("row vanished");
@@ -464,6 +486,7 @@ describe("one row, three answers", () => {
       github_username: row.github_username,
       city: row.city,
       country: row.country,
+      affiliation: row.affiliation,
     });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual(expected);

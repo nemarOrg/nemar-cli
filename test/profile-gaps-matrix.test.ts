@@ -13,7 +13,7 @@
  *    of that guard; `account-copy-parity.test.ts` is the half that reads the
  *    other checkout when it is present.
  *
- * 2. THE DERIVATION, over every one of the 2^8 combinations of the eight
+ * 2. THE DERIVATION, over every one of the 2^9 combinations of the nine
  *    derivable fields. The oracle is built by FILTERING the fixture table
  *    rather than by re-running the production rules, so the test can disagree
  *    with the implementation: it says "these fields are blank, therefore these
@@ -62,7 +62,7 @@ interface TableRow {
  *  and the `orcid_verified` row of website#312 at 19f93e3e). */
 const WEBSITE_TABLE: Record<string, TableRow> = {
   email_verified: {
-    blocks: ["verified", "upload_access"],
+    blocks: ["verified", "upload_access", "compute_access"],
     web: "the verify step on your dashboard",
     cli: "nemar auth resend-verification",
     label: "A verified email address",
@@ -76,7 +76,7 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
     derivable: true,
   },
   given_name: {
-    blocks: ["upload_access", "publication"],
+    blocks: ["upload_access", "compute_access", "publication"],
     web: "Settings",
     cli: "nemar auth profile set-name",
     orcidWeb: "your ORCID record at orcid.org, then sign in again",
@@ -84,7 +84,7 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
     derivable: true,
   },
   family_name: {
-    blocks: ["upload_access", "publication"],
+    blocks: ["upload_access", "compute_access", "publication"],
     web: "Settings",
     cli: "nemar auth profile set-name",
     orcidWeb: "your ORCID record at orcid.org, then sign in again",
@@ -106,17 +106,26 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
     derivable: true,
   },
   city: {
-    blocks: ["upload_access"],
+    blocks: ["upload_access", "compute_access"],
     web: "Settings",
     cli: "nemar auth profile set-location",
     label: "City",
     derivable: true,
   },
   country: {
-    blocks: ["upload_access"],
+    blocks: ["upload_access", "compute_access"],
     web: "Settings",
     cli: "nemar auth profile set-location",
     label: "Country",
+    derivable: true,
+  },
+  // Epic #2021 phase D1 (ADR 0118): the row that stops compute access ALONE. The website transcribes
+  // it in nemarOrg/website#494; until then this row is the local half of the guard.
+  affiliation: {
+    blocks: ["compute_access"],
+    web: "Settings",
+    cli: "nemar auth profile set-affiliation",
+    label: "Affiliation",
     derivable: true,
   },
   why: {
@@ -129,7 +138,7 @@ const WEBSITE_TABLE: Record<string, TableRow> = {
 };
 
 const TABLE_FIELDS = Object.keys(WEBSITE_TABLE);
-/** The eight the derivation can raise from a row; `why` needs a submitted form. */
+/** The nine the derivation can raise from a row; `why` needs a submitted form. */
 const DERIVABLE = TABLE_FIELDS.filter((f) => WEBSITE_TABLE[f].derivable) as GapField[];
 /** The two account columns that are flags rather than text, so "blank" is
  *  `false` and not `null`. */
@@ -149,6 +158,7 @@ function fullAccount(): Required<Omit<ProfileGapAccount, "status">> & { status: 
     github_username: "adalovelace",
     city: "London",
     country: "GB",
+    affiliation: "Swartz Center for Computational Neuroscience",
     orcid_verified: true,
   };
 }
@@ -194,15 +204,90 @@ describe("the matrix agrees with the website's table", () => {
   }
 });
 
+describe("the block filter (epic #2021 phase D1)", () => {
+  test("compute_access is declared after upload_access, in the order the type documents", () => {
+    const blocks = new Set<string>();
+    for (const field of GAP_FIELDS) for (const b of PROFILE_GAP_MATRIX[field].blocks) blocks.add(b);
+    expect([...blocks].sort()).toEqual([
+      "compute_access",
+      "publication",
+      "upload_access",
+      "verified",
+    ]);
+    for (const field of GAP_FIELDS) {
+      const b = [...PROFILE_GAP_MATRIX[field].blocks];
+      if (b.includes("compute_access") && b.includes("upload_access")) {
+        expect(b.indexOf("compute_access")).toBe(b.indexOf("upload_access") + 1);
+      }
+    }
+  });
+
+  test("an account lacking only its affiliation has an upload list of nothing and a compute list of one", () => {
+    // The upload-access `missing` list must not change: `checkUploadAccessRequest` asks for the
+    // `upload_access` block, and `affiliation` blocks compute access alone.
+    const account = accountMissing(["affiliation"]);
+    expect(profileGapFields(account, "upload_access")).toEqual([]);
+    expect(profileGapFields(account, "compute_access")).toEqual(["affiliation"]);
+    // Unfiltered, it is the one gap `/users/me` reports.
+    expect(profileGapFields(account)).toEqual(["affiliation"]);
+    expect(computeProfileGaps(account)[0]?.blocks).toEqual(["compute_access"]);
+  });
+
+  test("every other upload gap is unchanged by the filter, in the same order", () => {
+    const missing = DERIVABLE.filter((f) => f !== "affiliation");
+    const everything = profileGapFields(accountMissing(missing));
+    expect(profileGapFields(accountMissing([...missing, "affiliation"]), "upload_access")).toEqual(
+      everything,
+    );
+  });
+
+  test("the compute list is the five fields of the brief plus the inbox, and nothing else", () => {
+    // given name, family name, affiliation, city and country block compute access; so does the
+    // inbox. The username, the GitHub handle and the ORCID flag do not (ORCID is proven by a
+    // sign-in row, not by the flag, ADR 0106).
+    expect(profileGapFields(accountMissing(DERIVABLE), "compute_access")).toEqual([
+      "email_verified",
+      "given_name",
+      "family_name",
+      "city",
+      "country",
+      "affiliation",
+    ]);
+  });
+
+  test("an absent affiliation reads as blank: a SELECT that forgot it raises the gap", () => {
+    const { affiliation: _omitted, ...withoutIt } = fullAccount();
+    expect(profileGapFields(withoutIt as ProfileGapAccount)).toEqual(["affiliation"]);
+    expect(profileGapFields({ ...fullAccount(), affiliation: "   " })).toEqual(["affiliation"]);
+  });
+
+  test("the compute_access gap is described in the words of the copy table", () => {
+    expect(describeProfileGap(resolveProfileGap("affiliation"))).toBe(
+      "Affiliation is missing: needed to request compute access. Set it in Settings or run `nemar auth profile set-affiliation`.",
+    );
+    expect(describeProfileGapBlocks(resolveProfileGap("city"))).toBe(
+      "upload access and compute access",
+    );
+    expect(describeProfileGapBlocks(resolveProfileGap("given_name"))).toBe(
+      "upload access, compute access and publication",
+    );
+  });
+
+  test("a wire entry carrying compute_access is a block this build knows", () => {
+    const [gap] = resolveWireProfileGaps([{ field: "affiliation", blocks: ["compute_access"] }]);
+    expect([...(gap?.blocks ?? [])]).toEqual(["compute_access"]);
+  });
+});
+
 describe("computeProfileGaps over every field combination", () => {
-  // 2^8 = 256 subsets of the derivable fields.
+  // 2^9 = 512 subsets of the derivable fields.
   const subsets: string[][] = [];
   for (let mask = 0; mask < 1 << DERIVABLE.length; mask++) {
     subsets.push(DERIVABLE.filter((_, i) => (mask & (1 << i)) !== 0));
   }
 
-  test("raises exactly the blank fields, in table order, for all 256", () => {
-    expect(subsets).toHaveLength(256);
+  test("raises exactly the blank fields, in table order, for all 512", () => {
+    expect(subsets).toHaveLength(512);
     for (const missing of subsets) {
       // The oracle: the fixture's own order, filtered to what was blanked.
       const expected = TABLE_FIELDS.filter((f) => missing.includes(f));
@@ -365,9 +450,11 @@ describe("the sentences", () => {
 
   test("the full block list is noun-phrased for a surface that reports", () => {
     expect(describeProfileGapBlocks(resolveProfileGap("given_name"))).toBe(
-      "upload access and publication",
+      "upload access, compute access and publication",
     );
-    expect(describeProfileGapBlocks(resolveProfileGap("city"))).toBe("upload access");
+    expect(describeProfileGapBlocks(resolveProfileGap("city"))).toBe(
+      "upload access and compute access",
+    );
   });
 
   test("sandbox is CLI-only, is not in the shared matrix, and reads like the rest", () => {
@@ -400,14 +487,14 @@ describe("resolveWireProfileGaps", () => {
     const [fromWire] = resolveWireProfileGaps([{ field: "city", blocks: ["publication"] }]);
     expect([...fromWire.blocks]).toEqual(["publication"]);
     const [fromTable] = resolveWireProfileGaps([{ field: "city" }]);
-    expect([...fromTable.blocks]).toEqual(["upload_access"]);
+    expect([...fromTable.blocks]).toEqual(["upload_access", "compute_access"]);
   });
 
   test("drops block values it does not know rather than printing them raw", () => {
     const [gap] = resolveWireProfileGaps([{ field: "city", blocks: ["teleportation"] }]);
     // Every value filtered out means an empty list, which falls back to the
     // table -- a build that predates a new vocabulary still says something true.
-    expect([...gap.blocks]).toEqual(["upload_access"]);
+    expect([...gap.blocks]).toEqual(["upload_access", "compute_access"]);
   });
 
   test("ignores an entry with no field name", () => {

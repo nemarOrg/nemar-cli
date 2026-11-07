@@ -241,6 +241,16 @@ export const userSchema = z
      * line only when this is present and not `"person"`.
      */
     account_kind: accountKindSchema.optional(),
+    /**
+     * Compute access (epic #2021 phase D1; ADR 0118): a grant of its own, never `service_access`. One of
+     * `COMPUTE_ACCESS_STATES` (`shared/compute-access-state.ts`), as a plain string so a state a later
+     * Worker adds does not fail an older CLI's parse. Optional and never defaulted, for the reason
+     * `service_access` is: a backend that predates this phase sends no such key, and absence must render
+     * as "unknown", never as a confident "not requested".
+     */
+    compute_access: z.string().optional(),
+    compute_access_requested_at: z.string().nullable().optional(),
+    compute_access_granted_at: z.string().nullable().optional(),
   })
   .passthrough();
 export type ContractUser = z.infer<typeof userSchema>;
@@ -579,6 +589,15 @@ export const webUserSchema = z
      */
     profile_gaps: z.array(profileGapSchema),
     username_auto_assigned: z.boolean(),
+    /**
+     * Compute access (epic #2021 phase D1): the state and the two dates behind it. OPTIONAL here,
+     * unlike the two required additions above, because the website's own copy of this payload is
+     * transcribed, not imported, and a website that predates the field must keep parsing; they are
+     * never defaulted (absence is "this API cannot say").
+     */
+    compute_access: z.string().optional(),
+    compute_access_requested_at: z.string().nullable().optional(),
+    compute_access_granted_at: z.string().nullable().optional(),
   })
   .passthrough();
 export type WebUser = z.infer<typeof webUserSchema>;

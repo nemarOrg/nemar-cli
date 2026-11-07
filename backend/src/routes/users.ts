@@ -15,6 +15,7 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
+import type { ComputeAccessState } from "../../../shared/compute-access-state.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
@@ -66,6 +67,10 @@ userRoutes.get("/me", async (c) => {
       github_username,
       city,
       country,
+      affiliation,
+      compute_access,
+      compute_access_requested_at,
+      compute_access_granted_at,
       username_auto_assigned,
       sandbox_completed,
       sandbox_completed_at,
@@ -100,6 +105,13 @@ userRoutes.get("/me", async (c) => {
       github_username: string | null;
       city: string | null;
       country: string | null;
+      // Read for the compute-access gap (epic #2021 phase D1): without it every account would be
+      // reported as missing an affiliation.
+      affiliation: string | null;
+      // Compute access (migration 0131): its own grant, never `service_access`.
+      compute_access: ComputeAccessState;
+      compute_access_requested_at: string | null;
+      compute_access_granted_at: string | null;
       username_auto_assigned: number;
       sandbox_completed: number;
       sandbox_completed_at: string | null;
@@ -152,6 +164,12 @@ userRoutes.get("/me", async (c) => {
       sandbox_dataset_id: userDetails?.sandbox_dataset_id,
       // Tiered access (website ADR 0010): admin-granted permission to upload/compute.
       service_access: !!userDetails?.service_access,
+      // Compute access is a grant of its OWN (epic #2021 phase D1, ADR 0118): the state and when it
+      // was asked for and granted. Optional on the wire and never defaulted: absent means the row
+      // could not be read, and a CLI that predates the field reads "unknown", never "not granted".
+      compute_access: userDetails?.compute_access,
+      compute_access_requested_at: userDetails?.compute_access_requested_at,
+      compute_access_granted_at: userDetails?.compute_access_granted_at,
       // What this account is still missing, computed by the SAME function the
       // upload-access preconditions use (#1268, ADR 0045) -- so `nemar auth
       // status` can never list a different set of fields from the one a request

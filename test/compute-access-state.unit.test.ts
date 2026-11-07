@@ -71,7 +71,8 @@ describe("the states and the edges", () => {
   });
 
   test("only active may use compute", () => {
-    for (const s of COMPUTE_ACCESS_STATES) expect([s, canUseCompute(s)]).toEqual([s, s === "active"]);
+    for (const s of COMPUTE_ACCESS_STATES)
+      expect([s, canUseCompute(s)]).toEqual([s, s === "active"]);
   });
 
   test("a word that is not a state is not one", () => {
@@ -106,6 +107,7 @@ describe("the four decisions", () => {
 
   test("a decision word is exactly one of the four", () => {
     for (const d of COMPUTE_ACCESS_DECISIONS) expect(isComputeAccessDecision(d)).toBe(true);
-    for (const bad of ["approve", "Grant", "", null]) expect(isComputeAccessDecision(bad)).toBe(false);
+    for (const bad of ["approve", "Grant", "", null])
+      expect(isComputeAccessDecision(bad)).toBe(false);
   });
 });
