@@ -235,8 +235,7 @@ const QUEUE_HELP = `
 Description:
   Shows, for each partition offered to you, how long jobs have waited between being submitted to the
   scheduler and starting: the median and the 90th percentile over the jobs that started in the last 7
-  days. With fewer than 5 such jobs there is no estimate, only the count. It describes the whole platform's
-  queue, not yours, and it is a recent average, not a promise.
+  days. With fewer than 5 such jobs there is no estimate, only the count. ${ACCOUNT_COPY["compute_page.queue_note"]}
 
 Exit codes:
   0  the estimates were read.
