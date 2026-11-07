@@ -403,8 +403,6 @@ describe("the order of refusal: one failing request per code", () => {
       const r = bundleRequest(bundle, spec) as { spec: unknown; manifest: unknown };
       return manifest === undefined ? r : { ...r, manifest };
     };
-    const order: Array<[string, string, (p: Person) => Promise<Reply2>]> = [];
-    type Reply2 = Awaited<ReturnType<typeof submit>>;
     const run = async (access: string, req: unknown, headers: Record<string, string> = {}) => {
       const p = await newPerson(w, { access });
       return submit(p, req, headers);
@@ -447,7 +445,9 @@ describe("the order of refusal: one failing request per code", () => {
     // the person's live-job limit before the bundle and the datasets
     await setPolicy(w.env().DB, w.fx.ownerId, { maxLiveJobsPerPerson: 1 });
     const full = await newPerson(w);
-    expect((await submit(full, bundleRequest(makeBundle([{ path: "run.py", content: "1" }])))).status).toBe(201);
+    expect(
+      (await submit(full, bundleRequest(makeBundle([{ path: "run.py", content: "1" }])))).status,
+    ).toBe(201);
     expect(
       (
         await submit(
@@ -462,7 +462,6 @@ describe("the order of refusal: one failing request per code", () => {
     expect(
       (await submit(poor, failing({ datasets: [{ id: "nm000199", version: "1.0.0" }] }))).body.code,
     ).toBe("dataset_not_eligible");
-    void order;
   });
 });
 
@@ -613,10 +612,9 @@ describe("the dataset gate is the pipelines' own", () => {
     expect([untagged.status, untagged.body.code]).toEqual([422, "version_untagged"]);
     const big = await submit(p, request("nm000122", "latest"));
     expect([big.status, big.body.code]).toEqual([422, "too_many_files"]);
-    const edge = await seedEegDataset(w.env(), "nm000123", {
+    await seedEegDataset(w.env(), "nm000123", {
       versions: [["1.0.0", "2026-01-02 03:04:05", 38_000]],
     });
-    void edge;
     expect((await submit(p, request("nm000123", "latest"))).status).toBe(201);
   });
 });
@@ -658,7 +656,9 @@ describe("the Idempotency-Key", () => {
     } finally {
       clock.now = real;
     }
-    expect(await w.fx.harness.records.head(`incoming/${first.body.job_id}/bundle.tar.gz`)).toBeNull();
+    expect(
+      await w.fx.harness.records.head(`incoming/${first.body.job_id}/bundle.tar.gz`),
+    ).toBeNull();
     const again = await submit(p, bundleRequest(bundle), headers);
     expect(again.body.job_id).toBe(first.body.job_id);
     expect((await putArchive(again.body.upload, bundle.archive)).status).toBeLessThan(300);
