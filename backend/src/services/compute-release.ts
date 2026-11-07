@@ -4,13 +4,17 @@
  * batch as its own credential revocations, exactly as `mailReleaseStatements`
  * (`services/ticket-assignment.ts`) does for an admin's tickets.
  *
- * TWO CALLERS, and the count is the point: `finalizeRevocation` (`routes/admin/users.ts`: admin revoke,
- * by username and by id) and `tombstoneUserCascade` (`db/user-tombstone.ts`: the owner-only soft delete
- * and the scheduled sweep of the live tests' accounts, which run the same function, so it counts once).
- * These are the two paths that end EVERY credential an account holds. A THIRD path that ends an account
- * needs these statements too. The list is `COMPUTE_END_CALLERS` below, and a source scan
- * (`backend/test/compute-end-callers.test.ts`) holds it to the code: it fails when either caller drops the
- * statements (as does `compute-release-cascade.test.ts`), and when a function that revokes all of a
+ * THREE CALLERS, and the count is the point: `finalizeRevocation` (`routes/admin/users.ts`: admin revoke,
+ * by username and by id), `tombstoneUserCascade` (`db/user-tombstone.ts`: the owner-only soft delete
+ * and the scheduled sweep of the live tests' accounts, which run the same function, so it counts once),
+ * and `endComputeStatements` (`services/compute-access.ts`: an administrator's SUSPENSION or REVOCATION
+ * of a person's compute access, epic #2021 phase D1, which ends their compute and nothing else). The
+ * first two are the paths that end EVERY credential an account holds; the third ends only the grant of
+ * compute, and takes these statements so that a person whose compute standing is gone cannot go on
+ * spending. A FOURTH path that ends an account, or compute standing, needs these statements too. The
+ * list is `COMPUTE_END_CALLERS` below, and a source scan (`backend/test/compute-end-callers.test.ts`)
+ * holds it to the code: it fails when a caller drops the statements (as does
+ * `compute-release-cascade.test.ts`), and when a function that revokes all of a
  * user's keys and sessions THROUGH THE STATEMENT SHAPES THE SCAN RECOGNISES (`UPDATE tokens SET revoked_at
  * ... WHERE user_id ...`, and `UPDATE web_sessions SET revoked_at` or `DELETE FROM web_sessions WHERE
  * user_id ...`, however quoted or ordered, inline or in a constant or helper it names) neither runs them
@@ -169,7 +173,7 @@ export const COMPUTE_RELEASE_FREEZE_SQL = `UPDATE compute_pools SET
 
 /**
  * The statements that end an account's compute, for the caller's own batch (see the header for the
- * two callers, the order and the rules every statement keeps). Pure: it builds text and binds, and
+ * three callers, the order and the rules every statement keeps). Pure: it builds text and binds, and
  * touches no database and no network.
  */
 export function computeReleaseStatements(userId: number): ComputeReleaseStatement[] {
@@ -188,7 +192,8 @@ export function computeReleaseStatements(userId: number): ComputeReleaseStatemen
 /**
  * THE DOCUMENTED LIST of the functions that run {@link computeReleaseStatements}, as `file#function` under
  * `backend/src` (a route callback is `file#METHOD /path`). The two paths that end every credential an
- * account holds. `test/compute-end-callers.test.ts` holds this list to the code on the syntax tree, through
+ * account holds, and the one that ends a person's compute standing alone (a suspension or a revocation of
+ * compute access, `endComputeStatements`, epic #2021 phase D1). `test/compute-end-callers.test.ts` holds this list to the code on the syntax tree, through
  * aliased and namespace imports and uses that pass the function as a value: a function that runs the set
  * and is not listed, or a listed one that no longer runs it, fails the test, and so does a new function
  * that revokes all of a user's keys and sessions through the statement shapes the scan recognises (see the
@@ -201,6 +206,7 @@ export function computeReleaseStatements(userId: number): ComputeReleaseStatemen
 export const COMPUTE_END_CALLERS = [
   "db/user-tombstone.ts#tombstoneUserCascade",
   "routes/admin/users.ts#finalizeRevocation",
+  "services/compute-access.ts#endComputeStatements",
 ] as const;
 
 /**
