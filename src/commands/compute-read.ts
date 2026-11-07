@@ -155,9 +155,14 @@ export const balanceCommand = new Command("balance")
       console.log(`${chalk.bold("Compute access:")} ${stateLabel(me.access.state)}`);
       const note = stateNote(me.access.state);
       if (note) console.log(chalk.dim(`  ${plain(note)}`));
-      if (me.frozen) {
+      // A frozen pool is the reason for a refusal only while access is held: for every other state the
+      // note above already says why (paused, answered, not asked), and "an admin can lift it" would be
+      // the wrong thing to tell a person whose access ended.
+      if (me.frozen && me.access.state === "active") {
         console.log(
-          chalk.yellow("  Your pools are frozen: new jobs are refused until an admin lifts it."),
+          chalk.yellow(
+            "  Your pools are frozen, so new jobs are refused. Contact support to find out why.",
+          ),
         );
       }
       console.log("");

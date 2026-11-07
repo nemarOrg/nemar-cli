@@ -219,7 +219,7 @@ describe("nemar compute balance", () => {
     expect(r.stdout).toMatch(/cpu\s+10\.000\s+0\.000\s+14\.000\s+-4\.000/);
   });
 
-  test("without a grant it says so and how to ask; a suspended person is told it is paused; a frozen pool is said", async () => {
+  test("without a grant it says so and how to ask; a suspended person is told it is paused", async () => {
     const none = await personWithKey(db, { access: "none" });
     const a = await compute(none, "balance");
     expect(a.exitCode).toBe(0);
@@ -232,7 +232,25 @@ describe("nemar compute balance", () => {
     expect(b.exitCode).toBe(0);
     expect(b.stdout).toContain("Compute access: Suspended");
     expect(b.stdout).toContain("paused");
-    expect(b.stdout).toContain("frozen");
+    // The pause already explains the freeze; a second line that offers a lift would only confuse.
+    expect(b.stdout).not.toContain("frozen");
+  });
+
+  test("a frozen pool is said only while access is held; a closed account is not told an admin can lift it", async () => {
+    const held = await personWithKey(db, { access: "active" });
+    const heldPool = await fundAccount(realD1(db), held.id, 5_000);
+    db.query("UPDATE compute_pools SET frozen = 1 WHERE id = ?").run(heldPool);
+    const a = await compute(held, "balance");
+    expect(a.stdout).toContain("Your pools are frozen, so new jobs are refused.");
+    for (const state of ["revoked", "denied", "requested"]) {
+      const who = await personWithKey(db, { access: state });
+      const pool = await fundAccount(realD1(db), who.id, 5_000);
+      db.query("UPDATE compute_pools SET frozen = 1 WHERE id = ?").run(pool);
+      const r = await compute(who, "balance");
+      expect([state, r.exitCode]).toEqual([state, 0]);
+      expect([state, r.stdout.includes("frozen")]).toEqual([state, false]);
+      expect([state, r.stdout.includes("lifts")]).toEqual([state, false]);
+    }
   });
 
   test("--json is exactly the Worker's answer, parses against the contract, and stderr is empty", async () => {
