@@ -45,6 +45,15 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /me/jobs": 2,
   "GET /me/jobs/:id": 2,
   "GET /stats": 2,
+  // The person's submission, log and results (epic #2021 phase D3, #2024): a CLI key or the session
+  // cookie through `authMiddleware` (an OpenID Connect token is refused there: `compute.submit` is
+  // granted to no client yet), then, for a write, `cookieOriginGuard`, then the handler. Any account that
+  // is not the owner is answered `job_not_found`.
+  "POST /jobs": 3,
+  "POST /jobs/:id/finalize": 3,
+  "GET /jobs/:id/logs": 2,
+  "GET /jobs/:id/results": 2,
+  "POST /jobs/:id/results/renew": 3,
 };
 
 const tableOf = () => {
@@ -62,7 +71,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(20);
+    expect(computeRoutes.routes.length).toBe(33);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -74,6 +83,21 @@ describe("compute route inventory", () => {
       computeRoutes.routes.filter((r) => r.path === path).map((r) => r.handler.name || "handler");
     for (const path of ["/jobs/:id/cancel", "/jobs/:id/links"]) {
       expect(handlersOf(path)).toEqual(["authMiddleware", "cookieOriginGuard", "handler"]);
+    }
+    // The submission routes (phase D3): the same rule. Their handlers are named functions of `jobs.ts`.
+    for (const path of ["/jobs", "/jobs/:id/finalize", "/jobs/:id/results/renew"]) {
+      const names = computeRoutes.routes
+        .filter((r) => r.method === "POST" && r.path === path)
+        .map((r) => r.handler.name || "handler");
+      expect(names.slice(0, 2)).toEqual(["authMiddleware", "cookieOriginGuard"]);
+      expect(names).toHaveLength(3);
+    }
+    for (const path of ["/jobs/:id/logs", "/jobs/:id/results"]) {
+      const names = computeRoutes.routes
+        .filter((r) => r.method === "GET" && r.path === path)
+        .map((r) => r.handler.name || "handler");
+      expect(names[0]).toBe("authMiddleware");
+      expect(names).toHaveLength(2);
     }
     for (const path of [
       "/jobs/:id/bundle",
@@ -89,7 +113,15 @@ describe("compute route inventory", () => {
   test("every write is a POST, and every read route is a GET of the read table", () => {
     const reads = Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("GET "));
     expect(reads.sort()).toEqual(
-      ["GET /me", "GET /me/jobs", "GET /me/jobs/:id", "GET /me/usage", "GET /stats"].sort(),
+      [
+        "GET /me",
+        "GET /me/jobs",
+        "GET /me/jobs/:id",
+        "GET /me/usage",
+        "GET /stats",
+        "GET /jobs/:id/logs",
+        "GET /jobs/:id/results",
+      ].sort(),
     );
     for (const key of Object.keys(EXPECTED_ENTRIES)) {
       expect(key.startsWith("POST ") || key.startsWith("GET ")).toBe(true);
@@ -124,8 +156,12 @@ describe("compute route inventory", () => {
     // The two `oidcBearer` instances carry exactly the scope the table names, and no other.
     expect(oidcBearerScopes(PERSON_OIDC)).toEqual(["compute.read"]);
     expect(oidcBearerScopes(STATS_OIDC)).toEqual(["compute.stats"]);
-    // The table lists exactly the read routes, so a route cannot accept an OIDC token without a row here.
-    const reads = Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("GET "));
+    // The table lists exactly the `/me*` and `/stats` reads, so a route cannot accept an OIDC token
+    // without a row here. The job log and results are reads too, and are NOT in it: a key or the
+    // cookie only.
+    const reads = Object.keys(EXPECTED_ENTRIES).filter(
+      (k) => k.startsWith("GET ") && !k.startsWith("GET /jobs/"),
+    );
     expect(Object.keys(COMPUTE_OIDC_ROUTES).sort()).toEqual(reads.sort());
   });
 

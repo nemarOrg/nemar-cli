@@ -4,9 +4,12 @@
  *   POST /compute/jobs/:id/bundle             the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
- *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it
+ *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it (a job that had already
+ *                                             ended answers 200 with its state and `cancelled: false`)
  *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,
  *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
+ *   POST /compute/jobs, /jobs/:id/finalize, GET /jobs/:id/logs, /jobs/:id/results, POST /jobs/:id/results/renew
+ *                                             the person's submission, log and results (`./jobs.ts`, phase D3, #2024)
  *   POST /compute/observer                    the observer, with a token for one run (phase A7, #2012;
  *                                             no session: see `routes/callbacks/compute-observer.ts`)
  *   GET  /compute/me                          the caller's access, pools, limits and queue estimates
@@ -46,16 +49,18 @@ import {
   COMPUTE_ROUTE_SENTENCES,
   type ComputeRouteSentenceCode,
 } from "../../../../shared/compute-state.js";
-import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../../shared/contract/compute.js";
+import { COMPUTE_CANCEL_ENDED_OUTCOME } from "../../../../shared/contract/compute-submit.js";
+import { isSafeComputePath } from "../../../../shared/contract/compute.js";
 import { authMiddleware, cookieOriginGuard } from "../../middleware/auth.js";
-import { getJob } from "../../services/compute-jobs.js";
 import { requestComputeCancel } from "../../services/compute-lifecycle.js";
 import { mintResultLinks } from "../../services/compute-results.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
 import { readBoundedJsonObject } from "../callbacks/bounded-json.js";
 import { registerComputeJobCallbackRoutes } from "../callbacks/compute-job-callbacks.js";
 import { registerComputeObserverRoute } from "../callbacks/compute-observer.js";
+import { registerComputeJobRoutes } from "./jobs.js";
 import { registerComputeReadRoutes } from "./read.js";
+import { ownJob } from "./shared.js";
 
 /** The most bytes the links route reads: a cursor is at most 512 characters, which is 2 KiB at four bytes each. */
 export const LINKS_BODY_MAX_BYTES = 4096;
@@ -65,26 +70,29 @@ export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 registerComputeJobCallbackRoutes(computeRoutes);
 registerComputeObserverRoute(computeRoutes);
 registerComputeReadRoutes(computeRoutes);
+registerComputeJobRoutes(computeRoutes);
 
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },
   code: ComputeRouteSentenceCode,
 ) => c.json({ error: COMPUTE_ROUTE_SENTENCES[code], code }, COMPUTE_REFUSAL_STATUS[code]);
 
-/** The job a signed-in person owns, or null for any other reason (never says which). */
-async function ownJob(env: Bindings, id: string, userId: number) {
-  if (!COMPUTE_JOB_ID_RE.test(id)) return null;
-  const job = await getJob(env.DB, id);
-  return job && job.account_id === userId ? job : null;
-}
-
 computeRoutes.post("/jobs/:id/cancel", authMiddleware, cookieOriginGuard, async (c) => {
   const job = await ownJob(c.env, c.req.param("id"), c.get("user").id);
   if (!job) return refuse(c, "job_not_found");
   const result = await requestComputeCancel(c.env, job.id, "user");
-  if (!result.ok)
-    return refuse(c, result.outcome === "job_not_found" ? "job_not_found" : "bad_state");
-  return c.json({ ok: true, state: result.state, outcome: result.outcome });
+  if (!result.ok) {
+    if (result.outcome === "job_not_found") return refuse(c, "job_not_found");
+    // A job that had already finished or failed: answered, not refused (phase D3, #2024). It says what
+    // state the job is in and that this call cancelled nothing.
+    return c.json({
+      ok: true,
+      state: result.state,
+      outcome: COMPUTE_CANCEL_ENDED_OUTCOME,
+      cancelled: false,
+    });
+  }
+  return c.json({ ok: true, state: result.state, outcome: result.outcome, cancelled: true });
 });
 
 computeRoutes.post("/jobs/:id/links", authMiddleware, cookieOriginGuard, async (c) => {

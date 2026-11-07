@@ -727,7 +727,10 @@ describe("presignIncomingUploads", () => {
     // The checksum is signed with the URL and the client sends it as a header.
     const base64 = createHash("sha256").update(made.archive).digest("base64");
     expect(u?.headers).toEqual({ "x-amz-checksum-sha256": base64 });
-    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("host;x-amz-checksum-sha256");
+    // The archive's length is signed too (phase D3, #2024), but not handed back: the client sets it.
+    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-length;host;x-amz-checksum-sha256",
+    );
     const put = await fetch(u?.url ?? "", {
       method: "PUT",
       headers: u?.headers,
@@ -747,7 +750,9 @@ describe("presignIncomingUploads", () => {
     ]);
     if (!r.ok) throw new Error(r.code);
     expect(r.uploads[0]?.headers).toEqual({});
-    expect(new URL(r.uploads[0]?.url ?? "").searchParams.get("X-Amz-SignedHeaders")).toBe("host");
+    expect(new URL(r.uploads[0]?.url ?? "").searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-length;host",
+    );
   });
 
   test("can be asked again after the address has expired, and the new one works", async () => {

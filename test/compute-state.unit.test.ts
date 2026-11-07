@@ -407,11 +407,21 @@ describe("refusal codes", () => {
     ["results_incomplete", 409],
     // Review fixes of 2026-11-06: a transient fault reading the owner's policy; not `compute_disabled`.
     ["policy_unavailable", 503],
+    // Phase D3 (#2024): the dataset gate the pipeline already applies, and the submit routes' own words.
+    ["version_not_found", 404],
+    ["version_untagged", 422],
+    ["too_many_files", 422],
+    ["entry_not_in_bundle", 422],
+    ["bundle_incomplete", 409],
+    ["idempotency_conflict", 422],
+    ["logs_not_available", 404],
+    ["upload_expired", 409],
+    ["storage_unavailable", 503],
   ];
 
-  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one and the outputs route's", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one, the outputs route's and phase D3's nine", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(27);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(36);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
@@ -475,7 +485,7 @@ describe("the ACCESS report words (phase A8, #2013)", () => {
 });
 
 describe("failure codes", () => {
-  test("COMPUTE_FAILURE_CODES is the launcher's seven then the platform's other nine, in order", () => {
+  test("COMPUTE_FAILURE_CODES is the launcher's seven, the platform's other nine, then the submitter's, in order", () => {
     // Phase A5 checks a failure code read from launcher/result.json against this list.
     expect([...COMPUTE_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
@@ -494,7 +504,10 @@ describe("failure codes", () => {
       "result_verification_failed",
       "records_unavailable",
       "tapis_record_lost",
+      // The submitter's own (phase D3, #2024): an upload window that closed. Never a platform failure.
+      "upload_expired",
     ]);
+    expect(isPlatformFailure("upload_expired")).toBe(false);
   });
 
   test("an exit number is only ever asked for a launcher code", () => {

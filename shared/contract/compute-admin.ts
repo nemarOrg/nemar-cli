@@ -428,9 +428,6 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   recipe_not_automatic: 422,
   recipe_placeholder: 422,
   registry_drift: 409,
-  version_not_found: 404,
-  version_untagged: 422,
-  too_many_files: 422,
   create_failed: 502,
   run_failed: 500,
 } as const;

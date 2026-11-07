@@ -169,6 +169,11 @@ const SWEEP_WIRING: Record<
   // 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
   // exact production on its own, and reads no switch (a job that ran is owed its report).
   runAccessReportCron: "tick-prod-only",
+  // Epic #2021 phase D3 (#2024, ADR 0118): the release of abandoned uploads. It fails a person's job
+  // whose code bundle was never finalized within the hour (`upload_expired`) and releases its hold, so
+  // it moves the allocation ledger: it rides the 30-minute tick's production guard and is absent from
+  // DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and reads no switch.
+  runUploadExpiryCron: "tick-prod-only",
   // Epic #2005 phase A6 (#2011, ADR 0118): NEMAR's own pipelines. The daily dispatcher makes jobs that
   // take the allocation ledger's holds and reach a Tapis tenant, so it is production-only and absent
   // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and does nothing

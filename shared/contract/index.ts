@@ -40,3 +40,9 @@ export * from "./compute-terms.js";
 // A person's compute read routes and the partner's aggregate: bounds, error words and the OPEN response
 // schemas (epic #2021 phase D2).
 export * from "./compute-user.js";
+// A person's job submission and the code bundle it carries: the caps, the manifest rule, the request and
+// the OPEN responses (epic #2021 phase D3, #2024).
+export * from "./compute-bundle.js";
+export * from "./compute-submit.js";
+// The strict-by-design REQUESTS of the same routes (the Worker validates them as they come in).
+export * from "./compute-submit-request.js";

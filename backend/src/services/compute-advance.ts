@@ -88,10 +88,12 @@ export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
 /**
  * The `created` and `uploading` rows with no Tapis job, least recently examined first: the ones to be
  * submitted. A partner's reservation that has no Tapis job yet is the partner contract's, not this
- * tick's.
+ * tick's. A job still `uploading` with its records unwritten is the person's (the upload window) and the
+ * abandoned-upload release's, not this tick's: submitting it would only be refused (phase D3, #2024).
  */
 export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
+    AND NOT (state = 'uploading' AND records_written_at IS NULL)
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**

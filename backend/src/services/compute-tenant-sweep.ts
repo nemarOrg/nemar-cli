@@ -597,6 +597,7 @@ async function closeRow(
         facts?.slurm ?? null,
         `+${policy.retention.recordsYears} years`,
         0,
+        0,
       ),
     ...charge,
     db.prepare(STAMP_UNRESERVED_SQL).bind(id, to),

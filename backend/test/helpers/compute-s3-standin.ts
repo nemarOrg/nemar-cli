@@ -198,6 +198,9 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
         service: "s3",
         region: STANDIN_REGION,
         signQuery: true,
+        // `content-length` is signed only when the signer is told to sign every header (phase D3, #2024:
+        // a presigned PUT binds the archive's declared length); the request's own value is what is judged.
+        allHeaders: names.includes("content-length"),
         datetime: q.get("X-Amz-Date") as string,
       });
       const signed = await signer.sign();
@@ -236,6 +239,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
       secretAccessKey,
       service: "s3",
       region: STANDIN_REGION,
+      allHeaders: names.includes("content-length"),
       datetime: req.headers.get("x-amz-date") as string,
     });
     const header = (await signer.authHeader()) as string;

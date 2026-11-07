@@ -181,10 +181,16 @@ describe("cancel", () => {
     expect(row.charged_milli).toBeGreaterThanOrEqual(2000);
   });
 
-  test("a job that has ended is refused with `bad_state`", async () => {
+  test("a job that has ended is answered 200 with its state unchanged and `cancelled: false` (phase D3, #2024; it was a 409 `bad_state`)", async () => {
     const f = await finished();
     const res = await post(`/compute/jobs/${f.job.id}/cancel`, f.key);
-    expect([res.status, res.body.code]).toEqual([409, "bad_state"]);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      state: "finished",
+      outcome: "already_ended",
+      cancelled: false,
+    });
     expect((await reread(env(), f.job.id)).state).toBe("finished");
   });
 

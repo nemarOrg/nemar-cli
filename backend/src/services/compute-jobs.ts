@@ -69,6 +69,7 @@ import {
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
 import {
   COMPUTE_IMAGE_DIGEST_RE,
+  type ComputePolicy,
   type ComputePool,
   type JobSpec,
   JobSpecSchema,
@@ -76,6 +77,7 @@ import {
   PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
   type PartitionName,
+  canonicalJobSpec,
   computeSafeInt,
   datasetVersionWithoutTag,
   estimateSuMilli,
@@ -223,6 +225,20 @@ export interface SpecJobInput extends JobInputBase {
   /** Checked again here with the strict schema. */
   spec: JobSpec;
   holdBody?: undefined;
+  /**
+   * A person's submission (phase D3, #2024): the account's `compute_access` must be `active` IN THE HOLD'S
+   * OWN STATEMENT (a guard read beside the balance), so a grant that lands between a route's check and the
+   * hold cannot be spent by an account whose compute has ended. The freeze on the pools is the second line
+   * (ADR 0118, the D1 amendment, item 15), not the first. Refused as `no_compute_access` or `suspended`.
+   */
+  requireActiveAccess?: boolean;
+  /**
+   * A job with a code bundle is BORN `uploading` (the state is in the job's own INSERT, in the hold's
+   * batch), so no window exists in which a bundle job is `created` with a hold and no one owns its
+   * release: the abandoned-upload release (`runUploadExpiryCron`) sees it from the start. Ignored for a
+   * job with no bundle.
+   */
+  bornUploading?: boolean;
 }
 
 /** A partner's job: its hold body, as the exact text that was sent. */
@@ -281,6 +297,7 @@ export type PartnerHoldBody = z.infer<typeof PartnerHoldBodySchema>;
 
 export type CreateJobRefusal = Extract<
   ComputeRefusalCode,
+  | "no_compute_access"
   | "compute_disabled"
   | "invalid_spec"
   | "partition_not_offered"
@@ -369,6 +386,16 @@ export const TAPIS_REPORTING_STATES_SQL = sqlList(TAPIS_REPORTING_STATES);
 export const LIVE_JOBS_GUARD_SQL = `(SELECT COUNT(*) FROM compute_jobs
    WHERE account_id = ? AND state IN (${LIVE_STATES_SQL})) < ?`;
 
+/**
+ * The account's compute access is `active` and the account is not deleted: a boolean guard on the hold
+ * (plain `?` placeholder: the account). A person's submission carries it (`requireActiveAccess`).
+ */
+export const ACCESS_ACTIVE_GUARD_SQL = `(SELECT COUNT(*) FROM users
+   WHERE id = ? AND compute_access = 'active' AND deleted_at IS NULL) = 1`;
+
+/** The account's access state, read after a refusal to say which word it was. */
+export const ACCESS_STATE_SQL = "SELECT compute_access FROM users WHERE id = ?1";
+
 /** The hold row of a job exists: the one gate both of the batch's later statements wait behind. */
 const holdExists = (jobParam: number): string =>
   `EXISTS (SELECT 1 FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?${jobParam})`;
@@ -385,19 +412,19 @@ export const GATEWAY_USER_INSERT_SQL = `INSERT OR IGNORE INTO compute_gateway_us
  * The job's index row. `?1` id, `?2` account, `?3` Tapis owner, `?4` the pipelines' literal (or NULL,
  * and the pseudonym is then the account's), `?5` key, `?6` source, `?7` client, `?8` kind, `?9` app,
  * `?10` version, `?11` image digest, `?12` spec digest, `?13` partition, `?14` pool, `?15` nodes,
- * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce. It writes
+ * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce, `?22` the state it is born in (NULL for `created`, `uploading` for a bundle job). It writes
  * only if the hold row of this job exists (the EXISTS term: without it a refused hold would leave a
  * job), and links the hold's entry.
  */
 export const JOB_INSERT_SQL = `INSERT INTO compute_jobs
   (id, account_id, tapis_owner, gateway_user, idempotency_key, source, client_id, kind, app_id,
    app_version, image_digest, spec_digest, partition, pool, nodes, cores_per_node, memory_mb, gpus,
-   minutes, hold_ledger_id, held_milli, webhook_nonce)
+   minutes, hold_ledger_id, held_milli, webhook_nonce, state)
   SELECT ?1, ?2, ?3,
          COALESCE(?4, (SELECT g.gateway_user FROM compute_gateway_users g WHERE g.account_id = ?2)),
          ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
          (SELECT l.id FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?1),
-         ?20, ?21
+         ?20, ?21, COALESCE(?22, 'created')
    WHERE ${holdExists(1)}`;
 
 export async function getJob(db: D1Database, id: string): Promise<ComputeJobRow | null> {
@@ -499,6 +526,28 @@ const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(er
 
 const refusal = (code: CreateJobRefusal, field?: string): CreateJobResult =>
   field === undefined ? { ok: false, code } : { ok: false, code, field };
+
+/**
+ * The owner's per-job ceilings, for a job a PERSON runs: `partition_not_offered` when the partition has
+ * none, `over_job_limit` when a figure is over one. `createJob` applies it, and the submit route applies
+ * it first so that its answer comes before the bundle's, in the order the phase fixes.
+ */
+export function jobCeilingRefusal(
+  policy: ComputePolicy,
+  resources: Pick<HoldResources, "partition" | "nodes" | "cores" | "gpus" | "minutes">,
+): "partition_not_offered" | "over_job_limit" | null {
+  const ceiling = policy.ceilings[resources.partition];
+  if (!ceiling) return "partition_not_offered";
+  if (
+    resources.nodes > ceiling.maxNodes ||
+    resources.cores > ceiling.maxCoresPerNode ||
+    resources.gpus > ceiling.maxGpusPerNode ||
+    resources.minutes > ceiling.maxMinutes
+  ) {
+    return "over_job_limit";
+  }
+  return null;
+}
 
 // --- Records, after the commit ---------------------------------------------------------------------
 
@@ -610,7 +659,7 @@ export async function createJob(
       const path = parsed.error.issues[0]?.path ?? [];
       return refusal("invalid_spec", path.length > 0 ? fieldPath(path) : undefined);
     }
-    spec = parsed.data;
+    spec = canonicalJobSpec(parsed.data);
     specText = JSON.stringify(spec);
     resources = spec;
     appId = args.appId as string;
@@ -619,6 +668,10 @@ export async function createJob(
   }
   // The text is made ONCE; its digest is the job row's, and the same text is written after the commit.
   const specDigest = await sha256Hex(new TextEncoder().encode(specText));
+  const requireActive = input.source !== "partner" && input.requireActiveAccess === true;
+  if (requireActive && args.accountId === null) {
+    invalid("an access guard needs the account it guards");
+  }
   // A job that uploads something is complete only once its upload has been copied into the records
   // (`finalizeBundle`, or `finalizeSubmittedFiles` for a partner's own files): the bundle of a script,
   // and the files of a partner's batch job. An interactive session is its own record.
@@ -636,16 +689,8 @@ export async function createJob(
   // Before any hold exists: what the owner's policy and the launch itself allow.
   const policy = (await getPolicy(db)).policy;
   if (args.source !== "pipeline") {
-    const ceiling = policy.ceilings[resources.partition];
-    if (!ceiling) return refusal("partition_not_offered");
-    if (
-      resources.nodes > ceiling.maxNodes ||
-      resources.cores > ceiling.maxCoresPerNode ||
-      resources.gpus > ceiling.maxGpusPerNode ||
-      resources.minutes > ceiling.maxMinutes
-    ) {
-      return refusal("over_job_limit");
-    }
+    const over = jobCeilingRefusal(policy, resources);
+    if (over !== null) return refusal(over);
   }
   if (spec !== null) {
     const untagged = datasetVersionWithoutTag(spec.datasets);
@@ -694,6 +739,9 @@ export async function createJob(
     args.source !== "pipeline" && args.accountId !== null
       ? [{ sql: LIVE_JOBS_GUARD_SQL, binds: [args.accountId, policy.maxLiveJobsPerPerson] }]
       : [];
+  if (requireActive && args.accountId !== null) {
+    guards.push({ sql: ACCESS_ACTIVE_GUARD_SQL, binds: [args.accountId] });
+  }
   const hold = { poolId, budgetPoolId, amountMilli, jobId, extraGuards: guards };
 
   const statements = [...holdStatements(db, hold)];
@@ -727,6 +775,9 @@ export async function createJob(
         resources.minutes,
         amountMilli,
         crypto.randomUUID(),
+        input.source !== "partner" && input.bornUploading === true && spec?.bundle !== undefined
+          ? "uploading"
+          : null,
       ),
   );
 
@@ -746,6 +797,17 @@ export async function createJob(
     throw err;
   }
   if (changes === 0) {
+    // Compute access is the FIRST thing a person's submission asks, so a refusal for it is reported
+    // whatever else also failed (a frozen pool, a balance): read from the account after the fact.
+    if (requireActive && args.accountId !== null) {
+      const row = await db
+        .prepare(ACCESS_STATE_SQL)
+        .bind(args.accountId)
+        .first<{ compute_access: string | null }>();
+      if (row?.compute_access !== "active") {
+        return refusal(row?.compute_access === "suspended" ? "suspended" : "no_compute_access");
+      }
+    }
     const why = await holdRefusalReason(db, hold);
     return refusal(why === "guard_refused" ? "over_concurrency" : why);
   }
