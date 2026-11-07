@@ -8358,6 +8358,7 @@ emailPrefsCommand
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
         { key: "identifier_sweep", label: "Identifier sweep weekly report" },
         { key: "support_tickets", label: "Support tickets assigned to you" },
+        { key: "compute_requests", label: "Compute access requests" },
       ];
 
       for (const cat of categories) {
@@ -8383,6 +8384,7 @@ emailPrefsCommand
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
+  .option("--compute-requests <bool>", "Enable/disable compute access request notifications")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -8393,6 +8395,7 @@ emailPrefsCommand
       datasetAnonymity?: string;
       identifierSweep?: string;
       supportTickets?: string;
+      computeRequests?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8422,6 +8425,7 @@ emailPrefsCommand
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
         updates.support_tickets = val;
+        updates.compute_requests = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
@@ -8429,6 +8433,7 @@ emailPrefsCommand
         const anon = parseBool(options.datasetAnonymity);
         const sweep = parseBool(options.identifierSweep);
         const tickets = parseBool(options.supportTickets);
+        const compute = parseBool(options.computeRequests);
 
         if (
           ua === undefined &&
@@ -8436,7 +8441,8 @@ emailPrefsCommand
           ann === undefined &&
           anon === undefined &&
           sweep === undefined &&
-          tickets === undefined
+          tickets === undefined &&
+          compute === undefined
         ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
@@ -8445,6 +8451,7 @@ emailPrefsCommand
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --support-tickets <bool>       Support ticket notifications");
+          console.log("  --compute-requests <bool>      Compute access request notifications");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8455,6 +8462,7 @@ emailPrefsCommand
         if (anon !== undefined) updates.dataset_anonymity = anon;
         if (sweep !== undefined) updates.identifier_sweep = sweep;
         if (tickets !== undefined) updates.support_tickets = tickets;
+        if (compute !== undefined) updates.compute_requests = compute;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8480,6 +8488,9 @@ emailPrefsCommand
         );
         console.log(
           `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Compute requests:      ${result.compute_requests ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");

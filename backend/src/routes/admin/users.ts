@@ -1930,6 +1930,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     identifier_sweep: z.boolean().optional(),
     /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
     support_tickets: z.boolean().optional(),
+    /** Epic #2021 phase D1 (ADR 0118): a person asked for compute access. */
+    compute_requests: z.boolean().optional(),
   });
 
   /**
@@ -1981,6 +1983,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
       support_tickets: body.support_tickets ?? current.support_tickets,
+      compute_requests: body.compute_requests ?? current.compute_requests,
     };
 
     await db
