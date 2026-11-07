@@ -116,7 +116,7 @@ export const ACCOUNT_COPY = {
   // -------------------------------------------------------------------------
   "compute_access.section.title": "Compute access",
   "compute_access.section.lede":
-    "A separate grant from upload access. An admin reviews each request against export-control and local-jurisdiction rules and the purpose you state, and a grant opens a starting allocation of service units.",
+    "A separate grant from upload access. An admin reviews each request against export-control and local-jurisdiction rules and the purpose you state, and a grant lets you use compute within the limits an administrator sets.",
   "compute_access.state.none": "Not requested",
   "compute_access.state.requested": "Requested",
   "compute_access.state.active": "Active",
