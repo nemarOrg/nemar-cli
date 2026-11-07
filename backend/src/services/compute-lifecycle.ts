@@ -205,7 +205,7 @@ export const TERMINAL_TRANSITION_SQL = `UPDATE compute_jobs SET
     slurm_job_id = COALESCE(slurm_job_id, ?14),
     retention_until = datetime(COALESCE(?13, datetime('now')), ?15)
   WHERE id = ?1 AND state = ?2 AND (?16 = 0 OR tapis_uuid IS NULL)
-    AND (?17 = 0 OR records_written_at IS NULL)`;
+    AND (COALESCE(?17, 0) = 0 OR records_written_at IS NULL)`;
 
 /**
  * The gate of the settlement statement: this job row has taken the terminal state `?` and has not been
