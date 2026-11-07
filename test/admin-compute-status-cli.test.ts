@@ -297,6 +297,37 @@ describe("status", () => {
     expectNoSecrets(r);
   });
 
+  test("a cancel stuck for an hour and an abandoned copy are printed as attention counts, and a quiet Worker prints neither", async () => {
+    configuredWorker({});
+    const quiet = await runCli("owner", ["status"]);
+    expect(quiet.stdout).not.toContain("cancel_pending_failed");
+    expect(quiet.stdout).not.toContain("copy_abandoned");
+    const owner = db.query("SELECT id FROM users WHERE role = 'owner' LIMIT 1").get() as {
+      id: number;
+    };
+    const insert = (id: string, cols: string, vals: string) =>
+      db.run(
+        `INSERT INTO compute_jobs (id, account_id, source, kind, app_id, app_version, spec_digest, partition, pool, nodes, cores_per_node, minutes, ${cols})
+         VALUES (?, ?, 'cli', 'batch', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, ${vals})`,
+        [id, owner.id, "a".repeat(64)],
+      );
+    insert(
+      "job_0000000000000000000000d1",
+      "state, tapis_uuid, cancel_requested_at",
+      "'running', 'u-d1', datetime('now', '-3 hours')",
+    );
+    insert(
+      "job_0000000000000000000000d2",
+      "state, ended_at, settled_provisional_at",
+      "'finished', datetime('now', '-5 days'), datetime('now', '-5 days')",
+    );
+    const r = await runCli("owner", ["status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Attention: cancel_pending_failed 1");
+    expect(r.stdout).toContain("Attention: copy_abandoned 1");
+    expect(r.stdout).not.toContain("Attention: access_reports_failed");
+  });
+
   test("the runtime image: its digest when valid, a plain word when set to something that is not a pinned reference, and never the reference", async () => {
     const hex = "5".repeat(64);
     configuredWorker({

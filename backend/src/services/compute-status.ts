@@ -27,6 +27,7 @@
 
 import type { ComputeStatusResponse } from "../../../shared/contract/compute-admin";
 import type { Bindings } from "../types/bindings";
+import { CANCEL_PENDING_FAILED_SQL, COPY_ABANDONED_COUNT_SQL } from "./compute-lifecycle";
 import { pipelinesAccountId } from "./compute-pipeline";
 import { readRuntimeImage } from "./compute-runtime-image";
 import { computeS3 } from "./compute-s3";
@@ -88,6 +89,10 @@ const ATTENTION_COUNTS: ReadonlyArray<readonly [key: string, sql: string]> = [
     "access_reports_failed",
     "SELECT COUNT(*) AS n FROM compute_access_reports WHERE state = 'failed'",
   ],
+  // A recorded cancel still not carried out an hour after it was asked for (the cancel sweep retries it).
+  ["cancel_pending_failed", CANCEL_PENDING_FAILED_SQL],
+  // A terminal row whose copy of the launcher files was never made and no longer will be (flagged `mismatch`).
+  ["copy_abandoned", COPY_ABANDONED_COUNT_SQL],
 ];
 
 async function attentionCounts(db: D1Database): Promise<Record<string, number>> {

@@ -154,7 +154,7 @@ describe("an unconfigured Worker", () => {
       runtime_image: { set: false, valid: false, digest: null },
       prerequisites: NO_PREREQUISITES,
       reconciliation: { paused: true },
-      attention: { access_reports_failed: 0 },
+      attention: { access_reports_failed: 0, cancel_pending_failed: 0, copy_abandoned: 0 },
     });
     // The health call is the one request an address alone allows.
     expect(standin.log.map((r) => r.path)).toEqual(["/v3/jobs/healthcheck"]);
@@ -193,7 +193,7 @@ describe("an unconfigured Worker", () => {
         runtime_image: { set: false, valid: false, digest: null },
         prerequisites: NO_PREREQUISITES,
         reconciliation: { paused: true },
-        attention: { access_reports_failed: 0 },
+        attention: { access_reports_failed: 0, cancel_pending_failed: 0, copy_abandoned: 0 },
       });
       expect(standin.log).toHaveLength(0);
     } finally {
@@ -275,14 +275,68 @@ describe("what every launch needs besides the credential", () => {
     );
     expect(on.body.reconciliation).toEqual({ paused: false });
 
-    expect(on.body.attention).toEqual({ access_reports_failed: 0 });
+    expect(on.body.attention).toEqual({
+      access_reports_failed: 0,
+      cancel_pending_failed: 0,
+      copy_abandoned: 0,
+    });
     harness.db.run(
       `INSERT INTO compute_access_reports (job_id, state, attempts, last_error_code)
        VALUES ('job_00000000000000000000000a', 'failed', 3, 'outcome_unknown')`,
     );
     const failed = await status("admin", harness.env({ ENVIRONMENT: "production" } as never));
-    expect(failed.body.attention).toEqual({ access_reports_failed: 1 });
+    expect(failed.body.attention).toEqual({
+      access_reports_failed: 1,
+      cancel_pending_failed: 0,
+      copy_abandoned: 0,
+    });
     expect(ComputeStatusResponseSchema.safeParse(failed.body).success).toBe(true);
+  });
+});
+
+describe("attention: what waits on a person", () => {
+  const JOB_COLUMNS =
+    "id, account_id, source, kind, app_id, app_version, spec_digest, partition, pool, nodes, cores_per_node, minutes";
+  const insertJob = (id: string, extra: string, values: unknown[]) => {
+    const userId = harness.ownerId;
+    harness.db.run(
+      `INSERT INTO compute_jobs (${JOB_COLUMNS}, ${extra.split("=>")[0]})
+       VALUES (?, ?, 'cli', 'batch', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, ${extra.split("=>")[1]})`,
+      [id, userId, "a".repeat(64), ...values],
+    );
+  };
+
+  test("a cancel stuck for an hour and a copy abandoned are counted, through the route (MUTATION: drop either row)", async () => {
+    const on = harness.env({ ENVIRONMENT: "production", COMPUTE_ENABLED: "1" } as never);
+    // A live job whose cancel was asked for 90 minutes ago, and one asked for 10 minutes ago (not stuck yet).
+    insertJob(
+      "job_0000000000000000000000c1",
+      "state, tapis_uuid, cancel_requested_at=>'running', 'u-1', datetime('now', '-90 minutes')",
+      [],
+    );
+    insertJob(
+      "job_0000000000000000000000c2",
+      "state, tapis_uuid, cancel_requested_at=>'running', 'u-2', datetime('now', '-10 minutes')",
+      [],
+    );
+    // A finished job settled four days ago whose copy was never made, and one two days ago (still retried).
+    insertJob(
+      "job_0000000000000000000000c3",
+      "state, ended_at, settled_provisional_at=>'finished', datetime('now', '-4 days'), datetime('now', '-4 days')",
+      [],
+    );
+    insertJob(
+      "job_0000000000000000000000c4",
+      "state, ended_at, settled_provisional_at=>'finished', datetime('now', '-2 days'), datetime('now', '-2 days')",
+      [],
+    );
+    const res = await status("admin", on);
+    expect(res.body.attention).toEqual({
+      access_reports_failed: 0,
+      cancel_pending_failed: 1,
+      copy_abandoned: 1,
+    });
+    expect(ComputeStatusResponseSchema.safeParse(res.body).success).toBe(true);
   });
 });
 

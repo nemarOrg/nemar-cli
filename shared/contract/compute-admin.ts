@@ -324,6 +324,9 @@ export const ComputeStatusResponseSchema = z
      * Counts of things that need a person to look, by fixed word. Each value today is a count and zero
      * means nothing waits; the value is not narrowed, so a key the Worker adds in another shape (open,
      * like every response here) does not break a released CLI, which prints only the positive counts.
+     * Today: `access_reports_failed` (ACCESS reports that ended failed), `cancel_pending_failed` (a
+     * recorded cancel still not carried out an hour after it was asked for) and `copy_abandoned` (a
+     * terminal job whose launcher files were never copied and no longer will be).
      */
     attention: z.record(z.unknown()).optional(),
   })
