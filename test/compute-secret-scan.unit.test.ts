@@ -290,6 +290,7 @@ describe("in the packer: the scan sees the exact bytes and stops the archive", (
     };
     expect(packCollected(collect(), { entry: "run.py", inspect })).toEqual({
       ok: false,
+      reason: "inspected",
       inspected: 1,
     });
     expect(findings).toEqual([{ rule: "gitlab_token", where: "notes.txt", line: 2 }]);

@@ -534,9 +534,9 @@ const sha256Hex = (bytes: Uint8Array | string): string =>
 
 export type PackResult =
   | { ok: true; bundle: PackedBundle }
-  | { ok: false; refusal: PackRefusal }
+  | { ok: false; reason: "refused"; refusal: PackRefusal }
   /** The caller's inspection of the bytes found something: no archive was made. */
-  | { ok: false; inspected: number };
+  | { ok: false; reason: "inspected"; inspected: number };
 
 export interface PackOptions {
   entry?: string;
@@ -560,7 +560,7 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
     limits,
     ...(options.entry ? { entry: options.entry } : {}),
   });
-  if (early !== null) return { ok: false, refusal: early };
+  if (early !== null) return { ok: false, reason: "refused", refusal: early };
 
   const contents = new Map<string, Uint8Array>();
   const manifestFiles: PackedBundle["manifest"]["files"] = [];
@@ -572,10 +572,11 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
     contents.set(file.path, bytes);
     manifestFiles.push({ path: file.path, size: bytes.length, sha256: sha256Hex(bytes) });
   }
-  if (inspected > 0) return { ok: false, inspected };
+  if (inspected > 0) return { ok: false, reason: "inspected", inspected };
 
   const verdict = checkBundleManifest(manifestFiles, limits, options.entry);
-  if (!verdict.ok) return { ok: false, refusal: fromVerdict(verdict, manifestFiles) };
+  if (!verdict.ok)
+    return { ok: false, reason: "refused", refusal: fromVerdict(verdict, manifestFiles) };
 
   const blocks: Uint8Array[] = [];
   for (const item of tarItems(collected.files)) {
@@ -584,6 +585,7 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
       if (h === null) {
         return {
           ok: false,
+          reason: "refused",
           refusal: {
             code: "invalid_spec",
             message: "A folder path is too long for the archive.",
@@ -600,6 +602,7 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
     if (h === null) {
       return {
         ok: false,
+        reason: "refused",
         refusal: {
           code: "invalid_spec",
           message: "A file path is too long for the archive.",
@@ -622,6 +625,7 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
   if (archive.length > limits.maxTotalBytes) {
     return {
       ok: false,
+      reason: "refused",
       refusal: {
         code: "bundle_too_large",
         message: COMPUTE_SUBMIT_SENTENCES.bundle_too_large,

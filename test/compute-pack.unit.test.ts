@@ -282,7 +282,11 @@ describe("the Worker's caps, refused here with the Worker's word", () => {
     writeFileSync(join(dir, "run.py"), "1");
     const limits = { maxTotalBytes: 1600, maxFiles: 10, maxFileBytes: 2000 };
     const r = packCollected(collect(dir), { entry: "run.py", limits });
-    expect(r).toMatchObject({ ok: false, refusal: { code: "bundle_too_large" } });
+    expect(r).toMatchObject({
+      ok: false,
+      reason: "refused",
+      refusal: { code: "bundle_too_large" },
+    });
   });
 });
 
@@ -425,7 +429,7 @@ describe("Python's tarfile (3.9) reads the archive back", () => {
   test("a single segment too long for ustar is refused naming the path", () => {
     const dir = folder({ "run.py": "1", [`d/${"x".repeat(120)}.py`]: "1" });
     const r = packCollected(collect(dir), { entry: "run.py" });
-    expect(r).toMatchObject({ ok: false, refusal: { code: "invalid_spec" } });
+    expect(r).toMatchObject({ ok: false, reason: "refused", refusal: { code: "invalid_spec" } });
   });
 
   test("a file that is read is the file that is packed: the inspector sees the exact bytes", () => {
@@ -442,7 +446,7 @@ describe("Python's tarfile (3.9) reads the archive back", () => {
       ["a.txt", "needle"],
       ["run.py", "print(1)\n"],
     ]);
-    expect(r).toEqual({ ok: false, inspected: 1 });
+    expect(r).toEqual({ ok: false, reason: "inspected", inspected: 1 });
   });
 });
 

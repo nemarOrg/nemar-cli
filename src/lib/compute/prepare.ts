@@ -376,7 +376,7 @@ function prepare(input: PrepareInput): PrepareResult {
       },
     });
     if (!result.ok) {
-      if ("inspected" in result) return { ok: false, refused: secretRefusal(findings) };
+      if (result.reason === "inspected") return { ok: false, refused: secretRefusal(findings) };
       return { ok: false, refused: describePackRefusal(result.refusal) };
     }
     packed = result.bundle;
