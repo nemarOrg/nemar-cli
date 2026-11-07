@@ -53,6 +53,7 @@
 import type { Bindings } from "../types/bindings.js";
 import { LIVE_STATES_SQL } from "./compute-jobs.js";
 import {
+  type AdvanceResult,
   CLEAR_NONCES_SQL,
   MARK_COPY_ABANDONED_SQL,
   STAMP_CANCEL_ATTEMPT_SQL,
@@ -129,8 +130,10 @@ export interface ComputeTickResult {
   unreachable: number;
   /** Rows whose Tapis status is a word NEMAR does not know: nothing is refreshed, and the row goes `unreported` after a day. */
   unknown_status: number;
-  /** Terminal rows whose settlement or copy was repaired. */
+  /** Terminal rows whose owed settlement and copy are now both done. */
   repaired: number;
+  /** Terminal rows a repair was attempted for and something is still owed (the next tick tries again). */
+  repair_attempted: number;
   /** Webhook nonces cleared. */
   cleared: number;
   /**
@@ -151,14 +154,15 @@ const emptyResult = (): ComputeTickResult => ({
   unreachable: 0,
   unknown_status: 0,
   repaired: 0,
+  repair_attempted: 0,
   cleared: 0,
   copy_abandoned: 0,
   errors: [],
   errorClass: null,
 });
 
-function tally(r: ComputeTickResult, outcome: string): void {
-  switch (outcome) {
+function tally(r: ComputeTickResult, answer: AdvanceResult): void {
+  switch (answer.outcome) {
     case "submitted":
       r.submitted++;
       break;
@@ -172,7 +176,9 @@ function tally(r: ComputeTickResult, outcome: string): void {
       r.unknown_status++;
       break;
     case "terminal":
-      r.repaired++;
+      // Only what a repair really finished is a repair; an attempt that left something owed is counted apart.
+      if (answer.repair === "finished") r.repaired++;
+      else if (answer.repair === "incomplete") r.repair_attempted++;
       break;
     case "advanced":
     case "refreshed":
@@ -223,7 +229,7 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
     for (const id of ids) {
       try {
         const answer = await advanceComputeJob(env, id, { read: TICK_READ });
-        tally(r, answer.outcome);
+        tally(r, answer);
       } catch (err) {
         // The job by its id, the failure by its class: never its message.
         r.errors.push("row_failed");
@@ -238,16 +244,25 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
   return r;
 }
 
+/** How loud a tick's line is: `warn` for a fault that mends itself or waits (Tapis unreachable, an unknown status, a repair that did not finish), `error` for one that needs a person. */
+export type TickLogLevel = "info" | "warn" | "error";
+
 /**
- * The tick's one log line, or null when it changed nothing and nothing failed, so a tick that found
- * the same jobs waiting says nothing. Counts and fixed words only. Error level when anything failed.
+ * The tick's one log line, or null when it changed nothing and nothing is wrong, so a tick that found the
+ * same jobs waiting says nothing. Counts and fixed words only: never a job id, a token or a message.
+ *  - `error`: a row's step failed (`errors`), or a terminal row's copy was abandoned (`copy_abandoned`);
+ *  - `warn`: Tapis could not be read for a row (`unreachable`), a status NEMAR does not know
+ *    (`unknown_status`), or a repair that was tried and left something owed (`repair_attempted`). A tick
+ *    where Tapis is unreachable for EVERY row used to log nothing at all;
+ *  - `info`: the tick moved something (submitted, advanced, repaired, cleared a nonce).
  */
 export function computeAdvanceLogLine(
   r: ComputeTickResult,
-): { level: "info" | "error"; line: string } | null {
-  const failed = r.errors.length > 0 || r.copy_abandoned > 0;
-  const acted = r.submitted + r.advanced + r.repaired + r.cleared + r.unknown_status;
-  if (!failed && acted === 0) return null;
+): { level: TickLogLevel; line: string } | null {
+  const error = r.errors.length > 0 || r.copy_abandoned > 0;
+  const warn = r.unreachable > 0 || r.unknown_status > 0 || r.repair_attempted > 0;
+  const acted = r.submitted + r.advanced + r.repaired + r.cleared;
+  if (!error && !warn && acted === 0) return null;
   const line = [
     "[compute-advance]",
     `examined=${r.examined}`,
@@ -257,6 +272,7 @@ export function computeAdvanceLogLine(
     `unreachable=${r.unreachable}`,
     `unknown_status=${r.unknown_status}`,
     `repaired=${r.repaired}`,
+    `repair_attempted=${r.repair_attempted}`,
     `nonces_cleared=${r.cleared}`,
     `copy_abandoned=${r.copy_abandoned}`,
     `errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}`,
@@ -264,7 +280,7 @@ export function computeAdvanceLogLine(
   ]
     .filter((part) => part !== "")
     .join(" ");
-  return { level: failed ? "error" : "info", line };
+  return { level: error ? "error" : warn ? "warn" : "info", line };
 }
 
 export interface CancelSweepResult {

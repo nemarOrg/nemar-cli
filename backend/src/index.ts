@@ -1215,6 +1215,7 @@ export default {
             .then((r) => {
               const log = r ? computeAdvanceLogLine(r) : null;
               if (log?.level === "error") console.error(log.line);
+              else if (log?.level === "warn") console.warn(log.line);
               else if (log) console.log(log.line);
             })
             .catch((err) =>

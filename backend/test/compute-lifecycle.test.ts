@@ -2422,6 +2422,49 @@ describe("the 30-minute tick", () => {
     expect(await countCopyAbandoned(fx.env().DB)).toBe(1);
   });
 
+  test("a tick where Tapis cannot be read for ANY row still logs, at warn level (MUTATION: leave the line null)", async () => {
+    const s = await submittedJob();
+    await drive(s.env, s.made.job.id, s.uuid, "RUNNING");
+    fx.tapis.down();
+    const tick = await runComputeAdvanceCron(s.env);
+    fx.tapis.up();
+    expect(tick).toMatchObject({ examined: 1, unreachable: 1, advanced: 0, repaired: 0 });
+    const log = tick ? computeAdvanceLogLine(tick) : null;
+    expect(log?.level).toBe("warn");
+    expect(log?.line).toContain("unreachable=1");
+  });
+
+  test("`repaired` counts what a repair FINISHED: a copy that fails is `repair_attempted`, and the repair that works later is `repaired` (MUTATION: count every attempt)", async () => {
+    const s = await submittedJob();
+    await finishJob(s);
+    const id = s.made.job.id;
+    await s.env.DB.prepare("UPDATE compute_jobs SET result_records_at = NULL WHERE id = ?")
+      .bind(id)
+      .run();
+    // The copy was never made (nothing is in the records), and the bucket refuses every write.
+    for (const prefix of [`records/${id}/`, `logs/${id}/`]) {
+      const listed = await fx.harness.records.list({ prefix });
+      if (listed.objects.length > 0) {
+        await fx.harness.records.delete(listed.objects.map((o) => o.key));
+      }
+    }
+    const refusing = new Proxy(s.env.COMPUTE_RECORDS as R2Bucket, {
+      get(target, prop) {
+        if (prop === "put") return () => Promise.reject(new Error("storage fault"));
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const failing = { ...s.env, COMPUTE_RECORDS: refusing } as Bindings;
+    const first = await runComputeAdvanceCron(failing);
+    expect(first).toMatchObject({ repaired: 0, repair_attempted: 1, errors: [] });
+    expect((await reread(s.env, id)).result_records_at).toBeNull();
+    expect((first ? computeAdvanceLogLine(first) : null)?.level).toBe("warn");
+    const second = await runComputeAdvanceCron(s.env);
+    expect(second).toMatchObject({ repaired: 1, repair_attempted: 0 });
+    expect((await reread(s.env, id)).result_records_at).not.toBeNull();
+  });
+
   test("the webhook nonce is cleared one day after the job is terminal, and not before", async () => {
     const s = await submittedJob();
     await finishJob(s);

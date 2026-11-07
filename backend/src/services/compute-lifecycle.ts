@@ -1771,6 +1771,12 @@ export type AdvanceOutcome =
 export interface AdvanceResult {
   outcome: AdvanceOutcome;
   job: ComputeJobRow | null;
+  /**
+   * Set when a terminal row was owed a settlement or a copy: `finished` when everything owed is now done,
+   * `incomplete` when an attempt was made and something is still owed. Absent when nothing was owed. The
+   * tick counts the two apart, so an attempt that did not work is not reported as a repair.
+   */
+  repair?: "finished" | "incomplete";
   /** Set when a submit was attempted: what it answered. */
   submit?: SubmitOutcome;
 }
@@ -1912,7 +1918,10 @@ async function repairTerminal(
     }
     current = (await getJob(env.DB, current.id)) ?? current;
   }
-  return { outcome: "terminal", job: current };
+  const done =
+    (!needsSettlement || current.settled_provisional_at !== null) &&
+    (!needsCopy || current.result_records_at !== null);
+  return { outcome: "terminal", job: current, repair: done ? "finished" : "incomplete" };
 }
 
 // --- What an administrator is shown ----------------------------------------------------------------
