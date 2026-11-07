@@ -146,28 +146,49 @@ export const PIPELINE_ROW_COLUMNS = `d.dataset_id, d.status, d.visibility, d.ano
 /** One dataset's row regardless of eligibility, for the re-check. */
 export const PIPELINE_ROW_BY_ID_SQL = `SELECT ${PIPELINE_ROW_COLUMNS} FROM datasets d WHERE d.dataset_id = ?`;
 
-/** The pure re-check over a row. True only when every term holds. */
-export function isPipelineEligible(row: PipelineRow | null | undefined): boolean {
-  return !!row && PIPELINE_TERMS.every((t) => t.holds(row));
+/**
+ * The terms a PERSON's job does not need: the modality is a property of NEMAR's own recipes (they are
+ * EEG recipes), not a privacy rule, so a person may read a dataset of any modality. Every other term is
+ * the privacy and publication gate (active, public, NOT anonymous, first published, not withdrawn, not
+ * tombstoned, has a version, a real dataset) and a person's job meets all of them: the rule is this
+ * file's one list, with exactly this one term set aside (phase D3, #2024).
+ */
+export const PERSON_EXCEPT_TERMS: readonly PipelineTermId[] = ["eeg"];
+
+/** The pure re-check over a row. True only when every term (except those named) holds. */
+export function isPipelineEligible(
+  row: PipelineRow | null | undefined,
+  except: readonly PipelineTermId[] = [],
+): boolean {
+  return !!row && PIPELINE_TERMS.filter((t) => !except.includes(t.id)).every((t) => t.holds(row));
 }
 
 /**
  * The ids of the terms a row fails. Empty means eligible. A row that is not there fails every term:
  * a dataset that does not exist is blocked by all of them, and `active` is the first the answer names.
  */
-export function failedPipelineTerms(row: PipelineRow | null | undefined): PipelineTermId[] {
-  if (!row) return PIPELINE_TERMS.map((t) => t.id);
-  return PIPELINE_TERMS.filter((t) => !t.holds(row)).map((t) => t.id);
+export function failedPipelineTerms(
+  row: PipelineRow | null | undefined,
+  except: readonly PipelineTermId[] = [],
+): PipelineTermId[] {
+  const terms = PIPELINE_TERMS.filter((t) => !except.includes(t.id));
+  if (!row) return terms.map((t) => t.id);
+  return terms.filter((t) => !t.holds(row)).map((t) => t.id);
 }
 
 /** Load one row and re-check it: the SQL selects, the TypeScript confirms. */
 export async function loadPipelineRow(
   db: D1Database,
   datasetId: string,
+  except: readonly PipelineTermId[] = [],
 ): Promise<{ row: PipelineRow | null; eligible: boolean; blockedBy: PipelineTermId[] }> {
   const row =
     (await db.prepare(PIPELINE_ROW_BY_ID_SQL).bind(datasetId).first<PipelineRow>()) ?? null;
-  return { row, eligible: isPipelineEligible(row), blockedBy: failedPipelineTerms(row) };
+  return {
+    row,
+    eligible: isPipelineEligible(row, except),
+    blockedBy: failedPipelineTerms(row, except),
+  };
 }
 
 // --- The version a run reads ----------------------------------------------------------------------------

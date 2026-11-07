@@ -515,7 +515,13 @@ function manifestText(
   return JSON.stringify({
     job_id: jobId,
     archive,
-    files: files.map((f) => ({ path: f.path, size: f.size })),
+    // A file's digest is recorded when the packer gave one (a person's bundle) and is the packer's claim:
+    // the Worker does not hash a file inside the archive. A partner's files carry none.
+    files: files.map((f) =>
+      f.sha256 === undefined
+        ? { path: f.path, size: f.size }
+        : { path: f.path, size: f.size, sha256: f.sha256 },
+    ),
   });
 }
 
@@ -571,7 +577,7 @@ export type IncomingUploadsResult =
  * never made, and one whose records are written: never after the job is complete. `options.now` is the
  * moment to sign as of, which only a test sets (to make an address that has already expired).
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (the per-file upload) wires it.
+// Called by `POST /compute/jobs` for a job with a code bundle (phase D3, #2024); the partner's per-file form is phase D4's.
 export async function presignIncomingUploads(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -641,8 +647,8 @@ export type FinalizeResult = { ok: true; replayed: boolean; files: number } | Re
 export interface BundleFinalizeInput {
   /** The archive's own SHA-256 and size, which must be those the job was made with. */
   archive: { sha256: string; size: number };
-  /** The files inside the archive, as the packer lists them. */
-  files: Array<{ path: string; size: number }>;
+  /** The files inside the archive, as the packer lists them; a digest is recorded as given, never re-checked. */
+  files: Array<{ path: string; size: number; sha256?: string }>;
 }
 
 /** Whether the manifest already recorded is the one this request would write: a replay, or not. */
@@ -701,7 +707,7 @@ async function completeRecords(
  * never overwritten. A copy the store refuses throws `ComputeS3Error` (`copy_failed`): the caller
  * answers 503 and asks again.
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (a code bundle's finalize) wires it.
+// Called by `POST /compute/jobs/:id/finalize` (phase D3, #2024).
 export async function finalizeBundle(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -729,7 +735,7 @@ export async function finalizeBundle(
     return refuse("invalid_spec", "archive");
   }
   if (archive.size > copyableLimit(limits.maxTotalBytes)) return refuse("bundle_too_large");
-  const checked = checkFiles(input.files, limits, { maxCount: limits.maxFiles, digest: false });
+  const checked = checkFiles(input.files, limits, { maxCount: limits.maxFiles, digest: true });
   if (!checked.ok) return checked;
   const text = manifestText(jobId, { sha256: archive.sha256, size: archive.size }, checked.files);
 

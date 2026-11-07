@@ -177,7 +177,8 @@ export type PipelineRefusal =
   | "registry_drift"
   | "run_failed"
   | "create_failed"
-  | CreateJobRefusal;
+  // A pipeline job asks for no compute access (a service account, a platform pool).
+  | Exclude<CreateJobRefusal, "no_compute_access">;
 
 /** What the cron or an administrator is acting as. A cron may dispatch only an automatic recipe. */
 export type PipelineActor = { kind: "admin"; userId: number } | { kind: "cron" };
@@ -359,7 +360,7 @@ export function recipeEstimateMilli(recipe: ComputeRecipe): number {
 
 // --- What a run needs of the dataset ------------------------------------------------------------------
 
-type ResolvedRun =
+export type ResolvedRun =
   | { ok: true; tag: string }
   | {
       ok: false;
@@ -370,14 +371,17 @@ type ResolvedRun =
 /**
  * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
  * run cannot disagree: the eligibility predicate over the row (ADR 0065), the version row (the newest,
- * or the one named) with a data-plane tag, and the manifest bound.
+ * or the one named) with a data-plane tag, and the manifest bound. A PERSON's submission (phase D3,
+ * #2024) calls the same function, so the two front doors cannot disagree about which datasets a job may
+ * read; it sets aside only the terms in `PERSON_EXCEPT_TERMS` (the pipelines' modality).
  */
-async function resolveRun(
+export async function resolveRun(
   db: D1Database,
   datasetId: string,
   wanted: string | undefined,
+  except: readonly PipelineTermId[] = [],
 ): Promise<ResolvedRun> {
-  const loaded = await loadPipelineRow(db, datasetId);
+  const loaded = await loadPipelineRow(db, datasetId, except);
   if (!loaded.eligible) {
     return { ok: false, code: "dataset_not_eligible", extra: { blockedBy: loaded.blockedBy } };
   }
@@ -582,8 +586,10 @@ export async function dispatchPipelineJob(
     return fail("create_failed", datasetId, { version: tag, stampId });
   }
   if (!created.ok) {
-    await finishStamp(db, stampId, "refused", created.code);
-    return fail(created.code, datasetId, {
+    // `no_compute_access` is a person's refusal (`requireActiveAccess`), which no pipeline job asks for.
+    const code = created.code === "no_compute_access" ? "create_failed" : created.code;
+    await finishStamp(db, stampId, "refused", code);
+    return fail(code, datasetId, {
       version: tag,
       stampId,
       ...(created.field === undefined ? {} : { field: created.field }),

@@ -69,6 +69,7 @@ import {
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
 import {
   COMPUTE_IMAGE_DIGEST_RE,
+  type ComputePolicy,
   type ComputePool,
   type JobSpec,
   JobSpecSchema,
@@ -223,6 +224,13 @@ export interface SpecJobInput extends JobInputBase {
   /** Checked again here with the strict schema. */
   spec: JobSpec;
   holdBody?: undefined;
+  /**
+   * A person's submission (phase D3, #2024): the account's `compute_access` must be `active` IN THE HOLD'S
+   * OWN STATEMENT (a guard read beside the balance), so a grant that lands between a route's check and the
+   * hold cannot be spent by an account whose compute has ended. The freeze on the pools is the second line
+   * (ADR 0118, the D1 amendment, item 15), not the first. Refused as `no_compute_access` or `suspended`.
+   */
+  requireActiveAccess?: boolean;
 }
 
 /** A partner's job: its hold body, as the exact text that was sent. */
@@ -281,6 +289,7 @@ export type PartnerHoldBody = z.infer<typeof PartnerHoldBodySchema>;
 
 export type CreateJobRefusal = Extract<
   ComputeRefusalCode,
+  | "no_compute_access"
   | "compute_disabled"
   | "invalid_spec"
   | "partition_not_offered"
@@ -368,6 +377,16 @@ export const TAPIS_REPORTING_STATES_SQL = sqlList(TAPIS_REPORTING_STATES);
  */
 export const LIVE_JOBS_GUARD_SQL = `(SELECT COUNT(*) FROM compute_jobs
    WHERE account_id = ? AND state IN (${LIVE_STATES_SQL})) < ?`;
+
+/**
+ * The account's compute access is `active` and the account is not deleted: a boolean guard on the hold
+ * (plain `?` placeholder: the account). A person's submission carries it (`requireActiveAccess`).
+ */
+export const ACCESS_ACTIVE_GUARD_SQL = `(SELECT COUNT(*) FROM users
+   WHERE id = ? AND compute_access = 'active' AND deleted_at IS NULL) = 1`;
+
+/** The account's access state, read after a refusal to say which word it was. */
+export const ACCESS_STATE_SQL = "SELECT compute_access FROM users WHERE id = ?1";
 
 /** The hold row of a job exists: the one gate both of the batch's later statements wait behind. */
 const holdExists = (jobParam: number): string =>
@@ -500,6 +519,37 @@ const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(er
 const refusal = (code: CreateJobRefusal, field?: string): CreateJobResult =>
   field === undefined ? { ok: false, code } : { ok: false, code, field };
 
+/**
+ * The SHA-256, in lowercase hex, of the exact bytes `JSON.stringify(spec)` gives for a VALIDATED
+ * specification: the job row's `spec_digest` and the request hash of the person's idempotency key. Both
+ * `createJob` and a route that looks a key up before it creates anything call this one function.
+ */
+export async function specDigestOf(spec: JobSpec): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(JSON.stringify(spec)));
+}
+
+/**
+ * The owner's per-job ceilings, for a job a PERSON runs: `partition_not_offered` when the partition has
+ * none, `over_job_limit` when a figure is over one. `createJob` applies it, and the submit route applies
+ * it first so that its answer comes before the bundle's, in the order the phase fixes.
+ */
+export function jobCeilingRefusal(
+  policy: ComputePolicy,
+  resources: Pick<HoldResources, "partition" | "nodes" | "cores" | "gpus" | "minutes">,
+): "partition_not_offered" | "over_job_limit" | null {
+  const ceiling = policy.ceilings[resources.partition];
+  if (!ceiling) return "partition_not_offered";
+  if (
+    resources.nodes > ceiling.maxNodes ||
+    resources.cores > ceiling.maxCoresPerNode ||
+    resources.gpus > ceiling.maxGpusPerNode ||
+    resources.minutes > ceiling.maxMinutes
+  ) {
+    return "over_job_limit";
+  }
+  return null;
+}
+
 // --- Records, after the commit ---------------------------------------------------------------------
 
 /**
@@ -619,6 +669,10 @@ export async function createJob(
   }
   // The text is made ONCE; its digest is the job row's, and the same text is written after the commit.
   const specDigest = await sha256Hex(new TextEncoder().encode(specText));
+  const requireActive = input.source !== "partner" && input.requireActiveAccess === true;
+  if (requireActive && args.accountId === null) {
+    invalid("an access guard needs the account it guards");
+  }
   // A job that uploads something is complete only once its upload has been copied into the records
   // (`finalizeBundle`, or `finalizeSubmittedFiles` for a partner's own files): the bundle of a script,
   // and the files of a partner's batch job. An interactive session is its own record.
@@ -636,16 +690,8 @@ export async function createJob(
   // Before any hold exists: what the owner's policy and the launch itself allow.
   const policy = (await getPolicy(db)).policy;
   if (args.source !== "pipeline") {
-    const ceiling = policy.ceilings[resources.partition];
-    if (!ceiling) return refusal("partition_not_offered");
-    if (
-      resources.nodes > ceiling.maxNodes ||
-      resources.cores > ceiling.maxCoresPerNode ||
-      resources.gpus > ceiling.maxGpusPerNode ||
-      resources.minutes > ceiling.maxMinutes
-    ) {
-      return refusal("over_job_limit");
-    }
+    const over = jobCeilingRefusal(policy, resources);
+    if (over !== null) return refusal(over);
   }
   if (spec !== null) {
     const untagged = datasetVersionWithoutTag(spec.datasets);
@@ -694,6 +740,9 @@ export async function createJob(
     args.source !== "pipeline" && args.accountId !== null
       ? [{ sql: LIVE_JOBS_GUARD_SQL, binds: [args.accountId, policy.maxLiveJobsPerPerson] }]
       : [];
+  if (requireActive && args.accountId !== null) {
+    guards.push({ sql: ACCESS_ACTIVE_GUARD_SQL, binds: [args.accountId] });
+  }
   const hold = { poolId, budgetPoolId, amountMilli, jobId, extraGuards: guards };
 
   const statements = [...holdStatements(db, hold)];
@@ -746,6 +795,17 @@ export async function createJob(
     throw err;
   }
   if (changes === 0) {
+    // Compute access is the FIRST thing a person's submission asks, so a refusal for it is reported
+    // whatever else also failed (a frozen pool, a balance): read from the account after the fact.
+    if (requireActive && args.accountId !== null) {
+      const row = await db
+        .prepare(ACCESS_STATE_SQL)
+        .bind(args.accountId)
+        .first<{ compute_access: string | null }>();
+      if (row?.compute_access !== "active") {
+        return refusal(row?.compute_access === "suspended" ? "suspended" : "no_compute_access");
+      }
+    }
     const why = await holdRefusalReason(db, hold);
     return refusal(why === "guard_refused" ? "over_concurrency" : why);
   }
