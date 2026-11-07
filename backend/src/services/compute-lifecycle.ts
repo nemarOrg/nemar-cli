@@ -1205,9 +1205,25 @@ export async function recordOrphan(env: Bindings, jobId: string, uuid: string): 
 }
 
 /**
+ * Whether a Tapis job is confirmed gone: a read of it answers 404. Anything else (it answers, or the read
+ * itself fails) is not a confirmation.
+ */
+async function tapisRecordGone(ctx: TapisContext, uuid: string): Promise<boolean> {
+  try {
+    await getTapisJob(ctx, uuid);
+    return false;
+  } catch (err) {
+    return err instanceof TapisError && err.kind === "not_found";
+  }
+}
+
+/**
  * Cancel a Tapis job NEMAR made that no row owns, and clear the record of it once that is known to have
- * worked: the cancel was accepted, Tapis says the job is already over (409) or says there is no such job.
- * Any other failure leaves `orphan_tapis_uuid` set, and the next tick tries again. True when cleared.
+ * worked: the cancel was accepted, Tapis says the job is already over (409), or says there is no such job
+ * (404) AND a read of the job confirms it. Any other answer, a 400 or a 403 included, leaves
+ * `orphan_tapis_uuid` set and the next tick tries again: it is the tenant sweep's rule, and an orphan that
+ * is still running spends the allocation (review fixes of 2026-11-06; the first version cleared the
+ * record on any `rejected`). True when cleared.
  */
 async function cancelOrphan(
   env: Bindings,
@@ -1218,9 +1234,10 @@ async function cancelOrphan(
   try {
     await cancelJob(ctx, uuid);
   } catch (err) {
-    const settled =
-      err instanceof TapisError && (err.kind === "rejected" || err.kind === "not_found");
-    if (!settled) {
+    const over = err instanceof TapisError && err.status === 409;
+    const gone =
+      err instanceof TapisError && err.kind === "not_found" && (await tapisRecordGone(ctx, uuid));
+    if (!over && !gone) {
       console.warn(`[compute-lifecycle] orphan_cancel_failed job=${jobId} kind=${tapisWord(err)}`);
       return false;
     }

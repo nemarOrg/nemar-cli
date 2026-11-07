@@ -183,6 +183,58 @@ describe("a row has one orphan slot, and a second orphan is not lost silently", 
   });
 });
 
+describe("an orphan's cancel clears the record only when the orphan is known to be over", () => {
+  /** A row that owes the cancel of a Tapis job NEMAR made, which is a REAL job in the stand-in unless `uuid` says otherwise. */
+  async function orphanOf(uuid?: string) {
+    const made = await makeJob(fx);
+    expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+      ok: true,
+      outcome: "submitted",
+    });
+    const real = (await reread(made.env, made.job.id)).tapis_uuid as string;
+    // The row ends elsewhere; the Tapis job it made is the orphan.
+    fx.harness.db.run("UPDATE compute_jobs SET orphan_tapis_uuid = ? WHERE id = ?", [
+      uuid ?? real,
+      made.job.id,
+    ]);
+    return { made, real };
+  }
+  const orphanOn = (id: string) =>
+    (
+      fx.harness.db.query("SELECT orphan_tapis_uuid FROM compute_jobs WHERE id = ?").get(id) as {
+        orphan_tapis_uuid: string | null;
+      }
+    ).orphan_tapis_uuid;
+
+  test("a 400 or a 403 is a failure: the orphan stays marked, asked again, and counted (MUTATION: clear on any `rejected`)", async () => {
+    for (const status of [400, 403]) {
+      const { made, real } = await orphanOf();
+      fx.tapis.fail("POST /v3/jobs/:uuid/cancel", status);
+      await sweepComputeCancellations(env());
+      expect([status, orphanOn(made.job.id)]).toEqual([status, real]);
+    }
+  });
+
+  test("a 409 means it is over: the record is cleared", async () => {
+    const { made } = await orphanOf();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 409);
+    await sweepComputeCancellations(env());
+    expect(orphanOn(made.job.id)).toBeNull();
+  });
+
+  test("a 404 clears the record only when a read of the job confirms it is gone", async () => {
+    // Gone: the cancel and the read both answer 404.
+    const gone = await orphanOf("00000000-gone-gone-gone-000000000000");
+    await sweepComputeCancellations(env());
+    expect(orphanOn(gone.made.job.id)).toBeNull();
+    // A cancel that answers 404 for a job the read still finds is not gone.
+    const there = await orphanOf();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 404);
+    await sweepComputeCancellations(env());
+    expect(orphanOn(there.made.job.id)).toBe(there.real);
+  });
+});
+
 describe("a terminal row whose Tapis record is unreadable is settled without it (open point)", () => {
   async function terminalUnsettled(uuid: string, endedAgo: string) {
     const made = await makeJob(fx);
