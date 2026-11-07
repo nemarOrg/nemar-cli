@@ -30,7 +30,7 @@
  *    that `parseAllocTres` cannot read, a row with elapsed time and no `cpu` item (an allocation that
  *    ran and is not on record is a charge of nothing, which is a guess) and a row with elapsed time and
  *    no `node` item (the settlement reads no node as one node, which is a guess too; one word a row). A refusal names the path
- *    and a fixed word, never a value the sender wrote.
+ *    and a fixed word, never a value the sender wrote, and never a key the sender chose (`<key>`).
  *  - SKIPPED and COUNTED (`skipped` in the answer): a partition whose queue was not read (`jobs` is
  *    null: the observer says null, never zero, and so does this), and a row that is valid but that no
  *    table of ours can hold: a job id that is not one Slurm job (a pending array `123_[1-5]`, a list), a
@@ -70,6 +70,85 @@ export const OBSERVATION_REFUSALS = {
   missingCpu: "missing_cpu",
   missingNode: "missing_node",
 } as const;
+
+/**
+ * The field names the document itself declares. A path segment that is one of these, or a position in a
+ * list, is printed; every other segment is a KEY THE SENDER CHOSE (a partition, a node or job state, a
+ * pending reason, an allocation item) and is printed as `<key>`, so a refusal never echoes text the
+ * sender wrote.
+ */
+const DECLARED_FIELDS: ReadonlySet<string> = new Set([
+  "schema",
+  "mode",
+  "observed_at",
+  "observer_version",
+  "sources",
+  "partitions",
+  "pending_starts",
+  "balance",
+  "job_ids_dropped",
+  "accounting",
+  "sinfo",
+  "squeue",
+  "squeue_start",
+  "sacct",
+  "status",
+  "malformed_rows",
+  "detail",
+  "available",
+  "nodes",
+  "jobs",
+  "pending_reasons",
+  "cpus",
+  "expanse",
+  "expanse_gpu",
+  "projects",
+  "project",
+  "used",
+  "used_by_project",
+  "raw_lines",
+  "day",
+  "rows_total",
+  "rows_included",
+  "truncated",
+  "partition",
+  "job_id",
+  "state",
+  "expected_start",
+  "elapsed_seconds",
+  "alloc_tres",
+  "submit",
+  "start",
+  "end",
+]);
+
+/** The cap on the paths a refusal lists. */
+export const OBSERVATION_FIELDS_MAX = 5;
+
+/** Whether `path[i]` is a key the sender chose: a record's key, by where records are in the document. */
+function isSenderKey(path: ReadonlyArray<string | number>, i: number): boolean {
+  if (path[0] === "partitions") {
+    // partitions.<name>.<jobs|nodes|pending_reasons>.<state or reason>
+    return i === 1 || (i === 3 && ["jobs", "nodes", "pending_reasons"].includes(String(path[2])));
+  }
+  // accounting.jobs.<n>.alloc_tres.<item>
+  return path[0] === "accounting" && path[1] === "jobs" && path[3] === "alloc_tres" && i === 4;
+}
+
+/** `path: code` for the first issues of a failed parse, with every sender-chosen key replaced by `<key>`. */
+export function observationIssueFields(
+  issues: ReadonlyArray<{ path: ReadonlyArray<string | number>; code: string }>,
+): string[] {
+  return issues.slice(0, OBSERVATION_FIELDS_MAX).map((issue) => {
+    const path = issue.path
+      .map((segment, i) => {
+        if (typeof segment === "number") return String(segment);
+        return DECLARED_FIELDS.has(segment) && !isSenderKey(issue.path, i) ? segment : "<key>";
+      })
+      .join(".");
+    return `${path || "body"}: ${issue.code}`;
+  });
+}
 
 export function mapObservation(doc: ObservationDocument): MapResult {
   const partitions = Object.entries(doc.partitions);
@@ -146,7 +225,7 @@ export function mapObservation(doc: ObservationDocument): MapResult {
       charged_milli: null,
     });
   });
-  if (refused.length > 0) return { ok: false, fields: refused.slice(0, 5) };
+  if (refused.length > 0) return { ok: false, fields: refused.slice(0, OBSERVATION_FIELDS_MAX) };
 
   return { ok: true, mapped: { body, skipped, truncated: accounting?.truncated === true } };
 }

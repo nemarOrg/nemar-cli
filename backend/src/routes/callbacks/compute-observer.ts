@@ -22,7 +22,7 @@
 
 import type { Hono } from "hono";
 import { ObservationDocumentSchema } from "../../../../shared/contract/compute-observation.js";
-import { mapObservation } from "../../services/compute-observation.js";
+import { mapObservation, observationIssueFields } from "../../services/compute-observation.js";
 import {
   OBSERVER_BODY_MAX_BYTES,
   authorizeObserverRun,
@@ -53,10 +53,8 @@ export function registerComputeObserverRoute(router: Router): void {
     }
     const parsed = ObservationDocumentSchema.safeParse(read.body);
     if (!parsed.success) {
-      // The paths and codes of what is wrong, never a value the sender wrote.
-      const fields = parsed.error.issues
-        .slice(0, 5)
-        .map((i) => `${i.path.join(".") || "body"}: ${i.code}`);
+      // The paths and codes of what is wrong, never a value or a key the sender wrote.
+      const fields = observationIssueFields(parsed.error.issues);
       return c.json({ error: "The post is not valid.", code: "invalid_post", fields }, 400);
     }
     const mapped = mapObservation(parsed.data);

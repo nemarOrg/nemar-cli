@@ -376,7 +376,7 @@ describe("the wire", () => {
     };
     const bad: Array<[string, Doc, string]> = [
       ["top", withExtra([]), "body: unrecognized_keys"],
-      ["partition", withExtra(["partitions", "shared"]), "partitions.shared: unrecognized_keys"],
+      ["partition", withExtra(["partitions", "shared"]), "partitions.<key>: unrecognized_keys"],
       ["sources", withExtra(["sources"]), "sources: unrecognized_keys"],
       ["accounting", withExtra(["accounting"]), "accounting: unrecognized_keys"],
       ["job", withExtra(["accounting", "jobs", "0"]), "accounting.jobs.0: unrecognized_keys"],
@@ -417,6 +417,88 @@ describe("the wire", () => {
       expect(res.text).not.toContain("DROP");
     }
     expect((await counts()).rows).toBe(0);
+  });
+
+  test("a refusal never echoes a key the sender chose: partitions, states, reasons and allocation items are <key> (MUTATION: print the path as it is)", async () => {
+    const secret = "SECRET-VALUE";
+    const bad = (doc: Doc) => doc;
+    const cases: Array<[string, Doc, string]> = [
+      [
+        "a partition name",
+        bad({ ...quickFixture, partitions: { [`bad key ${secret}`]: queue(1, 1) } }),
+        "partitions.<key>: invalid_string",
+      ],
+      [
+        "a job state key",
+        bad({
+          ...quickFixture,
+          partitions: {
+            shared: { ...queue(1, 1), jobs: { [`bad ${secret}`]: { jobs: 1, nodes: 1, cpus: 1 } } },
+          },
+        }),
+        "partitions.<key>.jobs.<key>",
+      ],
+      [
+        "a node state key",
+        bad({
+          ...quickFixture,
+          partitions: { shared: { ...queue(1, 1), nodes: { [`BAD ${secret}`]: 1 } } },
+        }),
+        "partitions.<key>.nodes.<key>",
+      ],
+      [
+        "a pending reason",
+        bad({
+          ...quickFixture,
+          partitions: { shared: { ...queue(1, 1), pending_reasons: { [`bad ${secret}`]: 1 } } },
+        }),
+        "partitions.<key>.pending_reasons.<key>",
+      ],
+      [
+        "an allocation item",
+        daily([acct(nextSlurm(), { alloc_tres: { [`k${secret}`]: 5 } })]),
+        "accounting.jobs.0.alloc_tres.<key>: invalid_type",
+      ],
+      [
+        "a key in an unknown place",
+        bad({ ...quickFixture, [secret]: 1 }),
+        "body: unrecognized_keys",
+      ],
+    ];
+    for (const [label, doc, field] of cases) {
+      const run = await mint();
+      const res = await post(run.token, doc);
+      expect([label, res.status]).toEqual([label, 400]);
+      expect([label, res.text.includes(secret)]).toEqual([label, false]);
+      expect([label, JSON.parse(res.text).fields.join(" ")]).toEqual([
+        label,
+        expect.stringContaining(field),
+      ]);
+      expect((await counts()).rows).toBe(0);
+    }
+  });
+
+  test("at most five paths are listed in `fields`, from the document and from the mapping", async () => {
+    const run = await mint();
+    const many = await post(
+      run.token,
+      daily(Array.from({ length: 8 }, () => acct(nextSlurm(), { elapsed_seconds: "x" }))),
+    );
+    expect(many.status).toBe(400);
+    expect(JSON.parse(many.text).fields).toHaveLength(5);
+    const mapped = await post(
+      run.token,
+      daily(
+        Array.from({ length: 8 }, () =>
+          acct(nextSlurm(), { alloc_tres: tres(4, { cpu: "four" }) }),
+        ),
+      ),
+    );
+    expect(mapped.status).toBe(400);
+    expect(JSON.parse(mapped.text).fields).toEqual(
+      [0, 1, 2, 3, 4].map((i) => `accounting.jobs.${i}.alloc_tres: malformed_tres`),
+    );
+    expect((await post(run.token, daily([acct(nextSlurm())]))).status).toBe(200);
   });
 
   test("a body that fails validation does not spend the run, and names the field, never the value", async () => {
