@@ -1856,7 +1856,8 @@ export async function driveCancel(
   if (isUnverifiedPartnerJob(job)) return "skipped";
   if (job.tapis_uuid === null) {
     if (job.state !== "created" && job.state !== "uploading") return "skipped";
-    // A PARTNER'S RESERVATION is the partner contract's (phase D4), never ended here. NEMAR does not take
+    // A PARTNER'S RESERVATION is the partner contract's (phase D4, resolved by the hold reaper after a
+    // search of Tapis by its tag, `compute-hold-reaper.ts`), never ended here. NEMAR does not take
     // a submit lease or write a launch specification for a partner job (the partner launches its own
     // Tapis job under the reservation), so every test below, which proves that NEMAR's own submit never
     // reached Tapis, is true of such a row whether or not the partner has launched; ending it would
@@ -2288,5 +2289,7 @@ export function jobView(job: ComputeJobRow): ComputeJobView {
     results_verified: job.results_verified_at !== null,
     results_bytes: job.results_bytes,
     records_copied: job.result_records_at !== null,
+    partner_state: job.partner_state,
+    partner_flag: job.partner_flag,
   };
 }

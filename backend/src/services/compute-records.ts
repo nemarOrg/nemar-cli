@@ -604,7 +604,7 @@ export type IncomingUploadsResult =
  * never made, and one whose records are written: never after the job is complete. `options.now` is the
  * moment to sign as of, which only a test sets (to make an address that has already expired).
  */
-// Called by `POST /compute/jobs` for a job with a code bundle (phase D3, #2024); the partner's per-file form is phase D4's.
+// Called by `POST /compute/jobs` for a job with a code bundle (phase D3, #2024) and by `POST /compute/jobs/:id/report` for a partner's declared files (phase D4, #2025).
 export async function presignIncomingUploads(
   env: ComputeRecordsEnv,
   jobId: string,

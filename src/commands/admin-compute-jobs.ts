@@ -86,6 +86,11 @@ function printJob(res: ComputeJobAdminResponse): void {
     `  held ${formatSu(job.held_milli)} SU, charged ${formatSu(job.charged_milli)} SU, ${job.settled ? "settled" : "not settled"}`,
   );
   say(`  flags: ${job.flags.length > 0 ? job.flags.map(plain).join(", ") : "none"}`);
+  if (job.partner_state || job.partner_flag) {
+    say(
+      `  partner: ${job.partner_state ? plain(job.partner_state) : "reservation"}${job.partner_flag ? ` (${plain(job.partner_flag)})` : ""}`,
+    );
+  }
   say(
     `  results: upload ${job.outputs_completed ? "complete" : "not complete"}, ` +
       `${job.results_verified ? "verified" : "not verified"}, ` +

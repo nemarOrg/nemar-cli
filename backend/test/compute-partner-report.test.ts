@@ -374,6 +374,27 @@ describe("a report that does not match is cancelled, flagged and charged to the 
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
   });
 
+  test("an administrator is shown the partner words and the flags of a refused job", async () => {
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person, { appVersion: "9.9.9" });
+    await report(hold, { tapis_job_id: uuid });
+    const { OWNER_KEY } = await import("./helpers/oidc-harness");
+    const shown = await w.h.call("POST", `/admin/compute/jobs/${hold.job_id}/advance`, {
+      key: OWNER_KEY,
+      body: {},
+    });
+    expect(shown.status).toBe(200);
+    expect((shown.json as { job: Record<string, unknown> }).job).toMatchObject({
+      state: "cancelled",
+      partner_state: "mismatch",
+      partner_flag: "app_mismatch",
+      flags: ["mismatch"],
+      charged_milli: 0,
+    });
+    const listed = await w.h.call("GET", "/admin/compute/jobs?flag=mismatch", { key: OWNER_KEY });
+    expect(JSON.stringify(listed.json)).toContain(hold.job_id);
+  });
+
   test("a job that never ran is released with no charge at all", async () => {
     const hold = await reserve(w, person);
     const uuid = await partnerLaunch(w, hold, person, { appId: "another-app" });

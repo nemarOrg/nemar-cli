@@ -382,6 +382,18 @@ export const ComputeJobViewSchema = z
     results_verified: z.boolean(),
     results_bytes: z.number().int().nullable(),
     records_copied: z.boolean(),
+    /**
+     * A partner's reservation (phase D4, #2025): `pending` (a Tapis job is bound and not verified yet),
+     * `verified` or `mismatch` (refused); null for a reservation nothing was reported under and for a job
+     * that is not a partner's. Optional: an older Worker does not send it.
+     */
+    partner_state: nullableString.optional(),
+    /**
+     * The fixed word an administrator is shown for a partner's job: `owner_mismatch`, `app_mismatch`,
+     * `resources_mismatch`, `hold_ended` (why a report was refused), `ambiguous_tag`, `tapis_unreachable`
+     * or `tapis_job_in_use`.
+     */
+    partner_flag: nullableString.optional(),
   })
   .passthrough();
 

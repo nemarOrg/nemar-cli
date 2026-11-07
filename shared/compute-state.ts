@@ -23,8 +23,9 @@ export const COMPUTE_WORD_RE = /^[a-z0-9_]{1,64}$/;
 export const COMPUTE_STATES = [
   "created",
   // `uploading` is written by the person's submit route (phase D3, #2024: `POST /compute/jobs` for a job
-  // with a code bundle, after the hold and before the upload address is issued). The partner contract's
-  // per-file upload (phase D4) is what makes a partner's batch job wait here.
+  // with a code bundle, after the hold and before the upload address is issued). A partner's reservation
+  // (phase D4, #2025) is never `uploading`: it is `created` until a Tapis job is reported and verified, and
+  // its files are records uploaded beside a job that is already `submitted`.
   "uploading",
   "submitted",
   "queued",

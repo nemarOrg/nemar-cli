@@ -408,3 +408,41 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 6. **A cookie is a credential on `/me*` and not on `/stats`.** The session cookie is host-only (rule 10), so a partner host never holds one; a browser on the app host reads its own data. `/stats` is a client's route and a cookie alone is `missing_credential`.
 7. **Maintenance.** All five are GETs and are served in `read-only`. The refresh of a live job on `GET /me/jobs/:id` is a write, so it is skipped in `read-only` and the stored record is served with `stale: true`.
 
+
+## Amendment 2026-11-07 (#2025): three compute routes accept an access token for `compute.reserve` (phase D4 of epic #2021)
+
+`backend/src/routes/compute/auth.ts` (`computePartnerCredential`, `RESERVE_OIDC`) and `partner.ts` are the credential rule and the routes of the partner contract.
+This amendment says which routes accept an OpenID Connect access token for the scope `compute.reserve` and with which refusals.
+It widens rules 4 and 14 by exactly three WRITE paths: every other route of the Worker, and every other write of the compute router, still refuses an `nmo_` token by its prefix, and `backend/test/oidc-token-allowlist.test.ts` lists the three (`COMPUTE_PARTNER_ROUTES`, by method and path) as the only writes it leaves out of its walk.
+
+| Route | Accepted credential | Scope | What it does |
+|---|---|---|---|
+| `POST /compute/holds` | access token of a PERSON | `compute.reserve` | reserve compute time for the signed-in person: 201 `{ job_id, hold_id, tag, expires_at }` |
+| `POST /compute/jobs/:id/report` | same | `compute.reserve` | report the Tapis job launched under the reservation: 200 `verified` or 202 `pending`; 409 `report_mismatch` for a job that does not match |
+| `DELETE /compute/holds/:id` | same | `compute.reserve` | release a reservation nothing was launched under: 200 |
+
+1. **One guard, one credential.**
+   `computePartnerCredential` is `oidcBearer(["compute.reserve"])` (instantiated once as `RESERVE_OIDC`), mounted on each route the way the `/compute/me*` guards are.
+   A CLI key and the session cookie are 403 `forbidden_credential` (a key without a lookup, so a valid one and an invalid one are answered alike); no credential is 401 `missing_credential`; garbage, a refresh token and a client secret are 401 `invalid_token`; a live token without the scope is 403 `insufficient_scope` (the challenge names it); a client credentials token names no person and is 403 `forbidden_credential` even if it somehow carried the scope.
+   A disabled client, a token whose grant was ended (a compute suspension or revocation ends the grants that carry a `compute.` scope, rule 12) and an account that no longer passes its client's sign-in rule are refused by `oidcBearer` itself at every call, as 401 `invalid_token`.
+2. **Audience IS checked on these routes.**
+   The amendment of phase D2 (item 4) left the audience unchecked on the read routes; the write routes check it, because a reservation moves money and the scope names are shared by every resource server that may ever serve them.
+   The owner chooses a client's audience at registration and the client never does, so the check is on the owner's act: the token's audience must be an address on the same origin as this Worker's own issuer (`API_BASE_URL`; `https://api.nemar.org/compute` and `https://api.nemar.org` both pass), else 403 `wrong_audience`; a Worker with no issuer fails closed.
+   The consequence for registering `compute.nemar.org` is that its audience must name the NEMAR API; a client registered for another resource server cannot reserve.
+   The read routes are unchanged and a test holds both halves.
+3. **The client is the token's, and a reservation is the person's and the client's.**
+   A job that is another person's, another client's, not a partner's or absent is the same 404 `job_not_found`.
+   A client's caps are the owner's policy (`clients`), with the client's own record as a second ceiling; a client the policy does not list can make no reservation (ADR 0118, the amendment of this phase, item 4).
+4. **The refusal words** are a closed list, `COMPUTE_PARTNER_ERROR_STATUS` in `shared/contract/compute-partner.ts`, each answered as `{ error, code }` (with `field` for `invalid_spec`, `mismatch` and `job_id` for `report_mismatch`), `Cache-Control: no-store`:
+   - the credential: `missing_credential` 401, `invalid_token` 401, `forbidden_credential` 403, `insufficient_scope` 403, `wrong_audience` 403;
+   - the request: `idempotency_key_required` 400, `invalid_spec` 400, `idempotency_conflict` 422;
+   - the person and the balances: `no_compute_access` 403, `suspended` 403, `partition_not_offered` 422, `over_job_limit` 422, `over_concurrency` 409, `insufficient_balance` 409, `platform_budget_exhausted` 409, `client_cap_reached` 409;
+   - the reservation: `job_not_found` 404, `already_bound` 409, `tapis_job_in_use` 409, `tapis_job_not_found` 422, `hold_released` 409, `hold_cancelled` 409, `hold_bound` 409, `report_mismatch` 409 (with `mismatch`: `owner_mismatch`, `app_mismatch` or `resources_mismatch`);
+   - the files: `bundle_too_many_files` 413, `bundle_too_large` 413;
+   - the platform: `compute_disabled` 503, `policy_unavailable` 503, `storage_unavailable` 503.
+5. **The partner's side of rule 11.**
+   The Tapis username of a person's compute credential is the `sub` itself (the identity transform); NEMAR compares the Tapis job's owner with it exactly.
+   The partner may apply a fixed reversible transform once it names one, and `tapisUsernameForSub` (`compute-report-verify.ts`) is the one function that learns it.
+   NEMAR never trusts the owner or the tag alone: the uuid the partner reports, bound by a unique index, and NEMAR's own read of that job are the identity.
+6. **The credential-ending table is unchanged.**
+   The three routes add no path that ends a credential; a compute suspension or revocation ends the person's grants that carry a compute scope (so the partner's tokens for that person die), and a reservation of that person is resolved by the partner contract (ADR 0118, the amendment of this phase, items 9 and 10).
