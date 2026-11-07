@@ -48,6 +48,10 @@ async function recordsCopy(
 }
 
 export async function readJobLog(env: Bindings, job: ComputeJobRow): Promise<JobLogResult> {
+  // A partner's job is the person's to read ONLY once NEMAR verified it (phase D4, #2025): a job a partner
+  // reported and NEMAR has not matched (pending), or refused (mismatch), may be another owner's job, and
+  // its output is not this person's. A reservation with no job has none.
+  if (job.source === "partner" && job.partner_state !== "verified") return unavailable;
   try {
     if (env.COMPUTE_RECORDS && job.result_records_at !== null) {
       const copy = await recordsCopy(env.COMPUTE_RECORDS, job.id);
