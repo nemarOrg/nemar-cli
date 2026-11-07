@@ -13,7 +13,8 @@
  *   `checkReport`     the pure rule (owner, application, queue and resources).
  *   `verifyBoundJob`  read the bound job back and decide. A match is ONE batch (`pending` to `verified`,
  *                     the job `submitted`); NEMAR's webhook is subscribed after it. A mismatch is ONE batch
- *                     that records the intent (the flag word, the cancel intent, one audit row) and nothing
+ *                     that records the refusal (the flag word, `partner_refused_at`, one audit row; NO cancel intent, which
+ *                     belongs to a person, an administrator and the end of an account) and nothing
  *                     else. A Tapis that cannot be read leaves the row `pending`.
  *   `finishMismatch`  carry a recorded mismatch out: cancel the Tapis job (only a job the record shows is
  *                     not NEMAR's own), read it back, and when it has ended end the row in ONE batch
@@ -485,7 +486,7 @@ async function unreadable(
 
 /**
  * Record a refusal as intent, in one batch with its audit row, for a row that is `pending` with this
- * uuid: the flag word, the job flagged `mismatch`, the cancel intent. NO Tapis call and no ledger entry:
+ * uuid: the flag word, the job flagged `mismatch`, `partner_refused_at`; no cancel intent. NO Tapis call and no ledger entry:
  * `finishMismatch` carries it out and a retried tick repeats it. Returns the row as it stands.
  */
 export async function recordMismatch(
@@ -725,8 +726,8 @@ export const REWORD_UNVERIFIABLE_SQL = `UPDATE compute_jobs SET partner_flag = ?
 
 /**
  * An `unverifiable` refusal that NEMAR can read and that matches: `mismatch` to `verified` in ONE batch (the
- * job `submitted`, the cancel this refusal recorded withdrawn, the ACCESS report owed when a Slurm id shows,
- * one audit row), then NEMAR's webhook. True when this writer recovered it.
+ * job `submitted`, the ACCESS report owed when a Slurm id shows,
+ * one audit row), then NEMAR's webhook. Only for a row no one has cancelled and whose cancel is not on the wire. True when this writer recovered it.
  */
 async function recoverUnverifiable(
   env: Bindings,

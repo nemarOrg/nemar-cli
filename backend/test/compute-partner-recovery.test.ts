@@ -238,6 +238,41 @@ async function pendingJob() {
   return { hold, uuid };
 }
 
+describe("the person is told NEMAR is cancelling a refused job (minor 8)", () => {
+  async function personKey() {
+    const { hashApiKey } = await import("../src/services/token");
+    const key = `${"nemar"}_${"v".repeat(8)}${"0123456789abcdef".repeat(2)}`;
+    w.h.db
+      .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+      .run(person.id, await hashApiKey(key), key.slice(0, 8));
+    return key;
+  }
+
+  test("cancel_requested reads true while a refused job is not yet ended, and the admin view agrees; once ended it reads as the row says", async () => {
+    const { jobView } = await import("../src/services/compute-lifecycle");
+    const { getJob } = await import("../src/services/compute-jobs");
+    const key = await personKey();
+    const { hold } = await refusedBeforeCancel();
+    const before = await w.h.call("GET", `/compute/me/jobs/${hold.job_id}`, { key });
+    expect([before.status, before.json?.job?.cancel_requested]).toEqual([200, true]);
+    const admin = jobView((await getJob(fx.env().DB, hold.job_id)) as never);
+    expect(admin.cancel_requested).toBe(true);
+    // The cancel completes: the job has ended.
+    fx.tapis.clearFailures();
+    fx.tapis.fail("GET /v3/jobs/:uuid", 403, 1000);
+    await reapExpiredHolds(fx.env());
+    const after = await w.h.call("GET", `/compute/me/jobs/${hold.job_id}`, { key });
+    expect(after.json?.job).toMatchObject({ state: "cancelled", cancel_requested: false });
+  });
+
+  test("a reservation that was never refused reads false", async () => {
+    const key = await personKey();
+    const hold = await reserve(w, person);
+    const res = await w.h.call("GET", `/compute/me/jobs/${hold.job_id}`, { key });
+    expect(res.json?.job?.cancel_requested).toBe(false);
+  });
+});
+
 describe("a pending job the person cancelled is not verified into a live one (M-a)", () => {
   function expectRefusedAndStopped(hold: Hold, uuid: string, reason: string) {
     expect(row(w, hold.job_id)).toMatchObject({
@@ -505,22 +540,24 @@ describe("the failed-read counters do not carry over between bindings (M1)", () 
     });
   });
 
-  test("the reaper's own binding of a job found under the tag starts from zero too", async () => {
+  test("the reaper's own binding of a job found under a CANCELLED reservation starts from zero (the adoption's reset, not a verification's)", async () => {
     const hold = await reserve(w, person);
     w.h.db
       .query(
-        "UPDATE compute_jobs SET partner_read_failures = 2, partner_first_failed_at = datetime('now', '-200 minutes') WHERE id = ?",
+        "UPDATE compute_jobs SET partner_read_failures = 2, partner_first_failed_at = datetime('now', '-200 minutes'), partner_cancel_sent_at = datetime('now', '-90 minutes'), cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
       )
       .run(hold.job_id);
     const uuid = await partnerLaunch(w, hold, person);
-    w.h.db
-      .query(
-        "UPDATE compute_jobs SET created_at = datetime('now', '-40 minutes'), partner_expires_at = datetime('now', '-10 minutes') WHERE id = ?",
-      )
-      .run(hold.job_id);
+    // Refused as hold_ended on adoption: a verification (which would reset the counters itself) never runs.
     const tick = await reapExpiredHolds(fx.env());
-    expect(tick).toMatchObject({ adopted: 1, verified: 1 });
-    expect(row(w, hold.job_id)).toMatchObject({ tapis_uuid: uuid, partner_read_failures: 0 });
+    expect(tick).toMatchObject({ adopted: 1, refused: 1, verified: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      tapis_uuid: uuid,
+      partner_flag: "hold_ended",
+      partner_read_failures: 0,
+      partner_first_failed_at: null,
+      partner_cancel_sent_at: null,
+    });
   });
 });
 

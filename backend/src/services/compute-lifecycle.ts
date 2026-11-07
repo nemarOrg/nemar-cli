@@ -2357,7 +2357,9 @@ export function jobView(job: ComputeJobRow): ComputeJobView {
     failure_code: job.failure_code,
     failure_detail: job.failure_detail,
     platform_failure: job.platform_failure === 1,
-    cancel_requested: job.cancel_requested_at !== null,
+    cancel_requested:
+      job.cancel_requested_at !== null ||
+      (job.partner_refused_at !== null && job.ended_at === null),
     cancel_reason: job.cancel_reason,
     partition: job.partition,
     pool: job.pool,
