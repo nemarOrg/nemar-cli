@@ -41,9 +41,10 @@ import {
 } from "../src/services/oidc-keys";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
+import { BAD_OIDC_SECRETS, fakeOidcSecret } from "./helpers/oidc-secret";
 
-const SECRET = "oidc-keys-test-secret-0123456789abcdef0123";
-const OTHER_SECRET = "a-different-oidc-secret-0123456789abcdef0123";
+const SECRET = fakeOidcSecret("oidc-keys-test");
+const OTHER_SECRET = fakeOidcSecret("a-different-oidc-secret");
 const PUBLIC_MEMBERS = ["alg", "crv", "kid", "kty", "use", "x", "y"];
 
 let db: Database;
@@ -208,9 +209,9 @@ describe("the private key is ciphertext, readable only under OIDC_SECRET", () =>
     await expect(signJwt(wrong, { sub: "x" })).rejects.toBeInstanceOf(EncryptionError);
   });
 
-  test("with no secret, or a short one, the service refuses to make or use a key", async () => {
-    for (const secret of [undefined, "", "x".repeat(31)]) {
-      const off = makeEnv({ OIDC_SECRET: secret });
+  test("with no secret, a short one or one not in the nmsso- form, the service refuses to make or use a key", async () => {
+    for (const [, secret] of BAD_OIDC_SECRETS) {
+      const off = makeEnv({ OIDC_SECRET: secret as string });
       await expect(rotateSigningKeys(off, { actorId: 1 })).rejects.toThrow(/OIDC_SECRET/);
       await expect(signJwt(off, { sub: "x" })).rejects.toThrow(/OIDC_SECRET/);
     }

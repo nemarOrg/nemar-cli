@@ -16,8 +16,9 @@ import worker from "../../src/index";
 import { hashApiKey } from "../../src/services/token";
 import type { Bindings } from "../../src/types/bindings";
 import { freshDb, realD1 } from "./d1";
+import { fakeOidcSecret } from "./oidc-secret";
 
-export const OIDC_TEST_SECRET = "oidc-test-secret-0123456789abcdef0123456789abcdef";
+export const OIDC_TEST_SECRET = fakeOidcSecret("oidc-test");
 export const ISSUER = "https://api.nemar.org";
 export const OWNER_KEY = "oidc-owner-key-0123456789abcdef0123456789abcdef";
 export const ADMIN_KEY = "oidc-admin-key-0123456789abcdef0123456789abcdef";

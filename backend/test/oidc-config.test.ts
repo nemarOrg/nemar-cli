@@ -5,14 +5,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { OIDC_SECRET_PREFIX, isOidcSecret } from "../../shared/oidc";
 import {
   buildDiscoveryDocument,
   oidcEnabled,
   oidcIssuer,
+  oidcSecret,
+  oidcSecretStatus,
   onOidcSurface,
 } from "../src/services/oidc-config";
+import { BAD_OIDC_SECRETS, GOOD_OIDC_SECRETS, fakeOidcSecret } from "./helpers/oidc-secret";
 
-const SECRET_32 = "s".repeat(32);
+const SECRET_32 = fakeOidcSecret("config", 26);
 
 describe("the issuer is API_BASE_URL without trailing slashes, and nothing else", () => {
   test.each([
@@ -31,22 +35,40 @@ describe("the issuer is API_BASE_URL without trailing slashes, and nothing else"
   });
 });
 
-describe("the provider is on only with a secret of at least 32 characters", () => {
-  test.each([
-    [undefined, false],
-    ["", false],
-    ["s".repeat(31), false],
-    [SECRET_32, true],
-    ["s".repeat(33), true],
-    ["s".repeat(200), true],
-  ])("OIDC_SECRET of %j characters: %j", (secret, expected) => {
-    expect(oidcEnabled({ OIDC_SECRET: secret })).toBe(expected);
+describe("the provider is on only with an nmsso- secret of at least 32 characters in all", () => {
+  test.each(BAD_OIDC_SECRETS.map(([what, value]) => [what, value] as const))(
+    "OIDC_SECRET %s: off",
+    (_what, secret) => {
+      expect(oidcEnabled({ OIDC_SECRET: secret as string })).toBe(false);
+      expect(oidcSecret({ OIDC_SECRET: secret as string })).toBeNull();
+      expect(isOidcSecret(secret)).toBe(false);
+    },
+  );
+
+  test.each(GOOD_OIDC_SECRETS.map(([what, value]) => [what, value] as const))(
+    "OIDC_SECRET of %s: on, and read back unchanged",
+    (_what, secret) => {
+      expect(oidcEnabled({ OIDC_SECRET: secret })).toBe(true);
+      expect(oidcSecret({ OIDC_SECRET: secret })).toBe(secret);
+    },
+  );
+
+  test("the old rule, length alone, no longer turns it on", () => {
+    expect(oidcEnabled({ OIDC_SECRET: "s".repeat(32) })).toBe(false);
+    expect(oidcEnabled({ OIDC_SECRET: "s".repeat(70) })).toBe(false);
   });
 
-  test("a secret that is not a string is not a secret, whatever its length", () => {
-    // An object with a length is the near miss: only the type check refuses it.
-    expect(oidcEnabled({ OIDC_SECRET: { length: 40 } as unknown as string })).toBe(false);
-    expect(oidcEnabled({ OIDC_SECRET: 42 as unknown as string })).toBe(false);
+  test("the prefix alone is not enough: the body counts toward the 32", () => {
+    expect(isOidcSecret(`${OIDC_SECRET_PREFIX}${"a".repeat(25)}`)).toBe(false);
+    expect(isOidcSecret(`${OIDC_SECRET_PREFIX}${"a".repeat(26)}`)).toBe(true);
+  });
+
+  test("the status is a fixed word: unset for absent or empty, malformed for anything else", () => {
+    expect(oidcSecretStatus({ OIDC_SECRET: undefined })).toBe("unset");
+    expect(oidcSecretStatus({ OIDC_SECRET: "" })).toBe("unset");
+    expect(oidcSecretStatus({ OIDC_SECRET: "s".repeat(70) })).toBe("malformed");
+    expect(oidcSecretStatus({ OIDC_SECRET: 42 as unknown as string })).toBe("malformed");
+    expect(oidcSecretStatus({ OIDC_SECRET: SECRET_32 })).toBe("ok");
   });
 });
 
@@ -105,9 +127,12 @@ describe("a request is on the surface only on the issuer's host, off the legacy 
   });
 
   test("with no usable secret nothing is on the surface", () => {
-    for (const secret of [undefined, "", "s".repeat(31)]) {
+    for (const [, secret] of BAD_OIDC_SECRETS) {
       expect(
-        onOidcSurface({ ...env, OIDC_SECRET: secret }, "https://api.nemar.org/oauth/jwks"),
+        onOidcSurface(
+          { ...env, OIDC_SECRET: secret as string },
+          "https://api.nemar.org/oauth/jwks",
+        ),
       ).toBe(false);
     }
   });

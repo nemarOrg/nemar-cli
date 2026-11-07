@@ -56,6 +56,7 @@ import {
   OIDC_AUTHORIZE_CONSENT_PATH,
   type OidcAuthorizeAnswer,
 } from "../../shared/contract/oidc-authorize";
+import { OIDC_SECRET_PREFIX } from "../../shared/oidc";
 import { answerError, authorizationLogLine, carriesChallenge } from "./authz-log";
 import {
   RIG_ACCOUNT_EMAIL,
@@ -92,7 +93,7 @@ const env = {
   ENVIRONMENT: "development",
   API_BASE_URL: ISSUER,
   APP_BASE_URL: ISSUER,
-  OIDC_SECRET: `rig-oidc-secret-${hex(24)}`,
+  OIDC_SECRET: `${OIDC_SECRET_PREFIX}${hex(32)}`,
   ENCRYPTION_KEY: `rig-encryption-key-${hex(24)}`,
   HOST_PREFIXED_SESSION_COOKIE: "1",
 } as unknown as Bindings;

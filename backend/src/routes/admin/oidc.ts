@@ -19,8 +19,9 @@
  *                                                      became of each; `?status=` and `?limit=`
  *
  * WHO AND WHERE. `ownerMiddleware` first, so a caller is told what they are (401, 403) whether or not
- * the surface exists; then `oidcSurface`, which makes every route 404 unless the provider is on
- * (`OIDC_SECRET`), the request is on the issuer's host and the path is not under the legacy `/nemar`
+ * the surface exists; then `ownerOidcSurface` (`oidcSurface`, plus the word that says whether
+ * `OIDC_SECRET` is `unset` or `malformed`), which makes every route 404 unless the provider is on
+ * (`OIDC_SECRET` in the `nmsso-` form), the request is on the issuer's host and the path is not under the legacy `/nemar`
  * mount. Both are one `use` for the whole prefix, so a route added under `/oidc/` cannot forget
  * either; `test/oidc-admin-routes.test.ts` walks the router's own table to hold it to that.
  *
@@ -35,7 +36,7 @@
  * those files).
  */
 
-import type { Context } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import type { ZodTypeAny, z } from "zod";
 import {
   OIDC_ACCOUNT_END_FIELDS,
@@ -62,6 +63,7 @@ import {
   isOidcLogoutStatus,
 } from "../../../../shared/oidc";
 import { auditLogStatement } from "../../db/audit-log";
+import { notFoundBody } from "../../lib/not-found";
 import { ownerMiddleware } from "../../middleware/auth";
 import { oidcEndStatements } from "../../services/oidc-cascade";
 import {
@@ -71,6 +73,7 @@ import {
   listClients,
   rotateClientSecret,
 } from "../../services/oidc-clients";
+import { oidcSecretStatus, onIssuerHost } from "../../services/oidc-config";
 import { listSigningKeys, revokeSigningKey, rotateSigningKeys } from "../../services/oidc-keys";
 import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
 import { COUNT_DELIVERIES_SQL, LIST_DELIVERIES_SQL } from "../../services/oidc-logout-store";
@@ -192,8 +195,27 @@ async function endAccount(c: Ctx, userId: number, reason: OidcEndReason): Promis
   });
 }
 
+/**
+ * `oidcSurface` for a caller who has already proved they are the owner. The answer is the same 404
+ * with ONE extra field, `oidc_secret`, set to `unset` or `malformed` (`OIDC_SECRET` is absent, or
+ * is set but is not an `nmsso-` secret of 32 characters or more), and only when the request is
+ * otherwise on the surface (the issuer's host, off the legacy mount), so the owner is told which
+ * word to fix and the other 404s stay byte for byte the unrouted one. It never carries the value,
+ * its length or any part of it. `Not Found` and `message` are still there, so an older CLI treats
+ * it as it always did.
+ */
+const ownerOidcSurface: MiddlewareHandler = async (c, next) => {
+  const state = oidcSecretStatus(c.env);
+  if (state !== "ok" && onIssuerHost(c.env, c.req.url, c.req.path)) {
+    return c.json({ ...notFoundBody(c.req.method, c.req.path), oidc_secret: state }, 404, {
+      "Cache-Control": "no-store",
+    });
+  }
+  return oidcSurface(c, next);
+};
+
 export function registerOidcAdminRoutes(admin: AdminRouter): void {
-  admin.use("/oidc/*", ownerMiddleware, oidcSurface, async (c, next) => {
+  admin.use("/oidc/*", ownerMiddleware, ownerOidcSurface, async (c, next) => {
     await next();
     // A secret is in some of these answers; none of them is for a shared cache.
     c.res.headers.set("Cache-Control", "no-store");

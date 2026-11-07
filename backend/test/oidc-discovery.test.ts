@@ -16,6 +16,7 @@ import { rotateSigningKeys } from "../src/services/oidc-keys";
 import type { Bindings } from "../src/types/bindings";
 import { wrapD1 } from "./helpers/d1";
 import { ISSUER, type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
+import { BAD_OIDC_SECRETS, fakeOidcSecret } from "./helpers/oidc-secret";
 import { T0, edge, useRateLimitHarness } from "./helpers/rate-limit-harness";
 
 const DISCOVERY = "/.well-known/openid-configuration";
@@ -204,16 +205,16 @@ describe("and answered 404 everywhere else", () => {
     expect(res.status).toBe(404);
   });
 
-  test("when OIDC_SECRET is absent, empty or shorter than 32 characters", async () => {
-    for (const secret of [undefined, "", "s".repeat(31)]) {
+  test("when OIDC_SECRET is absent, empty, too short or not an nmsso- secret", async () => {
+    for (const [, secret] of BAD_OIDC_SECRETS) {
       for (const path of [DISCOVERY, JWKS]) {
-        const res = await h.call("GET", path, { env: { OIDC_SECRET: secret } });
+        const res = await h.call("GET", path, { env: { OIDC_SECRET: secret as string } });
         expect(res.status, `${path} with ${JSON.stringify(secret)}`).toBe(404);
         expect(res.text).not.toContain("issuer");
       }
     }
-    // Exactly 32 is on.
-    const on = await h.call("GET", DISCOVERY, { env: { OIDC_SECRET: "s".repeat(32) } });
+    // Exactly 32 in all, with the prefix, is on.
+    const on = await h.call("GET", DISCOVERY, { env: { OIDC_SECRET: fakeOidcSecret("min", 26) } });
     expect(on.status).toBe(200);
   });
 
