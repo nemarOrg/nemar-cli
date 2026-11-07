@@ -522,6 +522,8 @@ This amendment supersedes the wire described in item 4 of the amendment of 2026-
    The CPU, memory, node and GPU figures are read from `alloc_tres` by one function, `parseAllocTres`, which fails closed: a value it cannot read refuses the post (400 `invalid_post`, the path and the fixed word `malformed_tres`, never the value), the run is not spent and nothing is stored.
    Memory is converted to megabytes with Slurm's powers of 1024 and rounded up; a number with no unit is refused unless it is 0.
    A row with elapsed time and no `cpu` item is refused (`missing_cpu`): an allocation that ran and is not on record would be priced at nothing, which is a guess.
+   A row with elapsed time and no `node` item is refused the same way (`missing_node`): the settlement reads no node as one node, which is a guess too.
+   A refusal lists at most five paths, and a key the sender chose (a partition, a state, a reason, an allocation item) is printed as `<key>`.
 4. **What is skipped is counted, not refused.**
    A partition whose queue was not read (`jobs` is null) is not stored as zero; a row whose job id is not one Slurm job (a pending array `123_[1-5]`), whose partition, state or elapsed time the observer could not read, or whose value is past a column's bound is not a job NEMAR could have submitted as one Slurm job.
    Both are skipped and counted in `skipped` in the answer, so one array on the community account does not stop the rest of the day from settling.
@@ -530,5 +532,14 @@ This amendment supersedes the wire described in item 4 of the amendment of 2026-
 5. **A mode is never a dry run.** The observer defines `quick` and `daily`; both are live.
    A `quick` document has no `accounting` and no `sources.sacct` (the schema requires both for `daily`), so it stores the queue and settles whatever earlier rows can now be settled.
    Any other `mode`, and a `schema` word that is not exactly `nemar.observation.v1`, is refused like any malformed body.
-6. **Not verified.** The observer's formats were written from the Slurm manual and the public user guide, not captured from a cluster (nemar-process `docs/unverified.md`), so this schema describes what the observer emits and not what a cluster has been seen to print.
+6. **A decision for the owner to confirm: one unreadable row refuses the whole day.**
+   An `alloc_tres` value that `parseAllocTres` cannot read, a row with elapsed time and no `cpu` item, and a row with elapsed time and no `node` item each refuse the entire post (400 `invalid_post`, the run not spent, nothing stored), not just the row.
+   That is deliberate and fail closed: a charge that is guessed is a charge to a person's pool, and a post that settles part of a day hides that the rest was refused.
+   The cost is that the same document is refused on every retry until the observer or the cluster's text changes, so one row can hold back a whole day of settlement.
+   The alternative is to skip and count such a row as the unreadable-partition rows are; it is not taken here, and the owner is asked to confirm the choice.
+7. **Open item for the observer-dispatch phase: the row cap and the byte cap differ.**
+   The observer cuts its export by bytes only (1 MiB, from the end), and the Worker refuses more than 5,000 rows (partitions and accounting jobs together).
+   A busy day of short rows can pass 5,000 jobs inside 1 MiB, and the document is then refused `too_big` on every retry, so that day never settles.
+   The observer is not changed here; the dispatch phase has to choose between a row cap in the observer, a larger Worker bound, or accepting the refusal and re-reading the day in parts.
+8. **Not verified.** The observer's formats were written from the Slurm manual and the public user guide, not captured from a cluster (nemar-process `docs/unverified.md`), so this schema describes what the observer emits and not what a cluster has been seen to print.
    A quick post is made every 15 minutes and a token is good for one post, so a token per quick run must be minted; that is the operator's procedure and is not decided here.
