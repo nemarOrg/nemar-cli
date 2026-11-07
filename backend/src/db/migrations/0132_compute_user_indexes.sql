@@ -24,7 +24,14 @@ CREATE INDEX compute_jobs_queue_started ON compute_jobs (partition, started_at)
   WHERE started_at IS NOT NULL AND remote_submitted_at IS NOT NULL;
 
 -- A person's job list, newest first, `ORDER BY created_at DESC, id DESC` with an `id` cursor tie-breaker.
-CREATE INDEX compute_jobs_account_created_id ON compute_jobs (account_id, created_at, id);
+--
+-- It is PARTIAL on `flag_unreserved = 0`, which the list states (a swept job is nobody's to list), and that
+-- is not only a saving: a plain index on `(account_id, ...)` was chosen by SQLite for every query that
+-- names only the account, among them Epic A's quota sums (`account_id = ? AND results_bytes IS NOT NULL`,
+-- which `compute_jobs_results` answers), and took their plan. A query that does not state the predicate
+-- cannot use a partial index, so Epic A's plans are as they were.
+CREATE INDEX compute_jobs_account_created_id ON compute_jobs (account_id, created_at, id)
+  WHERE flag_unreserved = 0;
 
 -- The partner's aggregate: jobs made in a window (active people, outcomes).
 CREATE INDEX compute_jobs_created ON compute_jobs (created_at);

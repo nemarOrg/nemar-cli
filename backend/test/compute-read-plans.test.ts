@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { LIVE_JOBS_GUARD_SQL } from "../src/services/compute-jobs";
 import { ACCOUNT_POOLS_SQL } from "../src/services/compute-ledger";
 import { QUEUE_WAITS_SQL } from "../src/services/compute-queue-estimates";
 import {
@@ -115,6 +116,31 @@ describe("no read route scans the jobs or the ledger", () => {
       26,
     ]);
     expect(plan.filter((line) => /TEMP B-TREE FOR .*ORDER BY/.test(line))).toEqual([]);
+  });
+
+  test("the list index is partial on flag_unreserved = 0, so it cannot take Epic A's plans for queries that name only the account", () => {
+    const sql = db
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE name = 'compute_jobs_account_created_id'",
+      )
+      .get()?.sql;
+    expect(sql).toContain("WHERE flag_unreserved = 0");
+    // The quota sums (answered by Epic A's partial index `compute_jobs_results`) and the live-job count
+    // (`compute_jobs_live`) keep the plan they had before migration 0132: a plain index on the account
+    // took the first of them once.
+    const quota = planOf(
+      "SELECT COALESCE(SUM(results_bytes), 0) FROM compute_jobs WHERE account_id = 7 AND results_bytes IS NOT NULL",
+      [],
+    );
+    expect(quota.join(" ")).toContain("compute_jobs_results");
+    const all = planOf(
+      "SELECT COALESCE(SUM(results_bytes), 0) FROM compute_jobs WHERE account_id = 7",
+      [],
+    );
+    expect(all.join(" ")).not.toContain("compute_jobs_account_created_id");
+    const live = planOf(`SELECT ${LIVE_JOBS_GUARD_SQL.replace(/\?/g, "7")}`, []);
+    expect(live.join(" ")).toContain("compute_jobs_live");
+    expect(live.join(" ")).not.toContain("compute_jobs_account_created_id");
   });
 
   test("the four indexes of migration 0132 exist, and the queue index is partial", () => {
