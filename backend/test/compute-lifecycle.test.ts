@@ -45,8 +45,13 @@ import {
   isShellInertEnvValue,
 } from "../../shared/contract/compute-launch";
 import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
-import { ADVANCE_ROWS_PER_TICK, runComputeAdvanceCron } from "../src/services/compute-advance";
-import { cancellationsLogLine, sweepComputeCancellations } from "../src/services/compute-advance";
+import {
+  ADVANCE_ROWS_PER_TICK,
+  cancellationsLogLine,
+  computeAdvanceLogLine,
+  runComputeAdvanceCron,
+  sweepComputeCancellations,
+} from "../src/services/compute-advance";
 import type { ComputeJobRow } from "../src/services/compute-jobs";
 import { releaseStatements, settleStatements } from "../src/services/compute-ledger";
 import {
@@ -760,6 +765,43 @@ describe("advance", () => {
       (await applyTapisJob(s.env, job, { ...record, uuid: "another-job-007" } as never)).outcome,
     ).toBe("record_mismatch");
     expect((await reread(s.env, s.made.job.id)).state).toBe("submitted");
+  });
+
+  test("a status Tapis reports that NEMAR does not know freezes nothing: the tick counts it, logs the shortened word, and after a day the job is `unreported` (MUTATION: leave the job live without a mark)", async () => {
+    const s = await submittedJob();
+    const id = s.made.job.id;
+    await drive(s.env, id, s.uuid, "RUNNING");
+    const stored = fx.tapis.jobs.get(s.uuid);
+    if (!stored) throw new Error("no tapis job");
+    // A word from the future, with characters a log line must not carry.
+    const strange = `NEW-STATUS 9!_${"X".repeat(40)}`;
+    stored.status = strange;
+    stored.record.status = strange;
+    // Read less than a day ago: counted and warned, but not yet marked.
+    let tick = null as Awaited<ReturnType<typeof runComputeAdvanceCron>>;
+    const lines = await logged(async () => {
+      tick = await runComputeAdvanceCron(s.env);
+    });
+    expect(tick).toMatchObject({ examined: 1, unknown_status: 1, advanced: 0, errors: [] });
+    expect((await reread(s.env, id)).state).toBe("running");
+    const warned = lines.find((l) => l.includes("unknown_status") && l.includes(id));
+    expect(warned).toBeDefined();
+    // Stripped to letters and underscores first, then cut to 32.
+    expect(warned?.split("status=")[1]).toBe(`NEWSTATUS_${"X".repeat(22)}`);
+    expect((tick ? computeAdvanceLogLine(tick) : null)?.line).toContain("unknown_status=1");
+    // The last good read ages past the day: the job is `unreported`, and a person is told by the state.
+    await s.env.DB.prepare(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-25 hours') WHERE id = ?",
+    )
+      .bind(id)
+      .run();
+    await runComputeAdvanceCron(s.env);
+    expect((await reread(s.env, id)).state).toBe("unreported");
+    // Tapis speaks a known word again: the job returns.
+    stored.status = "RUNNING";
+    stored.record.status = "RUNNING";
+    await runComputeAdvanceCron(s.env);
+    expect((await reread(s.env, id)).state).toBe("running");
   });
 
   test("a read-back is one attempt with a short ceiling: a down Tapis is answered fast, not after retries", async () => {

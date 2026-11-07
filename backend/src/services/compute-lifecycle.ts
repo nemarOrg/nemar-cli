@@ -370,6 +370,13 @@ export const UNREADABLE_GIVE_UP_DAYS = 7;
 
 // --- Small helpers -------------------------------------------------------------------------------
 
+/** A status word from Tapis as a log line may carry it: letters and underscores only, at most 32. */
+export function logSafeStatus(status: unknown): string {
+  return String(status ?? "")
+    .replace(/[^A-Za-z_]/g, "")
+    .slice(0, 32);
+}
+
 /** The error's class name: all a log line ever says of a failure. */
 export const errorClassName = (err: unknown): string =>
   err instanceof Error ? err.name : typeof err;
@@ -1756,6 +1763,16 @@ export async function advanceComputeJob(
     return { outcome: "unreachable", job: await getJob(env.DB, job.id) };
   }
   const applied = await applyTapisJob(env, job, rec, nowMs);
+  if (applied.outcome === "unknown_status") {
+    // A status outside the thirteen words NEMAR knows is treated like a record that cannot be read: nothing
+    // is refreshed, so the row's last good read ages, and after a day it is `unreported` and a person
+    // looks. Without this the job froze live for ever with nothing said. The word is logged shortened and
+    // stripped to letters and underscores, since Tapis wrote it.
+    console.warn(
+      `[compute-lifecycle] unknown_status job=${job.id} status=${logSafeStatus(rec.status)}`,
+    );
+    await markUnreportedIfStale(env, job);
+  }
   return { outcome: applied.outcome, job: await getJob(env.DB, job.id) };
 }
 

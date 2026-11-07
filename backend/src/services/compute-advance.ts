@@ -126,6 +126,8 @@ export interface ComputeTickResult {
   waiting: number;
   /** Rows Tapis could not be read for. */
   unreachable: number;
+  /** Rows whose Tapis status is a word NEMAR does not know: nothing is refreshed, and the row goes `unreported` after a day. */
+  unknown_status: number;
   /** Terminal rows whose settlement or copy was repaired. */
   repaired: number;
   /** Webhook nonces cleared. */
@@ -141,6 +143,7 @@ const emptyResult = (): ComputeTickResult => ({
   advanced: 0,
   waiting: 0,
   unreachable: 0,
+  unknown_status: 0,
   repaired: 0,
   cleared: 0,
   errors: [],
@@ -157,6 +160,9 @@ function tally(r: ComputeTickResult, outcome: string): void {
       break;
     case "unreachable":
       r.unreachable++;
+      break;
+    case "unknown_status":
+      r.unknown_status++;
       break;
     case "terminal":
       r.repaired++;
@@ -232,7 +238,7 @@ export function computeAdvanceLogLine(
   r: ComputeTickResult,
 ): { level: "info" | "error"; line: string } | null {
   const failed = r.errors.length > 0;
-  const acted = r.submitted + r.advanced + r.repaired + r.cleared;
+  const acted = r.submitted + r.advanced + r.repaired + r.cleared + r.unknown_status;
   if (!failed && acted === 0) return null;
   const line = [
     "[compute-advance]",
@@ -241,6 +247,7 @@ export function computeAdvanceLogLine(
     `advanced=${r.advanced}`,
     `waiting=${r.waiting}`,
     `unreachable=${r.unreachable}`,
+    `unknown_status=${r.unknown_status}`,
     `repaired=${r.repaired}`,
     `nonces_cleared=${r.cleared}`,
     `errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}`,
