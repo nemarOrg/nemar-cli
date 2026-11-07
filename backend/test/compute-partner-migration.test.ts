@@ -21,6 +21,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Miniflare } from "miniflare";
+import { OPEN_RESERVATIONS_SQL, UNVERIFIED_ROWS_SQL } from "../src/services/compute-hold-reaper";
 import { MIGRATIONS_DIR, applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
 
 const FILE = "0134_compute_partner.sql";
@@ -247,6 +248,54 @@ describe("the new columns of compute_jobs", () => {
     async (e) => {
       expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toBeNull();
       expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toMatch(UNIQUE);
+    },
+  );
+});
+
+describe("the review round's columns and the reaper's plans (M3, Sonnet)", () => {
+  onEveryEngine(
+    "partner_expires_at and partner_files_digest exist, NULL on a row that predates them",
+    async (e) => {
+      const rows = await e.all<Record<string, unknown>>(
+        `SELECT partner_expires_at, partner_files_digest FROM compute_jobs
+        WHERE id = 'job_00000000000000000000aaaa'`,
+      );
+      expect(rows).toEqual([{ partner_expires_at: null, partner_files_digest: null }]);
+    },
+  );
+
+  onEveryEngine("partner_files_digest is a lowercase SHA-256 or nothing", async (e) => {
+    const base = (digest: string | null) => {
+      seq += 1;
+      return e.run(
+        `INSERT INTO compute_jobs (id, source, kind, app_id, app_version, spec_digest, partition, pool,
+           nodes, cores_per_node, minutes, partner_files_digest)
+         VALUES (?, 'partner', 'batch', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, ?)`,
+        `job_${(seq + 5000).toString(16).padStart(24, "0")}`,
+        HASH,
+        digest,
+      );
+    };
+    expect(await base(null)).toBeNull();
+    expect(await base(HASH)).toBeNull();
+    for (const bad of ["", "A".repeat(64), "a".repeat(63), "g".repeat(64)]) {
+      expect([bad.length, await base(bad)]).toEqual([bad.length, expect.stringMatching(CHECK)]);
+    }
+  });
+
+  onEveryEngine(
+    "the reaper's two lists are served by the partial indexes, with no sort of their own",
+    async (e) => {
+      const plan = async (sql: string, ...binds: unknown[]) =>
+        (await e.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`, ...binds))
+          .map((r) => r.detail)
+          .join(" | ");
+      const open = await plan(OPEN_RESERVATIONS_SQL, 30, 25);
+      expect(open).toContain("compute_jobs_partner_open");
+      expect(open).not.toContain("TEMP B-TREE");
+      const unverified = await plan(UNVERIFIED_ROWS_SQL, 25);
+      expect(unverified).toContain("compute_jobs_partner_unverified");
+      expect(unverified).not.toContain("TEMP B-TREE");
     },
   );
 });

@@ -62,7 +62,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
-import { isAwaitingPartnerReport } from "./compute-hold-reaper.js";
+import { awaitingPartnerReports } from "./compute-hold-reaper.js";
 import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
 import {
@@ -387,14 +387,6 @@ async function handleUnbound(
 ): Promise<void> {
   const rec = await getTapisJob(ctx, listed.uuid);
 
-  // A partner's job launched under a live reservation whose report has not come yet (phase D4, #2025): the
-  // report that is about to bind it, or the hold reaper after the reservation's wait, accounts for it. It is
-  // left for the next run; once the reservation is past its wait and grace it is a job that skipped it.
-  if (await isAwaitingPartnerReport(env, rec)) {
-    r.awaitingReport++;
-    return;
-  }
-
   // Tagged for a row that exists: NEMAR's own. A tag is TRUSTED only on a job the NEMAR service identity
   // owns: NEMAR owns every Tapis job it submits, and anyone else can write any tag on a job of theirs, so
   // a foreign job that carries a NEMAR-looking tag is a job that skipped the reservation, not a
@@ -660,7 +652,12 @@ export async function sweepTenantJobs(
       scope.map((j) => j.uuid),
     );
     r.bound = scope.filter((j) => bound.has(j.uuid)).length;
-    const unbound = scope.filter((j) => !bound.has(j.uuid));
+    const unboundAll = scope.filter((j) => !bound.has(j.uuid));
+    // A partner's job launched under a live reservation whose report has not come yet is left for the report
+    // (or the reaper): taken out BEFORE the slice, so a sheltered job never uses one of the run's slots.
+    const awaiting = await awaitingPartnerReports(env, ctx, unboundAll);
+    r.awaitingReport = awaiting.size;
+    const unbound = unboundAll.filter((j) => !awaiting.has(j.uuid));
     for (const job of unbound.slice(0, TENANT_NEW_PER_RUN)) {
       try {
         await handleUnbound(env, ctx, job, r);

@@ -70,7 +70,10 @@ beforeEach(async () => {
 /** Make a reservation `minutes` old. */
 function age(hold: Hold, minutes: number) {
   w.h.db
-    .query("UPDATE compute_jobs SET created_at = datetime('now', ?) WHERE id = ?")
+    .query(
+      `UPDATE compute_jobs SET created_at = datetime(created_at, ?1),
+         partner_expires_at = datetime(partner_expires_at, ?1) WHERE id = ?2`,
+    )
     .run(`-${minutes} minutes`, hold.job_id);
 }
 const kinds = (id: string) => entries(w, id).map((e) => e.kind);
@@ -130,8 +133,8 @@ describe("a reservation past the owner's wait", () => {
   });
 
   test("the wait is the owner's policy, not a constant", async () => {
-    const { setPolicy } = await import("./helpers/compute-seed");
-    await setPolicy(w.env().DB, fx.ownerId, {
+    const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
+    await setPartnerPolicy(w.env().DB, fx.ownerId, {
       reservationWaitMinutes: 5,
       clients: { [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1e9 } },
     });
@@ -390,8 +393,8 @@ describe("the sweep and the reaper agree about a partner's job", () => {
 
 describe("the tick is bounded, in rotation, production only, and reads no switch", () => {
   test("25 reservations a tick, then the rest on the next, none examined twice before all", async () => {
-    const { setPolicy } = await import("./helpers/compute-seed");
-    await setPolicy(w.env().DB, fx.ownerId, {
+    const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
+    await setPartnerPolicy(w.env().DB, fx.ownerId, {
       clients: { [w.client.clientId]: { maxOpenReservations: 100, maxReservedMilliPerDay: 1e9 } },
     });
     const holds: Hold[] = [];
@@ -442,5 +445,210 @@ describe("the tick is bounded, in rotation, production only, and reads no switch
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ examined: 0, released: 0 });
     expect(row(w, "job_0000000000000000000000c1").state).toBe("created");
+  });
+});
+
+describe("the review round: visibility, ambiguity, the sweep's shelter, keys and stuck cancels (PR #2077)", () => {
+  const confirmedClients = (over: Record<string, unknown> = {}) => ({
+    clients: { [w.client.clientId]: { maxOpenReservations: 100, maxReservedMilliPerDay: 1e9 } },
+    ...over,
+  });
+
+  test("an EMPTY search proves nothing until the owner confirms NEMAR can see the tenant: the hold is kept, counted and warned (I2, Sonnet)", async () => {
+    const { setPolicy } = await import("./helpers/compute-seed");
+    const { holdReaperLogLine } = await import("../src/services/compute-hold-reaper");
+    const hold = await reserve(w, person);
+    age(hold, 31);
+    // The confirmation is withdrawn after the reservation was made.
+    await setPolicy(w.env().DB, fx.ownerId, confirmedClients());
+    const kept = await reapExpiredHolds(production());
+    expect(kept).toMatchObject({ examined: 1, released: 0, unconfirmed: 1 });
+    expect(row(w, hold.job_id)).toMatchObject({ state: "created" });
+    expect(kinds(hold.job_id)).toEqual(["hold"]);
+    expect(holdReaperLogLine(kept as NonNullable<typeof kept>)?.level).toBe("warn");
+    // The owner's word releases it on the next tick.
+    const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
+    await setPartnerPolicy(w.env().DB, fx.ownerId, confirmedClients());
+    expect(await reapExpiredHolds(production())).toMatchObject({ released: 1, unconfirmed: 0 });
+    expect(row(w, hold.job_id).state).toBe("cancelled");
+  });
+
+  test("a tagged job another owner added does not make a reservation ambiguous; two of the person's do (I2, Opus)", async () => {
+    const hold = await reserve(w, person);
+    const foreign = await partnerLaunch(w, hold, person, { owner: "someone-else" });
+    const mine = await partnerLaunch(w, hold, person);
+    age(hold, 31);
+    const r = await reapExpiredHolds(production());
+    expect(r).toMatchObject({ ambiguous: 0, adopted: 1, verified: 1 });
+    expect(row(w, hold.job_id)).toMatchObject({ tapis_uuid: mine, partner_state: "verified" });
+    expect(fx.tapis.jobs.get(foreign)?.status).toBe("PENDING");
+
+    const second = await reserve(w, person);
+    await partnerLaunch(w, second, person);
+    await partnerLaunch(w, second, person);
+    age(second, 31);
+    expect(await reapExpiredHolds(production())).toMatchObject({ ambiguous: 1, adopted: 0 });
+    expect(row(w, second.job_id)).toMatchObject({
+      partner_flag: "ambiguous_tag",
+      state: "created",
+    });
+  });
+
+  describe("what the tenant sweep shelters (I2, Opus; M2, Sonnet)", () => {
+    test("only a job that is the only one under its tag, the person's, and a match", async () => {
+      // Two jobs under one tag: neither is sheltered.
+      const twice = await reserve(w, person);
+      const t1 = await partnerLaunch(w, twice, person);
+      const t2 = await partnerLaunch(w, twice, person);
+      // A job under a live reservation that is the wrong application: not a match, not sheltered.
+      const wrongApp = await reserve(w, person);
+      const w1 = await partnerLaunch(w, wrongApp, person, { appId: "another-app" });
+      // The honest one is sheltered.
+      const honest = await reserve(w, person);
+      const h1 = await partnerLaunch(w, honest, person);
+      // Bigger than the hold: not a match.
+      const big = await reserve(w, person);
+      const b1 = await partnerLaunch(w, big, person, { cores: 8 });
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept).toMatchObject({ awaitingReport: 1 });
+      expect(fx.tapis.jobs.get(h1)?.status).toBe("PENDING");
+      for (const uuid of [t1, t2, w1, b1])
+        expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+    });
+
+    test("a job tagged with ANOTHER person's reservation is not sheltered, even though its owner has a reservation of their own", async () => {
+      const second = await newPartnerPerson(w);
+      const mine = await reserve(w, person);
+      const theirs = await reserve(w, second);
+      // The first person's job, carrying the second person's tag.
+      const crossed = await partnerLaunch(w, theirs, person);
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept?.awaitingReport).toBe(0);
+      expect(fx.tapis.jobs.get(crossed)?.status).toBe("CANCELLED");
+      expect(row(w, mine.job_id).state).toBe("created");
+    });
+
+    test("the window is the stored expiry plus an hour: sheltered at 31 and 89 minutes old, not at 91", async () => {
+      for (const [minutes, sheltered] of [
+        [31, true],
+        [89, true],
+        [91, false],
+      ] as const) {
+        await fx.reset();
+        w = await buildPartnerWorld(fx);
+        person = await newPartnerPerson(w);
+        const hold = await reserve(w, person);
+        const uuid = await partnerLaunch(w, hold, person);
+        age(hold, minutes);
+        const swept = await sweepTenantJobs(fx.env(), "live");
+        expect([minutes, swept?.awaitingReport, fx.tapis.jobs.get(uuid)?.status]).toEqual([
+          minutes,
+          sheltered ? 1 : 0,
+          sheltered ? "PENDING" : "CANCELLED",
+        ]);
+      }
+    });
+
+    test("a sheltered job never uses one of the run's slots: 25 sheltered jobs and one that skipped the reservation", async () => {
+      const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
+      await setPartnerPolicy(w.env().DB, fx.ownerId, {
+        ...confirmedClients(),
+        maxLiveJobsPerPerson: 100,
+      });
+      const rich = await newPartnerPerson(w, { grant: 10_000_000 });
+      const sheltered: string[] = [];
+      for (let i = 0; i < 26; i++) {
+        const hold = await reserve(w, rich);
+        sheltered.push(await partnerLaunch(w, hold, rich));
+      }
+      const rogue = await partnerLaunch(w, null, rich, { tags: [] });
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept).toMatchObject({ awaitingReport: 26, indexed: 1, cancelled: 1 });
+      expect(fx.tapis.jobs.get(rogue)?.status).toBe("CANCELLED");
+      for (const uuid of sheltered) expect(fx.tapis.jobs.get(uuid)?.status).toBe("PENDING");
+    }, 120_000);
+
+    test("a backlog the reaper has not drained extends the shelter, a tick for each 25 ahead; without one it ends at the hour", async () => {
+      const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
+      await setPartnerPolicy(w.env().DB, fx.ownerId, {
+        ...confirmedClients(),
+        maxLiveJobsPerPerson: 100,
+      });
+      const rich = await newPartnerPerson(w, { grant: 10_000_000 });
+      const target = await reserve(w, rich);
+      const uuid = await partnerLaunch(w, target, rich);
+      age(target, 95); // 65 minutes past its expiry: outside the hour
+      expect((await sweepTenantJobs(fx.env(), "live"))?.awaitingReport).toBe(0);
+      expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+
+      // The same, behind 26 reservations that expired earlier and are still waiting for the reaper.
+      await fx.reset();
+      w = await buildPartnerWorld(fx);
+      await setPartnerPolicy(w.env().DB, fx.ownerId, {
+        ...confirmedClients(),
+        maxLiveJobsPerPerson: 100,
+      });
+      const rich2 = await newPartnerPerson(w, { grant: 10_000_000 });
+      for (let i = 0; i < 26; i++) age(await reserve(w, rich2), 100);
+      const target2 = await reserve(w, rich2);
+      const uuid2 = await partnerLaunch(w, target2, rich2);
+      age(target2, 95);
+      expect((await sweepTenantJobs(fx.env(), "live"))?.awaitingReport).toBe(1);
+      expect(fx.tapis.jobs.get(uuid2)?.status).toBe("PENDING");
+    }, 120_000);
+  });
+
+  test("idempotency keys older than seven days are deleted, a bounded batch a tick, and a fresh one stays (M3, Opus)", async () => {
+    const insert = w.h.db.query(
+      `INSERT INTO compute_idempotency_keys (scope, key, request_hash, job_id, created_at)
+       VALUES ('client:prune', ?, ?, ?, datetime('now', ?))`,
+    );
+    const hash = "a".repeat(64);
+    const job = `job_${"b".repeat(24)}`;
+    for (let i = 0; i < 520; i++) insert.run(`old-${i}`, hash, job, "-8 days");
+    insert.run("fresh", hash, job, "-6 days");
+    const first = await reapExpiredHolds(production());
+    expect(first?.pruned).toBe(500);
+    const second = await reapExpiredHolds(production());
+    expect(second?.pruned).toBe(20);
+    const left = w.h.db.query("SELECT key FROM compute_idempotency_keys").all() as Array<{
+      key: string;
+    }>;
+    expect(left.map((r) => r.key)).toEqual(["fresh"]);
+  });
+
+  test("a refusal whose cancel never takes is counted in cancel_pending_failed after an hour, and keeps its slot (M6, Sonnet)", async () => {
+    const { countCancelPendingFailed } = await import("../src/services/compute-lifecycle");
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person, { owner: "someone-else" });
+    fx.tapis.advance(uuid, "QUEUED");
+    fx.tapis.advance(uuid, "RUNNING");
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    const res = await partnerCall(w, "POST", `/compute/jobs/${hold.job_id}/report`, {
+      token: person.token,
+      json: { tapis_job_id: uuid },
+    });
+    expect(res.json?.code).toBe("report_mismatch");
+    expect(await countCancelPendingFailed(w.env().DB)).toBe(0);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET cancel_requested_at = datetime('now', '-61 minutes') WHERE id = ?",
+      )
+      .run(hold.job_id);
+    expect(await countCancelPendingFailed(w.env().DB)).toBe(1);
+    await reapExpiredHolds(production());
+    // Still there: the slot is not released until a read shows the job over.
+    expect(row(w, hold.job_id)).toMatchObject({ state: "created", partner_state: "mismatch" });
+    expect(await countCancelPendingFailed(w.env().DB)).toBe(1);
+    // A pending (unread) job has no cancel to carry out and is not counted.
+    const second = await reserve(w, person);
+    const u2 = await partnerLaunch(w, second, person);
+    fx.tapis.down();
+    await partnerCall(w, "POST", `/compute/jobs/${second.job_id}/report`, {
+      token: person.token,
+      json: { tapis_job_id: u2 },
+    });
+    fx.tapis.up();
+    expect(await countCancelPendingFailed(w.env().DB)).toBe(1);
   });
 });
