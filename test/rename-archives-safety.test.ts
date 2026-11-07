@@ -96,8 +96,13 @@ function scenario(name: string, body: (s: RenameS3Standin, ops: Ops) => Promise<
   const run = async (): Promise<void> => {
     const s = startRenameS3Standin();
     let bare: RenameS3Standin["log"] = [];
+    let failed = false;
+    let failure: unknown;
     try {
       await body(s, (op) => s.log.filter((e) => e.op === op));
+    } catch (e) {
+      failed = true;
+      failure = e;
     } finally {
       // Invariant across every scenario: the script only ever deletes BY
       // VERSION ID. On this versioned bucket a bare DELETE just adds a
@@ -105,6 +110,15 @@ function scenario(name: string, body: (s: RenameS3Standin, ops: Ops) => Promise<
       bare = s.log.filter((e) => e.op === "DeleteObject" && e.versionId === null);
       s.stop();
     }
+    // The invariant is judged even when the body failed, as the afterEach it replaced was: a
+    // scenario that both fails and issues a bare DELETE reports both.
+    if (failed && bare.length > 0) {
+      throw new AggregateError(
+        [failure, new Error(`bare DELETE requests: ${JSON.stringify(bare)}`)],
+        "the scenario failed and the script also issued a bare DELETE",
+      );
+    }
+    if (failed) throw failure;
     expect(bare).toEqual([]);
   };
   let settle: (o: Outcome) => void = () => {};
