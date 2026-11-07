@@ -473,7 +473,7 @@ describe("the ACCESS report words (phase A8, #2013)", () => {
 });
 
 describe("failure codes", () => {
-  test("COMPUTE_FAILURE_CODES is the launcher's seven then the platform's other eight, in order", () => {
+  test("COMPUTE_FAILURE_CODES is the launcher's seven then the platform's other nine, in order", () => {
     // Phase A5 checks a failure code read from launcher/result.json against this list.
     expect([...COMPUTE_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
@@ -491,6 +491,7 @@ describe("failure codes", () => {
       "tapis_error",
       "result_verification_failed",
       "records_unavailable",
+      "tapis_record_lost",
     ]);
   });
 
@@ -518,7 +519,7 @@ describe("failure codes", () => {
     expect(launcherExitNumber("result_upload_failed")).toBe(16);
   });
 
-  test("the platform codes are the eleven the phase names", () => {
+  test("the platform codes are the eleven the phase names and the one the review added", () => {
     expect([...PLATFORM_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
       "dataset_fetch_failed",
@@ -531,6 +532,7 @@ describe("failure codes", () => {
       "result_verification_failed",
       "records_unavailable",
       "result_upload_failed",
+      "tapis_record_lost",
     ]);
   });
 

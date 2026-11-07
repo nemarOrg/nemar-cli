@@ -237,6 +237,10 @@ export const PLATFORM_FAILURE_CODES = [
   "result_verification_failed",
   "records_unavailable",
   "result_upload_failed",
+  // A live job whose Tapis record is gone or has not been readable for a week (owner decision of
+  // 2026-11-06): the job ends `failed`, the hold is released with NO charge, and the row is flagged
+  // `mismatch` so the observer and the tenant sweep can reconcile any real use against Expanse's figures.
+  "tapis_record_lost",
 ] as const;
 
 export type PlatformFailureCode = (typeof PLATFORM_FAILURE_CODES)[number];

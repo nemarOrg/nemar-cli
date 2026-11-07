@@ -117,6 +117,8 @@ export const MAX_FAILED_ATTEMPTS = 3;
 export const CONSUMED_FAILURE_WORDS: readonly string[] = [
   "result_upload_failed",
   "result_verification_failed",
+  // The job may have run for real; its record is gone and nothing was charged, so it cannot be told apart.
+  "tapis_record_lost",
 ];
 
 /**

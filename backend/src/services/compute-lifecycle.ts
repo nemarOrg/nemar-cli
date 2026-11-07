@@ -1190,6 +1190,45 @@ async function endUnsubmitted(
   return won;
 }
 
+/**
+ * A live job whose Tapis record is gone (404 on the read and on a cancel's read-back) or has not been
+ * readable for {@link UNREADABLE_GIVE_UP_DAYS} days ends `failed` with `tapis_record_lost` (owner decision
+ * of 2026-11-06). The hold is RELEASED with no charge (the same statement, key and gate as any release, so
+ * the settlement stays idempotent and the hold is released exactly once), the row is flagged `mismatch` so
+ * the observer's final settlement and the tenant sweep can reconcile any use that really happened, and the
+ * failure is the platform's. The row leaves the live states, which frees the account's quota slot, and a
+ * pipeline stamp that reads it fails with the same word. True when this call moved the row.
+ */
+async function endRecordLost(env: Bindings, job: ComputeJobRow): Promise<boolean> {
+  const plan: TerminalPlan = {
+    to: "failed",
+    failureCode: "tapis_record_lost",
+    failureDetail: null,
+    cancelReason: null,
+    platformFailure: true,
+    verified: false,
+    mismatch: true,
+    tapisStatus: null,
+    remoteSubmittedAt: null,
+    startedAt: null,
+    endedAt: null,
+    slurmJobId: null,
+    settlement: { kind: "release" },
+    unsubmittedOnly: false,
+  };
+  const won = await commitTerminal(env, job, plan, await recordsRetentionYears(env));
+  if (!won) return false;
+  console.error(`[compute-lifecycle] tapis_record_lost job=${job.id}`);
+  await afterTerminal(env, (await getJob(env.DB, job.id)) ?? job, plan);
+  return true;
+}
+
+/** Whether a live row's last good read of Tapis is old enough for its record to be declared lost. */
+function recordLostByAge(job: ComputeJobRow, nowMs: number): boolean {
+  const lastGood = job.tapis_synced_at ?? job.submitted_at ?? job.created_at;
+  return ageMinutes(lastGood, nowMs) > UNREADABLE_GIVE_UP_DAYS * 24 * 60;
+}
+
 /** The webhook subscription of a bound job: a hint only, so a failure is a fixed word and nothing more. */
 async function subscribe(
   env: Bindings,
@@ -1665,11 +1704,13 @@ export async function driveCancel(
   // included, did not take it; the read-back below shows whether the job ended anyway (a lost answer may
   // have cancelled it), and if it did not, the cancel is `failed` and is asked again by the next tick.
   let cancelFailed = false;
+  let cancelNotFound = false;
   try {
     await cancelJob(ctx, uuid);
   } catch (err) {
     if (!(err instanceof TapisError && err.status === 409)) {
       cancelFailed = true;
+      cancelNotFound = err instanceof TapisError && err.kind === "not_found";
       console.warn(`[compute-lifecycle] cancel_unclear job=${job.id} kind=${tapisWord(err)}`);
     }
   }
@@ -1679,6 +1720,12 @@ export async function driveCancel(
     await applyTapisJob(env, fresh, rec);
   } catch (err) {
     console.warn(`[compute-lifecycle] cancel_readback_failed job=${job.id} kind=${tapisWord(err)}`);
+    // The cancel answered 404 AND the read-back answered 404: Tapis has no such job. Somebody asked for the
+    // job to end, and there is nothing to cancel or to read, so it ends as lost rather than waiting a week.
+    if (cancelNotFound && err instanceof TapisError && err.kind === "not_found") {
+      const fresh = (await getJob(env.DB, job.id)) ?? job;
+      if (isTerminalComputeState(fresh.state) || (await endRecordLost(env, fresh))) return "ended";
+    }
     return cancelFailed ? "failed" : "pending";
   }
   const after = await getJob(env.DB, job.id);
@@ -1759,7 +1806,9 @@ export async function advanceComputeJob(
     rec = await getTapisJob(ctx, job.tapis_uuid);
   } catch (err) {
     console.warn(`[compute-lifecycle] readback_failed job=${job.id} kind=${tapisWord(err)}`);
-    await markUnreportedIfStale(env, job);
+    // A record unread for a week is lost, not merely silent: the job ends and the hold is released.
+    if (recordLostByAge(job, nowMs)) await endRecordLost(env, job);
+    else await markUnreportedIfStale(env, job);
     return { outcome: "unreachable", job: await getJob(env.DB, job.id) };
   }
   const applied = await applyTapisJob(env, job, rec, nowMs);

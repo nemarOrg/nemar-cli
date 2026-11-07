@@ -15,6 +15,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { findRecipe } from "../../shared/compute-recipes";
+import { runComputeAdvanceCron } from "../src/services/compute-advance";
 import {
   MAX_FAILED_ATTEMPTS,
   RETRY_COOLDOWN_DAYS,
@@ -299,6 +300,39 @@ describe("a dataset that keeps failing", () => {
     expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
     await env.DB.prepare("DELETE FROM compute_pipeline_stamps").run();
     await failedRun(env, "staging_failed", 0);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  test("a pipeline job whose Tapis record is lost fails its stamp `tapis_record_lost`: the tuple is not blocked, and the dataset waits the cooldown (it may have run)", async () => {
+    const env = await world(["nm000104"]);
+    const dispatched = await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: "nm000104",
+      actor: ADMIN,
+    });
+    if (!dispatched.ok) throw new Error("not dispatched");
+    await env.DB.prepare(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-8 days') WHERE id = ?1",
+    )
+      .bind(dispatched.jobId)
+      .run();
+    fx.tapis.down();
+    await runComputeAdvanceCron(env);
+    fx.tapis.up();
+    expect(
+      await env.DB.prepare("SELECT state, failure_code FROM compute_jobs WHERE id = ?1")
+        .bind(dispatched.jobId)
+        .first(),
+    ).toEqual({ state: "failed", failure_code: "tapis_record_lost" });
+    await syncPipelineStamps(env);
+    expect(
+      await env.DB.prepare("SELECT state, refusal_code FROM compute_pipeline_stamps").first(),
+    ).toEqual({ state: "failed", refusal_code: "tapis_record_lost" });
+    // It may have run for real, so it waits out the cooldown rather than being sent again at once.
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', '-8 days')",
+    ).run();
     expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
   });
 

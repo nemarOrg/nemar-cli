@@ -2295,6 +2295,90 @@ describe("the 30-minute tick", () => {
     fx.tapis.up();
   });
 
+  test("a live job whose Tapis record stays unreadable for a week ENDS `failed`, `tapis_record_lost`: the hold is released with no charge, once, and the row is flagged (MUTATION: drop the week rule)", async () => {
+    const s = await submittedJob();
+    const id = s.made.job.id;
+    await drive(s.env, id, s.uuid, "RUNNING");
+    // Six days without a good read: unreported (a day), but not lost.
+    await s.env.DB.prepare(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-6 days') WHERE id = ?",
+    )
+      .bind(id)
+      .run();
+    fx.tapis.down();
+    await runComputeAdvanceCron(s.env);
+    expect((await reread(s.env, id)).state).toBe("unreported");
+    expect(kinds(await ledgerOf(s.env, id))).toEqual(["hold"]);
+    // Past the week it is lost.
+    await s.env.DB.prepare(
+      "UPDATE compute_jobs SET tapis_synced_at = datetime('now', '-8 days') WHERE id = ?",
+    )
+      .bind(id)
+      .run();
+    const lines = await logged(async () => {
+      await runComputeAdvanceCron(s.env);
+    });
+    let job = await reread(s.env, id);
+    expect([job.state, job.failure_code, job.platform_failure, job.flag_mismatch]).toEqual([
+      "failed",
+      "tapis_record_lost",
+      1,
+      1,
+    ]);
+    expect(job.settled_provisional_at).not.toBeNull();
+    expect(job.charged_milli).toBe(0);
+    expect(job.retention_until).not.toBeNull();
+    expect(kinds(await ledgerOf(s.env, id))).toEqual(["hold", "release"]);
+    expect(lines.some((l) => l.includes("tapis_record_lost") && l.includes(id))).toBe(true);
+    const pool = await poolOf(s.env, s.made.accountId);
+    expect([pool.held_milli, pool.charged_milli]).toEqual([0, 0]);
+    expect((await peopleBudget(s.env)).held_milli).toBe(0);
+    // A second tick, and a read when Tapis is back, change nothing: the hold was released exactly once.
+    await runComputeAdvanceCron(s.env);
+    fx.tapis.up();
+    await runComputeAdvanceCron(s.env);
+    await advanceComputeJob(s.env, id);
+    job = await reread(s.env, id);
+    expect([job.state, job.failure_code]).toEqual(["failed", "tapis_record_lost"]);
+    expect(kinds(await ledgerOf(s.env, id))).toEqual(["hold", "release"]);
+    // The quota slot is free: the row is no longer one of the account's live rows.
+    const live = await s.env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM compute_jobs WHERE account_id = ?1 AND state IN ('created', 'uploading', 'submitted', 'queued', 'running', 'archiving', 'unreported')",
+    )
+      .bind(s.made.accountId)
+      .first<{ n: number }>();
+    expect(live?.n).toBe(0);
+  });
+
+  test("a cancel that answers 404 AND a read-back that answers 404 end the job as lost at once; either alone does not", async () => {
+    // 404 on the cancel only: the read finds the job, so it is not lost.
+    const a = await submittedJob();
+    await drive(a.env, a.made.job.id, a.uuid, "RUNNING");
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 404);
+    await requestComputeCancel(a.env, a.made.job.id, "user");
+    expect(["running", "cancelled"]).toContain((await reread(a.env, a.made.job.id)).state);
+    expect((await reread(a.env, a.made.job.id)).failure_code).toBeNull();
+    // 404 on the read-back only: the cancel was accepted, so nothing is lost.
+    const b = await submittedJob();
+    await drive(b.env, b.made.job.id, b.uuid, "RUNNING");
+    fx.tapis.fail("GET /v3/jobs/:uuid", 404);
+    await requestComputeCancel(b.env, b.made.job.id, "user");
+    expect((await reread(b.env, b.made.job.id)).failure_code).toBeNull();
+    // Both 404: Tapis has no such job.
+    const c = await submittedJob();
+    await drive(c.env, c.made.job.id, c.uuid, "RUNNING");
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 404);
+    fx.tapis.fail("GET /v3/jobs/:uuid", 404);
+    await requestComputeCancel(c.env, c.made.job.id, "user");
+    const lost = await reread(c.env, c.made.job.id);
+    expect([lost.state, lost.failure_code, lost.flag_mismatch]).toEqual([
+      "failed",
+      "tapis_record_lost",
+      1,
+    ]);
+    expect(kinds(await ledgerOf(c.env, c.made.job.id))).toEqual(["hold", "release"]);
+  });
+
   test("the webhook nonce is cleared one day after the job is terminal, and not before", async () => {
     const s = await submittedJob();
     await finishJob(s);
