@@ -31,8 +31,8 @@
 -- schedule and not an account's deletion. Rows are small and bounded by the client's caps; the hold reaper
 -- deletes the rows older than seven days (500 a tick), the longest a key can be replayed.
 --
--- compute_jobs, seven columns (the three below, then `partner_expires_at`, `partner_read_failures`,
--- `partner_first_failed_at` and `partner_files_digest`, each described where it is added), NULL or 0 for a
+-- compute_jobs, nine columns (the three below, then `partner_expires_at`, `partner_read_failures`,
+-- `partner_first_failed_at`, `partner_refused_at`, `partner_cancel_sent_at` and `partner_files_digest`, each described where it is added), NULL or 0 for a
 -- job that is not a partner's reservation:
 --   * `partner_state`: NULL while the job is a RESERVATION (a hold the partner has not reported a Tapis job
 --     under); `pending` once a Tapis job is bound and NEMAR's own read-back has not yet verified it;
@@ -95,6 +95,17 @@ ALTER TABLE compute_jobs ADD COLUMN partner_read_failures INTEGER NOT NULL DEFAU
   CONSTRAINT compute_jobs_partner_read_failures CHECK (partner_read_failures BETWEEN 0 AND 1000000);
 
 ALTER TABLE compute_jobs ADD COLUMN partner_first_failed_at TEXT;
+
+--   * `partner_refused_at`: when a refusal was recorded (the clock of a cancel that does not take). A
+--     refusal does NOT write `cancel_requested_at` or `cancel_reason`: those are for a PERSON's cancel, an
+--     administrator's and the end of an account, which must survive a later recovery or re-binding; the
+--     ended row's reason is `unreserved` only when none of them was recorded.
+--   * `partner_cancel_sent_at`: stamped by a conditional UPDATE BEFORE a blind cancel (a cancel of a job
+--     NEMAR could not read) is sent. A refused-as-unverifiable job that can be read later is recovered to
+--     `verified` only while this is NULL, so a recovery and a cancel on the wire cannot both win.
+ALTER TABLE compute_jobs ADD COLUMN partner_refused_at TEXT;
+
+ALTER TABLE compute_jobs ADD COLUMN partner_cancel_sent_at TEXT;
 
 ALTER TABLE compute_jobs ADD COLUMN partner_files_digest TEXT
   CONSTRAINT compute_jobs_partner_files_digest CHECK (

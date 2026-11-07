@@ -105,6 +105,19 @@ async function unreadableJob() {
   return { hold, uuid };
 }
 
+/** The refusal as unverifiable is recorded and the tick stops before the blind cancel: no cancel is on the wire. */
+async function refusedBeforeCancel(jobId: string) {
+  const { verifyBoundJob } = await import("../src/services/compute-report-verify");
+  const { TICK_READ } = await import("../src/services/compute-lifecycle");
+  w.h.db
+    .query(
+      "UPDATE compute_jobs SET partner_read_failures = 2, partner_first_failed_at = datetime('now', '-130 minutes') WHERE id = ?",
+    )
+    .run(jobId);
+  const out = await verifyBoundJob(fx.env(), jobId, { read: TICK_READ, tick: true });
+  expect(out.kind).toBe("mismatch");
+}
+
 /** Three failed ticks over two hours: the third refuses the job. Returns the third tick's result. */
 async function refuse3(jobId: string) {
   await reapExpiredHolds(fx.env());
@@ -481,9 +494,10 @@ describe("an unverifiable refusal is reconsidered when NEMAR can read the job (i
 
   test("a job that matches, read once Tapis recovers, is verified again and NOT cancelled; the person is charged only what it uses", async () => {
     const { hold, uuid } = await unreadableJob();
-    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
-    await refuse3(hold.job_id);
+    // The refusal is on the record and no cancel was put on the wire (the tick stopped between the two).
+    await refusedBeforeCancel(hold.job_id);
     expect(row(w, hold.job_id).partner_flag).toBe("unverifiable");
+    expect(row(w, hold.job_id).partner_cancel_sent_at).toBeNull();
     // Tapis answers again; clear the injected failures but keep the job.
     fx.tapis.clearFailures();
     const subsBefore = fx.tapis.subscriptions.length;
@@ -495,7 +509,7 @@ describe("an unverifiable refusal is reconsidered when NEMAR can read the job (i
       state: "submitted",
       partner_state: "verified",
       partner_flag: null,
-      flag_mismatch: 0,
+      flag_mismatch: 1,
       cancel_requested_at: null,
       cancel_reason: null,
       partner_read_failures: 0,

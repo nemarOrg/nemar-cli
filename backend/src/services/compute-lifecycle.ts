@@ -361,17 +361,20 @@ export const CANCEL_PENDING_FAILED_MINUTES = 60;
  * Live rows whose recorded cancel is still not carried out {@link CANCEL_PENDING_FAILED_MINUTES} minutes
  * after it was asked for, on the cancel sweep's own list (so a partner's reservation, which is not the
  * sweep's, and a job of the tenant sweep are not counted; an unverified `pending` row has no cancel to
- * carry out, but a refused `mismatch` row's cancel is the reaper's and is counted: a cancel at Tapis that
+ * carry out, but a refused `mismatch` row's cancel is the reaper's and is counted from when it was REFUSED (`partner_refused_at`; a refusal records no cancel intent): a cancel at Tapis that
  * does not take keeps the person's hold and slot, so it must be seen). A cancel the sweep retries every 30 minutes has
  * had at least one retry fail by then. The count the status view and the sweep's line carry as
  * `cancel_pending_failed`; never a row id.
  */
 export const CANCEL_PENDING_FAILED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
-  WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
-    AND flag_unreserved = 0
+  WHERE state IN (${LIVE_STATES_SQL}) AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
-    AND (partner_state IS NULL OR partner_state IN ('verified', 'mismatch'))
-    AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes')`;
+    AND (
+      (cancel_requested_at IS NOT NULL AND (partner_state IS NULL OR partner_state IN ('verified', 'mismatch'))
+        AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes'))
+      OR (partner_state = 'mismatch'
+        AND partner_refused_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes'))
+    )`;
 
 /** {@link CANCEL_PENDING_FAILED_SQL} as a number. */
 export async function countCancelPendingFailed(db: D1Database): Promise<number> {

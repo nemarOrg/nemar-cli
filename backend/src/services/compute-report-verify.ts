@@ -256,27 +256,41 @@ export const VERIFIED_SQL = `UPDATE compute_jobs SET
     started_at = COALESCE(?5, started_at),
     slurm_job_id = COALESCE(slurm_job_id, ?6),
     partner_read_failures = 0, partner_first_failed_at = NULL
-  WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending' AND state = 'created'`;
+  WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending' AND state = 'created'
+    AND EXISTS (SELECT 1 FROM users u WHERE u.id = compute_jobs.account_id
+                  AND u.compute_access = 'active' AND u.deleted_at IS NULL)`;
 
 /**
  * A job refused as `unverifiable` that NEMAR can read now, and that matches, is a verified job after all:
- * `mismatch` to `verified`, the job `submitted`, the cancel intent this refusal recorded withdrawn (one a
- * person's cancel recorded stays). `?1` the job, `?2` the uuid, `?3` Tapis's status, `?4` and `?5` its submit
- * and start times, `?6` the Slurm id. It writes only for a row still `mismatch` and `unverifiable`, not over.
+ * `mismatch` to `verified` and the job `submitted`. `?1` the job, `?2` the uuid, `?3` Tapis's status, `?4`
+ * and `?5` its submit and start times, `?6` the Slurm id. It writes only for a row still `mismatch` and
+ * `unverifiable`, not over, with NO cancel recorded by anyone (a person's, an administrator's, the end of an
+ * account: a later cancel survives, and the job stays refused and is ended), NO blind cancel put on the
+ * wire (`partner_cancel_sent_at`), and whose person's compute is `active` in this statement. Flags the
+ * refusal set are kept, as `VERIFIED_SQL` keeps them.
  */
 export const RECOVER_UNVERIFIABLE_SQL = `UPDATE compute_jobs SET
-    partner_state = 'verified', partner_flag = NULL, flag_mismatch = 0,
+    partner_state = 'verified', partner_flag = NULL,
     partner_verified_at = datetime('now'),
-    cancel_requested_at = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_requested_at END,
-    cancel_reason = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_reason END,
     state = 'submitted', submitted_at = datetime('now'), tapis_status = ?3,
     tapis_synced_at = datetime('now'),
     remote_submitted_at = COALESCE(?4, remote_submitted_at),
     started_at = COALESCE(?5, started_at),
     slurm_job_id = COALESCE(slurm_job_id, ?6),
-    partner_read_failures = 0, partner_first_failed_at = NULL
+    partner_read_failures = 0, partner_first_failed_at = NULL, partner_refused_at = NULL
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'mismatch' AND partner_flag = 'unverifiable'
-    AND state = 'created'`;
+    AND state = 'created' AND cancel_requested_at IS NULL AND partner_cancel_sent_at IS NULL
+    AND EXISTS (SELECT 1 FROM users u WHERE u.id = compute_jobs.account_id
+                  AND u.compute_access = 'active' AND u.deleted_at IS NULL)`;
+
+const ACTIVE_ACCOUNT_SQL =
+  "SELECT 1 AS ok FROM users WHERE id = ?1 AND compute_access = 'active' AND deleted_at IS NULL";
+
+/** Whether the account may use compute NOW: `active` and not deleted. */
+async function personActive(db: D1Database, accountId: number | null): Promise<boolean> {
+  if (accountId === null) return false;
+  return (await db.prepare(ACTIVE_ACCOUNT_SQL).bind(accountId).first()) !== null;
+}
 
 /** A failed read of a bound job on a tick: counted, with when the first was. `?1` the job. */
 export const COUNT_FAILED_READ_SQL = `UPDATE compute_jobs SET
@@ -288,15 +302,15 @@ export const COUNT_FAILED_READ_SQL = `UPDATE compute_jobs SET
 export const PARTNER_RECOVERED_ACTION = "compute.partner.recovered";
 
 /**
- * The mismatch, as intent only: the flag word, the job flagged `mismatch`, the cancel intent (the first
- * recorded reason stands) and what Tapis last showed. `?1` the job, `?2` the bound uuid, `?3` the flag,
+ * The mismatch, as intent only: the flag word, the job flagged `mismatch`, when it was refused and what
+ * Tapis last showed. It records NO cancel intent: `cancel_requested_at` and `cancel_reason` are for a
+ * person's cancel, an administrator's and the end of an account, which must outlive a recovery. `?1` the job, `?2` the bound uuid, `?3` the flag,
  * `?4` Tapis's status, `?5` the start time (or NULL). The audit row follows in the same batch, only if
  * this statement changed the row.
  */
 export const MISMATCH_SQL = `UPDATE compute_jobs SET
     partner_state = 'mismatch', partner_flag = ?3, flag_mismatch = 1,
-    cancel_requested_at = COALESCE(cancel_requested_at, datetime('now')),
-    cancel_reason = COALESCE(cancel_reason, 'unreserved'),
+    partner_refused_at = datetime('now'),
     tapis_status = COALESCE(?4, tapis_status), started_at = COALESCE(?5, started_at)
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending'`;
 
@@ -304,7 +318,11 @@ export type VerifyOutcome =
   /** The read matched: the job is `verified` and `submitted`; the webhook is subscribed. */
   | { kind: "verified"; job: ComputeJobRow }
   /** The read did not match: the intent is recorded (the cancel is carried out by `finishMismatch`). */
-  | { kind: "mismatch"; flag: ComputeReportMismatch | typeof UNVERIFIABLE_FLAG; job: ComputeJobRow }
+  | {
+      kind: "mismatch";
+      flag: ComputeReportMismatch | typeof UNVERIFIABLE_FLAG | "hold_ended";
+      job: ComputeJobRow;
+    }
   /** Tapis could not be read just now (or the row is not ready): still `pending`, nothing charged. */
   | { kind: "pending"; job: ComputeJobRow; gone?: boolean }
   /** The row is not a partner job waiting to be verified (already verified, refused, ended or none). */
@@ -375,6 +393,15 @@ export async function verifyBoundJob(
 
   const pin = (await getPolicy(env.DB)).policy.partner;
   const verdict = checkReport(job, rec, pinOf(pin));
+  if (verdict.ok && !(await personActive(env.DB, job.account_id))) {
+    // The person's compute ended (or the account was deleted) after the job was bound: a job is not
+    // verified into a live one for a person who no longer has compute. It is refused and ended, and the
+    // use is the partner's. (The verifying statement re-checks this atomically.)
+    job = await recordMismatch(env, job, uuid, "hold_ended", rec);
+    return job.partner_state === "mismatch"
+      ? { kind: "mismatch", flag: "hold_ended", job }
+      : { kind: "skipped", job };
+  }
   if (verdict.ok) {
     const slurm =
       typeof rec.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
@@ -482,21 +509,22 @@ export async function recordMismatch(
  */
 export const BIND_ADOPT_SQL = `UPDATE compute_jobs SET
     tapis_uuid = ?2, partner_state = 'pending', partner_flag = NULL,
-    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL
+    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL,
+    partner_read_failures = 0, partner_first_failed_at = NULL, partner_refused_at = NULL,
+    partner_cancel_sent_at = NULL
   WHERE id = ?1 AND source = 'partner' AND state = 'created' AND tapis_uuid IS NULL
     AND partner_state IS NULL`;
 
 /**
  * Withdraw a binding that was never safe to keep: the row is a reservation again (`partner_state` NULL,
- * no uuid, a flag word that says why; the cancel intent THIS refusal recorded is withdrawn, one a person's
- * cancel or the end of an account recorded stands). `?1` the job, `?2` the uuid, `?3` the flag. Only
+ * no uuid, a flag word that says why; a cancel a person, an administrator or the end of an account
+ * recorded stands, so a re-binding is refused). `?1` the job, `?2` the uuid, `?3` the flag. Only
  * the row that is still bound to that uuid and not yet ended.
  */
 export const UNBIND_SQL = `UPDATE compute_jobs SET
     tapis_uuid = NULL, partner_state = NULL, partner_flag = ?3, tapis_status = NULL,
-    cancel_requested_at = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_requested_at END,
-    cancel_reason = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_reason END,
-    flag_mismatch = 1
+    partner_read_failures = 0, partner_first_failed_at = NULL, partner_refused_at = NULL,
+    partner_cancel_sent_at = NULL, flag_mismatch = 1
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state IN ('pending', 'mismatch')
     AND state = 'created'`;
 
@@ -550,6 +578,7 @@ export async function finishMismatch(
   env: Bindings,
   jobId: string,
   mode: { maxAttempts: number; timeoutMs: number } = TICK_READ,
+  options: { blindCancel?: boolean } = {},
 ): Promise<MismatchEnd> {
   // The row as it stands BEFORE Tapis is asked: the ending binds exactly this state, so a second writer
   // (a retried tick, a concurrent report) that lost changes nothing.
@@ -593,12 +622,25 @@ export async function finishMismatch(
   // A job this refusal itself cancelled (CANCELLED) stays refused: it did not get to run.
   if (unverifiable && rec !== null && rec.status !== "CANCELLED") {
     const verdict = checkReport(job, rec, pinOf((await getPolicy(env.DB)).policy.partner));
-    if (verdict.ok)
-      return (await recoverUnverifiable(env, ctx, job, uuid, rec)) ? "recovered" : "skipped";
-    await env.DB.prepare(REWORD_UNVERIFIABLE_SQL).bind(job.id, verdict.flag).run();
+    if (verdict.ok) {
+      if (await recoverUnverifiable(env, ctx, job, uuid, rec)) return "recovered";
+      // Not recovered: another writer did (or ended it), or a cancel, a blind cancel on the wire or the end
+      // of the person's compute forbids it. The first two are not ours to carry on; the rest stay refused
+      // and are ended below.
+      if ((await getJob(env.DB, job.id))?.partner_state !== "mismatch") return "skipped";
+    } else {
+      await env.DB.prepare(REWORD_UNVERIFIABLE_SQL).bind(job.id, verdict.flag).run();
+    }
   }
 
   if (unread) {
+    // The request path never sends a cancel for a job it could not read: that is the tick's.
+    if (options.blindCancel === false) return "pending";
+    // The blind cancel is put on the record BEFORE it is sent, by a conditional UPDATE that a recovery
+    // (which needs the stamp NULL) cannot both win: either the recovery committed first (this changes
+    // nothing and nothing is sent) or the stamp is down and no recovery can follow.
+    const stamped = await env.DB.prepare(STAMP_BLIND_CANCEL_SQL).bind(job.id, uuid).run();
+    if ((stamped.meta?.changes ?? 0) === 0) return "skipped";
     try {
       await cancelJob(ctx, uuid);
     } catch (err) {
@@ -615,6 +657,8 @@ export async function finishMismatch(
         console.warn(
           `[compute-partner] cancel_unclear job=${job.id} kind=${err instanceof TapisError ? err.kind : errorClassName(err)}`,
         );
+        // The stamp STAYS: the call may have taken effect (Tapis cancels are asynchronous and every failure
+        // of a mutating call has an unknown outcome), so the job is not recovered; the next tick asks again.
         return "pending";
       }
     }
@@ -650,6 +694,11 @@ export async function finishMismatch(
   const won = await commitPartnerMismatchEnd(env, job, rec, settlement, priced.pool);
   return won ? "ended" : "skipped";
 }
+
+/** The blind cancel is on the record before it is sent. `?1` the job, `?2` the uuid. */
+export const STAMP_BLIND_CANCEL_SQL = `UPDATE compute_jobs SET partner_cancel_sent_at = datetime('now')
+  WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'mismatch' AND partner_flag = 'unverifiable'
+    AND state = 'created'`;
 
 /** A refusal that turned out to be another word: the repeat is told what the record showed. `?1` the job, `?2` the word. */
 export const REWORD_UNVERIFIABLE_SQL = `UPDATE compute_jobs SET partner_flag = ?2
