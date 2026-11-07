@@ -46,3 +46,7 @@ export * from "./compute-bundle.js";
 export * from "./compute-submit.js";
 // The strict-by-design REQUESTS of the same routes (the Worker validates them as they come in).
 export * from "./compute-submit-request.js";
+// The partner contract: a partner's reserve, report and release, the OPEN responses, the refusal words
+// and their sentences (epic #2021 phase D4, #2025), and the strict-by-design REQUESTS beside them.
+export * from "./compute-partner.js";
+export * from "./compute-partner-request.js";

@@ -643,6 +643,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     // The person's job submission REQUESTS (phase D3, #2024): validated by the Worker as they come in, and
     // a mistyped key must be refused, not stripped. Their responses are in `compute-submit.ts`, open.
     "compute-submit-request.ts",
+    // The partner contract REQUESTS (phase D4, #2025): a hold body is kept byte for byte as the job's
+    // specification and a report is validated as it comes in; a mistyped key must be refused, not stripped.
+    // Their responses are in `compute-partner.ts`, open.
+    "compute-partner-request.ts",
   ]);
 
   const HEX = "a".repeat(64);

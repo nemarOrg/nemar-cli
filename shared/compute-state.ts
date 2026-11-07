@@ -663,6 +663,9 @@ export const COMPUTE_LEDGER_REASONS = [
   "expired",
   "final_settlement",
   "unreserved_usage",
+  // Phase D4 (#2025): an administrator moved the charge of a job that skipped the reservation from the
+  // partner's pool to a person's (two `adjust` entries, one batch).
+  "charge_moved",
 ] as const;
 
 export type ComputeLedgerReason = (typeof COMPUTE_LEDGER_REASONS)[number];
@@ -690,6 +693,11 @@ export const COMPUTE_CANCEL_REASONS = [
   "unreserved",
   "unattributed",
   "scheduler",
+  // Phase D4 (#2025), a partner's reservation: the partner released it (`DELETE /compute/holds/:id`), or it
+  // went unreported past the owner's reservation wait and NEMAR, finding no Tapis job under its tag,
+  // released it.
+  "partner_release",
+  "hold_expired",
 ] as const;
 
 export type ComputeCancelReason = (typeof COMPUTE_CANCEL_REASONS)[number];
