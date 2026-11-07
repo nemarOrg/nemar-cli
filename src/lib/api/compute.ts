@@ -11,6 +11,11 @@
  */
 
 import {
+  type ComputeAccessRequestBody,
+  type ComputeAccessRequestResponse,
+  computeAccessRequestResponseSchema,
+} from "../../../shared/contract/compute-access.js";
+import {
   type ComputeAccessReportResponse,
   ComputeAccessReportResponseSchema,
   type ComputeAccessReportsResponse,
@@ -441,4 +446,21 @@ export function computeRefusalCode(
     ? blocked.filter((t): t is string => typeof t === "string")
     : [];
   return { code, blockedBy };
+}
+
+/**
+ * `POST /users/me/compute-access/request` (the signed-in person): ask for compute access, once (epic
+ * #2021 phase D1, ADR 0118). A refusal is `{ error: <code>, message, missing }` like upload access's:
+ * the code is `ApiError.code` (one of `COMPUTE_ACCESS_ERROR_CODES`), the sentence is `ApiError.message`
+ * and the account fields still to fix are `ApiError.missing`. The answer is read with an open schema.
+ */
+export async function requestComputeAccess(
+  body: ComputeAccessRequestBody,
+): Promise<ComputeAccessRequestResponse> {
+  return request(
+    "/users/me/compute-access/request",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+    computeAccessRequestResponseSchema,
+  );
 }

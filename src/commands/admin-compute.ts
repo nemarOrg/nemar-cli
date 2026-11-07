@@ -13,6 +13,7 @@
  *                                                         reporting, legal holds and ACCESS reports (phase A7, #2012; the same file)
  *   nemar admin compute observer mint [--json]            mint the observer's one-hour token (admin)
  *   nemar admin compute pipeline run|status ...           run NEMAR's own recipes, or read their stamps (admin; src/commands/admin-compute-pipeline.ts)
+ *   nemar admin compute access list|grant|deny|suspend|revoke ...  decide on a person's compute access (admin; src/commands/admin-compute-access.ts)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
  * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so within one invocation the
@@ -61,6 +62,7 @@ import {
   putComputePolicy,
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
+import { accessCommand } from "./admin-compute-access.js";
 import { jobsCommand, observerCommand } from "./admin-compute-jobs.js";
 import { pipelineCommand } from "./admin-compute-pipeline.js";
 
@@ -659,7 +661,7 @@ const statusCommand = new Command("status")
   });
 
 export const computeCommand = new Command("compute").description(
-  "The compute gateway: the owner policy, the SU allocation pools, status, jobs and their reports, legal holds, the pipeline and the observer's token (ADR 0118)",
+  "The compute gateway: the owner policy, the SU allocation pools, people's access, status, jobs and their reports, legal holds, the pipeline and the observer's token (ADR 0118)",
 );
 
 computeCommand.addCommand(policyCommand);
@@ -668,3 +670,4 @@ computeCommand.addCommand(statusCommand);
 computeCommand.addCommand(observerCommand);
 computeCommand.addCommand(jobsCommand);
 computeCommand.addCommand(pipelineCommand);
+computeCommand.addCommand(accessCommand);

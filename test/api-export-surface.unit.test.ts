@@ -274,8 +274,14 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "putComputePolicy",
     "readComputeRecord",
     "releaseComputeHold",
+    "requestComputeAccess",
     "requeueComputeAccessReport",
     "runComputePipeline",
+  ],
+  "compute-access-admin": [
+    "computeAccessAdminErrorCode",
+    "decideComputeAccess",
+    "listComputeAccess",
   ],
 };
 
@@ -398,6 +404,10 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "requestComputeAccess", // epic #2021 phase D1: POST /users/me/compute-access/request
+  "listComputeAccess", // epic #2021 phase D1: GET /admin/compute/access
+  "decideComputeAccess", // epic #2021 phase D1: POST /admin/compute/access/{grant|deny|suspend|revoke}/...
+  "computeAccessAdminErrorCode", // epic #2021 phase D1: reads a compute-access refusal's word (no request)
   "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
   "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
   "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status

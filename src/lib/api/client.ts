@@ -13,6 +13,7 @@
 
 import type { ZodType } from "zod";
 import { ADMIN_USER_ERROR_CODES } from "../../../shared/contract/admin-user.js";
+import { COMPUTE_ACCESS_ERROR_CODES } from "../../../shared/contract/compute-access.js";
 import {
   DEVICE_AUTH_REFUSAL_CODES,
   deviceGrantErrorSchema,
@@ -270,7 +271,13 @@ export async function request<T>(
       isScreenCode ||
       (missing !== undefined &&
         typeof data.error === "string" &&
-        UPLOAD_ACCESS_ERROR_CODES.includes(data.error));
+        UPLOAD_ACCESS_ERROR_CODES.includes(data.error)) ||
+      // Compute access's refusals (epic #2021 phase D1): the same shape, a code in `error`, the sentence
+      // in `message` and the fields still to fix in `missing`. Keyed on the code AND on `missing`, as the
+      // upload arm is: `already_active` and `access_closed` are words other bodies may use.
+      (missing !== undefined &&
+        typeof data.error === "string" &&
+        COMPUTE_ACCESS_ERROR_CODES.includes(data.error));
     let primary = prefersMessage
       ? (data.message as string) || (data.error as string)
       : (data.error as string) || (data.message as string);

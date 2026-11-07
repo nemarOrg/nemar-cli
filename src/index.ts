@@ -27,6 +27,7 @@ import {
   switchAction,
 } from "./commands/auth.js";
 import { completionCommand } from "./commands/completion.js";
+import { computeCommand } from "./commands/compute.js";
 import { createDownloadCommand, createUploadCommand, datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
@@ -204,6 +205,7 @@ Support:
 program.addCommand(authCommand);
 program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
+program.addCommand(computeCommand);
 program.addCommand(adminCommand);
 program.addCommand(doctorCommand);
 program.addCommand(completionCommand);
