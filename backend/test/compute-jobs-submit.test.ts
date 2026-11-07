@@ -409,8 +409,9 @@ describe("the order of refusal: one failing request per code", () => {
       const p = await newPerson(w, { access });
       return submit(p, req, headers);
     };
-    // access before a bad body
+    // access before a bad body, for a paused grant as for one never asked
     expect((await run("none", { nonsense: 1 })).body.code).toBe("no_compute_access");
+    expect((await run("suspended", { nonsense: 1 })).body.code).toBe("suspended");
     // a bad key header before a bad body
     expect((await run("active", { nonsense: 1 }, { "Idempotency-Key": "x" })).body.field).toBe(
       "Idempotency-Key",
@@ -443,6 +444,19 @@ describe("the order of refusal: one failing request per code", () => {
         )
       ).body.code,
     ).toBe("entry_not_in_bundle");
+    // the person's live-job limit before the bundle and the datasets
+    await setPolicy(w.env().DB, w.fx.ownerId, { maxLiveJobsPerPerson: 1 });
+    const full = await newPerson(w);
+    expect((await submit(full, bundleRequest(makeBundle([{ path: "run.py", content: "1" }])))).status).toBe(201);
+    expect(
+      (
+        await submit(
+          full,
+          failing({ entry: "nope.py", datasets: [{ id: "nm000199", version: "1.0.0" }] }),
+        )
+      ).body.code,
+    ).toBe("over_concurrency");
+    await setPolicy(w.env().DB, w.fx.ownerId, {});
     // the datasets before the hold
     const poor = await newPerson(w, { grant: 1 });
     expect(
