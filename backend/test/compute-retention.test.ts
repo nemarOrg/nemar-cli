@@ -301,6 +301,36 @@ describe("legal holds", () => {
     expect(jobRow(job.id).account_id).toBe(job.accountId);
   });
 
+  test("a hold placed between the records and the logs still keeps the logs: the hold is read again between the two prefixes (MUTATION: drop the second read)", async () => {
+    const job = await oldJob();
+    const real = fx.harness.records;
+    // The hold appears once the records prefix is deleted and before the logs prefix is touched.
+    const racing = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "delete") {
+          return async (keys: string | string[]) => {
+            const done = await target.delete(keys as never);
+            if ((Array.isArray(keys) ? keys : [keys]).some((k) => k.startsWith("records/"))) {
+              await placeHold(env().DB, {
+                scope: "job",
+                ref: job.id,
+                reason: "legal_request",
+                ownerId: ownerId(),
+              });
+            }
+            return done;
+          };
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await runComputeRetentionSweep(env({ COMPUTE_RECORDS: racing }));
+    expect(result?.recordsDeleted).toBe(0);
+    expect(await keysUnder(fx.harness.records, `logs/${job.id}/`)).not.toEqual([]);
+    expect(jobRow(job.id).records_deleted_at).toBeNull();
+  });
+
   test("a hold placed after the delete began still stops the reduction of the row (MUTATION: drop the hold term of the reducing statement)", async () => {
     const job = await oldJob();
     const real = fx.harness.records;

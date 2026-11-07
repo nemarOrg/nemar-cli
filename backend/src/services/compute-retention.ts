@@ -341,6 +341,9 @@ export async function runComputeRetentionSweep(env: Bindings): Promise<Retention
         r.incomplete++;
         continue;
       }
+      // A hold placed since the first read, while the records were being deleted, still keeps the logs: the
+      // hold is read again between the two prefixes (the reducing statement guards the row, not the objects).
+      if (await isHeld(db, id)) continue;
       const b = await deletePrefix(records, `logs/${id}/`);
       r.objectsDeleted += b.deleted;
       if (b.locked) {
