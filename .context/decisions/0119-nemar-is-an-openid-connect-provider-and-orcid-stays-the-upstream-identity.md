@@ -379,3 +379,32 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - OpenID Connect Core 1.0; RFC 6749 and 7636 (authorization code, PKCE), RFC 7009 (revocation), RFC 7662 (introspection), RFC 9207 (issuer in the authorization response).
 - Rule 12's code and rule 15: issue #2019; migration `0124_oidc_logout_deliveries.sql`, `backend/src/services/oidc-cascade.ts`, `backend/src/services/oidc-logout.ts`, `backend/src/services/oidc-logout-store.ts`, `OIDC_END_CALLERS` and its test `backend/test/oidc-cascade-callers.test.ts`, the retry tick in `scheduled()` (`backend/src/index.ts`); OpenID Connect Back-Channel Logout 1.0; RFC 8725 (JWT best current practices, explicit typing).
 - Rules 13 and 14: issue #2018; migration `0123_oidc_tokens.sql`, `backend/src/services/oidc-tokens.ts`, `backend/src/services/oidc-claims.ts`, `backend/src/routes/oauth.ts`, `backend/src/middleware/oidc-bearer.ts`, `resolveApiKeyUser` in `backend/src/middleware/auth.ts`, the `oauth-ip` bucket in `backend/src/middleware/rateLimit.ts`; RFC 6750 (bearer tokens).
+
+## Amendment 2026-11-06 (#2023): five compute routes accept an access token (phase D2 of epic #2021)
+
+`backend/src/routes/compute/auth.ts` is the credential rule of the `/compute` read routes. This amendment says which routes accept an OpenID Connect access token and for which scope. It narrows nothing in rules 4 and 14 and widens them by exactly these five paths: every other route of the Worker still refuses an `nmo_` token by its prefix, and `backend/test/oidc-token-allowlist.test.ts` lists the five (its `COMPUTE_READ_RE`) as the only paths outside `/oauth` and discovery that may answer a token differently from an unknown key.
+
+| Route | Accepted credentials | Scope | Why |
+|---|---|---|---|
+| `GET /compute/me` | CLI key, session cookie, access token of a person | `compute.read` | The partner shows a person their access state and balances; the CLI and the website read the same body. Answers in every access state. |
+| `GET /compute/me/usage` | same | `compute.read` | Usage over time, for the partner's dashboard and the person's own. |
+| `GET /compute/me/jobs` | same | `compute.read` | The person's jobs from every front door. |
+| `GET /compute/me/jobs/:id` | same | `compute.read` | One job; a stranger's id answers 404 `job_not_found`, the same as an absent one. |
+| `GET /compute/stats` | access token of a CLIENT (client credentials grant) only | `compute.stats` | Platform-wide aggregates for the partner. Carries no account, subject, name or email. |
+
+1. **One resolver, two guards.**
+   `computePersonCredential` guards `/me*`: a bearer value with the `nmo_` prefix goes to `oidcBearer(["compute.read"])` (Epic B's one middleware, instantiated once as `PERSON_OIDC`), anything else to `authMiddleware`, exactly as every signed-in route.
+   `computeStatsCredential` guards `/stats`: only `oidcBearer(["compute.stats"])` (`STATS_OIDC`).
+   Both leave a `ComputeCredential` on the context, `{ kind: "user", userId, via: "key" | "cookie" | "oidc", scopes? }` or `{ kind: "client", clientId }`, and the handlers read the account from it and from nothing the request carries.
+   The two instances are called by the guards and are not route handlers themselves, so the allowlist test's scan for `oidcBearer` on a route (rule 14) still finds `/oauth/userinfo` alone; the five paths are listed by hand in that test, and `backend/test/compute-route-inventory.test.ts` pins each route's guard and the scope of each instance (`COMPUTE_OIDC_ROUTES`, `oidcBearerScopes`).
+2. **The refusals are fixed words with a fixed sentence**, `{ error, code }`, with the RFC 6750 challenge on a bearer refusal and `Cache-Control: no-store`: `invalid_token` (401, not a live access token), `insufficient_scope` (403, a live token without the scope, the challenge names it), `forbidden_credential` (403, the credential is of a kind the route never accepts) and `missing_credential` (401, `/stats` with no `Authorization` header).
+3. **Kinds are refused before scopes where the scope would mislead.**
+   A key on `/stats` is `forbidden_credential` without a lookup, so a valid key and an invalid one are answered alike.
+   A person's live access token on `/stats` is `forbidden_credential` and not `insufficient_scope`: `compute.stats` is machine only, a person cannot hold it, and the second sentence would suggest adding it.
+   A token that nevertheless carries `compute.stats` and names an account is refused by the account test (`accept` returns nothing for it).
+   A client credentials token on a `/me*` route has no `compute.read` and is refused as `insufficient_scope`; one that did carry it is refused as `forbidden_credential` because it names no account.
+4. **Audience is not checked.** A client chooses its audience when the owner registers it, and `compute.read` and `compute.stats` are served by one API; the scope and the live account rule (rule 14: the token, its client, its grant and the account against the client's sign-in rule are read at every call) are the gates. If a second resource server ever shares the scope names, the audience becomes the route's to check.
+5. **`/me*` does not require compute access.** `compute.nemar.org` signs people in without it (rule 7), so a person whose access is `none`, `requested`, `suspended`, `denied` or `revoked` reads their state and why a launch is refused. Submission (phase D3) asks `canUseCompute`.
+6. **A cookie is a credential on `/me*` and not on `/stats`.** The session cookie is host-only (rule 10), so a partner host never holds one; a browser on the app host reads its own data. `/stats` is a client's route and a cookie alone is `missing_credential`.
+7. **Maintenance.** All five are GETs and are served in `read-only`. The refresh of a live job on `GET /me/jobs/:id` is a write, so it is skipped in `read-only` and the stored record is served with `stale: true`.
+
