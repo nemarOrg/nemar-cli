@@ -179,6 +179,7 @@ describe("the copy table's own rules", () => {
       "flag",
       "token",
       "health",
+      "status",
     ]);
     for (const [key, value] of Object.entries(ACCOUNT_COPY)) {
       for (const [, name] of value.matchAll(/\{(\w+)\}/g)) {

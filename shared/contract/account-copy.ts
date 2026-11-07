@@ -29,10 +29,11 @@
  * 2. *Placeholders are `{name}`, filled by {@link fillCopy}.* A sentence with a
  *    moving part is a template, not a function, so it stays comparable as a
  *    string. The whole placeholder vocabulary is `{label} {blocks} {web} {cli}
- *    {date} {client} {redirect_host}`, plus `{reason}` on the CLI-only keys below and,
- *    on the `compute_admin.` keys, the counts and fixed words of the admin Compute tab (`{kind}
- *    {version} {id} {cpu} {gpu} {count} {max} {word} {what} {shown} {total} {state} {flag} {token}
- *    {health}`).
+ *    {date} {client} {redirect_host}`, plus `{reason}` on the CLI-only keys below (it is also
+ *    used by `compute_admin.result.granted_other` and `compute_admin.section.failed`, where it
+ *    carries a fixed word or the backend's own sentence) and, on the `compute_admin.` keys, the
+ *    counts and fixed words of the admin Compute tab (`{kind} {version} {id} {cpu} {gpu} {count}
+ *    {max} {word} {what} {shown} {total} {state} {flag} {token} {health} {status}`).
  * 3. *Keys are stable and dotted.* They are the mirroring contract; renaming
  *    one is a change on both sides.
  * 4. *A `cli.` prefix means the website ignores it.* The mirroring is
@@ -181,7 +182,7 @@ export const ACCOUNT_COPY = {
   "compute_admin.page.lede":
     "Compute access requests, and a read-only view of pools, usage, flagged jobs and reconciliation. A grant opens an allocation the person can spend, so each request is decided by a person, one at a time.",
   "compute_admin.page.cli_note":
-    "Owner policy, legal holds, record reads, moving a charge, pool grants and adjustments, and cancelling a job are done with `nemar admin compute` in the command line, not here.",
+    "Owner policy, legal holds, record reads, moving a charge, pool grants and adjustments, and canceling a job are done with `nemar admin compute` in the command line, not here.",
   "compute_admin.page.order_note":
     "Accounts are listed in the order they were created, not the order they asked in.",
   "compute_admin.view.nav": "Compute views",
@@ -231,18 +232,18 @@ export const ACCOUNT_COPY = {
   "compute_admin.dialog.title.suspend": "Suspend compute access?",
   "compute_admin.dialog.title.revoke": "Revoke compute access?",
   "compute_admin.dialog.consequence.grant":
-    "Opens the owner’s default allocation once for this account (a repeat grant adds nothing), unfreezes the account’s pools, and lets the person run jobs. The person is emailed.",
+    "Opens the owner’s default allocation once for this account (a repeat grant adds nothing), unfreezes the account’s pools, and allows the person to use compute when it is available. The person is emailed when they have an email address that can receive it.",
   "compute_admin.dialog.consequence.deny":
-    "Closes this request. The person is emailed and cannot ask again; only an administrator can grant later.",
+    "Closes this request. The person cannot ask again; only an administrator can grant later. The person is emailed when they have an email address that can receive it.",
   "compute_admin.dialog.consequence.suspend":
-    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. A grant lifts the suspension. The person is emailed.",
+    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. A grant lifts the suspension. The person is emailed when they have an email address that can receive it.",
   "compute_admin.dialog.consequence.revoke":
-    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. Only a new grant restores access. The person is emailed.",
+    "Freezes the account’s pools, cancels its live jobs and ends its compute sign-ins. Only a new grant restores access. The person is emailed when they have an email address that can receive it.",
   "compute_admin.dialog.reason_label": "Reason (optional)",
   "compute_admin.dialog.reason_hint": "Recorded in the audit log. The person is not sent it.",
   "compute_admin.dialog.reason_count": "{count} of {max}",
   "compute_admin.dialog.ack_export_review":
-    "I reviewed this person’s name, affiliation and stated country against the export-control rules",
+    "Confirm that you have reviewed this person’s name, affiliation and stated country against the export-control rules",
   "compute_admin.dialog.type_word": "Type {word} to confirm",
   "compute_admin.dialog.cancel": "Cancel",
   "compute_admin.result.working": "Working",
@@ -255,19 +256,36 @@ export const ACCOUNT_COPY = {
   "compute_admin.result.granted_other": "Granted. The allocation answered: {reason}.",
   "compute_admin.result.denied": "Denied.",
   "compute_admin.result.suspended":
-    "Suspended. The account’s pools are frozen and its live jobs are being cancelled.",
+    "Suspended. The account’s pools are frozen and its live jobs are being canceled.",
   "compute_admin.result.revoked":
-    "Revoked. The account’s pools are frozen and its live jobs are being cancelled.",
+    "Revoked. The account’s pools are frozen and its live jobs are being canceled.",
   "compute_admin.result.email_not_sent":
     "The decision stands, but the person could not be emailed. Tell them.",
   "compute_admin.result.state_changed":
     "Someone else may have decided this first. The row shows the current state.",
   "compute_admin.result.unconfirmed":
     "The result is not confirmed. The row shows what the server says now.",
+  "compute_admin.result.check_email":
+    "The decision is in place, but the answer was lost, so check that the person was emailed and tell them if not.",
   "compute_admin.result.stale": "This account was not found. Reload the page.",
   "compute_admin.result.reread_failed":
     "The current state could not be read. Reload the page before deciding again.",
   "compute_admin.result.signed_out": "You are signed out. Sign in again, then retry.",
+  "compute_admin.error.malformed": "The server sent an answer this page could not read.",
+  "compute_admin.error.unreachable":
+    "The server could not be reached. Check your connection and try again.",
+  "compute_admin.error.redirect":
+    "The server answered in a way this page cannot follow. Try again later.",
+  "compute_admin.error.origin":
+    "This page was not accepted as the source of the request. Reload and try again.",
+  "compute_admin.error.rate_limited": "Too many requests. Wait a moment, then try again.",
+  "compute_admin.error.timeout": "The server did not answer in time. Try again.",
+  "compute_admin.error.failed": "The request failed ({status}). Try again.",
+  "compute_admin.error.generic": "Something went wrong. Try again.",
+  "compute_admin.error.bad_id": "That is not an account id.",
+  "compute_admin.error.bad_decision": "That is not a decision.",
+  "compute_admin.error.reason_too_long": "A reason is at most {max} characters.",
+  "compute_admin.error.bad_quarter": "A quarter is written like 2026Q4.",
   "compute_admin.section.failed": "Could not load {what}: {reason}",
   "compute_admin.col.holder": "Holder",
   "compute_admin.col.pool": "Pool",
@@ -299,6 +317,7 @@ export const ACCOUNT_COPY = {
   "compute_admin.pools.account": "Account pools",
   "compute_admin.pools.none_platform": "No platform budgets are recorded.",
   "compute_admin.pools.none": "No pools are recorded in this group.",
+  "compute_admin.pools.truncated": "Showing the first {shown} pools of this group; more exist.",
   "compute_admin.pools.frozen": "Frozen",
   "compute_admin.pools.open": "Open",
   "compute_admin.usage.quarter": "Quarter",
@@ -326,6 +345,8 @@ export const ACCOUNT_COPY = {
   "compute_admin.flagged.partner": "Partner: {state}, {flag}",
   "compute_admin.drift.paused":
     "Reconciliation is paused while compute is off. An empty list below does not mean nothing is unmatched.",
+  "compute_admin.drift.pause_unknown":
+    "Whether reconciliation is running is not known, so an empty list does not mean nothing is unmatched.",
   "compute_admin.drift.status": "Status",
   "compute_admin.drift.compute_on": "Compute is on.",
   "compute_admin.drift.compute_off": "Compute is off.",
