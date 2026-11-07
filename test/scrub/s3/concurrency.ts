@@ -11,6 +11,17 @@
 
 import { test } from "bun:test";
 
+/**
+ * The limit of a test that is declared `test.concurrent`, or sits in a `describe.concurrent`.
+ *
+ * In Bun 1.4.3 adjacent concurrent tests run as one batch and the timeout of each test counts from
+ * the START OF THE BATCH, so the time a test spends waiting for a limiter slot counts against
+ * it. On a four-core CI runner the slowest test of a batch took 124 s of the 240 s `SLOW`; a
+ * larger limit keeps a slow runner from failing a test that is only queued. Sequential tests
+ * keep `SLOW`.
+ */
+export const BATCH_SLOW = 600_000;
+
 export type Limiter = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /** At most `n` calls of `fn` at once; the rest wait in the order they asked. */

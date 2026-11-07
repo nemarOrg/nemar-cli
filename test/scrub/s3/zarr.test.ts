@@ -18,7 +18,7 @@ import {
 } from "../../../scripts/scrub/contract";
 import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
-import { makeLimiter } from "./concurrency";
+import { BATCH_SLOW, makeLimiter } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -378,7 +378,7 @@ describe("zarr: --execute", () => {
       const renewed = readJson<ZarrVerifiedFile>(dir, "zarr-verified.json");
       expect(renewed.counts).toEqual({ stores: 3, docs: 4, rewritten: 0, untouched: 4 });
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -416,7 +416,7 @@ describe("zarr: --execute", () => {
       expect(versionsOf(standin, A).length).toBe(3);
       expect(has(dir, "zarr-verified.json")).toBe(true);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -430,7 +430,7 @@ describe("zarr: --execute", () => {
       expect(has(dir, "zarr-verified.json")).toBe(false);
       expect(text(standin, A)).toBe(prettyDirty);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -513,7 +513,7 @@ describe("zarr: --execute", () => {
       expect(plan.totals.unreadable).toBe(6);
       expect(plan.totals.failed).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -527,7 +527,7 @@ describe("zarr: --execute", () => {
       expect(has(dir, "zarr-verified.json")).toBe(false);
       expect(versionsOf(standin, B).length).toBe(1);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -637,7 +637,7 @@ describe("zarr-public: the check from outside after publication", () => {
       expect(before.stdout).toContain("stores=3 clean=1 identifier=2 unknownMembers=0");
       expectNoValue(before.all, dir);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -660,7 +660,7 @@ describe("zarr-public: the check from outside after publication", () => {
       expect(r.all).not.toContain("Wilhelmina");
       expect(r.all).not.toContain("Hieronymus");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -683,7 +683,7 @@ describe("zarr-public: the check from outside after publication", () => {
       expect(late.exitCode, late.all).toBe(1);
       expect(late.stdout).toContain("stores=4 clean=3 identifier=1");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -712,7 +712,7 @@ describe("zarr-public: the check from outside after publication", () => {
       rmSync(path.join(dir, "zarr-verified.json"));
       expectStopped(await runScrub(standin, publicArgs(dir, pub)), 3, "zarr-verified.json-missing");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -731,7 +731,7 @@ describe("zarr-public: the check from outside after publication", () => {
       );
       expect(pub.requests.length).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -750,7 +750,7 @@ describe("zarr-public: the check from outside after publication", () => {
       standin.putObject(BUCKET, `${DATASET}/zarr/index.json`, index(["../../objects/x.zarr"]));
       expectStopped(await runScrub(standin, publicArgs(dir, pub)), 4, "index-malformed");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -784,7 +784,7 @@ describe("zarr: a proof is never vacuous", () => {
       expect(r.stdout).toContain("not clean, by reason: no-store-root=1");
       expect(has(dir, "zarr-verified.json")).toBe(false);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -805,7 +805,7 @@ describe("zarr: a proof is never vacuous", () => {
       expect(r.stdout).toContain("store-root-missing=1");
       expect(has(dir, "zarr-verified.json")).toBe(false);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -821,7 +821,7 @@ describe("zarr: a proof is never vacuous", () => {
       expect(Buffer.compare(standin.current(BUCKET, B)?.data as Uint8Array, bom)).toBe(0);
       expect(has(dir, "zarr-verified.json")).toBe(false);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -990,7 +990,7 @@ describe("zarr: what a store may keep (I10, T8)", () => {
       expect(proof.found).toBe("stores");
       expect(proof.counts).toEqual({ stores: 2, docs: 2, rewritten: 0, untouched: 2 });
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -1035,7 +1035,7 @@ describe("zarr: what a store may keep (I10, T8)", () => {
         subject_note: "Marigold Thistlewood",
       });
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -1074,7 +1074,7 @@ describe("zarr: what a store may keep (I10, T8)", () => {
       expect(now?.kmsKeyId).toBe(kms);
       expect(text(standin, B)).toBe(compactCleaned);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -1095,6 +1095,6 @@ describe("zarr: what a store may keep (I10, T8)", () => {
       expect(has(dir, "zarr-verified.json")).toBe(false);
       expect(readJson<ZarrPlanFile>(dir, "zarr-plan.json").totals.clean).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });

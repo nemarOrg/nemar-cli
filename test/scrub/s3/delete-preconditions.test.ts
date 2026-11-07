@@ -10,7 +10,7 @@ import {
   checkPublicBase,
   publicObjectUrl,
 } from "../../../scripts/scrub/s3/s3-stages";
-import { makeLimiter, together } from "./concurrency";
+import { BATCH_SLOW, makeLimiter, together } from "./concurrency";
 import {
   type Lane,
   a,
@@ -116,7 +116,7 @@ describe.concurrent(
         expect(l.standin.log.length).toBe(0);
         expect(l.pub.requests.length).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -140,7 +140,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -169,7 +169,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -212,7 +212,7 @@ describe.concurrent(
           () => refused(dead, "privacy-unproven", { base: deadUrl }),
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -248,7 +248,7 @@ describe.concurrent(
         await refused(l, "privacy-unproven", { execute: false, intact: false });
         expect(l.pub.requests.length).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -281,7 +281,7 @@ describe.concurrent(
         ]);
         expect(readJson<DeletedFile>(again.dir, "deleted.json").counts.versions).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
   },
 );
@@ -348,7 +348,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -420,7 +420,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -439,7 +439,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
   },
 );
@@ -520,7 +520,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -560,7 +560,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -584,7 +584,7 @@ describe.concurrent(
           }),
         );
       }),
-      SLOW,
+      BATCH_SLOW,
     );
   },
 );

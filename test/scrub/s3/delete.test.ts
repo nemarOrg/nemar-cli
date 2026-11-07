@@ -16,7 +16,7 @@ import path from "node:path";
 import { type AssembledFile, type PlanFile, parseKey } from "../../../scripts/scrub/contract";
 import { AwsCliError, deleteVersion } from "../../../scripts/scrub/s3/s3-lib";
 import type { DeletedFile } from "../../../scripts/scrub/s3/s3-stages";
-import { makeLimiter, together } from "./concurrency";
+import { BATCH_SLOW, makeLimiter, together } from "./concurrency";
 import {
   a,
   b,
@@ -109,7 +109,7 @@ describe.concurrent("delete-old: refusals", () => {
       expectStopped(count, 3, "proof-count-mismatch");
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -122,7 +122,7 @@ describe.concurrent("delete-old: refusals", () => {
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -182,7 +182,7 @@ describe.concurrent("delete-old: refusals", () => {
         },
       ]);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -232,7 +232,7 @@ describe.concurrent("delete-old: refusals", () => {
       expectStopped(shared, 3, "duplicate-new-key+assembled-not-in-plan+keymap-mismatch");
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -250,7 +250,7 @@ describe.concurrent("delete-old: refusals", () => {
       expectStopped(r, 3, "new-object-missing");
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -292,7 +292,7 @@ describe.concurrent("delete-old: refusals", () => {
       }
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -335,7 +335,7 @@ describe.concurrent("delete-old: deleting", () => {
       expect((refused as AwsCliError).code).toBe("access-denied");
       expect(versionIdsOf(b.oldKey)).toContain(id);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -351,7 +351,7 @@ describe.concurrent("delete-old: deleting", () => {
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -368,7 +368,7 @@ describe.concurrent("delete-old: deleting", () => {
       expect(r.stdout).not.toContain("git-proof");
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -433,7 +433,7 @@ describe.concurrent("delete-old: deleting", () => {
       // Counts only: no key and no name in the record of what was done.
       expect(JSON.stringify(done)).not.toContain("SHA256E");
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -455,7 +455,7 @@ describe.concurrent("delete-old: deleting", () => {
       expect(versionIdsOf(b.oldKey)).toEqual([newcomer]);
       expect(standin.versions(BUCKET, objectPath(a.oldKey)).length).toBe(0);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -477,7 +477,7 @@ describe.concurrent("delete-old: deleting", () => {
         expect(standin.versions(BUCKET, objectPath(f.oldKey)).length).toBeGreaterThan(0);
       }
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -549,7 +549,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expect(done.counts.prunedMarkers).toBe(1);
       expect(r.stdout).toContain("no history under archives/, version/, zarr/");
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -566,7 +566,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expect(standin.versions(BUCKET, zarrJson).length).toBe(2);
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -605,7 +605,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -641,7 +641,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
         prunedMarkers: 0,
       });
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -663,7 +663,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expect(version).toBeGreaterThanOrEqual(0);
       expect(marker).toBeGreaterThan(version);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -680,7 +680,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expect(standin.versions(BUCKET, zarrJson).map((v) => v.deleteMarker)).toEqual([false, true]);
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -697,7 +697,7 @@ describe.concurrent("delete-old: pruning noncurrent versions", () => {
       expectStopped(r, 3, "over-max-prune");
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -767,7 +767,7 @@ describe.concurrent(
         expectOldIntact();
         expect(standin.log.length).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -801,7 +801,7 @@ describe.concurrent(
         expectOldIntact();
         expect(standin.log.length).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -839,7 +839,7 @@ describe.concurrent(
           },
         ]);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -871,7 +871,7 @@ describe.concurrent(
         expect(r.stdout).toContain("1 versions of old keys are not the size their key declares");
         expect(deleteRequests(standin)).toBe(0);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
 
     test(
@@ -889,7 +889,7 @@ describe.concurrent(
         expect(r.stdout).toContain("archives=1");
         expect(has(dir, "deleted.json")).toBe(false);
       }),
-      SLOW,
+      BATCH_SLOW,
     );
   },
 );
@@ -958,7 +958,7 @@ describe.concurrent("delete-old: every refusal is evaluated, and all are reporte
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -1043,7 +1043,7 @@ describe.concurrent("delete-old: every refusal is evaluated, and all are reporte
         }),
       );
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -1070,6 +1070,6 @@ describe.concurrent("delete-old: every refusal is evaluated, and all are reporte
       expect(pub.requests.length).toBe(0);
       expectOldIntact();
     }),
-    SLOW,
+    BATCH_SLOW,
   );
 });

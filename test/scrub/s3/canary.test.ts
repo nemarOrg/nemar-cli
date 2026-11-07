@@ -9,7 +9,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createAwsRunner, isoSeconds, putObjectLocked } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { makeLimiter } from "./concurrency";
+import { BATCH_SLOW, makeLimiter } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -179,7 +179,7 @@ describe("canary", () => {
       expect(standin.calls("ListObjectVersions").length).toBe(1);
       expect(standin.keys(BUCKET, prefix).length).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -191,7 +191,7 @@ describe("canary", () => {
       expectStopped(r, 1, "bypass-denied");
       expect(standin.versions(BUCKET, `${prefix}probe.txt`).length).toBe(1);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -214,7 +214,7 @@ describe("canary", () => {
       expectStopped(r, 1, "lock-not-enforced");
       // The twin is the first test of this file: with the lock in place the same run exits 0.
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -231,7 +231,7 @@ describe("canary", () => {
       const r = await runScrub(standin, canary(["--execute", "--multipart"]));
       expectStopped(r, 1, "multipart-lock-missing");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -250,7 +250,7 @@ describe("canary", () => {
       expectStopped(r, 5, "canary-remainder");
       expect(standin.keys(BUCKET, prefix)).toEqual([`${prefix}stray.txt`]);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -266,7 +266,7 @@ describe("canary", () => {
       expect(parts[0]?.status).toBe(200);
       expect(parts[0]?.checksum).toBe(true);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -385,7 +385,7 @@ describe("canary", () => {
       });
       expect(standin.calls("PutObject").at(-1)?.checksum).toBe(true);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -429,7 +429,7 @@ describe("canary", () => {
       expect(standin.keys(BUCKET, prefix).length).toBe(0);
       expect(standin.openUploads()).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -459,7 +459,7 @@ describe("canary", () => {
       );
       expect(standin.keys(BUCKET, prefix).length).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -477,7 +477,7 @@ describe("canary", () => {
       const r = await runScrub(standin, canary(["--execute", "--batch"]));
       expectStopped(r, 1, "batch-lock-not-enforced");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -490,7 +490,7 @@ describe("canary", () => {
       expectStopped(r, 1, "batch-bypass-denied");
       expect(standin.versions(BUCKET, `${prefix}batch-locked-1.txt`).length).toBe(1);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test(
@@ -527,7 +527,7 @@ describe("canary", () => {
       expect(gets.map((g) => g.status)).toEqual([200, 200, 412, 200]);
       expect(standin.keys(BUCKET, prefix).length).toBe(0);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -538,7 +538,7 @@ describe("canary", () => {
       const r = await runScrub(standin, canary(["--execute"]));
       expectStopped(r, 1, "conditional-put-not-enforced");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 
   test.concurrent(
@@ -569,7 +569,7 @@ describe("canary", () => {
       const right = await runScrub(standin, canary(["--execute"]));
       expectStopped(right, 1, "conditional-put-failed:PutObject:precondition-failed");
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });
 
@@ -587,6 +587,6 @@ describe("canary: an abort that fails is said, never swallowed (S1)", () => {
       );
       expect(standin.openUploads()).toBe(1);
     },
-    SLOW,
+    BATCH_SLOW,
   );
 });
