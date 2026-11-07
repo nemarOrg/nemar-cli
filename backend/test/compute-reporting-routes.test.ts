@@ -415,6 +415,10 @@ describe("report", () => {
       settled.accountId,
       running.job.id,
     );
+    sql.run(
+      "UPDATE compute_jobs SET flag_mismatch = 1, flag_unreserved = 1 WHERE id = ?",
+      running.job.id,
+    );
     const r = await call(
       "GET",
       `/compute/report?account=${settled.accountId}&from=2000-01-01&to=2100-01-01`,
@@ -435,6 +439,10 @@ describe("report", () => {
       running.job.id,
     ).h;
     expect(byId[running.job.id]?.open_hold_milli).toBe(held);
+    // The flags come from the columns by the one map the job view uses, in the declared order.
+    const flagsOfJob = (id: string) => r.body.jobs.find((j: { id: string }) => j.id === id).flags;
+    expect(flagsOfJob(running.job.id)).toEqual(["unreserved", "mismatch"]);
+    expect(flagsOfJob(settled.job.id)).toEqual([]);
     expect(r.body.totals.unsettled).toBe(1);
     expect(r.body.totals.open_hold_milli).toBe(held);
   });

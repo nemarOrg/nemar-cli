@@ -28,11 +28,12 @@ import {
   type ComputeJobFlag,
   type ComputeState,
 } from "../../../shared/compute-state.js";
-import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
 import type { ComputeRecordStatus } from "../../../shared/contract/compute-admin.js";
+import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
 import { LAUNCHER_FILES, RECORDS_RESULT_MANIFEST_FILE } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
+import { FLAG_COLUMN, type FlagColumns, flagsOf } from "./compute-job-flags.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
 import { ACTIVE_OWNER_SQL, heldSql } from "./compute-legal-holds.js";
 import { jobView } from "./compute-lifecycle.js";
@@ -44,13 +45,6 @@ export const REPORT_PAGE_MAX = 200;
 export const ACCOUNT_REPORT_ROWS_MAX = 5000;
 
 // --- Jobs -----------------------------------------------------------------------------------------------
-
-const FLAG_COLUMN: Record<ComputeJobFlag, string> = {
-  unreserved: "flag_unreserved",
-  unattributed: "flag_unattributed",
-  mismatch: "flag_mismatch",
-  overrun: "flag_overrun",
-};
 
 export interface JobListQuery {
   flag?: ComputeJobFlag;
@@ -322,22 +316,20 @@ export async function accountReport(
           ORDER BY created_at ASC, id ASC LIMIT ?4`,
       )
       .bind(input.account, input.from, input.to, ACCOUNT_REPORT_ROWS_MAX + 1)
-      .all<{
-        id: string;
-        created_at: string;
-        ended_at: string | null;
-        state: string;
-        partition: string;
-        pool: string;
-        source: string;
-        charged_milli: number;
-        held_milli: number;
-        settled_provisional_at: string | null;
-        flag_unreserved: number;
-        flag_unattributed: number;
-        flag_mismatch: number;
-        flag_overrun: number;
-      }>()
+      .all<
+        FlagColumns & {
+          id: string;
+          created_at: string;
+          ended_at: string | null;
+          state: string;
+          partition: string;
+          pool: string;
+          source: string;
+          charged_milli: number;
+          held_milli: number;
+          settled_provisional_at: string | null;
+        }
+      >()
   ).results;
   const truncated = rows.length > ACCOUNT_REPORT_ROWS_MAX;
   const page = rows.slice(0, ACCOUNT_REPORT_ROWS_MAX);
@@ -365,9 +357,7 @@ export async function accountReport(
       charged_milli: r.charged_milli,
       settled,
       open_hold_milli: openHold,
-      flags: COMPUTE_JOB_FLAGS.filter(
-        (f) => (r as unknown as Record<string, number>)[FLAG_COLUMN[f]] === 1,
-      ),
+      flags: flagsOf(r),
     };
   });
   return {
