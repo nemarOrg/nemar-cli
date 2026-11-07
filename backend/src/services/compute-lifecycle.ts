@@ -655,6 +655,7 @@ async function capPartnerCharge(
     excessMilli: settlement.milli - job.held_milli,
     routine: isRoutineDifference(settlement.milli, job.held_milli, policy.settle),
     heldMilli: job.held_milli,
+    requireNoSlurmId: true,
   });
   return { settlement: { ...settlement, milli: job.held_milli }, after };
 }

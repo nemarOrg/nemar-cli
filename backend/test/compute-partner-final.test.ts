@@ -29,6 +29,7 @@ import {
   partnerCall,
   partnerLaunch,
   poolOf,
+  raceAfterRead,
   reserve,
   row,
 } from "./helpers/compute-partner-world";
@@ -210,6 +211,25 @@ describe("the provisional settlement is capped at the hold, and who writes the e
     });
     await fx.env().DB.batch(right);
     expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(1);
+  });
+});
+
+describe("the provisional excess is refused by its own statement once the job has a Slurm id (minor 1)", () => {
+  test("a commit built from a record without the id, while a concurrent one gave the row its id, writes no excess", async () => {
+    const { advanceComputeJob } = await import("../src/services/compute-lifecycle");
+    const { hold } = await threeHourJob({ slurm: false });
+    // After the cap is decided (the pools are read to build the excess), a concurrent commit gives the row
+    // its Slurm id and charges exactly the hold.
+    const winner = async () => {
+      w.h.db.query("UPDATE compute_jobs SET slurm_job_id = '717171' WHERE id = ?").run(hold.job_id);
+    };
+    await advanceComputeJob(
+      fx.env({ DB: raceAfterRead(fx.env().DB, "FROM compute_pools", winner, 1) }),
+      hold.job_id,
+    );
+    expect(row(w, hold.job_id)).toMatchObject({ state: "finished", charged_milli: 4000 });
+    expect(entries(w, hold.job_id).map((e) => e.kind)).toEqual(["hold", "charge"]);
+    expect((poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli).toBe(0);
   });
 });
 

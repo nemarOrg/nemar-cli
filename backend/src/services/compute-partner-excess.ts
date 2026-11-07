@@ -46,6 +46,14 @@ export const PERSON_AT_HOLD_SQL = `(SELECT COALESCE(SUM(c.charged_delta_milli), 
                                          WHERE h.kind = 'hold' AND h.job_id = ?)) = ?`;
 
 /**
+ * The extra gate of the PROVISIONAL path: the job still has no Slurm id in this statement. A job that
+ * reaches accounting has its excess written by the final settlement, so a provisional writer that was
+ * built from a stale record (a concurrent commit gave the row its Slurm id) must write nothing. One `?`: the job.
+ */
+export const NO_SLURM_ID_SQL =
+  "NOT EXISTS (SELECT 1 FROM compute_jobs WHERE id = ? AND slurm_job_id IS NOT NULL)";
+
+/**
  * The statements that put `excessMilli` on the partner, for a batch of the caller's own, in the order
  * charge, audit (only if the charge was written and `routine` is false), mark. The charge is gated on
  * {@link PERSON_AT_HOLD_SQL}. `routine` true writes the charge and the information flag only.
@@ -60,6 +68,8 @@ export async function partnerExcessStatements(
     routine: boolean;
     /** The hold the person made (`held_milli`): the person must have been charged exactly this. */
     heldMilli: number;
+    /** The provisional path: also require that the job has no Slurm id in the statement itself. */
+    requireNoSlurmId?: boolean;
   },
 ): Promise<D1PreparedStatement[]> {
   const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, input.pool);
@@ -73,7 +83,12 @@ export async function partnerExcessStatements(
       budgetPoolId: people.id,
       chargeMilli: input.excessMilli,
     },
-    { sql: PERSON_AT_HOLD_SQL, binds: [input.jobId, input.jobId, input.heldMilli] },
+    input.requireNoSlurmId === true
+      ? {
+          sql: `${PERSON_AT_HOLD_SQL} AND ${NO_SLURM_ID_SQL}`,
+          binds: [input.jobId, input.jobId, input.heldMilli, input.jobId],
+        }
+      : { sql: PERSON_AT_HOLD_SQL, binds: [input.jobId, input.jobId, input.heldMilli] },
   );
   return [
     ...charge,
