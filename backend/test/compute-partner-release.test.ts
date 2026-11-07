@@ -186,6 +186,25 @@ describe("a release and a report race", () => {
   });
 });
 
+describe("the release statement binds 'no Tapis job' itself", () => {
+  test("a release working from a STALE row loses to a bind that landed in between", async () => {
+    const { endPartnerReservation } = await import("../src/services/compute-lifecycle");
+    const { getJob } = await import("../src/services/compute-jobs");
+    const hold = await reserve(w, person);
+    const stale = (await getJob(w.env().DB, hold.job_id)) as NonNullable<Awaited<ReturnType<typeof getJob>>>;
+    // The bind lands after the release read the row.
+    w.h.db
+      .query("UPDATE compute_jobs SET tapis_uuid = 'bound-between-1', partner_state = 'pending' WHERE id = ?")
+      .run(hold.job_id);
+    expect(stale.tapis_uuid).toBeNull();
+    expect(await endPartnerReservation(w.env(), stale, "partner_release")).toBe(false);
+    expect(await endPartnerReservation(w.env(), stale, "hold_expired")).toBe(false);
+    expect(row(w, hold.job_id)).toMatchObject({ state: "created", tapis_uuid: "bound-between-1" });
+    expect(kinds(hold.job_id)).toEqual(["hold"]);
+    expect(own().held_milli).toBe(4000);
+  });
+});
+
 describe("the key and the id", () => {
   test("another request under the key is idempotency_conflict, and a job id is not a hold id", async () => {
     const a = await reserve(w, person);
