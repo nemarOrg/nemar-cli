@@ -43,7 +43,7 @@ const OIDC_ROUTE_RE =
  * scope refusal and not the key path's; `compute-read-credentials.test.ts` pins what they do answer.
  * `GET` only: the compute router's writes stay in the comparison and must refuse the token.
  */
-const COMPUTE_READ_RE = /^(\/nemar)?\/compute\/(me|me\/usage|me\/jobs|me\/jobs\/[^/]+|stats)$/;
+const COMPUTE_READ_RE = /^(\/nemar)?\/compute\/(me|me\/usage|me\/jobs|me\/jobs\/:id|stats)$/;
 
 /** Where `oidcBearer` may sit: the resource routes that serve a scope. Today, userinfo only. */
 const OIDC_BEARER_ROUTE_RE = /^(\/nemar)?\/oauth\/userinfo$/;

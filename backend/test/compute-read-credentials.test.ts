@@ -209,6 +209,34 @@ describe("the credential matrix on /compute/me*", () => {
     expect([after.status, after.json?.code]).toEqual([401, "invalid_token"]);
   });
 
+  test("a revoked grant ends the token at once", async () => {
+    const c = await person(`cred-key-grant-${"G".repeat(43)}`);
+    const token = await accessToken(readClient, c, "openid compute.read");
+    expect((await get("/compute/me", { key: token })).status).toBe(200);
+    h.db.query("UPDATE oidc_grants SET revoked_at = datetime('now') WHERE user_id = ?").run(c.id);
+    for (const path of PERSON_ROUTES) {
+      const res = await get(path, { key: token });
+      expect([path, res.status, res.json?.code]).toEqual([path, 401, "invalid_token"]);
+    }
+  });
+
+  test("a disabled client's person token is refused at once", async () => {
+    const own = await registerClient(h, {
+      allowed_scopes: ["openid", "compute.read"],
+      allowed_grants: ["authorization_code"],
+    });
+    const c = await person(`cred-key-off-${"O".repeat(43)}`);
+    const token = await accessToken(own, c, "openid compute.read");
+    expect((await get("/compute/me", { key: token })).status).toBe(200);
+    h.db
+      .query(
+        "UPDATE oidc_clients SET status = 'disabled', disabled_at = datetime('now') WHERE client_id = ?",
+      )
+      .run(own.clientId);
+    const after = await get("/compute/me", { key: token });
+    expect([after.status, after.json?.code]).toEqual([401, "invalid_token"]);
+  });
+
   test("an existing route still refuses an OIDC token, and so does the cancel route", async () => {
     const token = await accessToken(readClient, a, "openid compute.read");
     const users = await get("/users/me", { key: token });
@@ -220,6 +248,59 @@ describe("the credential matrix on /compute/me*", () => {
     expect([cancel.status, cancel.json?.code]).toEqual([401, "oidc_token_not_accepted"]);
     const admin = await get("/admin/compute/status", { key: token });
     expect(admin.status).toBe(401);
+  });
+});
+
+describe("the maintenance modes, through the whole Worker", () => {
+  const modes = (mode: string) => ({ MAINTENANCE_MODE: mode });
+
+  test("read-only serves every read route; full refuses them; a write is refused in read-only", async () => {
+    const token = await accessToken(readClient, a, "openid compute.read");
+    const stats = await machineToken(machine);
+    const jobId = h.db
+      .query<{ id: string }, [number]>("SELECT id FROM compute_jobs WHERE account_id = ? LIMIT 1")
+      .get(a.id)?.id as string;
+    const reads: Array<[string, string]> = [
+      ["/compute/me", token],
+      ["/compute/me/usage", token],
+      ["/compute/me/jobs", token],
+      [`/compute/me/jobs/${jobId}`, token],
+      ["/compute/stats", stats],
+    ];
+    for (const [path, key] of reads) {
+      const readOnly = await h.call("GET", path, { key, env: modes("read-only") });
+      expect([path, readOnly.status]).toEqual([path, 200]);
+      const full = await h.call("GET", path, { key, env: modes("full") });
+      expect([path, full.status]).toEqual([path, 503]);
+    }
+    const write = await h.call("POST", `/compute/jobs/${jobId}/cancel`, {
+      key: KEY_A,
+      body: {},
+      env: modes("read-only"),
+    });
+    expect(write.status).toBe(503);
+  });
+
+  test("a live job with an old record is served in read-only with stale: true (the refresh's own write guard is pinned in compute-read-refresh.test.ts, where Tapis is configured)", async () => {
+    const c = await person(`cred-key-maint-${"M".repeat(43)}`);
+    const id = insertJob(h.db, {
+      account_id: c.id,
+      state: "running",
+      tapis_uuid: "33333333-4444-5555-6666-777777777777",
+      tapis_synced_at: "2026-10-05 10:00:00",
+    });
+    const res = await h.call("GET", `/compute/me/jobs/${id}`, {
+      key: c.key,
+      env: modes("read-only"),
+    });
+    expect(res.status).toBe(200);
+    expect((res.json as { stale: boolean }).stale).toBe(true);
+    const row = h.db
+      .query<{ tapis_synced_at: string; state: string }, [string]>(
+        "SELECT tapis_synced_at, state FROM compute_jobs WHERE id = ?",
+      )
+      .get(id);
+    expect(row).toEqual({ tapis_synced_at: "2026-10-05 10:00:00", state: "running" });
   });
 });
 
