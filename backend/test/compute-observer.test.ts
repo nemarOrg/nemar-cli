@@ -267,6 +267,10 @@ describe("the token", () => {
     const body = daily([acct(nextSlurm())]);
     const [a, b] = await Promise.all([post(run.token, body), post(run.token, body)]);
     expect([a.status, b.status].sort()).toEqual([200, 403]);
+    // The loser gets the one refusal body, the same as a wrong token, and says nothing of the race.
+    const loser = a.status === 403 ? a : b;
+    expect(JSON.parse(loser.text)).toEqual({ error: "Not accepted.", code: "observer_refused" });
+    expect(loser).toEqual(await post("garbage", empty));
     expect((await counts()).rows).toBe(1);
   });
 });
