@@ -284,11 +284,21 @@ describe("nemar compute request-access", () => {
     expect(row().compute_access).toBe("none");
   });
 
-  test("a request that was answered cannot be made again: exit 1 with the closed sentence", async () => {
-    db.run("UPDATE users SET compute_access = 'denied' WHERE id = ?", [personId]);
+  test("a request that was answered cannot be asked again: exit 1 with the closed sentence", async () => {
+    for (const state of ["denied", "revoked"]) {
+      db.run("UPDATE users SET compute_access = ? WHERE id = ?", [state, personId]);
+      const r = await request("person", GOOD);
+      expect([state, r.exitCode]).toEqual([state, 1]);
+      expect(r.stdout + r.stderr).toContain("cannot be asked again");
+    }
+  });
+
+  test("a suspended account is told its access is paused, not that its request was answered", async () => {
+    db.run("UPDATE users SET compute_access = 'suspended' WHERE id = ?", [personId]);
     const r = await request("person", GOOD);
     expect(r.exitCode).toBe(1);
-    expect(r.stdout + r.stderr).toContain("cannot be made again");
+    expect(r.stdout + r.stderr).toContain("Your compute access is paused");
+    expect(r.stdout + r.stderr).not.toContain("cannot be asked again");
   });
 
   test("an active account is told it already has access, and exits 1", async () => {

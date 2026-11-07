@@ -60,8 +60,8 @@ import type { AccountKind, AccountStatus } from "./user.js";
  * Ordered by how soon the account walks into it: an unverified inbox blocks
  * everything, an upload-access request comes before there is anything to
  * publish, and a compute-access request (epic #2021 phase D1; ADR 0118) is its
- * own review beside upload access, so it sits right after it. {@link describeProfileGap} names the FIRST of a gap's blocks — the
- * nearest wall, not every wall behind it — which is why the order is part of
+ * own review beside upload access, so it sits right after it. {@link describeProfileGap} names the FIRST of a gap's blocks, the
+ * nearest wall, not every wall behind it; which is why the order is part of
  * the data and not incidental.
  */
 export type GapBlock = "verified" | "upload_access" | "compute_access" | "publication";

@@ -142,6 +142,9 @@ export const ACCOUNT_COPY = {
     "Compute access is active. Your starting allocation is on your compute page, and you can submit jobs from there or with `nemar compute`.",
   "compute_access.closed.body":
     "This request has been answered and cannot be asked again. If you think that is a mistake, contact support and an admin will take another look.",
+  // A suspended account is not a request that was answered: its access exists and is paused.
+  "compute_access.suspended.body":
+    "Your compute access is paused. Contact support to find out why or to ask for it to be lifted.",
   "compute_access.terms_unpublished.body":
     "Compute access is not open yet: the compute terms are not published. Please check back later.",
   "compute_access.docs_link": "How compute access works",

@@ -28,6 +28,20 @@ export const COMPUTE_PURPOSE_MIN_CHARS = 20;
 export const COMPUTE_PURPOSE_MAX_CHARS = 1000;
 
 /**
+ * Whether a purpose carries a control character other than newline (10) and tab (9): NUL included, and
+ * DEL. SQLite's `length()` stops at the first NUL, so the migration's CHECK would count such a text short
+ * and the write would fail; the Worker refuses it first (`purpose_required`) and the CLI says so before
+ * sending. One function, so the two cannot disagree.
+ */
+export function hasPurposeControlChar(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if ((c < 32 && c !== 9 && c !== 10) || c === 127) return true;
+  }
+  return false;
+}
+
+/**
  * `POST /users/me/compute-access/request`. Bounds only at the door (the real rule, with the typed
  * refusals, is `checkComputeAccessRequest` in the Worker): `purpose` is what the person intends to
  * compute, and `accept_terms_version` is the terms version they accepted, which must be the current
@@ -126,6 +140,8 @@ export const COMPUTE_ACCESS_ADMIN_ERROR_CODES = [
   "not_active",
   /** Grant of an account that already holds it. */
   "already_active",
+  /** An administrator granting their OWN compute access (an owner may). */
+  "self_decision",
   /** Grant to an account that is deleted, revoked or not verified: its standing is not good. */
   "account_not_in_good_standing",
   /** The state changed between the read and the write; read it again. */
@@ -142,6 +158,7 @@ export const COMPUTE_ACCESS_ADMIN_ERROR_STATUS = {
   not_requested: 409,
   not_active: 409,
   already_active: 409,
+  self_decision: 409,
   account_not_in_good_standing: 409,
   stale_state: 409,
   policy_unreadable: 503,

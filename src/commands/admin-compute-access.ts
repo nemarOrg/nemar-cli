@@ -132,7 +132,7 @@ const DECISION_ABOUT: Record<ComputeAccessDecision, string> = {
     "Opens compute access (from requested, suspended, denied or revoked) and the owner's default allocation, once; a second grant after a suspension adds nothing. The account must be in good standing. The person is mailed.",
   deny: "Declines an open request. The person cannot ask again; only an administrator's grant reopens it. The person is mailed.",
   suspend:
-    "Pauses an active grant: the person's pools are frozen, their jobs that never started are cancelled and the rest are marked for cancellation. A grant lifts it. The person is mailed.",
+    "Pauses an active grant: the person's pools are frozen, their jobs that never started are canceled and the rest are marked for cancellation. A grant lifts it. The person is mailed.",
   revoke:
     "Ends an active or suspended grant, as a suspension does. The person cannot ask again; only an administrator's grant reopens it. The person is mailed.",
 };

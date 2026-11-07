@@ -21,6 +21,7 @@ import { ACCOUNT_COPY } from "../../shared/contract/account-copy.js";
 import {
   COMPUTE_PURPOSE_MAX_CHARS,
   COMPUTE_PURPOSE_MIN_CHARS,
+  hasPurposeControlChar,
 } from "../../shared/contract/compute-access.js";
 import { COMPUTE_TERMS_VERSION } from "../../shared/contract/compute-terms.js";
 import { describeProfileGap, resolveWireProfileGaps } from "../../shared/contract/profile-gaps.js";
@@ -45,6 +46,11 @@ export function validateComputePurpose(input: string | undefined): true | string
   }
   if (n > COMPUTE_PURPOSE_MAX_CHARS) {
     return `Please keep it under ${COMPUTE_PURPOSE_MAX_CHARS} characters`;
+  }
+  // The Worker refuses control characters other than newline and tab (a NUL would make the database
+  // count the text short), so the prompt says so before the text is sent.
+  if (hasPurposeControlChar(input ?? "")) {
+    return "Please use plain text, without control characters (newlines and tabs are fine)";
   }
   return true;
 }
@@ -84,9 +90,8 @@ function printRefusal(err: ApiError, json: boolean): void {
   const out = (line: string) => (json ? console.error(line) : console.log(line));
   const code = err.code;
   failMessage(err.message, { json, answered: true });
-  if (code === "terms_unpublished")
-    out(chalk.dim(`  ${ACCOUNT_COPY["compute_access.terms_unpublished.body"]}`));
-  if (code === "access_closed") out(chalk.dim(`  ${ACCOUNT_COPY["compute_access.closed.body"]}`));
+  // `terms_unpublished` and `access_closed` need nothing more: their message IS the shared copy
+  // (`compute_access.terms_unpublished.body`, `.closed.body`, `.suspended.body`), per state.
   // Only the refusals that are about the ACCOUNT list fields to fix: `purpose` and `accept_terms_version`
   // are flags, not Settings fields, and the sentence above already says which.
   if (

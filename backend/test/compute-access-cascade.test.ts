@@ -8,7 +8,7 @@
  * `sweepComputeCancellations`. Nothing here replaces a NEMAR decision.
  *
  *  - an administrator's SUSPENSION and REVOCATION of compute access (`endComputeStatements`): the
- *    state flips, every pool of the account freezes, a job that never reached Tapis is cancelled with its
+ *    state flips, every pool of the account freezes, a job that never reached Tapis is canceled with its
  *    hold released, a job at Tapis records `account_ended` and keeps its hold for the retried sweep, no
  *    network call is made, and a bystander's job, pools and ledger are untouched;
  *  - the ACCOUNT's revocation (`finalizeRevocation`) and deletion (`tombstoneUserCascade`) also set
@@ -195,7 +195,7 @@ describe("an administrator's suspension or revocation ends the person's compute 
     ["suspend", "suspended"],
     ["revoke", "revoked"],
   ] as const) {
-    test(`${decision}: the state flips, both pools freeze, an unsubmitted job is cancelled with its hold released, a running job records the intent, and nothing else moves (MUTATION: omit endComputeStatements from the route)`, async () => {
+    test(`${decision}: the state flips, both pools freeze, an unsubmitted job is canceled with its hold released, a running job records the intent, and nothing else moves (MUTATION: omit endComputeStatements from the route)`, async () => {
       const w = await seedWorld(`cascade-${decision}`);
       const before = untouched(w);
       const requests = fx.tapis.log.length;

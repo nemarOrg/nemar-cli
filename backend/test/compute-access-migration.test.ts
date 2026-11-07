@@ -245,6 +245,18 @@ describe("the purpose", () => {
     expect(await insertUser(e, { compute_purpose: "x".repeat(1000) })).toBeNull();
   });
 
+  onEveryEngine(
+    "refuses a text a NUL makes short: length() stops at the first NUL on both engines",
+    async (e) => {
+      // The Worker refuses control characters before this CHECK sees them (the route answers 400); this is
+      // why: the database counts the text up to the NUL, so a 35-character purpose with one at the sixth
+      // place is five characters long to it. If an engine stores it whole instead, the CHECK cannot
+      // protect the column from a caller that skips the Worker, and this test names which one.
+      const nul = `abcde\u0000${"x".repeat(30)}`;
+      expect(await insertUser(e, { compute_purpose: nul })).toMatch(CHECK);
+    },
+  );
+
   onEveryEngine("refuses 19 characters, 1001 characters and the empty text", async (e) => {
     for (const bad of ["x".repeat(19), "x".repeat(1001), ""]) {
       expect([bad.length, await insertUser(e, { compute_purpose: bad })]).toEqual([

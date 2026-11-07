@@ -31,8 +31,9 @@
 
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { COMPUTE_TERMS_VERSION } from "../../shared/contract/compute-terms";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
+import { COMPUTE_TERMS_VERSION } from "../../shared/contract/compute-terms";
+import { decisionFlipStatement } from "../src/services/compute-access";
 import { putPolicy } from "../src/services/compute-policy";
 import type { Bindings } from "../src/types/bindings";
 import {
@@ -599,6 +600,127 @@ describe("a decision that loses a race changes nothing", () => {
     expect(row(id).compute_access).toBe("revoked");
     expect(pools(id).map((p) => p.frozen)).toEqual([0]);
     expect(audits("compute_access_suspended")).toHaveLength(0);
+  });
+});
+
+describe("a decision binds the state the administrator read (MUTATION: drop `compute_access = ?` from the flips)", () => {
+  /** A decision whose read is followed by `then()` (another administrator's decision, landed through the database). */
+  async function raced(decision: string, id: number, then: () => void) {
+    const e = env();
+    e.DB = racing(realD1(db), isAccountRead, then);
+    return call("admin", "POST", `/${decision}/by-id/${id}`, { env: e });
+  }
+
+  test("a grant read on `suspended` loses to a revoke that landed first: stale_state, the account stays revoked and frozen", async () => {
+    await setDefault(10_000, 0);
+    const id = seedPerson({ compute_access: "suspended" });
+    db.run(
+      "INSERT INTO compute_pools (holder_kind, holder_ref, pool, frozen) VALUES ('account', ?, 'cpu', 1)",
+      [String(id)],
+    );
+    const res = await raced("grant", id, () =>
+      db.run("UPDATE users SET compute_access = 'revoked' WHERE id = ?", [id]),
+    );
+    expect([res.status, res.body.code]).toEqual([409, "stale_state"]);
+    expect(row(id).compute_access).toBe("revoked");
+    expect(pools(id).map((p) => [p.granted_milli, p.frozen])).toEqual([[0, 1]]);
+    expect(ledger(id)).toEqual([]);
+    expect(audits("compute_access_granted")).toHaveLength(0);
+  });
+
+  test("a revoke read on `suspended` loses to a grant that landed first: stale_state, the account stays active", async () => {
+    const id = seedPerson({ compute_access: "suspended" });
+    const res = await raced("revoke", id, () =>
+      db.run("UPDATE users SET compute_access = 'active' WHERE id = ?", [id]),
+    );
+    expect([res.status, res.body.code]).toEqual([409, "stale_state"]);
+    expect(row(id).compute_access).toBe("active");
+    expect(audits("compute_access_revoked")).toHaveLength(0);
+  });
+
+  test("a grant read on `requested` loses to a deny that landed first, and the audit never records a wrong `from`", async () => {
+    const id = seedPerson({ compute_access: "requested" });
+    const res = await raced("grant", id, () =>
+      db.run("UPDATE users SET compute_access = 'denied' WHERE id = ?", [id]),
+    );
+    expect([res.status, res.body.code]).toEqual([409, "stale_state"]);
+    expect(row(id).compute_access).toBe("denied");
+    expect(audits("compute_access_granted")).toHaveLength(0);
+  });
+
+  test("a grant AFTER a deny (a fresh read) is the administrator's decision and lands", async () => {
+    const id = seedPerson({ compute_access: "requested" });
+    await withFakeResend(async () => {
+      expect((await decide("deny", "admin", id)).status).toBe(200);
+      const res = await decide("grant", "admin", id);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ from: "denied", to: "active" });
+    });
+    expect(JSON.parse(audits("compute_access_granted")[0]?.details ?? "{}").from).toBe("denied");
+  });
+
+  test("a suspend read on `active` loses to a revoke: stale_state and the state stays revoked", async () => {
+    const id = seedPerson({ compute_access: "active" });
+    const res = await raced("suspend", id, () =>
+      db.run("UPDATE users SET compute_access = 'revoked' WHERE id = ?", [id]),
+    );
+    expect([res.status, res.body.code]).toEqual([409, "stale_state"]);
+    expect(row(id).compute_access).toBe("revoked");
+  });
+});
+
+describe("an administrator does not grant themselves compute access; an owner may", () => {
+  const self = (who: "admin" | "owner") => ids[who];
+
+  test("an admin granting their own account is 409 self_decision and nothing is written (MUTATION: drop the route check, then the flip's term)", async () => {
+    await setDefault(10_000, 0);
+    const me = self("admin");
+    db.run("UPDATE users SET compute_access = 'requested' WHERE id = ?", [me]);
+    const res = await decide("grant", "admin", me);
+    expect([res.status, res.body.code]).toEqual([409, "self_decision"]);
+    expect(row(me).compute_access).toBe("requested");
+    expect(ledger(me)).toEqual([]);
+    expect(audits("compute_access_granted")).toHaveLength(0);
+    // By username too.
+    const named = await decide("grant", "admin", row(me).username as string);
+    expect(named.body.code).toBe("self_decision");
+  });
+
+  test("the flip itself refuses it for the admin role, whatever the route did", async () => {
+    // The statement as the route's batch would run it, called directly: a caller that skipped the route
+    // check still writes nothing.
+    const me = self("admin");
+    db.run("UPDATE users SET compute_access = 'requested' WHERE id = ?", [me]);
+    const flip = decisionFlipStatement("grant", me, me, "requested");
+    const r = db.query(flip.sql).run(...(flip.binds as never[]));
+    expect(r.changes).toBe(0);
+    expect(row(me).compute_access).toBe("requested");
+    const owner = self("owner");
+    db.run("UPDATE users SET compute_access = 'requested' WHERE id = ?", [owner]);
+    const ownFlip = decisionFlipStatement("grant", owner, owner, "requested");
+    expect(db.query(ownFlip.sql).run(...(ownFlip.binds as never[])).changes).toBe(1);
+  });
+
+  test("an owner may grant their own account", async () => {
+    const me = self("owner");
+    db.run("UPDATE users SET compute_access = 'requested' WHERE id = ?", [me]);
+    const res = await withFakeResend(() => decide("grant", "owner", me));
+    expect(res.status).toBe(200);
+    expect(row(me).compute_access).toBe("active");
+  });
+
+  test("an admin may grant someone else, and may deny, suspend and revoke themselves", async () => {
+    const me = self("admin");
+    for (const [decision, from] of [
+      ["deny", "requested"],
+      ["suspend", "active"],
+      ["revoke", "active"],
+    ] as const) {
+      db.run("UPDATE users SET compute_access = ? WHERE id = ?", [from, me]);
+      const res = await withFakeResend(() => decide(decision, "admin", me));
+      expect([decision, res.status]).toEqual([decision, 200]);
+    }
+    expect((await withFakeResend(() => decide("grant", "admin", personId))).status).toBe(200);
   });
 });
 

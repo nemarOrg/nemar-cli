@@ -24,16 +24,8 @@ import {
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, cookieOriginGuard } from "../middleware/auth";
 import {
-  getAdminEmailsForCategory,
-  isAdminNotificationAllowed,
-  resolveEmailConfig,
-  sendComputeAccessRequestEmail,
-  sendUploadAccessRequestEmail,
-} from "../services/email";
-import {
-  ACCESS_CLOSED_REFUSAL,
   ALREADY_ACTIVE_REFUSAL,
   COMPUTE_ACCESS_NOTIFIED_SQL,
   COMPUTE_ACCESS_REQUEST_ROW_SQL,
@@ -41,9 +33,17 @@ import {
   TERMS_UNPUBLISHED_REFUSAL,
   asState,
   checkComputeAccessRequest,
+  closedRefusalFor,
   requestAuditDetails,
   termsUnpublished,
 } from "../services/compute-access";
+import {
+  getAdminEmailsForCategory,
+  isAdminNotificationAllowed,
+  resolveEmailConfig,
+  sendComputeAccessRequestEmail,
+  sendUploadAccessRequestEmail,
+} from "../services/email";
 import { appBase } from "../services/environment";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
@@ -690,7 +690,8 @@ async function notifyAdminsOfComputeRequest(
  * is when, `compute_purpose` is what for, and an administrator's decision moves the state. There is no
  * request table because there is no second request: `denied` and `revoked` answer 409 `access_closed`
  * (and so does `suspended`, which is access that was paused, not a request to repeat), and re-opening one
- * is an administrator's grant. The route works whether or not the compute switch is on: it is bookkeeping,
+ * is an administrator's grant. A request made with a session cookie must carry a NEMAR Origin (403
+ * `origin_not_allowed` otherwise); a bearer key need not. The route works whether or not the compute switch is on: it is bookkeeping,
  * and spends nothing and calls no Tapis.
  *
  * Outcomes:
@@ -706,6 +707,10 @@ async function notifyAdminsOfComputeRequest(
  */
 userRoutes.post(
   "/me/compute-access/request",
+  // A write made with a session cookie must come from a NEMAR page (#1603, ADR 0105 decision 10), as on
+  // the admin router and the cookie writes of routes/compute.ts: `authMiddleware` runs first (the router's
+  // `use`), then this guard, then the body is read. A bearer key is not asked for an Origin.
+  cookieOriginGuard,
   zValidator("json", computeAccessRequestSchema),
   async (c) => {
     const authUser = c.get("user");
@@ -727,7 +732,7 @@ userRoutes.post(
       const state = asState(row.compute_access);
       if (state === "active") return refuseCompute(c, ALREADY_ACTIVE_REFUSAL);
       if (state === "denied" || state === "revoked" || state === "suspended") {
-        return refuseCompute(c, ACCESS_CLOSED_REFUSAL);
+        return refuseCompute(c, closedRefusalFor(state));
       }
 
       // Answered BEFORE the preconditions: an open request is already on an admin's desk, and telling
@@ -792,7 +797,7 @@ userRoutes.post(
           .first<{ compute_access: string; compute_access_requested_at: string | null }>();
         if (current?.compute_access === "active") return refuseCompute(c, ALREADY_ACTIVE_REFUSAL);
         if (current && current.compute_access !== "requested") {
-          return refuseCompute(c, ACCESS_CLOSED_REFUSAL);
+          return refuseCompute(c, closedRefusalFor(asState(current.compute_access)));
         }
         return c.json({
           ok: true,

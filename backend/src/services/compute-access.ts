@@ -24,7 +24,7 @@
  * the state the flip leaves, so a decision that lost a race changes nothing else. A grant carries the
  * owner's default allocation and the unfreezing of the person's pools; a suspension and a revocation carry
  * Epic A's release statements for the account and the end of its compute OpenID Connect grants. No
- * network call is made inside a batch: a live job is cancelled at Tapis by the retried sweep.
+ * network call is made inside a batch: a live job is canceled at Tapis by the retried sweep.
  *
  * THE FREEZE HAS TWO CAUSES AND ONE BIT. A pool is frozen by the end of the ACCOUNT
  * (`finalizeRevocation`, `tombstoneUserCascade`) and by the end of COMPUTE (a suspension or a revocation
@@ -42,25 +42,27 @@ import {
   type ComputeAccessState,
   canTransition,
 } from "../../../shared/compute-access-state.js";
+import { ACCOUNT_COPY } from "../../../shared/contract/account-copy.js";
 import {
   COMPUTE_PURPOSE_MAX_CHARS,
   COMPUTE_PURPOSE_MIN_CHARS,
   type ComputeAccessErrorCode,
   type ComputeAccessRefusal,
+  hasPurposeControlChar,
 } from "../../../shared/contract/compute-access.js";
-import { COMPUTE_POOLS, type ComputePool } from "../../../shared/contract/compute.js";
 import {
   COMPUTE_TERMS_PUBLISHED,
   COMPUTE_TERMS_VERSION,
 } from "../../../shared/contract/compute-terms.js";
+import { COMPUTE_POOLS, type ComputePool } from "../../../shared/contract/compute.js";
 import { profileGapFields } from "../../../shared/contract/profile-gaps.js";
 import type { AccountKind } from "../../../shared/contract/user.js";
 import { OIDC_COMPUTE_SCOPE_PREFIX } from "../../../shared/oidc.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL } from "../db/audit-log";
 import type { Bindings } from "../types/bindings";
 import { ACTIVE_ACCOUNT_STATUSES } from "./account-tier";
-import { type ComputeReleaseStatement, computeReleaseStatements } from "./compute-release";
 import { GRANT_INSERT_SQL } from "./compute-ledger";
+import { type ComputeReleaseStatement, computeReleaseStatements } from "./compute-release";
 import { oidcEndStatements } from "./oidc-cascade";
 import { isExactProduction } from "./repull-switches";
 
@@ -140,6 +142,13 @@ export function checkComputeAccessRequest(
       ["purpose"],
     );
   }
+  if (hasPurposeControlChar(purpose)) {
+    return refusal(
+      "purpose_required",
+      "Describe what you intend to compute in plain text, without control characters (newlines and tabs are fine)",
+      ["purpose"],
+    );
+  }
 
   if (input.accept_terms_version !== COMPUTE_TERMS_VERSION) {
     return refusal(
@@ -195,16 +204,34 @@ export const ALREADY_ACTIVE_REFUSAL: ComputeAccessRefusal = refusal(
   "This account already has compute access; there is nothing to request",
 );
 
-/** The 409 for a request that was answered (denied or revoked): a person asks once, and an administrator re-opens it by granting. */
+/**
+ * The 409 for a request that was answered (denied or revoked): a person asks once, and an administrator
+ * re-opens it by granting. The message IS the shared copy, so the website, the CLI and this body say one thing.
+ */
 export const ACCESS_CLOSED_REFUSAL: ComputeAccessRefusal = refusal(
   "access_closed",
-  "Your compute access request has been answered and cannot be made again; contact support if you think that is a mistake",
+  ACCOUNT_COPY["compute_access.closed.body"],
 );
+
+/**
+ * The same code for a SUSPENDED account, with its own words: its access exists and is paused, so it is
+ * not told its request "has been answered and cannot be asked again". No new code (a client switches on
+ * `access_closed`); the message differs.
+ */
+export const ACCESS_SUSPENDED_REFUSAL: ComputeAccessRefusal = refusal(
+  "access_closed",
+  ACCOUNT_COPY["compute_access.suspended.body"],
+);
+
+/** The refusal for an account in `denied`, `revoked` or `suspended`. */
+export function closedRefusalFor(state: ComputeAccessState): ComputeAccessRefusal {
+  return state === "suspended" ? ACCESS_SUSPENDED_REFUSAL : ACCESS_CLOSED_REFUSAL;
+}
 
 /** The 503 while the compute terms are not published (exact production only). */
 export const TERMS_UNPUBLISHED_REFUSAL: ComputeAccessRefusal = refusal(
   "terms_unpublished",
-  "Compute access is not open yet: the compute terms are not published. Please check back later",
+  ACCOUNT_COPY["compute_access.terms_unpublished.body"],
 );
 
 /**
@@ -269,11 +296,17 @@ const FROM_LIST = (decision: ComputeAccessDecision): string =>
   COMPUTE_DECISION_FROM[decision].map((s) => `'${s}'`).join(", ");
 
 /**
- * The state flip of a decision. A grant binds `?1` the actor and `?2` the account; the others bind `?1`
- * the account. The from-states are in the WHERE, so a decision on a state it cannot start from writes
- * nothing, and a grant is refused for an account that is not in good standing (see the header, on the
- * freeze). A grant stamps who and when, over the previous grant's stamps: they are the history of the
- * LATEST grant, and are never cleared by a decision.
+ * The state flip of a decision. A grant binds `?1` the actor, `?2` the account and `?3` the state the
+ * administrator READ; the others bind `?1` the account and `?2` the state read. BOTH the observed state
+ * and the list of states the decision may start from are in the WHERE: the list alone would let a
+ * decision made on a stale read land on a state it was never shown (two administrators read `suspended`,
+ * one revokes, and the other's grant would then match `revoked`, reopen the account, unfreeze its pools,
+ * open the allocation and record the wrong `from`). A decision on a state that moved matches nothing and
+ * answers 409 `stale_state`. A grant is also refused for an account that is not in good standing (see the
+ * header, on the freeze) and for an administrator granting THEMSELVES: the `admin` role may not, an `owner`
+ * may (the route answers 409 `self_decision` first; the flip says it again so a caller that skipped the
+ * route writes nothing). A grant stamps who and when, over the previous grant's stamps: they are the
+ * history of the LATEST grant, and are never cleared by a decision.
  */
 export const DECISION_UPDATE_SQL: Readonly<Record<ComputeAccessDecision, string>> = {
   grant: `UPDATE users
@@ -281,16 +314,21 @@ export const DECISION_UPDATE_SQL: Readonly<Record<ComputeAccessDecision, string>
         compute_access_granted_at = datetime('now'),
         compute_access_granted_by = ?1,
         updated_at = datetime('now')
-  WHERE id = ?2 AND compute_access IN (${FROM_LIST("grant")}) AND ${GOOD_STANDING}`,
+  WHERE id = ?2 AND compute_access = ?3 AND compute_access IN (${FROM_LIST("grant")})
+    AND ${GOOD_STANDING}
+    AND (?1 <> ?2 OR (SELECT role FROM users WHERE id = ?1) = 'owner')`,
   deny: `UPDATE users
     SET compute_access = '${COMPUTE_DECISION_TARGET.deny}', updated_at = datetime('now')
-  WHERE id = ?1 AND compute_access IN (${FROM_LIST("deny")}) AND deleted_at IS NULL`,
+  WHERE id = ?1 AND compute_access = ?2 AND compute_access IN (${FROM_LIST("deny")})
+    AND deleted_at IS NULL`,
   suspend: `UPDATE users
     SET compute_access = '${COMPUTE_DECISION_TARGET.suspend}', updated_at = datetime('now')
-  WHERE id = ?1 AND compute_access IN (${FROM_LIST("suspend")}) AND deleted_at IS NULL`,
+  WHERE id = ?1 AND compute_access = ?2 AND compute_access IN (${FROM_LIST("suspend")})
+    AND deleted_at IS NULL`,
   revoke: `UPDATE users
     SET compute_access = '${COMPUTE_DECISION_TARGET.revoke}', updated_at = datetime('now')
-  WHERE id = ?1 AND compute_access IN (${FROM_LIST("revoke")}) AND deleted_at IS NULL`,
+  WHERE id = ?1 AND compute_access = ?2 AND compute_access IN (${FROM_LIST("revoke")})
+    AND deleted_at IS NULL`,
 };
 
 /**
@@ -344,22 +382,23 @@ export function decisionAuditStatement(input: {
   };
 }
 
-/** The flip itself. */
+/** The flip itself, bound to the state the administrator read (`from`). */
 export function decisionFlipStatement(
   decision: ComputeAccessDecision,
   actorId: number,
   userId: number,
+  from: ComputeAccessState,
 ): DecisionStatement {
   return {
     sql: DECISION_UPDATE_SQL[decision],
-    binds: decision === "grant" ? [actorId, userId] : [userId],
+    binds: decision === "grant" ? [actorId, userId, from] : [userId, from],
   };
 }
 
 /**
  * What a suspension or a revocation does to the account's compute, in one place (epic #2021 phase D1):
  * Epic A's release statements for the account (every live job records `account_ended`, a job that never
- * reached Tapis is cancelled with its hold released, every pool is frozen) and the end of the account's
+ * reached Tapis is canceled with its hold released, every pool is frozen) and the end of the account's
  * compute OpenID Connect grants (only those that carry a `compute.` scope, and only their clients are told).
  * Each is guarded on the state the flip leaves.
  *

@@ -31,6 +31,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_ACCESS_STATES } from "../../shared/compute-access-state";
+import { ACCOUNT_COPY } from "../../shared/contract/account-copy";
 import { COMPUTE_TERMS_VERSION } from "../../shared/contract/compute-terms";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
@@ -239,6 +240,33 @@ describe("the refusals, in the order the rulebook gives them", () => {
     expect(row().compute_purpose).toBe(twenty);
   });
 
+  test("a purpose with a NUL or another control character is a 400 purpose_required, not a 500 (MUTATION: drop the control-character check)", async () => {
+    // SQLite's length() stops at the first NUL, so `abcde\0...` is five characters to the migration's
+    // CHECK and thirty-five to `purposeLength`: without the check the write fails and the route answers 500.
+    await seedRequester();
+    for (const bad of [
+      `abcde\u0000${"x".repeat(30)}`,
+      `${"x".repeat(30)}\u0007`,
+      `${"x".repeat(30)}\u001b[31m`,
+      `${"x".repeat(30)}\u007f`,
+    ]) {
+      const res = await request({ ...GOOD, purpose: bad });
+      expect([JSON.stringify(bad), res.status]).toEqual([JSON.stringify(bad), 400]);
+      const body = await asJson(res);
+      expect(body.error).toBe("purpose_required");
+      expect(body.missing).toEqual(["purpose"]);
+    }
+    expect(row().compute_access).toBe("none");
+    // Newlines and tabs are text, and are accepted.
+    const ok = await withFakeResend(() =>
+      request({
+        ...GOOD,
+        purpose: `Run ICA on public EEG data.\n\tFirst: nm000104\n\tThen: nm000105`,
+      }),
+    );
+    expect(ok.status).toBe(201);
+  });
+
   test("the terms version must be the current one, and comes before the inbox", async () => {
     await seedRequester({ email_verified: 0, identity: false });
     for (const accept_terms_version of [undefined, "", "2026-11", `${COMPUTE_TERMS_VERSION}x`]) {
@@ -416,7 +444,11 @@ describe("a successful request", () => {
       handle(
         new Request("http://api.test/users/me/compute-access/request", {
           method: "POST",
-          headers: { Cookie: `nemar_session=${cookieIdRaw}`, "content-type": "application/json" },
+          headers: {
+            Cookie: `nemar_session=${cookieIdRaw}`,
+            Origin: "https://app.nemar.org",
+            "content-type": "application/json",
+          },
           body: JSON.stringify(GOOD),
         }),
         env(),
@@ -424,6 +456,51 @@ describe("a successful request", () => {
     );
     expect(res.status).toBe(201);
     expect(JSON.parse(audits("compute_access_requested")[0]?.details ?? "{}").via).toBe("web");
+  });
+
+  test("a cookie request needs a NEMAR Origin: a foreign, a null and a missing one are 403 origin_not_allowed and write nothing (MUTATION: drop cookieOriginGuard)", async () => {
+    const id = await seedRequester();
+    const { cookieIdRaw } = await issueSession(env(), id, false, null, null, "orcid");
+    const withOrigin = (origin: string | null) =>
+      handle(
+        new Request("http://api.test/users/me/compute-access/request", {
+          method: "POST",
+          headers: {
+            Cookie: `nemar_session=${cookieIdRaw}`,
+            ...(origin === null ? {} : { Origin: origin }),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(GOOD),
+        }),
+        env(),
+      );
+    for (const origin of ["https://evil.example", "null", null]) {
+      const res = await withFakeResend(() => withOrigin(origin));
+      expect([origin, res.status]).toEqual([origin, 403]);
+      expect(await asJson(res)).toMatchObject({ error: "origin_not_allowed" });
+    }
+    expect(row().compute_access).toBe("none");
+    // The same cookie from a NEMAR page works; a bearer key needs no Origin and is unaffected by a foreign one.
+    expect((await withFakeResend(() => withOrigin("https://app.nemar.org"))).status).toBe(201);
+    db.run(
+      "UPDATE users SET compute_access = 'none', compute_access_requested_at = NULL WHERE id = ?",
+      [id],
+    );
+    const bearer = await withFakeResend(() =>
+      handle(
+        new Request("http://api.test/users/me/compute-access/request", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${USER_KEY}`,
+            Origin: "https://evil.example",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(GOOD),
+        }),
+        env(),
+      ),
+    );
+    expect(bearer.status).toBe(201);
   });
 
   test("works with the compute switch off, unset or on: it is bookkeeping", async () => {
@@ -527,12 +604,22 @@ describe("the states a request is answered from", () => {
     expect(await asJson(res)).toMatchObject({ error: "already_active", missing: [] });
   });
 
+  // Same code, the words of the state: a suspended account is not told its request "has been answered and
+  // cannot be asked again". MUTATION: answer `suspended` with the closed wording.
+  const WORDS: Record<string, string> = {
+    denied: ACCOUNT_COPY["compute_access.closed.body"],
+    revoked: ACCOUNT_COPY["compute_access.closed.body"],
+    suspended: ACCOUNT_COPY["compute_access.suspended.body"],
+  };
   for (const state of ["denied", "revoked", "suspended"]) {
-    test(`${state} answers 409 access_closed and writes nothing`, async () => {
+    test(`${state} answers 409 access_closed with its own words and writes nothing`, async () => {
       await seedRequester({ compute_access: state });
       const res = await request();
       expect(res.status).toBe(409);
-      expect(await asJson(res)).toMatchObject({ error: "access_closed", missing: [] });
+      const body = await asJson(res);
+      expect(body).toMatchObject({ error: "access_closed", missing: [], message: WORDS[state] });
+      if (state === "suspended") expect(body.message).not.toContain("cannot be asked again");
+      else expect(body.message).toContain("cannot be asked again");
       expect(row().compute_access).toBe(state);
       expect(audits("compute_access_requested")).toHaveLength(0);
     });

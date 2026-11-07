@@ -88,6 +88,8 @@ const SENTENCES: Record<ComputeAccessAdminErrorCode, string> = {
   already_active: "That account already holds compute access.",
   account_not_in_good_standing:
     "That account is deleted, revoked or not verified, so compute access cannot be granted to it.",
+  self_decision:
+    "An administrator cannot grant their own compute access; ask another administrator or an owner.",
   stale_state: "The account's compute access changed while this was being decided; read it again.",
   policy_unreadable: "The stored policy cannot be read, so nothing was granted.",
   internal: "The compute access routes failed unexpectedly.",
@@ -280,10 +282,16 @@ async function decide(
     const refusal = stateRefusal(decision, from);
     if (refusal) return refuse(c, refusal);
 
+    // An administrator does not grant THEMSELVES compute access (an owner may). Deny, suspend and
+    // revoke of oneself stay allowed: they only take access away.
+    if (decision === "grant" && account.id === actor.id && actor.role !== "owner") {
+      return refuse(c, "self_decision");
+    }
+
     const via = c.get("authMethod") === "cookie" ? "web" : "cli";
     const to = COMPUTE_DECISION_TARGET[decision];
     const statements: DecisionStatement[] = [
-      decisionFlipStatement(decision, actor.id, account.id),
+      decisionFlipStatement(decision, actor.id, account.id, from),
       decisionAuditStatement({
         decision,
         from,
