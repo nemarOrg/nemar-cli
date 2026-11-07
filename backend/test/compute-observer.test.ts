@@ -478,7 +478,7 @@ describe("the allocation string", () => {
     expect(await reread(j.env, j.job.id)).toEqual(before);
   });
 
-  test("elapsed time with no cpu item is refused, and so is any item past a column's bound; no allocation at all with no elapsed time is stored", async () => {
+  test("elapsed time with no cpu item or no node item is refused; no allocation at all with no elapsed time is stored", async () => {
     await refusedFor(
       acct(nextSlurm(), { alloc_tres: { billing: "4", mem: "8000M", node: "1" } }),
       "accounting.jobs.0.alloc_tres: missing_cpu",
@@ -487,6 +487,27 @@ describe("the allocation string", () => {
       acct(nextSlurm(), { alloc_tres: {} }),
       "accounting.jobs.0.alloc_tres: missing_cpu",
     );
+    // No node item with time is refused too (MUTATION: store it with nodes 0, which prices as one node).
+    await refusedFor(
+      acct(nextSlurm(), { alloc_tres: { cpu: "4", mem: "8000M", "gres/gpu": "1" } }),
+      "accounting.jobs.0.alloc_tres: missing_node",
+    );
+    // No node item and no time is stored: a cancelled-before-start job with a cpu item and no node.
+    const idle = nextSlurm();
+    const idleRun = await mint();
+    expect(
+      (
+        await post(
+          idleRun.token,
+          daily([acct(idle, { state: "CANCELLED", elapsed_seconds: 0, alloc_tres: { cpu: "4" } })]),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      fx.harness.db
+        .query("SELECT alloc_nodes, alloc_cpus FROM compute_sacct_rows WHERE slurm_job_id = ?")
+        .get(idle),
+    ).toEqual({ alloc_nodes: 0, alloc_cpus: 4 });
     // A job that was cancelled before it started has no allocation and no time: Slurm's own empty string.
     const run = await mint();
     const slurm = nextSlurm();

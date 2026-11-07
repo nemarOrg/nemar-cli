@@ -27,8 +27,9 @@
  * WHAT IS REFUSED, WHAT IS SKIPPED, WHAT NEVER HAPPENS.
  *  - REFUSED (the post is 400 `invalid_post` and the run is not spent): a document that is not the
  *    document (wrong `schema`, an unknown key, a wrong type), more than 5,000 rows, an allocation item
- *    that `parseAllocTres` cannot read, and a row with elapsed time and no `cpu` item (an allocation
- *    that ran and is not on record is a charge of nothing, which is a guess). A refusal names the path
+ *    that `parseAllocTres` cannot read, a row with elapsed time and no `cpu` item (an allocation that
+ *    ran and is not on record is a charge of nothing, which is a guess) and a row with elapsed time and
+ *    no `node` item (the settlement reads no node as one node, which is a guess too; one word a row). A refusal names the path
  *    and a fixed word, never a value the sender wrote.
  *  - SKIPPED and COUNTED (`skipped` in the answer): a partition whose queue was not read (`jobs` is
  *    null: the observer says null, never zero, and so does this), and a row that is valid but that no
@@ -67,6 +68,7 @@ export const OBSERVATION_REFUSALS = {
   tooManyRows: "too_big",
   malformedTres: "malformed_tres",
   missingCpu: "missing_cpu",
+  missingNode: "missing_node",
 } as const;
 
 export function mapObservation(doc: ObservationDocument): MapResult {
@@ -124,6 +126,12 @@ export function mapObservation(doc: ObservationDocument): MapResult {
     const { nodes, cpus, gpus, memMb } = tres.value;
     if (cpus === null && job.elapsed_seconds > 0) {
       refused.push(`${where}: ${OBSERVATION_REFUSALS.missingCpu}`);
+      return;
+    }
+    // The settlement prices per node and reads a node count of 0 as one, so an allocation that ran with
+    // no `node` item would be priced as one node: a guess. One word per row, the first that applies.
+    if (nodes === null && job.elapsed_seconds > 0) {
+      refused.push(`${where}: ${OBSERVATION_REFUSALS.missingNode}`);
       return;
     }
     body.sacct.push({
