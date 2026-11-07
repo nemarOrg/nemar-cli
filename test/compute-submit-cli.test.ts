@@ -19,7 +19,7 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -451,6 +451,55 @@ describe("a local refusal is exit 2 with nothing sent", () => {
       expect((await run(args)).exitCode).toBe(1);
     }
     expect(requests).toEqual([]);
+  });
+});
+
+describe("a file that cannot be read is a local refusal that names it relatively", () => {
+  const unprivileged = process.getuid?.() !== 0;
+
+  test.skipIf(!unprivileged)("an unreadable file", async () => {
+    put("run.py", "print(1)\n");
+    const secret = put("lib/locked.txt", "x");
+    chmodSync(secret, 0o000);
+    try {
+      const r = await run(["submit", ".", "--entry", "run.py", "--dry-run"], { signedIn: true });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain("lib/locked.txt cannot be read.");
+      expect(r.stderr).not.toContain(work);
+      expect(r.stderr).not.toContain("--debug");
+      expect(r.stdout).toBe("");
+    } finally {
+      chmodSync(secret, 0o644);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test.skipIf(!unprivileged)("an unreadable subfolder", async () => {
+    put("run.py", "print(1)\n");
+    put("data/a.csv", "x");
+    chmodSync(join(work, "data"), 0o000);
+    try {
+      const r = await run(["submit", ".", "--entry", "run.py", "--dry-run"], { signedIn: true });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain("data cannot be read.");
+      expect(r.stderr).not.toContain(work);
+      expect(r.stderr).not.toContain("--debug");
+    } finally {
+      chmodSync(join(work, "data"), 0o755);
+    }
+  });
+
+  test.skipIf(!unprivileged)("an unreadable script header and job file", async () => {
+    const script = put("run.py", "print(1)\n");
+    chmodSync(script, 0o000);
+    try {
+      const r = await run(["submit", "run.py", "--dry-run"], { signedIn: true });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain("run.py cannot be read.");
+      expect(r.stderr).not.toContain(work);
+    } finally {
+      chmodSync(script, 0o644);
+    }
   });
 });
 

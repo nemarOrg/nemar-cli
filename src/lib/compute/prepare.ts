@@ -50,6 +50,7 @@ import {
   type PackRefusal,
   type PackedBundle,
   type Skipped,
+  UnreadablePath,
   collectFile,
   collectFolder,
   packCollected,
@@ -161,6 +162,17 @@ function describePackRefusal(refusal: PackRefusal): Refusal {
 // --- The one function --------------------------------------------------------------------------------
 
 export function prepareSubmission(input: PrepareInput): PrepareResult {
+  try {
+    return prepare(input);
+  } catch (error) {
+    // A file that cannot be read, or that vanished while the bundle was made: a local refusal that names
+    // the relative path and nothing else.
+    if (error instanceof UnreadablePath) return refuse(`${error.path} cannot be read.`);
+    throw error;
+  }
+}
+
+function prepare(input: PrepareInput): PrepareResult {
   const { flags } = input;
 
   // 1. The flags.

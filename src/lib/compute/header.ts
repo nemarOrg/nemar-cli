@@ -98,7 +98,13 @@ export function fieldsFromHeaderText(text: string, kind: HeaderKind, label: stri
 export function readScriptHeader(path: string, label: string): HeaderRead {
   const kind = headerKindForFile(path);
   if (kind === null) return { ok: true, found: false, fields: {} };
-  return fieldsFromHeaderText(readPrefix(path), kind, label);
+  let text: string;
+  try {
+    text = readPrefix(path);
+  } catch {
+    return { ok: false, problems: [`${label} cannot be read.`] };
+  }
+  return fieldsFromHeaderText(text, kind, label);
 }
 
 /** The folder's `nemar-job.toml`, if it has one: an absent file is `found: false`, never an error. */
@@ -111,7 +117,13 @@ export function readFolderHeader(dir: string): HeaderRead {
     isFile = false;
   }
   if (!isFile) return { ok: true, found: false, fields: {} };
-  return fieldsFromHeaderText(readPrefix(path), "toml", FOLDER_JOB_FILE);
+  let text: string;
+  try {
+    text = readPrefix(path);
+  } catch {
+    return { ok: false, problems: [`${FOLDER_JOB_FILE} cannot be read.`] };
+  }
+  return fieldsFromHeaderText(text, "toml", FOLDER_JOB_FILE);
 }
 
 // --- The flags ------------------------------------------------------------------------------------

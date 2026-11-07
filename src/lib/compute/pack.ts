@@ -167,6 +167,28 @@ function ignored(rules: readonly IgnoreRule[], rel: string, isDir: boolean): boo
   });
 }
 
+// --- A path that cannot be read -----------------------------------------------------------------------
+
+/**
+ * A file or folder of the target that cannot be read (permission, or it vanished since it was listed).
+ * `path` is RELATIVE to the folder, never the absolute path, so what is said names the person's own file
+ * and nothing else about this machine. The command turns it into a local refusal (exit 2).
+ */
+export class UnreadablePath extends Error {
+  constructor(public readonly path: string) {
+    super("a path cannot be read");
+    this.name = "UnreadablePath";
+  }
+}
+
+function reading<T>(rel: string, read: () => T): T {
+  try {
+    return read();
+  } catch {
+    throw new UnreadablePath(rel === "" ? "." : rel);
+  }
+}
+
 // --- Collecting -------------------------------------------------------------------------------------
 
 export interface CollectedFile {
@@ -221,7 +243,7 @@ export function collectFolder(
   let rules: readonly IgnoreRule[] = [];
   const ignorePath = join(root, IGNORE_FILE);
   if (existsSync(ignorePath) && statSync(ignorePath).isFile()) {
-    const parsed = parseIgnore(readFileSync(ignorePath, "utf8"));
+    const parsed = parseIgnore(reading(IGNORE_FILE, () => readFileSync(ignorePath, "utf8")));
     if (!parsed.ok) return { ok: false, problems: parsed.problems };
     rules = parsed.rules;
   }
@@ -230,8 +252,8 @@ export function collectFolder(
   let overFileCap = false;
 
   const walk = (dirAbs: string, prefix: string): void => {
-    const entries = readdirSync(dirAbs, { withFileTypes: true }).sort((a, b) =>
-      byteCompare(a.name, b.name),
+    const entries = reading(prefix, () => readdirSync(dirAbs, { withFileTypes: true })).sort(
+      (a, b) => byteCompare(a.name, b.name),
     );
     for (const entry of entries) {
       if (overFileCap) return;
@@ -265,7 +287,7 @@ export function collectFolder(
         skipped.ignored++;
         continue;
       }
-      const st = lstatSync(abs);
+      const st = reading(rel, () => lstatSync(abs));
       if (st.size > limits.maxFileBytes) {
         skipped.tooLarge.push({ path: rel, size: st.size });
         continue;
@@ -282,9 +304,9 @@ export function collectFolder(
 /** The one file a person named: the bundle is that file alone, under its own name. */
 export function collectFile(file: string, options: CollectOptions = {}): Collected {
   const limits = options.limits ?? BUNDLE_DEFAULT_LIMITS;
-  const st = statSync(file);
-  const skipped = emptySkipped();
   const name = basename(file);
+  const st = reading(name, () => statSync(file));
+  const skipped = emptySkipped();
   if (st.size > limits.maxFileBytes) {
     skipped.tooLarge.push({ path: name, size: st.size });
     return { files: [], skipped, overFileCap: false };
@@ -544,7 +566,7 @@ export function packCollected(collected: Collected, options: PackOptions = {}): 
   const manifestFiles: PackedBundle["manifest"]["files"] = [];
   let inspected = 0;
   for (const file of collected.files) {
-    const bytes = new Uint8Array(readFileSync(file.abs));
+    const bytes = new Uint8Array(reading(file.path, () => readFileSync(file.abs)));
     // The file may have changed since it was listed: what is packed is what was read.
     if (options.inspect) inspected += options.inspect(file.path, bytes);
     contents.set(file.path, bytes);

@@ -22,6 +22,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -36,6 +37,7 @@ import {
 import { COMPUTE_SUBMIT_SENTENCES } from "../shared/contract/compute-submit";
 import {
   type Collected,
+  UnreadablePath,
   collectFile,
   collectFolder,
   gzipDeterministic,
@@ -441,5 +443,27 @@ describe("Python's tarfile (3.9) reads the archive back", () => {
       ["run.py", "print(1)\n"],
     ]);
     expect(r).toEqual({ ok: false, inspected: 1 });
+  });
+});
+
+describe("a file that cannot be read says so by its relative path", () => {
+  test("a file that vanishes between listing and reading", () => {
+    const dir = folder({ "run.py": "1", "lib/gone.py": "2" });
+    const listed = collect(dir);
+    unlinkSync(join(dir, "lib/gone.py"));
+    let thrown: unknown;
+    try {
+      packCollected(listed, { entry: "run.py" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(UnreadablePath);
+    expect((thrown as UnreadablePath).path).toBe("lib/gone.py");
+    expect((thrown as Error).message).not.toContain(dir);
+  });
+
+  test("a folder that is not there, and a file named that is not there", () => {
+    expect(() => collectFolder(join(root, "no-such-folder"))).toThrow(UnreadablePath);
+    expect(() => collectFile(join(root, "no-such.py"))).toThrow(UnreadablePath);
   });
 });
