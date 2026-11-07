@@ -51,7 +51,6 @@
 import {
   type ComputeFailureCode,
   type ComputeFailureDetail,
-  type ComputeJobFlag,
   type ComputeState,
   LIVE_COMPUTE_STATES,
   RECORDS_UNREADABLE,
@@ -63,6 +62,7 @@ import {
   resultRefusalOf,
   stateFromTapisStatus,
 } from "../../../shared/compute-state.js";
+import type { ComputeJobView } from "../../../shared/contract/compute-admin.js";
 import {
   type LaunchSpecEnvValue,
   encodeLaunchSpec,
@@ -81,6 +81,7 @@ import {
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
+import { flagsOf } from "./compute-job-flags.js";
 import {
   type ComputeJobRow,
   LIVE_STATES_SQL,
@@ -2058,12 +2059,7 @@ async function repairTerminal(
  * `platform_failure` is the information flag that says NEMAR caused the failure (so an administrator can
  * compensate it by a manual grant: nothing is refunded automatically).
  */
-export function jobView(job: ComputeJobRow) {
-  const flags: ComputeJobFlag[] = [];
-  if (job.flag_unreserved === 1) flags.push("unreserved");
-  if (job.flag_unattributed === 1) flags.push("unattributed");
-  if (job.flag_mismatch === 1) flags.push("mismatch");
-  if (job.flag_overrun === 1) flags.push("overrun");
+export function jobView(job: ComputeJobRow): ComputeJobView {
   return {
     id: job.id,
     account_id: job.account_id,
@@ -2081,7 +2077,7 @@ export function jobView(job: ComputeJobRow) {
     held_milli: job.held_milli,
     charged_milli: job.charged_milli,
     settled: job.settled_provisional_at !== null,
-    flags,
+    flags: flagsOf(job),
     created_at: job.created_at,
     submitted_at: job.submitted_at,
     started_at: job.started_at,
@@ -2093,5 +2089,3 @@ export function jobView(job: ComputeJobRow) {
     records_copied: job.result_records_at !== null,
   };
 }
-
-export type ComputeJobView = ReturnType<typeof jobView>;

@@ -37,6 +37,7 @@ import {
   DEFAULT_COMPUTE_POLICY,
   RECORDS_RESULT_MANIFEST_FILE,
 } from "../../shared/contract/compute";
+import { ComputeJobViewSchema } from "../../shared/contract/compute-admin";
 import {
   LaunchSpecSchema,
   decodeLaunchSpecEnv,
@@ -61,6 +62,7 @@ import {
   applyTapisJob,
   copyResultRecords,
   countCopyAbandoned,
+  jobView,
   provisionalCharge,
   requestComputeCancel,
   sqliteTime,
@@ -2444,6 +2446,11 @@ describe("the 30-minute tick", () => {
     await runComputeAdvanceCron(s.env);
     let job = await reread(s.env, id);
     expect([job.state, job.tapis_status]).toEqual(["unreported", "SOMETHING_NEW"]);
+    // An administrator is shown the word, and the view is the contract's.
+    const view = jobView(job);
+    expect(view.tapis_status).toBe("SOMETHING_NEW");
+    expect(ComputeJobViewSchema.safeParse(view).success).toBe(true);
+    expect(view.flags).toEqual([]);
     // The record then goes: Tapis answered, so this is not a lost record, however old the last usable read.
     fx.tapis.fail("GET /v3/jobs/:uuid", 404, 50);
     await runComputeAdvanceCron(s.env);
