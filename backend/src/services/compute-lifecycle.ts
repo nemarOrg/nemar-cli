@@ -365,9 +365,9 @@ export async function countCancelPendingFailed(db: D1Database): Promise<number> 
  * Terminal rows whose copy of the launcher files and logs was never made and no longer will be: past the
  * {@link RECORDS_COPY_RETRY_DAYS} days {@link UNCOPIED_TERMINAL_SQL} retries it (its exact complement), and
  * not yet reduced by retention. Without this the failure was a `console.error` and the row dropped out of
- * the list for good. Each such row is flagged `mismatch` ONCE (so `jobs list` and the status view show it
- * to an administrator, and it is not counted again), and the tick counts the rows it newly flagged as
- * `copy_abandoned` and logs them at error level. `?` nothing.
+ * the list for good. Each such row is flagged `mismatch` (where it is not flagged already: a row born
+ * flagged, like a lost record, is abandoned all the same), so `jobs list` and the status view show it to an
+ * administrator.
  */
 export const MARK_COPY_ABANDONED_SQL = `UPDATE compute_jobs SET flag_mismatch = 1
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
@@ -375,7 +375,21 @@ export const MARK_COPY_ABANDONED_SQL = `UPDATE compute_jobs SET flag_mismatch = 
     AND flag_mismatch = 0
     AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
 
-/** The rows {@link MARK_COPY_ABANDONED_SQL} describes, flagged or not: the number an administrator is shown. */
+/** How many days after the retry window closes the tick still reports an abandoned copy (the running total never expires). */
+export const COPY_ABANDONED_REPORT_DAYS = 30;
+
+/**
+ * The abandoned rows the TICK reports, whatever their flag: those whose window closed in the last
+ * {@link COPY_ABANDONED_REPORT_DAYS} days. A standing count that never ended would be an error line every
+ * half hour for the years until retention; a month is long enough to be noticed.
+ */
+export const COPY_ABANDONED_RECENT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL
+    AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')
+    AND ended_at >= datetime('now', '-${RECORDS_COPY_RETRY_DAYS + COPY_ABANDONED_REPORT_DAYS} days')`;
+
+/** The rows {@link MARK_COPY_ABANDONED_SQL} describes, flagged or not and however old: the number an administrator is shown. */
 export const COPY_ABANDONED_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
     AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL
@@ -394,6 +408,16 @@ export const STAMP_CANCEL_ATTEMPT_SQL =
 export const UNREADABLE_GIVE_UP_DAYS = 7;
 
 // --- Small helpers -------------------------------------------------------------------------------
+
+/** The unrecognized status Tapis answered, kept on a live row: `?1` the job, `?2` the word. Touches nothing else, so the row's last good read keeps ageing. */
+export const STORE_UNKNOWN_STATUS_SQL = `UPDATE compute_jobs SET tapis_status = ?2
+  WHERE id = ?1 AND state IN (${LIVE_STATES_SQL})`;
+
+/** The word to store for a status NEMAR does not know: the word when it fits the column and names no known status, else a fixed one. */
+export function unknownStatusWord(status: unknown): string {
+  const word = typeof status === "string" ? status : "";
+  return /^[A-Z_]{1,32}$/.test(word) && stateFromTapisStatus(word) === null ? word : "UNRECOGNIZED";
+}
 
 /** A status word from Tapis as a log line may carry it: letters and underscores only, at most 32. */
 export function logSafeStatus(status: unknown): string {
@@ -1216,15 +1240,68 @@ async function endUnsubmitted(
 }
 
 /**
- * A live job whose Tapis record is gone (404 on the read and on a cancel's read-back) or has not been
- * readable for {@link UNREADABLE_GIVE_UP_DAYS} days ends `failed` with `tapis_record_lost` (owner decision
- * of 2026-11-06). The hold is RELEASED with no charge (the same statement, key and gate as any release, so
- * the settlement stays idempotent and the hold is released exactly once), the row is flagged `mismatch` so
- * the observer's final settlement and the tenant sweep can reconcile any use that really happened, and the
- * failure is the platform's. The row leaves the live states, which frees the account's quota slot, and a
- * pipeline stamp that reads it fails with the same word. True when this call moved the row.
+ * What a lost job settles at, from the ROW alone (its Tapis record cannot be read). The code's own rule
+ * applies: a job that ran is never released, because a release closes the hold and the ledger then
+ * refuses a charge, so a wrong release is permanent (see {@link provisionalCharge}).
+ *  - EVIDENCE OF START: `started_at` is set (an earlier read showed the job running). The job is charged
+ *    for the time from that start to now, capped at the job's own time limit (`minutes`), through
+ *    `provisionalCharge` with the figures the row has; the settlement caps it at the hold and puts any
+ *    excess to overrun, as for any failed job that ran.
+ *  - OTHER EVIDENCE OF USE: the launcher reached the Worker (`results_bytes`, `outputs_completed_at`), the
+ *    scheduler gave the job an id (`slurm_job_id`), or Tapis last reported it `running` or `archiving`.
+ *    The contract's minimum is charged.
+ *  - NO EVIDENCE of ever starting: the hold is released, nothing is charged. Any use after that is
+ *    flagged (`mismatch`), not reconciled: the observer corrects only a row with a `charge` entry, and the
+ *    tenant sweep skips a bound row.
  */
-async function endRecordLost(env: Bindings, job: ComputeJobRow): Promise<boolean> {
+export function lostSettlement(job: ComputeJobRow, nowMs: number): Provisional {
+  const startedMs = parseMs(job.started_at);
+  if (startedMs !== null) {
+    const endedMs = Math.min(nowMs, startedMs + job.minutes * 60_000);
+    const priced = provisionalCharge(
+      job,
+      {
+        remoteStarted: new Date(startedMs).toISOString(),
+        remoteEnded: new Date(Math.max(startedMs, endedMs)).toISOString(),
+      } as TapisJob,
+      nowMs,
+    );
+    // Flagged `mismatch` whatever the pricing says: the record is gone.
+    return priced;
+  }
+  const otherEvidence =
+    job.results_bytes !== null ||
+    job.outputs_completed_at !== null ||
+    job.slurm_job_id !== null ||
+    job.state === "running" ||
+    job.state === "archiving";
+  return otherEvidence
+    ? { kind: "charge", milli: RATE_TABLE_V1.minChargeMilli, seconds: 0, fallback: true }
+    : { kind: "release" };
+}
+
+/**
+ * A live job whose Tapis record is GONE ends `failed` with `tapis_record_lost` (owner decision of
+ * 2026-11-06, refined in review). It is called only for a read that answered 404, never for any other
+ * failure (a refused credential, a response that fails its schema and a Tapis that is down each leave the
+ * job `unreported` and loud): a record that is merely unreadable may still be running.
+ *
+ *  - A job with NO evidence of ever starting is RELEASED with no charge, once (the same release statement,
+ *    key and gate as any release);
+ *  - a job that ran is CHARGED provisionally ({@link lostSettlement}), once, capped at the hold, excess to
+ *    overrun as for any failed job;
+ *  - either way the row is flagged `mismatch` and the failure is the platform's. A released job's later
+ *    use is flagged for an administrator and is not reconciled by the observer or the tenant sweep;
+ *  - the Tapis uuid is recorded as the row's ORPHAN, so a job that is in fact still running is cancelled
+ *    by the orphan retry loop as soon as Tapis answers a cancel.
+ * The row leaves the live states, which frees the account's quota slot, and a pipeline stamp that reads
+ * it fails with the same word. True when this call moved the row.
+ */
+async function endRecordLost(
+  env: Bindings,
+  job: ComputeJobRow,
+  nowMs: number = Date.now(),
+): Promise<boolean> {
   const plan: TerminalPlan = {
     to: "failed",
     failureCode: "tapis_record_lost",
@@ -1238,20 +1315,37 @@ async function endRecordLost(env: Bindings, job: ComputeJobRow): Promise<boolean
     startedAt: null,
     endedAt: null,
     slurmJobId: null,
-    settlement: { kind: "release" },
+    settlement: lostSettlement(job, nowMs),
     unsubmittedOnly: false,
   };
   const won = await commitTerminal(env, job, plan, await recordsRetentionYears(env));
   if (!won) return false;
-  console.error(`[compute-lifecycle] tapis_record_lost job=${job.id}`);
+  console.error("[compute-lifecycle] tapis_record_lost");
+  if (job.tapis_uuid !== null) await recordOrphan(env, job.id, job.tapis_uuid);
   await afterTerminal(env, (await getJob(env.DB, job.id)) ?? job, plan);
   return true;
 }
 
-/** Whether a live row's last good read of Tapis is old enough for its record to be declared lost. */
+/**
+ * Whether a live row may be declared lost for want of a read: its last SUCCESSFUL read of Tapis is more
+ * than {@link UNREADABLE_GIVE_UP_DAYS} days old, and Tapis has not answered it with a word NEMAR does not
+ * know since. `tapis_synced_at` is the last good read that NEMAR could use; a status NEMAR does not know
+ * never refreshes it (so the job still goes `unreported` after a day), but it is stored in `tapis_status`,
+ * and a stored word that is no known status means Tapis ANSWERED after that read. A job Tapis answered is
+ * never lost.
+ */
 function recordLostByAge(job: ComputeJobRow, nowMs: number): boolean {
+  if (job.tapis_status !== null && stateFromTapisStatus(job.tapis_status) === null) return false;
   const lastGood = job.tapis_synced_at ?? job.submitted_at ?? job.created_at;
   return ageMinutes(lastGood, nowMs) > UNREADABLE_GIVE_UP_DAYS * 24 * 60;
+}
+
+/** A 404 on the cancel and on the read-back may end a job only if its last good read is over a day old. */
+const LOST_ON_CANCEL_MIN_MINUTES = 24 * 60;
+
+function recordLostOnCancel(job: ComputeJobRow, nowMs: number): boolean {
+  const lastGood = job.tapis_synced_at ?? job.submitted_at ?? job.created_at;
+  return ageMinutes(lastGood, nowMs) > LOST_ON_CANCEL_MIN_MINUTES;
 }
 
 /** The webhook subscription of a bound job: a hint only, so a failure is a fixed word and nothing more. */
@@ -1309,10 +1403,21 @@ async function tapisRecordGone(ctx: TapisContext, uuid: string): Promise<boolean
   }
 }
 
+/** Whether a read of the Tapis job shows it has ended (any terminal status). A failed read is not a confirmation. */
+async function tapisRecordEnded(ctx: TapisContext, uuid: string): Promise<boolean> {
+  try {
+    const state = stateFromTapisStatus((await getTapisJob(ctx, uuid)).status);
+    return state !== null && isTerminalComputeState(state);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Cancel a Tapis job NEMAR made that no row owns, and clear the record of it once that is known to have
  * worked: the cancel was accepted, Tapis says the job is already over (409), or says there is no such job
- * (404) AND a read of the job confirms it. Any other answer, a 400 or a 403 included, leaves
+ * (404) AND a read of the job confirms it, or refuses the cancel (a 4xx other than 404, as a finished job
+ * may be answered) AND a read shows the job has ended. Any other answer, a 400 on a live job or a 403, leaves
  * `orphan_tapis_uuid` set and the next tick tries again: it is the tenant sweep's rule, and an orphan that
  * is still running spends the allocation (review fixes of 2026-11-06; the first version cleared the
  * record on any `rejected`). True when cleared.
@@ -1327,9 +1432,15 @@ async function cancelOrphan(
     await cancelJob(ctx, uuid);
   } catch (err) {
     const over = err instanceof TapisError && err.status === 409;
-    const gone =
-      err instanceof TapisError && err.kind === "not_found" && (await tapisRecordGone(ctx, uuid));
-    if (!over && !gone) {
+    // A 404 is settled only if a read confirms the job is gone; a refusal (a 400 for cancelling a job that
+    // already finished, say) only if a read shows the job has ended. Any other answer stays marked.
+    const settled =
+      over ||
+      (err instanceof TapisError &&
+        err.kind === "not_found" &&
+        (await tapisRecordGone(ctx, uuid))) ||
+      (err instanceof TapisError && err.kind === "rejected" && (await tapisRecordEnded(ctx, uuid)));
+    if (!settled) {
       console.warn(`[compute-lifecycle] orphan_cancel_failed job=${jobId} kind=${tapisWord(err)}`);
       return false;
     }
@@ -1747,9 +1858,13 @@ export async function driveCancel(
     console.warn(`[compute-lifecycle] cancel_readback_failed job=${job.id} kind=${tapisWord(err)}`);
     // The cancel answered 404 AND the read-back answered 404: Tapis has no such job. Somebody asked for the
     // job to end, and there is nothing to cancel or to read, so it ends as lost rather than waiting a week.
+    // Only if the last good read is over a day old, so one wrong-tenant 404 cannot end a job at once.
     if (cancelNotFound && err instanceof TapisError && err.kind === "not_found") {
       const fresh = (await getJob(env.DB, job.id)) ?? job;
-      if (isTerminalComputeState(fresh.state) || (await endRecordLost(env, fresh))) return "ended";
+      if (isTerminalComputeState(fresh.state)) return "ended";
+      if (recordLostOnCancel(fresh, Date.now()) && (await endRecordLost(env, fresh))) {
+        return "ended";
+      }
     }
     return cancelFailed ? "failed" : "pending";
   }
@@ -1837,9 +1952,17 @@ export async function advanceComputeJob(
     rec = await getTapisJob(ctx, job.tapis_uuid);
   } catch (err) {
     console.warn(`[compute-lifecycle] readback_failed job=${job.id} kind=${tapisWord(err)}`);
-    // A record unread for a week is lost, not merely silent: the job ends and the hold is released.
-    if (recordLostByAge(job, nowMs)) await endRecordLost(env, job);
-    else await markUnreportedIfStale(env, job);
+    // A record that answers 404 for a week is lost, not merely silent. Only a 404 counts: a refused
+    // credential, a response that fails its schema, or a Tapis that is down for a week leaves the job
+    // `unreported` (the state a person is told by), loudly, and never ends it.
+    if (err instanceof TapisError && err.kind === "not_found" && recordLostByAge(job, nowMs)) {
+      await endRecordLost(env, job, nowMs);
+    } else {
+      if (!(err instanceof TapisError && err.kind === "not_found") && recordLostByAge(job, nowMs)) {
+        console.error(`[compute-lifecycle] unreadable_for_a_week kind=${tapisWord(err)}`);
+      }
+      await markUnreportedIfStale(env, job);
+    }
     return { outcome: "unreachable", job: await getJob(env.DB, job.id) };
   }
   const applied = await applyTapisJob(env, job, rec, nowMs);
@@ -1848,9 +1971,12 @@ export async function advanceComputeJob(
     // is refreshed, so the row's last good read ages, and after a day it is `unreported` and a person
     // looks. Without this the job froze live for ever with nothing said. The word is logged shortened and
     // stripped to letters and underscores, since Tapis wrote it.
-    console.warn(
-      `[compute-lifecycle] unknown_status job=${job.id} status=${logSafeStatus(rec.status)}`,
-    );
+    console.warn(`[compute-lifecycle] unknown_status status=${logSafeStatus(rec.status)}`);
+    // Remember that Tapis ANSWERED: the word is stored in `tapis_status` (it is shown to an administrator
+    // too), and a stored word that is no known status stops the lost-by-age rule for this job.
+    await env.DB.prepare(STORE_UNKNOWN_STATUS_SQL)
+      .bind(job.id, unknownStatusWord(rec.status))
+      .run();
     await markUnreportedIfStale(env, job);
   }
   return { outcome: applied.outcome, job: await getJob(env.DB, job.id) };

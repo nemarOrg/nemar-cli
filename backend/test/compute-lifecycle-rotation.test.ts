@@ -223,6 +223,20 @@ describe("an orphan's cancel clears the record only when the orphan is known to 
     expect(orphanOn(made.job.id)).toBeNull();
   });
 
+  test("a refusal clears the record when a read shows the job has ENDED (a 400 for cancelling a finished job), and not while it runs (MUTATION: never read after a refusal)", async () => {
+    const { made, real } = await orphanOf();
+    fx.tapis.advance(real, "FINISHED");
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 400);
+    await sweepComputeCancellations(env());
+    expect(orphanOn(made.job.id)).toBeNull();
+    // The same refusal for a job that is still running keeps the alarm.
+    const live = await orphanOf();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 400);
+    const swept = await sweepComputeCancellations(env());
+    expect(orphanOn(live.made.job.id)).toBe(live.real);
+    expect(swept).toMatchObject({ cancel_failed: 1 });
+  });
+
   test("a 404 clears the record only when a read of the job confirms it is gone", async () => {
     // Gone: the cancel and the read both answer 404.
     const gone = await orphanOf("00000000-gone-gone-gone-000000000000");

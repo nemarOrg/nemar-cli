@@ -316,9 +316,9 @@ describe("a dataset that keeps failing", () => {
     )
       .bind(dispatched.jobId)
       .run();
-    fx.tapis.down();
+    // The record is gone for good (404).
+    fx.tapis.fail("GET /v3/jobs/:uuid", 404, 50);
     await runComputeAdvanceCron(env);
-    fx.tapis.up();
     expect(
       await env.DB.prepare("SELECT state, failure_code FROM compute_jobs WHERE id = ?1")
         .bind(dispatched.jobId)

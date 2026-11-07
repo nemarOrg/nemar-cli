@@ -55,6 +55,7 @@ import { LIVE_STATES_SQL } from "./compute-jobs.js";
 import {
   type AdvanceResult,
   CLEAR_NONCES_SQL,
+  COPY_ABANDONED_RECENT_SQL,
   MARK_COPY_ABANDONED_SQL,
   STAMP_CANCEL_ATTEMPT_SQL,
   STAMP_EXAMINED_SQL,
@@ -137,8 +138,9 @@ export interface ComputeTickResult {
   /** Webhook nonces cleared. */
   cleared: number;
   /**
-   * Terminal rows this tick found past the days their copy of the launcher files is retried and still
-   * uncopied (flagged `mismatch` once; `countCopyAbandoned` is the running total). Error level.
+   * Terminal rows past the days their copy of the launcher files is retried and still uncopied, whose
+   * window closed within the last 30 days, flagged or not (`countCopyAbandoned` is the running total).
+   * Error level, on every tick while any exists.
    */
   copy_abandoned: number;
   /** Fixed words; never a message. */
@@ -213,7 +215,9 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
     ).results;
     const cleared = await env.DB.prepare(CLEAR_NONCES_SQL).run();
     r.cleared = cleared.meta?.changes ?? 0;
-    r.copy_abandoned = (await env.DB.prepare(MARK_COPY_ABANDONED_SQL).run()).meta?.changes ?? 0;
+    await env.DB.prepare(MARK_COPY_ABANDONED_SQL).run();
+    r.copy_abandoned =
+      (await env.DB.prepare(COPY_ABANDONED_RECENT_SQL).first<{ n: number }>())?.n ?? 0;
 
     // Every row taken is stamped BEFORE its step: whatever the step does (a read that fails, a
     // submit that cannot go, an exception) the row has had its turn and goes to the back of the line.
