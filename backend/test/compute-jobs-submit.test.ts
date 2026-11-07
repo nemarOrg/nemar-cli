@@ -14,8 +14,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { BUNDLE_MAX_FILES } from "../../shared/contract/compute-bundle";
+import {
+  ComputeSubmitErrorSchema,
+  ComputeSubmitRequestSchema,
+  ComputeSubmitResponseSchema,
+} from "../../shared/contract/compute-submit";
 import { createJob } from "../src/services/compute-jobs";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
+import { COMPUTE_ACCESS_READ_SQL } from "../src/services/compute-submit";
 import { seedEegDataset } from "./helpers/compute-pipeline-fixture";
 import { fundAccount, setPolicy, trace } from "./helpers/compute-seed";
 import {
@@ -58,8 +64,12 @@ describe("a script job with a code bundle", () => {
     const p = await newPerson(w);
     const bundle = makeBundle();
     const before = Date.now();
-    const r = await submit(p, bundleRequest(bundle));
+    const request = bundleRequest(bundle);
+    // The request is the contract's, and the answer parses against the contract's open response.
+    expect(ComputeSubmitRequestSchema.safeParse(request).success).toBe(true);
+    const r = await submit(p, request);
     expect(r.status).toBe(201);
+    expect(ComputeSubmitResponseSchema.safeParse(r.body).success).toBe(true);
     const id = r.body.job_id as string;
     expect(id).toMatch(/^job_[0-9a-f]{24}$/);
     expect(r.body).toMatchObject({
@@ -365,7 +375,7 @@ describe("the order of refusal: one failing request per code", () => {
         COMPUTE_REFUSAL_STATUS[c.code as keyof typeof COMPUTE_REFUSAL_STATUS],
         c.code,
       ]);
-      expect(typeof r.body.error).toBe("string");
+      expect(ComputeSubmitErrorSchema.safeParse(r.body).success).toBe(true);
       if (c.field !== undefined) expect(r.body.field).toBe(c.field);
       // A refusal writes nothing and carries no address, in either bucket.
       expect(await trace(w.env().DB)).toEqual(before);
@@ -460,6 +470,45 @@ describe("compute access is read in the hold's own statement, not only from the 
       expect([access, r.status]).toEqual([access, 403]);
       expect(r.body.code).toBe(access === "suspended" ? "suspended" : "no_compute_access");
     }
+  });
+
+  test("through the route: access ends AFTER the route read it and BEFORE the hold, and the hold's own statement refuses", async () => {
+    const p = await newPerson(w);
+    const real = w.env().DB;
+    // A database whose read of the access state is answered truthfully (`active`) and is followed at once
+    // by the end of the grant: the interleaving the D1 amendment names. Every other statement, a batch
+    // included, is the real one.
+    const flipping = {
+      prepare(sql: string) {
+        const statement = real.prepare(sql);
+        if (sql !== COMPUTE_ACCESS_READ_SQL) return statement;
+        return {
+          bind(...args: unknown[]) {
+            const bound = statement.bind(...args);
+            return {
+              async first() {
+                const row = await bound.first();
+                await real
+                  .prepare("UPDATE users SET compute_access = 'revoked' WHERE id = ?1")
+                  .bind(p.id)
+                  .run();
+                return row;
+              },
+            };
+          },
+        };
+      },
+      batch: (statements: D1PreparedStatement[]) => real.batch(statements),
+    } as unknown as D1Database;
+    const before = await trace(real);
+    const r = await call(w, "POST", "/compute/jobs", {
+      key: p.key,
+      json: bundleRequest(makeBundle()),
+      env: { ...w.env(), DB: flipping },
+    });
+    expect([r.status, r.body.code]).toEqual([403, "no_compute_access"]);
+    expect(await trace(real)).toEqual(before);
+    expect(r.body.upload).toBeUndefined();
   });
 
   test("the hold's own statement refuses when the route's read was stale (createJob, called as the route calls it)", async () => {

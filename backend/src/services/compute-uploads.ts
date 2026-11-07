@@ -37,10 +37,13 @@ export const UPLOAD_WINDOW_MINUTES = COMPUTE_UPLOAD_WINDOW_SECONDS / 60;
 
 /**
  * The rows to end: `uploading`, no Tapis job, records not written, no cancel recorded, not a partner's,
- * created more than the window ago; least recently examined first. The state list is the partial index
- * `compute_jobs_examined`'s own (live rows only), which `compute-uploads.test.ts` holds the plan to.
+ * created more than the window ago; least recently examined first. The statement NAMES its index
+ * (`INDEXED BY compute_jobs_examined`, the partial index of the live rows, which the state list below
+ * implies): left to choose, the planner took `compute_jobs_created` or the unique index on `tapis_uuid`,
+ * each of which walks rows that are not live. A live row is bounded by the owner's per-person limit, so
+ * walking them is cheap. `compute-jobs-finalize.test.ts` holds the plan.
  */
-export const ABANDONED_UPLOADS_SQL = `SELECT id FROM compute_jobs
+export const ABANDONED_UPLOADS_SQL = `SELECT id FROM compute_jobs INDEXED BY compute_jobs_examined
   WHERE state IN (${LIVE_STATES_SQL}) AND state = 'uploading' AND tapis_uuid IS NULL
     AND records_written_at IS NULL AND cancel_requested_at IS NULL AND source <> 'partner'
     AND created_at < datetime('now', '-${UPLOAD_WINDOW_MINUTES} minutes')

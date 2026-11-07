@@ -228,6 +228,24 @@ describe("an OIDC access token is refused by every route that is not an OIDC rou
     }
   });
 
+  test("the person's job routes (phase D3, #2024) are in the walk, so the token is refused on each: `compute.submit` is granted to no client yet", () => {
+    // They are not OIDC routes (not in COMPUTE_OIDC_ROUTES, not matched by COMPUTE_READ_RE), so the walk
+    // below calls every one of them with the token and holds the answer to an unknown key's.
+    const walked = requestList().map(
+      (c) => `${c.method} ${c.path.replace(PRIVATE_DATASET, ":id")}`,
+    );
+    for (const route of [
+      "POST /compute/jobs",
+      "POST /compute/jobs/:id/finalize",
+      "GET /compute/jobs/:id/logs",
+      "GET /compute/jobs/:id/results",
+      "POST /compute/jobs/:id/results/renew",
+    ]) {
+      expect(walked).toContain(route);
+      expect(COMPUTE_READ_RE.test(route.split(" ")[1] as string)).toBe(false);
+    }
+  });
+
   test(
     "every route answers the access token exactly as it answers an unknown API key",
     async () => {
