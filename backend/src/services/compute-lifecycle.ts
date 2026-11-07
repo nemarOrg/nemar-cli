@@ -626,20 +626,18 @@ export interface TerminalPlan {
   releaseReason?: "released" | "expired";
 }
 
-/** The gate of a partner's excess entry, placed AFTER the stamp: the row has taken the state and is settled. */
-const SETTLED_GATE_SQL = `EXISTS (SELECT 1 FROM compute_jobs
-    WHERE id = ? AND state = ? AND settled_provisional_at IS NOT NULL)`;
-
 /**
  * A PARTNER job's charge to the person never exceeds the hold the person made: the figure is capped at
- * `held_milli`, and what was used above it is the partner's (`partnerExcessStatements`, written AFTER the
- * stamp in the same batch, so the row's `charged_milli` stays the person's). Any other job is unchanged.
+ * `held_milli`. What was used above it is the partner's, but the excess is written HERE only for a job with
+ * NO Slurm id (nothing will correct it); a job that reaches accounting has its excess written by the
+ * observer's final settlement, from Expanse's figure (`compute-partner-excess.ts`). It is written AFTER the
+ * stamp in the same batch, so the row's `charged_milli` stays the person's. Any other job is unchanged.
  */
 async function capPartnerCharge(
   env: Bindings,
   job: ComputeJobRow,
   settlement: Provisional,
-  state: string,
+  hasSlurm: boolean,
 ): Promise<{ settlement: Provisional; after: D1PreparedStatement[] }> {
   if (
     job.source !== "partner" ||
@@ -648,6 +646,7 @@ async function capPartnerCharge(
   ) {
     return { settlement, after: [] };
   }
+  if (hasSlurm) return { settlement: { ...settlement, milli: job.held_milli }, after: [] };
   const { policy } = await getPolicy(env.DB);
   const after = await partnerExcessStatements(env.DB, {
     jobId: job.id,
@@ -655,7 +654,7 @@ async function capPartnerCharge(
     client: job.client_id,
     excessMilli: settlement.milli - job.held_milli,
     routine: isRoutineDifference(settlement.milli, job.held_milli, policy.settle),
-    gate: { sql: SETTLED_GATE_SQL, binds: [job.id, state] },
+    heldMilli: job.held_milli,
   });
   return { settlement: { ...settlement, milli: job.held_milli }, after };
 }
@@ -675,7 +674,12 @@ async function commitTerminal(
 ): Promise<boolean> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, plan.to] };
-  const capped = await capPartnerCharge(env, job, plan.settlement, plan.to);
+  const capped = await capPartnerCharge(
+    env,
+    job,
+    plan.settlement,
+    plan.slurmJobId !== null || job.slurm_job_id !== null,
+  );
   const settle =
     capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id, reason: plan.releaseReason }, gate)
@@ -720,7 +724,7 @@ async function commitSettlementOnly(
 ): Promise<void> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, job.state] };
-  const capped = await capPartnerCharge(env, job, settlement, job.state);
+  const capped = await capPartnerCharge(env, job, settlement, job.slurm_job_id !== null);
   const settle =
     capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id }, gate)
