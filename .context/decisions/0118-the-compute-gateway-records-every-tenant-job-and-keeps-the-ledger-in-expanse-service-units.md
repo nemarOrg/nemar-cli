@@ -695,7 +695,7 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
    A grant unfreezes the account's pools (`UNFREEZE_POOLS_SQL`) and is refused (409 `account_not_in_good_standing`) unless the account is not deleted and has status `verified` or `approved`, in the flip itself as well as before the batch, so lifting a compute suspension can never lift the freeze an account revocation put on its pools.
    An account that was revoked and put back stays closed for compute until an administrator grants it.
 7. **Suspending or revoking compute ends it in the same batch.**
-   Both put `computeReleaseStatements(account)` (A8 item 2: live jobs record `account_ended`, a job that never reached Tapis is cancelled with its hold released, every pool is frozen; no network call, the retried sweep cancels at Tapis) and `oidcEndStatements(account, "compute_suspended", { scopePrefix: "compute." })` (only the grants that carry a compute scope end, ADR 0119 rule 12) in the batch, each guarded on the state the flip leaves.
+   Both put `computeReleaseStatements(account)` (A8 item 2: live jobs record `account_ended`, a job that never reached Tapis is canceled with its hold released, every pool is frozen; no network call, the retried sweep cancels at Tapis) and `oidcEndStatements(account, "compute_suspended", { scopePrefix: "compute." })` (only the grants that carry a compute scope end, ADR 0119 rule 12) in the batch, each guarded on the state the flip leaves.
    `endComputeStatements` is the one function; it is the third caller of `computeReleaseStatements` (`COMPUTE_END_CALLERS`) and the seventh of `oidcEndStatements` (`OIDC_END_CALLERS`).
    A role demotion and an API key revocation still end none of it.
 8. **The account's own end also ends compute access.**
@@ -706,3 +706,24 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
    The admin user detail carries the state, the dates, the granter and the terms version; the purpose is read only in the compute access queue.
 10. **A new mail category, `compute_requests`,** is opted in by default and production-only like every admin notification.
     The request mail links to the administrator's compute tab (`<APP_BASE_URL>/admin/compute`) and the decision mail to the person's compute page (`<APP_BASE_URL>/compute`); neither links to a file.
+11. **A decision binds the state the administrator read.**
+    The flip's WHERE carries the observed state (`compute_access = ?`) as well as the list of states the decision may start from, so a decision made on a stale read matches nothing and answers 409 `stale_state`: two administrators who both read `suspended` cannot have a grant land on the `revoked` the other made (which would reopen the account, unfreeze its pools, open the allocation and record the wrong `from` on the audit row).
+12. **An administrator does not grant themselves compute access; an owner may.**
+    The route answers 409 `self_decision` (and the grant flip says it again, so a caller that skipped the route writes nothing) when the target is the acting `admin`.
+    Deny, suspend and revoke of oneself stay allowed: they only take access away.
+13. **The request route takes the cookie Origin guard and refuses control characters.**
+    A request made with a session cookie must carry a NEMAR Origin (403 `origin_not_allowed`), as every cookie write on the admin router does; a bearer key is not asked for one.
+    A purpose with a control character other than newline and tab (NUL above all) is 400 `purpose_required`: SQLite's `length()` stops at the first NUL, so the column's CHECK would count the text short and the write would fail with a 500.
+14. **A suspended account is not told its request was answered.**
+    It gets the same code, `access_closed`, with its own words (`compute_access.suspended.body`: its access is paused); a denied or revoked account gets `compute_access.closed.body`.
+    The message of each refusal is the shared copy, so the website, the CLI and the Worker say one thing.
+15. **What submission must check (phase D3, #2024).**
+    `canUseCompute(compute_access)` as well as `pool.frozen`.
+    The freeze is a second line, not the first: a grant that lands inside `finalizeRevocation`'s two steps (the batch, then the UPDATE that sets `revoked`) can leave a revoked account's pools unfrozen, and a pool made after compute ended by a later `ensurePool` is born unfrozen.
+    No D3 code exists yet, so this is a rule to build against, not a tested one.
+16. **Recorded choices that are not obvious from the code.**
+    - The tombstone mask sets `compute_access = 'revoked'` for an account that never asked, while `finalizeRevocation` leaves `none` alone: a deleted row holds no access and is never read again, so the difference is harmless.
+    - `compute_purpose` is kept after a denial or a revocation until the tombstone erases it: it is read only in the administrators' queue (`GET /admin/compute/access`), never in an audit row (the audit carries the character count), a mail or an export.
+    - If the stamp of `compute_access_notified_at` fails to write after a send landed, the next call re-sends: at most one duplicate administrator mail, accepted.
+    - `unlinkOrcid` (and a relink) does not end compute standing: ORCID is proven at request time only, and a grantee who unlinks keeps access; revoking it is the administrator's act.
+    The last is an open product question: if the owner wants compute to follow the proof, the caller to add is `unlinkOrcid`, with `endComputeStatements`.
