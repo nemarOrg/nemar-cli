@@ -817,6 +817,9 @@ describe("the upload window on a repeat, and a store that fails after the hold",
     expect(ComputeSubmitErrorSchema.safeParse(down.body).success).toBe(true);
     expect(down.body.upload).toBeUndefined();
     expect((await trace(w.env().DB)).holds).toBe(1);
+    // The job was born `uploading` in the hold's own batch: even here, where nothing after the hold
+    // worked, it is not `created` with a hold and no owner for its release.
+    expect(jobRow(w, down.body.job_id).state).toBe("uploading");
     // The same key, the store back: it finishes the job it made, with an address.
     const again = await submit(p, bundleRequest(bundle), headers);
     expect(again.status).toBe(201);
