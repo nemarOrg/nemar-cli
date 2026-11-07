@@ -174,6 +174,14 @@ const SWEEP_WIRING: Record<
   // it moves the allocation ledger: it rides the 30-minute tick's production guard and is absent from
   // DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and reads no switch.
   runUploadExpiryCron: "tick-prod-only",
+  // Epic #2021 phase D4 (#2025, ADR 0118): the partner's hold reaper. It looks a reservation up in Tapis by
+  // its tag and releases it only when nothing is found (never on a Tapis error), verifies a report that
+  // could not be read back, and carries out a refusal (cancels in a tenant, moves the ledger), so it rides
+  // the 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside
+  // exact production on its own, and reads no switch.
+  reapExpiredHolds: "tick-prod-only",
+  // Its one log line: a pure formatter the tick prints, never an entry point of its own.
+  holdReaperLogLine: "helper",
   // Epic #2005 phase A6 (#2011, ADR 0118): NEMAR's own pipelines. The daily dispatcher makes jobs that
   // take the allocation ledger's holds and reach a Tapis tenant, so it is production-only and absent
   // from DEV_CRON_ALLOWLIST; it also refuses outside exact production on its own, and does nothing
@@ -260,6 +268,9 @@ function discoverSweepExports(): string[] {
   const patterns = [
     /^export\s+(?:async\s+)?function\s+(\w*[Ss]weep\w*)\s*\(/gm,
     /^export\s+const\s+(\w*[Ss]weep\w*)\s*=/gm,
+    // ...and a reaper (epic #2021 phase D4, #2025): `reapExpiredHolds` is a cron entry point that carries
+    // neither "sweep" nor "Cron" in its name, which is the shape this test exists to catch.
+    /^export\s+(?:async\s+)?function\s+(\w*[Rr]eap\w*)\s*\(/gm,
     // ...and anything named *Cron, which by construction IS a cron entry point.
     // Added for #1312, whose job is a weekly REPORT rather than a sweep and so
     // carries no "sweep" in any of its names -- exactly the #1164 shape this test

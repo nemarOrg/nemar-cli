@@ -194,7 +194,7 @@ export type VerifyOutcome =
   /** The read did not match: the intent is recorded (the cancel is carried out by `finishMismatch`). */
   | { kind: "mismatch"; flag: ComputeReportMismatch; job: ComputeJobRow }
   /** Tapis could not be read just now (or the row is not ready): still `pending`, nothing charged. */
-  | { kind: "pending"; job: ComputeJobRow }
+  | { kind: "pending"; job: ComputeJobRow; gone?: boolean }
   /** The row is not a partner job waiting to be verified (already verified, refused, ended or none). */
   | { kind: "skipped"; job: ComputeJobRow | null };
 
@@ -235,7 +235,12 @@ export async function verifyBoundJob(
       console.warn(
         `[compute-partner] verify_read_failed job=${job.id} kind=${err instanceof TapisError ? err.kind : errorClassName(err)}`,
       );
-      return { kind: "pending", job };
+      // A 404 is "Tapis has no such job": the tick may withdraw a binding that stays that way.
+      return {
+        kind: "pending",
+        job,
+        ...(err instanceof TapisError && err.kind === "not_found" ? { gone: true } : {}),
+      };
     }
   }
   if (rec.uuid !== uuid) return { kind: "pending", job };
@@ -273,23 +278,48 @@ export async function verifyBoundJob(
       : { kind: "skipped", job };
   }
 
-  const audit = auditLogParams(mismatchAudit(job, verdict.flag));
-  const results = await env.DB.batch([
+  job = await recordMismatch(env, job, uuid, verdict.flag, rec);
+  if (job.partner_state !== "mismatch") return { kind: "skipped", job };
+  return { kind: "mismatch", flag: verdict.flag, job };
+}
+
+/**
+ * Record a refusal as intent, in one batch with its audit row, for a row that is `pending` with this
+ * uuid: the flag word, the job flagged `mismatch`, the cancel intent. NO Tapis call and no ledger entry:
+ * `finishMismatch` carries it out and a retried tick repeats it. Returns the row as it stands.
+ */
+export async function recordMismatch(
+  env: Bindings,
+  job: ComputeJobRow,
+  uuid: string,
+  flag: string,
+  rec: Pick<TapisJob, "status" | "remoteStarted"> | null,
+): Promise<ComputeJobRow> {
+  const audit = auditLogParams(mismatchAudit(job, flag));
+  await env.DB.batch([
     env.DB.prepare(MISMATCH_SQL).bind(
       job.id,
       uuid,
-      verdict.flag,
-      rec.status,
-      sqliteTime(rec.remoteStarted),
+      flag,
+      rec?.status ?? null,
+      sqliteTime(rec?.remoteStarted),
     ),
     env.DB.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(...audit),
   ]);
-  job = (await getJob(env.DB, job.id)) ?? job;
-  if ((results[0]?.meta?.changes ?? 0) !== 1 && job.partner_state !== "mismatch") {
-    return { kind: "skipped", job };
-  }
-  return { kind: "mismatch", flag: verdict.flag, job };
+  return (await getJob(env.DB, job.id)) ?? job;
 }
+
+/**
+ * Bind a Tapis job found under a reservation's tag to the reservation, `pending`: the reaper's own bind
+ * (a report is `BIND_REPORT_SQL`, which also refuses a cancelled reservation and a person whose compute
+ * ended). Here those two are not reasons to leave a live Tapis job unaccounted: the row takes it and the
+ * caller refuses it (`recordMismatch`) or verifies it. `?1` the job, `?2` the uuid, `?3` Tapis's status.
+ */
+export const BIND_ADOPT_SQL = `UPDATE compute_jobs SET
+    tapis_uuid = ?2, partner_state = 'pending', partner_flag = NULL,
+    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL
+  WHERE id = ?1 AND source = 'partner' AND state = 'created' AND tapis_uuid IS NULL
+    AND partner_state IS NULL`;
 
 /**
  * Withdraw a binding that was never safe to keep: the row is a reservation again (`partner_state` NULL,

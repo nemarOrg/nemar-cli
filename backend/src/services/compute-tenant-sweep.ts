@@ -75,6 +75,7 @@ import {
   sqliteTime,
   tapisAccess,
 } from "./compute-lifecycle.js";
+import { isAwaitingPartnerReport } from "./compute-hold-reaper.js";
 import { settleObservedRows } from "./compute-observer.js";
 import { getPolicy } from "./compute-policy.js";
 import { sha256Hex } from "./compute-records.js";
@@ -382,6 +383,14 @@ async function handleUnbound(
   r: TenantSweepResult,
 ): Promise<void> {
   const rec = await getTapisJob(ctx, listed.uuid);
+
+  // A partner's job launched under a live reservation whose report has not come yet (phase D4, #2025): the
+  // report that is about to bind it, or the hold reaper after the reservation's wait, accounts for it. It is
+  // left for the next run; once the reservation is past its wait and grace it is a job that skipped it.
+  if (await isAwaitingPartnerReport(env, rec)) {
+    r.deferred++;
+    return;
+  }
 
   // Tagged for a row that exists: NEMAR's own. A tag is TRUSTED only on a job the NEMAR service identity
   // owns: NEMAR owns every Tapis job it submits, and anyone else can write any tag on a job of theirs, so

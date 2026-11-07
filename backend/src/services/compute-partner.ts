@@ -363,7 +363,7 @@ const UUID_TAKEN_SQL = `SELECT 1 AS taken FROM compute_jobs
  */
 export const BIND_REPORT_SQL = `UPDATE compute_jobs SET
     tapis_uuid = ?2, partner_state = 'pending', partner_flag = NULL,
-    tapis_status = COALESCE(?3, tapis_status), examined_at = NULL
+    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL
   WHERE id = ?1 AND source = 'partner' AND state = 'created' AND tapis_uuid IS NULL
     AND partner_state IS NULL AND cancel_requested_at IS NULL
     AND EXISTS (SELECT 1 FROM users u WHERE u.id = compute_jobs.account_id
