@@ -408,7 +408,7 @@ describe("refusal codes", () => {
     // Review fixes of 2026-11-06: a transient fault reading the owner's policy; not `compute_disabled`.
     ["policy_unavailable", 503],
     // Phase D3 (#2024): the dataset gate the pipeline already applies, and the submit routes' own words.
-    ["version_not_found", 422],
+    ["version_not_found", 404],
     ["version_untagged", 422],
     ["too_many_files", 422],
     ["entry_not_in_bundle", 422],

@@ -363,3 +363,16 @@ Call these; never write a second statement that reads a person's usage, jobs or 
 - **Per-isolate state.** The refresh debounce (`refreshLiveJob`: an attempt stamp per job, one in-flight refresh per job, 1,000 jobs) and the queue-estimate cache (30 seconds, 32 partitions) are best-effort `WeakMap`s keyed by the database binding; their clocks (`refreshClock`, `queueEstimateClock`) and limits are mutable exports for tests. The list cursor is `created_at|job id`, not a row number.
 - **Not here**: creating, cancelling from the CLI, logs and results (phase D3), holds and reports (phase D4), the website's pages (Epic E). The job view has no `name` (the index has no column for it).
 
+## 14. A person's job submission, the server half, shipped in phase D3a (ADR 0118, amendment of 2026-11-06, #2024)
+
+Call these; never write a second way to start a person's job or to hand out an upload address.
+
+- **Routes.** `backend/src/routes/compute/jobs.ts` (`registerComputeJobRoutes`): `POST /compute/jobs`, `POST /compute/jobs/:id/finalize`, `GET /compute/jobs/:id/logs`, `GET /compute/jobs/:id/results`, `POST /compute/jobs/:id/results/renew`; `shared.ts` holds `ownJob` and `refuseWith`. The person's cancel and links stay in `index.ts` (cancel gained `cancelled`). A key or the cookie only: an OpenID Connect token is refused.
+- **Order.** `services/compute-submit.ts` (`submitPersonJob`, `finalizePersonJob`) states the order of refusal in its header; `accessRefusal` is step 1 and `createJob({ requireActiveAccess: true })` repeats it inside the hold.
+- **Contract.** `shared/contract/compute-bundle.ts` (caps, `checkBundleManifest`, the manifest schema) and `compute-submit.ts` (request, open responses, header names, `COMPUTE_SUBMIT_SENTENCES`). The website's job page (website#496) transcribes them.
+- **Idempotency** is Epic A's `(account_id, idempotency_key)` with `spec_digest` as the request hash; there is no `compute_idempotency_keys` table. The partner contract (D4) adds its own for `client:<id>`.
+- **Release.** `services/compute-uploads.ts` (`runUploadExpiryCron`, `ABANDONED_UPLOADS_SQL`, which names its index) and `endUploadExpired` in `compute-lifecycle.ts`. The 30-minute backstop no longer takes an `uploading` row whose records are unwritten.
+- **Dataset gate.** `resolveRun` (now exported from `compute-pipeline.ts`) with `PERSON_EXCEPT_TERMS` (`eeg` only).
+- **Test seams.** `backend/test/helpers/compute-submit-world.ts` (the lifecycle fixture, real keys, a real session, `makeBundle`, `putArchive`); the suites are `compute-jobs-submit`, `-race`, `-finalize` and `-person-routes`.
+- **Not here**: the CLI (`nemar compute submit|logs|results|cancel`, header parsing, packing, the secret scan, `--wait`: phase D3b), the website's pages, partner uploads.
+

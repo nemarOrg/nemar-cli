@@ -591,10 +591,11 @@ export const COMPUTE_REFUSAL_STATUS = {
   guard_refused: 409,
   results_incomplete: 409,
   policy_unavailable: 503,
-  // 422: the request names something outside what is offered (a version, an entry that is not in the
-  // bundle, a key already used for another request). 409: the job is in a state that refuses it
+  // 404: a dataset version that does not exist (the pipelines' administrator route has always said so).
+  // 422: the request names something outside what is offered (a version with no tag, an entry that is not
+  // in the bundle, a key already used for another request). 409: the job is in a state that refuses it
   // (an upload that is not all there, an upload window that closed). 404: no log yet. 503: storage.
-  version_not_found: 422,
+  version_not_found: 404,
   version_untagged: 422,
   too_many_files: 422,
   entry_not_in_bundle: 422,

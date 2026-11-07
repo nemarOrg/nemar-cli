@@ -645,6 +645,25 @@ describe("the Idempotency-Key", () => {
     expect((await trace(w.env().DB)).holds).toBe(1);
   });
 
+  test("an address that has expired is refused by the store; a repeat of the key (inside the job's hour) gives one that works", async () => {
+    const p = await newPerson(w);
+    const bundle = makeBundle();
+    const headers = { "Idempotency-Key": "key-0007-abcdef" };
+    const first = await submit(p, bundleRequest(bundle), headers);
+    const clock = w.fx.harness.standin.clock;
+    const real = clock.now;
+    clock.now = () => Date.now() + 2 * 3600 * 1000;
+    try {
+      expect((await putArchive(first.body.upload, bundle.archive)).status).toBe(403);
+    } finally {
+      clock.now = real;
+    }
+    expect(await w.fx.harness.records.head(`incoming/${first.body.job_id}/bundle.tar.gz`)).toBeNull();
+    const again = await submit(p, bundleRequest(bundle), headers);
+    expect(again.body.job_id).toBe(first.body.job_id);
+    expect((await putArchive(again.body.upload, bundle.archive)).status).toBeLessThan(300);
+  });
+
   test("a repeat does not depend on the world staying as it was: the dataset has since been withdrawn", async () => {
     const p = await newPerson(w);
     const bundle = makeBundle();
