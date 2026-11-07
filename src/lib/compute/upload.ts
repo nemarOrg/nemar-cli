@@ -8,12 +8,13 @@
  * hour and for that one object, and it is a bearer secret, so it is never printed, never logged and never
  * put in an error message here.
  *
- * Three retries (four attempts) on a 5xx or a network failure, with 1, 2 and 4 seconds between. A 4xx is
+ * An address that is not `https:` (loopback `http:` aside), and a redirect, are refused. Three retries (four attempts) on a 5xx or a network failure, with 1, 2 and 4 seconds between. A 4xx is
  * not retried: a 403 is the store saying the address has expired (or the body is not what was signed), and
  * the answer is to run the command again, which makes a NEW job with a new key; any other 4xx is a refusal.
  */
 
 import type { ComputeUpload } from "../../../shared/contract/compute-submit.js";
+import { isStoreUrlAllowed } from "./store-url.js";
 
 export const UPLOAD_RETRIES = 3;
 export const UPLOAD_BACKOFF_MS = [1000, 2000, 4000] as const;
@@ -29,12 +30,20 @@ export type UploadOutcome =
   /** A 5xx or no answer on every attempt. */
   | { ok: false; kind: "failed"; status: number | null; attempts: number }
   /** The archive is not the length the address was signed for: nothing was sent. */
-  | { ok: false; kind: "wrong_size"; attempts: 0 };
+  | { ok: false; kind: "wrong_size"; attempts: 0 }
+  /** The address is not `https:` (or loopback): it is not used. */
+  | { ok: false; kind: "insecure_address"; attempts: 0 };
 
 export interface UploadOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
+
+/**
+ * How far past its time an address must be, by THIS machine's clock, before it is not even tried. The
+ * clock here may be wrong, so the store's answer decides inside this margin (a 403 is `expired`).
+ */
+export const CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -46,8 +55,9 @@ export async function uploadBundle(
   const sleep = options.sleep ?? wait;
   const now = options.now ?? Date.now;
   if (archive.length !== upload.size) return { ok: false, kind: "wrong_size", attempts: 0 };
+  if (!isStoreUrlAllowed(upload.url)) return { ok: false, kind: "insecure_address", attempts: 0 };
   const expires = Date.parse(upload.expires_at);
-  if (Number.isFinite(expires) && expires <= now()) {
+  if (Number.isFinite(expires) && expires + CLOCK_SKEW_MS <= now()) {
     return { ok: false, kind: "expired", attempts: 0 };
   }
   const headers = { ...upload.headers, "Content-Length": String(upload.size) };
@@ -59,6 +69,8 @@ export async function uploadBundle(
         method: "PUT",
         headers,
         body: archive,
+        // The address is the authority and the signed headers go with it only to that host.
+        redirect: "error",
         signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
       });
       status = response.status;

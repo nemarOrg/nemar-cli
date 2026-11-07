@@ -404,7 +404,9 @@ async function send(prepared: Prepared, o: SubmitOptions, json: boolean): Promis
               ? `The store refused the upload (HTTP ${uploaded.status}). Run the command again to make a new job.`
               : uploaded.kind === "failed"
                 ? `The upload could not be completed after ${uploaded.attempts} attempts. Run the command again to make a new job.`
-                : "The archive is not the size NEMAR was told.";
+                : uploaded.kind === "insecure_address"
+                  ? "NEMAR gave an upload address that is not https, so it was not used."
+                  : "The archive is not the size NEMAR was told.";
         failText(why, {
           answered: uploaded.kind !== "failed",
           hint: `This job waits for its bundle for up to an hour, then ends by itself; end it now with: ${cancel}`,

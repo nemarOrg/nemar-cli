@@ -33,6 +33,9 @@ const server = Bun.serve({
       headers,
       body: new Uint8Array(await req.arrayBuffer()),
     });
+    if (new URL(req.url).pathname === "/redirect") {
+      return Response.redirect("http://127.0.0.1:1/elsewhere", 307);
+    }
     const status = answers.shift() ?? 200;
     return new Response(status === 200 ? "" : "<Error>no</Error>", { status });
   },
@@ -133,19 +136,35 @@ describe("retries", () => {
 });
 
 describe("before any request", () => {
-  test("an address already past its time is expired and nothing is sent", async () => {
+  test("an address long past its time is expired and nothing is sent", async () => {
     const out = await uploadBundle(
-      address({ expires_at: new Date(Date.now() - 1000).toISOString() }),
+      address({ expires_at: new Date(Date.now() - 10 * 60_000).toISOString() }),
       archive,
     );
     expect(out).toEqual({ ok: false, kind: "expired", attempts: 0 });
     expect(seen).toHaveLength(0);
   });
 
+  test("within the clock-skew margin the store decides: a request is sent, and its 403 is expired", async () => {
+    answers = [403];
+    const out = await uploadBundle(
+      address({ expires_at: new Date(Date.now() - 60_000).toISOString() }),
+      archive,
+    );
+    expect(out).toEqual({ ok: false, kind: "expired", attempts: 1 });
+    expect(seen).toHaveLength(1);
+    answers = [];
+    const fine = await uploadBundle(
+      address({ expires_at: new Date(Date.now() - 60_000).toISOString() }),
+      archive,
+    );
+    expect(fine).toEqual({ ok: true, attempts: 1 });
+  });
+
   test("the clock is injectable", async () => {
     const soon = new Date(Date.now() + 60_000).toISOString();
     const out = await uploadBundle(address({ expires_at: soon }), archive, {
-      now: () => Date.now() + 120_000,
+      now: () => Date.now() + 10 * 60_000,
     });
     expect(out).toEqual({ ok: false, kind: "expired", attempts: 0 });
   });
@@ -157,5 +176,28 @@ describe("before any request", () => {
       attempts: 0,
     });
     expect(seen).toHaveLength(0);
+  });
+
+  test("an address that is not https (and not this machine) is never used", async () => {
+    const out = await uploadBundle(
+      address({ url: "http://store.example.org/x?X-Amz-Signature=a" }),
+      archive,
+    );
+    expect(out).toEqual({ ok: false, kind: "insecure_address", attempts: 0 });
+    expect(seen).toHaveLength(0);
+  });
+
+  test("a redirect is not followed: the signed headers never go to another host", async () => {
+    answers = [];
+    const out = await uploadBundle(
+      address({ url: `http://127.0.0.1:${server.port}/redirect` }),
+      archive,
+      {
+        sleep: async () => {},
+      },
+    );
+    expect(out).toMatchObject({ ok: false, kind: "failed", status: null });
+    expect(seen.map((s) => s.method)).toEqual(["PUT", "PUT", "PUT", "PUT"]);
+    expect(seen.every((s) => s.headers.host === `127.0.0.1:${server.port}`)).toBe(true);
   });
 });
