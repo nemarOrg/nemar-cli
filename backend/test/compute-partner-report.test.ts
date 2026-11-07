@@ -202,6 +202,22 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
     expect(cancels()).toHaveLength(0);
   });
 
+  test("two reservations racing to report ONE uuid: one binds, the other is tapis_job_in_use (the unique index decides)", async () => {
+    const a = await reserve(w, person);
+    const b = await reserve(w, person);
+    const uuid = await partnerLaunch(w, a, person);
+    const [x, y] = await Promise.all([
+      report(a, { tapis_job_id: uuid }),
+      report(b, { tapis_job_id: uuid }),
+    ]);
+    expect([x.status, y.status].sort()).toEqual([200, 409]);
+    expect([x, y].find((r) => r.status === 409)?.json?.code).toBe("tapis_job_in_use");
+    expect(
+      (w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE tapis_uuid = ?").get(uuid) as { n: number }).n,
+    ).toBe(1);
+    expect(cancels()).toHaveLength(0);
+  });
+
   test("a job NEMAR itself submitted is tapis_job_in_use, and is neither bound nor cancelled", async () => {
     const hold = await reserve(w, person);
     const made = await makeJob(fx, { account: { status: "approved" } });
@@ -330,6 +346,16 @@ describe("a report that does not match is cancelled, flagged and charged to the 
       });
     });
   }
+
+  test("memory above what the hold PRICED is a mismatch even when the hold named no memory (the price check is its own term)", async () => {
+    // The reservation names no memory, so there is no per-dimension memory bound: a partition priced by
+    // memory is guarded only by pricing the record's resources against the hold.
+    const hold = await reserve(w, person, { memory_mb: null });
+    const uuid = await partnerLaunch(w, hold, person, { memoryMB: 64_000 });
+    const res = await report(hold, { tapis_job_id: uuid });
+    expect([res.status, res.json?.mismatch]).toEqual([409, "resources_mismatch"]);
+    expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+  });
 
   test("a job that never ran is released with no charge at all", async () => {
     const hold = await reserve(w, person);
