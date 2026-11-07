@@ -248,6 +248,22 @@ What the build settled, each a rule and not a description of today:
 11. **Read-only maintenance mode lets a running job finish.**
     The three launcher callbacks (`POST /compute/jobs/<job id>/bundle`, `/outputs` and `/outputs/complete`) stay open in `read-only` mode by an exact pattern, for POST and a well-formed job id only: a job already on a cluster has nowhere to hold its results, and a launcher refused there would fail a job that did nothing wrong.
     The person's own `cancel` and `links` stay blocked like any other write, and `full` mode refuses all three callbacks with everything else.
+    **What each maintenance mode does to the rest of compute** (verified against `middleware/maintenance.ts` and the crons on 2026-11-06; the middleware, and the service-binding entrypoint beside it, are the Worker's only readers of `MAINTENANCE_MODE`; no cron reads it):
+
+    | Surface | `read-only` | `full` |
+    |---|---|---|
+    | Launcher callbacks (`POST /compute/jobs/<id>/bundle`, `outputs`, `outputs/complete`) | open, by exact shape | 503: the launcher's upload fails and the job ends `result_upload_failed`, charged what it used, with no refund |
+    | A person's `cancel` and `links` | 503 | 503 |
+    | Tapis webhook (`POST /webhooks/tapis/<job id>/<token>`) | open: it passes the `/webhooks/` allowlist, and it WRITES (the job's state, and its settlement or release in the ledger) | 503; the job's end is then seen by the poll after the mode ends |
+    | The observer (`POST /compute/observer`) | 503: a write, not on any allowlist, so the day's settlement waits for a post after the mode ends (its token is good for an hour) | 503 |
+    | Administrator routes (`/admin/compute/*`, including the ledger-writing ones: pool grant and adjust, `jobs advance` and `cancel`, the pipeline run, holds, observer mint, the ACCESS re-queue) | open: the `/admin/` prefix is allowlisted, so they write | 503 |
+    | Crons (the 30-minute tick, the daily jobs) | run | run |
+
+    The crons do not read `MAINTENANCE_MODE` at all: the advance tick, the cancel sweep, the ACCESS reporter, the tenant sweep and the retention sweep run and write in every mode, which is deliberate for a job already on a cluster and means maintenance does not freeze the ledger.
+    Anyone who needs the ledger frozen turns the compute switch off, which stops new holds and submits but not these.
+    `LAUNCHER_CALLBACK_RE` is anchored at `/compute`, so the `/nemar/compute/...` spelling of the same route (the API is mounted at `/` and at `/nemar`, and middleware sees the full path) is not matched and is refused in `read-only`; the same is true of the `/admin/`, `/webhooks/` and `/auth/login` allowlists.
+    That is not a defect today and the regex is unchanged: the launcher and the Tapis webhook address are built from `API_BASE_URL`, which has no prefix, so no caller uses the `/nemar` spelling, and the miss is in the safe direction (blocked, never opened).
+    A deployment whose `API_BASE_URL` gains the `/nemar` prefix has to widen every allowlist at once, not this pattern alone (`.memory/api-mounted-twice-full-path.md`).
 12. **The webhook token is redacted from this Worker's access log.**
     The Tapis webhook address carries its token in the path, because Tapis does not sign webhooks, so the Worker's access logger and the maintenance refusal line print `/webhooks/tapis/<job id>/[redacted]`.
     The token is bound to the job's nonce, dies a day after the job ends and can only make the Worker read the job back from Tapis, so a leaked one is a nuisance and not a breach.

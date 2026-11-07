@@ -181,6 +181,23 @@ describe("maintenanceMode: read-only and the compute launcher's callbacks", () =
   });
 });
 
+// The API is mounted at `/` and at `/nemar`, and this middleware sees the full path. The pattern is
+// anchored at `/compute`, so the other spelling is refused in read-only: safe (it never opens), and
+// unused (the launcher's address is `API_BASE_URL`, which has no prefix). This pins the documented
+// behavior (ADR 0118, item 11 of the A5 amendment) so a change to it is a decision and not an accident.
+describe("maintenanceMode: read-only and the /nemar spelling of the launcher's callbacks", () => {
+  const app = buildApp();
+  const JOB = `job_${"0f".repeat(12)}`;
+
+  test.each(["bundle", "outputs", "outputs/complete"])(
+    "POST /nemar/compute/jobs/<job>/%s -> 503 (not matched, so not opened)",
+    async (leaf) => {
+      const res = await hit(app, "read-only", `/nemar/compute/jobs/${JOB}/${leaf}`, "POST");
+      expect(res.status).toBe(503);
+    },
+  );
+});
+
 describe("maintenanceMode: full", () => {
   const app = buildApp();
 

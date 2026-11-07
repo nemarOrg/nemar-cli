@@ -43,6 +43,14 @@ const READ_ONLY_EXACT_MUTATIONS = new Set(["/auth/login"]);
  * job that did nothing wrong and was already paid for. They write only that job's own prefix and its own
  * row, behind a per-job token. `full` still refuses them (it refuses everything), and the person's own
  * `cancel` and `links` stay blocked in read-only like any other write (round 1 of #2041).
+ *
+ * The pattern is anchored at `/compute` and so does not match the `/nemar/compute/...` spelling the API
+ * is also mounted at (this middleware sees the full path). That is deliberate and safe: the launcher's
+ * address comes from `API_BASE_URL`, which carries no prefix, so nothing calls the other spelling, and
+ * a miss refuses and never opens. The `/admin/`, `/webhooks/` and `/auth/login` allowlists above have
+ * the same property. If `API_BASE_URL` ever gains the prefix, widen them all together. What each mode
+ * does to the rest of compute (webhooks, the observer, admin routes, crons) is in ADR 0118, item 11 of
+ * the amendment of 2026-11-04 (#2010).
  */
 const LAUNCHER_CALLBACK_RE = /^\/compute\/jobs\/([^/]+)\/(?:bundle|outputs|outputs\/complete)$/;
 
