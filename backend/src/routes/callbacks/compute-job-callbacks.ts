@@ -106,7 +106,10 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     try {
       cap = await outputsBodyCap(c.env);
     } catch {
-      return answer(c, COMPUTE_REFUSAL_STATUS.compute_disabled, "compute_disabled");
+      // The cap comes from the owner's policy, read from the database: a failure here is a transient fault
+      // of the Worker's own, not the platform being off. 503 as before, with its own word, so the launcher
+      // is not told that compute is disabled (and does not stop) because a read failed.
+      return answer(c, COMPUTE_REFUSAL_STATUS.policy_unavailable, "policy_unavailable");
     }
     const read = await readBoundedJsonObject(c, cap);
     // A body over the derived cap is more outputs than the owner allows: the submitter's, and charged.

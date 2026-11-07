@@ -521,6 +521,10 @@ export const COMPUTE_REFUSAL_CODES = [
   // Phase A5 (#2010): the launcher called `complete` and an object it declared is missing or short.
   // Retryable: the launcher uploads what is missing and asks again.
   "results_incomplete",
+  // Review fixes of 2026-11-06: the Worker could not read its own limits (the owner's policy) just now, a
+  // transient fault of its database. 503 like `compute_disabled`, but a DIFFERENT word, because that one
+  // says the platform is switched off and a caller told so stops retrying.
+  "policy_unavailable",
 ] as const;
 
 export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
@@ -561,6 +565,7 @@ export const COMPUTE_REFUSAL_STATUS = {
   bad_state: 409,
   guard_refused: 409,
   results_incomplete: 409,
+  policy_unavailable: 503,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
 /**
@@ -580,6 +585,7 @@ export const COMPUTE_ROUTE_SENTENCES = {
   results_too_large: "The job's results are over the size limit.",
   results_quota_exceeded: "There is no room left in the results budget for this job.",
   results_incomplete: "An object the job declared is missing or short; upload it and ask again.",
+  policy_unavailable: "The platform could not read its limits just now; ask again shortly.",
 } as const satisfies Partial<Record<ComputeRefusalCode, string>>;
 
 export type ComputeRouteSentenceCode = keyof typeof COMPUTE_ROUTE_SENTENCES;

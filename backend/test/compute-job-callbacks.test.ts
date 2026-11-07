@@ -430,6 +430,46 @@ describe("outputs refuses before it signs anything", () => {
     expect(reply.text).not.toContain("/outputs/");
   }
 
+  test("a fault reading the owner's policy is `policy_unavailable` (503), NOT `compute_disabled`, and nothing is recorded or signed (MUTATION: answer compute_disabled)", async () => {
+    const b = await person();
+    const token = await tokenFor(b.job.id);
+    const real = workerEnv.DB;
+    // One read of the policy fails, as a transient database fault does; every other statement is the real one.
+    let armed = true;
+    const faulty = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (armed && sql.includes("FROM compute_policy")) {
+              armed = false;
+              throw new Error("injected: database fault");
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    const saved = workerEnv;
+    workerEnv = { ...workerEnv, DB: faulty } as Bindings;
+    const reply = await call(b.job.id, "outputs", {
+      token,
+      body: outputsBody([{ path: "a.txt", content: "hello" }]),
+    });
+    workerEnv = saved;
+    expect([reply.status, reply.body.code]).toEqual([503, "policy_unavailable"]);
+    expect(reply.body.uploads).toBeUndefined();
+    expect(armed).toBe(false);
+    expect(await hasDeclared(b.job.id)).toBe(false);
+    // The launcher asks again and is served: the fault was not the platform being off.
+    const again = await call(b.job.id, "outputs", {
+      token,
+      body: outputsBody([{ path: "a.txt", content: "hello" }]),
+    });
+    expect(again.status).toBe(200);
+  });
+
   test("too many files (`too_many_outputs`, 413)", async () => {
     await policyOf({ maxFiles: 3 });
     const j = await person();

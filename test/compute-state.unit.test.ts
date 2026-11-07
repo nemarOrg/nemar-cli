@@ -405,11 +405,13 @@ describe("refusal codes", () => {
     ["guard_refused", 409],
     // Phase A5 (#2010): the launcher called `complete` and an object it declared is missing or short.
     ["results_incomplete", 409],
+    // Review fixes of 2026-11-06: a transient fault reading the owner's policy; not `compute_disabled`.
+    ["policy_unavailable", 503],
   ];
 
   test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one and the outputs route's", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(26);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(27);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
@@ -983,6 +985,7 @@ describe("the words the job routes and the lifecycle share", () => {
       "compute_disabled",
       "invalid_spec",
       "job_not_found",
+      "policy_unavailable",
       "results_expired",
       "results_incomplete",
       "results_quota_exceeded",
