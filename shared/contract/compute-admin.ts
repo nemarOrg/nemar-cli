@@ -540,6 +540,10 @@ export const ComputeUnmatchedResponseSchema = z
 
 export type ComputeUnmatchedResponse = z.infer<typeof ComputeUnmatchedResponseSchema>;
 
+/** What reading one record for a job's summary found: present, absent, or present and unusable. */
+export const COMPUTE_RECORD_STATUSES = ["ok", "missing", "unreadable"] as const;
+export type ComputeRecordStatus = (typeof COMPUTE_RECORD_STATUSES)[number];
+
 /**
  * `GET /admin/compute/records/:ref`: one job's index row, ledger entries, provenance and manifest summary.
  * OPEN (passthrough): the CLI never parses it with a strict compute schema (the amendment on #2006).
@@ -550,11 +554,18 @@ export const ComputeRecordResponseSchema = z
     identifiers: z.object({}).passthrough(),
     ledger: z.array(z.object({}).passthrough()),
     provenance: z.object({}).passthrough().nullable(),
+    // Why `provenance` or `manifest` is null: the object is not there (`missing`) or is there and
+    // cannot be read (`unreadable`); `ok` means the value is present, however empty. Optional so a
+    // CLI newer than its Worker still reads the answer.
+    provenance_status: z.enum(COMPUTE_RECORD_STATUSES).optional(),
     manifest: z
       .object({ files: z.number().int(), bytes: z.number().int() })
       .passthrough()
       .nullable(),
+    manifest_status: z.enum(COMPUTE_RECORD_STATUSES).optional(),
     legal_hold: z.boolean(),
+    retention_until: z.string().nullable().optional(),
+    launcher_files: z.array(z.string()).optional(),
   })
   .passthrough();
 

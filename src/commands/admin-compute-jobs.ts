@@ -384,17 +384,40 @@ jobsCommand
               `${plain(String(l.reason ?? ""))}  ${plain(String(l.created_at))}`,
           );
         }
+        // A null value has two causes the Worker names: the object is not there (`missing`) or is there
+        // and cannot be read (`unreadable`). An older Worker names neither, and prints as before.
         say(
-          `  provenance: ${res.provenance === null ? "none" : plain(JSON.stringify(res.provenance))}`,
+          `  provenance: ${
+            res.provenance === null
+              ? recordAbsence(res.provenance_status)
+              : plain(JSON.stringify(res.provenance))
+          }`,
         );
         say(
-          `  manifest: ${res.manifest === null ? "none" : `${res.manifest.files} file(s), ${res.manifest.bytes} bytes`}`,
+          `  manifest: ${
+            res.manifest === null
+              ? recordAbsence(res.manifest_status)
+              : `${res.manifest.files} file(s), ${res.manifest.bytes} bytes`
+          }`,
         );
+        if (typeof res.retention_until === "string") {
+          say(`  records kept until: ${plain(res.retention_until)}`);
+        }
+        if (Array.isArray(res.launcher_files) && res.launcher_files.length > 0) {
+          say(`  launcher files: ${res.launcher_files.map(plain).join(", ")}`);
+        }
       } catch (err) {
         failWith(err, null, "Could not read the record.", undefined, { json });
       }
     },
   );
+
+/** Why a record's value is absent from a summary, in words that keep a missing file apart from a broken one. */
+function recordAbsence(status: string | undefined): string {
+  if (status === "missing") return "missing (no such record)";
+  if (status === "unreadable") return "unreadable (present but not readable as expected)";
+  return "none";
+}
 
 const REPORT_HELP = `
 One account's jobs created from --from to the end of --to (dates, YYYY-MM-DD), the SU they were charged

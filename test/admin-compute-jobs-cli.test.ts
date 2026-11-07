@@ -38,7 +38,12 @@ import {
   startLifecycleFixture,
 } from "../backend/test/helpers/compute-lifecycle-fixture";
 import { launchSecretForms } from "../backend/test/helpers/launch-secret-forms";
-import { ComputeJobAdminResponseSchema } from "../shared/contract/compute-admin";
+import { recordKey } from "../backend/src/services/compute-records";
+import { RECORDS_RESULT_MANIFEST_FILE } from "../shared/contract/compute";
+import {
+  ComputeJobAdminResponseSchema,
+  ComputeRecordResponseSchema,
+} from "../shared/contract/compute-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -368,6 +373,44 @@ describe("record", () => {
       clean(r);
     }
     expect(new Set(outs.map((o) => o.length)).size).toBe(1);
+  });
+
+  test("a missing record, an unreadable one and an empty one are printed as three different things", async () => {
+    // No records yet: both are missing, and the line says so (it used to say `none` for every cause).
+    const bare = await makeJob(fx);
+    const missing = await runCli("admin", ["record", bare.job.id]);
+    expect(missing.exitCode).toBe(0);
+    expect(missing.stdout).toContain("provenance: missing");
+    expect(missing.stdout).toContain("manifest: missing");
+
+    // Present but broken: not JSON for provenance, not an object for the manifest.
+    const broken = await endedJob(fx, 30);
+    await fx.harness.records.put(recordKey(broken.job.id, "provenance.json"), "not json {");
+    await fx.harness.records.put(recordKey(broken.job.id, RECORDS_RESULT_MANIFEST_FILE), "[1, 2]");
+    const unreadable = await runCli("admin", ["record", broken.job.id]);
+    expect(unreadable.stdout).toContain("provenance: unreadable");
+    expect(unreadable.stdout).toContain("manifest: unreadable");
+    expect(unreadable.stdout).not.toContain("provenance: none");
+
+    // Present and empty is a value, not an absence.
+    const empty = await endedJob(fx, 30);
+    await fx.harness.records.put(recordKey(empty.job.id, "provenance.json"), "{}");
+    await fx.harness.records.put(
+      recordKey(empty.job.id, RECORDS_RESULT_MANIFEST_FILE),
+      JSON.stringify({ files: [] }),
+    );
+    const present = await runCli("admin", ["record", empty.job.id]);
+    expect(present.stdout).toContain("manifest: 0 file(s), 0 bytes");
+    expect(present.stdout).not.toContain("provenance: missing");
+    expect(present.stdout).not.toContain("provenance: unreadable");
+    // The launcher's file names ride along, and the answer parses.
+    expect(present.stdout).toContain("launcher files:");
+    const asJson = await runCli("admin", ["record", broken.job.id, "--json"]);
+    expect(ComputeRecordResponseSchema.safeParse(JSON.parse(asJson.stdout)).success).toBe(true);
+    expect(JSON.parse(asJson.stdout)).toMatchObject({
+      provenance_status: "unreadable",
+      manifest_status: "unreadable",
+    });
   });
 
   test("--identity refuses an administrator, needs a reason, and for the owner prints the snapshot (MUTATION: let an administrator read it)", async () => {

@@ -134,8 +134,12 @@ const VALID: Record<string, unknown> = {
     identifiers: { tapis_uuid: "u-1", slurm_job_id: "12345" },
     ledger: [{ id: 1, kind: "hold" }],
     provenance: { image: { digest: "sha256:abc" } },
+    provenance_status: "ok",
     manifest: { files: 2, bytes: 100 },
+    manifest_status: "ok",
     legal_hold: false,
+    retention_until: "2033-11-05 10:00:00",
+    launcher_files: ["result.json", "provenance.json"],
   },
   ComputeRecordReadResponseSchema: {
     job_id: "job_0123456789abcdef01234567",

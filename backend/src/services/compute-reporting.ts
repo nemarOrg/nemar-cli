@@ -29,6 +29,7 @@ import {
   type ComputeState,
 } from "../../../shared/compute-state.js";
 import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
+import type { ComputeRecordStatus } from "../../../shared/contract/compute-admin.js";
 import { LAUNCHER_FILES, RECORDS_RESULT_MANIFEST_FILE } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
@@ -188,6 +189,11 @@ async function readJsonRecord(
   }
 }
 
+/** A record that was read but whose value is not the shape a summary needs is unreadable, not present. */
+function statusOf(kind: ComputeRecordStatus, view: unknown): ComputeRecordStatus {
+  return kind === "ok" && view === null ? "unreadable" : kind;
+}
+
 export interface LedgerLine {
   id: number;
   kind: string;
@@ -256,9 +262,9 @@ export async function recordSummary(env: Bindings, job: ComputeJobRow) {
     },
     ledger,
     provenance: provenanceView,
-    provenance_status: provenance.kind === "ok" ? "ok" : provenance.kind,
+    provenance_status: statusOf(provenance.kind, provenanceView),
     manifest: manifestView,
-    manifest_status: manifest.kind === "ok" && manifestView === null ? "unreadable" : manifest.kind,
+    manifest_status: statusOf(manifest.kind, manifestView),
     legal_hold: (held?.held ?? 0) === 1,
     retention_until: job.retention_until,
     // Every launcher file name, so a reader of the summary knows which records exist to be asked for.
