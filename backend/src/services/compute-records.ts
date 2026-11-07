@@ -521,8 +521,10 @@ function manifestText(
   return JSON.stringify({
     job_id: jobId,
     archive,
-    // A file's digest is recorded when the packer gave one (a person's bundle) and is the packer's claim:
-    // the Worker does not hash a file inside the archive. A partner's files carry none.
+    // A file's digest is recorded when the declarer gave one: the packer's claim for a person's bundle (the
+    // Worker does not hash a file inside the archive), and a partner's claim for its own files, which
+    // `finalizeSubmittedFiles` compares with the digest the store holds for the object where the store
+    // returns one (an object uploaded with a signed SHA-256 checksum) and otherwise checks by size only.
     files: files.map((f) =>
       f.sha256 === undefined
         ? { path: f.path, size: f.size }
@@ -530,6 +532,9 @@ function manifestText(
     ),
   });
 }
+
+const toHex = (buffer: ArrayBuffer): string =>
+  [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 /** The size of every object under a prefix of a bucket, by key (a listing is one subrequest per 1,000). */
 async function sizesUnder(bucket: R2Bucket, prefix: string): Promise<Map<string, number>> {
@@ -861,17 +866,33 @@ export async function finalizeSubmittedFiles(
     const size = incoming.get(incomingKey(jobId, file.path));
     if (size === undefined) return refuse("bad_state", `files.${i}.path`);
     if (size !== file.size) return refuse("invalid_spec", `files.${i}.size`);
+    if (file.sha256 !== undefined) {
+      // Where the store knows the object's SHA-256 it must be the declared one; where it does not, the
+      // declaration is checked by size only (what the contract documents).
+      const held = (await bucket.head(incomingKey(jobId, file.path)))?.checksums?.sha256;
+      if (held !== undefined && toHex(held) !== file.sha256) {
+        return refuse("invalid_spec", `files.${i}.sha256`);
+      }
+    }
     const there = submitted.get(submittedKey(jobId, file.path));
     if (there === undefined) toCopy.push(file);
     else if (there !== file.size) return refuse("bad_state", `files.${i}.path`);
   }
 
   for (const file of toCopy) {
-    await copyObject(
-      s3,
-      { bucket: "records", key: incomingKey(jobId, file.path) },
-      { bucket: "records", key: submittedKey(jobId, file.path) },
-    );
+    try {
+      await copyObject(
+        s3,
+        { bucket: "records", key: incomingKey(jobId, file.path) },
+        { bucket: "records", key: submittedKey(jobId, file.path) },
+      );
+    } catch (err) {
+      // A concurrent replay of the same report may have copied this file between the listing and here, and
+      // the destination is locked once written: a store that refuses the second copy has not failed to
+      // hold the file. The file counts as copied only when it is there at its declared size.
+      const there = await bucket.head(submittedKey(jobId, file.path));
+      if (there === null || there.size !== file.size) throw err;
+    }
   }
   if (toCopy.length > 0) {
     const after = await sizesUnder(bucket, `records/${jobId}/submitted/`);
