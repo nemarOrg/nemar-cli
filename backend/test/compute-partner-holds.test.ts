@@ -51,6 +51,7 @@ import {
   row,
   setPartnerPolicy,
 } from "./helpers/compute-partner-world";
+import { setPolicy } from "./helpers/compute-seed";
 import { registerClient } from "./helpers/oidc-flow";
 
 let fx: LifecycleFixture;
@@ -559,12 +560,18 @@ describe("the review round: a key that raced, a day that turned, a policy that m
     });
     expect((await post(person, holdBody())).status).toBe(201);
     // Withdrawing the confirmation closes it again.
-    await setPartnerPolicy(w.env().DB, fx.ownerId, {
-      partner: { tapisVisibilityConfirmed: false },
-      clients: {
-        [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
+    // Turning it off with a reservation open freezes that reservation, so the write needs the owner's word.
+    await setPolicy(
+      w.env().DB,
+      fx.ownerId,
+      {
+        partner: { tapisVisibilityConfirmed: false },
+        clients: {
+          [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
+        },
       },
-    });
+      true,
+    );
     expect((await post(person, holdBody())).json?.code).toBe("partner_not_enabled");
   });
 

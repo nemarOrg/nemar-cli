@@ -295,6 +295,8 @@ export interface HoldReaperResult {
   recovered: number;
   /** Empty searches that were NOT acted on because the owner has not confirmed NEMAR can see the tenant. */
   unconfirmed: number;
+  /** Reservations released with no search: unconfirmed, a day past expiry, and the person ended or cancelled. */
+  releasedUnseen: number;
   /** Idempotency keys deleted. */
   pruned: number;
   /** `mismatch` rows taken, and how many were ended. */
@@ -318,6 +320,7 @@ const empty = (): HoldReaperResult => ({
   unverifiable: 0,
   recovered: 0,
   unconfirmed: 0,
+  releasedUnseen: 0,
   pruned: 0,
   mismatches: 0,
   ended: 0,
@@ -338,6 +341,15 @@ async function resolveReservation(
   visibilityConfirmed: boolean,
 ): Promise<void> {
   const db = env.DB;
+  // WITHOUT THE OWNER'S CONFIRMATION nothing is released on a search, but a reservation that has been past
+  // its expiry for a day and whose person's compute has ended, or whose cancel was asked for, is released
+  // WITHOUT a Tapis call: it must not pin the person's hold and slot for ever because a switch is off. Any
+  // job it left running is the sweep's, charged to the partner.
+  if (!visibilityConfirmed && (await staleAndEnded(db, job))) {
+    const fresh = (await getJob(db, job.id)) ?? job;
+    if (await endPartnerReservation(env, fresh, "hold_expired")) r.releasedUnseen++;
+    return;
+  }
   if (ctx === null) {
     r.unreachable++;
     await db.prepare(UNREACHABLE_SQL).bind(job.id).run();
@@ -442,6 +454,19 @@ async function carryOut(env: Bindings, id: string, r: HoldReaperResult): Promise
   const outcome = await finishMismatch(env, id, TICK_READ);
   if (outcome === "ended") r.ended++;
   else if (outcome === "recovered") r.recovered++;
+}
+
+/** How long past its expiry an unconfirmed reservation of an ended person (or a cancelled one) is released unseen. */
+export const UNSEEN_RELEASE_AFTER_HOURS = 24;
+
+/** Whether a reservation is a day past its expiry and ended: its person's compute is over, or its cancel was asked for. */
+async function staleAndEnded(db: D1Database, job: ComputeJobRow): Promise<boolean> {
+  const expiresAt = job.partner_expires_at ?? job.created_at;
+  const ms = Date.parse(`${expiresAt.replace(" ", "T")}Z`);
+  if (!Number.isFinite(ms) || Date.now() < ms + UNSEEN_RELEASE_AFTER_HOURS * 3_600_000) {
+    return false;
+  }
+  return job.cancel_requested_at !== null || (await personStandingEnded(db, job));
 }
 
 const STANDING_SQL = "SELECT compute_access FROM users WHERE id = ?1 AND deleted_at IS NULL";
@@ -562,6 +587,7 @@ export function holdReaperLogLine(
     r.unverifiable +
     r.recovered +
     r.unconfirmed +
+    r.releasedUnseen +
     r.pruned;
   if (acted === 0 && r.errors.length === 0) return null;
   const level =
@@ -580,7 +606,8 @@ export function holdReaperLogLine(
       `[compute-reaper] examined=${r.examined} released=${r.released} adopted=${r.adopted}` +
       ` ambiguous=${r.ambiguous} unreachable=${r.unreachable} pending=${r.pending}` +
       ` verified=${r.verified} refused=${r.refused} withdrawn=${r.withdrawn}` +
-      ` unverifiable=${r.unverifiable} recovered=${r.recovered} unconfirmed=${r.unconfirmed} pruned=${r.pruned}` +
+      ` unverifiable=${r.unverifiable} recovered=${r.recovered} unconfirmed=${r.unconfirmed}` +
+      ` released_unseen=${r.releasedUnseen} pruned=${r.pruned}` +
       ` mismatches=${r.mismatches} ended=${r.ended}` +
       ` errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}${r.errorClass === null ? "" : ` class=${r.errorClass}`}`,
   };

@@ -460,7 +460,7 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
     const hold = await reserve(w, person);
     age(hold, 31);
     // The confirmation is withdrawn after the reservation was made.
-    await setPolicy(w.env().DB, fx.ownerId, confirmedClients());
+    await setPolicy(w.env().DB, fx.ownerId, confirmedClients(), true);
     const kept = await reapExpiredHolds(production());
     expect(kept).toMatchObject({ examined: 1, released: 0, unconfirmed: 1 });
     expect(row(w, hold.job_id)).toMatchObject({ state: "created" });

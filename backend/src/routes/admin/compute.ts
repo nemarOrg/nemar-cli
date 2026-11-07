@@ -114,6 +114,8 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   already_moved: "That job's charge was moved already.",
   target_not_in_good_standing: "That account is deleted or not in good standing.",
   target_has_no_pool: "That account has no pool of the word the charge is in.",
+  partner_reservations_open:
+    "Partner reservations are open, and this policy turns the partner contract off, which freezes them. Send force_partner_off to do it anyway.",
   owner_not_proven:
     "That account is not the one the job's Tapis owner was attributed to; send the explicit confirmation to charge it anyway.",
 };
@@ -203,7 +205,13 @@ const reasonWord = z.string().regex(COMPUTE_WORD_RE);
 /** A whole number of milli-SU, either sign, at most one request's worth. */
 const movedMilli = z.number().int().min(-COMPUTE_REQUEST_MILLI_MAX).max(COMPUTE_REQUEST_MILLI_MAX);
 
-const putPolicyBody = z.object({ policy: z.unknown(), note: z.string().optional() }).strict();
+const putPolicyBody = z
+  .object({
+    policy: z.unknown(),
+    note: z.string().optional(),
+    force_partner_off: z.boolean().optional(),
+  })
+  .strict();
 
 const grantBody = z
   .object({
@@ -419,9 +427,13 @@ export function registerComputeAdminRoutes(admin: AdminRouter): void {
         parsed.data.policy,
         parsed.data.note,
         "policy",
+        { forcePartnerOff: parsed.data.force_partner_off === true },
       );
       if (!result.ok) {
         if (result.code === "not_owner") return refuse(c, "owner_only");
+        if (result.code === "partner_reservations_open") {
+          return refuse(c, "partner_reservations_open", undefined, { open: result.open });
+        }
         if (result.code === "invalid_note") {
           return invalidBody(c, [{ path: "note", code: "invalid_string" }]);
         }
@@ -429,7 +441,11 @@ export function registerComputeAdminRoutes(admin: AdminRouter): void {
       }
       const written = await getPolicyVersion(c.env.DB, result.version);
       if (!written) throw new Error("a policy version that was just written could not be read");
-      return c.json(written);
+      return c.json(
+        result.partnerFrozen !== undefined
+          ? { ...written, partner_reservations_frozen: result.partnerFrozen }
+          : written,
+      );
     } catch (err) {
       return fail(c, err);
     }

@@ -135,8 +135,17 @@ export async function setPolicy(
   d1: D1Database,
   ownerId: number,
   over: Record<string, unknown>,
+  /** True writes a policy that turns the partner contract off although partner reservations are open. */
+  forcePartnerOff = false,
 ): Promise<void> {
-  const r = await putPolicy(d1, ownerId, { ...DEFAULT_COMPUTE_POLICY, ...over }, "test");
+  const r = await putPolicy(
+    d1,
+    ownerId,
+    { ...DEFAULT_COMPUTE_POLICY, ...over },
+    "test",
+    undefined,
+    { forcePartnerOff },
+  );
   if (!r.ok) throw new Error(`could not set the policy: ${JSON.stringify(r)}`);
 }
 

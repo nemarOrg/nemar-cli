@@ -101,10 +101,18 @@ export async function getComputePolicy(): Promise<ComputePolicyResponse> {
 export async function putComputePolicy(
   policy: unknown,
   note?: string,
+  forcePartnerOff = false,
 ): Promise<ComputePolicyResponse> {
   return request(
     "/admin/compute/policy",
-    { method: "PUT", body: JSON.stringify(note === undefined ? { policy } : { policy, note }) },
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        policy,
+        ...(note === undefined ? {} : { note }),
+        ...(forcePartnerOff ? { force_partner_off: true } : {}),
+      }),
+    },
     true,
     ComputePolicyResponseSchema,
   );

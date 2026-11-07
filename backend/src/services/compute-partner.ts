@@ -215,7 +215,8 @@ export type ReserveResult =
  *   1. the person's compute access (`no_compute_access`, `suspended`);
  *   2. the body, through the contract (`invalid_spec`, the field);
  *   3. A REPEATED KEY finds its reservation (the same request is that reservation, nothing below is asked
- *      again; any other request is `idempotency_conflict`);
+ *      again, whether or not the partner contract is on; any other request is `idempotency_conflict`);
+ *   3b. a NEW reservation needs the owner's confirmation (`policy.partner`): `partner_not_enabled`;
  *   4. the owner's ceilings (`partition_not_offered`, `over_job_limit`);
  *   5. the person's live jobs against the owner's limit (`over_concurrency`);
  *   6. THE HOLD, one conditional INSERT that also carries the client's caps and the platform budget:
@@ -230,12 +231,8 @@ export async function reserveHold(
   bodyText: string,
 ): Promise<ReserveResult> {
   const db = env.DB;
-  // 0. The owner's confirmation that NEMAR can see the tenant's jobs. Closed until it is given: a
-  // reservation is only as safe as the reaper's search by its tag, and an empty search proves nothing about
-  // a tenant NEMAR cannot see into.
   const policyView = await getPolicy(db);
   const policy = policyView.policy;
-  if (policy.partner?.tapisVisibilityConfirmed !== true) return refuse("partner_not_enabled");
 
   // 1. The person.
   const { refusal, facts } = await standing(db, caller.userId);
@@ -264,6 +261,14 @@ export async function reserveHold(
     .prepare(IDEMPOTENCY_BY_KEY_SQL)
     .bind(caller.scope, key)
     .first<{ request_hash: string }>();
+
+  // The owner's confirmation that NEMAR can see the tenant's jobs gates a NEW reservation. Closed until it
+  // is given: a reservation is only as safe as the reaper's search by its tag, and an empty search proves
+  // nothing about a tenant NEMAR cannot see into. A REPEAT of a key replays the reservation it made (with its
+  // state) whether or not the contract is on.
+  if (claimed === null && policy.partner?.tapisVisibilityConfirmed !== true) {
+    return refuse("partner_not_enabled");
+  }
 
   if (claimed === null) {
     // 4. The owner's ceilings.

@@ -99,6 +99,7 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "target_not_in_good_standing",
   "target_has_no_pool",
   "owner_not_proven",
+  "partner_reservations_open",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -133,6 +134,7 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   target_not_in_good_standing: 409,
   target_has_no_pool: 409,
   owner_not_proven: 409,
+  partner_reservations_open: 409,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -141,6 +143,8 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
 export interface ComputePolicyPutRequest {
   policy: unknown;
   note?: string;
+  /** Write a policy that turns the partner contract off although partner reservations are open (they are frozen). */
+  force_partner_off?: boolean;
 }
 
 /** `POST /admin/compute/pools/.../grant`: SU into one pool. The reason is a fixed word. */
