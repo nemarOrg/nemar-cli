@@ -65,7 +65,6 @@ import {
   createJob,
   getJob,
   jobCeilingRefusal,
-  specDigestOf,
 } from "./compute-jobs.js";
 import { submitComputeJob } from "./compute-lifecycle.js";
 import { PERSON_EXCEPT_TERMS } from "./compute-pipeline-eligibility.js";
@@ -386,12 +385,10 @@ export async function submitPersonJob(
   // 4. A repeated key.
   if (key !== null) {
     const existing = await env.DB.prepare(JOB_BY_KEY_SQL).bind(userId, key).first<ComputeJobRow>();
-    if (existing) {
-      if (existing.spec_digest !== (await specDigestOf(spec))) {
-        return refuse("idempotency_conflict");
-      }
-      return replayOf(env, input, spec);
-    }
+    // A key that finds a job is answered from that job and nothing below is asked. `createJob` compares
+    // the specification's digest with the job's (the request hash) and throws `idempotency_conflict` for
+    // another request, which `replayOf` answers.
+    if (existing) return replayOf(env, input, spec);
   }
 
   let policy: ComputePolicy;

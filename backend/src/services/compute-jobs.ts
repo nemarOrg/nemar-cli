@@ -520,15 +520,6 @@ const refusal = (code: CreateJobRefusal, field?: string): CreateJobResult =>
   field === undefined ? { ok: false, code } : { ok: false, code, field };
 
 /**
- * The SHA-256, in lowercase hex, of the exact bytes `JSON.stringify(spec)` gives for a VALIDATED
- * specification: the job row's `spec_digest` and the request hash of the person's idempotency key. Both
- * `createJob` and a route that looks a key up before it creates anything call this one function.
- */
-export async function specDigestOf(spec: JobSpec): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(JSON.stringify(spec)));
-}
-
-/**
  * The owner's per-job ceilings, for a job a PERSON runs: `partition_not_offered` when the partition has
  * none, `over_job_limit` when a figure is over one. `createJob` applies it, and the submit route applies
  * it first so that its answer comes before the bundle's, in the order the phase fixes.
