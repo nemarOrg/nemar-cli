@@ -571,6 +571,7 @@ export type IncomingUploadsResult =
  * never made, and one whose records are written: never after the job is complete. `options.now` is the
  * moment to sign as of, which only a test sets (to make an address that has already expired).
  */
+// NOT CALLED YET: no route reaches this; Epic D's partner contract (the per-file upload) wires it.
 export async function presignIncomingUploads(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -700,6 +701,7 @@ async function completeRecords(
  * never overwritten. A copy the store refuses throws `ComputeS3Error` (`copy_failed`): the caller
  * answers 503 and asks again.
  */
+// NOT CALLED YET: no route reaches this; Epic D's partner contract (a code bundle's finalize) wires it.
 export async function finalizeBundle(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -775,6 +777,7 @@ export async function finalizeBundle(
  * manifest (`archive: null`) is written and the records marked written. Idempotent as `finalizeBundle`
  * is.
  */
+// NOT CALLED YET: no route reaches this; Epic D's partner contract (a partner's own files) wires it.
 export async function finalizeSubmittedFiles(
   env: ComputeRecordsEnv,
   jobId: string,

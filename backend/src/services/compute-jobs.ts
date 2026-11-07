@@ -167,6 +167,11 @@ export interface ComputeJobRow {
   flag_mismatch: number;
   flag_overrun: number;
   retention_until: string | null;
+  /**
+   * UNUSED: always 0, and nothing reads or writes it. The hold that counts is a row of `compute_legal_holds`
+   * (migration 0118), read by `heldSql` in `compute-legal-holds.ts`; the retention sweep and the reporting
+   * both ask that table. The column is kept because dropping a column is a migration of its own.
+   */
   legal_hold: number;
   webhook_nonce: string | null;
   /**
@@ -328,6 +333,8 @@ export function newGatewayUser(): string {
 
 // --- Statements ------------------------------------------------------------------------------------
 
+// `legal_hold` is selected for the row type but UNUSED (always 0): the hold that counts is a row of
+// `compute_legal_holds` (see `heldSql`).
 const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key, source, client_id, kind,
   state, failure_code, failure_detail, cancel_reason, cancel_requested_at, tapis_uuid, tapis_status,
   slurm_job_id, app_id, app_version, image_digest, spec_digest, partition, pool, nodes,

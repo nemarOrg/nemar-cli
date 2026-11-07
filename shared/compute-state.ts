@@ -22,6 +22,8 @@ export const COMPUTE_WORD_RE = /^[a-z0-9_]{1,64}$/;
  */
 export const COMPUTE_STATES = [
   "created",
+  // `uploading` has NO writer yet: no code moves a job into it. Epic D (the partner contract, which wires
+  // `presignIncomingUploads`, `finalizeBundle` and `finalizeSubmittedFiles`) is what makes a job wait here.
   "uploading",
   "submitted",
   "queued",

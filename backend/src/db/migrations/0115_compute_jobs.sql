@@ -58,7 +58,8 @@
 --   * `hold_ledger_id`, `held_milli`, `charged_milli`, `settled_provisional_at`, `settled_final_at`:
 --     the ledger's entry, what the job holds and what it has been charged, in whole milli-SU.
 --   * `flag_*`: what an administrator is told (COMPUTE_JOB_FLAGS).
---   * `retention_until`, `legal_hold`: the retention sweep honours them (phase A7).
+--   * `retention_until`: the retention sweep honours it (phase A7). `legal_hold` is UNUSED and stays 0:
+--     the hold that counts is a row of `compute_legal_holds` (migration 0118), not this column.
 --   * `webhook_nonce`: the secret half of the job's webhook address, a random UUID.
 
 CREATE TABLE compute_jobs (
