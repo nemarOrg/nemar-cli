@@ -188,6 +188,19 @@ describe("text in other encodings", () => {
     expect(scanFile("clean.txt", utf16le("just some text\nwith lines\n", true))).toEqual([]);
   });
 
+  test("a token after a character outside Latin-1 is found by the decoded view (NUL stripping alone would miss it)", () => {
+    const bytes = utf16le(`\u65e5${FAKES.github_token}\n`, true);
+    expect(scanFile("cjk.txt", bytes).map((f) => f.rule)).toEqual(["github_token"]);
+  });
+
+  test("UTF-16 text inside a mostly ASCII file is found by the NUL-stripped view", () => {
+    const bytes = new Uint8Array([
+      ...enc("plain ascii line\n".repeat(40)),
+      ...utf16le(`${FAKES.gitlab_token}\n`, false),
+    ]);
+    expect(scanFile("mixed.bin", bytes).map((f) => f.rule)).toEqual(["gitlab_token"]);
+  });
+
   test("a rule found in two views is one finding", () => {
     const both = new Uint8Array([...enc(`${FAKES.github_token}\n`), 0, ...enc("tail")]);
     expect(scanFile("both.txt", both)).toEqual([
