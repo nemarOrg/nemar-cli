@@ -342,54 +342,55 @@ export async function getUserJob(
   return db.prepare(USER_JOB_SQL).bind(jobId, accountId).first<UserJobRecord>();
 }
 
-/** A page cursor: the UTC time text of the last job's creation (with `T`) and its row number. */
-const CURSOR_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})_(\d{1,15})$/;
+/** A page cursor: the last job's creation time (UTC, with `T`), `|`, and its job id. */
+const CURSOR_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})\|(job_[0-9a-f]{24})$/;
 
-export function parseCursor(text: string): { createdAt: string; seq: number } | null {
+export function parseCursor(text: string): { createdAt: string; id: string } | null {
   const match = CURSOR_RE.exec(text);
   if (!match) return null;
-  return { createdAt: `${match[1]} ${match[2]}`, seq: Number(match[3]) };
+  return { createdAt: `${match[1]} ${match[2]}`, id: match[3] as string };
 }
 
-const cursorOf = (row: { created_at: string; seq: number }) =>
-  `${row.created_at.replace(" ", "T")}_${row.seq}`;
+const cursorOf = (row: { created_at: string; id: string }) =>
+  `${row.created_at.replace(" ", "T")}|${row.id}`;
 
 /**
  * A page of the caller's jobs, newest first: `?1` the account, then (each only when used) `?2` the
- * state, and a cursor's creation time and row number. Ordered by `(created_at, rowid)`, which is the
- * order of the index `compute_jobs_account_created` (its rowid is the last column of every entry), so
- * a page never sorts and a cursor continues exactly: a job made between two pages is newer than the
- * cursor and is not in the rest, and no job is shown twice or skipped. `limit + 1` rows are read to
- * learn whether there is a next page.
+ * state, and a cursor's creation time and job id. Ordered by `(created_at, id)`, a total order (the id is
+ * the primary key), which is the order of the index `compute_jobs_account_created_id` of migration 0132,
+ * so a page never sorts and a cursor continues exactly: a job made between two pages is newer than the
+ * cursor and is not in the rest, and no job is shown twice or skipped. The tie-breaker is the job id and
+ * not the row number, so the cursor carries nothing about the table beyond a job the caller already has.
+ * `limit + 1` rows are read to learn whether there is a next page.
  */
 export function jobsPageSql(opts: { state: boolean; cursor: boolean }): string {
   const where = ["account_id = ?1", "flag_unreserved = 0"];
   let n = 1;
   if (opts.state) where.push(`state = ?${++n}`);
   if (opts.cursor) {
-    where.push(`(created_at < ?${n + 1} OR (created_at = ?${n + 1} AND rowid < ?${n + 2}))`);
+    where.push(`(created_at < ?${n + 1} OR (created_at = ?${n + 1} AND id < ?${n + 2}))`);
     n += 2;
   }
-  return `SELECT rowid AS seq, ${USER_JOB_COLUMNS} FROM compute_jobs
+  return `SELECT ${USER_JOB_COLUMNS} FROM compute_jobs
    WHERE ${where.join(" AND ")}
-   ORDER BY created_at DESC, rowid DESC LIMIT ?${n + 1}`;
+   ORDER BY created_at DESC, id DESC LIMIT ?${n + 1}`;
 }
 
 export async function listUserJobs(
   db: D1Database,
   accountId: number,
-  q: { state?: ComputeState; limit: number; cursor?: { createdAt: string; seq: number } },
+  q: { state?: ComputeState; limit: number; cursor?: { createdAt: string; id: string } },
 ): Promise<{ jobs: ComputeUserJob[]; next_after: string | null }> {
   const limit = Math.min(Math.max(1, Math.trunc(q.limit)), COMPUTE_JOBS_PAGE_MAX);
   const binds: unknown[] = [accountId];
   if (q.state !== undefined) binds.push(q.state);
-  if (q.cursor !== undefined) binds.push(q.cursor.createdAt, q.cursor.seq);
+  if (q.cursor !== undefined) binds.push(q.cursor.createdAt, q.cursor.id);
   binds.push(limit + 1);
   const rows = (
     await db
       .prepare(jobsPageSql({ state: q.state !== undefined, cursor: q.cursor !== undefined }))
       .bind(...binds)
-      .all<UserJobColumns & { seq: number }>()
+      .all<UserJobColumns>()
   ).results;
   const page = rows.slice(0, limit);
   const last = page[page.length - 1];

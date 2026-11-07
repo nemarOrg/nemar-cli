@@ -162,6 +162,11 @@ describe("the list", () => {
       ["after=", "invalid_cursor"],
       ["after=2026-10-01T10:00:00", "invalid_cursor"],
       ["after=2026-10-01T10:00:00_x", "invalid_cursor"],
+      // The old shape, with a row number, and a job id that is not one.
+      ["after=2026-10-01T10:00:00_41", "invalid_cursor"],
+      ["after=2026-10-01T10:00:00|41", "invalid_cursor"],
+      ["after=2026-10-01T10:00:00|job_XYZ", "invalid_cursor"],
+      ["after=2026-10-01 10:00:00|job_000000000000000000000001", "invalid_cursor"],
     ] as const) {
       const res = await get(`/me/jobs?${query}`);
       expect([query, res.status, res.body.code]).toEqual([query, 400, code]);
@@ -192,6 +197,15 @@ describe("pagination", () => {
     expect(new Set(seen).size).toBe(seen.length);
     // And a fresh read starts with the new job.
     expect((await get("/me/jobs?limit=1")).body.jobs[0].id).toBe(arrived);
+  });
+
+  test("the cursor is the last job's time and id, and carries no row number of the table", async () => {
+    const ids = jobsOf(me.id, 3);
+    const page = await get("/me/jobs?limit=2");
+    const last = page.body.jobs[1].id;
+    expect(page.body.next_after).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\|job_[0-9a-f]{24}$/);
+    expect(page.body.next_after.endsWith(`|${last}`)).toBe(true);
+    expect(last).toBe(ids[1]);
   });
 
   test("jobs created in the same second are paged without a gap or a repeat", async () => {

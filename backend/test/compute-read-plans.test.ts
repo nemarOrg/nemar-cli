@@ -60,13 +60,13 @@ const CASES: Array<{ name: string; sql: string; binds: unknown[]; index: string 
     name: "a person's jobs",
     sql: jobsPageSql({ state: false, cursor: false }),
     binds: [7, 26],
-    index: "compute_jobs_account_created",
+    index: "compute_jobs_account_created_id",
   },
   {
     name: "a person's jobs by state, after a cursor",
     sql: jobsPageSql({ state: true, cursor: true }),
-    binds: [7, "running", WINDOW[0], 5, 26],
-    index: "compute_jobs_account_created",
+    binds: [7, "running", WINDOW[0], "job_000000000000000000000005", 26],
+    index: "compute_jobs_account_created_id",
   },
   {
     name: "one job",
@@ -114,16 +114,17 @@ describe("no read route scans the jobs or the ledger", () => {
       5,
       26,
     ]);
-    expect(plan.filter((line) => line.includes("TEMP B-TREE FOR ORDER BY"))).toEqual([]);
+    expect(plan.filter((line) => /TEMP B-TREE FOR .*ORDER BY/.test(line))).toEqual([]);
   });
 
-  test("the three indexes of migration 0132 exist, and the queue index is partial", () => {
+  test("the four indexes of migration 0132 exist, and the queue index is partial", () => {
     const rows = db
       .query<{ name: string; sql: string }, []>(
-        "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('compute_jobs_queue_started', 'compute_jobs_created', 'compute_ledger_created')",
+        "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN ('compute_jobs_queue_started', 'compute_jobs_created', 'compute_ledger_created', 'compute_jobs_account_created_id')",
       )
       .all();
     expect(rows.map((r) => r.name).sort()).toEqual([
+      "compute_jobs_account_created_id",
       "compute_jobs_created",
       "compute_jobs_queue_started",
       "compute_ledger_created",
