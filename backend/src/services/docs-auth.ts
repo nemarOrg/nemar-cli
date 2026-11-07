@@ -294,6 +294,12 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * (`services/ticket-assignment.ts`) in the same batch, which drops the person's support
  * tickets, away window, read markers and queue references; key revocation alone does not, because the
  * person is still an admin. A new path that removes an admin needs both sets.
+ * TWO of those three paths, `finalizeRevocation` and the tombstone cascade, also run
+ * `computeReleaseStatements` (`services/compute-release.ts`, epic #2005 phase A8), which ends the
+ * account's compute: a role demotion does not (compute is not an admin's standing), and key revocation
+ * does not (a job's identity is the account's, not a key's; the person still has the account, so a
+ * stolen key's jobs already submitted keep running until a cancel or an administrative revoke). A new
+ * path that ends a whole account needs that set too.
  *
  * The by-id routes also run it when their revoke changed nothing (a
  * concurrent revoke of the same key won the race), because it is idempotent

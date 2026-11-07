@@ -249,6 +249,34 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "repullErrorCode",
     "transitionRepull",
   ],
+  compute: [
+    "adjustAccountComputePool",
+    "adjustPlatformComputePool",
+    "advanceComputeJobAsAdmin",
+    "cancelComputeJobAsAdmin",
+    "computeRefusalCode",
+    "getAccountComputePools",
+    "getComputeAccessReport",
+    "getComputeAccountReport",
+    "getComputePipelineStatus",
+    "getComputePolicy",
+    "getComputeRecord",
+    "getComputeStatus",
+    "grantAccountComputePool",
+    "grantPlatformComputePool",
+    "listComputeAccessReports",
+    "listComputeHolds",
+    "listComputeJobs",
+    "listComputePools",
+    "listUnmatchedComputeRows",
+    "mintComputeObserverRun",
+    "placeComputeHold",
+    "putComputePolicy",
+    "readComputeRecord",
+    "releaseComputeHold",
+    "requeueComputeAccessReport",
+    "runComputePipeline",
+  ],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -370,6 +398,32 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
+  "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
+  "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status
+  "cancelComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/cancel
+  "advanceComputeJobAsAdmin", // epic #2005 phase A5: POST /admin/compute/jobs/:id/advance
+  "runComputePipeline", // epic #2005 phase A6: POST /admin/compute/pipeline/run
+  "getComputePipelineStatus", // epic #2005 phase A6: GET /admin/compute/pipeline/status
+  "computeRefusalCode", // epic #2005 phase A6: reads a compute refusal's word (no request)
+  "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
+  "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
+  "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant
+  "adjustAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/adjust
+  "grantPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/grant
+  "adjustPlatformComputePool", // epic #2005 phase A2: POST /admin/compute/pools/platform/:key/adjust
+  "listComputeJobs", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listUnmatchedComputeRows", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeRecord", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "readComputeRecord", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeAccountReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "getComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listComputeHolds", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "placeComputeHold", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "releaseComputeHold", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "listComputeAccessReports", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "requeueComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "mintComputeObserverRun", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "createOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients (shared/contract/oidc-admin.ts)
   "listOidcClients", // epic #2014 phase #2016: GET /admin/oidc/clients
   "getOidcClient", // epic #2014 phase #2016: GET /admin/oidc/clients/:client_id

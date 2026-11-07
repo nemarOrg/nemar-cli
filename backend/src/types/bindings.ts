@@ -59,6 +59,62 @@ export interface Bindings {
    *  reports `unchecked`, never healthy, while it is unset. */
   NEUROBAGEL_FEDERATION_URL?: string;
 
+  // Compute gateway storage (epic #2005 phase A3, ADR 0118 decision 7): two PRIVATE R2 buckets,
+  // reached by the Worker through these bindings and, for the few things a binding cannot do (a
+  // presigned PUT for one file of one job, a presigned GET, a server-side copy), through R2's S3
+  // interface (services/compute-s3.ts). `nemar-compute-records` and `nemar-compute-results` in
+  // production, `...-dev` in [env.dev]. The records bucket is locked by prefix and the results bucket
+  // expires its objects: both are bucket configuration, never code. Optional: with no binding a job
+  // cannot be made (`compute_disabled`).
+  COMPUTE_RECORDS?: R2Bucket;
+  COMPUTE_RESULTS?: R2Bucket;
+  /** The two buckets' names, which a binding hides and the S3 interface needs. Plain variables, set in
+   *  [vars] and in [env.dev.vars] both (variables do not inherit). */
+  COMPUTE_RECORDS_BUCKET_NAME?: string;
+  COMPUTE_RESULTS_BUCKET_NAME?: string;
+  /** Worker SECRETS, set by the owner: one R2 API token per environment (Object Read & Write on its
+   *  two buckets) and the account endpoint, which is never written in this repository. */
+  COMPUTE_R2_ACCESS_KEY_ID?: string;
+  COMPUTE_R2_SECRET_ACCESS_KEY?: string;
+  COMPUTE_R2_S3_ENDPOINT?: string;
+
+  // The compute gateway's two dark switches (epic #2005 phase A4, ADR 0118 decision 8;
+  // services/compute-switches.ts). Each reads as on only when it is exactly "1", and compute only in
+  // exactly `production` or `development` (the dev Worker runs against its own Tapis tenant with its
+  // own credentials; every compute schedule stays production-only). Deliberately absent from every
+  // table of wrangler-sccn.toml, and compute-switches-flag.test.ts pins that: the owner turns them
+  // on in a reviewed change that edits that test. A Worker secret of the same name takes effect too,
+  // so `GET /admin/compute/status` is what says what the Worker reads.
+  COMPUTE_ENABLED?: string; // "1" lets compute run (production or development only)
+  COMPUTE_PIPELINES_DISPATCH_ENABLED?: string; // "1" lets NEMAR's own pipelines dispatch (needs COMPUTE_ENABLED)
+
+  // The Tapis tenant the compute gateway submits to (epic #2005 phase A4, services/tapis/config.ts).
+  // Worker secrets or owner-set variables, NEVER in wrangler-sccn.toml: a tenant name is not public.
+  // Dev and production use SEPARATE tenants' credentials, because dev D1 shares real users and the
+  // GitHub org. TAPIS_AUTH_STRATEGY picks how the Worker authenticates, with no code change:
+  //   "password": the account TAPIS_USERNAME / TAPIS_PASSWORD signs in with the password grant;
+  //   "service": TAPIS_SERVICE_TOKEN (a Tokens API service credential) mints a user token per
+  //              username, and TAPIS_USERNAME is then optional (the user `status` probes with).
+  TAPIS_BASE_URL?: string; // the tenant's base address, https, no path needed
+  TAPIS_TENANT_ID?: string;
+  TAPIS_AUTH_STRATEGY?: string; // "password" | "service"; anything else is unconfigured
+  TAPIS_USERNAME?: string;
+  TAPIS_PASSWORD?: string;
+  TAPIS_SERVICE_TOKEN?: string;
+  /** The key of the ACCESS gateway-attributes API (reporting every tenant job under a pseudonym).
+   *  Owner-set Worker secret, absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that).
+   *  `runAccessReportCron` (services/access-attributes.ts) sends it in a header and never logs or stores
+   *  it; `GET /admin/compute/status` reports only whether it is set. Unset, reports wait `unconfigured`. */
+  ACCESS_GATEWAY_ATTRIBUTES_KEY?: string;
+  /** The name ACCESS knows the cluster by in the gateway-attributes interface (the design's question 14),
+   *  an owner-set Worker secret like the key and pinned absent from wrangler-sccn.toml the same way. */
+  ACCESS_RESOURCE_NAME?: string;
+  /** NEMAR's own runtime image for a `python` job (epic #2005 phase A5, services/compute-lifecycle.ts):
+   *  a digest-pinned reference, `[docker://]registry/path@sha256:<64 hex>`. Owner-set, like the Tapis
+   *  names, and absent from wrangler-sccn.toml (compute-switches-flag.test.ts pins that). Unset, a
+   *  `python` job stays `created` and is submitted once it is set; an `image` job brings its own. */
+  COMPUTE_RUNTIME_IMAGE?: string;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;
@@ -313,7 +369,10 @@ export interface Bindings {
   // unchanged so a deploy does not silently enable screening. With the publication review on
   // (PUBLICATION_REVIEW_ENABLED, below) it is not dispatched for a request the review covers.
   PRESCREEN_ENABLED?: string; // "true" enables the dispatch on publish request
-  PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; HMAC key for prescreen callback
+  PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; the ONE HMAC key for every callback token:
+  // prescreen and pull-request review callbacks, and the compute gateway's job token (inside each
+  // running job's launch spec), Tapis webhook address and observer token. Rotating it kills all of
+  // them: drain running compute jobs first (compute-tokens.ts, ADR 0118 A5 amendment item 5).
 
   // Dataset pull-request review (ADR 0092). When PR_REVIEW_ENABLED is "1", a pull request opened
   // or updated against `main` of a dataset repository is reviewed by a model and the result is

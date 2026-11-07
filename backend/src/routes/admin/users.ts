@@ -33,6 +33,7 @@ import {
   getBroadcastRecipients,
   sendBroadcast,
 } from "../../services/broadcast";
+import { computeReleaseStatements } from "../../services/compute-release";
 import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-auth";
 import {
   parseEmailPreferences,
@@ -366,6 +367,13 @@ const REVOCABLE_USER_COLUMNS =
  * GitHub-collaborator sweep is skipped when there is no handle to remove, the
  * audit resource id falls back to the stable numeric id, and the messages use
  * an `id N` label.
+ *
+ * The credential cascade is ONE batch: sessions, docs and private grants, the
+ * support tickets (`mailReleaseStatements`) and the account's compute
+ * (`computeReleaseStatements`, epic #2005 phase A8). Compute has TWO callers,
+ * this function and `tombstoneUserCascade`; a role demotion and a key
+ * revocation do not end it (`services/compute-release.ts` says why). The Tapis
+ * cancels are not made in the batch: the retried sweep makes them.
  */
 async function finalizeRevocation(
   c: Context<{ Bindings: Bindings; Variables: Variables }>,
@@ -529,6 +537,11 @@ async function finalizeRevocation(
       .bind(user.id),
     // Their support tickets, queue references and away window go in the same batch (phase 3).
     ...mailReleaseStatements(user.id, "all").map((s) => db.prepare(s.sql).bind(...s.binds)),
+    // Their compute goes in the same batch (epic #2005 phase A8): every live job records
+    // `account_ended`, a job that never reached Tapis is cancelled with its hold released, and
+    // every pool is frozen. The Tapis cancels follow from the retried sweep, never from this
+    // batch. A role demotion and a key revocation do NOT end compute; compute-release.ts says why.
+    ...computeReleaseStatements(user.id).map((s) => db.prepare(s.sql).bind(...s.binds)),
     // What the account holds at every OpenID Connect client: its grants, tokens and unused codes end,
     // and each client with a back-channel logout address is queued to be told (ADR 0119 rule 12).
     // In this batch for the same reason as the rest: a revoked account that is approved again must
@@ -1185,7 +1198,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
           // demoted account is still a legitimate user, and `resolveCookieUser`
           // re-reads its role per request. Private-site sessions are left alone
           // for the same reason: `resolvePrincipal` reports the live role on
-          // every call (ADR 0079, `PRIVATE_REVOKE_ALL_SQL`).
+          // every call (ADR 0079, `PRIVATE_REVOKE_ALL_SQL`). Compute is left alone for the same
+          // kind of reason: a demoted person is still an account with a grant, pools and jobs
+          // (`computeReleaseStatements` is for the two paths that end the whole account).
           //
           // OpenID Connect grants are not ended here (ADR 0119 rule 12): a token carries no role and
           // no OIDC scope confers admin authority, so a demotion leaves nothing of theirs to

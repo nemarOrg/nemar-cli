@@ -206,6 +206,24 @@ bucket_name = "nemar-news-media"
 binding = "NEUROBAGEL"
 bucket_name = "nemar-neurobagel"
 
+# Compute gateway storage (epic #2005 phase A3, ADR 0118 decision 7): two PRIVATE buckets, outside the
+# AWS account that holds the Open Data buckets, reached only through these bindings (and, for a
+# presigned PUT or GET and a server-side copy, through R2's S3 interface with the secrets named in
+# the comment block below). COMPUTE_RECORDS holds what a job submitted and who submitted it, locked
+# by prefix (`records/` for the records retention, `logs/` for the log retention) with a lifecycle
+# rule deleting `incoming/` after two days; COMPUTE_RESULTS holds the results and expires them.
+# Lock and lifecycle rules are bucket configuration, never code, and the owner set them (see the
+# compute program's owner actions). Never shared with [env.dev]: the dev worker has its own two
+# buckets below, and its own R2 API token. The buckets must exist before the next deploy that
+# carries these bindings, or that deploy fails (they do).
+[[r2_buckets]]
+binding = "COMPUTE_RECORDS"
+bucket_name = "nemar-compute-records"
+
+[[r2_buckets]]
+binding = "COMPUTE_RESULTS"
+bucket_name = "nemar-compute-results"
+
 # Outbound mail (epic #1893, ADR 0110). The Cloudflare Email Service binding.
 # Production sends through it (EMAIL_PROVIDER="cloudflare" below), with Resend as
 # the fallback for quota and account-level refusals only (EMAIL_FALLBACK="resend").
@@ -240,6 +258,12 @@ invocation_logs = true
 # Environment variables
 [vars]
 ENVIRONMENT = "production"
+# The compute buckets' names (epic #2005 phase A3): a binding hides its bucket's name and the S3
+# interface needs it, so each name is a plain variable here and in [env.dev.vars] (variables do not
+# inherit). They are the same names as the bindings' `bucket_name` above, and a test holds the two to
+# each other.
+COMPUTE_RECORDS_BUCKET_NAME = "nemar-compute-records"
+COMPUTE_RESULTS_BUCKET_NAME = "nemar-compute-results"
 # Dataset pull-request review (ADR 0092). On in production from 2026-10-13. It lives in this
 # file because `wrangler deploy` drops dashboard-only variables (see [env.dev.vars]).
 # Not a casual switch: once any repository carries the review ruleset (ADR 0107), an unset or 0
@@ -440,6 +464,33 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                           /webhooks/zarr-ready cache purge. WARNING: same name as wrangler's own
 #                           deploy-auth env var -- unset it from the shell before `secret put`, e.g.
 #                           env -u CLOUDFLARE_API_TOKEN npx cfman wrangler --account sccn secret put CLOUDFLARE_API_TOKEN -c backend/wrangler-sccn.toml)
+# Compute gateway storage (epic #2005 phase A3): one R2 API token per environment, Object Read & Write
+# on that environment's two compute buckets (R2 has no write-only or prefix scoping), and the account's
+# S3 endpoint. The owner keeps them in the Infisical folder /backend/compute (dev and prod) and sets
+# them as Worker secrets; names only here, never a value, and the endpoint is not written in this
+# public repository. Dev and production use different tokens.
+# - COMPUTE_R2_ACCESS_KEY_ID
+# - COMPUTE_R2_SECRET_ACCESS_KEY
+# - COMPUTE_R2_S3_ENDPOINT
+# Compute gateway Tapis connection (epic #2005 phase A4): Worker secrets or owner-set variables, names
+# only here, never a value, and never in a table of this file (a tenant name is not public;
+# compute-switches-flag.test.ts pins that). Dev and production use SEPARATE credentials, because dev D1
+# shares real users and the GitHub org. TAPIS_AUTH_STRATEGY is `password` (TAPIS_USERNAME and
+# TAPIS_PASSWORD) or `service` (TAPIS_SERVICE_TOKEN; TAPIS_USERNAME optional): selecting one is
+# configuration, not code. `nemar admin compute status` says whether they work.
+# - TAPIS_BASE_URL
+# - TAPIS_TENANT_ID
+# - TAPIS_AUTH_STRATEGY
+# - TAPIS_USERNAME
+# - TAPIS_PASSWORD
+# - TAPIS_SERVICE_TOKEN
+# - ACCESS_GATEWAY_ATTRIBUTES_KEY
+# - ACCESS_RESOURCE_NAME
+# - COMPUTE_RUNTIME_IMAGE   (epic #2005 phase A5: NEMAR's runtime image for a `python` job, a digest-pinned
+#                           reference; owner-set, and not a line of this file, like the names above)
+# The compute switches COMPUTE_ENABLED and COMPUTE_PIPELINES_DISPATCH_ENABLED are dark: exactly "1" and
+# absent from every table of this file until the owner adds them in a reviewed change that edits
+# backend/test/compute-switches-flag.test.ts. Compute runs only in `production` and `development`.
 # GitHub App credentials (epic #432, in soak -- GITHUB_ADMIN_PAT is the active fallback while any of these are unset)
 # - GITHUB_APP_ID                              (GitHub App numeric ID; replaces PAT for API auth once Phase 5 lands)
 # - GITHUB_APP_PRIVATE_KEY                     (PKCS#8 PEM private key for JWT signing)
@@ -554,6 +605,17 @@ bucket_name = "nemar-news-media-dev"
 binding = "NEUROBAGEL"
 bucket_name = "nemar-neurobagel-dev"
 
+# Compute gateway storage for dev (not inherited; see the top-level COMPUTE_RECORDS block). Its own two
+# buckets, so the dev worker can never write or read production's, with one-day lock rules on
+# `records/` and `logs/` so a test can clean up. They exist already, and dev has its own R2 API token.
+[[env.dev.r2_buckets]]
+binding = "COMPUTE_RECORDS"
+bucket_name = "nemar-compute-records-dev"
+
+[[env.dev.r2_buckets]]
+binding = "COMPUTE_RESULTS"
+bucket_name = "nemar-compute-results-dev"
+
 # Outbound mail for dev (epic #1893, ADR 0110; not inherited from top-level).
 # The Cloudflare Email Service binding the dev worker sends staging mail through
 # when EMAIL_PROVIDER="cloudflare" (see [env.dev.vars]). It is restricted to the
@@ -606,6 +668,9 @@ invocation_logs = true
 
 [env.dev.vars]
 ENVIRONMENT = "development"
+# The compute buckets' names for dev (variables do not inherit): the same as the bindings' above.
+COMPUTE_RECORDS_BUCKET_NAME = "nemar-compute-records-dev"
+COMPUTE_RESULTS_BUCKET_NAME = "nemar-compute-results-dev"
 # Support-ticket retention (ADR 0112): 30 days on staging, matching its raw-mail bucket's lifecycle.
 MAIL_RETENTION_DAYS = "30"
 # Inbound screening (ADR 0113): the same hourly cap per sender address as production.

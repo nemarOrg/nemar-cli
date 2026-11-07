@@ -9,6 +9,10 @@
 
 import { Hono } from "hono";
 import { adminMiddleware, authMiddleware, cookieOriginGuard } from "../../middleware/auth";
+import { registerComputeAdminRoutes } from "./compute";
+import { registerComputeJobAdminRoutes } from "./compute-jobs";
+import { registerComputePipelineAdminRoutes } from "./compute-pipeline";
+import { registerComputeReportingRoutes } from "./compute-reporting";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerExemplarRoutes } from "./exemplar";
@@ -90,3 +94,7 @@ registerUpstreamRepullRoutes(adminRoutes);
 // owner only, on the issuer's host only, behind one `use` for the whole /oidc prefix.
 registerOidcAdminRoutes(adminRoutes);
 registerMailRoutes(adminRoutes);
+registerComputeAdminRoutes(adminRoutes);
+registerComputeJobAdminRoutes(adminRoutes);
+registerComputePipelineAdminRoutes(adminRoutes);
+registerComputeReportingRoutes(adminRoutes);

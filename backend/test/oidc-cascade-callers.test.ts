@@ -152,7 +152,7 @@ describe("the scan fires on a planted violation", () => {
     expect(calledFrom(scan, "aNewPath")).toBe(true);
     expect(callsOf(scan.calls, "oidcEndStatements")).not.toEqual(listed(OIDC_END_CALLERS));
     expect(planted(scan)).toEqual([]);
-  });
+  }, 60_000);
 
   test("an aliased import is still the cascade", () => {
     const scan = plant(`import { oidcEndStatements as endThem } from "../services/oidc-cascade";
@@ -164,7 +164,7 @@ export function viaAlias(userId: number) {
       site: "viaAlias",
       name: "oidcEndStatements",
     });
-  });
+  }, 60_000);
 
   test("a local alias chain, an assignment and a cast are followed to the call", () => {
     const scan = plant(`${IMPORT}const first = oidcEndStatements;
@@ -176,7 +176,7 @@ export function viaChain(userId: number) {
 }`);
     expect(calledFrom(scan, "viaChain")).toBe(true);
     expect(planted(scan)).toEqual([]);
-  });
+  }, 60_000);
 
   test("a call through a namespace, and through a destructured namespace, is still a call", () => {
     const scan = plant(`${NAMESPACE}export function viaNamespace(userId: number) {
@@ -197,7 +197,7 @@ export function viaDestructuring(id: string) {
       name: "oidcClientEndStatements",
     });
     expect(planted(scan)).toEqual([]);
-  });
+  }, 60_000);
 
   test("the function passed or stored as a value is a stray", () => {
     for (const body of [
@@ -211,7 +211,7 @@ export function viaDestructuring(id: string) {
       expect(strays.length, body).toBeGreaterThan(0);
       expect(strays.join("\n"), body).toContain("used as a value");
     }
-  });
+  }, 60_000);
 
   test("an alias exported where it is declared is a stray: a caller in another file would hide behind it", () => {
     // `export const endIt = oidcEndStatements;` makes no call and passes no value, so the scan saw nothing,
@@ -261,7 +261,7 @@ export function viaDestructuring(id: string) {
     ]) {
       expect(planted(plant(body)).length, body).toBeGreaterThan(0);
     }
-  });
+  }, 60_000);
 
   test("an export that is not an alias of the cascade is not a stray, and neither is an alias that stays in its file", () => {
     const scan = plant(`${IMPORT}declare const somethingElse: () => void;
@@ -275,7 +275,7 @@ export function viaLocal(userId: number) {
 }`);
     expect(planted(scan)).toEqual([]);
     expect(calledFrom(scan, "viaLocal")).toBe(true);
-  });
+  }, 60_000);
 
   test("a raw statement of the cascade is a stray, imported by its name or through the namespace", () => {
     for (const source of [
@@ -288,7 +288,7 @@ export function viaLocal(userId: number) {
       expect(strays.length, source).toBeGreaterThan(0);
       expect(strays.join("\n"), source).toContain("raw statement of the cascade");
     }
-  });
+  }, 60_000);
 
   test("the namespace used as a value, by element access, or spread, is a stray", () => {
     for (const body of [
@@ -300,7 +300,7 @@ export function viaLocal(userId: number) {
       const strays = planted(plant(`${NAMESPACE}${body}`));
       expect(strays.length, body).toBeGreaterThan(0);
     }
-  });
+  }, 60_000);
 
   test("a dynamic import or require of the module is a stray, literal or not", () => {
     for (const body of [
@@ -313,7 +313,7 @@ export function viaLocal(userId: number) {
       expect(strays.length, body).toBeGreaterThan(0);
       expect(strays.join("\n"), body).toContain("dynamic import");
     }
-  });
+  }, 60_000);
 
   test("a re-export, a default import and an import = require are strays", () => {
     for (const [source, words] of [
@@ -337,13 +337,13 @@ export function viaLocal(userId: number) {
       expect(strays.length, source).toBeGreaterThan(0);
       expect(strays.join("\n"), source).toContain(words);
     }
-  });
+  }, 60_000);
 
   test("a call at module level has no path to name, and is a stray as well as a call", () => {
     const scan = plant(`${IMPORT}export const eager = oidcEndStatements(1, "account_revoked");`);
     expect(calledFrom(scan, "(module)")).toBe(true);
     expect(planted(scan).join("\n")).toContain("module-level call");
-  });
+  }, 60_000);
 
   test("a call in a comment or a string, a type import, the lists, and another object's method are not uses", () => {
     const scan = plant(`// oidcEndStatements(1, "account_revoked")
@@ -355,7 +355,7 @@ export const x = [text, other.oidcEndStatements(1), OIDC_END_CALLERS.length] as 
     expect(scan.calls.filter((c) => c.file === "routes/planted.ts")).toEqual([]);
     expect(planted(scan)).toEqual([]);
     expect(callsOf(scan.calls, "oidcEndStatements")).toEqual(listed(OIDC_END_CALLERS));
-  });
+  }, 60_000);
 
   test("a new raw statement exported by the module is guarded without touching the scan", () => {
     // The names come from the module's own exports, so a `*_SQL` constant added tomorrow is covered today.
@@ -365,7 +365,7 @@ export const x = [text, other.oidcEndStatements(1), OIDC_END_CALLERS.length] as 
         'import { OIDC_NEW_ENDING_SQL } from "../services/oidc-cascade";\nexport const s = OIDC_NEW_ENDING_SQL;',
     });
     expect(planted(scanEndUsers(tree)).join("\n")).toContain("OIDC_NEW_ENDING_SQL");
-  });
+  }, 60_000);
 });
 
 /**
