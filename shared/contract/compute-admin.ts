@@ -249,7 +249,8 @@ export type ComputePolicyResponse = z.infer<typeof ComputePolicyResponseSchema>;
  *    with under the service strategy) or the kind of the error the call failed with
  *    (`unauthorized`, `not_found`, `rejected`, `unavailable`, `invalid_response`): a string here,
  *    not an enum, so a word the Worker adds does not break a released CLI;
- *  - `runtime_image` is whether the runtime image variable is set and valid, and its digest.
+ *  - `runtime_image` is whether the runtime image variable is set and valid, and its digest;
+ *  - `prerequisites`, `reconciliation` and `attention` are presence booleans and counts (see each field).
  */
 export const ComputeStatusResponseSchema = z
   .object({
@@ -293,6 +294,36 @@ export const ComputeStatusResponseSchema = z
       .object({ set: z.boolean(), valid: z.boolean(), digest: z.string().nullable() })
       .passthrough()
       .optional(),
+    /**
+     * What every launch needs besides the Tapis credential and the buckets, as presence only (never a
+     * value): the callback secret that signs the job, webhook and observer tokens, the API base address
+     * the launcher calls back, NEMAR's pipelines service account (approved, kind service), a current
+     * owner policy, and a grant on the `people` and `pipelines` platform pools. Optional so a CLI that
+     * reads an older Worker still parses its answer.
+     */
+    prerequisites: z
+      .object({
+        callback_secret: z.boolean(),
+        api_base_url: z.boolean(),
+        pipelines_account: z.boolean(),
+        policy_set: z.boolean(),
+        people_pool_granted: z.boolean(),
+        pipelines_pool_granted: z.boolean(),
+      })
+      .passthrough()
+      .optional(),
+    /**
+     * Whether the reconciliation that follows jobs without a webhook is paused: the tenant sweep (the
+     * week-mode final settlement, the failed ACCESS report listing and the following of rows nobody
+     * reserved) does not run while compute is switched off, so a job that ended while it was off waits.
+     */
+    reconciliation: z.object({ paused: z.boolean() }).passthrough().optional(),
+    /**
+     * Counts of things that need a person to look, by fixed word. Each value today is a count and zero
+     * means nothing waits; the value is not narrowed, so a key the Worker adds in another shape (open,
+     * like every response here) does not break a released CLI, which prints only the positive counts.
+     */
+    attention: z.record(z.unknown()).optional(),
   })
   .passthrough();
 

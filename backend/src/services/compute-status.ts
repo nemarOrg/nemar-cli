@@ -16,6 +16,10 @@
  * timeout and a single attempt, so the route answers within a few seconds whatever Tapis does. This
  * route writes nothing.
  *
+ * `prerequisites` says, as presence booleans, what every launch needs besides the credential and the
+ * buckets; `reconciliation.paused` says the tenant sweep is off with the compute switch; `attention` is
+ * a record of counts (one row of `ATTENTION_COUNTS` each).
+ *
  * `runtime_image` (round 1 of #2041) says whether the owner has set `COMPUTE_RUNTIME_IMAGE`, whether
  * what is set is a digest-pinned reference, and its digest: a `python` job is not submitted until it is
  * `valid`. The reference itself is never echoed.
@@ -23,6 +27,7 @@
 
 import type { ComputeStatusResponse } from "../../../shared/contract/compute-admin";
 import type { Bindings } from "../types/bindings";
+import { pipelinesAccountId } from "./compute-pipeline";
 import { readRuntimeImage } from "./compute-runtime-image";
 import { computeS3 } from "./compute-s3";
 import { computeEnabled, computePipelinesDispatchEnabled } from "./compute-switches";
@@ -73,6 +78,39 @@ function runtimeImageStatus(env: Bindings): ComputeStatusResponse["runtime_image
   };
 }
 
+/**
+ * Counts that need a person to look. ONE ROW A COUNT: `[key, statement]`, the statement a single
+ * `SELECT COUNT(*) AS n`; add a line and the Worker, the contract (a record of counts) and the CLI
+ * (which prints every key) carry it. Fixed words as keys, never a value.
+ */
+const ATTENTION_COUNTS: ReadonlyArray<readonly [key: string, sql: string]> = [
+  [
+    "access_reports_failed",
+    "SELECT COUNT(*) AS n FROM compute_access_reports WHERE state = 'failed'",
+  ],
+];
+
+async function attentionCounts(db: D1Database): Promise<Record<string, number>> {
+  const counts = await Promise.all(
+    ATTENTION_COUNTS.map(async ([key, sql]) => {
+      const row = await db.prepare(sql).first<{ n: number }>();
+      return [key, row?.n ?? 0] as const;
+    }),
+  );
+  return Object.fromEntries(counts);
+}
+
+/** Whether any pool of the platform's budget `key` has a grant: a hold on a person's job needs `people`. */
+async function platformGranted(db: D1Database, key: "people" | "pipelines"): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT 1 AS granted FROM compute_pools WHERE holder_kind = 'platform' AND holder_ref = ?1 AND granted_milli > 0 LIMIT 1",
+    )
+    .bind(key)
+    .first();
+  return row !== null;
+}
+
 export interface StatusOptions {
   /** The timeout of each call, at most the client's own 15 seconds. */
   timeoutMs?: number;
@@ -108,6 +146,14 @@ export async function computeStatus(
     outcome(() => tapisHealth(env, { timeoutMs, maxAttempts: 1 })),
   ]);
 
+  const [pipelinesAccount, policy, peopleGranted, pipelinesGranted, attention] = await Promise.all([
+    pipelinesAccountId(env.DB),
+    env.DB.prepare("SELECT 1 AS present FROM compute_policy LIMIT 1").first(),
+    platformGranted(env.DB, "people"),
+    platformGranted(env.DB, "pipelines"),
+    attentionCounts(env.DB),
+  ]);
+
   return {
     switches: {
       environment: environmentWord(env),
@@ -133,5 +179,18 @@ export async function computeStatus(
       resource_name_configured: present(env.ACCESS_RESOURCE_NAME),
     },
     runtime_image: runtimeImageStatus(env),
+    // PRESENCE ONLY. `buildLaunch` refuses a job `unconfigured` without the first two; the account, the
+    // policy and the grants are what a pipeline run and a person's hold need.
+    prerequisites: {
+      callback_secret: present(env.PRESCREEN_CALLBACK_SECRET),
+      api_base_url: present(env.API_BASE_URL),
+      pipelines_account: pipelinesAccount !== null,
+      policy_set: policy !== null,
+      people_pool_granted: peopleGranted,
+      pipelines_pool_granted: pipelinesGranted,
+    },
+    // The tenant sweep returns null while compute is off, which pauses what only it does.
+    reconciliation: { paused: !computeEnabled(env) },
+    attention,
   };
 }
