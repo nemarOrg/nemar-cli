@@ -15,6 +15,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { PIPELINE_STAMP_STATES } from "../shared/compute-recipes";
+import { COMPUTE_REFUSAL_CODES, COMPUTE_REFUSAL_STATUS } from "../shared/compute-state";
 import * as admin from "../shared/contract/compute-admin";
 
 const pool = {
@@ -335,6 +337,33 @@ describe("compute-admin: every exported schema is open", () => {
         access: { key_configured: true, resource_name_configured: "yes" },
       }).success,
     ).toBe(false);
+  });
+
+  test("the pipeline refusal statuses are the ledger's plus the pipeline's own, each declared once", () => {
+    const table = admin.COMPUTE_PIPELINE_REFUSAL_STATUS;
+    // Every ledger word keeps the status the ledger gives it: nothing is copied and then allowed to drift.
+    for (const code of COMPUTE_REFUSAL_CODES) {
+      expect([code, table[code]]).toEqual([code, COMPUTE_REFUSAL_STATUS[code]]);
+    }
+    // The pipeline's own words are not also the ledger's (a status in two places is the drift this prevents).
+    for (const code of Object.keys(admin.COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS)) {
+      expect([code, (COMPUTE_REFUSAL_CODES as readonly string[]).includes(code)]).toEqual([
+        code,
+        false,
+      ]);
+    }
+    // `run_failed` is a word a run stops with, so it has a status, and not the 422 a missing one used to get.
+    expect(table.run_failed).toBe(500);
+    expect(table.registry_drift).toBe(409);
+    expect(table.version_not_found).toBe(404);
+    expect(Object.keys(table).length).toBe(
+      COMPUTE_REFUSAL_CODES.length + Object.keys(admin.COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS).length,
+    );
+  });
+
+  test("the stamp states the CLI filters by are the registry's list, in its order", () => {
+    expect([...admin.COMPUTE_PIPELINE_STAMP_STATES]).toEqual([...PIPELINE_STAMP_STATES]);
+    expect(admin.COMPUTE_PIPELINE_STAMP_STATES).toBe(PIPELINE_STAMP_STATES);
   });
 
   test("the file declares no closed schema at all", () => {

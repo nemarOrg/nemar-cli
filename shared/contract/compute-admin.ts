@@ -18,6 +18,8 @@
  */
 
 import { z } from "zod";
+import { PIPELINE_STAMP_STATES } from "../compute-recipes.js";
+import { COMPUTE_REFUSAL_STATUS, type ComputeRefusalCode } from "../compute-state.js";
 import type { ComputePool } from "./compute.js";
 
 // --- Words -----------------------------------------------------------------------------------
@@ -391,13 +393,8 @@ export const COMPUTE_PIPELINE_RUN_LIMIT_MAX = 100;
 /** The default number of datasets an `--eligible` run takes when none is named. */
 export const COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT = 10;
 
-/** The states a stamp is filtered by, as the registry declares them. */
-export const COMPUTE_PIPELINE_STAMP_STATES = [
-  "dispatched",
-  "succeeded",
-  "failed",
-  "refused",
-] as const;
+/** The states a stamp is filtered by: the registry's own list (`shared/compute-recipes.ts`), not a copy of it. */
+export const COMPUTE_PIPELINE_STAMP_STATES = PIPELINE_STAMP_STATES;
 
 /** The most stamps one status page answers with. */
 export const COMPUTE_PIPELINE_STATUS_PAGE_MAX = 200;
@@ -418,28 +415,36 @@ export interface ComputePipelineRunRequest {
 }
 
 /**
- * The HTTP status of each word a pipeline run is refused with, declared once so no route picks its own
- * (the ledger's words keep the statuses `shared/compute-state.ts` gives them).
+ * The refusal words only a pipeline run has. Their statuses are declared here; every other word a run
+ * is refused with is one of the ledger's (`COMPUTE_REFUSAL_CODES`) and keeps the status
+ * `COMPUTE_REFUSAL_STATUS` gives it, so no status is declared twice.
+ *  - `create_failed`: the job could not be written (502); `run_failed`: the run stopped on an
+ *    unexpected error (500), a platform fault and not a refusal of the request.
  */
-export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<string, number>> = {
-  recipe_unknown: 422,
+export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   recipe_not_automatic: 422,
   recipe_placeholder: 422,
   registry_drift: 409,
-  dataset_not_eligible: 422,
   version_not_found: 404,
   version_untagged: 422,
   too_many_files: 422,
-  runtime_unavailable: 422,
-  pipelines_account_missing: 503,
-  compute_disabled: 503,
-  live_attempt_exists: 409,
-  insufficient_balance: 409,
-  platform_budget_exhausted: 409,
-  suspended: 403,
-  over_concurrency: 409,
-  invalid_spec: 400,
   create_failed: 502,
+  run_failed: 500,
+} as const;
+
+/** Every word a pipeline run can be refused with. */
+export type ComputePipelineRefusal =
+  | ComputeRefusalCode
+  | keyof typeof COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS;
+
+/**
+ * The HTTP status of each word a pipeline run is refused with, declared once so no route picks its own.
+ * Typed against the union of the words, so a word added to it without a status here does not compile,
+ * and the route has no fallback status to hide the omission.
+ */
+export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<ComputePipelineRefusal, number>> = {
+  ...COMPUTE_REFUSAL_STATUS,
+  ...COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS,
 };
 
 /** One dataset's outcome in a run: dispatched (a job and a stamp) or refused (a word). Words are strings. */
