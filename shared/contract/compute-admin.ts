@@ -683,7 +683,12 @@ export type ComputeHoldView = z.infer<typeof ComputeHoldViewSchema>;
 
 /** `GET /admin/compute/holds`. */
 export const ComputeHoldsResponseSchema = z
-  .object({ holds: z.array(ComputeHoldViewSchema) })
+  .object({
+    holds: z.array(ComputeHoldViewSchema),
+    // True when more than 200 holds are active and this list is the oldest 200. Optional so a CLI that
+    // reads an older Worker (which cut the list without saying so) still parses its answer.
+    truncated: z.boolean().optional(),
+  })
   .passthrough();
 
 export type ComputeHoldsResponse = z.infer<typeof ComputeHoldsResponseSchema>;

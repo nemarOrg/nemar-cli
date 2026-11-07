@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { recordKey } from "../backend/src/services/compute-records";
 import {
   COMPUTE_KEYS,
   type ComputeWho,
@@ -38,7 +39,6 @@ import {
   startLifecycleFixture,
 } from "../backend/test/helpers/compute-lifecycle-fixture";
 import { launchSecretForms } from "../backend/test/helpers/launch-secret-forms";
-import { recordKey } from "../backend/src/services/compute-records";
 import { RECORDS_RESULT_MANIFEST_FILE, formatSu } from "../shared/contract/compute";
 import {
   ComputeJobAdminResponseSchema,
@@ -659,6 +659,26 @@ describe("holds", () => {
       ref: String(made.accountId),
     });
   });
+});
+
+describe("holds listing", () => {
+  test("a list that is cut says so and a list that is not does not", async () => {
+    const none = await runCli("admin", ["holds"]);
+    expect(none.stdout).toContain("No active holds.");
+    expect(none.stdout).not.toContain("The list is cut");
+    for (let i = 1; i <= 201; i++) {
+      sql.run(
+        "INSERT INTO compute_legal_holds (scope, ref, reason, placed_by) VALUES ('account', ?, 'legal_request', 1)",
+        String(i),
+      );
+    }
+    const cut = await runCli("admin", ["holds"]);
+    expect(cut.exitCode).toBe(0);
+    expect(cut.stdout).toContain("The list is cut at the oldest 200 active holds");
+    expect(cut.stdout.trim().split("\n")).toHaveLength(201);
+    const asJson = await runCli("admin", ["holds", "--json"]);
+    expect(JSON.parse(asJson.stdout).truncated).toBe(true);
+  }, 60_000);
 });
 
 describe("ACCESS reports", () => {

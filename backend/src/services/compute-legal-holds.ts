@@ -9,7 +9,7 @@
  * released, never removed. There is at most one active hold per (scope, ref): a second placement is a
  * conflict. `reason` is a fixed word, never free text.
  *
- * `HELD_SQL` is the one predicate "this job is held, by itself or by its account", used by the
+ * `heldSql` is the one predicate "this job is held, by itself or by its account", used by the
  * retention sweep both to choose its candidates and again, per job, immediately before it deletes.
  */
 
@@ -137,19 +137,27 @@ export async function releaseHold(
   return { ok: true, hold };
 }
 
-/** The active holds, optionally for one target. */
+/** The most active holds one listing answers with; a longer list says so (`truncated`). */
+export const HOLDS_LIST_MAX = 200;
+
+/**
+ * The active holds, oldest first, optionally for one target. One more row than the maximum is read, so
+ * a list that is cut says so: a legal hold missing from a list that does not say it is incomplete is
+ * the worse failure.
+ */
 export async function listActiveHolds(
   db: D1Database,
   filter: { scope?: ComputeHoldScope; ref?: string } = {},
-): Promise<HoldRow[]> {
-  return (
+): Promise<{ holds: HoldRow[]; truncated: boolean }> {
+  const rows = (
     await db
       .prepare(
         `SELECT ${HOLD_COLUMNS} FROM compute_legal_holds
           WHERE released_at IS NULL AND (?1 IS NULL OR scope = ?1) AND (?2 IS NULL OR ref = ?2)
-          ORDER BY id ASC LIMIT 200`,
+          ORDER BY id ASC LIMIT ?3`,
       )
-      .bind(filter.scope ?? null, filter.ref ?? null)
+      .bind(filter.scope ?? null, filter.ref ?? null, HOLDS_LIST_MAX + 1)
       .all<HoldRow>()
   ).results;
+  return { holds: rows.slice(0, HOLDS_LIST_MAX), truncated: rows.length > HOLDS_LIST_MAX };
 }

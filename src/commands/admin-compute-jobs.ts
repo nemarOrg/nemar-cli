@@ -691,6 +691,11 @@ jobsCommand
           `${h.id}  ${plain(h.scope)}:${plain(h.ref)}  ${plain(h.reason)}  placed ${plain(h.placed_at)}`,
         );
       }
+      if (res.truncated === true) {
+        say(
+          `The list is cut at the oldest ${res.holds.length} active holds; there are more. A target's own hold is found with release-hold <target>.`,
+        );
+      }
     } catch (err) {
       failWith(err, null, "Could not list the holds.", undefined, { json });
     }

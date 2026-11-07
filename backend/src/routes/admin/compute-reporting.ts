@@ -218,7 +218,7 @@ export function registerComputeReportingRoutes(admin: AdminRouter): void {
     const query = holdsQuery.safeParse(c.req.query());
     if (!query.success) return badQuery(c, query.error);
     try {
-      return c.json({ holds: await listActiveHolds(c.env.DB, query.data) });
+      return c.json(await listActiveHolds(c.env.DB, query.data));
     } catch (err) {
       return fail(c, err);
     }

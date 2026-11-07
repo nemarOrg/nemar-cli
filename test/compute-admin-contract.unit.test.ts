@@ -164,7 +164,7 @@ const VALID: Record<string, unknown> = {
     totals: { distinct_users: 2, jobs: 5 },
   },
   ComputeHoldViewSchema: hold,
-  ComputeHoldsResponseSchema: { holds: [hold] },
+  ComputeHoldsResponseSchema: { holds: [hold], truncated: false },
   ComputeHoldResponseSchema: { hold },
   ComputeAccessReportsResponseSchema: {
     rows: [

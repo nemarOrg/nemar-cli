@@ -597,6 +597,31 @@ describe("legal holds", () => {
     ).toEqual(["compute.hold.place", "compute.hold.release"]);
   });
 
+  test("a list of more than 200 active holds is the oldest 200 and SAYS it is cut; 200 exactly is not cut", async () => {
+    for (let i = 1; i <= 201; i++) {
+      sql.run(
+        "INSERT INTO compute_legal_holds (scope, ref, reason, placed_by) VALUES ('account', ?, 'legal_request', 1)",
+        String(i),
+      );
+    }
+    const cut = await call("GET", "/compute/holds", "admin");
+    expect(cut.status).toBe(200);
+    expect(ComputeHoldsResponseSchema.safeParse(cut.body).success).toBe(true);
+    expect(cut.body.holds).toHaveLength(200);
+    expect(cut.body.truncated).toBe(true);
+    // Oldest first: the 201st hold is the one left out.
+    expect(cut.body.holds[0].ref).toBe("1");
+    expect(cut.body.holds[199].ref).toBe("200");
+    // A filter that names one target is not cut, and a list of exactly 200 is not either.
+    const one = await call("GET", "/compute/holds?scope=account&ref=201", "admin");
+    expect(one.body.holds).toHaveLength(1);
+    expect(one.body.truncated).toBe(false);
+    sql.run("UPDATE compute_legal_holds SET released_at = datetime('now') WHERE ref = '201'");
+    const exact = await call("GET", "/compute/holds", "admin");
+    expect(exact.body.holds).toHaveLength(200);
+    expect(exact.body.truncated).toBe(false);
+  });
+
   test("an account hold, a second hold, a target that is not there and a ref that is not a ref", async () => {
     const made = await makeJob(fx);
     const ok = await call("POST", "/compute/holds", "owner", {
