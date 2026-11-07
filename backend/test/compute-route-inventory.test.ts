@@ -12,7 +12,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { oidcBearerScopes } from "../src/middleware/oidc-bearer";
 import { computeRoutes } from "../src/routes/compute";
+import {
+  COMPUTE_OIDC_ROUTES,
+  PERSON_OIDC,
+  STATS_OIDC,
+  computePersonCredential,
+  computeStatsCredential,
+} from "../src/routes/compute/auth";
 
 const EXPECTED_ENTRIES: Record<string, number> = {
   // The launcher's callbacks: one handler each, authenticated inline by the `X-Compute-Job-Token`
@@ -29,6 +37,14 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // `Authorization: Bearer` header (an HMAC over a run id and the run's own nonce, one run, one post),
   // with one refusal for every failure.
   "POST /observer": 1,
+  // The read routes (epic #2021 phase D2, #2023): the credential rule of `routes/compute/auth.ts`, then the
+  // handler. `/me*` is a person's (a CLI key, the session cookie, or an access token carrying
+  // `compute.read`); `/stats` is a partner CLIENT's (a client credentials token carrying `compute.stats`).
+  "GET /me": 2,
+  "GET /me/usage": 2,
+  "GET /me/jobs": 2,
+  "GET /me/jobs/:id": 2,
+  "GET /stats": 2,
 };
 
 const tableOf = () => {
@@ -46,7 +62,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(10);
+    expect(computeRoutes.routes.length).toBe(20);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -70,7 +86,54 @@ describe("compute route inventory", () => {
     }
   });
 
-  test("every pinned route is a POST (the launcher and the person both write)", () => {
-    for (const key of Object.keys(EXPECTED_ENTRIES)) expect(key.startsWith("POST ")).toBe(true);
+  test("every write is a POST, and every read route is a GET of the read table", () => {
+    const reads = Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("GET "));
+    expect(reads.sort()).toEqual(
+      ["GET /me", "GET /me/jobs", "GET /me/jobs/:id", "GET /me/usage", "GET /stats"].sort(),
+    );
+    for (const key of Object.keys(EXPECTED_ENTRIES)) {
+      expect(key.startsWith("POST ") || key.startsWith("GET ")).toBe(true);
+    }
+  });
+
+  test("each read route names its credential rule, then the handler; nothing else sits in front", () => {
+    const handlersOf = (method: string, path: string) =>
+      computeRoutes.routes
+        .filter((r) => r.method === method && r.path === path)
+        .map((r) => r.handler);
+    for (const path of ["/me", "/me/usage", "/me/jobs", "/me/jobs/:id"]) {
+      const [first, second, ...rest] = handlersOf("GET", path);
+      expect([path, first]).toEqual([path, computePersonCredential]);
+      expect(typeof second).toBe("function");
+      expect(rest).toEqual([]);
+    }
+    const [first, second, ...rest] = handlersOf("GET", "/stats");
+    expect(first).toBe(computeStatsCredential);
+    expect(typeof second).toBe("function");
+    expect(rest).toEqual([]);
+  });
+
+  test("the credential kinds and scopes each read route accepts are the ones pinned (ADR 0119 addendum)", () => {
+    expect(COMPUTE_OIDC_ROUTES).toEqual({
+      "GET /me": "compute.read",
+      "GET /me/usage": "compute.read",
+      "GET /me/jobs": "compute.read",
+      "GET /me/jobs/:id": "compute.read",
+      "GET /stats": "compute.stats",
+    });
+    // The two `oidcBearer` instances carry exactly the scope the table names, and no other.
+    expect(oidcBearerScopes(PERSON_OIDC)).toEqual(["compute.read"]);
+    expect(oidcBearerScopes(STATS_OIDC)).toEqual(["compute.stats"]);
+    // The table lists exactly the read routes, so a route cannot accept an OIDC token without a row here.
+    const reads = Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("GET "));
+    expect(Object.keys(COMPUTE_OIDC_ROUTES).sort()).toEqual(reads.sort());
+  });
+
+  test("the writes (cancel, links, the launcher's callbacks, the observer) accept no OpenID Connect token", () => {
+    // None of them is in the OIDC table; the end-to-end proof (a token is refused on cancel) is in
+    // `compute-read-credentials.test.ts`.
+    for (const key of Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("POST "))) {
+      expect(Object.keys(COMPUTE_OIDC_ROUTES)).not.toContain(key);
+    }
   });
 });

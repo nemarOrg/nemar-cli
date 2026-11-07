@@ -576,7 +576,19 @@ export interface Variables {
    *  authenticated the request, read live. Only the OIDC resource routes carry `oidcBearer`; every
    *  other route refuses such a token (`resolveApiKeyUser`'s `oidc_token`). */
   oidcToken?: OidcTokenContext;
+  /** Set by the `/compute` read routes' credential rule (epic #2021 phase D2): who the request is, whichever
+   *  credential proved it. See `routes/compute/auth.ts`. */
+  computeCredential?: ComputeCredential;
 }
+
+/**
+ * What a `/compute` read route knows of its caller (`routes/compute/auth.ts`): a person, by a CLI key, the
+ * session cookie or an OpenID Connect access token (with that token's scopes), or a machine client by a
+ * client credentials token (which names no account).
+ */
+export type ComputeCredential =
+  | { kind: "user"; userId: number; via: "key" | "cookie" | "oidc"; scopes?: string[] }
+  | { kind: "client"; clientId: string };
 
 /**
  * What `oidcBearer` knows of a live access token: the client it was issued to, the account it names

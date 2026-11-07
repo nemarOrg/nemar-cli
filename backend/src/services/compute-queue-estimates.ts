@@ -77,16 +77,15 @@ export function buildQueueEstimates(
 
 /**
  * The waits of one partition's jobs that started in the window, newest start first, at most the cap:
- * `?1` the partition. A job with no scheduler submission time, or whose start is before its submission
- * (a clock fault), is not a sample. The partial index of migration 0132 answers it.
+ * `?1` the partition. A job with no scheduler submission time, no start, or whose start is before its
+ * submission (a clock fault), is not a sample: both comparisons are NULL for a missing time, which also
+ * lets the planner use the partial index of migration 0132 (its two `IS NOT NULL` terms are implied).
  */
 export const QUEUE_WAITS_SQL = `SELECT
     CAST(strftime('%s', started_at) AS INTEGER)
       - CAST(strftime('%s', remote_submitted_at) AS INTEGER) AS wait_seconds
   FROM compute_jobs
   WHERE partition = ?1
-    AND started_at IS NOT NULL
-    AND remote_submitted_at IS NOT NULL
     AND started_at >= datetime('now', '-${COMPUTE_QUEUE_WINDOW_DAYS} days')
     AND started_at >= remote_submitted_at
   ORDER BY started_at DESC

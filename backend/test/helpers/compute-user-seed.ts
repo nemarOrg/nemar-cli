@@ -168,3 +168,122 @@ export function correctionAt(
 export function sqliteAt(ms: number): string {
   return new Date(ms).toISOString().replace("T", " ").slice(0, 19);
 }
+
+// --- People with keys, and calls to the real compute router --------------------------------------
+
+import { Hono } from "hono";
+import { computeRoutes } from "../../src/routes/compute";
+import { hashApiKey } from "../../src/services/token";
+import type { Bindings, Variables } from "../../src/types/bindings";
+import { realD1 } from "./d1";
+
+export interface Person {
+  id: number;
+  key: string;
+  username: string;
+  email: string;
+}
+
+let people = 0;
+
+/** A person (an approved member) with a real API key, stored hashed as production stores one. */
+export async function personWithKey(
+  db: Database,
+  over: { access?: string; purpose?: string; status?: string } = {},
+): Promise<Person> {
+  const n = ++people;
+  const username = `reader-${n}-${Math.floor(Math.random() * 1e6)}`;
+  const email = `${username}@example.org`;
+  const key = `read-key-${n}-0123456789abcdef0123456789abcdef0123456789`;
+  db.query(
+    `INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified,
+                        service_access, account_kind, given_name, family_name, orcid, country,
+                        affiliation, city, compute_access, compute_purpose)
+     VALUES (?, ?, 'x', ?, 'member', 'cli', 1, 0, 'person', 'Ada', 'Lovelace', ?, 'Freedonia',
+             'Institute of Analytical Engines', 'Sylvania', ?, ?)`,
+  ).run(
+    username,
+    email,
+    over.status ?? "approved",
+    `0000-0002-${String(1000 + n).padStart(4, "0")}-0000`,
+    over.access ?? "active",
+    over.purpose ?? null,
+  );
+  const id = (
+    db.query<{ id: number }, [string]>("SELECT id FROM users WHERE username = ?").get(username) as {
+      id: number;
+    }
+  ).id;
+  db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+    id,
+    await hashApiKey(key),
+    key.slice(0, 8),
+  );
+  return { id, key, username, email };
+}
+
+export interface Reply {
+  status: number;
+  text: string;
+  body: Record<string, any>;
+  headers: Headers;
+}
+
+/**
+ * The REAL compute router (`computeRoutes`) mounted at `/compute` over `db`, with the credential rule
+ * and middleware it carries, called through `app.fetch`. `env` defaults to a production-shaped
+ * binding set with no compute switch, so a case proves the reads work with compute off.
+ */
+export function readApp(db: Database, envOver: Partial<Bindings> = {}) {
+  const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/compute", computeRoutes);
+  const env = { DB: realD1(db), ENVIRONMENT: "production", ...envOver } as Bindings;
+  return {
+    env,
+    async call(
+      path: string,
+      opts: { key?: string | null; headers?: Record<string, string>; method?: string } = {},
+    ): Promise<Reply> {
+      const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+      if (opts.key) headers.Authorization = `Bearer ${opts.key}`;
+      const res = await app.fetch(
+        new Request(`http://api.test/compute${path}`, { method: opts.method ?? "GET", headers }),
+        env,
+        { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext,
+      );
+      const text = await res.text();
+      let body: Record<string, any> = {};
+      try {
+        body = JSON.parse(text);
+      } catch {
+        /* not JSON */
+      }
+      return { status: res.status, text, body, headers: res.headers };
+    },
+  };
+}
+
+/**
+ * Use that the tenant sweep charged to the PARTNER's pool for a job nobody reserved: an `overrun` entry
+ * on the partner pool `tenant`, named to the platform `people` budget, with no hold (the one writer of
+ * such an entry in production is `unreservedChargeStatements`; this writes the same shape at a chosen
+ * time).
+ */
+export function partnerOverrunAt(
+  db: Database,
+  input: { jobId: string; milli: number; at: string; pool?: "cpu" | "gpu" },
+): void {
+  const pool = input.pool ?? "cpu";
+  db.query(
+    `INSERT INTO compute_ledger
+       (kind, pool_id, budget_pool_id, charged_delta_milli, job_id, reason, idempotency_key, created_at)
+     VALUES ('overrun', ?, ?, ?, ?, 'unreserved_usage', ?, ?)`,
+  ).run(
+    poolId(db, "partner", "tenant", pool),
+    poolId(db, "platform", "people", pool),
+    input.milli,
+    input.jobId,
+    `seed:unreserved:${input.jobId}:${next()}`,
+    input.at,
+  );
+}
