@@ -485,7 +485,7 @@ function tarItems(files: readonly CollectedFile[]): TarItem[] {
 
 /** gzip with the header's modification time and operating-system byte fixed, so the bytes do not depend on when or where. */
 export function gzipDeterministic(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(Bun.gzipSync(data, { level: 9 }));
+  const out = new Uint8Array(Bun.gzipSync(Buffer.from(data), { level: 9 }));
   out.fill(0, 4, 8);
   out[9] = 0xff;
   return out;
@@ -502,7 +502,13 @@ export interface PackedBundle {
 }
 
 const sha256Hex = (bytes: Uint8Array | string): string =>
-  createHash("sha256").update(bytes).digest("hex");
+  createHash("sha256")
+    .update(
+      typeof bytes === "string"
+        ? bytes
+        : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    )
+    .digest("hex");
 
 export type PackResult =
   | { ok: true; bundle: PackedBundle }
