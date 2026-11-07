@@ -20,7 +20,16 @@
  *    `shared/oidc.ts`'s);
  *  - `credential_file_name`: a file called `.env` (but not `.env.example`), `.netrc`, `id_rsa`, `*.pem`,
  *    `*.key`, `.aws/credentials` and the like, whatever is inside.
- * It is a net for the common mistakes, not a proof that a bundle holds no secret.
+ *
+ * TEXT ENCODINGS. A file is looked at three ways: as Latin-1 (every byte a character), as UTF-16 when it
+ * starts with a byte-order mark or is mostly NUL bytes (decoded little or big endian by where the NULs
+ * fall), and with its NUL bytes removed (which reads UTF-16 and UTF-32 text of ASCII characters whatever
+ * the mark). A rule found in any view is one finding.
+ *
+ * WHAT IT DOES NOT CATCH, said plainly: a token wrapped across lines, a token split into pieces and
+ * joined by the program, one hidden in an archive, an image or any compressed or encrypted file, and a
+ * bare 40-character AWS secret key with no field name near it. It is a net for the common mistakes, not a
+ * proof that a bundle holds no secret.
  */
 
 import { OIDC_ACCESS_TOKEN_PREFIX, OIDC_REFRESH_TOKEN_PREFIX } from "../../../shared/oidc.js";
@@ -88,6 +97,9 @@ export type SecretRuleName = (typeof SECRET_RULE_NAMES)[number];
 const EXACT_NAMES = new Set([
   ".netrc",
   "_netrc",
+  ".envrc",
+  "credentials.json",
+  "service-account.json",
   ".pgpass",
   ".git-credentials",
   ".htpasswd",
@@ -105,7 +117,8 @@ const EXACT_NAMES = new Set([
   "secrets.toml",
 ]);
 
-const SUFFIXES = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx"];
+/** File name endings: `*.pem`, `*.key`, `prod.env` and the key stores. `environment.py` and `my-env-notes.txt` are not. */
+const SUFFIXES = [".pem", ".key", ".env", ".p12", ".pfx", ".jks", ".keystore", ".ppk", ".kdbx"];
 
 /** `.env` files that hold no secret by convention: a template. */
 const ENV_TEMPLATES = new Set([".env.example", ".env.sample", ".env.template", ".env.dist"]);
@@ -160,8 +173,41 @@ function scanString(where: string, text: string, withLines: boolean): Finding[] 
 export function scanFile(path: string, bytes: Uint8Array): Finding[] {
   const found: Finding[] = [];
   if (isCredentialFileName(path)) found.push({ rule: NAME_RULE, where: path, line: null });
-  found.push(...scanString(path, Buffer.from(bytes).toString("latin1"), true));
+  const seen = new Set<string>();
+  for (const view of textViews(bytes)) {
+    for (const finding of scanString(path, view, true)) {
+      if (seen.has(finding.rule)) continue;
+      seen.add(finding.rule);
+      found.push(finding);
+    }
+  }
   return found;
+}
+
+/**
+ * The ways a file's bytes read as text: Latin-1; UTF-16 decoded when there is a byte-order mark or the
+ * file is mostly NUL bytes; and the bytes with every NUL removed (when there are any).
+ */
+function textViews(bytes: Uint8Array): string[] {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const views = [buffer.toString("latin1")];
+  let nuls = 0;
+  let evenNuls = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0) {
+      nuls++;
+      if (i % 2 === 0) evenNuls++;
+    }
+  }
+  if (nuls === 0) return views;
+  const bom16le = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const bom16be = bytes[0] === 0xfe && bytes[1] === 0xff;
+  if (bom16le || bom16be || nuls / bytes.length >= 0.25) {
+    const bigEndian = bom16be || (!bom16le && evenNuls > nuls / 2);
+    views.push(new TextDecoder((bigEndian ? "utf-16be" : "utf-16le") as "utf-16le").decode(bytes));
+  }
+  views.push(Buffer.from(bytes.filter((b) => b !== 0)).toString("latin1"));
+  return views;
 }
 
 /** The findings for a value that is sent in the request itself (an argument, an environment value, a name). */

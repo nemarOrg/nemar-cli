@@ -155,6 +155,47 @@ describe("a clean folder passes, and so do the near-misses", () => {
   });
 });
 
+describe("text in other encodings", () => {
+  const body = `# settings\nname = x\ntoken = '${FAKES.github_token}'\n`;
+  const utf16le = (text: string, bom: boolean) =>
+    new Uint8Array([...(bom ? [0xff, 0xfe] : []), ...Buffer.from(text, "utf16le")]);
+  const utf16be = (text: string, bom: boolean) => {
+    const le = Buffer.from(text, "utf16le");
+    for (let i = 0; i + 1 < le.length; i += 2) {
+      const a = le[i] as number;
+      le[i] = le[i + 1] as number;
+      le[i + 1] = a;
+    }
+    return new Uint8Array([...(bom ? [0xfe, 0xff] : []), ...le]);
+  };
+
+  for (const [what, bytes] of [
+    ["UTF-16LE with a byte-order mark", utf16le(body, true)],
+    ["UTF-16LE without one", utf16le(body, false)],
+    ["UTF-16BE with a byte-order mark", utf16be(body, true)],
+    ["UTF-16BE without one", utf16be(body, false)],
+  ] as const) {
+    test(`${what}: found, at its line`, () => {
+      expect(scanFile("config.txt", bytes)).toEqual([
+        { rule: "github_token", where: "config.txt", line: 3 },
+      ]);
+    });
+  }
+
+  test("a key among NUL bytes in a binary file is found, and clean text in UTF-16 is not a finding", () => {
+    const bytes = new Uint8Array([0, 0, 1, ...enc("x"), 0, ...enc(FAKES.google_api_key), 0, 0]);
+    expect(scanFile("blob.bin", bytes).map((f) => f.rule)).toEqual(["google_api_key"]);
+    expect(scanFile("clean.txt", utf16le("just some text\nwith lines\n", true))).toEqual([]);
+  });
+
+  test("a rule found in two views is one finding", () => {
+    const both = new Uint8Array([...enc(`${FAKES.github_token}\n`), 0, ...enc("tail")]);
+    expect(scanFile("both.txt", both)).toEqual([
+      { rule: "github_token", where: "both.txt", line: 1 },
+    ]);
+  });
+});
+
 describe("credential file names", () => {
   const credentialNames = [
     ".env",
@@ -180,6 +221,11 @@ describe("credential file names", () => {
     "home/.aws/credentials",
     "secrets.json",
     "config/secrets.yaml",
+    ".envrc",
+    "prod.env",
+    "deploy/staging.ENV",
+    "credentials.json",
+    "gcp/service-account.json",
   ];
   for (const name of credentialNames) {
     test(`${name} is refused by name, whatever it holds`, () => {
@@ -201,6 +247,11 @@ describe("credential file names", () => {
       "key.py",
       "aws/credentials.md",
       "secrets.md",
+      "environment.py",
+      "my-env-notes.txt",
+      "credentials.md",
+      "service-account.md",
+      "envrc-notes.md",
       "README.md",
     ]) {
       expect(isCredentialFileName(name)).toBe(false);
