@@ -15,6 +15,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ComputeUserJobResponseSchema } from "../../shared/contract/compute-user";
+import { JOB_BY_ID_SQL } from "../src/services/compute-jobs";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { hashApiKey } from "../src/services/token";
 import { endedJob } from "./helpers/compute-ended";
@@ -26,6 +27,7 @@ import {
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
 import { type RoutesHandle, makeRoutesApp } from "./helpers/compute-routes-app";
+import { realD1, wrapD1 } from "./helpers/d1";
 
 let fx: LifecycleFixture;
 let routes: RoutesHandle;
@@ -117,6 +119,21 @@ describe("a stale live job is read back from Tapis", () => {
     expect(res.body.job.id).toBe(made.job.id);
   });
 
+  test("an unexpected failure of the refresh itself (the database refuses the lifecycle's read) serves the stored record with stale: true", async () => {
+    const { made } = await runningAtTapis();
+    stale(made.job.id);
+    const storedState = (await reread(made.env, made.job.id)).state;
+    // The refresh's first statement is `advanceComputeJob`'s read of the job row (`JOB_BY_ID_SQL`); the
+    // route's own statements are different text, so only the refresh meets the fault.
+    const faulty = wrapD1(realD1(fx.harness.db), (sql) => {
+      if (sql === JOB_BY_ID_SQL) throw new Error("the database refused");
+    });
+    const res = await detail(made, { DB: faulty });
+    expect(res.status).toBe(200);
+    expect(res.body.stale).toBe(true);
+    expect(res.body.job.state).toBe(storedState);
+  });
+
   test("in the read-only maintenance mode nothing is written: the stored record, stale: true, no call", async () => {
     const { made } = await runningAtTapis();
     stale(made.job.id);
@@ -142,19 +159,29 @@ describe("what is not read back", () => {
     expect(jobReads()).toBe(before);
   });
 
-  test("a terminal job is not read back", async () => {
+  test("a terminal job is not read back, and the read repairs nothing", async () => {
     const ended = await endedJob(fx, 30);
     stale(ended.job.id);
+    // A finished job whose launcher files were never copied is owed that copy; `advanceComputeJob` would
+    // make it, and a GET must not.
+    fx.harness.db
+      .query("UPDATE compute_jobs SET result_records_at = NULL WHERE id = ?")
+      .run(ended.job.id);
     const before = jobReads();
     const res = await detail(ended);
     expect(res.body.job.state).toBe("finished");
     expect(res.body.stale).toBe(false);
     expect(jobReads()).toBe(before);
+    expect((await reread(ended.env, ended.job.id)).result_records_at).toBeNull();
   });
 
   test("a job that never reached Tapis is shown as it is, and the read submits nothing", async () => {
     const made = await makeJob(fx);
     expect((await reread(made.env, made.job.id)).tapis_uuid).toBeNull();
+    // Old enough that the 60-second rule alone would read it: only "no Tapis job" keeps it from being asked.
+    fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-1 hour') WHERE id = ?")
+      .run(made.job.id);
     const res = await detail(made);
     expect(res.body.job.state).toBe("created");
     expect(res.body.stale).toBe(false);
