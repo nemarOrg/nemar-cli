@@ -28,9 +28,21 @@ import {
   seedComputeUsers,
 } from "./helpers/compute-app";
 import { type ComputeHarness, startComputeHarness } from "./helpers/compute-harness";
+import { seedPipelinesAccount } from "./helpers/compute-pipeline-fixture";
+import { fundPlatform, setPolicy } from "./helpers/compute-seed";
 import { type TapisStandin, startTapisStandin } from "./helpers/tapis-standin";
 
 const handle = makeComputeApp();
+
+/** A database with nothing set up: no account, no policy, no grant, and no secret in the environment. */
+const NO_PREREQUISITES = {
+  callback_secret: false,
+  api_base_url: false,
+  pipelines_account: false,
+  policy_set: false,
+  people_pool_granted: false,
+  pipelines_pool_granted: false,
+};
 
 let harness: ComputeHarness;
 let standin: TapisStandin;
@@ -140,6 +152,9 @@ describe("an unconfigured Worker", () => {
       storage: { records_binding: false, results_binding: true, signing_configured: true },
       access: { key_configured: false, resource_name_configured: false },
       runtime_image: { set: false, valid: false, digest: null },
+      prerequisites: NO_PREREQUISITES,
+      reconciliation: { paused: true },
+      attention: { access_reports_failed: 0 },
     });
     // The health call is the one request an address alone allows.
     expect(standin.log.map((r) => r.path)).toEqual(["/v3/jobs/healthcheck"]);
@@ -176,6 +191,9 @@ describe("an unconfigured Worker", () => {
         storage: { records_binding: false, results_binding: false, signing_configured: false },
         access: { key_configured: false, resource_name_configured: false },
         runtime_image: { set: false, valid: false, digest: null },
+        prerequisites: NO_PREREQUISITES,
+        reconciliation: { paused: true },
+        attention: { access_reports_failed: 0 },
       });
       expect(standin.log).toHaveLength(0);
     } finally {
@@ -191,6 +209,80 @@ describe("an unconfigured Worker", () => {
     const parsed = ComputeStatusResponseSchema.parse(future);
     expect((parsed as Record<string, unknown>).added).toBe(1);
     expect((parsed.tapis as Record<string, unknown>).added_too).toEqual([1]);
+  });
+});
+
+describe("what every launch needs besides the credential", () => {
+  const SECRET_MARK = "callback-secret-mark-7731";
+  const BASE_MARK = "https://api-base-mark-7731.invalid";
+
+  test("each prerequisite flips only its own flag, and no value is ever echoed", async () => {
+    const flags = async (over: Record<string, unknown> = {}) =>
+      (await status("admin", harness.env(over as never))).body;
+
+    expect((await flags()).prerequisites).toEqual(NO_PREREQUISITES);
+    const secret = await flags({ PRESCREEN_CALLBACK_SECRET: SECRET_MARK });
+    expect(secret.prerequisites).toEqual({ ...NO_PREREQUISITES, callback_secret: true });
+    const base = await flags({ API_BASE_URL: BASE_MARK });
+    expect(base.prerequisites).toEqual({ ...NO_PREREQUISITES, api_base_url: true });
+    // An empty or blank value is absent, like every other presence flag.
+    expect(
+      (await flags({ PRESCREEN_CALLBACK_SECRET: "  ", API_BASE_URL: "" })).prerequisites,
+    ).toEqual(NO_PREREQUISITES);
+    const both = await status(
+      "admin",
+      harness.env({ PRESCREEN_CALLBACK_SECRET: SECRET_MARK, API_BASE_URL: BASE_MARK } as never),
+    );
+    expect(both.text).not.toContain(SECRET_MARK);
+    expect(both.text).not.toContain("api-base-mark-7731");
+
+    // The account counts only when it is approved, not deleted and a service.
+    for (const bad of [{ kind: "person" }, { status: "pending" }, { deleted: true }]) {
+      await harness.reset();
+      await seedComputeUsers(harness.db);
+      await seedPipelinesAccount(harness.env(), bad);
+      expect([bad, (await flags()).prerequisites.pipelines_account]).toEqual([bad, false]);
+    }
+    await harness.reset();
+    const ids = await seedComputeUsers(harness.db);
+    await seedPipelinesAccount(harness.env());
+    expect((await flags()).prerequisites).toEqual({ ...NO_PREREQUISITES, pipelines_account: true });
+
+    // A policy version, and a grant on each platform budget, each alone.
+    await setPolicy(harness.env().DB, ids.owner, {});
+    expect((await flags()).prerequisites).toMatchObject({ policy_set: true });
+    await fundPlatform(harness.env().DB, "people", 1000, "gpu");
+    expect((await flags()).prerequisites).toMatchObject({
+      people_pool_granted: true,
+      pipelines_pool_granted: false,
+    });
+    await fundPlatform(harness.env().DB, "pipelines", 1000);
+    expect((await flags()).prerequisites).toEqual({
+      ...NO_PREREQUISITES,
+      pipelines_account: true,
+      policy_set: true,
+      people_pool_granted: true,
+      pipelines_pool_granted: true,
+    });
+  });
+
+  test("reconciliation is paused exactly while compute is off, and a failed ACCESS report is counted", async () => {
+    const off = await status("admin", harness.env({ ENVIRONMENT: "production" } as never));
+    expect(off.body.reconciliation).toEqual({ paused: true });
+    const on = await status(
+      "admin",
+      harness.env({ ENVIRONMENT: "production", COMPUTE_ENABLED: "1" } as never),
+    );
+    expect(on.body.reconciliation).toEqual({ paused: false });
+
+    expect(on.body.attention).toEqual({ access_reports_failed: 0 });
+    harness.db.run(
+      `INSERT INTO compute_access_reports (job_id, state, attempts, last_error_code)
+       VALUES ('job_00000000000000000000000a', 'failed', 3, 'outcome_unknown')`,
+    );
+    const failed = await status("admin", harness.env({ ENVIRONMENT: "production" } as never));
+    expect(failed.body.attention).toEqual({ access_reports_failed: 1 });
+    expect(ComputeStatusResponseSchema.safeParse(failed.body).success).toBe(true);
   });
 });
 

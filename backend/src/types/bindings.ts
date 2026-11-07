@@ -369,7 +369,10 @@ export interface Bindings {
   // unchanged so a deploy does not silently enable screening. With the publication review on
   // (PUBLICATION_REVIEW_ENABLED, below) it is not dispatched for a request the review covers.
   PRESCREEN_ENABLED?: string; // "true" enables the dispatch on publish request
-  PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; HMAC key for prescreen callback
+  PRESCREEN_CALLBACK_SECRET?: string; // Workers secret; the ONE HMAC key for every callback token:
+  // prescreen and pull-request review callbacks, and the compute gateway's job token (inside each
+  // running job's launch spec), Tapis webhook address and observer token. Rotating it kills all of
+  // them: drain running compute jobs first (compute-tokens.ts, ADR 0118 A5 amendment item 5).
 
   // Dataset pull-request review (ADR 0092). When PR_REVIEW_ENABLED is "1", a pull request opened
   // or updated against `main` of a dataset repository is reviewed by a model and the result is

@@ -26,6 +26,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
 import { SACCT_COLUMN_MAX, TRES_MAX } from "../../shared/contract/compute-observation";
+import { ComputeObserverIngestResponseSchema } from "../../shared/contract/compute-responses";
 import dailyFixture from "../../test/fixtures/compute-observation/daily.v1.json";
 import quickFixture from "../../test/fixtures/compute-observation/quick.v1.json";
 import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
@@ -365,10 +366,15 @@ describe("the wire", () => {
     expect((await counts()).snaps).toBe(0);
     const quickPost = await post(run.token, quickFixture);
     expect(quickPost.status).toBe(200);
-    expect(JSON.parse(quickPost.text)).toMatchObject({ snapshots: 4, sacctRows: 0 });
+    expect(JSON.parse(quickPost.text)).toMatchObject({ snapshots: 4, sacct_rows: 0 });
     expect((await counts()).snaps).toBe(4);
     const dailyPost = await post((await mint()).token, dailyFixture);
-    expect(JSON.parse(dailyPost.text)).toMatchObject({ snapshots: 4, sacctRows: 3 });
+    expect(JSON.parse(dailyPost.text)).toMatchObject({ snapshots: 4, sacct_rows: 3 });
+    // The answer is the contract's, in snake_case throughout (the observer drops the body; a reader that
+    // does not must not meet `sacctRows`).
+    const answer = JSON.parse(dailyPost.text);
+    expect(ComputeObserverIngestResponseSchema.safeParse(answer).success).toBe(true);
+    expect(Object.keys(answer).filter((k) => /[A-Z]/.test(k))).toEqual([]);
   });
 
   test("a v1 document with a field the observer does not write is refused, at every level, and names the path, never the value", async () => {
@@ -619,7 +625,7 @@ describe("the allocation string", () => {
       daily([acct("123_[1-5]", { alloc_tres: { cpu: "four" } }), acct(nextSlurm())]),
     );
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.text)).toMatchObject({ sacctRows: 1, skipped: 1 });
+    expect(JSON.parse(res.text)).toMatchObject({ sacct_rows: 1, skipped: 1 });
   });
 });
 
@@ -630,7 +636,7 @@ describe("the mapping from the document to the rows", () => {
     expect(res.status).toBe(200);
     expect(JSON.parse(res.text)).toMatchObject({
       snapshots: 4,
-      sacctRows: 3,
+      sacct_rows: 3,
       skipped: 0,
       unmatched: 3,
     });
@@ -756,7 +762,7 @@ describe("the mapping from the document to the rows", () => {
       ]),
     );
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.text)).toMatchObject({ sacctRows: 2, skipped: 7 });
+    expect(JSON.parse(res.text)).toMatchObject({ sacct_rows: 2, skipped: 7 });
     expect(
       fx.harness.db
         .query("SELECT slurm_job_id FROM compute_sacct_rows ORDER BY slurm_job_id")
@@ -769,7 +775,8 @@ describe("the mapping from the document to the rows", () => {
     doc.accounting.truncated = true;
     doc.accounting.rows_total = 9000;
     const res = await post((await mint()).token, doc);
-    expect(JSON.parse(res.text)).toMatchObject({ ok: true, truncated: true, sacctRows: 1 });
+    expect(JSON.parse(res.text)).toMatchObject({ ok: true, truncated: true, sacct_rows: 1 });
+    expect(ComputeObserverIngestResponseSchema.safeParse(JSON.parse(res.text)).success).toBe(true);
     const plain = await post((await mint()).token, daily([acct(nextSlurm())]));
     expect(JSON.parse(plain.text).truncated).toBeUndefined();
   });
@@ -781,7 +788,7 @@ describe("the mapping from the document to the rows", () => {
       sources: { ...dailyFixture.sources, sacct: { status: "failed", detail: "exit_1" } },
     };
     const res = await post((await mint()).token, doc);
-    expect(JSON.parse(res.text)).toMatchObject({ snapshots: 4, sacctRows: 0 });
+    expect(JSON.parse(res.text)).toMatchObject({ snapshots: 4, sacct_rows: 0 });
   });
 
   test("nothing of the token or the document's text reaches the logs", async () => {
@@ -1191,10 +1198,11 @@ describe("a failure partway through a post", () => {
     );
     expect(res.status).toBe(200);
     expect(JSON.parse(res.text)).toMatchObject({
-      settlementFailed: true,
-      sacctRows: 1,
+      settlement_failed: true,
+      sacct_rows: 1,
       settled: 0,
     });
+    expect(ComputeObserverIngestResponseSchema.safeParse(JSON.parse(res.text)).success).toBe(true);
     expect(res.text).not.toContain("store down");
     expect((await counts()).rows).toBe(1);
     expect((await reread(j.env, j.job.id)).settled_final_at).toBeNull();

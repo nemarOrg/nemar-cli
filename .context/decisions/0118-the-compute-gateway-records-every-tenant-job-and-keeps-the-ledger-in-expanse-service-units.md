@@ -31,15 +31,25 @@ Tapis has no allocations and no idempotency key, signs no webhook, lets a job's 
 7. **Retention is a policy row, not a constant**: records 7 years, logs 1 year, results 30 days and never fewer than 14.
    Storage is two private Cloudflare R2 buckets, records (locked by prefix) and results (expiring), outside the Amazon Web Services (AWS) account that holds the Open Data buckets.
    Only the Worker reaches them, through bindings, and no storage credential reaches Tapis, a node or the launcher: uploads go to addresses the Worker signs for one file of one job.
-8. **`COMPUTE_ENABLED` is a dark switch**: exactly `1` and absent from the wrangler configuration. The switch and the test that pins it arrive in phase A4 (issue #2009); every compute cron runs in production only.
+8. **`COMPUTE_ENABLED` is a dark switch**: exactly `1` and absent from the wrangler configuration. The switch and the test that pins it landed in phase A4 (issue #2009); every compute cron runs in production only.
 9. **NEMAR reports ACCESS gateway attributes for every tenant job**, once, under a per-account pseudonym that is not the sign-in subject.
-10. **Every compute word is declared once**, in `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words), `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes) `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte) and `shared/contract/compute-admin.ts` (the allocation routes' error words, request shapes and open response schemas; a module of words and of open schemas only, never of a strict one).
+10. **Every compute word is declared once**, in one of these modules:
+   `shared/compute-state.ts` (states, failure, refusal, ledger and cancel words);
+   `shared/contract/compute.ts` (the job specification, partition and rate tables, owner policy and launcher file shapes);
+   `shared/contract/compute-launch.ts` (the launch specification and the launcher's routes, with their JSON Schema, which `nemarOrg/nemar-process` copies byte for byte);
+   `shared/contract/compute-admin.ts` (the allocation, reporting, status and pipeline routes' error words, request shapes and open response schemas; a module of words and of open schemas only, never of a strict one);
+   `shared/compute-header.ts` (the inline job header a script states its resources in, read by the CLI and the Worker alike);
+   `shared/compute-recipes.ts` (the pipeline recipe registry, the stamp states and the recipe's argument words);
+   `shared/contract/compute-observation.ts` (the observer's document, with its JSON Schema shared byte for byte with `nemarOrg/nemar-process`);
+   `shared/contract/compute-responses.ts` (the open response schemas of a person's cancel and links and of the observer's answer).
 11. **Two digests, named apart.** `spec_digest` is the job row's: the SHA-256 of the exact bytes of `records/<id>/spec.json`. `launch_spec_digest` is the launcher's: the SHA-256 of the exact raw bytes of the `NEMAR_LAUNCH_SPEC` value, which is ASCII-only JSON, hashed before parsing.
 12. **Responses are open, requests and documents are closed.** The two responses a launcher reads ignore unknown keys, so one that runs for 48 hours survives the Worker adding a key; the job specification, owner policy, launch specification and the launcher's own files refuse them.
 13. **Launcher details are declared and classified, in `shared/compute-state.ts`.**
    `LAUNCHER_DETAILS` maps each of the seven launcher codes to the fixed-word details it may carry, and `PLATFORM_LAUNCHER_DETAILS` is the subset that is a NEMAR, node, runtime or contract fault.
    The rule: a detail is the platform's if and only if a submitter cannot cause it with a valid specification and bundle, and a dataset that was eligible when the job was submitted.
-   The Worker refuses at submit, with its own refusal `dataset_not_eligible`, any dataset that is not public and published, any version that is not published, and any manifest over 38,000 entries; so `dataset_not_found` and the manifest-too-large case cannot be a submitter's doing and stay declared as the platform's.
+   That rests on an eligibility gate at submit, and today the gate runs on the pipeline path only: `resolveRun` in `compute-pipeline.ts` refuses with `dataset_not_eligible` a dataset that is not eligible (ADR 0065 and the pipeline predicate), `version_not_found` or `version_untagged` for a version that is not published or has no data-plane tag, and `too_many_files` for a manifest over 38,000 entries (`PIPELINE_MANIFEST_MAX_ENTRIES`).
+   `createJob` does not apply it: it leaves the check to its caller, and no person-facing submit route exists until Epic D3 (#2024).
+   So the classification is a REQUIREMENT on that route, which must call the same eligibility check before it creates a job (the hand-off is on #2024), and until it does, `dataset_not_found` and the manifest-too-large case are declared as the platform's only because the one submitter that is reachable, NEMAR's own pipeline, passes the gate; a person's job cannot reach them yet.
    `isPlatformFailure(code, detail)` follows it: a platform detail is refunded even under `runtime_error` **["refunded" superseded by the A5 amendment of 2026-11-04 (#2010), item 1: it is attributed to the platform, flagged, and not refunded]**, a submitter detail is charged even under `code_fetch_failed` or `dataset_fetch_failed`, and a missing or undeclared detail leaves the code alone to decide, as before.
    The result refusal details stay as they were.
    The Worker's own cancel record overrules the launcher's `terminated` detail, because the launcher cannot tell a cancel by the person from a Slurm preemption.
@@ -216,6 +226,12 @@ What the build settled, each a rule and not a description of today:
    The webhook address carries an HMAC token (domain tag `compute-webhook`, over the job id and the job's `webhook_nonce`, no clock) and the launcher's `job_token` is the same construction under the tag `compute-job`, under the callback secret that signs every other callback; the nonce is cleared one day after the job is terminal, which is when the address stops working.
    The route ignores the body, answers one identical refusal for every failure, reads the job back from Tapis (one attempt, a short ceiling) and calls `applyTapisJob`, which the 30-minute tick, a cancel and an administrator's command call too.
    `applyTapisJob` writes `WHERE id = ? AND state = <from>` along the edges of `COMPUTE_TRANSITIONS`, so a repeated, reordered or concurrent writer changes nothing, and a subscription that cannot be deduplicated is harmless.
+   **One secret signs three kinds of token, so it cannot be rotated while a job runs.**
+   `PRESCREEN_CALLBACK_SECRET` signs the webhook token, the launcher's `job_token` and the observer's run token (domain-separated by their tags), and the prescreen and pull-request review callbacks as well.
+   The job token is written into the job's launch specification once, at submit, and that text is never re-signed.
+   Rotating the secret therefore refuses every running job's uploads (the job ends `result_upload_failed` and is charged, as any upload failure is), stops the webhook addresses registered with Tapis (the 30-minute poll remains), and refuses an observer token already minted.
+   The safe rotation: switch compute off, let the running jobs drain (none `submitted`, `queued`, `running`, `archiving` or `unreported`), change the secret, mint observer tokens afterwards, switch compute on; for a suspected leak, cancel the running jobs first and accept the cost.
+   `.rules/revocation.md`, `compute-tokens.ts` and the binding's comment say the same.
 6. **A terminal transition and its settlement are one batch.**
    The state UPDATE, the ledger entry (a charge, or a release for a job that never started) gated on the job row having just taken the new state and not being settled, and the stamp of what was settled run in one D1 batch; a retry repairs a terminal row whose `settled_provisional_at` is still NULL.
 7. **A Tapis `FINISHED` stands only after the upload is verified.**
@@ -240,6 +256,22 @@ What the build settled, each a rule and not a description of today:
 11. **Read-only maintenance mode lets a running job finish.**
     The three launcher callbacks (`POST /compute/jobs/<job id>/bundle`, `/outputs` and `/outputs/complete`) stay open in `read-only` mode by an exact pattern, for POST and a well-formed job id only: a job already on a cluster has nowhere to hold its results, and a launcher refused there would fail a job that did nothing wrong.
     The person's own `cancel` and `links` stay blocked like any other write, and `full` mode refuses all three callbacks with everything else.
+    **What each maintenance mode does to the rest of compute** (verified against `middleware/maintenance.ts` and the crons on 2026-11-06; the middleware, and the service-binding entrypoint beside it, are the Worker's only readers of `MAINTENANCE_MODE`; no cron reads it):
+
+    | Surface | `read-only` | `full` |
+    |---|---|---|
+    | Launcher callbacks (`POST /compute/jobs/<id>/bundle`, `outputs`, `outputs/complete`) | open, by exact shape | 503: the launcher's upload fails and the job ends `result_upload_failed`, charged what it used, with no refund |
+    | A person's `cancel` and `links` | 503 | 503 |
+    | Tapis webhook (`POST /webhooks/tapis/<job id>/<token>`) | open: it passes the `/webhooks/` allowlist, and it WRITES (the job's state, and its settlement or release in the ledger) | 503; the job's end is then seen by the poll after the mode ends |
+    | The observer (`POST /compute/observer`) | 503: a write, not on any allowlist, so the day's settlement waits for a post after the mode ends (its token is good for an hour) | 503 |
+    | Administrator routes (`/admin/compute/*`, including the ledger-writing ones: pool grant and adjust, `jobs advance` and `cancel`, the pipeline run, holds, observer mint, the ACCESS re-queue) | open: the `/admin/` prefix is allowlisted, so they write | 503 |
+    | Crons (the 30-minute tick, the daily jobs) | run | run |
+
+    The crons do not read `MAINTENANCE_MODE` at all: the advance tick, the cancel sweep, the ACCESS reporter, the tenant sweep and the retention sweep run and write in every mode, which is deliberate for a job already on a cluster and means maintenance does not freeze the ledger.
+    Anyone who needs the ledger frozen turns the compute switch off, which stops new holds and submits but not these.
+    `LAUNCHER_CALLBACK_RE` is anchored at `/compute`, so the `/nemar/compute/...` spelling of the same route (the API is mounted at `/` and at `/nemar`, and middleware sees the full path) is not matched and is refused in `read-only`; the same is true of the `/admin/`, `/webhooks/` and `/auth/login` allowlists.
+    That is not a defect today and the regex is unchanged: the launcher and the Tapis webhook address are built from `API_BASE_URL`, which has no prefix, so no caller uses the `/nemar` spelling, and the miss is in the safe direction (blocked, never opened).
+    A deployment whose `API_BASE_URL` gains the `/nemar` prefix has to widen every allowlist at once, not this pattern alone (`.memory/api-mounted-twice-full-path.md`).
 12. **The webhook token is redacted from this Worker's access log.**
     The Tapis webhook address carries its token in the path, because Tapis does not sign webhooks, so the Worker's access logger and the maintenance refusal line print `/webhooks/tapis/<job id>/[redacted]`.
     The token is bound to the job's nonce, dies a day after the job ends and can only make the Worker read the job back from Tapis, so a leaked one is a nuisance and not a breach.

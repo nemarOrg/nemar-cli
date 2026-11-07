@@ -373,8 +373,23 @@ describe("report", () => {
     );
     expect(r.status).toBe(200);
     expect(ComputeAccountReportResponseSchema.safeParse(r.body).success).toBe(true);
-    expect(r.body.totals).toEqual({ jobs: 2, charged_milli: 4000 });
-    expect(r.body.by_pool).toEqual({ cpu: { jobs: 2, charged_milli: 4000 } });
+    // Both jobs are still held and unsettled (makeJob leaves the hold open): they have charged what the
+    // test wrote into the column, and the report says they are not final and what they still hold.
+    const held = sql.one<{ h: number }>(
+      "SELECT SUM(held_milli) AS h FROM compute_jobs WHERE account_id = ?",
+      a.accountId,
+    ).h;
+    expect(held).toBeGreaterThan(0);
+    expect(r.body.totals).toEqual({
+      jobs: 2,
+      charged_milli: 4000,
+      unsettled: 2,
+      open_hold_milli: held,
+    });
+    expect(r.body.by_pool).toEqual({
+      cpu: { jobs: 2, charged_milli: 4000, unsettled: 2, open_hold_milli: held },
+    });
+    expect(r.body.jobs.map((j: { settled: boolean }) => j.settled)).toEqual([false, false]);
     expect(r.body.jobs.map((j: { id: string }) => j.id)).toEqual([a.job.id, a2.job.id]);
     expect(r.body.truncated).toBe(false);
     // Outside the range there is nothing.
@@ -383,8 +398,53 @@ describe("report", () => {
       `/compute/report?account=${a.accountId}&from=2026-11-01&to=2026-11-30`,
       "admin",
     );
-    expect(none.body.totals).toEqual({ jobs: 0, charged_milli: 0 });
+    expect(none.body.totals).toEqual({
+      jobs: 0,
+      charged_milli: 0,
+      unsettled: 0,
+      open_hold_milli: 0,
+    });
     expectNoIdentity(r.text);
+  });
+
+  test("a settled job holds nothing and is not counted unsettled; an unsettled one shows its hold", async () => {
+    const settled = await endedJob(fx, 30);
+    const running = await makeJob(fx);
+    sql.run(
+      "UPDATE compute_jobs SET account_id = ? WHERE id = ?",
+      settled.accountId,
+      running.job.id,
+    );
+    sql.run(
+      "UPDATE compute_jobs SET flag_mismatch = 1, flag_unreserved = 1 WHERE id = ?",
+      running.job.id,
+    );
+    const r = await call(
+      "GET",
+      `/compute/report?account=${settled.accountId}&from=2000-01-01&to=2100-01-01`,
+      "admin",
+    );
+    expect(r.status).toBe(200);
+    const byId = Object.fromEntries(r.body.jobs.map((j: { id: string }) => [j.id, j])) as Record<
+      string,
+      { settled: boolean; open_hold_milli: number; charged_milli: number }
+    >;
+    expect(byId[settled.job.id]?.settled).toBe(true);
+    expect(byId[settled.job.id]?.open_hold_milli).toBe(0);
+    expect(byId[settled.job.id]?.charged_milli).toBeGreaterThan(0);
+    expect(byId[running.job.id]?.settled).toBe(false);
+    expect(byId[running.job.id]?.charged_milli).toBe(0);
+    const held = sql.one<{ h: number }>(
+      "SELECT held_milli AS h FROM compute_jobs WHERE id = ?",
+      running.job.id,
+    ).h;
+    expect(byId[running.job.id]?.open_hold_milli).toBe(held);
+    // The flags come from the columns by the one map the job view uses, in the declared order.
+    const flagsOfJob = (id: string) => r.body.jobs.find((j: { id: string }) => j.id === id).flags;
+    expect(flagsOfJob(running.job.id)).toEqual(["unreserved", "mismatch"]);
+    expect(flagsOfJob(settled.job.id)).toEqual([]);
+    expect(r.body.totals.unsettled).toBe(1);
+    expect(r.body.totals.open_hold_milli).toBe(held);
   });
 
   test("an account, a date that is not one, and a missing parameter are refused", async () => {
@@ -428,16 +488,17 @@ describe("access-report", () => {
     sql.run("UPDATE compute_jobs SET flag_unattributed = 1 WHERE id = ?", c.job.id);
     sql.run("UPDATE compute_jobs SET flag_unreserved = 1 WHERE id = ?", d.job.id);
     sql.run("UPDATE compute_jobs SET source = 'web' WHERE id = ?", a3.job.id);
-    for (const j of [a, a2, a3, b, c, d]) {
+    for (const [i, j] of [a, a2, a3, b, c, d].entries()) {
       sql.run(
-        "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        "UPDATE compute_jobs SET slurm_job_id = ?, remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        `${5000 + i}`,
         j.job.id,
       );
     }
     // Outside the quarter.
     const old = await makeJob(fx);
     sql.run(
-      "UPDATE compute_jobs SET submitted_at = '2026-09-30 23:59:59' WHERE id = ?",
+      "UPDATE compute_jobs SET slurm_job_id = '4999', remote_submitted_at = '2026-09-30 23:59:59' WHERE id = ?",
       old.job.id,
     );
     const neverSubmitted = await makeJob(fx);
@@ -457,6 +518,29 @@ describe("access-report", () => {
     expectNoIdentity(r.text);
     const q3 = await call("GET", "/compute/access-report?quarter=2026Q3", "admin");
     expect(q3.body.totals).toEqual({ distinct_users: 1, jobs: 1 });
+  });
+
+  test("counts what ACCESS is told: a Slurm id and the scheduler's own time, in UTC, not NEMAR's bind time", async () => {
+    // Accepted by Tapis (submitted_at set) and then failed in staging: no Slurm id, nothing was told to
+    // ACCESS, so the report must not count it.
+    const staged = await makeJob(fx);
+    sql.run(
+      "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00', remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+      staged.job.id,
+    );
+    // Bound to Tapis at 23:58 on 31 December, scheduled at 00:01 on 1 January: ACCESS was sent the
+    // January time, so the job belongs to Q1 and not to Q4.
+    const straddle = await makeJob(fx);
+    sql.run(
+      `UPDATE compute_jobs SET submitted_at = '2026-12-31 23:58:00', slurm_job_id = '7001',
+              remote_submitted_at = '2027-01-01 00:01:00' WHERE id = ?`,
+      straddle.job.id,
+    );
+    const q4 = await call("GET", "/compute/access-report?quarter=2026Q4", "admin");
+    expect(q4.status).toBe(200);
+    expect(q4.body.totals).toEqual({ distinct_users: 0, jobs: 0 });
+    const q1 = await call("GET", "/compute/access-report?quarter=2027Q1", "admin");
+    expect(q1.body.totals).toEqual({ distinct_users: 1, jobs: 1 });
   });
 
   test("a quarter that is not one is refused", async () => {
@@ -511,6 +595,31 @@ describe("legal holds", () => {
         )
         .map((a) => a.action),
     ).toEqual(["compute.hold.place", "compute.hold.release"]);
+  });
+
+  test("a list of more than 200 active holds is the oldest 200 and SAYS it is cut; 200 exactly is not cut", async () => {
+    for (let i = 1; i <= 201; i++) {
+      sql.run(
+        "INSERT INTO compute_legal_holds (scope, ref, reason, placed_by) VALUES ('account', ?, 'legal_request', 1)",
+        String(i),
+      );
+    }
+    const cut = await call("GET", "/compute/holds", "admin");
+    expect(cut.status).toBe(200);
+    expect(ComputeHoldsResponseSchema.safeParse(cut.body).success).toBe(true);
+    expect(cut.body.holds).toHaveLength(200);
+    expect(cut.body.truncated).toBe(true);
+    // Oldest first: the 201st hold is the one left out.
+    expect(cut.body.holds[0].ref).toBe("1");
+    expect(cut.body.holds[199].ref).toBe("200");
+    // A filter that names one target is not cut, and a list of exactly 200 is not either.
+    const one = await call("GET", "/compute/holds?scope=account&ref=201", "admin");
+    expect(one.body.holds).toHaveLength(1);
+    expect(one.body.truncated).toBe(false);
+    sql.run("UPDATE compute_legal_holds SET released_at = datetime('now') WHERE ref = '201'");
+    const exact = await call("GET", "/compute/holds", "admin");
+    expect(exact.body.holds).toHaveLength(200);
+    expect(exact.body.truncated).toBe(false);
   });
 
   test("an account hold, a second hold, a target that is not there and a ref that is not a ref", async () => {

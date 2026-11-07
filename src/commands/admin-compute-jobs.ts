@@ -384,22 +384,55 @@ jobsCommand
               `${plain(String(l.reason ?? ""))}  ${plain(String(l.created_at))}`,
           );
         }
+        // A null value has two causes the Worker names: the object is not there (`missing`) or is there
+        // and cannot be read (`unreadable`). An older Worker names neither, and prints as before.
         say(
-          `  provenance: ${res.provenance === null ? "none" : plain(JSON.stringify(res.provenance))}`,
+          `  provenance: ${
+            res.provenance === null
+              ? recordAbsence(res.provenance_status)
+              : plain(JSON.stringify(res.provenance))
+          }`,
         );
         say(
-          `  manifest: ${res.manifest === null ? "none" : `${res.manifest.files} file(s), ${res.manifest.bytes} bytes`}`,
+          `  manifest: ${
+            res.manifest === null
+              ? recordAbsence(res.manifest_status)
+              : `${res.manifest.files} file(s), ${res.manifest.bytes} bytes`
+          }`,
         );
+        if (typeof res.retention_until === "string") {
+          say(`  records kept until: ${plain(res.retention_until)}`);
+        }
+        if (Array.isArray(res.launcher_files) && res.launcher_files.length > 0) {
+          say(`  launcher files: ${res.launcher_files.map(plain).join(", ")}`);
+        }
       } catch (err) {
         failWith(err, null, "Could not read the record.", undefined, { json });
       }
     },
   );
 
+/** ", N not settled, X SU still held" for a total or a pool with open holds, and nothing when none is open. */
+function unsettledNote(t: { unsettled?: unknown; open_hold_milli?: unknown }): string {
+  const n = Number(t.unsettled ?? 0);
+  return n > 0
+    ? `, ${n} not settled (${formatSu(Number(t.open_hold_milli ?? 0))} SU still held)`
+    : "";
+}
+
+/** Why a record's value is absent from a summary, in words that keep a missing file apart from a broken one. */
+function recordAbsence(status: string | undefined): string {
+  if (status === "missing") return "missing (no such record)";
+  if (status === "unreadable") return "unreadable (present but not readable as expected)";
+  return "none";
+}
+
 const REPORT_HELP = `
 One account's jobs created from --from to the end of --to (dates, YYYY-MM-DD), the SU they were charged
 by pool, and one line for each job. --csv prints the lines as comma-separated values (id, created, ended,
-state, partition, pool, source, SU charged, flags) and nothing else. No identity is shown.
+state, partition, pool, source, SU charged, settled, SU still held, flags) and nothing else. A job that is
+not settled yet has charged nothing so far and still holds SU: the totals count those jobs and the SU they
+hold, so a running account does not look cheaper than it is. No identity is shown.
 
 Exit codes:
   0  reported.
@@ -449,6 +482,8 @@ jobsCommand
               "pool",
               "source",
               "su_charged",
+              "settled",
+              "su_held",
               "flags",
             ],
             ...jobs.map((j) => [
@@ -460,23 +495,29 @@ jobsCommand
               String(j.pool),
               String(j.source),
               formatSu(Number(j.charged_milli)),
+              j.settled === false ? "no" : "yes",
+              formatSu(Number(j.open_hold_milli ?? 0)),
               Array.isArray(j.flags) ? j.flags.join(" ") : "",
             ]),
           ]);
           return;
         }
         say(
-          `account ${res.account_id}, ${plain(res.from)} to ${plain(res.to)}: ${res.totals.jobs} job(s), ${formatSu(res.totals.charged_milli)} SU`,
+          `account ${res.account_id}, ${plain(res.from)} to ${plain(res.to)}: ${res.totals.jobs} job(s), ${formatSu(res.totals.charged_milli)} SU charged${unsettledNote(res.totals)}`,
         );
         for (const [pool, t] of Object.entries(res.by_pool)) {
           const row = t as Record<string, unknown>;
           say(
-            `  ${plain(pool)}: ${Number(row.jobs)} job(s), ${formatSu(Number(row.charged_milli))} SU`,
+            `  ${plain(pool)}: ${Number(row.jobs)} job(s), ${formatSu(Number(row.charged_milli))} SU charged${unsettledNote(row)}`,
           );
         }
         for (const j of jobs) {
+          const note =
+            j.settled === false
+              ? `  (not settled, ${formatSu(Number(j.open_hold_milli ?? 0))} SU held)`
+              : "";
           say(
-            `  ${plain(String(j.id))}  ${plain(String(j.state))}  ${plain(String(j.partition))}  ${formatSu(Number(j.charged_milli))} SU  ${plain(String(j.created_at))}`,
+            `  ${plain(String(j.id))}  ${plain(String(j.state))}  ${plain(String(j.partition))}  ${formatSu(Number(j.charged_milli))} SU${note}  ${plain(String(j.created_at))}`,
           );
         }
         if (res.truncated) say("  (the list is cut at 5,000 jobs; narrow the range)");
@@ -487,7 +528,8 @@ jobsCommand
   );
 
 const ACCESS_REPORT_HELP = `
-For ACCESS, the jobs submitted to the scheduler in a quarter (--quarter 2026Q4): the distinct gateway
+For ACCESS, the jobs the scheduler took in a quarter (--quarter 2026Q4, by the scheduler's own submission
+time in UTC, and only jobs with a Slurm job id, as reported to ACCESS): the distinct gateway
 users (pseudonyms, counted and never listed) and the jobs, by partition and source. A person is counted
 once however many jobs they ran. A job that skipped the reservation or whose owner NEMAR could not
 attribute is left out. --csv prints quarter, partition, source, distinct users and jobs, then a total.
@@ -649,6 +691,11 @@ jobsCommand
           `${h.id}  ${plain(h.scope)}:${plain(h.ref)}  ${plain(h.reason)}  placed ${plain(h.placed_at)}`,
         );
       }
+      if (res.truncated === true) {
+        say(
+          `The list is cut at the oldest ${res.holds.length} active holds; there are more. A target's own hold is found with release-hold <target>.`,
+        );
+      }
     } catch (err) {
       failWith(err, null, "Could not list the holds.", undefined, { json });
     }
@@ -660,8 +707,9 @@ their fixed word:
   outcome_unknown   the request may or may not have been recorded; it is NEVER sent again by code
   no_gateway_user   the job has no pseudonym to report (a partner's job with no account)
   no_submit_time    the scheduler's submission time never showed
-  unconfigured, refused, busy, unavailable   the retry classes, once their attempts ran out
-A failed report is not retried. If you have confirmed with ACCESS that one was NOT recorded, the owner
+  refused, busy, unavailable   the retry classes, once their attempts ran out
+("unconfigured" is a word of a PENDING report that waits for the ACCESS key and resource name; a failed
+report never carries it.) A failed report is not retried. If you have confirmed with ACCESS that one was NOT recorded, the owner
 re-queues it with requeue-access-report.
 
 Exit codes:

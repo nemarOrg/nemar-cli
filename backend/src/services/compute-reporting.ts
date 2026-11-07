@@ -28,10 +28,12 @@ import {
   type ComputeJobFlag,
   type ComputeState,
 } from "../../../shared/compute-state.js";
+import type { ComputeRecordStatus } from "../../../shared/contract/compute-admin.js";
 import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
 import { LAUNCHER_FILES, RECORDS_RESULT_MANIFEST_FILE } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
+import { FLAG_COLUMN, type FlagColumns, flagsOf } from "./compute-job-flags.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
 import { ACTIVE_OWNER_SQL, heldSql } from "./compute-legal-holds.js";
 import { jobView } from "./compute-lifecycle.js";
@@ -43,13 +45,6 @@ export const REPORT_PAGE_MAX = 200;
 export const ACCOUNT_REPORT_ROWS_MAX = 5000;
 
 // --- Jobs -----------------------------------------------------------------------------------------------
-
-const FLAG_COLUMN: Record<ComputeJobFlag, string> = {
-  unreserved: "flag_unreserved",
-  unattributed: "flag_unattributed",
-  mismatch: "flag_mismatch",
-  overrun: "flag_overrun",
-};
 
 export interface JobListQuery {
   flag?: ComputeJobFlag;
@@ -188,6 +183,11 @@ async function readJsonRecord(
   }
 }
 
+/** A record that was read but whose value is not the shape a summary needs is unreadable, not present. */
+function statusOf(kind: ComputeRecordStatus, view: unknown): ComputeRecordStatus {
+  return kind === "ok" && view === null ? "unreadable" : kind;
+}
+
 export interface LedgerLine {
   id: number;
   kind: string;
@@ -256,9 +256,9 @@ export async function recordSummary(env: Bindings, job: ComputeJobRow) {
     },
     ledger,
     provenance: provenanceView,
-    provenance_status: provenance.kind === "ok" ? "ok" : provenance.kind,
+    provenance_status: statusOf(provenance.kind, provenanceView),
     manifest: manifestView,
-    manifest_status: manifest.kind === "ok" && manifestView === null ? "unreadable" : manifest.kind,
+    manifest_status: statusOf(manifest.kind, manifestView),
     legal_hold: (held?.held ?? 0) === 1,
     retention_until: job.retention_until,
     // Every launcher file name, so a reader of the summary knows which records exist to be asked for.
@@ -272,8 +272,17 @@ export interface AccountReport {
   account_id: number;
   from: string;
   to: string;
-  totals: { jobs: number; charged_milli: number };
-  by_pool: Record<string, { jobs: number; charged_milli: number }>;
+  /**
+   * `charged_milli` is what is CHARGED so far. A job whose settlement has not been written still has
+   * its hold open and charges 0, so `unsettled` counts those jobs and `open_hold_milli` is what they
+   * still hold: the account has used at least `charged_milli` and may owe up to
+   * `charged_milli + open_hold_milli`.
+   */
+  totals: { jobs: number; charged_milli: number; unsettled: number; open_hold_milli: number };
+  by_pool: Record<
+    string,
+    { jobs: number; charged_milli: number; unsettled: number; open_hold_milli: number }
+  >;
   jobs: Array<{
     id: string;
     created_at: string;
@@ -283,6 +292,10 @@ export interface AccountReport {
     pool: string;
     source: string;
     charged_milli: number;
+    /** False while the job's hold is open: `charged_milli` is not its final figure yet. */
+    settled: boolean;
+    /** The hold the job still has open: 0 once it is settled (the hold was closed by the settlement). */
+    open_hold_milli: number;
     flags: string[];
   }>;
   truncated: boolean;
@@ -297,45 +310,43 @@ export async function accountReport(
     await db
       .prepare(
         `SELECT id, created_at, ended_at, state, partition, pool, source, charged_milli,
-                flag_unreserved, flag_unattributed, flag_mismatch, flag_overrun
+                held_milli, settled_provisional_at, flag_unreserved, flag_unattributed, flag_mismatch, flag_overrun
            FROM compute_jobs
           WHERE account_id = ?1 AND created_at >= ?2 AND created_at < date(?3, '+1 day')
           ORDER BY created_at ASC, id ASC LIMIT ?4`,
       )
       .bind(input.account, input.from, input.to, ACCOUNT_REPORT_ROWS_MAX + 1)
-      .all<{
-        id: string;
-        created_at: string;
-        ended_at: string | null;
-        state: string;
-        partition: string;
-        pool: string;
-        source: string;
-        charged_milli: number;
-        flag_unreserved: number;
-        flag_unattributed: number;
-        flag_mismatch: number;
-        flag_overrun: number;
-      }>()
+      .all<
+        FlagColumns & {
+          id: string;
+          created_at: string;
+          ended_at: string | null;
+          state: string;
+          partition: string;
+          pool: string;
+          source: string;
+          charged_milli: number;
+          held_milli: number;
+          settled_provisional_at: string | null;
+        }
+      >()
   ).results;
   const truncated = rows.length > ACCOUNT_REPORT_ROWS_MAX;
   const page = rows.slice(0, ACCOUNT_REPORT_ROWS_MAX);
   const byPool: AccountReport["by_pool"] = {};
-  let charged = 0;
-  for (const r of page) {
-    const entry = byPool[r.pool] ?? { jobs: 0, charged_milli: 0 };
+  const totals = { jobs: 0, charged_milli: 0, unsettled: 0, open_hold_milli: 0 };
+  const jobs = page.map((r) => {
+    const settled = r.settled_provisional_at !== null;
+    const openHold = settled ? 0 : r.held_milli;
+    const entry = byPool[r.pool] ?? { jobs: 0, charged_milli: 0, unsettled: 0, open_hold_milli: 0 };
     byPool[r.pool] = entry;
-    entry.jobs++;
-    entry.charged_milli += r.charged_milli;
-    charged += r.charged_milli;
-  }
-  return {
-    account_id: input.account,
-    from: input.from,
-    to: input.to,
-    totals: { jobs: page.length, charged_milli: charged },
-    by_pool: byPool,
-    jobs: page.map((r) => ({
+    for (const t of [entry, totals]) {
+      t.jobs++;
+      t.charged_milli += r.charged_milli;
+      t.open_hold_milli += openHold;
+      if (!settled) t.unsettled++;
+    }
+    return {
       id: r.id,
       created_at: r.created_at,
       ended_at: r.ended_at,
@@ -344,10 +355,18 @@ export async function accountReport(
       pool: r.pool,
       source: r.source,
       charged_milli: r.charged_milli,
-      flags: COMPUTE_JOB_FLAGS.filter(
-        (f) => (r as unknown as Record<string, number>)[FLAG_COLUMN[f]] === 1,
-      ),
-    })),
+      settled,
+      open_hold_milli: openHold,
+      flags: flagsOf(r),
+    };
+  });
+  return {
+    account_id: input.account,
+    from: input.from,
+    to: input.to,
+    totals,
+    by_pool: byPool,
+    jobs,
     truncated,
   };
 }
@@ -378,15 +397,19 @@ export interface AccessReport {
 }
 
 /**
- * For ACCESS, jobs submitted to the scheduler in the quarter: the distinct gateway users (pseudonyms,
- * counted and never listed) and the jobs, by partition and source. A job that skipped the reservation or
+ * For ACCESS, the jobs the scheduler took in the quarter: the distinct gateway users (pseudonyms,
+ * counted and never listed) and the jobs, by partition and source. A job counts when it has a Slurm id
+ * and its `remote_submitted_at` (the scheduler's own submission time, UTC) falls in the quarter, which
+ * is exactly what the ACCESS reporter sends; `submitted_at` (NEMAR's bind to Tapis) is not used, so a
+ * job Tapis accepted that never reached the scheduler is not counted, and one bound late on the last
+ * day of a quarter and scheduled in the next belongs to the next. A job that skipped the reservation or
  * whose owner NEMAR could not attribute is excluded: it has no gateway user to report, and ACCESS is
  * not told of use NEMAR did not authorise as the person's. A person is counted once however many jobs.
  */
 export async function accessReport(db: D1Database, quarter: string): Promise<AccessReport | null> {
   const bounds = quarterBounds(quarter);
   if (bounds === null) return null;
-  const where = `submitted_at IS NOT NULL AND submitted_at >= ?1 AND submitted_at < ?2
+  const where = `slurm_job_id IS NOT NULL AND remote_submitted_at >= ?1 AND remote_submitted_at < ?2
       AND flag_unattributed = 0 AND flag_unreserved = 0 AND gateway_user IS NOT NULL`;
   const rows = (
     await db

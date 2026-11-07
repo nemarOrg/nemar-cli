@@ -7,8 +7,7 @@
  * owner policy is for what `policy set` sends, and `policy show` never parses a response with it.
  * A refusal answers `{ error: <sentence>, code: <word> }`: the sentence is `ApiError.message`, and
  * the word is in `ApiError.rawBody.code` (never `ApiError.code`, which is the body's `error`, the
- * sentence, under this convention); nothing reads it yet, and the reader is added with the first
- * caller that needs one.
+ * sentence, under this convention); `computeRefusalCode` below reads it, and `pipeline run` uses it.
  */
 
 import {

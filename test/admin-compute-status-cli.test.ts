@@ -73,6 +73,9 @@ const server = Bun.serve({
     if (olderWorker && res.ok) {
       const body = (await res.json()) as Record<string, any>;
       body.access.resource_name_configured = undefined;
+      body.prerequisites = undefined;
+      body.reconciliation = undefined;
+      body.attention = undefined;
       return Response.json(body, { status: res.status });
     }
     return res;
@@ -260,6 +263,37 @@ describe("status", () => {
     expect(r.stdout).toContain("ACCESS key: yes");
     expect(r.stdout).toContain("ACCESS resource name: unknown (this Worker does not report it)");
     expect(r.stdout).not.toContain("ACCESS reports wait");
+    // The same older Worker has no prerequisites, no reconciliation line and no counts: unknown, not "no".
+    expect(r.stdout).toContain("unknown (this Worker does not report them)");
+    expect(r.stdout).not.toContain("Reconciliation paused");
+    expectNoSecrets(r);
+  });
+
+  test("the prerequisites are printed as yes or no (never a value), and a paused reconciliation and a failed ACCESS report are said", async () => {
+    configuredWorker({
+      PRESCREEN_CALLBACK_SECRET: "callback-secret-mark-5521",
+      API_BASE_URL: "https://api-base-mark-5521.invalid",
+    });
+    db.run(
+      `INSERT INTO compute_access_reports (job_id, state, attempts, last_error_code)
+       VALUES ('job_00000000000000000000000a', 'failed', 3, 'outcome_unknown')`,
+    );
+    const r = await runCli("owner", ["status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("callback secret: yes");
+    expect(r.stdout).toContain("API base address: yes");
+    expect(r.stdout).toContain("pipelines service account: no");
+    expect(r.stdout).toContain("owner policy: not set (the default applies)");
+    expect(r.stdout).toContain("people pool granted: no");
+    expect(r.stdout).toContain("pipelines pool granted: no");
+    expect(r.stdout).toContain("Reconciliation paused: compute is off");
+    expect(r.stdout).toContain("Attention: access_reports_failed 1");
+    expect(r.stdout + r.stderr).not.toContain("mark-5521");
+    // With compute on, the reconciliation line is gone.
+    configuredWorker({ COMPUTE_ENABLED: "1" });
+    const on = await runCli("owner", ["status"]);
+    expect(on.stdout).not.toContain("Reconciliation paused");
+    expect(on.stdout).toContain("callback secret: no");
     expectNoSecrets(r);
   });
 

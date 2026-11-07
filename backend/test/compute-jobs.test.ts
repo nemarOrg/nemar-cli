@@ -14,6 +14,12 @@
  * in a log line, and identity is in the records bucket only; the gateway pseudonym is made once per
  * account, stored, and shared by that account's jobs.
  *
+ * ONE SEAM IS NOT A REAL BINDING: the test "a replay writes only what is missing" wraps the records bucket
+ * in a hand-written `flaky` object that delegates every call to the real Miniflare bucket and throws on
+ * the second `put`. It is a fault injection (a real R2 cannot be told to fail one write) and replaces no
+ * business logic: what is under test, `createJob`'s ordering and its replay, runs unchanged on both sides
+ * of the failure.
+ *
  * MUTATION (proved by hand, see the pull request): removing the EXISTS term of `JOB_INSERT_SQL` makes
  * the refused-hold cases see a job row; writing the records before the batch makes them see an object.
  */

@@ -18,6 +18,8 @@
  */
 
 import { z } from "zod";
+import { PIPELINE_STAMP_STATES } from "../compute-recipes.js";
+import { COMPUTE_REFUSAL_STATUS, type ComputeRefusalCode } from "../compute-state.js";
 import type { ComputePool } from "./compute.js";
 
 // --- Words -----------------------------------------------------------------------------------
@@ -249,7 +251,8 @@ export type ComputePolicyResponse = z.infer<typeof ComputePolicyResponseSchema>;
  *    with under the service strategy) or the kind of the error the call failed with
  *    (`unauthorized`, `not_found`, `rejected`, `unavailable`, `invalid_response`): a string here,
  *    not an enum, so a word the Worker adds does not break a released CLI;
- *  - `runtime_image` is whether the runtime image variable is set and valid, and its digest.
+ *  - `runtime_image` is whether the runtime image variable is set and valid, and its digest;
+ *  - `prerequisites`, `reconciliation` and `attention` are presence booleans and counts (see each field).
  */
 export const ComputeStatusResponseSchema = z
   .object({
@@ -293,6 +296,36 @@ export const ComputeStatusResponseSchema = z
       .object({ set: z.boolean(), valid: z.boolean(), digest: z.string().nullable() })
       .passthrough()
       .optional(),
+    /**
+     * What every launch needs besides the Tapis credential and the buckets, as presence only (never a
+     * value): the callback secret that signs the job, webhook and observer tokens, the API base address
+     * the launcher calls back, NEMAR's pipelines service account (approved, kind service), a current
+     * owner policy, and a grant on the `people` and `pipelines` platform pools. Optional so a CLI that
+     * reads an older Worker still parses its answer.
+     */
+    prerequisites: z
+      .object({
+        callback_secret: z.boolean(),
+        api_base_url: z.boolean(),
+        pipelines_account: z.boolean(),
+        policy_set: z.boolean(),
+        people_pool_granted: z.boolean(),
+        pipelines_pool_granted: z.boolean(),
+      })
+      .passthrough()
+      .optional(),
+    /**
+     * Whether the reconciliation that follows jobs without a webhook is paused: the tenant sweep (the
+     * week-mode final settlement, the failed ACCESS report listing and the following of rows nobody
+     * reserved) does not run while compute is switched off, so a job that ended while it was off waits.
+     */
+    reconciliation: z.object({ paused: z.boolean() }).passthrough().optional(),
+    /**
+     * Counts of things that need a person to look, by fixed word. Each value today is a count and zero
+     * means nothing waits; the value is not narrowed, so a key the Worker adds in another shape (open,
+     * like every response here) does not break a released CLI, which prints only the positive counts.
+     */
+    attention: z.record(z.unknown()).optional(),
   })
   .passthrough();
 
@@ -360,13 +393,8 @@ export const COMPUTE_PIPELINE_RUN_LIMIT_MAX = 100;
 /** The default number of datasets an `--eligible` run takes when none is named. */
 export const COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT = 10;
 
-/** The states a stamp is filtered by, as the registry declares them. */
-export const COMPUTE_PIPELINE_STAMP_STATES = [
-  "dispatched",
-  "succeeded",
-  "failed",
-  "refused",
-] as const;
+/** The states a stamp is filtered by: the registry's own list (`shared/compute-recipes.ts`), not a copy of it. */
+export const COMPUTE_PIPELINE_STAMP_STATES = PIPELINE_STAMP_STATES;
 
 /** The most stamps one status page answers with. */
 export const COMPUTE_PIPELINE_STATUS_PAGE_MAX = 200;
@@ -387,28 +415,36 @@ export interface ComputePipelineRunRequest {
 }
 
 /**
- * The HTTP status of each word a pipeline run is refused with, declared once so no route picks its own
- * (the ledger's words keep the statuses `shared/compute-state.ts` gives them).
+ * The refusal words only a pipeline run has. Their statuses are declared here; every other word a run
+ * is refused with is one of the ledger's (`COMPUTE_REFUSAL_CODES`) and keeps the status
+ * `COMPUTE_REFUSAL_STATUS` gives it, so no status is declared twice.
+ *  - `create_failed`: the job could not be written (502); `run_failed`: the run stopped on an
+ *    unexpected error (500), a platform fault and not a refusal of the request.
  */
-export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<string, number>> = {
-  recipe_unknown: 422,
+export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   recipe_not_automatic: 422,
   recipe_placeholder: 422,
   registry_drift: 409,
-  dataset_not_eligible: 422,
   version_not_found: 404,
   version_untagged: 422,
   too_many_files: 422,
-  runtime_unavailable: 422,
-  pipelines_account_missing: 503,
-  compute_disabled: 503,
-  live_attempt_exists: 409,
-  insufficient_balance: 409,
-  platform_budget_exhausted: 409,
-  suspended: 403,
-  over_concurrency: 409,
-  invalid_spec: 400,
   create_failed: 502,
+  run_failed: 500,
+} as const;
+
+/** Every word a pipeline run can be refused with. */
+export type ComputePipelineRefusal =
+  | ComputeRefusalCode
+  | keyof typeof COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS;
+
+/**
+ * The HTTP status of each word a pipeline run is refused with, declared once so no route picks its own.
+ * Typed against the union of the words, so a word added to it without a status here does not compile,
+ * and the route has no fallback status to hide the omission.
+ */
+export const COMPUTE_PIPELINE_REFUSAL_STATUS: Readonly<Record<ComputePipelineRefusal, number>> = {
+  ...COMPUTE_REFUSAL_STATUS,
+  ...COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS,
 };
 
 /** One dataset's outcome in a run: dispatched (a job and a stamp) or refused (a word). Words are strings. */
@@ -540,6 +576,10 @@ export const ComputeUnmatchedResponseSchema = z
 
 export type ComputeUnmatchedResponse = z.infer<typeof ComputeUnmatchedResponseSchema>;
 
+/** What reading one record for a job's summary found: present, absent, or present and unusable. */
+export const COMPUTE_RECORD_STATUSES = ["ok", "missing", "unreadable"] as const;
+export type ComputeRecordStatus = (typeof COMPUTE_RECORD_STATUSES)[number];
+
 /**
  * `GET /admin/compute/records/:ref`: one job's index row, ledger entries, provenance and manifest summary.
  * OPEN (passthrough): the CLI never parses it with a strict compute schema (the amendment on #2006).
@@ -550,11 +590,18 @@ export const ComputeRecordResponseSchema = z
     identifiers: z.object({}).passthrough(),
     ledger: z.array(z.object({}).passthrough()),
     provenance: z.object({}).passthrough().nullable(),
+    // Why `provenance` or `manifest` is null: the object is not there (`missing`) or is there and
+    // cannot be read (`unreadable`); `ok` means the value is present, however empty. Optional so a
+    // CLI newer than its Worker still reads the answer.
+    provenance_status: z.enum(COMPUTE_RECORD_STATUSES).optional(),
     manifest: z
       .object({ files: z.number().int(), bytes: z.number().int() })
       .passthrough()
       .nullable(),
+    manifest_status: z.enum(COMPUTE_RECORD_STATUSES).optional(),
     legal_hold: z.boolean(),
+    retention_until: z.string().nullable().optional(),
+    launcher_files: z.array(z.string()).optional(),
   })
   .passthrough();
 
@@ -580,8 +627,17 @@ export const ComputeAccountReportResponseSchema = z
     account_id: z.number().int(),
     from: z.string(),
     to: z.string(),
-    totals: z.object({ jobs: z.number().int(), charged_milli: z.number().int() }).passthrough(),
-    // Each value is an open object (`jobs`, `charged_milli`): a word the Worker adds is kept.
+    // `unsettled` and `open_hold_milli` are optional so a CLI newer than its Worker still reads the
+    // answer; a job whose hold is open has charged nothing yet, and these say how much it still holds.
+    totals: z
+      .object({
+        jobs: z.number().int(),
+        charged_milli: z.number().int(),
+        unsettled: z.number().int().optional(),
+        open_hold_milli: z.number().int().optional(),
+      })
+      .passthrough(),
+    // Each value is an open object (`jobs`, `charged_milli`, `unsettled`, `open_hold_milli`): a word the Worker adds is kept.
     by_pool: z.record(z.object({}).passthrough()),
     jobs: z.array(z.object({}).passthrough()),
     truncated: z.boolean(),
@@ -627,7 +683,12 @@ export type ComputeHoldView = z.infer<typeof ComputeHoldViewSchema>;
 
 /** `GET /admin/compute/holds`. */
 export const ComputeHoldsResponseSchema = z
-  .object({ holds: z.array(ComputeHoldViewSchema) })
+  .object({
+    holds: z.array(ComputeHoldViewSchema),
+    // True when more than 200 holds are active and this list is the oldest 200. Optional so a CLI that
+    // reads an older Worker (which cut the list without saying so) still parses its answer.
+    truncated: z.boolean().optional(),
+  })
   .passthrough();
 
 export type ComputeHoldsResponse = z.infer<typeof ComputeHoldsResponseSchema>;

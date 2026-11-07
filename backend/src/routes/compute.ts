@@ -16,6 +16,15 @@
  * session cookie must pass): there is no `use("*")` here, which would put a session in front of a
  * launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
  *
+ * THE ANSWERS ARE CONTRACTS. `shared/contract/compute-responses.ts` declares the answers of `cancel`,
+ * `links` and the observer as open schemas, and `backend/test/compute-person-responses.test.ts` parses the
+ * real output against them. The wire is snake_case throughout.
+ *
+ * NO CLI COMMAND FOR `cancel` AND `links` YET. They are a person's routes, and a person's front doors are
+ * the website's job page and `nemar compute submit`, both Epic D (#2024 is the submit command; the job
+ * page is nemarOrg/website#495). An administrator cancels with `nemar admin compute jobs cancel`. A
+ * command added here belongs to that epic, built on the contract above.
+ *
  * THE OWNER ONLY. A job is the person's own: any other signed-in account, an administrator included
  * (an administrator has `/admin/compute/jobs/:id/cancel`), is answered `job_not_found`, which never
  * says whether the job exists for someone else. Neither route reads the compute switch: a person can

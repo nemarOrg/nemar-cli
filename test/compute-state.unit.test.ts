@@ -837,7 +837,11 @@ describe("launcher details and who pays", () => {
     ] as const) {
       // Who pays: the Worker's refusal, the cancel record, the default, the pair of pull requests.
       expect(text, name).toContain("dataset_not_eligible");
-      expect(text, name).toContain("any manifest over 38,000 entries");
+      // The gate that makes the classification true runs on the pipeline path only today (the reword of
+      // the review of PR #2063): the records must say so, and that the person's route must call it.
+      expect(text, name).toContain("38,000 entries");
+      expect(text, name).toContain("pipeline path only");
+      expect(text, name).toContain("#2024");
       expect(text, name).toContain("`dataset_not_found`");
       expect(text, name).toContain("cancel record overrules the launcher's `terminated` detail");
       expect(text, name).toContain("an undeclared `runtime_error` detail is deliberate");

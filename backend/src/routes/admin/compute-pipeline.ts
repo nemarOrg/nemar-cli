@@ -22,10 +22,7 @@ import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
 import { findRecipe } from "../../../../shared/compute-recipes.js";
-import {
-  COMPUTE_REFUSAL_STATUS,
-  COMPUTE_ROUTE_SENTENCES,
-} from "../../../../shared/compute-state.js";
+import { COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
 import {
   COMPUTE_ADMIN_ERROR_STATUS,
   COMPUTE_PIPELINE_REFUSAL_STATUS,
@@ -33,6 +30,7 @@ import {
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
+  type ComputePipelineRefusal,
   type ComputePipelineResult,
   type ComputePipelineStampView,
 } from "../../../../shared/contract/compute-admin.js";
@@ -43,6 +41,7 @@ import {
 import { AUDIT_LOG_INSERT_SQL } from "../../db/audit-log.js";
 import {
   type DispatchResult,
+  type PipelineRefusal,
   type StampRow,
   dispatchEligible,
   dispatchPipelineJob,
@@ -60,7 +59,8 @@ type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
 /** The audit action of a live run. */
 export const PIPELINE_RUN_AUDIT_ACTION = "compute.pipeline.run";
 
-const SENTENCES: Record<string, string> = {
+/** One sentence per word, and a word without one does not compile. */
+const SENTENCES = {
   recipe_unknown: "There is no such recipe.",
   recipe_not_automatic: "That recipe is not run automatically.",
   recipe_placeholder: "That recipe is a placeholder and cannot be run.",
@@ -80,14 +80,31 @@ const SENTENCES: Record<string, string> = {
   over_concurrency: "Too many jobs are running.",
   invalid_spec: "The job could not be built from the recipe.",
   create_failed: "The job could not be created.",
-};
+  run_failed: "The run stopped on an unexpected error.",
+  // Words a run does not produce today, but that its type admits (the ledger's own, and the
+  // create-job refusals): said plainly so a new producer needs no second edit to be answered.
+  partition_not_offered: "That partition is not offered.",
+  over_job_limit: "The job is over a limit.",
+  bundle_too_large: "The bundle is too large.",
+} as const satisfies { [K in PipelineRefusal]?: string };
 
-const refuse = (c: Ctx, code: string, extra: object = {}) =>
+/** The words the route can answer with: those with a sentence, and every one of them is a refusal word. */
+type SentencedRefusal = keyof typeof SENTENCES;
+type MissingSentence = Exclude<PipelineRefusal, SentencedRefusal>;
+// A word the run can produce that has no sentence is a compile error here: `never` is the only value.
+const noMissingSentence: [MissingSentence] extends [never] ? true : MissingSentence = true;
+void noMissingSentence;
+// Every word the service can refuse with has a status in the contract (the contract may hold more: the
+// ledger's whole vocabulary). A word added to `PipelineRefusal` without one is a compile error here.
+const everyWordHasAStatus: [Exclude<PipelineRefusal, ComputePipelineRefusal>] extends [never]
+  ? true
+  : Exclude<PipelineRefusal, ComputePipelineRefusal> = true;
+void everyWordHasAStatus;
+
+const refuse = (c: Ctx, code: SentencedRefusal, extra: object = {}) =>
   c.json(
-    { error: SENTENCES[code] ?? "The request was refused.", code, ...extra },
-    (COMPUTE_PIPELINE_REFUSAL_STATUS[code] ??
-      (COMPUTE_REFUSAL_STATUS as Record<string, number>)[code] ??
-      422) as ContentfulStatusCode,
+    { error: SENTENCES[code], code, ...extra },
+    COMPUTE_PIPELINE_REFUSAL_STATUS[code] as ContentfulStatusCode,
   );
 
 /** A 400 that names the fields and what is wrong with each, never what was sent. */

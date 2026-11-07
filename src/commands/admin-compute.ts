@@ -560,7 +560,13 @@ a tenant name or a username.
              unconfigured, skipped, or the kind of the error (unauthorized, not_found, rejected,
              unavailable, invalid_response)
   storage    whether each compute bucket binding and the signing secrets are set
-  ACCESS key whether the ACCESS gateway-attributes key is set
+  ACCESS key whether the ACCESS gateway-attributes key is set, and (a separate line) whether the
+             ACCESS resource name is set; the ACCESS reports wait until both are
+  prerequisites whether the callback secret and the API base address are set, whether NEMAR's
+             pipelines service account is approved, whether an owner policy exists, and whether the
+             people and pipelines platform pools have a grant; each is yes or no, never a value
+  reconciliation whether the tenant sweep is paused, which it is while compute is off
+  attention  counts of things that need a person to look (for example ACCESS reports that failed)
   runtime image whether the runtime image variable is set, whether it is a digest-pinned reference,
              and its digest (never the reference); a python job is not submitted until it is valid
 
@@ -601,6 +607,26 @@ function printStatus(res: ComputeStatusResponse): void {
   if (!res.access.key_configured || resourceName === false) {
     say("  ACCESS reports wait until both are set");
   }
+  const need = res.prerequisites;
+  say("Prerequisites");
+  if (need === undefined) {
+    say("  unknown (this Worker does not report them)");
+  } else {
+    say(`  callback secret: ${yesNo(need.callback_secret)}`);
+    say(`  API base address: ${yesNo(need.api_base_url)}`);
+    say(`  pipelines service account: ${yesNo(need.pipelines_account)}`);
+    say(`  owner policy: ${need.policy_set ? "set" : "not set (the default applies)"}`);
+    say(`  people pool granted: ${yesNo(need.people_pool_granted)}`);
+    say(`  pipelines pool granted: ${yesNo(need.pipelines_pool_granted)}`);
+  }
+  if (res.reconciliation?.paused === true) {
+    say(
+      "Reconciliation paused: compute is off, so the tenant sweep does not run (no final settlement against Expanse, no failed ACCESS report listing, and no following of jobs nobody reserved)",
+    );
+  }
+  for (const [word, n] of Object.entries(res.attention ?? {})) {
+    if (typeof n === "number" && n > 0) say(`Attention: ${plain(word)} ${n}`);
+  }
   say("Runtime image");
   const image = res.runtime_image;
   if (image === undefined) {
@@ -633,7 +659,7 @@ const statusCommand = new Command("status")
   });
 
 export const computeCommand = new Command("compute").description(
-  "The compute gateway: the owner policy and the SU allocation pools (ADR 0118)",
+  "The compute gateway: the owner policy, the SU allocation pools, status, jobs and their reports, legal holds, the pipeline and the observer's token (ADR 0118)",
 );
 
 computeCommand.addCommand(policyCommand);

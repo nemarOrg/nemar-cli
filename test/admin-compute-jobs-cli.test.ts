@@ -20,6 +20,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { recordKey } from "../backend/src/services/compute-records";
 import {
   COMPUTE_KEYS,
   type ComputeWho,
@@ -38,7 +39,11 @@ import {
   startLifecycleFixture,
 } from "../backend/test/helpers/compute-lifecycle-fixture";
 import { launchSecretForms } from "../backend/test/helpers/launch-secret-forms";
-import { ComputeJobAdminResponseSchema } from "../shared/contract/compute-admin";
+import { RECORDS_RESULT_MANIFEST_FILE, formatSu } from "../shared/contract/compute";
+import {
+  ComputeJobAdminResponseSchema,
+  ComputeRecordResponseSchema,
+} from "../shared/contract/compute-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -370,6 +375,44 @@ describe("record", () => {
     expect(new Set(outs.map((o) => o.length)).size).toBe(1);
   });
 
+  test("a missing record, an unreadable one and an empty one are printed as three different things", async () => {
+    // No records yet: both are missing, and the line says so (it used to say `none` for every cause).
+    const bare = await makeJob(fx);
+    const missing = await runCli("admin", ["record", bare.job.id]);
+    expect(missing.exitCode).toBe(0);
+    expect(missing.stdout).toContain("provenance: missing");
+    expect(missing.stdout).toContain("manifest: missing");
+
+    // Present but broken: not JSON for provenance, not an object for the manifest.
+    const broken = await endedJob(fx, 30);
+    await fx.harness.records.put(recordKey(broken.job.id, "provenance.json"), "not json {");
+    await fx.harness.records.put(recordKey(broken.job.id, RECORDS_RESULT_MANIFEST_FILE), "[1, 2]");
+    const unreadable = await runCli("admin", ["record", broken.job.id]);
+    expect(unreadable.stdout).toContain("provenance: unreadable");
+    expect(unreadable.stdout).toContain("manifest: unreadable");
+    expect(unreadable.stdout).not.toContain("provenance: none");
+
+    // Present and empty is a value, not an absence.
+    const empty = await endedJob(fx, 30);
+    await fx.harness.records.put(recordKey(empty.job.id, "provenance.json"), "{}");
+    await fx.harness.records.put(
+      recordKey(empty.job.id, RECORDS_RESULT_MANIFEST_FILE),
+      JSON.stringify({ files: [] }),
+    );
+    const present = await runCli("admin", ["record", empty.job.id]);
+    expect(present.stdout).toContain("manifest: 0 file(s), 0 bytes");
+    expect(present.stdout).not.toContain("provenance: missing");
+    expect(present.stdout).not.toContain("provenance: unreadable");
+    // The launcher's file names ride along, and the answer parses.
+    expect(present.stdout).toContain("launcher files:");
+    const asJson = await runCli("admin", ["record", broken.job.id, "--json"]);
+    expect(ComputeRecordResponseSchema.safeParse(JSON.parse(asJson.stdout)).success).toBe(true);
+    expect(JSON.parse(asJson.stdout)).toMatchObject({
+      provenance_status: "unreadable",
+      manifest_status: "unreadable",
+    });
+  });
+
   test("--identity refuses an administrator, needs a reason, and for the owner prints the snapshot (MUTATION: let an administrator read it)", async () => {
     const made = await makeJob(fx);
     const noReason = await runCli("owner", ["record", made.job.id, "--identity"]);
@@ -483,7 +526,11 @@ describe("report and access-report", () => {
       "2026-10-31",
     ]);
     expect(text.exitCode).toBe(0);
-    expect(text.stdout).toContain("1 job(s), 1.5 SU");
+    // The job is held and unsettled: the total says so, so a running account does not look cheaper.
+    expect(text.stdout).toMatch(
+      /1 job\(s\), 1\.5 SU charged, 1 not settled \([0-9.]+ SU still held\)/,
+    );
+    expect(text.stdout).toContain("(not settled,");
     clean(text);
     const csv = await runCli("admin", [
       "report",
@@ -496,8 +543,17 @@ describe("report and access-report", () => {
       "--csv",
     ]);
     const lines = csv.stdout.trim().split("\n");
-    expect(lines[0]).toBe("id,created_at,ended_at,state,partition,pool,source,su_charged,flags");
-    expect(lines[1]).toBe(`${a.job.id},2026-10-05 10:00:00,,created,shared,cpu,cli,1.5,`);
+    expect(lines[0]).toBe(
+      "id,created_at,ended_at,state,partition,pool,source,su_charged,settled,su_held,flags",
+    );
+    const held = sql.one<{ h: number }>(
+      "SELECT held_milli AS h FROM compute_jobs WHERE id = ?",
+      a.job.id,
+    ).h;
+    expect(held).toBeGreaterThan(0);
+    expect(lines[1]).toBe(
+      `${a.job.id},2026-10-05 10:00:00,,created,shared,cpu,cli,1.5,no,${formatSu(held)},`,
+    );
     expect(lines).toHaveLength(2);
     expect(csv.stderr.trim()).toBe("");
   });
@@ -533,9 +589,10 @@ describe("report and access-report", () => {
       a.accountId,
       a2.job.id,
     );
-    for (const j of [a, a2, b])
+    for (const [i, j] of [a, a2, b].entries())
       sql.run(
-        "UPDATE compute_jobs SET submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        "UPDATE compute_jobs SET slurm_job_id = ?, remote_submitted_at = '2026-11-15 12:00:00' WHERE id = ?",
+        `${6000 + i}`,
         j.job.id,
       );
     const text = await runCli("admin", ["access-report", "--quarter", "2026Q4"]);
@@ -602,6 +659,26 @@ describe("holds", () => {
       ref: String(made.accountId),
     });
   });
+});
+
+describe("holds listing", () => {
+  test("a list that is cut says so and a list that is not does not", async () => {
+    const none = await runCli("admin", ["holds"]);
+    expect(none.stdout).toContain("No active holds.");
+    expect(none.stdout).not.toContain("The list is cut");
+    for (let i = 1; i <= 201; i++) {
+      sql.run(
+        "INSERT INTO compute_legal_holds (scope, ref, reason, placed_by) VALUES ('account', ?, 'legal_request', 1)",
+        String(i),
+      );
+    }
+    const cut = await runCli("admin", ["holds"]);
+    expect(cut.exitCode).toBe(0);
+    expect(cut.stdout).toContain("The list is cut at the oldest 200 active holds");
+    expect(cut.stdout.trim().split("\n")).toHaveLength(201);
+    const asJson = await runCli("admin", ["holds", "--json"]);
+    expect(JSON.parse(asJson.stdout).truncated).toBe(true);
+  }, 60_000);
 });
 
 describe("ACCESS reports", () => {
