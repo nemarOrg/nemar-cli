@@ -513,6 +513,7 @@ This amendment supersedes the wire described in item 4 of the amendment of 2026-
    A zod schema in `shared/contract/compute-observation.ts` mirrors it, and `test/compute-observation-contract.unit.test.ts` holds the two to each other on a corpus of valid and invalid documents.
    The schema was derived from what the observer emits, and the two documents the observer itself wrote (`test/fixtures/compute-observation/`) are fixtures on both sides.
    Drift is checked on both sides: nemar-process compares its copies with nemar-cli's at a pinned commit (CI sets `NEMAR_REQUIRE_OBSERVATION_DRIFT=1` and checks the commit out), and nemar-cli compares with a nemar-process checkout when `NEMAR_PROCESS_DIR` names one (`NEMAR_REQUIRE_PROCESS_DRIFT=1` turns a missing checkout into a failure).
+   `test.yml` checks out nemar-process's integration branch (public, sparse, no token) and sets both, so CI compares against that branch's HEAD, not a pinned commit; it does not check that nemar-process's own CI is green or that its pin is current (its advisory job says so).
    A change to the document is made in nemar-cli and copied, never edited in one copy.
 2. **The token is `Authorization: Bearer <token>` only.**
    The header `X-Compute-Observer-Token` is not read; a post that carries it alone is the one refusal, like a wrong token.

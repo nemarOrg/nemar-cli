@@ -10,9 +10,13 @@
  *  - the two documents the observer itself wrote (`test/fixtures/compute-observation/`) are valid;
  *  - the DRIFT TEST: when `NEMAR_PROCESS_DIR` names a nemar-process checkout, the schema and the two
  *    fixtures are compared with that checkout's copies byte for byte. Without one the comparison skips
- *    with its reason; with `NEMAR_REQUIRE_PROCESS_DRIFT=1` (which a CI job that has the checkout sets) a
- *    missing checkout is a failure. nemar-process runs the mirror of this test against nemar-cli's
- *    files at a pinned commit (`tests/observer/test_observation_schema.py` there);
+ *    with its reason; with `NEMAR_REQUIRE_PROCESS_DRIFT=1` a missing checkout is a failure. CI
+ *    (`.github/workflows/test.yml`, the unit-pure shards) checks out nemar-process's integration branch
+ *    `feature/issue-1-epic-process` (public, sparse, no token) and sets both variables, so the
+ *    comparison runs there against that branch's HEAD, not against a pinned commit. What CI does NOT
+ *    check: that nemar-process's CI is green, or that its pin names this repository's current commit
+ *    (that is nemar-process's own test and advisory job). nemar-process runs the mirror of this test
+ *    against nemar-cli's files at a pinned commit (`tests/observer/test_observation_schema.py` there);
  *  - `parseAllocTres` reads what Slurm prints and fails closed on anything else.
  */
 

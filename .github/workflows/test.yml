@@ -992,6 +992,31 @@ jobs:
           sparse-checkout-cone-mode: false
           ref: staging
 
+      # nemar-process's copy of the observation schema and the two documents its observer wrote, so
+      # test/compute-observation-contract.unit.test.ts can compare them with ours byte for byte (epic
+      # #2005 phase A7, ADR 0118 amendment of 2026-11-06). Without it that comparison found no checkout
+      # and skipped: the drift claim was enforced on developer machines and nowhere else.
+      #
+      # nemarOrg/nemar-process is PUBLIC, so no token is needed. Sparse, non-cone: one schema file and
+      # one fixture directory, a few kilobytes. It lands in process-copy/ at the repo root, which the
+      # unit-pure file glob does not reach.
+      #
+      # `feature/issue-1-epic-process`, the integration branch of that repository, where the copy lands
+      # through its own pull request. Move this to its `main` when that epic merges. Until the pull
+      # request that adds the schema there has merged, this step finds no such files and the test FAILS
+      # (NEMAR_REQUIRE_PROCESS_DRIFT below), which is deliberate: a broken checkout must not quietly
+      # disable the comparison.
+      - name: Check out nemar-process's observation schema and fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: nemarOrg/nemar-process
+          path: process-copy
+          sparse-checkout: |
+            observer/schema/observation-v1.schema.json
+            tests/observer/fixtures/
+          sparse-checkout-cone-mode: false
+          ref: feature/issue-1-epic-process
+
       # The deployed copies of onboard-openneuro.yml, run-pr-review.yml,
       # run-publication-review.yml and run-upstream-repull.yml, for the same reason
       # and with the same shape (#1309). All four are authored in this repo beside
@@ -1075,6 +1100,10 @@ jobs:
           # Same checkout, same rule, for the page-owned words of the publication
           # review (ADR 0102, #1780): a path that is not there FAILS.
           NEMAR_WEBSITE_REVIEW_COPY: website-copy/src/lib/publication-review-copy.ts
+          # The nemar-process checkout above, for the observation schema and fixtures. A path that is
+          # not there FAILS, as above.
+          NEMAR_PROCESS_DIR: process-copy
+          NEMAR_REQUIRE_PROCESS_DRIFT: "1"
           NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
           NEMAR_PR_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-pr-review.yml
           NEMAR_PUBLICATION_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-publication-review.yml
