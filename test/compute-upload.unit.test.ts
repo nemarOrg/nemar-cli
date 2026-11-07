@@ -13,6 +13,7 @@ import { UPLOAD_BACKOFF_MS, uploadBundle } from "../src/lib/compute/upload";
 
 interface Seen {
   method: string;
+  path: string;
   headers: Record<string, string>;
   body: Uint8Array;
 }
@@ -30,11 +31,12 @@ const server = Bun.serve({
     });
     seen.push({
       method: req.method,
+      path: new URL(req.url).pathname,
       headers,
       body: new Uint8Array(await req.arrayBuffer()),
     });
     if (new URL(req.url).pathname === "/redirect") {
-      return Response.redirect("http://127.0.0.1:1/elsewhere", 307);
+      return Response.redirect(`http://127.0.0.1:${server.port}/landing`, 307);
     }
     const status = answers.shift() ?? 200;
     return new Response(status === 200 ? "" : "<Error>no</Error>", { status });
@@ -198,6 +200,7 @@ describe("before any request", () => {
     );
     expect(out).toMatchObject({ ok: false, kind: "failed", status: null });
     expect(seen.map((s) => s.method)).toEqual(["PUT", "PUT", "PUT", "PUT"]);
+    expect(seen.some((s) => s.path === "/landing")).toBe(false);
     expect(seen.every((s) => s.headers.host === `127.0.0.1:${server.port}`)).toBe(true);
   });
 });
