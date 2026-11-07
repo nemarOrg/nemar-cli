@@ -48,6 +48,7 @@ import {
   reportableGatewayUser,
   runAccessReportCron,
   sendAccessReport,
+  throwedBeforeSend,
 } from "../src/services/access-attributes";
 import { advanceComputeJob, claimStamp, submitComputeJob } from "../src/services/compute-lifecycle";
 import type { Bindings } from "../src/types/bindings";
@@ -409,6 +410,57 @@ describe("a report is never sent twice for one job", () => {
     access.up();
     await runAccessReportCron(e);
     expect(access.requests).toHaveLength(0);
+  });
+
+  /** The runtime's refusal of a call before it is made, thrown by `fetch` for the ACCESS address only. */
+  async function withSubrequestLimit<T>(body: () => Promise<T>): Promise<T> {
+    const real = globalThis.fetch;
+    globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (String(input).startsWith(access.url)) {
+        return Promise.reject(new Error("Too many subrequests by single Worker invocation."));
+      }
+      return real(input, init);
+    }) as typeof fetch;
+    try {
+      return await body();
+    } finally {
+      globalThis.fetch = real;
+    }
+  }
+
+  test("a call the runtime refused BEFORE it was made (the subrequest limit) is retried on a later tick, not ended `outcome_unknown`; the tick stops claiming (MUTATION: treat every throw as unknown)", async () => {
+    const first = await queuedJob();
+    const second = await queuedJob();
+    const e = env();
+    const tick = await withSubrequestLimit(() => runAccessReportCron(e, { timeoutMs: 1000 }));
+    expect(tick).toMatchObject({ examined: 2, retry: 1, unknown: 0, skipped: 1 });
+    expect(access.requests).toHaveLength(0);
+    const rows = [await report(e, first.made.job.id), await report(e, second.made.job.id)];
+    // One row spent an attempt and waits; the other was never claimed. Neither is final.
+    expect(rows.filter((r) => r.state === "pending")).toHaveLength(2);
+    expect(rows.some((r) => r.last_error_code === "unavailable")).toBe(true);
+    expect(rows.some((r) => r.last_error_code === "outcome_unknown")).toBe(false);
+    // The next tick, with the limit gone and the delay passed, sends both.
+    await e.DB.prepare(
+      "UPDATE compute_access_reports SET next_attempt_at = datetime('now', '-1 minute')",
+    ).run();
+    expect(await runAccessReportCron(e)).toMatchObject({ sent: 2, unknown: 0 });
+    expect(access.requests).toHaveLength(2);
+  });
+
+  test("any other throw (a reset, a refused connection) is still unknown: only the runtime's own refusal is known to be unsent", () => {
+    expect(throwedBeforeSend(new Error("Too many subrequests by single Worker invocation."))).toBe(
+      true,
+    );
+    for (const err of [
+      new TypeError("Network connection lost."),
+      new DOMException("The operation timed out.", "TimeoutError"),
+      new Error("connect ECONNREFUSED"),
+      "Too many subrequests",
+      null,
+    ]) {
+      expect(throwedBeforeSend(err)).toBe(false);
+    }
   });
 
   test("a sender whose lease was reaped while its POST was in flight cannot turn the row into `sent`", async () => {

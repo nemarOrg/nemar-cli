@@ -290,13 +290,29 @@ export function classifyAnswer(
   return { kind: "unknown" };
 }
 
-/** One POST: the status of the answer, or null when none came (a timeout, a lost or refused connection). The body is discarded unread. */
+/**
+ * A throw that proves NOTHING LEFT the Worker: the runtime refused the call before it was made (the
+ * subrequest limit of one invocation). It is recognized by the runtime's own message, because the runtime
+ * gives no code or class for it; the list is closed on purpose. A timeout, a reset, a refused or lost
+ * connection and every other throw are NOT in it: a runtime cannot tell those from a reset after the request
+ * left, so they stay unknown and are never resent (ADR 0118, review fixes of 2026-11-06). Guessing wider
+ * would send a report twice, which ACCESS is not known to ignore.
+ */
+export function throwedBeforeSend(err: unknown): boolean {
+  return err instanceof Error && /too many subrequests|subrequest limit/i.test(err.message);
+}
+
+/**
+ * One POST: the status of the answer; null when none came (a timeout, a lost or refused connection: the
+ * request may have left); `"not_sent"` when the runtime refused the call before it was made. The body is
+ * discarded unread.
+ */
 async function post(
   url: string,
   key: string,
   body: Record<string, unknown>,
   timeoutMs: number,
-): Promise<number | null> {
+): Promise<number | null | "not_sent"> {
   const signal = AbortSignal.timeout(timeoutMs);
   try {
     const res = await fetch(url, {
@@ -309,15 +325,16 @@ async function post(
     });
     await res.body?.cancel().catch(() => {});
     return res.status;
-  } catch {
-    return null;
+  } catch (err) {
+    return throwedBeforeSend(err) ? "not_sent" : null;
   }
 }
 
 // --- One report ------------------------------------------------------------------------------------
 
 /**
- * What `sendAccessReport` did for one job: `sent`; `retry` (refused, pending again, delayed); `failed` (the
+ * What `sendAccessReport` did for one job: `sent`; `retry` (refused, pending again, delayed); `not_sent` (the
+ * runtime refused the call before it was made: pending again like `retry`, and the tick stops claiming); `failed` (the
  * attempts ran out, or the job has no pseudonym); `outcome_unknown` (no answer: failed, never sent again by
  * code); `unconfigured` and `no_submit_time` (waiting, no attempt spent; the latter for a week at most, and then `failed`); and the ones that sent nothing
  * because the row was not this sender's to send: `not_found`, `not_pending` (sent, failed or claimed
@@ -327,6 +344,7 @@ async function post(
 export type AccessSendOutcome =
   | "sent"
   | "retry"
+  | "not_sent"
   | "failed"
   | "outcome_unknown"
   | "unconfigured"
@@ -404,7 +422,12 @@ export async function sendAccessReport(
     ACCESS_REPORT_TIMEOUT_MS,
   );
   // THE POST: between two statements, never inside a batch.
-  const answer = classifyAnswer(await post(accessAttributesUrl(), config.key, body, timeout));
+  const posted = await post(accessAttributesUrl(), config.key, body, timeout);
+  // Nothing left the Worker (the invocation's subrequest limit): the report is simply not sent yet, so it
+  // goes back to pending through the ordinary retry (an attempt is spent and the delay applies; the bound
+  // still ends it). It is NOT `outcome_unknown`, which code never resends.
+  const answer: ReturnType<typeof classifyAnswer> =
+    posted === "not_sent" ? { kind: "retry", word: "unavailable" } : classifyAnswer(posted);
 
   if (answer.kind === "sent") {
     const wrote = await db.prepare(ACCESS_REPORT_SENT_SQL).bind(jobId, stamp).run();
@@ -428,7 +451,8 @@ export async function sendAccessReport(
     )
     .run();
   if ((wrote.meta?.changes ?? 0) !== 1) return "lease_lost";
-  return attempts >= ACCESS_REPORT_MAX_ATTEMPTS ? "failed" : "retry";
+  if (attempts >= ACCESS_REPORT_MAX_ATTEMPTS) return "failed";
+  return posted === "not_sent" ? "not_sent" : "retry";
 }
 
 // --- The tick --------------------------------------------------------------------------------------
@@ -539,7 +563,7 @@ async function runAccessReportTick(
           options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
         );
         if (outcome === "sent") r.sent++;
-        else if (outcome === "retry") r.retry++;
+        else if (outcome === "retry" || outcome === "not_sent") r.retry++;
         else if (outcome === "failed" || outcome === "no_gateway_user") r.failed++;
         else if (outcome === "outcome_unknown") r.unknown++;
         else if (outcome === "no_submit_time") r.deferred++;
@@ -549,7 +573,9 @@ async function runAccessReportTick(
         // stay `pending` with no attempt spent for the next tick, and the error-level log line (an
         // unknown outcome needs a person) has a margin of thirty minutes to be noticed in. An answer that
         // proves the request was not processed (a retry) does not stop the tick.
-        if (outcome === "outcome_unknown") {
+        // A call the runtime refused before it was made (the invocation's subrequest limit) ends the claiming
+        // too: every later row would meet the same limit and spend an attempt for nothing.
+        if (outcome === "outcome_unknown" || outcome === "not_sent") {
           r.skipped = due.length - index - 1;
           break;
         }
