@@ -380,10 +380,8 @@ describe("a hung connection cannot hold the wait", () => {
     process.env.TEST_API_URL = `http://127.0.0.1:${hung.port}`;
   });
   afterEach(() => {
-    if (previous === undefined) process.env.TEST_API_URL = undefined;
+    if (previous === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
     else process.env.TEST_API_URL = previous;
-    // biome-ignore lint/performance/noDelete: an unset variable must be absent, not the string "undefined"
-    if (previous === undefined) delete process.env.TEST_API_URL;
   });
 
   const read = (signal: AbortSignal, timeoutMs: number) =>
