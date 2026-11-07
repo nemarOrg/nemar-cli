@@ -60,6 +60,24 @@ import {
   ComputeUnmatchedResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
 import {
+  type ComputeCancelResponse,
+  ComputeCancelResponseSchema,
+} from "../../../shared/contract/compute-responses.js";
+import type {
+  ComputeFinalizeRequest,
+  ComputeSubmitRequest,
+} from "../../../shared/contract/compute-submit-request.js";
+import {
+  COMPUTE_IDEMPOTENCY_HEADER,
+  COMPUTE_TRUNCATED_HEADER,
+  type ComputeFinalizeResponse,
+  ComputeFinalizeResponseSchema,
+  type ComputeResultsResponse,
+  ComputeResultsResponseSchema,
+  type ComputeSubmitResponse,
+  ComputeSubmitResponseSchema,
+} from "../../../shared/contract/compute-submit.js";
+import {
   type ComputeMeResponse,
   ComputeMeResponseSchema,
   type ComputeUsageResponse,
@@ -516,5 +534,111 @@ export async function getMyComputeJob(jobId: string): Promise<ComputeUserJobResp
     {},
     true,
     ComputeUserJobResponseSchema,
+  );
+}
+
+// --- A person's own jobs: submit, upload, logs, results, cancel (epic #2021 phase D3b, #2024) --------------------
+//
+// `shared/contract/compute-submit.ts` has the open responses and `compute-submit-request.ts` the strict
+// requests. A refusal is `{ error: <sentence>, code: <word> }` (`computeRefusalCode` reads the word); a
+// `503 storage_unavailable` that came after the hold also carries `job_id` in `rawBody`.
+
+/**
+ * `POST /compute/jobs`: submit a job. `Idempotency-Key` makes a repeat of this call (after a lost answer, a
+ * 503) the same job again, and the same key with another body `422 idempotency_conflict`. A bundle job is
+ * answered `uploading` with the one `upload` address; an image job is submitted at once.
+ */
+export async function submitComputeJob(
+  body: ComputeSubmitRequest,
+  idempotencyKey: string,
+): Promise<ComputeSubmitResponse> {
+  return request(
+    "/compute/jobs",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { [COMPUTE_IDEMPOTENCY_HEADER]: idempotencyKey },
+    },
+    true,
+    ComputeSubmitResponseSchema,
+  );
+}
+
+/** `POST /compute/jobs/:id/finalize`: the bundle is uploaded; the manifest is sent again and the job is submitted. */
+export async function finalizeComputeJob(
+  jobId: string,
+  manifest: ComputeFinalizeRequest,
+): Promise<ComputeFinalizeResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/finalize`,
+    { method: "POST", body: JSON.stringify(manifest) },
+    true,
+    ComputeFinalizeResponseSchema,
+  );
+}
+
+/** The log of a job: at most its first 1 MiB, and whether the Worker cut it (`X-Nemar-Truncated: true`). */
+export interface ComputeLogAnswer {
+  text: string;
+  truncated: boolean;
+}
+
+/** `GET /compute/jobs/:id/logs`: plain text, not JSON. `404 logs_not_available` before the job started. */
+export async function getComputeLogs(jobId: string): Promise<ComputeLogAnswer> {
+  const answer = await request<{ text: string; headers: Headers }>(
+    `/compute/jobs/${encodeURIComponent(jobId)}/logs`,
+    {},
+    true,
+    undefined,
+    "text",
+  );
+  return {
+    text: answer.text,
+    truncated: answer.headers.get(COMPUTE_TRUNCATED_HEADER)?.toLowerCase() === "true",
+  };
+}
+
+const afterQuery = (after?: string) =>
+  after === undefined ? "" : `?${new URLSearchParams({ after }).toString()}`;
+
+/**
+ * `GET /compute/jobs/:id/results[?after=]`: seven-day BEARER links to a finished job's outputs, at most
+ * 1,000 a page; `next_after` continues. `410 results_expired` once they are past retention.
+ */
+export async function getComputeResults(
+  jobId: string,
+  after?: string,
+): Promise<ComputeResultsResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/results${afterQuery(after)}`,
+    {},
+    true,
+    ComputeResultsResponseSchema,
+  );
+}
+
+/** `POST /compute/jobs/:id/results/renew[?after=]`: the same links, made again while the objects exist. */
+export async function renewComputeResults(
+  jobId: string,
+  after?: string,
+): Promise<ComputeResultsResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/results/renew${afterQuery(after)}`,
+    { method: "POST" },
+    true,
+    ComputeResultsResponseSchema,
+  );
+}
+
+/**
+ * `POST /compute/jobs/:id/cancel`: cancel one of your jobs. A job that had already ended is a 200 with its
+ * state unchanged and `cancelled: false`.
+ */
+export async function cancelComputeJob(jobId: string): Promise<ComputeCancelResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+    true,
+    ComputeCancelResponseSchema,
   );
 }

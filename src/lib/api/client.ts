@@ -72,6 +72,9 @@ export async function request<T>(
   // (the getCurrentUser class of bug). Endpoints opt in by passing a schema from
   // shared/contract; passthrough schemas keep additive backend fields safe.
   schema?: ZodType<T>,
+  // "text" is for a route whose SUCCESS is not JSON (a job's log, `text/plain`): a 2xx returns
+  // `{ text, headers }` and a refusal is still the JSON `ApiError` below.
+  responseMode: "json" | "text" = "json",
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -165,6 +168,10 @@ export async function request<T>(
       requestBody,
       responseBody: rawBody,
     });
+  }
+
+  if (responseMode === "text" && response.ok) {
+    return { text: rawBody, headers: response.headers } as T;
   }
 
   let data: Record<string, unknown>;
