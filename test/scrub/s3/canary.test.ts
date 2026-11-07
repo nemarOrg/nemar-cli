@@ -3,7 +3,7 @@
  * before anything real is touched. Run as the real CLI against the S3 stand-in.
  */
 
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -18,15 +18,43 @@ import {
   awsTestEnv,
   diag,
   removeTempDirs,
-  runScrub,
+  runScrub as runScrubUnbounded,
   tempDir,
   withCtx,
 } from "./support";
 
 afterAll(removeTempDirs);
 
-let standin: S3Standin;
-afterEach(() => standin?.stop());
+/**
+ * Every test makes a stand-in of its own, so the tests that only need a stand-in and a CLI run
+ * can share the clock: they are declared `test.concurrent`, and Bun runs a run of adjacent
+ * concurrent tests together. Separate tests between such runs (the cheap ones) keep each group
+ * small, and `runScrub` below lets at most SLOTS real CLI runs be in flight at any moment, in
+ * a group or inside a test, so the four-core CI runner is never given more than that.
+ */
+const standins: S3Standin[] = [];
+function open(): S3Standin {
+  const s = startS3Standin();
+  standins.push(s);
+  return s;
+}
+afterAll(() => {
+  for (const s of standins) s.stop();
+});
+
+const SLOTS = 3;
+let inFlight = 0;
+const waiting: Array<() => void> = [];
+async function runScrub(...args: Parameters<typeof runScrubUnbounded>) {
+  if (inFlight >= SLOTS) await new Promise<void>((resolve) => waiting.push(resolve));
+  inFlight += 1;
+  try {
+    return await runScrubUnbounded(...args);
+  } finally {
+    inFlight -= 1;
+    waiting.shift()?.();
+  }
+}
 
 const prefix = `${DATASET}/canary-k3x9q2/`;
 const canary = (extra: string[] = [], p = prefix) => ["canary", "--prefix", p, ...extra];
@@ -35,7 +63,8 @@ describe("canary", () => {
   test(
     "refuses any prefix that is not a canary prefix, with and without --execute",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
+      const runs: Array<[string, string[]]> = [];
       for (const bad of [
         `${DATASET}/`,
         `${DATASET}/objects/`,
@@ -72,13 +101,20 @@ describe("canary", () => {
         "",
       ]) {
         for (const extra of [[], ["--execute"]]) {
+          runs.push([bad, extra]);
+        }
+      }
+      // Every refusal comes before any S3 call and none depends on another, so they run
+      // together (`runScrub` bounds how many at once).
+      await Promise.all(
+        runs.map(async ([bad, extra]) => {
           const r = await runScrub(standin, canary(extra, bad));
           const label = `${JSON.stringify(bad)} ${extra}`;
           // The exact word: an empty prefix is a usage error, every other one a refusal.
           if (bad === "") expectUsage(r, "missing-prefix", label);
           else expectStopped(r, 3, "prefix-not-canary", label);
-        }
-      }
+        }),
+      );
       expect(standin.log.length).toBe(0);
     },
     SLOW,
@@ -87,16 +123,17 @@ describe("canary", () => {
   test(
     "the end-to-end fixture's id and a dev ephemeral sandbox id are accepted",
     async () => {
-      standin = startS3Standin();
-      for (const ok of [
+      const standin = open();
+      const accepted = [
         "nm099999/canary-abc/",
         "xx090411/canary-k3x9q2/",
         "xx090000/canary-1/",
         "xx098999/canary-A_b-9/",
-      ]) {
+      ].map(async (ok) => {
         const r = await runScrub(standin, canary([], ok));
         expect(r.exitCode, `${ok}: ${r.all}`).toBe(0);
-      }
+      });
+      await Promise.all(accepted);
       expect(standin.log.length).toBe(0);
     },
     SLOW,
@@ -105,7 +142,7 @@ describe("canary", () => {
   test(
     "a dry run lists the steps and makes no S3 call",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary());
       expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("dry run");
@@ -117,10 +154,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "proves the lock holds, the bypass works, and nothing is left behind",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       let lockSeen: { mode: string; until: Date } | undefined;
       standin.beforeOp("DeleteObject", () => {
         lockSeen = standin.versions(BUCKET, `${prefix}probe.txt`)[0]?.lock;
@@ -153,10 +190,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "an operator who cannot bypass fails the canary, and the probe is not reported deleted",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       standin.setDenyBypass(true);
       const r = await runScrub(standin, canary(["--execute"]));
       expectStopped(r, 1, "bypass-denied");
@@ -165,10 +202,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "a lock that is not enforced fails the canary: the delete without the bypass must be refused",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       // The lock is stripped just before the first delete, as a bucket without Object Lock would
       // behave: the delete then succeeds, and a canary that took that for a pass would approve
       // every irreversible stage that follows.
@@ -188,10 +225,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--multipart fails when the object built by the multipart path carries no lock",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       // The lock vanishes from the multipart object before the canary reads it back.
       const strip = () => {
         for (const v of standin.versions(BUCKET, `${prefix}multipart.bin`)) {
@@ -205,10 +242,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "a version left under the prefix after the deletes fails the canary",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       // A stray writer adds an object under the prefix while the probe is being removed.
       standin.beforeOp(
         "DeleteObject",
@@ -224,10 +261,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--multipart still sends a part checksum when the operator's environment asks for none",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary(["--execute", "--multipart"]), {
         AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
       });
@@ -243,7 +280,7 @@ describe("canary", () => {
   test(
     "the stand-in refuses a part of a lock-created upload that has no checksum, as real S3 does",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const create = await fetch(`${standin.url}/${BUCKET}/${prefix}raw.bin?uploads`, {
         method: "POST",
         headers: {
@@ -270,7 +307,7 @@ describe("canary", () => {
   test(
     "the stand-in refuses a put with lock parameters and no checksum, and the bare CLI sends none",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const lock = {
         "x-amz-object-lock-mode": "GOVERNANCE",
         "x-amz-object-lock-retain-until-date": new Date(Date.now() + 86_400_000).toISOString(),
@@ -324,10 +361,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "a locked put-object sends a checksum whatever the operator's environment asks for",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary(["--execute"]), {
         AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
       });
@@ -359,10 +396,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--multipart proves the production path: the lock set at create, an upload part, a server-side copy",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       let lockSeen: { mode: string; until: Date } | undefined;
       standin.beforeOp(
         "DeleteObject",
@@ -403,10 +440,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--batch proves DeleteObjects: a locked version in a 200 is refused per item, a marker and an XML-character key go, the bypass removes the rest",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary(["--execute", "--batch"]));
       expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain(
@@ -433,10 +470,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--batch fails when a batch deletes a locked version without the bypass",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       // A lock that is not honored in a batch: stripped just before the request is handled.
       standin.beforeOp("DeleteObjects", () => {
         for (const n of ["batch-locked-1.txt", "batch-locked-2.txt"]) {
@@ -451,10 +488,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "--batch fails when the bypass is refused in a batch",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       // The single deletes before it pass; the operator loses the bypass for the second batch.
       standin.beforeOp("DeleteObjects", () => standin.setDenyBypass(true), 2);
       const r = await runScrub(standin, canary(["--execute", "--batch"]));
@@ -467,7 +504,7 @@ describe("canary", () => {
   test(
     "a dry run with --batch lists the batch steps and makes no S3 call",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary(["--batch"]));
       expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("ONE DeleteObjects request WITHOUT the bypass");
@@ -477,10 +514,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "proves the conditional writes the zarr stage relies on: the right ETag passes, a stale one is refused",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       const r = await runScrub(standin, canary(["--execute"]));
       expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("a put conditional on the current ETag succeeded");
@@ -501,10 +538,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "an endpoint that ignores If-Match fails the canary, with a fixed word",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       standin.setIgnoreIfMatch(true);
       const r = await runScrub(standin, canary(["--execute"]));
       expectStopped(r, 1, "conditional-put-not-enforced");
@@ -512,10 +549,10 @@ describe("canary", () => {
     SLOW,
   );
 
-  test(
+  test.concurrent(
     "a conflicting-write refusal (409) is a refusal: on the stale put it passes, on the right one it fails",
     async () => {
-      standin = startS3Standin();
+      let standin = open();
       const key = `${prefix}conditional.json`;
       // PutObject calls: 1 the locked probe, 2 the conditional object's create, 3 the put with the
       // right ETag, 4 the put with the stale one.
@@ -529,7 +566,7 @@ describe("canary", () => {
       expect(stale.exitCode, stale.all).toBe(0);
 
       standin.stop();
-      standin = startS3Standin();
+      standin = open();
       standin.inject("PutObject", {
         code: "ConditionalRequestConflict",
         status: 409,
@@ -545,10 +582,10 @@ describe("canary", () => {
 });
 
 describe("canary: an abort that fails is said, never swallowed (S1)", () => {
-  test(
+  test.concurrent(
     "a failed part copy whose abort also fails names the key and the upload id",
     async () => {
-      standin = startS3Standin();
+      const standin = open();
       standin.inject("UploadPartCopy", { code: "InternalError", status: 500 });
       standin.inject("AbortMultipartUpload", { code: "InternalError", status: 500 });
       const r = await runScrub(standin, canary(["--execute", "--multipart"]));
