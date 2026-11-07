@@ -218,6 +218,12 @@ What the build settled, each a rule and not a description of today:
    The webhook address carries an HMAC token (domain tag `compute-webhook`, over the job id and the job's `webhook_nonce`, no clock) and the launcher's `job_token` is the same construction under the tag `compute-job`, under the callback secret that signs every other callback; the nonce is cleared one day after the job is terminal, which is when the address stops working.
    The route ignores the body, answers one identical refusal for every failure, reads the job back from Tapis (one attempt, a short ceiling) and calls `applyTapisJob`, which the 30-minute tick, a cancel and an administrator's command call too.
    `applyTapisJob` writes `WHERE id = ? AND state = <from>` along the edges of `COMPUTE_TRANSITIONS`, so a repeated, reordered or concurrent writer changes nothing, and a subscription that cannot be deduplicated is harmless.
+   **One secret signs three kinds of token, so it cannot be rotated while a job runs.**
+   `PRESCREEN_CALLBACK_SECRET` signs the webhook token, the launcher's `job_token` and the observer's run token (domain-separated by their tags), and the prescreen and pull-request review callbacks as well.
+   The job token is written into the job's launch specification once, at submit, and that text is never re-signed.
+   Rotating the secret therefore refuses every running job's uploads (the job ends `result_upload_failed` and is charged, as any upload failure is), stops the webhook addresses registered with Tapis (the 30-minute poll remains), and refuses an observer token already minted.
+   The safe rotation: switch compute off, let the running jobs drain (none `submitted`, `queued`, `running`, `archiving` or `unreported`), change the secret, mint observer tokens afterwards, switch compute on; for a suspected leak, cancel the running jobs first and accept the cost.
+   `.rules/revocation.md`, `compute-tokens.ts` and the binding's comment say the same.
 6. **A terminal transition and its settlement are one batch.**
    The state UPDATE, the ledger entry (a charge, or a release for a job that never started) gated on the job row having just taken the new state and not being settled, and the stamp of what was settled run in one D1 batch; a retry repairs a terminal row whose `settled_provisional_at` is still NULL.
 7. **A Tapis `FINISHED` stands only after the upload is verified.**

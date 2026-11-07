@@ -1,7 +1,8 @@
 /**
- * The two per-job tokens of the compute gateway (epic #2005 phase A5, #2010; ADR 0118).
+ * The three tokens of the compute gateway (epic #2005 phases A5 and A7, #2010, #2012; ADR 0118): two per
+ * job (webhook, job) and one per observer run.
  *
- * Both are HMAC-SHA256 hex digests over a job id and the job's `webhook_nonce`, signed with the
+ * All three are HMAC-SHA256 hex digests over a job id and the job's `webhook_nonce`, signed with the
  * callback secret (`PRESCREEN_CALLBACK_SECRET`, one fewer secret to provision on two Workers) and
  * DOMAIN-SEPARATED the way every other callback token is (`services/github/callback-tokens.ts`): the
  * message begins with a tag line that no other kind's message begins with, so a token minted for one
@@ -18,7 +19,17 @@
  *                      payload is the RUN id and the nonce is the run's own: the run row, not a clock in
  *                      the token, says whether it is unspent and within its hour.
  *
- * There is NO clock inside either token: validity is the row's (a non-null nonce, and for the job
+ * ROTATING THE CALLBACK SECRET ENDS ALL THREE KINDS AT ONCE, and it signs the other callbacks too (the
+ * prescreen and pull-request review tokens): the `job_token` inside every RUNNING job's launch
+ * specification stops verifying (its uploads are refused and the job ends `result_upload_failed`,
+ * charged), the Tapis webhook address each live job was registered with stops working (the 30-minute
+ * poll is then the only way a job's end is seen), and an observer token already minted is refused. The
+ * launch specification is written once and cannot be re-signed. Rotate only after the running jobs have
+ * drained (no job in `submitted`, `queued`, `running`, `archiving` or `unreported`), mint observer tokens after the
+ * change, and expect any in-flight prescreen or review callback to be refused (ADR 0118, A5 amendment,
+ * item 5).
+ *
+ * There is NO clock inside any token: validity is the row's (a non-null nonce, and for the job
  * token a job that is not terminal), so a replay after the end has nothing to verify against. The
  * message is three lines, so no field may carry a line break; the signer refuses one and the verifier
  * answers false.
