@@ -121,6 +121,9 @@ export async function computeStatus(
   options: StatusOptions = {},
 ): Promise<ComputeStatusResponse> {
   const timeoutMs = options.timeoutMs ?? STATUS_TIMEOUT_MS;
+  // Read ONCE: the source scan pins the places that read the switch, and the report and the paused
+  // reconciliation must come from the same read.
+  const computeOn = computeEnabled(env);
   const config = tapisConfig(env);
 
   // The user a token is minted for: the configured account under `password`, and under `service` the
@@ -157,7 +160,7 @@ export async function computeStatus(
   return {
     switches: {
       environment: environmentWord(env),
-      compute_enabled: computeEnabled(env),
+      compute_enabled: computeOn,
       pipelines_dispatch_enabled: computePipelinesDispatchEnabled(env),
     },
     tapis: {
@@ -190,7 +193,7 @@ export async function computeStatus(
       pipelines_pool_granted: pipelinesGranted,
     },
     // The tenant sweep returns null while compute is off, which pauses what only it does.
-    reconciliation: { paused: !computeEnabled(env) },
+    reconciliation: { paused: !computeOn },
     attention,
   };
 }
