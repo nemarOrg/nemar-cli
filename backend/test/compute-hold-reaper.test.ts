@@ -710,7 +710,7 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
     expect(await countCancelPendingFailed(w.env().DB)).toBe(0);
     w.h.db
       .query(
-        "UPDATE compute_jobs SET cancel_requested_at = datetime('now', '-61 minutes') WHERE id = ?",
+        "UPDATE compute_jobs SET partner_refused_at = datetime('now', '-61 minutes') WHERE id = ?",
       )
       .run(hold.job_id);
     expect(await countCancelPendingFailed(w.env().DB)).toBe(1);

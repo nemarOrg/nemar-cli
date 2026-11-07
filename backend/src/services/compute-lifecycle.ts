@@ -99,7 +99,7 @@ import {
   unreservedChargeStatements,
 } from "./compute-ledger.js";
 import { isRoutineDifference } from "./compute-observer.js";
-import { partnerExcessStatements } from "./compute-partner-excess.js";
+import { partnerCapNoteStatements, partnerExcessStatements } from "./compute-partner-excess.js";
 import { getPolicy } from "./compute-policy.js";
 import { submitMemoryForQueue } from "./compute-queues.js";
 import {
@@ -361,17 +361,20 @@ export const CANCEL_PENDING_FAILED_MINUTES = 60;
  * Live rows whose recorded cancel is still not carried out {@link CANCEL_PENDING_FAILED_MINUTES} minutes
  * after it was asked for, on the cancel sweep's own list (so a partner's reservation, which is not the
  * sweep's, and a job of the tenant sweep are not counted; an unverified `pending` row has no cancel to
- * carry out, but a refused `mismatch` row's cancel is the reaper's and is counted: a cancel at Tapis that
+ * carry out, but a refused `mismatch` row's cancel is the reaper's and is counted from when it was REFUSED (`partner_refused_at`; a refusal records no cancel intent): a cancel at Tapis that
  * does not take keeps the person's hold and slot, so it must be seen). A cancel the sweep retries every 30 minutes has
  * had at least one retry fail by then. The count the status view and the sweep's line carry as
  * `cancel_pending_failed`; never a row id.
  */
 export const CANCEL_PENDING_FAILED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
-  WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
-    AND flag_unreserved = 0
+  WHERE state IN (${LIVE_STATES_SQL}) AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
-    AND (partner_state IS NULL OR partner_state IN ('verified', 'mismatch'))
-    AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes')`;
+    AND (
+      (cancel_requested_at IS NOT NULL AND (partner_state IS NULL OR partner_state IN ('verified', 'mismatch'))
+        AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes'))
+      OR (partner_state = 'mismatch'
+        AND partner_refused_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes'))
+    )`;
 
 /** {@link CANCEL_PENDING_FAILED_SQL} as a number. */
 export async function countCancelPendingFailed(db: D1Database): Promise<number> {
@@ -623,20 +626,18 @@ export interface TerminalPlan {
   releaseReason?: "released" | "expired";
 }
 
-/** The gate of a partner's excess entry, placed AFTER the stamp: the row has taken the state and is settled. */
-const SETTLED_GATE_SQL = `EXISTS (SELECT 1 FROM compute_jobs
-    WHERE id = ? AND state = ? AND settled_provisional_at IS NOT NULL)`;
-
 /**
  * A PARTNER job's charge to the person never exceeds the hold the person made: the figure is capped at
- * `held_milli`, and what was used above it is the partner's (`partnerExcessStatements`, written AFTER the
- * stamp in the same batch, so the row's `charged_milli` stays the person's). Any other job is unchanged.
+ * `held_milli`. What was used above it is the partner's, but the excess is written HERE only for a job with
+ * NO Slurm id (nothing will correct it); a job that reaches accounting has its excess written by the
+ * observer's final settlement, from Expanse's figure (`compute-partner-excess.ts`). It is written AFTER the
+ * stamp in the same batch, so the row's `charged_milli` stays the person's. Any other job is unchanged.
  */
 async function capPartnerCharge(
   env: Bindings,
   job: ComputeJobRow,
   settlement: Provisional,
-  state: string,
+  hasSlurm: boolean,
 ): Promise<{ settlement: Provisional; after: D1PreparedStatement[] }> {
   if (
     job.source !== "partner" ||
@@ -645,6 +646,18 @@ async function capPartnerCharge(
   ) {
     return { settlement, after: [] };
   }
+  if (hasSlurm) {
+    // The excess is the final settlement's to write (from Expanse's figure), but the loss is not silent: the
+    // job is marked and one audit row says so until the final arrives; no ledger entry.
+    return {
+      settlement: { ...settlement, milli: job.held_milli },
+      after: partnerCapNoteStatements(env.DB, {
+        jobId: job.id,
+        client: job.client_id,
+        heldMilli: job.held_milli,
+      }),
+    };
+  }
   const { policy } = await getPolicy(env.DB);
   const after = await partnerExcessStatements(env.DB, {
     jobId: job.id,
@@ -652,7 +665,8 @@ async function capPartnerCharge(
     client: job.client_id,
     excessMilli: settlement.milli - job.held_milli,
     routine: isRoutineDifference(settlement.milli, job.held_milli, policy.settle),
-    gate: { sql: SETTLED_GATE_SQL, binds: [job.id, state] },
+    heldMilli: job.held_milli,
+    requireNoSlurmId: true,
   });
   return { settlement: { ...settlement, milli: job.held_milli }, after };
 }
@@ -672,7 +686,12 @@ async function commitTerminal(
 ): Promise<boolean> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, plan.to] };
-  const capped = await capPartnerCharge(env, job, plan.settlement, plan.to);
+  const capped = await capPartnerCharge(
+    env,
+    job,
+    plan.settlement,
+    plan.slurmJobId !== null || job.slurm_job_id !== null,
+  );
   const settle =
     capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id, reason: plan.releaseReason }, gate)
@@ -717,7 +736,7 @@ async function commitSettlementOnly(
 ): Promise<void> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, job.state] };
-  const capped = await capPartnerCharge(env, job, settlement, job.state);
+  const capped = await capPartnerCharge(env, job, settlement, job.slurm_job_id !== null);
   const settle =
     capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id }, gate)
@@ -2338,7 +2357,9 @@ export function jobView(job: ComputeJobRow): ComputeJobView {
     failure_code: job.failure_code,
     failure_detail: job.failure_detail,
     platform_failure: job.platform_failure === 1,
-    cancel_requested: job.cancel_requested_at !== null,
+    cancel_requested:
+      job.cancel_requested_at !== null ||
+      (job.partner_refused_at !== null && job.ended_at === null),
     cancel_reason: job.cancel_reason,
     partition: job.partition,
     pool: job.pool,

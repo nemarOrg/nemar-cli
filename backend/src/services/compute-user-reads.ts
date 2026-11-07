@@ -291,11 +291,13 @@ export interface UserJobColumns {
   charged_milli: number;
   failure_code: string | null;
   cancel_requested_at: string | null;
+  /** When NEMAR refused a partner's job (migration 0134): it is being cancelled until the job ends. */
+  partner_refused_at: string | null;
 }
 
 export const USER_JOB_COLUMNS = `id, kind, source, state, app_id, app_version, partition, pool, nodes,
   cores_per_node, memory_mb, gpus, minutes, created_at, started_at, ended_at, charged_milli,
-  failure_code, cancel_requested_at`;
+  failure_code, cancel_requested_at, partner_refused_at`;
 
 /** A job as its person sees it (`ComputeUserJobSchema`). */
 export function userJobView(row: UserJobColumns): ComputeUserJob {
@@ -320,7 +322,11 @@ export function userJobView(row: UserJobColumns): ComputeUserJob {
     ended_at: row.ended_at,
     charged_milli: row.charged_milli,
     failure_code: row.failure_code,
-    cancel_requested: row.cancel_requested_at !== null,
+    // A refusal records no cancel intent of its own (ADR 0118 item 34), but NEMAR IS cancelling a refused
+    // job until it has ended, and the person has always been told so.
+    cancel_requested:
+      row.cancel_requested_at !== null ||
+      (row.partner_refused_at !== null && row.ended_at === null),
   };
 }
 

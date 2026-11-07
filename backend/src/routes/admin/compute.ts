@@ -115,7 +115,7 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   target_not_in_good_standing: "That account is deleted or not in good standing.",
   target_has_no_pool: "That account has no pool of the word the charge is in.",
   partner_reservations_open:
-    "Partner reservations are open, and this policy turns the partner contract off, which freezes them. Send force_partner_off to do it anyway.",
+    "This policy turns the partner contract off (freezing the open reservations counted in `open`) or changes what bound jobs are verified against (the jobs counted in `bound`). Send force_partner_off to do it anyway.",
   owner_not_proven:
     "That account is not the one the job's Tapis owner was attributed to; send the explicit confirmation to charge it anyway.",
 };
@@ -432,7 +432,10 @@ export function registerComputeAdminRoutes(admin: AdminRouter): void {
       if (!result.ok) {
         if (result.code === "not_owner") return refuse(c, "owner_only");
         if (result.code === "partner_reservations_open") {
-          return refuse(c, "partner_reservations_open", undefined, { open: result.open });
+          return refuse(c, "partner_reservations_open", undefined, {
+            open: result.open,
+            bound: result.bound,
+          });
         }
         if (result.code === "invalid_note") {
           return invalidBody(c, [{ path: "note", code: "invalid_string" }]);

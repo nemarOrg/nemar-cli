@@ -884,6 +884,25 @@ export const ComputeClientCapsSchema = z
   .strict();
 
 /**
+ * Whether a scheduler option string NAMES an option that could allocate GPUs or generic resources. Only the
+ * option NAME counts (the part before `=` or whitespace, after the leading dashes), never its value, so
+ * `--account=progress` and `--chdir=/home/gpuser` are not GPU options. Refused, fail-closed: a name that
+ * contains `gpu`, `gres` or `tres` in any case (`--gpus-per-node`, `--mem-per-gpu`, `--gres-flags`,
+ * `--tres-per-task`), the short option `-G` with or without an attached value, and an abbreviation of
+ * `--gpus`, `--gres` or `--tres` the scheduler would accept (`--g`, `--gp`, `--gpu`, `--gre`, `--tre`).
+ * The hold bounds GPUs; the owner's list never admits one. Options that move a job off the checked queue or
+ * size (`--partition`, `-N`, `--ntasks`, `--mem`, `--time`, `--exclusive`) are NOT refused here and must
+ * not be listed: see ADR 0118 item 41.
+ */
+export function schedulerOptionNamesGpus(arg: string): boolean {
+  const rawName = arg.split(/[=\s]/)[0] ?? "";
+  if (rawName.startsWith("-G")) return true;
+  const name = rawName.replace(/^-+/, "").toLowerCase();
+  if (/gpu|gres|tres/.test(name)) return true;
+  return name.length >= 1 && ["gpus", "gres", "tres"].some((long) => long.startsWith(name));
+}
+
+/**
  * Everything the owner sets without a deploy, validated strictly on every write
  * (`nemar admin compute policy set`, owner only, audited). A partition that has a ceiling here is
  * offered to people; one without is for NEMAR's pipelines only. Grants and caps are whole numbers
@@ -968,7 +987,7 @@ export const ComputePolicySchema = z
             z
               .string()
               .regex(/^[-A-Za-z0-9=_.:,@/]{1,100}$/)
-              .refine((a) => !a.startsWith("--gpus") && !a.startsWith("--gres"), {
+              .refine((a) => !schedulerOptionNamesGpus(a), {
                 message: "GPUs are bounded by the hold, never allowed by name",
               }),
           )

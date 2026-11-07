@@ -772,20 +772,22 @@ describe("a report's files", () => {
 });
 
 describe("a binding withdrawn because the job is NEMAR's own", () => {
-  test("keeps a cancel a person's account recorded and withdraws only the refusal's own (`unreserved`)", async () => {
+  test("a withdrawal never touches a cancel a person, an administrator or the end of an account recorded (a refusal records none of its own)", async () => {
     const { UNBIND_SQL } = await import("../src/services/compute-report-verify");
     for (const [reason, kept] of [
       ["account_ended", true],
       ["user", true],
-      ["unreserved", false],
+      [null, false],
     ] as const) {
       const hold = await reserve(w, person);
-      const uuid = `uuid-${reason.replace("_", "-")}-1`;
+      const uuid = `uuid-${reason ?? "none"}-1`.replace("_", "-");
       w.h.db
         .query(
-          "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending', cancel_requested_at = datetime('now'), cancel_reason = ? WHERE id = ?",
+          reason === null
+            ? "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending' WHERE id = ?"
+            : "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending', cancel_requested_at = datetime('now'), cancel_reason = ? WHERE id = ?",
         )
-        .run(uuid, reason, hold.job_id);
+        .run(...(reason === null ? [uuid, hold.job_id] : [uuid, reason, hold.job_id]));
       const done = await w
         .env()
         .DB.prepare(UNBIND_SQL)

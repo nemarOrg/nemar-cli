@@ -207,7 +207,8 @@ export const STAMP_FINAL_SQL = `UPDATE compute_jobs SET
                       WHERE e.job_id = ?1
                         AND e.pool_id = (SELECT h.pool_id FROM compute_ledger h
                                           WHERE h.kind = 'hold' AND h.job_id = ?1)),
-    flag_mismatch = CASE WHEN ?2 = 1 THEN 1 ELSE flag_mismatch END
+    flag_mismatch = CASE WHEN ?2 = 1 THEN 1 ELSE flag_mismatch END,
+    partner_flag = CASE WHEN partner_flag = 'capped_provisional' THEN NULL ELSE partner_flag END
   WHERE id = ?1 AND settled_final_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger f WHERE f.idempotency_key = 'job:' || ?1 || ':final')`;
 
@@ -524,6 +525,7 @@ export async function settleObservedRows(
             client: c.job_client,
             excessMilli: excess,
             routine: routineExcess,
+            heldMilli: c.job_held_milli,
           })),
         );
       }
