@@ -58,10 +58,30 @@ export const PARTNER_SCOPES = [
   "offline_access",
 ];
 
+/**
+ * The owner's confirmation the partner contract needs (`policy.partner`): NEMAR's service identity can see
+ * the tenant's jobs, and the execution system a partner's job must run on (the Tapis stand-in's own).
+ */
+export const PARTNER_CONFIRMED = { tapisVisibilityConfirmed: true, execSystemId: "standin-exec" };
+
+/** `setPolicy` with the partner confirmation in it (any key of `over` wins). */
+export async function setPartnerPolicy(
+  d1: Parameters<typeof setPolicy>[0],
+  ownerId: number,
+  over: Record<string, unknown> = {},
+): Promise<void> {
+  await setPolicy(d1, ownerId, { partner: PARTNER_CONFIRMED, ...over });
+}
+
 /** Build the world on a fixture that has just been reset. */
 export async function buildPartnerWorld(
   fx: LifecycleFixture,
-  options: { client?: Record<string, unknown>; caps?: { open: number; milli: number } | null } = {},
+  options: {
+    client?: Record<string, unknown>;
+    caps?: { open: number; milli: number } | null;
+    /** False leaves the owner's partner confirmation out (the default policy: closed). */
+    confirmed?: boolean;
+  } = {},
 ): Promise<PartnerWorld> {
   const base = fx.env({
     ENVIRONMENT: "test",
@@ -89,6 +109,7 @@ export async function buildPartnerWorld(
   if (options.caps !== null) {
     const caps = options.caps ?? { open: 10, milli: 1_000_000_000 };
     await setPolicy(base.DB, fx.ownerId, {
+      ...(options.confirmed === false ? {} : { partner: PARTNER_CONFIRMED }),
       clients: {
         [client.clientId]: {
           maxOpenReservations: caps.open,
@@ -254,6 +275,10 @@ export interface Launch {
   memoryMB?: number;
   maxMinutes?: number;
   tags?: string[];
+  /** The `arg` of each scheduler option the job is submitted with (e.g. `--gpus=4`). */
+  schedulerArgs?: string[];
+  /** The execution system the job runs on. */
+  execSystemId?: string;
   /** Share the job with the NEMAR service identity, so NEMAR's tag search sees it (an arrangement of the real tenant, unverified). */
   share?: boolean;
 }
@@ -284,6 +309,10 @@ export async function partnerLaunch(
       memoryMB: over.memoryMB ?? 8000,
       maxMinutes: over.maxMinutes ?? 60,
       tags,
+      ...(over.execSystemId === undefined ? {} : { execSystemId: over.execSystemId }),
+      ...(over.schedulerArgs === undefined
+        ? {}
+        : { parameterSet: { schedulerOptions: over.schedulerArgs.map((arg) => ({ arg })) } }),
     }),
   });
   const body = (await res.json()) as { result: { uuid: string } };
@@ -321,4 +350,59 @@ export interface ReportUpload {
   url: string;
   method: string;
   headers: Record<string, string>;
+}
+
+/**
+ * A database handle that runs `during` ONCE, right after the first read whose SQL contains `after` has
+ * returned: what a CONCURRENT request did while this one was between two of its statements. The reads and
+ * writes themselves are the real database's; nothing is faked, the other request is a real request (the
+ * caller passes it as `during`). The local engine serializes whole requests, so a race that production's
+ * interleaving can produce is made here, deterministically, at the exact statement.
+ */
+export function raceAfterRead(
+  db: D1Database,
+  after: string,
+  during: () => Promise<void>,
+  /** Which matching read: the first by default. */
+  nth = 1,
+): D1Database {
+  let armed = true;
+  let seen = 0;
+  const wrapStatement = (statement: D1PreparedStatement, sql: string): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, prop, receiver) {
+        if (prop === "__target") return target;
+        if (prop === "bind") {
+          return (...values: unknown[]) => wrapStatement(target.bind(...values), sql);
+        }
+        if (prop === "first") {
+          return async (...args: unknown[]) => {
+            const result = await (target.first as (...a: unknown[]) => Promise<unknown>)(...args);
+            if (armed && sql.includes(after) && ++seen === nth) {
+              armed = false;
+              await during();
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  return new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === "prepare") return (sql: string) => wrapStatement(target.prepare(sql), sql);
+      if (prop === "batch") {
+        // The real batch takes the real statements: unwrap the proxies.
+        return (statements: D1PreparedStatement[]) =>
+          target.batch(
+            statements.map(
+              (s) => (s as unknown as { __target?: D1PreparedStatement }).__target ?? s,
+            ),
+          );
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }

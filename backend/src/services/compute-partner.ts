@@ -38,6 +38,7 @@ import {
 } from "../../../shared/contract/compute-partner-request.js";
 import {
   COMPUTE_PARTNER_TAG_PREFIX,
+  COMPUTE_REPORT_MISMATCHES,
   type ComputePartnerErrorCode,
   type ComputePartnerHoldResponse,
   type ComputePartnerReleaseResponse,
@@ -181,12 +182,25 @@ export function plusMinutes(sqlTime: string, minutes: number): string {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
+/**
+ * The answer for a hold. `expires_at` is the time stored on the row when it was made (never recomputed from
+ * today's policy), so what the partner was told and what the reaper acts on are one time. A REPLAYED hold
+ * that ended before any job was reported under it is told so (`hold_released`, `hold_cancelled`), never
+ * answered as a live one; any other replay carries the job's current `state`.
+ */
 function holdAnswer(job: ComputeJobRow, policy: ComputePolicy, replayed: boolean) {
+  if (replayed && job.tapis_uuid === null && isTerminalComputeState(job.state)) {
+    return job.cancel_requested_at !== null
+      ? refuse("hold_cancelled", { job_id: job.id })
+      : refuse("hold_released", { job_id: job.id });
+  }
   const body: ComputePartnerHoldResponse = {
     job_id: job.id,
     hold_id: holdIdForJob(job.id),
     tag: `${COMPUTE_PARTNER_TAG_PREFIX}${job.id}`,
-    expires_at: plusMinutes(job.created_at, policy.reservationWaitMinutes),
+    expires_at:
+      job.partner_expires_at ?? plusMinutes(job.created_at, policy.reservationWaitMinutes),
+    state: job.state,
     ...(replayed ? { replayed: true as const } : {}),
   };
   return { ok: true as const, replayed, body };
@@ -216,6 +230,13 @@ export async function reserveHold(
   bodyText: string,
 ): Promise<ReserveResult> {
   const db = env.DB;
+  // 0. The owner's confirmation that NEMAR can see the tenant's jobs. Closed until it is given: a
+  // reservation is only as safe as the reaper's search by its tag, and an empty search proves nothing about
+  // a tenant NEMAR cannot see into.
+  const policyView = await getPolicy(db);
+  const policy = policyView.policy;
+  if (policy.partner?.tapisVisibilityConfirmed !== true) return refuse("partner_not_enabled");
+
   // 1. The person.
   const { refusal, facts } = await standing(db, caller.userId);
   if (refusal !== null) return refuse(refusal);
@@ -236,8 +257,6 @@ export async function reserveHold(
   }
   const body = parsed.data;
 
-  const policyView = await getPolicy(db);
-  const policy = policyView.policy;
   const hash = await requestHash("POST", "/compute/holds", caller.userId, bodyText);
 
   // 3. A repeated key: the reservation again, or a conflict. Nothing below is asked.
@@ -255,11 +274,22 @@ export async function reserveHold(
       gpus: body.gpus,
       minutes: body.minutes,
     });
-    if (over !== null) return refuse(over);
     // 5. The person's live jobs.
     const live =
       (await db.prepare(ACCOUNT_LIVE_COUNT_SQL).bind(caller.userId).first<{ n: number }>())?.n ?? 0;
-    if (live >= policy.maxLiveJobsPerPerson) return refuse("over_concurrency");
+    const early = over ?? (live >= policy.maxLiveJobsPerPerson ? "over_concurrency" : null);
+    // The same key may have won a race while these were read: its hold now counts against the ceilings, so
+    // a refusal named from a stale read would tell a retrying client that a request that succeeded failed.
+    // The key is asked again first; a claimed key goes on to be answered as the reservation it names.
+    if (
+      early !== null &&
+      (await db
+        .prepare(IDEMPOTENCY_BY_KEY_SQL)
+        .bind(caller.scope, key)
+        .first<{ request_hash: string }>()) === null
+    ) {
+      return refuse(early);
+    }
   }
 
   // 6. The hold.
@@ -469,23 +499,48 @@ function reportBody(
   };
 }
 
-/** The mismatch a refused reservation carries, as the partner is told it. */
-function mismatchWord(job: ComputeJobRow): ComputeReportMismatch {
+/**
+ * What a replayed report of a refused reservation is told. The word the verification found
+ * (`owner_mismatch`, `app_mismatch`, `resources_mismatch`, `unverifiable`) is `report_mismatch`; a
+ * reservation that ended before the job was found under it (`hold_ended`: the person cancelled, or their
+ * compute ended) is `hold_cancelled`, which is what happened, and never an owner mismatch.
+ */
+function refusedAgain(job: ComputeJobRow): PartnerRefusal {
   const flag = job.partner_flag;
-  return flag === "app_mismatch" || flag === "resources_mismatch" ? flag : "owner_mismatch";
+  if (flag === "hold_ended") return refuse("hold_cancelled", { job_id: job.id });
+  const word = (COMPUTE_REPORT_MISMATCHES as readonly string[]).includes(flag ?? "")
+    ? (flag as ComputeReportMismatch)
+    : "owner_mismatch";
+  return refuse("report_mismatch", { mismatch: word, job_id: job.id });
 }
 
+/** The digest of a declared list, in the order given: path, size and digest of each. */
+async function filesDigest(files: ComputeReportFile[]): Promise<string> {
+  return sha256Hex(
+    new TextEncoder().encode(JSON.stringify(files.map((f) => [f.path, f.size, f.sha256]))),
+  );
+}
+
+/** Pin the first accepted list of files to the job; a later report may repeat it and no other. `?1` the job, `?2` the digest. */
+const PIN_FILES_SQL = `UPDATE compute_jobs SET partner_files_digest = ?2
+  WHERE id = ?1 AND (partner_files_digest IS NULL OR partner_files_digest = ?2)`;
+
 /**
- * `POST /compute/jobs/:id/report`. In order:
+ * `POST /compute/jobs/:id/report`. In order (a request is judged by everything that is cheap and writes
+ * nothing BEFORE its key is claimed, so a corrected retry under the same key is not a conflict):
  *   1. the job is this person's AND this client's, else `job_not_found`;
- *   2. the key (`idempotency_conflict`);
- *   3. a reservation that was refused before is `report_mismatch` again; one that ended unbound is
- *      `hold_released`; a cancelled one is `hold_cancelled`; one whose person's compute ended is
- *      `suspended`/`no_compute_access`;
- *   4. the uuid: the same one is a repeat, another is `already_bound`;
- *   5. NEMAR reads the Tapis job (8 seconds): a job that is NEMAR's own, or another reservation's, is
- *      `tapis_job_in_use` and is never bound or cancelled; a job Tapis does not have is `tapis_job_not_found`;
- *      a Tapis that cannot be read binds the row `pending` (202) for the tick;
+ *   2. the declared files, whole (`invalid_spec`, `bundle_too_*`), and, once a list was accepted, only that
+ *      list again;
+ *   3. a reservation that was refused before is refused again; one that ended unbound is `hold_released`;
+ *      a cancelled one is `hold_cancelled`; one whose person's compute ended is `suspended` or
+ *      `no_compute_access`; a second uuid is `already_bound`;
+ *   4. the key (`idempotency_conflict`);
+ *   5. NEMAR reads the Tapis job (8 seconds): a job Tapis does not have, or answers for as another uuid, is
+ *      `tapis_job_not_found`; one NEMAR may not read (a refusal of its credential) is
+ *      `tapis_job_unreadable`; neither is bound. A job that is NEMAR's own, or another reservation's, is
+ *      `tapis_job_in_use` and is never bound or cancelled. Only a Tapis that is TRANSIENTLY unable to answer
+ *      (unavailable) binds the row `pending` (202) for the tick, and a job still unreadable two hours later
+ *      is refused (`unverifiable`);
  *   6. the bind (one conditional UPDATE, a unique index behind it), then the verification: a match is
  *      `verified` (200), a mismatch is `report_mismatch` (409, the Tapis job being cancelled);
  *   7. the files, only after the match.
@@ -502,24 +557,36 @@ export async function reportJob(
   const found = await ownReservation(env, caller, jobId);
   if (found === null) return refuse("job_not_found");
   let job = found;
-  const hash = await requestHash("POST", `/compute/jobs/${jobId}/report`, caller.userId, bodyText);
-  const claim = await claimKey(db, caller, key, hash, jobId);
-  if (claim === "conflict") return refuse("idempotency_conflict");
-  const replayed = claim === "repeat";
   const uuid = body.tapis_job_id;
+
+  // A key already used for ANOTHER request is a conflict whatever else is true (read only: the key is
+  // claimed below, after the cheap checks, so a corrected retry under a key that was never claimed works).
+  const hash = await requestHash("POST", `/compute/jobs/${jobId}/report`, caller.userId, bodyText);
+  const held = await db
+    .prepare(IDEMPOTENCY_BY_KEY_SQL)
+    .bind(caller.scope, key)
+    .first<{ request_hash: string }>();
+  if (held !== null && held.request_hash !== hash) return refuse("idempotency_conflict");
 
   // Declared files are judged BEFORE anything is bound: a list the owner's limits or the path rule refuse
   // is refused whole (traversal in any encoding, too many, too large, a digest that is not one), so a
-  // hostile list leaves no binding behind.
-  if (body.files !== undefined && job.records_written_at === null) {
-    const bad = await checkPartnerFiles(env, job.id, body.files);
-    if (bad !== null) return filesRefusal(bad.code, bad.field);
+  // hostile list leaves no binding behind. Once a list was accepted, only that list is accepted again.
+  let digest: string | null = null;
+  if (body.files !== undefined) {
+    digest = await filesDigest(body.files);
+    if (job.partner_files_digest !== null && job.partner_files_digest !== digest) {
+      return refuse("invalid_spec", { field: "files" });
+    }
+    if (job.records_written_at === null) {
+      const bad = await checkPartnerFiles(env, job.id, body.files);
+      if (bad !== null) return filesRefusal(bad.code, bad.field);
+    }
   }
 
   // A reservation that was refused is refused again, and the cancel is asked again (idempotent).
   if (job.partner_state === "mismatch") {
     await finishMismatch(env, job.id, REQUEST_READ);
-    return refuse("report_mismatch", { mismatch: mismatchWord(job), job_id: job.id });
+    return refusedAgain(job);
   }
   if (job.tapis_uuid === null) {
     if (isTerminalComputeState(job.state)) return refuse("hold_released");
@@ -529,6 +596,10 @@ export async function reportJob(
   } else if (job.tapis_uuid !== uuid) {
     return refuse("already_bound", { job_id: job.id });
   }
+
+  const claim = await claimKey(db, caller, key, hash, jobId);
+  if (claim === "conflict") return refuse("idempotency_conflict");
+  const replayed = claim === "repeat";
 
   // Bind, if this is the first report of the uuid.
   let rec: TapisJob | null = null;
@@ -543,10 +614,18 @@ export async function reportJob(
         if (err instanceof TapisError && err.kind === "not_found") {
           return refuse("tapis_job_not_found");
         }
+        // A refusal of NEMAR's credential, or any other 4xx, is a decision and not a moment: a job NEMAR is
+        // not allowed to read can never be verified, so it is not bound (it would run unbilled while it
+        // pinned the person's hold). Only a Tapis that cannot answer just now binds `pending`.
+        if (err instanceof TapisError && (err.kind === "unauthorized" || err.kind === "rejected")) {
+          return refuse("tapis_job_unreadable");
+        }
         unreadable = true;
       }
+      // Tapis answered for another job than the one reported: that is no read of it.
+      if (rec !== null && rec.uuid !== uuid) return refuse("tapis_job_not_found");
       // NEMAR's own job, or another reservation's: never bound, never cancelled on a partner's word.
-      if (rec !== null && isNemarsOwnJob(ctx as NonNullable<typeof ctx>, rec, job.id)) {
+      if (rec !== null && isNemarsOwnJob(ctx, rec, job.id)) {
         return refuse("tapis_job_in_use");
       }
     }
@@ -585,9 +664,9 @@ export async function reportJob(
   // The read-back.
   let verification: "verified" | "pending" = "pending";
   if (job.partner_state === "verified") verification = "verified";
-  else if (job.partner_state === "pending" && !unreadable) {
+  else if (job.partner_state === "pending") {
     const outcome = await verifyBoundJob(env, job.id, {
-      ...(rec === null ? {} : { record: rec }),
+      ...(rec === null || unreadable ? {} : { record: rec }),
       read: REQUEST_READ,
     });
     job = outcome.job ?? job;
@@ -605,7 +684,10 @@ export async function reportJob(
 
   // The files enter the record only after the match. A job NEMAR cannot read back yet is given addresses
   // to upload to (nothing is copied), and the same report again, once it is verified, finishes the copy.
-  if (body.files !== undefined) {
+  if (body.files !== undefined && digest !== null) {
+    // The first accepted list is pinned to the job (a later report repeats it or is refused).
+    const pinned = await db.prepare(PIN_FILES_SQL).bind(job.id, digest).run();
+    if ((pinned.meta?.changes ?? 0) !== 1) return refuse("invalid_spec", { field: "files" });
     const settled =
       verification === "verified"
         ? await settleFiles(env, job, body.files)

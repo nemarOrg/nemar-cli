@@ -29,7 +29,14 @@
 
 import { isTerminalComputeState } from "../../../shared/compute-state.js";
 import type { ComputeReportMismatch } from "../../../shared/contract/compute-partner.js";
-import { type PartitionName, RATE_TABLE_V1, suMilliFor } from "../../../shared/contract/compute.js";
+import {
+  type ComputePool,
+  PARTITIONS,
+  PARTITION_NAMES,
+  type PartitionName,
+  RATE_TABLE_V1,
+  suMilliFor,
+} from "../../../shared/contract/compute.js";
 import {
   AUDIT_IF_PREVIOUS_CHANGED_SQL,
   type AuditLogEntry,
@@ -49,6 +56,7 @@ import {
   subscribeVerifiedJob,
   tapisAccess,
 } from "./compute-lifecycle.js";
+import { getPolicy } from "./compute-policy.js";
 import {
   type TapisContext,
   type TapisJob,
@@ -57,6 +65,17 @@ import {
 } from "./tapis/client.js";
 import { TapisError } from "./tapis/errors.js";
 import { TAPIS_JOB_UUID_RE } from "./tapis/schemas.js";
+
+/**
+ * The flag of a job NEMAR could not read back for {@link UNVERIFIABLE_AFTER_MINUTES} minutes after it was
+ * bound: a job that cannot be shown to match is refused like one that does not (the cancel is attempted,
+ * the hold released, the use charged to the partner's pool), because the alternative is a job that runs
+ * unbilled while it pins the person's hold and live-job slot.
+ */
+export const UNVERIFIABLE_FLAG = "unverifiable";
+
+/** Minutes a bound job may stay unreadable (a Tapis that is down, a record NEMAR may not read) before it is refused. */
+export const UNVERIFIABLE_AFTER_MINUTES = 120;
 
 /** The audit action of a refused report: one row, written in the batch that records the mismatch. */
 export const PARTNER_MISMATCH_ACTION = "compute.partner.mismatch";
@@ -85,7 +104,12 @@ const whole = (value: unknown): number | null =>
  * or its version is not the reservation's), `resources_mismatch` (the queue is not the reservation's
  * partition, or the nodes, the cores per node, the memory, the minutes or the price of the record's
  * resources exceed the hold's; a figure the record does not carry cannot be shown within it, so it
- * fails). The GPUs are not on the record, so a GPU count is not checked; the price uses the hold's.
+ * fails). THE SCHEDULER OPTIONS are read through the narrow accessor `schedulerArgsOf` and held to an
+ * ALLOWLIST: at most one `--gpus=N` with N no more than the hold's GPUs, and nothing else (a partner that
+ * adds `--exclusive`, `--mem` or a second option is changing what the scheduler allocates and the
+ * accounting charges, which the record's own figures do not show); a record whose options cannot be read is
+ * never verified. When the owner pinned the execution system (`policy.partner.execSystemId`), a record on
+ * another system is a `resources_mismatch`.
  */
 export function checkReport(
   job: Pick<
@@ -111,7 +135,10 @@ export function checkReport(
     | "coresPerNode"
     | "memoryMB"
     | "maxMinutes"
+    | "execSystemId"
+    | "schedulerArgs"
   >,
+  pin: { execSystemId?: string | undefined } = {},
 ): ReportCheck {
   if (job.tapis_owner === null || rec.owner !== job.tapis_owner) {
     return { ok: false, flag: "owner_mismatch" };
@@ -125,6 +152,8 @@ export function checkReport(
   const minutes = whole(rec.maxMinutes);
   const resources = { ok: false, flag: "resources_mismatch" } as const;
   if (rec.execSystemLogicalQueue !== job.partition) return resources;
+  if (pin.execSystemId !== undefined && rec.execSystemId !== pin.execSystemId) return resources;
+  if (!schedulerArgsWithin(rec.schedulerArgs, job.gpus)) return resources;
   if (nodes === null || cores === null || memory === null || minutes === null) return resources;
   if (nodes < 1 || nodes > job.nodes) return resources;
   if (cores > job.cores_per_node) return resources;
@@ -143,6 +172,18 @@ export function checkReport(
     return resources;
   }
   return { ok: true };
+}
+
+/**
+ * Whether a record's scheduler options are the ones a reservation allows: readable (`undefined` and `null`
+ * are not), at most one, and that one `--gpus=N` with N no more than the hold's GPUs.
+ */
+export function schedulerArgsWithin(args: string[] | null | undefined, holdGpus: number): boolean {
+  if (!Array.isArray(args)) return false;
+  if (args.length > 1) return false;
+  if (args.length === 0) return true;
+  const m = /^--gpus=([0-9]{1,2})$/.exec(args[0] as string);
+  return m !== null && Number(m[1]) <= holdGpus;
 }
 
 /** True when a Tapis record carries a `nemar_job:<id>` tag for a job other than `jobId`. */
@@ -200,7 +241,7 @@ export type VerifyOutcome =
   /** The read matched: the job is `verified` and `submitted`; the webhook is subscribed. */
   | { kind: "verified"; job: ComputeJobRow }
   /** The read did not match: the intent is recorded (the cancel is carried out by `finishMismatch`). */
-  | { kind: "mismatch"; flag: ComputeReportMismatch; job: ComputeJobRow }
+  | { kind: "mismatch"; flag: ComputeReportMismatch | typeof UNVERIFIABLE_FLAG; job: ComputeJobRow }
   /** Tapis could not be read just now (or the row is not ready): still `pending`, nothing charged. */
   | { kind: "pending"; job: ComputeJobRow; gone?: boolean }
   /** The row is not a partner job waiting to be verified (already verified, refused, ended or none). */
@@ -236,22 +277,20 @@ export async function verifyBoundJob(
   const ctx = tapisAccess(env, options.read ?? REQUEST_READ);
   let rec = options.record ?? null;
   if (rec === null) {
-    if (ctx === null) return { kind: "pending", job };
+    if (ctx === null) return unreadable(env, job, uuid, false);
     try {
       rec = await getTapisJob(ctx, uuid);
     } catch (err) {
       console.warn(
         `[compute-partner] verify_read_failed job=${job.id} kind=${err instanceof TapisError ? err.kind : errorClassName(err)}`,
       );
-      // A 404 is "Tapis has no such job": the tick may withdraw a binding that stays that way.
-      return {
-        kind: "pending",
-        job,
-        ...(err instanceof TapisError && err.kind === "not_found" ? { gone: true } : {}),
-      };
+      // A 404 is "Tapis has no such job": the tick may withdraw a binding that stays that way. Any other
+      // failure is "cannot read it": pending, until the limit, and then refused (`unverifiable`).
+      return unreadable(env, job, uuid, err instanceof TapisError && err.kind === "not_found");
     }
   }
-  if (rec.uuid !== uuid) return { kind: "pending", job };
+  // Tapis answered for another job than the one bound: that is no read of this job.
+  if (rec.uuid !== uuid) return unreadable(env, job, uuid, false);
 
   // A record that is NEMAR's own job is never judged or cancelled on a partner's word: the binding is
   // withdrawn (the row is a reservation again) and the partner is told it is in use.
@@ -260,7 +299,8 @@ export async function verifyBoundJob(
     return { kind: "skipped", job: await getJob(env.DB, job.id) };
   }
 
-  const verdict = checkReport(job, rec);
+  const pin = (await getPolicy(env.DB)).policy.partner;
+  const verdict = checkReport(job, rec, { execSystemId: pin?.execSystemId });
   if (verdict.ok) {
     const slurm =
       typeof rec.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
@@ -287,6 +327,37 @@ export async function verifyBoundJob(
   job = await recordMismatch(env, job, uuid, verdict.flag, rec);
   if (job.partner_state !== "mismatch") return { kind: "skipped", job };
   return { kind: "mismatch", flag: verdict.flag, job };
+}
+
+/** Minutes since the job was bound (`submitted_at` is the bind time of a pending partner row). */
+function boundMinutes(job: Pick<ComputeJobRow, "submitted_at" | "created_at">): number {
+  const raw = (job.submitted_at ?? job.created_at).replace(" ", "T");
+  const ms = Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(raw) ? raw : `${raw}Z`);
+  return Number.isFinite(ms) ? (Date.now() - ms) / 60_000 : 0;
+}
+
+/**
+ * NEMAR could not read the bound job back. Until {@link UNVERIFIABLE_AFTER_MINUTES} it stays `pending`
+ * (nothing is charged beyond the hold, no generic path takes the row); past it a job that cannot be shown
+ * to match is refused as `unverifiable` (the intent is recorded here, one audit row; `finishMismatch`
+ * cancels it, releases the hold and charges the partner's pool). A 404 (`gone`) is the other case: the
+ * tick withdraws that binding after a time (`compute-hold-reaper.ts`), since a job Tapis does not have is
+ * not running.
+ */
+async function unreadable(
+  env: Bindings,
+  job: ComputeJobRow,
+  uuid: string,
+  gone: boolean,
+): Promise<VerifyOutcome> {
+  if (gone || boundMinutes(job) < UNVERIFIABLE_AFTER_MINUTES) {
+    return { kind: "pending", job, ...(gone ? { gone: true } : {}) };
+  }
+  console.warn("[compute-partner] unverifiable");
+  const refused = await recordMismatch(env, job, uuid, UNVERIFIABLE_FLAG, null);
+  return refused.partner_state === "mismatch"
+    ? { kind: "mismatch", flag: UNVERIFIABLE_FLAG, job: refused }
+    : { kind: "skipped", job: refused };
 }
 
 /**
@@ -385,6 +456,8 @@ export async function finishMismatch(
   jobId: string,
   mode: { maxAttempts: number; timeoutMs: number } = TICK_READ,
 ): Promise<MismatchEnd> {
+  // The row as it stands BEFORE Tapis is asked: the ending binds exactly this state, so a second writer
+  // (a retried tick, a concurrent report) that lost changes nothing.
   const job = await getJob(env.DB, jobId);
   if (
     job === null ||
@@ -399,13 +472,21 @@ export async function finishMismatch(
   if (!TAPIS_JOB_UUID_RE.test(uuid)) return "skipped";
   const ctx = tapisAccess(env, mode);
   if (ctx === null) return "pending";
+  const unverifiable = job.partner_flag === UNVERIFIABLE_FLAG;
 
   let rec: TapisJob | null = null;
+  let unread = false;
   try {
     rec = await getTapisJob(ctx, uuid);
   } catch (err) {
-    if (!(err instanceof TapisError && err.kind === "not_found")) return "pending";
-    // The record is gone. The row's own evidence decides what it was (below); a 404 is not a release.
+    if (err instanceof TapisError && err.kind === "not_found") {
+      // The record is gone. The row's own evidence decides what it was (below); a 404 is not a release.
+    } else if (unverifiable) {
+      // A job NEMAR could not read for hours is cancelled blind: the cancel needs only the uuid.
+      unread = true;
+    } else {
+      return "pending";
+    }
   }
 
   if (rec !== null && isNemarsOwnJob(ctx, rec, job.id)) {
@@ -413,7 +494,18 @@ export async function finishMismatch(
     return "skipped";
   }
 
-  if (rec !== null && !TAPIS_ENDED.has(rec.status)) {
+  if (unread) {
+    try {
+      await cancelJob(ctx, uuid);
+    } catch (err) {
+      if (!(err instanceof TapisError && err.status === 409)) {
+        console.warn(
+          `[compute-partner] cancel_unclear job=${job.id} kind=${err instanceof TapisError ? err.kind : errorClassName(err)}`,
+        );
+        return "pending";
+      }
+    }
+  } else if (rec !== null && !TAPIS_ENDED.has(rec.status)) {
     try {
       await cancelJob(ctx, uuid);
     } catch (err) {
@@ -433,9 +525,37 @@ export async function finishMismatch(
     if (!TAPIS_ENDED.has(rec.status)) return "pending";
   }
 
-  const settlement: Provisional =
-    rec === null ? partnerLostSettlement(job) : provisionalCharge(job, rec);
-  const fresh = (await getJob(env.DB, job.id)) ?? job;
-  const won = await commitPartnerMismatchEnd(env, fresh, rec, settlement);
+  // What ran is priced from what the RECORD shows where it is readable (its queue and its GPUs), else from
+  // the hold; a job that could not be read at all is charged the minimum (it cannot be shown not to have run).
+  const priced = pricedAs(job, rec);
+  const settlement: Provisional = unread
+    ? { kind: "charge", milli: RATE_TABLE_V1.minChargeMilli, seconds: 0, fallback: true }
+    : rec === null
+      ? partnerLostSettlement(job)
+      : provisionalCharge(priced.job, rec);
+  const won = await commitPartnerMismatchEnd(env, job, rec, settlement, priced.pool);
   return won ? "ended" : "skipped";
+}
+
+/**
+ * The job as the use of a refused partner job is priced: on the QUEUE the record shows when it is one of
+ * ours (a GPU queue is the gpu pool whatever the hold asked for) and with the GPUs of its `--gpus=N`
+ * option when readable, else the hold's partition and GPUs.
+ */
+export function pricedAs(
+  job: ComputeJobRow,
+  rec: TapisJob | null,
+): { job: ComputeJobRow; pool: ComputePool } {
+  const queue = rec?.execSystemLogicalQueue;
+  if (typeof queue !== "string" || !(PARTITION_NAMES as readonly string[]).includes(queue)) {
+    return { job, pool: job.pool };
+  }
+  const partition = queue as PartitionName;
+  const pool = PARTITIONS[partition].pool;
+  const args = rec?.schedulerArgs;
+  const given = Array.isArray(args)
+    ? args.map((a) => /^--gpus=([0-9]{1,2})$/.exec(a)?.[1]).find((g) => g !== undefined)
+    : undefined;
+  const gpus = given !== undefined ? Number(given) : pool === "gpu" ? Math.max(job.gpus, 1) : 0;
+  return { job: { ...job, partition, pool, gpus }, pool };
 }

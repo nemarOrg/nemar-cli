@@ -49,8 +49,8 @@ import {
   poolOf,
   reserve,
   row,
+  setPartnerPolicy,
 } from "./helpers/compute-partner-world";
-import { setPolicy } from "./helpers/compute-seed";
 import { registerClient } from "./helpers/oidc-flow";
 
 let fx: LifecycleFixture;
@@ -101,7 +101,7 @@ async function refused(
 
 /** The owner's policy with this client's caps (and any other change). */
 async function caps(open: number, milli: number, over: Record<string, unknown> = {}) {
-  await setPolicy(w.env().DB, fx.ownerId, {
+  await setPartnerPolicy(w.env().DB, fx.ownerId, {
     clients: { [w.client.clientId]: { maxOpenReservations: open, maxReservedMilliPerDay: milli } },
     ...over,
   });
@@ -522,7 +522,7 @@ describe("idempotency", () => {
       allowed_grants: ["authorization_code"],
       audience: "https://api.nemar.org/compute",
     });
-    await setPolicy(w.env().DB, fx.ownerId, {
+    await setPartnerPolicy(w.env().DB, fx.ownerId, {
       clients: {
         [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
         [other.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
@@ -539,5 +539,172 @@ describe("idempotency", () => {
     expect(second.status).toBe(201);
     expect(second.json?.job_id).not.toBe(first.json?.job_id);
     expect(count("compute_idempotency_keys")).toBe(2);
+  });
+});
+
+describe("the review round: a key that raced, a day that turned, a policy that moved (PR #2077)", () => {
+  test("the partner contract is closed until the owner confirms NEMAR can see the tenant (I2): 503 partner_not_enabled, nothing written", async () => {
+    await fx.reset();
+    w = await buildPartnerWorld(fx, { confirmed: false });
+    const person = await newPartnerPerson(w);
+    const before = snapshot();
+    const res = await post(person, holdBody());
+    expect([res.status, res.json?.code]).toEqual([503, "partner_not_enabled"]);
+    expect(snapshot()).toEqual(before);
+    // The owner's word opens it.
+    await setPartnerPolicy(w.env().DB, fx.ownerId, {
+      clients: {
+        [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
+      },
+    });
+    expect((await post(person, holdBody())).status).toBe(201);
+    // Withdrawing the confirmation closes it again.
+    await setPartnerPolicy(w.env().DB, fx.ownerId, {
+      partner: { tapisVisibilityConfirmed: false },
+      clients: {
+        [w.client.clientId]: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
+      },
+    });
+    expect((await post(person, holdBody())).json?.code).toBe("partner_not_enabled");
+  });
+
+  test("a policy that confirms the partner contract must name the execution system (I2)", async () => {
+    const { putPolicy } = await import("../src/services/compute-policy");
+    const bad = await putPolicy(
+      w.env().DB,
+      fx.ownerId,
+      { ...DEFAULT_COMPUTE_POLICY, partner: { tapisVisibilityConfirmed: true } },
+      "test",
+    );
+    expect(bad.ok).toBe(false);
+    const ok = await putPolicy(
+      w.env().DB,
+      fx.ownerId,
+      { ...DEFAULT_COMPUTE_POLICY, partner: { tapisVisibilityConfirmed: false } },
+      "test",
+    );
+    expect(ok.ok).toBe(true);
+  });
+
+  test("the same key racing a winner at a cap of ONE is answered with the winner, never a refusal (I1, Sonnet)", async () => {
+    await caps(1, 1_000_000_000, { maxLiveJobsPerPerson: 1 });
+    const person = await newPartnerPerson(w);
+    for (let round = 0; round < 5; round++) {
+      w.h.db.exec("DELETE FROM compute_idempotency_keys");
+      w.h.db.exec("UPDATE compute_jobs SET state = 'cancelled'");
+      const [x, y] = await Promise.all([
+        post(person, holdBody(), `race-${round}`),
+        post(person, holdBody(), `race-${round}`),
+      ]);
+      expect([round, x.status, y.status]).toEqual([round, 201, 201]);
+      expect(x.json?.job_id).toBe(y.json?.job_id);
+    }
+  });
+
+  test("a same-key request that loses to a winner between its key read and its checks is answered with the winner, not a refusal (I1, Sonnet)", async () => {
+    const { raceAfterRead } = await import("./helpers/compute-partner-world");
+    // The pre-check path: the person's one live job is the winner's by the time the loser counts.
+    await caps(10, 1_000_000_000, { maxLiveJobsPerPerson: 1 });
+    const person = await newPartnerPerson(w);
+    const winner = () => post(person, holdBody(), "late-key").then(() => undefined);
+    const loser = await partnerCall(w, "POST", "/compute/holds", {
+      token: person.token,
+      json: holdBody(),
+      key: "late-key",
+      env: { DB: raceAfterRead(w.env().DB, "compute_idempotency_keys", winner) } as never,
+    });
+    expect([loser.status, loser.json?.replayed]).toEqual([201, true]);
+    expect(count("compute_jobs")).toBe(1);
+
+    // The hold's own statement: the client's one open reservation is the winner's by the time it runs.
+    await fx.reset();
+    w = await buildPartnerWorld(fx);
+    await caps(1, 1_000_000_000);
+    const other = await newPartnerPerson(w);
+    const winner2 = () => post(other, holdBody(), "late-key-2").then(() => undefined);
+    const loser2 = await partnerCall(w, "POST", "/compute/holds", {
+      token: other.token,
+      json: holdBody(),
+      key: "late-key-2",
+      // The second read of the key is the hold's own (the first is the route's).
+      env: { DB: raceAfterRead(w.env().DB, "compute_idempotency_keys", winner2, 2) } as never,
+    });
+    expect([loser2.status, loser2.json?.replayed]).toEqual([201, true]);
+    expect(count("compute_jobs")).toBe(1);
+  });
+
+  test("the client's daily cap counts from UTC midnight: a hold a minute before it is yesterday's, one at 00:00 is today's (M4, Sonnet)", async () => {
+    await caps(10, 4000);
+    const person = await newPartnerPerson(w);
+    const first = await reserve(w, person);
+    // Put the hold's ledger entry a minute before this UTC day began: the cap is free again. (The ledger is
+    // append-only; the test lifts the guard for the one statement and puts it back.)
+    const setHoldTime = (sql: string) => {
+      const guard = w.h.db
+        .query("SELECT sql FROM sqlite_master WHERE name = 'compute_ledger_no_update'")
+        .get() as { sql: string };
+      w.h.db.exec("DROP TRIGGER compute_ledger_no_update");
+      w.h.db
+        .query(`UPDATE compute_ledger SET created_at = ${sql} WHERE job_id = ? AND kind = 'hold'`)
+        .run(first.job_id);
+      w.h.db.exec(guard.sql);
+    };
+    setHoldTime("datetime(date('now'), '-1 minutes')");
+    const second = await post(person, holdBody());
+    expect(second.status).toBe(201);
+    // Now exactly at midnight: today's, so a third does not fit (4000 + 4000 > 4000).
+    setHoldTime("date('now') || ' 00:00:00'");
+    const third = await post(person, holdBody());
+    expect([third.status, third.json?.code]).toEqual([409, "client_cap_reached"]);
+  });
+
+  test("a key that names a job removed after its retention is a conflict, never a 500 (minor, Sonnet)", async () => {
+    const person = await newPartnerPerson(w);
+    const first = await reserve(w, person, {}, "retention-key");
+    w.h.db.exec("PRAGMA foreign_keys = OFF");
+    w.h.db.query("DELETE FROM compute_jobs WHERE id = ?").run(first.job_id);
+    w.h.db.exec("PRAGMA foreign_keys = ON");
+    const again = await post(person, holdBody(), "retention-key");
+    expect([again.status, again.json?.code]).toEqual([422, "idempotency_conflict"]);
+  });
+
+  test("expires_at is the time stored when the hold was made: a policy change moves neither the answer nor the reaper's clock (minor, Sonnet)", async () => {
+    const person = await newPartnerPerson(w);
+    const first = await reserve(w, person, {}, "expiry-key");
+    await caps(10, 1_000_000_000, { reservationWaitMinutes: 5 });
+    const again = await post(person, holdBody(), "expiry-key");
+    expect(again.json?.expires_at).toBe(first.expires_at);
+    const stored = row(w, first.job_id).partner_expires_at as string;
+    expect(stored.replace(" ", "T").slice(0, 16)).toBe(
+      first.expires_at.replace(" ", "T").slice(0, 16),
+    );
+    // Six minutes old under a wait of five now: still inside the thirty it was made with.
+    w.h.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-6 minutes') WHERE id = ?")
+      .run(first.job_id);
+    const { reapExpiredHolds } = await import("../src/services/compute-hold-reaper");
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ examined: 0, released: 0 });
+  });
+
+  test("a repeat of a hold's key after the hold ended says so; one that is bound carries the job's state (M7, Sonnet)", async () => {
+    const person = await newPartnerPerson(w);
+    const first = await reserve(w, person, {}, "end-key");
+    const live = await post(person, holdBody(), "end-key");
+    expect([live.status, live.json?.replayed, live.json?.state]).toEqual([201, true, "created"]);
+    const released = await partnerCall(w, "DELETE", `/compute/holds/${first.hold_id}`, {
+      token: person.token,
+    });
+    expect(released.status).toBe(200);
+    const after = await post(person, holdBody(), "end-key");
+    expect([after.status, after.json?.code]).toEqual([409, "hold_released"]);
+    // A cancelled one is told cancelled.
+    const second = await reserve(w, person, {}, "cancel-key");
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET state = 'cancelled', cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
+      )
+      .run(second.job_id);
+    const cancelled = await post(person, holdBody(), "cancel-key");
+    expect([cancelled.status, cancelled.json?.code]).toEqual([409, "hold_cancelled"]);
   });
 });

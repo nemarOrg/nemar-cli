@@ -73,7 +73,10 @@ const own = (p: PartnerPerson = person) =>
   poolOf(w, "account", String(p.id)) as Record<string, number>;
 const age = (id: string, minutes: number) =>
   w.h.db
-    .query("UPDATE compute_jobs SET created_at = datetime('now', ?) WHERE id = ?")
+    .query(
+      `UPDATE compute_jobs SET created_at = datetime(created_at, ?1),
+         partner_expires_at = datetime(partner_expires_at, ?1) WHERE id = ?2`,
+    )
     .run(`-${minutes} minutes`, id);
 
 describe("the partner's story", () => {

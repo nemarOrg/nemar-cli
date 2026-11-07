@@ -102,7 +102,9 @@ describe("a release", () => {
     // A reservation the reaper expired answers 200 as well.
     const old = await reserve(w, person);
     w.h.db
-      .query("UPDATE compute_jobs SET created_at = datetime('now', '-31 minutes') WHERE id = ?")
+      .query(
+        "UPDATE compute_jobs SET created_at = datetime('now', '-31 minutes'), partner_expires_at = datetime('now', '-1 minutes') WHERE id = ?",
+      )
       .run(old.job_id);
     const { reapExpiredHolds } = await import("../src/services/compute-hold-reaper");
     expect((await reapExpiredHolds(fx.env()))?.released).toBe(1);

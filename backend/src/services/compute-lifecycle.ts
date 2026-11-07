@@ -71,6 +71,7 @@ import {
   resultsLauncherKey,
 } from "../../../shared/contract/compute-launch.js";
 import {
+  type ComputePool,
   type JobSpec,
   LAUNCHER_FILES,
   type LauncherFileName,
@@ -357,7 +358,9 @@ export const CANCEL_PENDING_FAILED_MINUTES = 60;
 /**
  * Live rows whose recorded cancel is still not carried out {@link CANCEL_PENDING_FAILED_MINUTES} minutes
  * after it was asked for, on the cancel sweep's own list (so a partner's reservation, which is not the
- * sweep's, and a job of the tenant sweep are not counted). A cancel the sweep retries every 30 minutes has
+ * sweep's, and a job of the tenant sweep are not counted; an unverified `pending` row has no cancel to
+ * carry out, but a refused `mismatch` row's cancel is the reaper's and is counted: a cancel at Tapis that
+ * does not take keeps the person's hold and slot, so it must be seen). A cancel the sweep retries every 30 minutes has
  * had at least one retry fail by then. The count the status view and the sweep's line carry as
  * `cancel_pending_failed`; never a row id.
  */
@@ -365,7 +368,7 @@ export const CANCEL_PENDING_FAILED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
     AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
-    AND (partner_state IS NULL OR partner_state = 'verified')
+    AND (partner_state IS NULL OR partner_state IN ('verified', 'mismatch'))
     AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes')`;
 
 /** {@link CANCEL_PENDING_FAILED_SQL} as a number. */
@@ -2195,6 +2198,8 @@ export async function commitPartnerMismatchEnd(
   job: ComputeJobRow,
   rec: TapisJob | null,
   settlement: Provisional,
+  /** The word of the pool the use is charged to: the QUEUE the record shows, else the hold's. */
+  poolWord: ComputePool = job.pool,
 ): Promise<boolean> {
   const db = env.DB;
   const years = await recordsRetentionYears(env);
@@ -2202,8 +2207,11 @@ export async function commitPartnerMismatchEnd(
   const slurm =
     typeof rec?.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
   const statements: D1PreparedStatement[] = [
+    // The transition binds the state the caller read BEFORE it asked Tapis and the row still being a
+    // refused job bound to that uuid, so a second writer (a retried tick, a concurrent report) that lost
+    // changes nothing and is told so, and never rewrites an ended row.
     db
-      .prepare(TERMINAL_TRANSITION_SQL)
+      .prepare(PARTNER_MISMATCH_TERMINAL_SQL)
       .bind(
         job.id,
         job.state,
@@ -2222,12 +2230,13 @@ export async function commitPartnerMismatchEnd(
         `+${years} years`,
         0,
         0,
+        job.tapis_uuid,
       ),
     ...releaseStatements(db, { jobId: job.id }, gate),
   ];
   if (settlement.kind === "charge") {
-    const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, job.pool);
-    const people = await platformPool(db, "people", job.pool);
+    const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, poolWord);
+    const people = await platformPool(db, "people", poolWord);
     if (!people) throw new Error("the people budget is missing");
     statements.push(
       ...unreservedChargeStatements(
@@ -2242,21 +2251,29 @@ export async function commitPartnerMismatchEnd(
       ),
     );
   }
+  // No ACCESS report is owed for it: the pseudonym is cleared (attribution was not proven), so the report
+  // would be certain to fail `no_gateway_user`, a false alarm for a person to look at.
   statements.push(
     db.prepare(SETTLED_STAMP_SQL).bind(job.id, "cancelled"),
     db.prepare(PARTNER_MISMATCH_PERSON_SQL).bind(job.id),
-    ...(slurm === null ? [] : [db.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
   );
   const results = await db.batch(statements);
   return (results[0]?.meta?.changes ?? 0) === 1;
 }
 
+/** The terminal transition of a refused partner job: {@link TERMINAL_TRANSITION_SQL} bound to its state and uuid (`?18`). */
+export const PARTNER_MISMATCH_TERMINAL_SQL = `${TERMINAL_TRANSITION_SQL}
+    AND partner_state = 'mismatch' AND tapis_uuid = ?18`;
+
 /**
  * The person's side of a refused partner job, after its settlement: the row names nobody (attribution
  * was not proven, so ACCESS is not told a pseudonym for it) and the person's job view reads a charge of
- * 0. Only a row that is a refused partner job. `?1` the job.
+ * 0. Only a row that is a refused partner job. `?1` the job. `result_records_at` is stamped because there is
+ * nothing of NEMAR's launcher to copy and the output of a job that is not the person's must never be
+ * copied into the person's locked records (the copy tick and the "abandoned copy" alarm both read the stamp).
  */
-export const PARTNER_MISMATCH_PERSON_SQL = `UPDATE compute_jobs SET gateway_user = NULL, charged_milli = 0
+export const PARTNER_MISMATCH_PERSON_SQL = `UPDATE compute_jobs SET gateway_user = NULL, charged_milli = 0,
+    result_records_at = datetime('now')
   WHERE id = ?1 AND source = 'partner' AND partner_state = 'mismatch' AND state = 'cancelled'`;
 
 // --- What an administrator is shown ----------------------------------------------------------------
