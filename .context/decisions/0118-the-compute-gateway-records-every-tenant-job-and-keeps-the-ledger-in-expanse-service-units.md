@@ -897,7 +897,7 @@ Only the bound Tapis uuid and NEMAR's own read of that job prove what ran.
    A match is ONE batch (`pending` to `verified`, the job `submitted`, the ACCESS report owed when a Slurm id shows), after which NEMAR's webhook is subscribed (a Tapis call is never inside a batch); the ordinary lifecycle follows the job from there.
    Until then NOTHING is charged beyond the hold, and no generic path reads, cancels or settles the row (`isUnverifiedPartnerJob` is checked in `advanceComputeJob`, `driveCancel`, `applyTapisJob` and the lists of the tick and of the cancel sweep).
 7. **A mismatch is refused, cancelled, flagged and charged to the partner, never to the person.**
-   The batch records the intent only (`partner_state = mismatch`, the flag word `owner_mismatch`, `app_mismatch` or `resources_mismatch`, the job flagged `mismatch`, the cancel intent, one audit row `compute.partner.mismatch` of fixed words); the Tapis cancel and the ending are `finishMismatch`'s, run at once and retried by the tick until a read shows the job over.
+   The batch records the intent only (`partner_state = mismatch`, the flag word `owner_mismatch`, `app_mismatch` or `resources_mismatch`, the job flagged `mismatch`, `partner_refused_at`, one audit row `compute.partner.mismatch` of fixed words; item 34: a refusal records NO cancel intent); the Tapis cancel and the ending are `finishMismatch`'s, run at once and retried by the tick until a read shows the job over.
    A job the record shows is NEMAR's own is never cancelled; one whose record is gone is settled by the row's own evidence (`partnerLostSettlement`), and a job that cannot be shown not to have run is never released with no charge (the `tapis_record_lost` rule).
    The end is ONE batch (`commitPartnerMismatchEnd`): the terminal transition (`cancelled`), the person's hold RELEASED in full, what ran priced by `provisionalCharge` over the record's actual resources as an `overrun` of the partner pool `tenant` (`unreservedChargeStatements`, counted against the `people` budget once), the settled stamp, and the row's pseudonym cleared and its `charged_milli` set to 0.
    The phase issue said to price what ran "with Epic A's settle function" and write an `overrun` entry; `settleStatements` charges the hold's pool, which is the person's, and the epic's own acceptance criterion and decision 5 say no path charges a person for a job NEMAR has not verified.
@@ -1016,7 +1016,7 @@ They are settled here; "item N" continues the numbering above.
 27. **`unverifiable` needs sustained failure, and is reconsidered.**
     The reaper's tick counts a failed read of a bound job (`partner_read_failures`, `partner_first_failed_at`); a request's failed read counts nothing.
     A job is refused only after at least three failed reads on separate ticks, the first at least two hours ago; a read that succeeds ends the count.
-    A job refused as `unverifiable` that NEMAR can read later, and that matches and is not `CANCELLED`, is moved from `mismatch` to `verified` in one batch (the cancel intent that refusal recorded is withdrawn, one audit row `compute.partner.recovered`, NEMAR's webhook subscribed) and is NOT cancelled; one that does not match is a real mismatch with its own word.
+    A job refused as `unverifiable` that NEMAR can read later, and that matches and is not `CANCELLED`, is moved from `mismatch` to `verified` in one batch (one audit row `compute.partner.recovered`, NEMAR's webhook subscribed) and is NOT cancelled, but only under the conditions of items 34 and 35; one that does not match is a real mismatch with its own word.
 28. **A report binds `pending` only for an unavailable Tapis; a cancel Tapis refuses for good ends the row.**
     Any other error at the report (an answer that is not what the specification says, a 4xx, Tapis access not configured) is `tapis_job_unreadable` (422) and binds nothing.
     In the blind cancel of an `unverifiable` row, HTTP 400, 403 or 404 on the cancel is definitive: the row ends (the hold released, the WHOLE hold charged to the partner's pool, a warn line `cancel_refused`) so that it cannot pin the person's slot for ever; any other failure of the cancel keeps the row as before (item 17's "a cancel that does not take" means a transient one).
@@ -1038,4 +1038,35 @@ They are settled here; "item N" continues the numbering above.
 33. **Staging.**
     The partner policy is per environment: the development Worker's policy stays unconfirmed (`tapisVisibilityConfirmed` absent or false), so the contract answers 503 there, and the development Worker never holds production tenant credentials.
     A staging test of the contract confirms the policy in staging only, against the stand-in or a non-production tenant.
+
+## Amendment 2026-11-07 (the epic-level review of phase D4)
+
+The review of the whole epic branch found a critical fault in the second round's recovery and several related ones.
+"Item N" continues the numbering above; item 17 to 33 are amended where they say otherwise.
+
+34. **A refusal records no cancel intent of its own (critical).**
+    A refusal wrote `cancel_reason = COALESCE(cancel_reason, 'unreserved')`, and the three later writers of a cancel (a person's or an administrator's cancel, the cascade of an account that ended) also use `COALESCE`, so one recorded after the refusal kept the refusal's word and a recovery that cleared `unreserved` threw it away: a person who cancelled, or an administrator who suspended or revoked, saw the job recovered and running, charged to the person.
+    The refusal now writes `partner_refused_at` (the clock of a cancel that does not take, counted by `cancel_pending_failed`) and nothing in `cancel_requested_at` or `cancel_reason`; the ended row's reason is `unreserved` only when no one recorded another (the terminal transition's `COALESCE`).
+    A withdrawal (`UNBIND_SQL`) no longer touches the cancel columns either, and a re-binding is refused while a cancel stands (`BIND_REPORT_SQL`).
+    A recovery needs `cancel_requested_at IS NULL`: with a cancel recorded by anyone the job stays refused, is cancelled at Tapis and ended, and the use is the partner's.
+35. **Recovery and verification re-check the person, in their own statements; a blind cancel forbids a recovery.**
+    `RECOVER_UNVERIFIABLE_SQL` and `VERIFIED_SQL` carry `EXISTS (users.compute_access = 'active' AND deleted_at IS NULL)`; `verifyBoundJob` refuses a matching job whose person's compute ended as `hold_ended` (ended, charged to the partner; a report is told `hold_cancelled`).
+    A blind cancel (one for a job NEMAR could not read) is stamped by a conditional UPDATE BEFORE it is sent (`partner_cancel_sent_at`), and a recovery needs the stamp NULL, so a recovery and a cancel on the wire cannot both win; the stamp stays after any failure of the call (every failure of a mutating call has an unknown outcome, and Tapis cancels are asynchronous).
+    The request path (the report route) sends no blind cancel; it is the tick's.
+    A recovery keeps the flags the refusal set, as a verification does.
+36. **A report that triggers the recovery is answered with the recovered job.**
+    The report route reads the row again after carrying a refusal out, and continues on the verified path (200 `verified`) when the job was recovered; it no longer builds its answer from the stale row.
+37. **The failed-read counters belong to a binding.**
+    `partner_read_failures`, `partner_first_failed_at`, `partner_refused_at` and `partner_cancel_sent_at` are reset by every statement that binds or unbinds a job (`BIND_REPORT_SQL`, `BIND_ADOPT_SQL`, `UNBIND_SQL`, the reaper's withdrawal).
+38. **Who writes a partner's excess (settles item 32's trade-off).**
+    Option (a): a job that reaches accounting (it has a Slurm id) has its excess written ONLY by the observer's final settlement, from Expanse's figure; the provisional settlement caps the person at the hold and writes nothing for the partner, so a figure built from Tapis's times (a fallback end time, walltime rounding) can never be the partner's bill or over-count the `people` budget.
+    A job with no Slurm id has nothing to correct it, so its provisional settlement writes the excess.
+    If no final ever arrives for a job that has a Slurm id, the person is charged the hold (never more) and the partner's excess is not billed.
+    The entry is gated on the person's charge on the hold's pool being exactly the hold (`PERSON_AT_HOLD_SQL`), not on "some batch settled the job".
+39. **Smaller corrections.**
+    `allowedSchedulerArgs` refuses any `gpu`, `gres` or `tres` token in any case, `-G`, and abbreviations of `--gpus`, `--gres` and `--tres` (`schedulerOptionNamesGpus`).
+    The `open` count of `partner_reservations_open` is the reservations the switch freezes (unbound), not the bound rows the reaper still ends with the contract off.
+    The admin copy says an unreported partner reservation is left to expire when an account is suspended or revoked, and the mismatch flag's meaning covers partner refusals and capped excess (keys listed in the pull request; the website copy follows).
+    The ORCID rule split (the profile-gap matrix does not list compute access under `orcid_verified`, the compute request refuses an unproven iD) is ADR 0045's and is filed as an issue, not changed here.
+40. **Migration 0134 was edited in place again** (`partner_refused_at`, `partner_cancel_sent_at`): it has not been released, and the epic branch has not been deployed to a database.
 
