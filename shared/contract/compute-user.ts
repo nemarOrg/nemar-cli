@@ -295,7 +295,7 @@ export const ComputeStatsResponseSchema = z
         .passthrough(),
     ),
     active_people: count,
-    jobs_by_outcome: z.record(count),
+    jobs_by_outcome: z.object({ finished: count, failed: count, cancelled: count }).passthrough(),
   })
   .passthrough();
 

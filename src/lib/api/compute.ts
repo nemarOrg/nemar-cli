@@ -59,6 +59,16 @@ import {
   type ComputeUnmatchedResponse,
   ComputeUnmatchedResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
+import {
+  type ComputeMeResponse,
+  ComputeMeResponseSchema,
+  type ComputeUsageResponse,
+  ComputeUsageResponseSchema,
+  type ComputeUserJobResponse,
+  ComputeUserJobResponseSchema,
+  type ComputeUserJobsResponse,
+  ComputeUserJobsResponseSchema,
+} from "../../../shared/contract/compute-user.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -462,5 +472,49 @@ export async function requestComputeAccess(
     { method: "POST", body: JSON.stringify(body) },
     true,
     computeAccessRequestResponseSchema,
+  );
+}
+
+// --- A person's own reads (epic #2021 phase D2, #2023) ------------------------------------------------------
+//
+// `/compute/me*` answer for the signed-in account in every access state. A refusal is `{ error: <sentence>,
+// code: <word> }` (`computeRefusalCode` reads the word). The responses are `shared/contract/compute-user.ts`,
+// parsed open. `listMyComputeJobs` and `getMyComputeJob` carry "My" because `listComputeJobs` above is the
+// administrator's listing of every account's jobs.
+
+/** `GET /compute/me`: access, pools, limits and queue estimates. */
+export async function getComputeMe(): Promise<ComputeMeResponse> {
+  return request("/compute/me", {}, true, ComputeMeResponseSchema);
+}
+
+/** `GET /compute/me/usage`: the net charge by `group` (day, app, partition, source) over `from` to `to` (UTC days). */
+export async function getComputeUsage(
+  q: { from?: string; to?: string; group?: string[] } = {},
+): Promise<ComputeUsageResponse> {
+  const params = new URLSearchParams();
+  if (q.from) params.set("from", q.from);
+  if (q.to) params.set("to", q.to);
+  if (q.group && q.group.length > 0) params.set("group", q.group.join(","));
+  return request(`/compute/me/usage${queryString(params)}`, {}, true, ComputeUsageResponseSchema);
+}
+
+/** `GET /compute/me/jobs`: the caller's jobs, newest first; `after` is the previous page's `next_after`. */
+export async function listMyComputeJobs(
+  q: { state?: string; limit?: number; after?: string } = {},
+): Promise<ComputeUserJobsResponse> {
+  const params = new URLSearchParams();
+  if (q.state) params.set("state", q.state);
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.after) params.set("after", q.after);
+  return request(`/compute/me/jobs${queryString(params)}`, {}, true, ComputeUserJobsResponseSchema);
+}
+
+/** `GET /compute/me/jobs/:id`: one of the caller's jobs; a live one is refreshed from Tapis when stale. */
+export async function getMyComputeJob(jobId: string): Promise<ComputeUserJobResponse> {
+  return request(
+    `/compute/me/jobs/${encodeURIComponent(jobId)}`,
+    {},
+    true,
+    ComputeUserJobResponseSchema,
   );
 }

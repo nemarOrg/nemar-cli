@@ -258,16 +258,20 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getAccountComputePools",
     "getComputeAccessReport",
     "getComputeAccountReport",
+    "getComputeMe",
     "getComputePipelineStatus",
     "getComputePolicy",
     "getComputeRecord",
     "getComputeStatus",
+    "getComputeUsage",
+    "getMyComputeJob",
     "grantAccountComputePool",
     "grantPlatformComputePool",
     "listComputeAccessReports",
     "listComputeHolds",
     "listComputeJobs",
     "listComputePools",
+    "listMyComputeJobs",
     "listUnmatchedComputeRows",
     "mintComputeObserverRun",
     "placeComputeHold",
@@ -405,6 +409,10 @@ const POST_SPLIT_ADDITIONS = [
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
   "requestComputeAccess", // epic #2021 phase D1: POST /users/me/compute-access/request
+  "getComputeMe", // epic #2021 phase D2: GET /compute/me
+  "getComputeUsage", // epic #2021 phase D2: GET /compute/me/usage
+  "listMyComputeJobs", // epic #2021 phase D2: GET /compute/me/jobs
+  "getMyComputeJob", // epic #2021 phase D2: GET /compute/me/jobs/:id
   "listComputeAccess", // epic #2021 phase D1: GET /admin/compute/access
   "decideComputeAccess", // epic #2021 phase D1: POST /admin/compute/access/{grant|deny|suspend|revoke}/...
   "computeAccessAdminErrorCode", // epic #2021 phase D1: reads a compute-access refusal's word (no request)

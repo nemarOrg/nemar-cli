@@ -239,12 +239,16 @@ export const JOBS_BY_OUTCOME_SQL = `SELECT state, COUNT(*) AS n FROM compute_job
   WHERE created_at >= ?1 AND created_at < ?2 AND state IN ('finished', 'failed', 'cancelled')
   GROUP BY state`;
 
+/** The terminal states, which `JOBS_BY_OUTCOME_SQL` counts and every answer lists, a zero included. */
 const TERMINAL_OUTCOMES = ["finished", "failed", "cancelled"] as const;
 
 export async function platformCounts(
   db: D1Database,
   window: UsageWindow,
-): Promise<{ active_people: number; jobs_by_outcome: Record<string, number> }> {
+): Promise<{
+  active_people: number;
+  jobs_by_outcome: Record<(typeof TERMINAL_OUTCOMES)[number], number>;
+}> {
   const people = await db
     .prepare(ACTIVE_PEOPLE_SQL)
     .bind(window.start, window.end)
@@ -255,9 +259,12 @@ export async function platformCounts(
       .bind(window.start, window.end)
       .all<{ state: string; n: number }>()
   ).results;
-  const jobs_by_outcome: Record<string, number> = {};
-  for (const state of TERMINAL_OUTCOMES) jobs_by_outcome[state] = 0;
-  for (const row of outcomes) jobs_by_outcome[row.state] = row.n;
+  const jobs_by_outcome = { finished: 0, failed: 0, cancelled: 0 };
+  for (const row of outcomes) {
+    if ((TERMINAL_OUTCOMES as readonly string[]).includes(row.state)) {
+      jobs_by_outcome[row.state as (typeof TERMINAL_OUTCOMES)[number]] = row.n;
+    }
+  }
   return { active_people: people?.n ?? 0, jobs_by_outcome };
 }
 
