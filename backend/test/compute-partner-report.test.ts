@@ -780,15 +780,16 @@ describe("a binding withdrawn because the job is NEMAR's own", () => {
       ["unreserved", false],
     ] as const) {
       const hold = await reserve(w, person);
+      const uuid = `uuid-${reason.replace("_", "-")}-1`;
       w.h.db
         .query(
           "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending', cancel_requested_at = datetime('now'), cancel_reason = ? WHERE id = ?",
         )
-        .run(`uuid-${reason}-1`, reason, hold.job_id);
+        .run(uuid, reason, hold.job_id);
       const done = await w
         .env()
         .DB.prepare(UNBIND_SQL)
-        .bind(hold.job_id, `uuid-${reason}-1`, "tapis_job_in_use")
+        .bind(hold.job_id, uuid, "tapis_job_in_use")
         .run();
       expect(done.meta?.changes).toBe(1);
       const job = row(w, hold.job_id);
