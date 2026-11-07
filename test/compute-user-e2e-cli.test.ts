@@ -378,6 +378,16 @@ describe("the whole story", () => {
     expect(again.exitCode).toBe(0);
     expect(again.stdout).toContain("already   report.txt");
 
+    // A file of the person's own that differs is not overwritten without --force.
+    writeFileSync(join(dir, "report.txt"), "my own notes\n");
+    const kept = await cli(p, "results", firstId, "--download", dir);
+    expect(kept.exitCode).toBe(1);
+    expect(kept.stderr).toContain("FAILED    report.txt: exists and differs; use --force");
+    expect(readFileSync(join(dir, "report.txt"), "utf8")).toBe("my own notes\n");
+    const forced = await cli(p, "results", firstId, "--download", dir, "--force");
+    expect(forced.exitCode).toBe(0);
+    expect(readFileSync(join(dir, "report.txt"), "utf8")).toBe("the report\n");
+
     // the second job: submitted, then canceled
     script("second.py");
     const second = start(p, ["submit", "second.py"]);
