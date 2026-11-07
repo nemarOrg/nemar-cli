@@ -116,7 +116,7 @@ export const ACCOUNT_COPY = {
   // -------------------------------------------------------------------------
   "compute_access.section.title": "Compute access",
   "compute_access.section.lede":
-    "A separate grant from upload access. An admin reviews each request against export-control and local-jurisdiction rules and the purpose you state, and a grant opens a starting allocation of service units.",
+    "A separate grant from upload access. An admin reviews each request against export-control and local-jurisdiction rules and the purpose you state, and a grant lets you use compute within the limits an administrator sets.",
   "compute_access.state.none": "Not requested",
   "compute_access.state.requested": "Requested",
   "compute_access.state.active": "Active",
@@ -139,7 +139,8 @@ export const ACCOUNT_COPY = {
   "compute_access.requested.body":
     "We’ll email you when there’s a decision. Everything else on your account keeps working in the meantime.",
   "compute_access.granted.body":
-    "Compute access is active. Your starting allocation is on your compute page, and you can submit jobs from there or with `nemar compute`.",
+    "Compute access is active. Your balances are on your compute page, and you submit jobs with the `nemar compute` command line.",
+  "compute_access.granted.link": "Open your compute page",
   "compute_access.closed.body":
     "This request has been answered and cannot be asked again. If you think that is a mistake, contact support and an admin will take another look.",
   // A suspended account is not a request that was answered: its access exists and is paused.
@@ -148,6 +149,23 @@ export const ACCOUNT_COPY = {
   "compute_access.terms_unpublished.body":
     "Compute access is not open yet: the compute terms are not published. Please check back later.",
   "compute_access.docs_link": "How compute access works",
+
+  // -------------------------------------------------------------------------
+  // The compute page (website `/compute`, nemar-cli epic #2021 phase E2,
+  // nemarOrg/website#495). The first two are also printed by
+  // `nemar compute balance`, so the two surfaces say one thing.
+  // -------------------------------------------------------------------------
+  "compute_page.frozen.body":
+    "Your pools are frozen, so new jobs are refused. Contact support to find out why.",
+  "compute_page.units_note": "Amounts are service units (SU).",
+  "compute_page.available_note":
+    "Available is granted minus held minus charged and can be negative after an overrun.",
+  "compute_page.queue_note":
+    "It describes the queue of the whole platform, not yours, and it is a recent average, not a promise.",
+  "compute_page.usage_note":
+    "Net charge by UTC day of the charge, not the day a job was created. A day with no charge has no bar.",
+  "compute_page.unreported_note":
+    "NEMAR has not heard from the cluster about this job for a while. It may still finish.",
 
   // -------------------------------------------------------------------------
   // Profile gaps: the sentence, its two halves, and the vocabulary they use

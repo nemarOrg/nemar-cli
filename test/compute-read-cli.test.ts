@@ -34,6 +34,7 @@ import {
   sqliteAt,
 } from "../backend/test/helpers/compute-user-seed";
 import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { ACCOUNT_COPY } from "../shared/contract/account-copy";
 import {
   ComputeMeResponseSchema,
   ComputeUserJobResponseSchema,
@@ -454,6 +455,19 @@ describe("nemar compute status", () => {
     for (const word of ["mismatch", "platform_failure", "9876543", "11111111-2222", "flags"]) {
       expect([word, r.stdout.includes(word)]).toEqual([word, false]);
     }
+  });
+});
+
+describe("the help says what the website says", () => {
+  test("balance and queue embed the shared sentences", async () => {
+    const balance = await compute(null, "balance", "--help-all");
+    expect(balance.exitCode).toBe(0);
+    expect(balance.stdout.replace(/\s+/g, " ")).toContain(
+      ACCOUNT_COPY["compute_page.available_note"],
+    );
+    const queue = await compute(null, "queue", "--help-all");
+    expect(queue.exitCode).toBe(0);
+    expect(queue.stdout.replace(/\s+/g, " ")).toContain(ACCOUNT_COPY["compute_page.queue_note"]);
   });
 });
 

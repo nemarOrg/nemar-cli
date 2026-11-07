@@ -59,7 +59,7 @@ const REQUEST_HELP = `
 Description:
   Compute access is a grant of its own, separate from upload access: an administrator reviews each
   request against export-control and local-jurisdiction rules and the purpose you state, and answers
-  once. A grant opens a starting allocation of service units. You ask once; asking again while the
+  once. A grant lets you use compute within the limits an administrator sets. You ask once; asking again while the
   request is open does nothing, and a request that was answered cannot be made again.
 
   Before asking, your account needs a verified email address, an ORCID iD proven by signing in with

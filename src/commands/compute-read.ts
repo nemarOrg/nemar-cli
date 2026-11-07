@@ -128,8 +128,8 @@ async function run(o: JsonOption, failure: string, body: () => Promise<void>): P
 const BALANCE_HELP = `
 Description:
   Shows your compute access and, for each pool (cpu and gpu), the service units (SU) granted to you, held
-  for jobs that have not finished, charged so far, and still available. Available is granted minus held
-  minus charged and can be negative after an overrun. Amounts are SU with three decimals.
+  for jobs that have not finished, charged so far, and still available. ${ACCOUNT_COPY["compute_page.available_note"]}
+  Amounts are SU with three decimals.
 
   It works in every access state: without a grant it says so and how to ask for one.
 
@@ -159,11 +159,7 @@ export const balanceCommand = new Command("balance")
       // note above already says why (paused, answered, not asked), and "an admin can lift it" would be
       // the wrong thing to tell a person whose access ended.
       if (me.frozen && me.access.state === "active") {
-        console.log(
-          chalk.yellow(
-            "  Your pools are frozen, so new jobs are refused. Contact support to find out why.",
-          ),
-        );
+        console.log(chalk.yellow(`  ${ACCOUNT_COPY["compute_page.frozen.body"]}`));
       }
       console.log("");
       console.log(
@@ -180,7 +176,7 @@ export const balanceCommand = new Command("balance")
           )} ${suFixed(pool.available_milli)}`,
         );
       }
-      console.log(chalk.dim("\nAmounts are service units (SU)."));
+      console.log(chalk.dim(`\n${ACCOUNT_COPY["compute_page.units_note"]}`));
     });
   });
 
@@ -239,8 +235,7 @@ const QUEUE_HELP = `
 Description:
   Shows, for each partition offered to you, how long jobs have waited between being submitted to the
   scheduler and starting: the median and the 90th percentile over the jobs that started in the last 7
-  days. With fewer than 5 such jobs there is no estimate, only the count. It describes the whole platform's
-  queue, not yours, and it is a recent average, not a promise.
+  days. With fewer than 5 such jobs there is no estimate, only the count. ${ACCOUNT_COPY["compute_page.queue_note"]}
 
 Exit codes:
   0  the estimates were read.

@@ -1536,7 +1536,7 @@ export async function sendComputeAccessRequestEmail(
 
   <p>A verified account with a proven ORCID iD has asked for compute access. This is a separate grant from
   upload access: check the person, their institution, their location and what they intend to compute, then
-  grant or decline. A grant opens the starting allocation set in the owner policy.</p>
+  grant or decline. A grant lets the person use compute within the limits an administrator sets; the owner policy's default allocation applies, if there is one.</p>
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Requester</h2>
 
@@ -1622,7 +1622,7 @@ const COMPUTE_DECISION_MAIL: Record<
     subject: "Compute access granted on NEMAR",
     heading: "Compute access granted",
     color: "#16a34a",
-    body: "An administrator has reviewed your request and granted compute access to your NEMAR account. Your starting allocation, if one was opened, is on your compute page.",
+    body: "An administrator has reviewed your request and granted compute access to your NEMAR account. You can use compute within the limits an administrator sets, and your balances are on your compute page.",
   },
   denied: {
     subject: "Your NEMAR compute access request",
