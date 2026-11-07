@@ -28,10 +28,12 @@
 -- A reservation's row is written IN THE SAME BATCH as its hold (gated on the hold row of that job
 -- existing), so two requests with one key racing make one hold: the primary key refuses the second as a
 -- whole, and the batch is one transaction. No foreign key, none cascades: a job follows the retention
--- schedule and not an account's deletion. Rows are small and bounded by the client's caps; their
--- pruning follows the job's retention and is not designed here.
+-- schedule and not an account's deletion. Rows are small and bounded by the client's caps; the hold reaper
+-- deletes the rows older than seven days (500 a tick), the longest a key can be replayed.
 --
--- compute_jobs, three columns, all NULL for a job that is not a partner's reservation:
+-- compute_jobs, seven columns (the three below, then `partner_expires_at`, `partner_read_failures`,
+-- `partner_first_failed_at` and `partner_files_digest`, each described where it is added), NULL or 0 for a
+-- job that is not a partner's reservation:
 --   * `partner_state`: NULL while the job is a RESERVATION (a hold the partner has not reported a Tapis job
 --     under); `pending` once a Tapis job is bound and NEMAR's own read-back has not yet verified it;
 --     `verified` when the read-back matched (the job is then an ordinary live job, `submitted`, followed
@@ -40,9 +42,13 @@
 --     leaves a `pending` and a `mismatch` row alone: no path charges a person for a job NEMAR has not
 --     bound AND verified.
 --   * `partner_flag`: a fixed word an administrator is shown: `owner_mismatch`, `app_mismatch`,
---     `resources_mismatch` (why a read-back refused the job), `ambiguous_tag` (the reaper found several
---     Tapis jobs under one tag and kept the hold), `tapis_unreachable` (the last look could not be made).
---     Checked by shape, never by a list, so a new word never forces a rebuild of the table.
+--     `resources_mismatch` (why a read-back refused the job, or that a verified job used more than its hold
+--     and was capped), `unverifiable` (NEMAR could not read the job back on three ticks over two hours),
+--     `hold_ended` (the reservation was cancelled, or its person's compute ended, before the job was found
+--     under it), `ambiguous_tag` (the reaper found several Tapis jobs under one tag and kept the hold),
+--     `tapis_unreachable` (the last look could not be made), `tapis_job_not_found` and `tapis_job_in_use`
+--     (a binding withdrawn). Checked by shape, never by a list, so a new word never forces a rebuild of the
+--     table.
 --   * `partner_verified_at`: when the read-back matched. A partner's files enter `records/` only for a row
 --     that has this set (the copy is a lock that cannot be undone).
 -- D1 runs ALTER TABLE ADD COLUMN as written; every GLOB below is at most 50 characters.

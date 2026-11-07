@@ -959,8 +959,8 @@ They are settled here; each item names the test that kills it.
 
 17. **A job NEMAR cannot read is never left bound for ever (C1), and the person is never charged for resources NEMAR did not verify (C2).**
     A refusal of NEMAR's own credential reading a reported job (HTTP 401 or 403, or any other 4xx) is `tapis_job_unreadable` (422) and binds NOTHING; a job Tapis does not have, or answers for as another uuid, is `tapis_job_not_found`; only a Tapis that cannot answer just now (a timeout, a 5xx, no connection) binds the row `pending` and answers 202.
-    A bound job still unreadable two hours after the bind is refused as a mismatch with the new fixed word `unverifiable`: the intent is recorded with its audit row, the Tapis job is cancelled blind (the cancel needs only the uuid), the person's hold is released, the minimum charge is an `overrun` of the partner pool, and the tick logs it at warn.
-    A cancel that does not take keeps the row, the hold and the slot, and `cancel_pending_failed` counts it after an hour (the status view and the cancel sweep's line carry it); nothing is released on an error.
+    A bound job the tick could not read on three separate ticks over two hours (item 27) is refused as a mismatch with the new fixed word `unverifiable`: the intent is recorded with its audit row, the Tapis job is cancelled blind (the cancel needs only the uuid), the person's hold is released, the whole hold is an `overrun` of the partner pool (item 29), and the tick logs it at warn.
+    A cancel that fails transiently keeps the row, the hold and the slot, and `cancel_pending_failed` counts it after an hour (the status view and the cancel sweep's line carry it); nothing is released on an error. A cancel Tapis refuses for good ends the row (item 28).
     The scheduler options of a record (`parameterSet.schedulerOptions`, the only part of `parameterSet` that is read, through `schedulerArgsOf`) are held to an allowlist: none, or exactly one `--gpus=N` with N no more than the hold's GPUs; anything else, and an option list NEMAR cannot read, is a `resources_mismatch`.
     The owner may pin the execution system (`policy.partner.execSystemId`); a record on another system is a `resources_mismatch`.
     The verification cannot see everything Expanse allocates, so the observer's final settlement CAPS a partner job's charge to the person at the hold the person made (`held_milli`); the excess is an `overrun` of the partner pool, once (key `job:<id>:unreserved`), the job is flagged `resources_mismatch`, and one audit row `compute.partner.final_capped` records it.
@@ -1000,4 +1000,42 @@ They are settled here; each item names the test that kills it.
     The batch's success is judged by `changes > 0`, because D1 counts the rows a trigger writes.
 24. **Not changed, and why.**
     The pull request's other findings that were reviewed and kept: the dev Worker's reach is closed by item 18 and not by a second gate in the report route; the reaper's per-list bound stays 25; `settleFinal` is not changed (the cap is applied by its caller, so its single-writer contract stays).
+
+## Amendment 2026-11-07 (second review round of PR #2077)
+
+An Opus review of the first round's changes found one critical fault and several others.
+They are settled here; "item N" continues the numbering above.
+
+25. **`parameterSet` is read in both wire forms (critical).**
+    The Jobs specification types `parameterSet` as a JSON STRING and the documentation's examples show an object; the first round read only the object, which would have refused every spec-shaped partner job as a `resources_mismatch` and cancelled it.
+    `schedulerArgsOf` now parses a string under a bound (262,144 characters) and reads only `schedulerOptions`; a string that is not JSON, is over the bound, or holds no readable list is unreadable and never verified.
+    The Tapis stand-in serves the specification's string by default (`parameterSetAs("object")` for the other form), so every happy path of the partner suites covers the specification.
+26. **The owner lists the options a tenant merges in.**
+    `policy.partner.allowedSchedulerArgs` (exact strings, at most 20, default none, never a `--gpus` or `--gres` option) are accepted in addition to at most one `--gpus=N` within the hold.
+    The owner must read ONE real job record of the tenant and copy the options it shows (and its execution system) BEFORE turning `tapisVisibilityConfirmed` on; the rest stay a `resources_mismatch`.
+27. **`unverifiable` needs sustained failure, and is reconsidered.**
+    The reaper's tick counts a failed read of a bound job (`partner_read_failures`, `partner_first_failed_at`); a request's failed read counts nothing.
+    A job is refused only after at least three failed reads on separate ticks, the first at least two hours ago; a read that succeeds ends the count.
+    A job refused as `unverifiable` that NEMAR can read later, and that matches and is not `CANCELLED`, is moved from `mismatch` to `verified` in one batch (the cancel intent that refusal recorded is withdrawn, one audit row `compute.partner.recovered`, NEMAR's webhook subscribed) and is NOT cancelled; one that does not match is a real mismatch with its own word.
+28. **A report binds `pending` only for an unavailable Tapis; a cancel Tapis refuses for good ends the row.**
+    Any other error at the report (an answer that is not what the specification says, a 4xx, Tapis access not configured) is `tapis_job_unreadable` (422) and binds nothing.
+    In the blind cancel of an `unverifiable` row, HTTP 400, 403 or 404 on the cancel is definitive: the row ends (the hold released, the WHOLE hold charged to the partner's pool, a warn line `cancel_refused`) so that it cannot pin the person's slot for ever; any other failure of the cancel keeps the row as before (item 17's "a cancel that does not take" means a transient one).
+29. **An unread job is charged the whole hold, to the partner.**
+    The unread settlement of item 17 charged the minimum, against the fail-closed rule; it charges `held_milli` as an `overrun` of the partner pool, once by its key.
+30. **The shelter and the ambiguity count the same way.**
+    The sweep's tag search keeps only the jobs the reservation's Tapis username owns, that are not over and that no row accounts for, and requires exactly one; the reaper ignores an ended first attempt when a live retry exists.
+    A failed first attempt that was resubmitted is sheltered and its report binds; a foreign-owned job carrying the tag does not unshelter the person's own.
+    The shelter is evaluated lazily while the run's slice fills and stops reading once it is full.
+31. **Turning the partner contract off.**
+    A policy write that drops or flips `tapisVisibilityConfirmed`, or omits the block (a file written before it existed does), is refused with 409 `partner_reservations_open` and the count while partner reservations are open, unless `--force-partner-off` (`force_partner_off`) is given; the answer then says how many are frozen.
+    While it is off the reaper still never releases on an empty search, but a reservation a day past its expiry whose person's compute ended, or whose cancel was asked for, is released WITHOUT a Tapis call (`released_unseen`).
+    A repeat of a hold's key replays the reservation (with its state) whether or not the contract is on; only a new reservation is `partner_not_enabled`.
+32. **The cap applies at both settlements.**
+    The provisional settlement charges a partner job's person at most `held_milli` and puts the rest on the partner pool (`compute-partner-excess.ts`, shared with the observer; whichever writes the unreserved entry first wins its key, so the partner is charged the first figure and never twice).
+    The flag word `resources_mismatch` and the audit row need a difference above the hold beyond the owner's settle tolerance; inside it the job is only marked `flag_overrun`.
+    The final stamp reads the person's pool only.
+    A job with no Slurm id and no final settlement is charged to the person by its provisional settlement alone, which never exceeds the hold.
+33. **Staging.**
+    The partner policy is per environment: the development Worker's policy stays unconfirmed (`tapisVisibilityConfirmed` absent or false), so the contract answers 503 there, and the development Worker never holds production tenant credentials.
+    A staging test of the contract confirms the policy in staging only, against the stand-in or a non-production tenant.
 
