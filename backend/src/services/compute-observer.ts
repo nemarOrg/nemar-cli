@@ -38,17 +38,28 @@
  */
 
 import { z } from "zod";
+import { COMPUTE_TENANT_POOL_REF } from "../../../shared/compute-state.js";
 import { SACCT_COLUMN_MAX } from "../../../shared/contract/compute-observation.js";
 import {
   type ComputePolicy,
+  type ComputePool,
   PARTITION_NAMES,
   type PartitionName,
   suMilliFor,
 } from "../../../shared/contract/compute.js";
-import { auditLogStatement } from "../db/audit-log.js";
+import {
+  AUDIT_IF_PREVIOUS_CHANGED_SQL,
+  auditLogParams,
+  auditLogStatement,
+} from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { TERMINAL_STATES_SQL } from "./compute-jobs.js";
-import { settleFinal } from "./compute-ledger.js";
+import {
+  ensurePool,
+  platformPool,
+  settleFinal,
+  unreservedChargeStatements,
+} from "./compute-ledger.js";
 import { getPolicy } from "./compute-policy.js";
 import { NO_NONCE, signComputeToken, verifyComputeToken } from "./compute-tokens.js";
 
@@ -179,7 +190,9 @@ export const MATCH_ROWS_SQL = `UPDATE compute_sacct_rows SET matched_job_id =
  */
 export const CANDIDATE_ROWS_SQL = `SELECT s.slurm_job_id, s.partition AS sacct_partition, s.elapsed_seconds,
     s.alloc_nodes, s.alloc_cpus, s.alloc_gpus, s.alloc_mem_mb, s.charged_milli AS sacct_charged,
-    j.id AS job_id, j.partition AS job_partition, j.charged_milli AS provisional_milli
+    j.id AS job_id, j.partition AS job_partition, j.charged_milli AS provisional_milli,
+    j.source AS job_source, j.held_milli AS job_held_milli, j.pool AS job_pool,
+    j.client_id AS job_client
   FROM compute_sacct_rows s JOIN compute_jobs j ON j.id = s.matched_job_id
   WHERE s.applied_at IS NULL AND s.state IN ${ENDED_SQL}
     AND j.state IN (${TERMINAL_STATES_SQL}) AND j.settled_provisional_at IS NOT NULL
@@ -195,6 +208,16 @@ export const STAMP_FINAL_SQL = `UPDATE compute_jobs SET
     flag_mismatch = CASE WHEN ?2 = 1 THEN 1 ELSE flag_mismatch END
   WHERE id = ?1 AND settled_final_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger f WHERE f.idempotency_key = 'job:' || ?1 || ':final')`;
+
+/**
+ * The mark of a partner job whose Expanse figure exceeded what its reservation held: the flag word an
+ * administrator is shown. The job is `verified` (it matched at the read-back), so `partner_flag` is free.
+ */
+export const RESOURCES_EXCEEDED_SQL = `UPDATE compute_jobs SET partner_flag = 'resources_mismatch', flag_mismatch = 1
+  WHERE id = ?1 AND source = 'partner'`;
+
+/** The audit action of a partner job whose final figure was capped at its hold. */
+export const PARTNER_OVERRUN_ACTION = "compute.partner.final_capped";
 
 export const FLAG_ONLY_SQL = "UPDATE compute_jobs SET flag_mismatch = 1 WHERE id = ?1";
 
@@ -419,6 +442,10 @@ interface Candidate {
   job_id: string;
   job_partition: string;
   provisional_milli: number;
+  job_source: string;
+  job_held_milli: number;
+  job_pool: ComputePool;
+  job_client: string | null;
 }
 
 /** Expanse's figure for a row: what it says, else what the rate table gives for what it allocated; null when neither. */
@@ -443,6 +470,38 @@ export function expanseFigureMilli(c: Candidate): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The statements that put what a partner's job used beyond its hold on the partner: the `overrun` of the
+ * pool `tenant` (once, by its key), the audit row (only if the overrun was written), and the flag.
+ */
+async function excessStatements(
+  db: D1Database,
+  c: Candidate,
+  excess: number,
+): Promise<D1PreparedStatement[]> {
+  const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, c.job_pool);
+  const people = await platformPool(db, "people", c.job_pool);
+  if (!people) throw new Error("the platform people budget is missing");
+  return [
+    ...unreservedChargeStatements(db, {
+      jobId: c.job_id,
+      poolId: tenant.id,
+      budgetPoolId: people.id,
+      chargeMilli: excess,
+    }),
+    db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
+      ...auditLogParams({
+        userId: null,
+        action: PARTNER_OVERRUN_ACTION,
+        resourceType: "compute_job",
+        resourceId: c.job_id,
+        details: JSON.stringify({ flag: "resources_mismatch", client: c.job_client }),
+      }),
+    ),
+    db.prepare(RESOURCES_EXCEEDED_SQL).bind(c.job_id),
+  ];
 }
 
 export interface SettlePassResult {
@@ -476,13 +535,25 @@ export async function settleObservedRows(
       out.mismatched++;
       continue;
     }
-    const mismatch = !isRoutineDifference(figure, c.provisional_milli, policy.settle);
-    const result = await settleFinal(env.DB, { jobId: c.job_id, finalMilli: figure });
+    // A PARTNER'S job is capped at its hold: the partner chose the scheduler options, and the verification
+    // cannot see everything Expanse allocated (it allows only `--gpus=N` within the hold, but the cap does
+    // not rest on that). The person is never charged beyond what they reserved; what ran beyond it is the
+    // partner's, an `overrun` of its pool, flagged and audited.
+    const capped = c.job_source === "partner" && figure > c.job_held_milli;
+    const personFigure = capped ? c.job_held_milli : figure;
+    const excess = capped ? figure - c.job_held_milli : 0;
+    const mismatch =
+      !isRoutineDifference(personFigure, c.provisional_milli, policy.settle) || capped;
+    const result = await settleFinal(env.DB, { jobId: c.job_id, finalMilli: personFigure });
     if (result.ok || result.code === "already_final") {
-      await env.DB.batch([
+      // The stamp reads the job's ledger entries, so it comes BEFORE the partner's overrun is written: the
+      // row's `charged_milli` is what the person was charged.
+      const batch = [
         env.DB.prepare(STAMP_FINAL_SQL).bind(c.job_id, mismatch ? 1 : 0),
         env.DB.prepare(APPLIED_SQL).bind(c.slurm_job_id),
-      ]);
+      ];
+      if (excess > 0) batch.push(...(await excessStatements(env.DB, c, excess)));
+      await env.DB.batch(batch);
       out.settled++;
       if (mismatch) out.mismatched++;
     } else {
