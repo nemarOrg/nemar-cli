@@ -72,6 +72,13 @@ export async function request<T>(
   // (the getCurrentUser class of bug). Endpoints opt in by passing a schema from
   // shared/contract; passthrough schemas keep additive backend fields safe.
   schema?: ZodType<T>,
+  // "text" is for a route whose SUCCESS is not JSON (a job's log, `text/plain`): a 2xx returns
+  // `{ text, headers }` and a refusal is still the JSON `ApiError` below.
+  responseMode: "json" | "text" = "json",
+  // A time after which the request is abandoned (connection and body together), as a network failure
+  // (`ApiError` with status 0). Off by default; a caller that polls sets it, so one hung connection cannot
+  // stall it. A caller's own `options.signal` still aborts the request.
+  timeoutMs?: number,
 ): Promise<T> {
   const url = `${getApiUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -96,9 +103,18 @@ export async function request<T>(
 
   let response: Response;
   try {
+    const signals = [
+      ...(options.signal ? [options.signal] : []),
+      ...(timeoutMs === undefined ? [] : [AbortSignal.timeout(timeoutMs)]),
+    ];
     response = await fetch(url, {
       ...options,
       headers,
+      ...(signals.length === 0
+        ? {}
+        : {
+            signal: signals.length === 1 ? (signals[0] as AbortSignal) : AbortSignal.any(signals),
+          }),
     });
   } catch (fetchError) {
     // Network error - DNS resolution, connection refused, etc.
@@ -165,6 +181,10 @@ export async function request<T>(
       requestBody,
       responseBody: rawBody,
     });
+  }
+
+  if (responseMode === "text" && response.ok) {
+    return { text: rawBody, headers: response.headers } as T;
   }
 
   let data: Record<string, unknown>;
@@ -312,6 +332,14 @@ export async function request<T>(
     if (typeof data.error === "string") apiError.code = data.error;
     if (typeof data.reason === "string") apiError.reason = data.reason;
     apiError.rawBody = data;
+    const retryAfter = Number(response.headers.get("retry-after"));
+    if (
+      response.headers.get("retry-after") !== null &&
+      Number.isFinite(retryAfter) &&
+      retryAfter >= 0
+    ) {
+      apiError.retryAfterSeconds = retryAfter;
+    }
     throw apiError;
   }
 

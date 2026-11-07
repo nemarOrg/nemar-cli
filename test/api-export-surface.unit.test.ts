@@ -253,15 +253,19 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "adjustAccountComputePool",
     "adjustPlatformComputePool",
     "advanceComputeJobAsAdmin",
+    "cancelComputeJob",
     "cancelComputeJobAsAdmin",
     "computeRefusalCode",
+    "finalizeComputeJob",
     "getAccountComputePools",
     "getComputeAccessReport",
     "getComputeAccountReport",
+    "getComputeLogs",
     "getComputeMe",
     "getComputePipelineStatus",
     "getComputePolicy",
     "getComputeRecord",
+    "getComputeResults",
     "getComputeStatus",
     "getComputeUsage",
     "getMyComputeJob",
@@ -278,9 +282,11 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "putComputePolicy",
     "readComputeRecord",
     "releaseComputeHold",
+    "renewComputeResults",
     "requestComputeAccess",
     "requeueComputeAccessReport",
     "runComputePipeline",
+    "submitComputeJob",
   ],
   "compute-access-admin": [
     "computeAccessAdminErrorCode",
@@ -413,6 +419,12 @@ const POST_SPLIT_ADDITIONS = [
   "getComputeUsage", // epic #2021 phase D2: GET /compute/me/usage
   "listMyComputeJobs", // epic #2021 phase D2: GET /compute/me/jobs
   "getMyComputeJob", // epic #2021 phase D2: GET /compute/me/jobs/:id
+  "submitComputeJob", // epic #2021 phase D3b: POST /compute/jobs
+  "finalizeComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/finalize
+  "getComputeLogs", // epic #2021 phase D3b: GET /compute/jobs/:id/logs (plain text)
+  "getComputeResults", // epic #2021 phase D3b: GET /compute/jobs/:id/results
+  "renewComputeResults", // epic #2021 phase D3b: POST /compute/jobs/:id/results/renew
+  "cancelComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/cancel
   "listComputeAccess", // epic #2021 phase D1: GET /admin/compute/access
   "decideComputeAccess", // epic #2021 phase D1: POST /admin/compute/access/{grant|deny|suspend|revoke}/...
   "computeAccessAdminErrorCode", // epic #2021 phase D1: reads a compute-access refusal's word (no request)
