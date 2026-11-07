@@ -72,6 +72,7 @@ import {
   sendComputeAccessDecisionEmail,
 } from "../../services/email";
 import { appBase } from "../../services/environment";
+import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
 import { ACTIVE_ACCOUNT_STATUSES } from "../../services/account-tier";
 import type { Bindings, Variables } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -345,6 +346,12 @@ async function decide(
         if (standing) return refuse(c, "account_not_in_good_standing");
       }
       return refuse(c, "stale_state");
+    }
+
+    if (decision === "suspend" || decision === "revoke") {
+      // The logouts the batch queued for the compute clients are tried once now, after the response, so
+      // no partner can slow or fail the decision; a partner that fails leaves it standing (the tick retries).
+      deferLogoutDelivery(c.env, account.id, backgroundOf(c));
     }
 
     const after = await db.prepare(ACCESS_ACCOUNT_BY_ID_SQL).bind(account.id).first<AccountRow>();

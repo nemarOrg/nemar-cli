@@ -97,6 +97,13 @@ export const USER_TOMBSTONE_MASK_SQL = `UPDATE users
        service_access_granted_at = NULL,
        service_access_granted_by = NULL,
        upload_access_requested_at = NULL,
+       -- Compute access is a grant of its own (epic #2021 phase D1, ADR 0118): a deleted account holds
+       -- none, so the state is 'revoked' whatever it was (the pools were frozen and the live jobs given
+       -- their intent to cancel by the same batch), and the purpose, a person's prose, is erased. The terms
+       -- version and the times stay: they are the record that a person once accepted the terms, and are
+       -- not personal prose.
+       compute_access = 'revoked',
+       compute_purpose = NULL,
        status = 'revoked',
        revoked_at = COALESCE(revoked_at, datetime('now')),
        deleted_at = datetime('now'),
