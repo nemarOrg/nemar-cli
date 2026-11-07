@@ -182,7 +182,7 @@ export const ACCOUNT_COPY = {
   "compute_admin.page.lede":
     "Compute access requests, and a read-only view of pools, usage, flagged jobs and reconciliation. A grant opens an allocation the person can spend, so each request is decided by a person, one at a time.",
   "compute_admin.page.cli_note":
-    "Owner policy, legal holds, record reads, moving a charge, pool grants and adjustments, and canceling a job are done with `nemar admin compute` in the command line, not here.",
+    "Owner policy, legal holds, record reads, moving a charge, pool grants and adjustments, and canceling a job are done with the nemar admin compute command in the command line, not here.",
   "compute_admin.page.order_note":
     "Accounts are listed in the order they were created, not the order they asked in.",
   "compute_admin.view.nav": "Compute views",
