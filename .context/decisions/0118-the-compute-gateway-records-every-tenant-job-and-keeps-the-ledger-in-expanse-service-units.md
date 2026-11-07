@@ -1070,3 +1070,20 @@ The review of the whole epic branch found a critical fault in the second round's
     The ORCID rule split (the profile-gap matrix does not list compute access under `orcid_verified`, the compute request refuses an unproven iD) is ADR 0045's and is filed as an issue, not changed here.
 40. **Migration 0134 was edited in place again** (`partner_refused_at`, `partner_cancel_sent_at`): it has not been released, and the epic branch has not been deployed to a database.
 
+## Amendment 2026-11-07 (delta review of the epic-level fixes)
+
+41. **The owner's list of scheduler options.**
+    `schedulerOptionNamesGpus` judges the option NAME only (after the leading dashes, before `=` or whitespace), so a value such as `--account=progress` or `--chdir=/home/gpuser` is not a GPU option; a name containing `gpu`, `gres` or `tres`, `-G`, and the abbreviations of `--gpus`, `--gres` and `--tres` are refused.
+    The check does NOT refuse `--partition`/`-p`, `--nodes`/`-N`, `--ntasks`/`-n`, `--cpus-per-task`/`-c`, `--mem`, `--time`/`-t` or `--exclusive`: they are legitimate for an owner to list only if something else verifies them against the hold, and nothing does.
+    Such an option can move a job off the queue or size the Tapis record shows, at the Slurm level, so the owner must not list them (the `policy set` help says so).
+    Tightening the check could make a stored policy unreadable; no stored policy lists any option today.
+42. **A cancel recorded while a job is unverified stops it.**
+    `VERIFIED_SQL` needs no cancel recorded, and `verifyBoundJob` refuses a matching job with a cancel recorded (or whose person's compute ended) as `hold_ended`: the Tapis job is cancelled so it actually stops, the hold released, the use the partner's.
+    Every cancel of an `unverifiable` row, the readable one too, is stamped `partner_cancel_sent_at` before it is sent.
+43. **A capped job whose final never comes is visible.**
+    The provisional cap of a job with a Slurm id marks the job (`flag_overrun`, `partner_flag = capped_provisional`) and writes one audit row `compute.partner.provisional_capped`, with no ledger entry; the final settlement clears the word, or replaces it with `resources_mismatch` when the excess is beyond the owner's tolerance.
+    The status view counts `partner_capped_no_final`: such jobs, terminal, a Slurm id, no final, a week after their end.
+    The provisional excess of a job with no Slurm id is refused by its own statement if the row has gained an id.
+44. **Changing the pin under bound jobs.**
+    A policy write that drops the partner block, or changes its execution system or listed options, while bound `pending` or `unverifiable` jobs wait is refused (409 `partner_reservations_open`, with `open` and `bound` named apart) unless `--force-partner-off`, because the reaper verifies them under the new pin.
+

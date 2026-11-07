@@ -203,6 +203,11 @@ before that block existed omits it. A write that would turn it off while partner
 refused (they would be frozen: the reaper releases none on an empty search); --force-partner-off writes it
 anyway and says how many are frozen. Before turning tapisVisibilityConfirmed on, read ONE real job record
 of the tenant and copy its execution system and the scheduler options it shows (allowedSchedulerArgs).
+WARNING: never list an option that changes where or how big a job runs at the scheduler (--partition or -p,
+--nodes or -N, --ntasks or -n, --cpus-per-task or -c, --mem, --time or -t, --exclusive): the checked queue
+and size are the record's own, and such an option can move the job off them. GPU options cannot be listed.
+A write that drops the block or changes the execution system or the listed options while bound jobs wait is
+refused too (--force-partner-off overrides).
 
 Exit codes:
   0  written; the new version is printed.

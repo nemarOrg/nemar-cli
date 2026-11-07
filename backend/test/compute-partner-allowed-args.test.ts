@@ -90,6 +90,8 @@ describe("the options an app or a system adds are the owner's exact strings (ite
       );
     for (const bad of [
       ["-G"],
+      ["gpus=1"],
+      ["-gpu"],
       ["-G2"],
       ["-Ggpu:2"],
       ["--gpus-per-node=2"],
