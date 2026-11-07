@@ -329,12 +329,15 @@ export const BIND_ADOPT_SQL = `UPDATE compute_jobs SET
 
 /**
  * Withdraw a binding that was never safe to keep: the row is a reservation again (`partner_state` NULL,
- * no uuid, no cancel intent, a flag word that says why). `?1` the job, `?2` the uuid, `?3` the flag. Only
+ * no uuid, a flag word that says why; the cancel intent THIS refusal recorded is withdrawn, one a person's
+ * cancel or the end of an account recorded stands). `?1` the job, `?2` the uuid, `?3` the flag. Only
  * the row that is still bound to that uuid and not yet ended.
  */
 export const UNBIND_SQL = `UPDATE compute_jobs SET
     tapis_uuid = NULL, partner_state = NULL, partner_flag = ?3, tapis_status = NULL,
-    cancel_requested_at = NULL, cancel_reason = NULL, flag_mismatch = 1
+    cancel_requested_at = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_requested_at END,
+    cancel_reason = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_reason END,
+    flag_mismatch = 1
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state IN ('pending', 'mismatch')
     AND state = 'created'`;
 

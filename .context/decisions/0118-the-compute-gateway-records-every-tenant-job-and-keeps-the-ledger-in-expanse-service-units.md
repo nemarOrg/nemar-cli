@@ -936,6 +936,7 @@ Only the bound Tapis uuid and NEMAR's own read of that job prove what ran.
     `TerminalPlan.releaseReason` lets the reaper's release carry the ledger reason `expired`.
     The new cancel reasons are `partner_release` and `hold_expired`, the new ledger reason `charge_moved`.
 14. **The compute switch is not read here** (`compute-source-scan.test.ts` holds it): with compute off the routes work, a hold is taken and the reaper expires it, as for a person's submission.
+    The three routes are writes, so `read-only` maintenance refuses them (503) like any write; the crons, the reaper included, do not read the maintenance mode.
 15. **Deviations from the phase issue, recorded.**
     The issue's states say `held`: the real word is `created`, and `partner_state` says where the verification is.
     The issue's migration number 0128 is 0134 (the epic's range moved); the unique index it asked for if absent was present.

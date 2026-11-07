@@ -770,3 +770,35 @@ describe("a report's files", () => {
     expect(subscriptions()).toBe(0);
   });
 });
+
+describe("a binding withdrawn because the job is NEMAR's own", () => {
+  test("keeps a cancel a person's account recorded and withdraws only the refusal's own (`unreserved`)", async () => {
+    const { UNBIND_SQL } = await import("../src/services/compute-report-verify");
+    for (const [reason, kept] of [
+      ["account_ended", true],
+      ["user", true],
+      ["unreserved", false],
+    ] as const) {
+      const hold = await reserve(w, person);
+      w.h.db
+        .query(
+          "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending', cancel_requested_at = datetime('now'), cancel_reason = ? WHERE id = ?",
+        )
+        .run(`uuid-${reason}-1`, reason, hold.job_id);
+      const done = await w
+        .env()
+        .DB.prepare(UNBIND_SQL)
+        .bind(hold.job_id, `uuid-${reason}-1`, "tapis_job_in_use")
+        .run();
+      expect(done.meta?.changes).toBe(1);
+      const job = row(w, hold.job_id);
+      expect([reason, job.tapis_uuid, job.partner_state, job.partner_flag]).toEqual([
+        reason,
+        null,
+        null,
+        "tapis_job_in_use",
+      ]);
+      expect([reason, job.cancel_requested_at !== null]).toEqual([reason, kept]);
+    }
+  });
+});
