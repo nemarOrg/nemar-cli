@@ -815,3 +815,40 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
     The idempotency table of the issue is not added (item 4). The caps are the owner's `bundleLimits` (default equal to `compute-bundle.ts`, held by a test); a CLI released before the owner raises them keeps refusing at the constants, which is the safe direction.
     The issue's `results` has a cursor the issue did not mention, because a job may hold 5,000 outputs.
     Not verified: that R2 enforces the signed checksum on a presigned PUT; the Tapis output download's behavior on a large `tapisjob.out`; every Tapis shape (from the published specifications, as phase A4 says).
+
+
+## Amendment 2026-11-07 (#2024): a person submits a job, the command-line half (phase D3b)
+
+`nemar compute submit|logs|results|cancel` (`src/commands/compute-submit.ts`, `compute-jobs.ts`; the library is `src/lib/compute/`) is the client of the routes of the amendment of 2026-11-06. "Item N" means the numbered item of THIS amendment.
+
+1. **Exit codes.**
+   0 done (submitted; with `--wait`, finished), 1 NEMAR refused or could not answer, the job failed or was canceled, or the person is not signed in, 2 refused on this machine before anything was sent, 3 `--wait` ended with the job still live (Ctrl-C, or NEMAR could not be reached five times running).
+   Every failure sentence is on standard error; `--json` standard output is only the answer (the finalize answer, or the submit answer of an image job, or with `--wait` the last read of the job; for `--dry-run` the request that would be sent; for `results` every page of files in one document; for `logs` `{ job_id, truncated, text }`).
+   Each command's help has an "Exit codes:" block.
+2. **What a job asks for.**
+   The parser of the inline header is `shared/compute-header.ts` (phase A1), not a second one on `Bun.TOML.parse`: one subset of TOML, read the same way by the CLI, the Worker and the tests.
+   `src/lib/compute/header.ts` finds the block (`# /// nemar` in a `.py`, `% /// nemar` in a `.m`, a folder's `nemar-job.toml`), turns every parser error into `file:line: sentence` (the sentence never quotes the line), reads `--mem` and `--time` with the header's own conversions, and merges key by key: FLAGS, then the script's HEADER, then the folder FILE, then the DEFAULTS (partition `shared`, 1 node, 1 core, no GPU, 1 hour), a list (`datasets`, `args`) replaced whole.
+   `env` and `image` are flags only (they are not header keys).
+   A dataset needs its version (`nm000104@1.0.2`): the A1 header allows an id alone "for the CLI to resolve", and the CLI does not, because a job recorded against `latest` cannot be run again on the same data and `--dry-run` must work offline.
+   `--image` must be `docker://<registry>/<repo>@sha256:<64 hex>`; a tag is refused locally; the owner's registry list is the Worker's (`registry_not_allowed`).
+3. **The bundle.**
+   One deterministic `bundle.tar.gz` (ustar regular files and folders only, sorted by UTF-8 bytes, owner, group and times zero, mode 0644 or 0755 so the executable bit survives, gzip through `Bun.gzipSync` at level 9 with the header's time and operating-system bytes fixed); the same input is the same bytes whatever the clock or the folder's name, and Python 3.9's `tarfile` reads it back (the test does).
+   Left out and counted: `.git`, caches, virtual environments, `node_modules`, editor droppings, `.pyc`, symlinks and special files (never followed: the launcher refuses a link), anything a `.nemarignore` names (a subset of gitignore; a bad line is an error naming it), and any file over the per-file cap (listed, with the advice to put data in a dataset).
+   Every number is `shared/contract/compute-bundle.ts` and the rule is its `checkBundleManifest`, applied to the files found before a byte is read and again to the real digests; `compute-pack-worker.test.ts` sends the same bundles to the real route and demands the same word at the same boundary.
+   A path ustar cannot hold (one segment over 100 bytes after the prefix split) is refused by name; a percent-encoded traversal is refused as the records bucket refuses it.
+4. **The credential scan** (`secret-scan.ts`) reads the exact bytes that are packed, and the name, the arguments and the environment values, before any request, with no override.
+   Its rules are `private_key_block`, `aws_access_key_id`, `aws_secret_access_key`, `google_api_key`, `azure_storage_key`, `github_token`, `gitlab_token`, `huggingface_token`, `slack_token`, `nemar_api_key` (`nm_` and 43 base64url characters, held by a test to `generateApiKey`), `nemar_oidc_token` (the prefixes of `shared/oidc.ts`) and `credential_file_name` (`.env` but not `.env.example`, `.netrc`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials` and the like).
+   A finding is a rule name and `path:line`; the value, the matching text and the line are never in a finding, a message or a file.
+5. **The upload.**
+   `PUT upload.url` with exactly `upload.headers` and `Content-Length: upload.size`, no NEMAR credential, three retries on a 5xx or no answer (1, 2 and 4 seconds), no retry on a 4xx, a 403 is "expired or refused"; an address already past its time is not used.
+   The address and the signed headers are never printed or logged (the debug log's presigned-parameter redaction covers a result link as well; a test reads the real log).
+   The `Idempotency-Key` is one random UUID per run, kept across the run's own retries of `POST /compute/jobs` (a 503 `storage_unavailable` after the hold is retried with the same key and finishes the one job) and `finalize`.
+   A late finalize is the Worker's `upload_expired` sentence and exit 1; the person submits again (a new run, a new key).
+6. **`--wait`** (`wait.ts`) polls `GET /compute/me/jobs/:id` at once and then every 5 seconds, growing by half to 30 while nothing changes, starting over on a change; five consecutive 5xx or network failures end it (exit 3); a 4xx ends it at once (exit 1).
+   Ctrl-C removes its listener, stops waiting and exits 3. It does not cancel, and the module has no way to.
+7. **Results.**
+   The listing prints no link; `--download <dir>` fetches each file with NO NEMAR credential, checks its size and SHA-256 against the Worker's record, writes through `<file>.part` and deletes a file that does not match (exit 1); a path that is absolute or contains `..` is refused whatever the Worker sent; a file already there with the same size and checksum is left alone.
+   `--json` prints the links because it was asked to.
+8. **Deviations from the phase issue, recorded.**
+   The header parser is the shared one (item 2); a dataset needs its version (item 2); `--dry-run --json` prints the request, not "the Worker's answer", because there is none; `logs --json` wraps the text because the answer is not JSON; `cancel` of an ended job exits 0 (the Worker's 200); `cancel` asks for confirmation on a terminal and needs `--yes` with `--json` or without one; the job ids of `logs`, `results` and `cancel` are checked locally (exit 2, where `status` of phase D2 exits 1).
+   Not verified: a real R2 PUT of an archive (the S3 interface is a stand-in built from the specification); a real SIGINT on a terminal (the test sends the signal to the process); Windows paths.
