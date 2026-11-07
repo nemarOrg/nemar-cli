@@ -77,6 +77,7 @@ function harness(steps: Step[], over: Partial<WaitOptions> = {}) {
   const options: WaitOptions = {
     fetchJob: reader.fetchJob,
     sleep: async (ms) => {
+      if (sleeps.length > 5000) throw new Error("a wait that never ends");
       sleeps.push(ms);
       clock += ms;
     },
