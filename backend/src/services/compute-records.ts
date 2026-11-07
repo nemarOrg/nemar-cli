@@ -557,6 +557,27 @@ async function recordedSpec(bucket: R2Bucket, jobId: string): Promise<JobSpec | 
   return parsed.success ? parsed.data : null;
 }
 
+/**
+ * Whether a partner's declared files are acceptable, BEFORE anything is bound, signed or written: the
+ * count against the partner cap, every path against the path rule in any encoding and as a key of this job,
+ * every size against the owner's file and total limits and every digest against its shape. Pure of
+ * effects. Returns the refusal, or null. A report that declares files it may not is refused whole, so a
+ * hostile list leaves no binding behind.
+ */
+export async function checkPartnerFiles(
+  env: ComputeRecordsEnv,
+  jobId: string,
+  files: unknown,
+): Promise<RecordsRefusal | null> {
+  const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
+  const checked = checkFiles(files, limits, {
+    maxCount: partnerFileCap(limits),
+    digest: true,
+    keysOf: jobIdOrThrow(jobId),
+  });
+  return checked.ok ? null : checked;
+}
+
 // --- Upload addresses --------------------------------------------------------------------------------
 
 export interface IncomingUpload {

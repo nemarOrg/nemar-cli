@@ -66,6 +66,7 @@ import { endPartnerReservation, REQUEST_READ, tapisAccess } from "./compute-life
 import { fieldPath, getPolicy } from "./compute-policy.js";
 import {
   type DeclaredFile,
+  checkPartnerFiles,
   finalizeSubmittedFiles,
   presignIncomingUploads,
   sha256Hex,
@@ -505,6 +506,14 @@ export async function reportJob(
   const replayed = claim === "repeat";
   const uuid = body.tapis_job_id;
 
+  // Declared files are judged BEFORE anything is bound: a list the owner's limits or the path rule refuse
+  // is refused whole (traversal in any encoding, too many, too large, a digest that is not one), so a
+  // hostile list leaves no binding behind.
+  if (body.files !== undefined && job.records_written_at === null) {
+    const bad = await checkPartnerFiles(env, job.id, body.files);
+    if (bad !== null) return filesRefusal(bad.code, bad.field);
+  }
+
   // A reservation that was refused is refused again, and the cancel is asked again (idempotent).
   if (job.partner_state === "mismatch") {
     await finishMismatch(env, job.id, REQUEST_READ);
@@ -566,13 +575,7 @@ export async function reportJob(
     job = (await getJob(db, job.id)) ?? job;
   }
 
-  // Declared files: addresses now, so the partner can upload while NEMAR verifies. Nothing is copied yet.
   let files: FilesAnswer | undefined;
-  if (body.files !== undefined && job.records_written_at === null) {
-    const signed = await addressesFor(env, job, body.files);
-    if (!signed.ok) return signed;
-    files = signed.files;
-  }
 
   // The read-back.
   let verification: "verified" | "pending" = "pending";
@@ -595,11 +598,19 @@ export async function reportJob(
     }
   }
 
-  // The files enter the record only after the match.
-  if (verification === "verified" && body.files !== undefined) {
-    const settled = await settleFiles(env, job, body.files);
-    if (!settled.ok) return settled;
-    files = settled.files;
+  // The files enter the record only after the match. A job NEMAR cannot read back yet is given addresses
+  // to upload to (nothing is copied), and the same report again, once it is verified, finishes the copy.
+  if (body.files !== undefined) {
+    const settled =
+      verification === "verified"
+        ? await settleFiles(env, job, body.files)
+        : job.records_written_at === null
+          ? await addressesFor(env, job, body.files)
+          : null;
+    if (settled !== null) {
+      if (!settled.ok) return settled;
+      files = settled.files;
+    }
   }
   job = (await getJob(db, job.id)) ?? job;
   return {
