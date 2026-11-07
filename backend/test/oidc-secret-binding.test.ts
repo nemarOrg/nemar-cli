@@ -58,7 +58,7 @@ describe("OIDC_SECRET is a secret", () => {
 
   test("the comment says it must differ from ENCRYPTION_KEY and be random, with a way to make one", () => {
     expect(raw).toMatch(/OIDC_SECRET[\s\S]{0,900}MUST differ from ENCRYPTION_KEY/);
-    expect(raw).toContain("openssl rand -base64 48");
+    expect(raw).toContain("`nmsso-` followed by the output of `openssl rand -hex 32`");
   });
 
   test("the bindings declare it optional, so a Worker without it still starts", () => {

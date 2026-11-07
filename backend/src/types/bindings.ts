@@ -212,9 +212,9 @@ export interface Bindings {
   GITHUB_WEBHOOK_SECRET?: string; // HMAC secret for /webhooks/github signature verification (GitHub App push deliveries)
   NEMAR_WEBHOOK_TOKEN?: string; // Bearer token for /publish-version-doi and /llm-enrich (X-Webhook-Token header from dataset workflows)
   /** Worker SECRET (never a var): the key the OpenID Connect provider's private signing keys are
-   *  encrypted under at rest (epic #2014 phase #2016; ADR 0119). At least 32 characters or the
-   *  provider is off: discovery, the key set and the owner routes then answer 404, as if they did
-   *  not exist (`services/oidc-config.ts`, `oidcEnabled`). The owner sets it; an agent never does.
+   *  encrypted under at rest (epic #2014 phase #2016; ADR 0119). Must be `nmsso-` and a random
+   *  body, 32 characters or more in all (`isOidcSecret`, `shared/oidc.ts`), or the provider is off: discovery, the key set and the owner routes then answer 404, as if they did
+   *  not exist (`services/oidc-config.ts`, `oidcSecret` is the one reader). The owner sets it; an agent never does.
    *  Changing it makes every stored key unreadable, and there is no re-encryption path yet.
    *  The authorization routes (`/auth/oidc/*`) and the `/oauth` token, userinfo, revocation and
    *  introspection endpoints also answer 404 until `HOST_PREFIXED_SESSION_COOKIE` is "1": set both. */

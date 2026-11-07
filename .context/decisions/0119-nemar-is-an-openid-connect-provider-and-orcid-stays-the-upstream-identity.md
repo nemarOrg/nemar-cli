@@ -379,3 +379,26 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - OpenID Connect Core 1.0; RFC 6749 and 7636 (authorization code, PKCE), RFC 7009 (revocation), RFC 7662 (introspection), RFC 9207 (issuer in the authorization response).
 - Rule 12's code and rule 15: issue #2019; migration `0124_oidc_logout_deliveries.sql`, `backend/src/services/oidc-cascade.ts`, `backend/src/services/oidc-logout.ts`, `backend/src/services/oidc-logout-store.ts`, `OIDC_END_CALLERS` and its test `backend/test/oidc-cascade-callers.test.ts`, the retry tick in `scheduled()` (`backend/src/index.ts`); OpenID Connect Back-Channel Logout 1.0; RFC 8725 (JWT best current practices, explicit typing).
 - Rules 13 and 14: issue #2018; migration `0123_oidc_tokens.sql`, `backend/src/services/oidc-tokens.ts`, `backend/src/services/oidc-claims.ts`, `backend/src/routes/oauth.ts`, `backend/src/middleware/oidc-bearer.ts`, `resolveApiKeyUser` in `backend/src/middleware/auth.ts`, the `oauth-ip` bucket in `backend/src/middleware/rateLimit.ts`; RFC 6750 (bearer tokens).
+
+## Addendum (2026-11-07): `OIDC_SECRET` has a form
+
+The owner decided that a wrong or placeholder value must not be able to switch the provider on.
+`OIDC_SECRET` is valid only when it starts with `nmsso-` (lowercase, exactly), is at least 32 characters in all, and has a body of letters, digits, underscore and hyphen.
+Length alone no longer turns the provider on.
+
+- **One test, one reader.**
+  `isOidcSecret` in `shared/oidc.ts` is the only test of validity, and `oidcSecret` in `backend/src/services/oidc-config.ts` is the only code that reads the binding: it returns the value when the test passes and `null` otherwise.
+  `oidcEnabled`, key creation and rotation, signing, and the authorization cookie MACs all take their secret from it, so a value that fails the test behaves exactly like an unset one: the surface answers 404, nothing is signed, encrypted or decrypted, and the bad value is never used as a fallback.
+- **The family convention.**
+  Any further secret the OpenID Connect handshake needs uses the same `nmsso-` prefix.
+  A new one is a new constant beside `OIDC_SECRET_PREFIX` and a new pure check beside `isOidcSecret`, not a new format.
+- **How to make one.**
+  `nmsso-` followed by the output of `openssl rand -hex 32`, which is 70 characters.
+  Dev and production use different values, and `OIDC_SECRET` still differs from `ENCRYPTION_KEY`.
+  A value is made and set by the owner; an agent never reads, prints or sets it.
+- **What the owner is told.**
+  The owner routes (and so `nemar admin oidc`) answer a provider that is off for want of a usable secret with the same 404 plus one field, `oidc_secret`, whose value is `unset` (absent or empty) or `malformed` (set, but not in the form).
+  The word is only ever one of those two, never the value or its length, and only an authenticated owner on the issuer's own host sees it; every public route stays the ordinary unrouted 404.
+- **Unchanged.**
+  The secret is for good once a key exists, changing it makes every stored key unreadable, a rotation under another secret is refused with `key_unreadable`, and recovery is the by-hand path in Consequences.
+  A Worker whose existing secret does not have the form goes dark until it is replaced, and replacing it after a key exists is that same recovery; the real values already have the form, so no Worker is affected.
