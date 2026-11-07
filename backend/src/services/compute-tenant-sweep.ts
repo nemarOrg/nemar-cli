@@ -111,6 +111,12 @@ export interface TenantSweepResult {
   listed: number;
   /** The listing was cut off at its page bound: a job past it was not seen. */
   truncated: boolean;
+  /**
+   * The listing was cut off AND its last page still held a job that has not ended, so a live job could be
+   * hiding past the cut. A `live` run needs a person only for this; a cut that ends in ended jobs only
+   * (the tenant has simply run more than 5,000 jobs) is counted in `truncated` and is not a problem.
+   */
+  liveMayHide: boolean;
   /** Jobs already bound to a row: left alone. */
   bound: number;
   /** Rows that took a Tapis job they had none of (the submit race). */
@@ -142,6 +148,7 @@ const emptyResult = (mode: TenantSweepMode): TenantSweepResult => ({
   mode,
   listed: 0,
   truncated: false,
+  liveMayHide: false,
   bound: 0,
   raced: 0,
   duplicates: 0,
@@ -284,6 +291,7 @@ function digestSource(rec: TapisJob): string {
 
 async function listTenant(ctx: TapisContext, r: TenantSweepResult): Promise<TapisJob[]> {
   const out: TapisJob[] = [];
+  let last: TapisJob[] = [];
   for (let page = 0; page < TENANT_MAX_PAGES; page++) {
     const jobs = await listJobs(ctx, {
       listType: "ALL_JOBS",
@@ -293,9 +301,12 @@ async function listTenant(ctx: TapisContext, r: TenantSweepResult): Promise<Tapi
     });
     out.push(...jobs);
     if (jobs.length < TENANT_PAGE) return out;
+    last = jobs;
   }
-  // A full last page: there may be more behind it.
+  // A full last page: there may be more behind it. The listing is newest first, so what is behind it is
+  // older than everything read; a live job can be hiding there only if the last page itself still held one.
   r.truncated = true;
+  r.liveMayHide = last.some((j) => !tapisEnded(j.status));
   return out;
 }
 
@@ -680,7 +691,10 @@ export function tenantLogLine(
   r: TenantSweepResult,
 ): { level: "info" | "error"; line: string } | null {
   const accessFailed = Object.entries(r.accessFailed).reduce((n, [, c]) => n + c, 0);
-  const needsPerson = r.errors.length > 0 || r.truncated || r.deferred > 0 || accessFailed > 0;
+  // A cut listing needs a person in a `week` pass (a job of the week may be missing) and, in a `live` pass,
+  // only when a live job could be hiding past the cut.
+  const cutMatters = r.truncated && (r.mode === "week" || r.liveMayHide);
+  const needsPerson = r.errors.length > 0 || cutMatters || r.deferred > 0 || accessFailed > 0;
   const acted =
     r.indexed + r.raced + r.duplicates + r.cancelled + r.finished + r.gaveUp + r.settledFinal;
   if (!needsPerson && acted === 0) return null;
@@ -698,6 +712,7 @@ export function tenantLogLine(
     `gave_up=${r.gaveUp}`,
     `deferred=${r.deferred}`,
     `truncated=${r.truncated ? 1 : 0}`,
+    `live_may_hide=${r.liveMayHide ? 1 : 0}`,
     ...(r.mode === "week" ? [`settled_final=${r.settledFinal}`] : []),
     ...Object.entries(r.accessFailed).map(([word, count]) => `access_${word}=${count}`),
     `errors=${r.errors.length > 0 ? [...new Set(r.errors)].join(",") : "none"}`,

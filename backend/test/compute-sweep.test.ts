@@ -613,8 +613,8 @@ describe("the listing", () => {
     expect(query.get("skip")).toBe("0");
   });
 
-  test("five full pages are read and no more, the cut-off is reported at error level, and nothing past it is invented (MUTATION: read on past five)", async () => {
-    // Five pages of 1,000 ended jobs: every page is full, so there may be more behind the fifth.
+  /** Five full pages of ended jobs; `liveOnLast` replaces one of the last page's jobs by the given record. */
+  function fivePages(liveOnLast?: { uuid: string; status: string }) {
     const ended = (page: number) =>
       Array.from({ length: 1000 }, (_, i) => ({
         uuid: `00000000-0000-0000-${String(page).padStart(4, "0")}-${String(i).padStart(12, "0")}-007`,
@@ -623,13 +623,21 @@ describe("the listing", () => {
         created: new Date().toISOString(),
       }));
     for (let page = 0; page < 5; page++) {
+      const jobs = ended(page);
+      if (page === 4 && liveOnLast) {
+        jobs[999] = { ...jobs[999], ...liveOnLast } as (typeof jobs)[number];
+      }
       fx.tapis.respond("GET /v3/jobs/list", 200, {
         status: "success",
         message: "ok",
         version: "1",
-        result: ended(page),
+        result: jobs,
       });
     }
+  }
+
+  test("five full pages are read and no more, and nothing past the cut is invented (MUTATION: read on past five)", async () => {
+    fivePages();
     const result = await sweepTenantJobs(env(), "live");
     expect(listCalls()).toHaveLength(5);
     expect(listCalls().map((c) => new URL(`http://x${c.path}`).searchParams.get("skip"))).toEqual([
@@ -640,6 +648,35 @@ describe("the listing", () => {
       "4000",
     ]);
     expect(result).toMatchObject({ listed: 5000, truncated: true, indexed: 0 });
+  }, 30_000);
+
+  test("a live pass cut off over ended jobs only is not a problem: no live job can hide behind it (MUTATION: raise on every cut)", async () => {
+    fivePages();
+    const result = await sweepTenantJobs(env(), "live");
+    expect(result).toMatchObject({ truncated: true, liveMayHide: false });
+    expect(result ? tenantLogLine(result) : "missing").toBeNull();
+  }, 30_000);
+
+  test("a live pass whose last page still holds a job that has not ended says so at error level, since an older live job could hide (MUTATION: ignore the last page)", async () => {
+    const made = await makeJob(fx);
+    expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+      ok: true,
+      outcome: "submitted",
+    });
+    const uuid = (await reread(made.env, made.job.id)).tapis_uuid as string;
+    fivePages({ uuid, status: "RUNNING" });
+    const result = await sweepTenantJobs(env(), "live");
+    expect(result).toMatchObject({ truncated: true, liveMayHide: true, errors: [] });
+    const log = result ? tenantLogLine(result) : null;
+    expect(log?.level).toBe("error");
+    expect(log?.line).toContain("truncated=1");
+    expect(log?.line).toContain("live_may_hide=1");
+  }, 30_000);
+
+  test("a week pass cut off is a problem whatever the last page holds: a job of the week may be missing", async () => {
+    fivePages();
+    const result = await sweepTenantJobs(env(), "week");
+    expect(result).toMatchObject({ truncated: true, liveMayHide: false });
     const log = result ? tenantLogLine(result) : null;
     expect(log?.level).toBe("error");
     expect(log?.line).toContain("truncated=1");
