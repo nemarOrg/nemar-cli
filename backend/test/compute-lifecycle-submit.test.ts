@@ -291,7 +291,10 @@ describe("two submitters, one Tapis job", () => {
     expect(
       await sweepComputeCancellations({ ...made.env, ENVIRONMENT: "development" } as Bindings),
     ).toBeNull();
-    expect(await sweepComputeCancellations(made.env)).toMatchObject({ errors: [] });
+    expect(await sweepComputeCancellations(made.env)).toMatchObject({
+      errors: [],
+      cancel_failed: 0,
+    });
     expect(only?.status).toBe("CANCELLED");
     expect((await reread(made.env, made.job.id)).orphan_tapis_uuid).toBeNull();
     // Nothing is left to do.

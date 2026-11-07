@@ -46,7 +46,7 @@ import {
 } from "../../shared/contract/compute-launch";
 import { resultsLauncherKey, resultsOutputKey } from "../../shared/contract/compute-launch";
 import { ADVANCE_ROWS_PER_TICK, runComputeAdvanceCron } from "../src/services/compute-advance";
-import { sweepComputeCancellations } from "../src/services/compute-advance";
+import { cancellationsLogLine, sweepComputeCancellations } from "../src/services/compute-advance";
 import type { ComputeJobRow } from "../src/services/compute-jobs";
 import { releaseStatements, settleStatements } from "../src/services/compute-ledger";
 import {
@@ -1755,7 +1755,14 @@ describe("cancel", () => {
       await sweepComputeCancellations({ ...s.env, ENVIRONMENT: "staging" } as Bindings),
     ).toBeNull();
     const swept = await sweepComputeCancellations(s.env);
-    expect(swept).toMatchObject({ examined: 1, errors: [] });
+    // A TRANSIENT failure that the retry cured is quiet: the retry took the cancel.
+    expect(swept).toMatchObject({
+      examined: 1,
+      errors: [],
+      cancel_failed: 0,
+      cancel_pending_failed: 0,
+    });
+    expect(swept ? cancellationsLogLine(swept)?.level : null).toBe("info");
     job = await reread(s.env, id);
     expect(job.state).toBe("cancelled");
     // Thirty minutes of four cores, give or take the seconds the stand-in took to cancel.
@@ -1763,6 +1770,43 @@ describe("cancel", () => {
     expect(job.charged_milli).toBeLessThanOrEqual(2010);
     // Nothing is left to do, and the sweep says so.
     expect(await sweepComputeCancellations(s.env)).toMatchObject({ examined: 0 });
+  });
+
+  test("a cancel Tapis keeps refusing is LOUD on every tick it persists: counted as `cancel_failed`, logged at error level without an id, and stuck after an hour (MUTATION: count nothing, or log at info)", async () => {
+    const s = await submittedJob();
+    const id = s.made.job.id;
+    await drive(s.env, id, s.uuid, "RUNNING");
+    setTapisTimes(fx, s.uuid, 30 * MINUTE, null);
+    // The request, then three ticks, fail; the fourth tick is the retry that works.
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 4);
+    await requestComputeCancel(s.env, id, "user");
+    for (const stuck of [0, 0]) {
+      const swept = await sweepComputeCancellations(s.env);
+      expect(swept).toMatchObject({
+        examined: 1,
+        errors: [],
+        cancel_failed: 1,
+        cancel_pending_failed: stuck,
+      });
+      const log = swept ? cancellationsLogLine(swept) : null;
+      expect(log?.level).toBe("error");
+      expect(log?.line).toContain("cancel_failed=1");
+      expect(log?.line).not.toContain(id);
+      expect((await reread(s.env, id)).state).toBe("running");
+    }
+    // An hour after it was asked for, a cancel still not carried out is reported as stuck.
+    await s.env.DB.prepare(
+      "UPDATE compute_jobs SET cancel_requested_at = datetime('now', '-61 minutes') WHERE id = ?",
+    )
+      .bind(id)
+      .run();
+    const third = await sweepComputeCancellations(s.env);
+    expect(third).toMatchObject({ cancel_failed: 1, cancel_pending_failed: 1 });
+    expect(third ? cancellationsLogLine(third)?.line : "").toContain("cancel_pending_failed=1");
+    // Tapis takes it on the next tick: quiet again.
+    const fourth = await sweepComputeCancellations(s.env);
+    expect(fourth).toMatchObject({ cancel_failed: 0, cancel_pending_failed: 0 });
+    expect((await reread(s.env, id)).state).toBe("cancelled");
   });
 
   test("a partner's reservation with no Tapis job is not ended by a cancel: the partner launches its own Tapis job, so the row's records prove nothing (MUTATION: drop the partner term of driveCancel, or of the sweep's list)", async () => {

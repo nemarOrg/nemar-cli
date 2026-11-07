@@ -340,6 +340,27 @@ export const UNCOPIED_TERMINAL_SQL = `SELECT id FROM compute_jobs
     AND ended_at >= datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')
   ORDER BY examined_at ASC, ended_at ASC LIMIT ?1`;
 
+/** A recorded cancel that is still not carried out this long after it was asked for is reported as stuck. */
+export const CANCEL_PENDING_FAILED_MINUTES = 60;
+
+/**
+ * Live rows whose recorded cancel is still not carried out {@link CANCEL_PENDING_FAILED_MINUTES} minutes
+ * after it was asked for, on the cancel sweep's own list (so a partner's reservation, which is not the
+ * sweep's, and a job of the tenant sweep are not counted). A cancel the sweep retries every 30 minutes has
+ * had at least one retry fail by then. The count the status view and the sweep's line carry as
+ * `cancel_pending_failed`; never a row id.
+ */
+export const CANCEL_PENDING_FAILED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
+    AND flag_unreserved = 0
+    AND NOT (source = 'partner' AND tapis_uuid IS NULL)
+    AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes')`;
+
+/** {@link CANCEL_PENDING_FAILED_SQL} as a number. */
+export async function countCancelPendingFailed(db: D1Database): Promise<number> {
+  return (await db.prepare(CANCEL_PENDING_FAILED_SQL).first<{ n: number }>())?.n ?? 0;
+}
+
 /** The cancel sweep took this row: `?1` the job. Its own rotation (`cancel_attempted_at`), apart from the tick's. */
 export const STAMP_CANCEL_ATTEMPT_SQL =
   "UPDATE compute_jobs SET cancel_attempted_at = datetime('now') WHERE id = ?1";
@@ -1248,18 +1269,19 @@ async function cancelOrphan(
 
 /**
  * The retry of a recorded orphan: the tick calls it for every row with `orphan_tapis_uuid` set. Never
- * throws for what Tapis does; true when the orphan is cleared.
+ * throws for what Tapis does. `ended` when the orphan is cleared, `failed` when it is not (Tapis could not
+ * be asked or did not take the cancel), `skipped` when there is no orphan to cancel.
  */
 export async function retryOrphanCancel(
   env: Bindings,
   jobId: string,
   mode: { maxAttempts: number; timeoutMs: number },
-): Promise<boolean> {
+): Promise<CancelDrive> {
   const row = await getJob(env.DB, jobId);
-  if (!row || row.orphan_tapis_uuid === null) return false;
+  if (!row || row.orphan_tapis_uuid === null) return "skipped";
   const ctx = tapisAccess(env, mode);
-  if (ctx === null) return false;
-  return cancelOrphan(env, ctx, row.id, row.orphan_tapis_uuid);
+  if (ctx === null) return "failed";
+  return (await cancelOrphan(env, ctx, row.id, row.orphan_tapis_uuid)) ? "ended" : "failed";
 }
 
 /**
@@ -1550,21 +1572,30 @@ export async function requestComputeCancel(
 }
 
 /**
+ * What {@link driveCancel} came to: `ended` (the row is over), `pending` (the cancel is under way or waits
+ * on something that is not a fault: a submitter's lease, a cancel Tapis accepted that is not yet shown),
+ * `failed` (Tapis could not be asked, or did not take the cancel and the job is not shown to be over: the
+ * intent stays recorded and the sweep counts it) and `skipped` (nothing was owed here).
+ */
+export type CancelDrive = "ended" | "pending" | "failed" | "skipped";
+
+/**
  * Carry out a recorded cancel as far as it can go now. Never throws for what Tapis does: a failure is a
- * fixed word, and the intent stays recorded.
+ * fixed word and an outcome, and the intent stays recorded.
  */
 export async function driveCancel(
   env: Bindings,
   jobId: string,
   mode: { maxAttempts: number; timeoutMs: number },
-): Promise<void> {
+): Promise<CancelDrive> {
   let job = await getJob(env.DB, jobId);
-  if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null) return;
+  if (!job || isTerminalComputeState(job.state) || job.cancel_requested_at === null)
+    return "skipped";
   // A job that skipped the reservation is the tenant sweep's, which cancels it and follows it to its end
   // (phase A7): the lifecycle's read-back would verify results a foreign job never uploaded.
-  if (job.flag_unreserved === 1) return;
+  if (job.flag_unreserved === 1) return "skipped";
   if (job.tapis_uuid === null) {
-    if (job.state !== "created" && job.state !== "uploading") return;
+    if (job.state !== "created" && job.state !== "uploading") return "skipped";
     // A PARTNER'S RESERVATION is the partner contract's (phase D4), never ended here. NEMAR does not take
     // a submit lease or write a launch specification for a partner job (the partner launches its own
     // Tapis job under the reservation), so every test below, which proves that NEMAR's own submit never
@@ -1572,7 +1603,7 @@ export async function driveCancel(
     // release a hold for a job that may be running. The intent stays recorded and the sweep's list leaves
     // the row out (`CANCEL_ROWS_SQL`), like `CREATED_ROWS_SQL`. Once it HAS a Tapis job it is cancelled
     // there like any other: NEMAR owns every Tapis job.
-    if (job.source === "partner") return;
+    if (job.source === "partner") return "skipped";
     // A submitter holds the lease: a Tapis job may be in flight that no search can see yet (Tapis has
     // not persisted it, or the answer has not come back). Ending the row now could release the hold for a
     // job that then appears, and if the submitter's answer is also lost nothing would ever search for it
@@ -1580,7 +1611,8 @@ export async function driveCancel(
     // pending cancel into an orphan cancel, and once the lease ends the sweep's tag search is the
     // authority (round 2 of #2041).
     const claimedMs = parseMs(job.submit_claimed_at);
-    if (claimedMs !== null && Date.now() - claimedMs < SUBMIT_LEASE_MINUTES * 60_000) return;
+    if (claimedMs !== null && Date.now() - claimedMs < SUBMIT_LEASE_MINUTES * 60_000)
+      return "pending";
     // A job that never reached Tapis is ended here, and a submit in flight meets a row it cannot bind
     // and cancels the Tapis job it made. But a job whose launch specification was written has been
     // SUBMITTED at least once, and a submit whose answer was lost may have made a Tapis job: ending the
@@ -1588,7 +1620,7 @@ export async function driveCancel(
     // by tag. If it cannot be asked, the cancel stays recorded for the sweep and nothing is released.
     if (job.launch_spec_digest !== null) {
       const ctx = tapisAccess(env, mode);
-      if (ctx === null) return;
+      if (ctx === null) return "failed";
       let found: TapisJob[];
       try {
         found = await searchJobsByTag(ctx, nemarJobTag(job.id));
@@ -1596,7 +1628,7 @@ export async function driveCancel(
         console.warn(
           `[compute-lifecycle] cancel_search_failed job=${job.id} kind=${tapisWord(err)}`,
         );
-        return;
+        return "failed";
       }
       const first = found[0];
       if (first !== undefined && TAPIS_JOB_UUID_RE.test(first.uuid)) {
@@ -1610,25 +1642,27 @@ export async function driveCancel(
           }
         }
         job = await getJob(env.DB, jobId);
-        if (!job || job.tapis_uuid === null || isTerminalComputeState(job.state)) return;
+        if (!job || isTerminalComputeState(job.state)) return "ended";
+        if (job.tapis_uuid === null) return "pending";
       } else {
-        await endUnsubmitted(env, job, "cancelled", null, null);
-        return;
+        return (await endUnsubmitted(env, job, "cancelled", null, null)) ? "ended" : "pending";
       }
     } else {
-      await endUnsubmitted(env, job, "cancelled", null, null);
-      return;
+      return (await endUnsubmitted(env, job, "cancelled", null, null)) ? "ended" : "pending";
     }
   }
   const uuid = job.tapis_uuid as string;
   const ctx = tapisAccess(env, mode);
-  if (ctx === null) return;
+  if (ctx === null) return "failed";
+  // Only a 409 means Tapis says the job is already over. Any other answer to the cancel, a 400 or a 403
+  // included, did not take it; the read-back below shows whether the job ended anyway (a lost answer may
+  // have cancelled it), and if it did not, the cancel is `failed` and is asked again by the next tick.
+  let cancelFailed = false;
   try {
     await cancelJob(ctx, uuid);
   } catch (err) {
-    // 409: Tapis says the job is already over, which the read-back below shows. Anything else is left
-    // for the sweep (a lost answer may have cancelled it; the read-back shows that too).
-    if (!(err instanceof TapisError && err.kind === "rejected")) {
+    if (!(err instanceof TapisError && err.status === 409)) {
+      cancelFailed = true;
       console.warn(`[compute-lifecycle] cancel_unclear job=${job.id} kind=${tapisWord(err)}`);
     }
   }
@@ -1638,7 +1672,11 @@ export async function driveCancel(
     await applyTapisJob(env, fresh, rec);
   } catch (err) {
     console.warn(`[compute-lifecycle] cancel_readback_failed job=${job.id} kind=${tapisWord(err)}`);
+    return cancelFailed ? "failed" : "pending";
   }
+  const after = await getJob(env.DB, job.id);
+  if (after === null || isTerminalComputeState(after.state)) return "ended";
+  return cancelFailed ? "failed" : "pending";
 }
 
 // --- Advance -------------------------------------------------------------------------------------

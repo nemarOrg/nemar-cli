@@ -60,6 +60,7 @@ import {
   UNCOPIED_TERMINAL_SQL,
   UNSETTLED_TERMINAL_SQL,
   advanceComputeJob,
+  countCancelPendingFailed,
   driveCancel,
   errorClassName,
   retryOrphanCancel,
@@ -253,6 +254,13 @@ export function computeAdvanceLogLine(
 export interface CancelSweepResult {
   /** Rows with a recorded cancel, and rows with an orphaned Tapis job, taken this tick. */
   examined: number;
+  /**
+   * Cancels this tick that Tapis did not take and that are not shown to have ended (a row's cancel, or an
+   * orphan's): a COUNT, never a job id or an account. A tick where it is above 0 logs at error level.
+   */
+  cancel_failed: number;
+  /** Live rows whose cancel is still not carried out an hour after it was asked for ({@link countCancelPendingFailed}). */
+  cancel_pending_failed: number;
   errors: string[];
   errorClass: string | null;
 }
@@ -264,7 +272,13 @@ export interface CancelSweepResult {
  */
 export async function sweepComputeCancellations(env: Bindings): Promise<CancelSweepResult | null> {
   if (!isExactProduction(env)) return null;
-  const r: CancelSweepResult = { examined: 0, errors: [], errorClass: null };
+  const r: CancelSweepResult = {
+    examined: 0,
+    cancel_failed: 0,
+    cancel_pending_failed: 0,
+    errors: [],
+    errorClass: null,
+  };
   try {
     const rows = (
       await env.DB.prepare(CANCEL_ROWS_SQL).bind(ADVANCE_ROWS_PER_TICK).all<{ id: string }>()
@@ -273,7 +287,7 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
     for (const { id } of rows) {
       try {
         await env.DB.prepare(STAMP_CANCEL_ATTEMPT_SQL).bind(id).run();
-        await driveCancel(env, id, TICK_READ);
+        if ((await driveCancel(env, id, TICK_READ)) === "failed") r.cancel_failed++;
       } catch (err) {
         r.errors.push("row_failed");
         r.errorClass = errorClassName(err);
@@ -288,13 +302,14 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
     for (const { id } of orphans) {
       try {
         await env.DB.prepare(STAMP_EXAMINED_SQL).bind(id).run();
-        await retryOrphanCancel(env, id, TICK_READ);
+        if ((await retryOrphanCancel(env, id, TICK_READ)) === "failed") r.cancel_failed++;
       } catch (err) {
         r.errors.push("orphan_failed");
         r.errorClass = errorClassName(err);
         console.error(`[compute-cancel] job ${id}: its orphan cancel failed (${r.errorClass})`);
       }
     }
+    r.cancel_pending_failed = await countCancelPendingFailed(env.DB);
   } catch (err) {
     r.errors.push("sweep_failed");
     r.errorClass = errorClassName(err);
@@ -302,13 +317,24 @@ export async function sweepComputeCancellations(env: Bindings): Promise<CancelSw
   return r;
 }
 
-/** The cancel sweep's one log line, or null when there was nothing to do and nothing failed. */
+/**
+ * The cancel sweep's one log line, or null when there was nothing to do and nothing failed. Error level
+ * when a row failed or any cancel was not taken (a persistent failure shows every tick it persists).
+ * Counts and fixed words only: never a job id, an account or a message.
+ */
 export function cancellationsLogLine(
   r: CancelSweepResult,
 ): { level: "info" | "error"; line: string } | null {
-  if (r.examined === 0 && r.errors.length === 0) return null;
+  if (
+    r.examined === 0 &&
+    r.errors.length === 0 &&
+    r.cancel_failed === 0 &&
+    r.cancel_pending_failed === 0
+  )
+    return null;
+  const loud = r.errors.length > 0 || r.cancel_failed > 0 || r.cancel_pending_failed > 0;
   return {
-    level: r.errors.length > 0 ? "error" : "info",
-    line: `[compute-cancel] examined=${r.examined} errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}${r.errorClass === null ? "" : ` class=${r.errorClass}`}`,
+    level: loud ? "error" : "info",
+    line: `[compute-cancel] examined=${r.examined} cancel_failed=${r.cancel_failed} cancel_pending_failed=${r.cancel_pending_failed} errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}${r.errorClass === null ? "" : ` class=${r.errorClass}`}`,
   };
 }

@@ -112,7 +112,8 @@ describe("the orphan list and the cancel list rotate (open points)", () => {
       ids.push(made.job.id);
     }
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 100);
-    await sweepComputeCancellations(env());
+    // Every orphan's cancel failed, and each failure is counted (an orphan still running spends the pool).
+    expect(await sweepComputeCancellations(env())).toMatchObject({ cancel_failed: 10 });
     const stamped = () =>
       ids.filter(
         (id) =>
