@@ -620,6 +620,8 @@ export interface SignupCompletionOptions extends ConfirmOptions {
   github?: string;
   city?: string;
   country?: string;
+  /** The institution; asked for by compute access only, so it is offered and never required here. */
+  affiliation?: string;
   why?: string;
   /** `false` for `--no-upload-access`. */
   uploadAccess?: boolean;
@@ -729,6 +731,25 @@ async function completeProfile(options: SignupCompletionOptions): Promise<void> 
       options.country ?? (await promptForRequired("Country (for export-control screening):"));
   }
 
+  // The affiliation stops compute access alone (epic #2021 phase D1), not upload access, which is what
+  // this flow is for: so it is OFFERED. A flag sets it; a terminal may answer or press Enter to skip;
+  // with no terminal it is left alone (and the list below still names it) rather than failing a signup
+  // that a script runs.
+  if (gapFields.has("affiliation")) {
+    if (options.affiliation) {
+      patch.affiliation = options.affiliation;
+    } else if (process.stdin.isTTY === true) {
+      const { value } = await inquirer.prompt([
+        {
+          type: "input",
+          name: "value",
+          message: "Institution (needed for compute access; Enter to skip):",
+        },
+      ]);
+      if (String(value).trim()) patch.affiliation = String(value).trim();
+    }
+  }
+
   if (Object.keys(patch).length > 0) {
     const patchSpinner = ora("Saving your profile...").start();
     try {
@@ -805,6 +826,7 @@ const signupCmd = authCommand
   .option("--github <handle>", "GitHub username")
   .option("--city <city>", "City")
   .option("--country <country>", "Country")
+  .option("--affiliation <text>", "Institution (asked for by compute access)")
   .option("--why <text>", "What you intend to upload (20-500 characters)")
   .option("--no-upload-access", "Skip the upload-access request")
   .option("--no-open", "Print the sign-in link instead of trying to open a browser")
@@ -2031,8 +2053,12 @@ export async function profileAction(): Promise<void> {
   console.log(
     `  Location    ${chalk.cyan("nemar auth profile set-location --city <c> --country <k>")}`,
   );
+  console.log(`  Affiliation ${chalk.cyan("nemar auth profile set-affiliation <institution>")}`);
   console.log(
     `  Upload access          ${chalk.dim("one-time admin approval; nemar auth request-upload-access")}`,
+  );
+  console.log(
+    `  Compute access         ${chalk.dim("one-time admin approval; nemar compute request-access")}`,
   );
   console.log();
   console.log(
@@ -2077,6 +2103,7 @@ Subcommands (the same changes Settings on nemar.org makes):
   set-name                --given / --family (ORCID wins when a verified iD is linked)
   set-github <handle>     set the GitHub username (checked against GitHub)
   set-location            --city / --country
+  set-affiliation <text>  set the institution (compute access asks for it)
   orcid link|relink|unlink   opens a browser for ORCID's consent screen
 
 Examples:

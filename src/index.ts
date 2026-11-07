@@ -241,6 +241,7 @@ const signupFlags = (cmd: Command): Command =>
     .option("--github <handle>", "GitHub username")
     .option("--city <city>", "City")
     .option("--country <country>", "Country")
+    .option("--affiliation <text>", "Institution (asked for by compute access)")
     .option("--why <text>", "What you intend to upload (20-500 characters)")
     .option("--no-upload-access", "Skip the upload-access request")
     .option("--no-open", "Print the sign-in link instead of trying to open a browser")
