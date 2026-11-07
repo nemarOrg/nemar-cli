@@ -319,7 +319,9 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
     const person = await newPartnerPerson(w);
     const off = await post(person, holdBody(), undefined, { COMPUTE_RECORDS: undefined });
     expect([off.status, off.json?.code]).toEqual([503, "compute_disabled"]);
-    w.h.db.exec("INSERT INTO compute_policy (policy_json, set_by, note) VALUES ('{"defaultGrantMilli": 1}', 1, 'broken')");
+    w.h.db
+      .query("INSERT INTO compute_policy (policy_json, set_by, note) VALUES (?, 1, 'broken')")
+      .run('{"defaultGrantMilli": 1}');
     const broken = await post(person, holdBody());
     expect([broken.status, broken.json?.code]).toEqual([503, "policy_unavailable"]);
     expect(snapshot()[1]).toBe(0);
