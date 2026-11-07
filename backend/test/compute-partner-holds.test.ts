@@ -346,6 +346,34 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
   });
 });
 
+describe("compute access is read in the hold's own statement too", () => {
+  test("a person whose access ended after the route read it is refused by the hold itself, with the pools UNfrozen", async () => {
+    const { createJob } = await import("../src/services/compute-jobs");
+    const text = JSON.stringify(holdBody());
+    for (const [state, word] of [
+      ["suspended", "suspended"],
+      ["revoked", "no_compute_access"],
+      ["denied", "no_compute_access"],
+      ["none", "no_compute_access"],
+    ] as const) {
+      const person = await newPartnerPerson(w);
+      w.h.db.query("UPDATE users SET compute_access = ? WHERE id = ?").run(state, person.id);
+      const before = snapshot();
+      const made = await createJob(w.env(), {
+        source: "partner",
+        accountId: person.id,
+        clientId: w.client.clientId,
+        tapisOwner: person.sub,
+        holdBody: text,
+        requireActiveAccess: true,
+        caps: { maxOpenReservations: 10, maxReservedMilliPerDay: 1_000_000_000 },
+      });
+      expect([state, made.ok === false ? made.code : "made"]).toEqual([state, word]);
+      expect(snapshot()).toEqual(before);
+    }
+  });
+});
+
 describe("races are decided in the hold's own statement", () => {
   test("two holds for the last SU: one wins and the loser wrote nothing", async () => {
     const person = await newPartnerPerson(w, { grant: 4000 });
