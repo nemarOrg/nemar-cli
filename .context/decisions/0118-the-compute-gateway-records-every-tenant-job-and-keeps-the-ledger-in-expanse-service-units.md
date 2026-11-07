@@ -583,19 +583,29 @@ Each item below says what changed and what was decided; the owner decisions of 2
 8. **A Tapis cancel that failed is counted, and loud while it persists.**
    `driveCancel` and `retryOrphanCancel` return an outcome (`ended`, `pending`, `failed`, `skipped`) instead of nothing.
    The cancel sweep counts `cancel_failed` (a count, never a job id or an account) and logs at error level when it is above 0, so a persistent failure is loud on every tick it persists, and a transient failure the next tick cures is one line.
-   `cancel_pending_failed` counts live rows whose recorded cancel is still not carried out an hour after it was asked for (`countCancelPendingFailed`); the status view carries it.
-   An orphan's cancel (a Tapis job NEMAR made that no row owns) now clears the record only on a 409, or on a 404 that a read of the job confirms: a 400 or a 403 no longer clears an orphan that is still running (this is the tenant sweep's rule).
+   `cancel_pending_failed` counts live rows whose recorded cancel is still not carried out an hour after it was asked for (`countCancelPendingFailed`); the status view will carry it once the reporting changes that wire it are merged.
+   An orphan's cancel (a Tapis job NEMAR made that no row owns) now clears the record only on a 409, on a 404 that a read of the job confirms, or on a refusal after which a read shows the job has ended (a finished job may be answered with a 400): a 400 or a 403 no longer clears an orphan that is still running (this is the tenant sweep's rule).
 9. **A status Tapis reports that NEMAR does not know is treated as an unreadable record.**
    `unknown_status` refreshes nothing, so the row's last good read ages and the job is `unreported` after a day (it used to stay live and silent for ever); the tick counts it as `unknown_status` and logs the status word shortened to 32 characters and reduced to letters and underscores.
    It is not ended as lost: only a record that cannot be read at all is.
-10. **A live job whose Tapis record is gone ends `failed` with `tapis_record_lost` (owner decision 1 of 2026-11-06).**
+10. **A live job whose Tapis record is gone ends `failed` with `tapis_record_lost` (owner decision 1 of 2026-11-06, refined in review).**
     The word is a platform failure code (`PLATFORM_FAILURE_CODES`, so `isPlatformFailure` is true and the attribution follows).
-    Two things end it: a row whose last good read of Tapis is more than `UNREADABLE_GIVE_UP_DAYS` (7) days old and whose read fails again; and a job with a cancel recorded whose cancel answers 404 AND whose read-back answers 404.
-    The hold is released with NO charge (the same release statement, key and gate as any release, so the hold is released once and the settlement is idempotent), the row is flagged `mismatch` so the observer's final settlement and the tenant sweep can reconcile any use that really happened, the row leaves the live states (the account's live-job slot is free), and a pipeline stamp that reads it fails with the same word, which counts toward the pipeline's cooldown (item 4) because the job may have run.
+    Only a read that answers 404 can end a job this way; a refused credential, a response that fails its schema and a Tapis that is down for a week each leave the job `unreported` and put an error line in the tick, because a record that is merely unreadable may still be running.
+    Two things end it: a row whose last good read of Tapis is more than `UNREADABLE_GIVE_UP_DAYS` (7) days old and whose read answers 404 again; and a job with a cancel recorded whose cancel answers 404 AND whose read-back answers 404, when its last good read is more than a day old (so one wrong-tenant 404 cannot end a job at once).
+    A job Tapis has ANSWERED since its last usable read is never lost: a status NEMAR does not know leaves `tapis_synced_at` alone, so the job goes `unreported` after a day as before, and is stored in `tapis_status` (an administrator sees the word), and the stored word that names no known status is what stops the lost-by-age rule.
+    That is the clock chosen instead of a new column: no migration.
+    What the lost job settles at depends on the row, because a job that ran is never released (a release closes the hold, the ledger then refuses a charge, and the observer corrects only a row that has a `charge` entry):
+    - **evidence of a start** (`started_at` set by an earlier read): charged the time from that start to now, capped at the job's own time limit, through `provisionalCharge`, once, capped at the hold, excess to overrun as for any failed job that ran;
+    - **other evidence of use** (the launcher's bytes or completed upload, a Slurm id, or the last reported state `running` or `archiving`): the contract's minimum is charged;
+    - **no evidence of ever starting**: the hold is released with no charge, once, by the same release statement and gate as any release.
+    In every case the row is flagged `mismatch`, leaves the live states (the account's live-job slot is free), and its Tapis uuid is recorded as the row's orphan, so a job that is in fact still running is cancelled by the existing orphan retry as soon as Tapis answers a cancel.
+    A released job's later use is FLAGGED for an administrator, not reconciled: the observer cannot repair a released job and the tenant sweep skips a bound row (the repair path above says the same).
+    A pipeline stamp that reads the row fails with the same word, which counts toward the pipeline's cooldown (item 4) because the job may have run.
     Recovery before 7 days is unchanged: a good read refreshes the clock.
 11. **A copy of the launcher files abandoned after three days is counted.**
     `UNCOPIED_TERMINAL_SQL` stops listing a terminal row three days after it ended, and the failure used to be a log line.
-    The tick now flags such a row `mismatch` once and reports the rows it flagged as `copy_abandoned` in its result and its line, at error level; `countCopyAbandoned` is the running total for the status view.
+    The tick now flags such a row `mismatch` where it is not flagged already, and reports `copy_abandoned` in its result and its line at error level: the rows that are abandoned whatever their flag (a lost record is born flagged and is abandoned all the same) whose window closed in the last 30 days, so the line is an error on every tick for a month and then stops.
+    `countCopyAbandoned` is the running total with no age limit; the status view will carry it once the reporting changes that wire it are merged.
 12. **The tick's line says what it did.**
     A tick where Tapis could not be read for a row is a `warn` line (it used to log nothing when nothing else happened); `unknown_status` and a repair that did not finish are `warn`; a failed step and an abandoned copy are `error`.
     `repaired` counts only a repair that finished what was owed (`repairTerminal` returns the real outcome); an attempt that left something owed is `repair_attempted`.
