@@ -41,6 +41,7 @@ import {
   getComputeResults,
   renewComputeResults,
 } from "../lib/api/compute.js";
+import { type DownloadResult, caseCollision, downloadOne } from "../lib/compute/download.js";
 import { failCompute, refuseLocally } from "../lib/compute/fail.js";
 import { markReportedExit } from "../lib/debug-log.js";
 import { plain } from "../lib/terminal-text.js";
@@ -138,17 +139,6 @@ export const logsCommand = new Command("logs")
 
 // --- results ------------------------------------------------------------------------------------------------
 
-type ResultFile = ComputeResultsResponse["files"][number];
-
-/**
- * Whether a result path is one that may be written under the download folder: relative, no `..`, no empty
- * segment, no backslash or control character, no drive letter. A path NEMAR sends is checked again here:
- * the folder is the person's, and what is written into it is decided on this machine.
- */
-export function safeResultPath(path: string): boolean {
-  return isSafeComputePath(path, 1024) && !/^[A-Za-z]:/.test(path);
-}
-
 /** Every page of the results as one document; the links are the Worker's, unchanged. */
 async function fetchAllResults(job: string, renew: boolean): Promise<ComputeResultsResponse> {
   const read = renew ? renewComputeResults : getComputeResults;
@@ -163,70 +153,14 @@ async function fetchAllResults(job: string, renew: boolean): Promise<ComputeResu
   return { ...page, files, truncated: false, next_after: null };
 }
 
-function sha256File(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-/** Download one file to `dir` and verify its size and SHA-256. Returns null on success, or a short reason. */
-export async function downloadOne(
-  dir: string,
-  file: ResultFile,
-): Promise<"ok" | "skipped" | string> {
-  if (!safeResultPath(file.path)) return "the path is not one that may be written";
-  const root = resolve(dir);
-  const dest = resolve(root, file.path);
-  if (!dest.startsWith(root + sep)) return "the path leaves the download folder";
-  if (existsSync(dest) && statSync(dest).isFile() && statSync(dest).size === file.size) {
-    if (sha256File(dest) === file.sha256) return "skipped";
-  }
-  mkdirSync(dirname(dest), { recursive: true });
-  const part = `${dest}.part`;
-  try {
-    // No credential of ours goes to the store: the link is the authority.
-    const response = await fetch(file.url);
-    if (!response.ok || response.body === null) return `HTTP ${response.status}`;
-    const hash = createHash("sha256");
-    const out = createWriteStream(part);
-    let bytes = 0;
-    let tooBig = false;
-    const reader = response.body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.length;
-        if (bytes > file.size) {
-          tooBig = true;
-          break;
-        }
-        hash.update(value);
-        if (!out.write(value)) await new Promise<void>((r) => out.once("drain", () => r()));
-      }
-    } finally {
-      await new Promise<void>((r) => out.end(() => r()));
-    }
-    if (tooBig) {
-      rmSync(part, { force: true });
-      return "the file is larger than NEMAR said";
-    }
-    if (bytes !== file.size || hash.digest("hex") !== file.sha256) {
-      rmSync(part, { force: true });
-      return "the size or checksum did not match";
-    }
-    renameSync(part, dest);
-    return "ok";
-  } catch {
-    // The error text of a failed fetch can name the link, which is a bearer secret: it is not kept.
-    rmSync(part, { force: true });
-    return "the download failed";
-  }
-}
-
 const RESULTS_HELP = `
 Description:
   Lists the files a finished job made, and with --download <dir> fetches them into <dir>, checking each
   file's size and SHA-256 against what NEMAR recorded (a file that does not match is deleted and reported).
-  A file already there with the same size and checksum is left alone.
+  A file already there with the same size and checksum is left alone; one that exists and DIFFERS is not
+  overwritten (it is reported) unless you pass --force. Nothing is written outside <dir>, through a
+  symbolic link or otherwise, and a link that is not https, or that redirects, is refused. Two results whose
+  names differ only in case cannot both be written on a case-insensitive disk: the later one is reported.
 
   The links are BEARER links: anyone who holds one can download that file until it expires, seven days
   after it was made. This command prints no link unless you ask with --json; keep them private. --renew
@@ -251,58 +185,79 @@ export const resultsCommand = new Command("results")
   .argument("<job>", "The job id")
   .option("--download <dir>", "Download the files into this folder, verifying each")
   .option("--renew", "Make new links for the same files")
+  .option("--force", "With --download: replace a file that exists and differs")
   .option(...JSON_FLAG)
   .addHelpText("after", RESULTS_HELP)
-  .action(async (raw: string, o: JsonOption & { download?: string; renew?: boolean }) => {
-    const job = checkedJob(raw);
-    if (job === null) return;
-    if (!requireSignedIn(o.json)) return;
-    let results: ComputeResultsResponse;
-    try {
-      results = await fetchAllResults(job, o.renew === true);
-    } catch (error) {
-      failCompute(error, "Could not read the results.");
-      return;
-    }
-    const say = (line: string) => (o.json ? console.error(line) : console.log(line));
-    if (o.json) console.log(JSON.stringify(results, null, 2));
-    else {
-      const total = results.files.reduce((n, f) => n + f.size, 0);
-      console.log(
-        `${chalk.bold(job)}: ${results.files.length} file${results.files.length === 1 ? "" : "s"}, ${formatBytesCli(total)}. Links expire ${plain(results.expires_at)}.`,
-      );
-      for (const f of results.files) {
-        console.log(
-          `  ${plain(f.path)}  ${formatBytesCli(f.size)}  sha256 ${plain(f.sha256).slice(0, 12)}`,
-        );
+  .action(
+    async (
+      raw: string,
+      o: JsonOption & { download?: string; renew?: boolean; force?: boolean },
+    ) => {
+      const job = checkedJob(raw);
+      if (job === null) return;
+      if (!requireSignedIn(o.json)) return;
+      let results: ComputeResultsResponse;
+      try {
+        results = await fetchAllResults(job, o.renew === true);
+      } catch (error) {
+        failCompute(error, "Could not read the results.");
+        return;
       }
-      console.log(chalk.dim(plain(results.notice)));
-    }
-    if (o.download === undefined) {
-      if (!o.json && results.files.length > 0) {
-        say(chalk.dim("Download them with: nemar compute results <job> --download <dir>"));
-      }
-      return;
-    }
-    let failed = 0;
-    for (const file of results.files) {
-      const outcome = await downloadOne(o.download, file);
-      if (outcome === "ok") say(`  fetched   ${plain(file.path)}`);
-      else if (outcome === "skipped") say(chalk.dim(`  already   ${plain(file.path)}`));
+      const say = (line: string) => (o.json ? console.error(line) : console.log(line));
+      if (o.json) console.log(JSON.stringify(results, null, 2));
       else {
-        failed++;
-        console.error(chalk.red(`  FAILED    ${plain(file.path)}: ${plain(outcome)}`));
+        const total = results.files.reduce((n, f) => n + f.size, 0);
+        console.log(
+          `${chalk.bold(job)}: ${results.files.length} file${results.files.length === 1 ? "" : "s"}, ${formatBytesCli(total)}. Links expire ${plain(results.expires_at)}.`,
+        );
+        for (const f of results.files) {
+          console.log(
+            `  ${plain(f.path)}  ${formatBytesCli(f.size)}  sha256 ${plain(f.sha256).slice(0, 12)}`,
+          );
+        }
+        console.log(chalk.dim(plain(results.notice)));
       }
-    }
-    if (failed > 0) {
-      console.error(
-        chalk.red(`${failed} of ${results.files.length} files could not be fetched and verified.`),
-      );
-      process.exitCode = 1;
-      // A file that did not match is a verdict about the file, not a fault in the command.
-      markReportedExit();
-    }
-  });
+      if (o.download === undefined) {
+        if (!o.json && results.files.length > 0) {
+          say(chalk.dim("Download them with: nemar compute results <job> --download <dir>"));
+        }
+        return;
+      }
+      let failed = 0;
+      const claimed = new Map<string, string>();
+      for (const file of results.files) {
+        // Names that differ only in case (or Unicode form) are one file on a case-insensitive disk.
+        const key = file.path.normalize("NFC").toLowerCase();
+        const earlier = claimed.get(key);
+        claimed.set(key, earlier ?? file.path);
+        let outcome: DownloadResult;
+        if (earlier !== undefined) {
+          outcome = {
+            status: "failed",
+            reason: `its name differs only in case or form from ${plain(earlier)}; not written`,
+          };
+        } else {
+          outcome = await downloadOne(o.download, file, { force: o.force === true });
+        }
+        if (outcome.status === "fetched") say(`  fetched   ${plain(file.path)}`);
+        else if (outcome.status === "skipped") say(chalk.dim(`  already   ${plain(file.path)}`));
+        else {
+          failed++;
+          console.error(chalk.red(`  FAILED    ${plain(file.path)}: ${plain(outcome.reason)}`));
+        }
+      }
+      if (failed > 0) {
+        console.error(
+          chalk.red(
+            `${failed} of ${results.files.length} files could not be fetched and verified.`,
+          ),
+        );
+        process.exitCode = 1;
+        // A file that did not match is a verdict about the file, not a fault in the command.
+        markReportedExit();
+      }
+    },
+  );
 
 // --- cancel -------------------------------------------------------------------------------------------------
 
