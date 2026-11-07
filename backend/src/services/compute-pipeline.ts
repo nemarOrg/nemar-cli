@@ -504,7 +504,13 @@ export async function dispatchPipelineJob(
     if (looksUnique(err)) return fail("live_attempt_exists", datasetId, { version: tag });
     throw err;
   }
-  const stamp = (await getStamp(db, stampId)) as StampRow;
+  const stamp = await getStamp(db, stampId);
+  if (stamp === null) {
+    // The stamp was claimed a moment ago and is gone: the dataset was deleted in between (the deletion
+    // cascades its stamps). Nothing was created, no hold was taken, and there is no tuple left to hold.
+    console.error(`[compute-pipeline] stamp_gone stamp=${stampId}`);
+    return fail("dataset_not_eligible", datasetId, { version: tag });
+  }
   const key = await pipelineKey(stamp);
 
   // The job, from the specification built above. The stamp is ended whatever happens next.

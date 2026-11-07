@@ -26,6 +26,7 @@ import { MAX_MANIFEST_JSON_ENTRIES } from "../src/routes/data";
 import { JOB_BY_ID_SQL, JOB_BY_KEY_SQL, createJob } from "../src/services/compute-jobs";
 import { advanceComputeJob } from "../src/services/compute-lifecycle";
 import {
+  CLAIM_STAMP_SQL,
   PIPELINES_ACCOUNT_USERNAME,
   PIPELINE_MANIFEST_MAX_ENTRIES,
   STAMP_NO_JOB_MINUTES,
@@ -338,6 +339,49 @@ describe("a run", () => {
       job_id: null,
     });
     expect(submits()).toBe(0);
+  });
+
+  test("a dataset deleted between the claim and the read of the stamp (the deletion cascades its stamps) is a clean refusal: no job, no hold, no throw (MUTATION: cast the missing stamp)", async () => {
+    const { env } = await world();
+    // The real deletion of the stamp happens right after the real claim, as a racing delete does.
+    const racing = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            if (sql !== CLAIM_STAMP_SQL) return statement;
+            const wrapped: Record<string, unknown> = {
+              bind: (...a: unknown[]) => {
+                statement.bind(...a);
+                return wrapped;
+              },
+              run: async () => {
+                const done = await statement.run();
+                await target.prepare("DELETE FROM compute_pipeline_stamps").run();
+                return done;
+              },
+            };
+            return wrapped;
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    const lines = await logged(async () => {
+      const result = await run({ ...env, DB: racing });
+      expect(result).toMatchObject({ ok: false, code: "dataset_not_eligible" });
+    });
+    expect(lines.some((l) => l.includes("stamp_gone"))).toBe(true);
+    expect(await jobCount(env)).toBe(0);
+    expect((await stampsOf(env)).length).toBe(0);
+    expect(
+      (
+        await env.DB.prepare("SELECT COUNT(*) AS n FROM compute_ledger WHERE kind = 'hold'").first<{
+          n: number;
+        }>()
+      )?.n,
+    ).toBe(0);
   });
 
   test("a read that fails AFTER the job was committed finds the job by its key and links it", async () => {
