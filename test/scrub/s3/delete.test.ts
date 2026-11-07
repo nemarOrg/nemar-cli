@@ -13,38 +13,29 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import {
-  type AssembledFile,
-  type PlanFile,
-  type ZarrVerifiedFile,
-  parseKey,
-} from "../../../scripts/scrub/contract";
+import { type AssembledFile, type PlanFile, parseKey } from "../../../scripts/scrub/contract";
 import { AwsCliError, deleteVersion } from "../../../scripts/scrub/s3/s3-lib";
 import type { DeletedFile } from "../../../scripts/scrub/s3/s3-stages";
-import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { makeLimiter, together } from "./concurrency";
 import {
   a,
   b,
-  built,
   cleanStore,
   d,
   dirtyStore,
   firstNewKey,
+  makeLanes,
   oldIds,
-  snap,
   useDeleteHarness,
 } from "./delete-harness";
 import { expectStopped } from "./refusal";
 import {
   BUCKET,
   DATASET,
-  type PublicEndpoint,
-  type RunResult,
   SLOW,
   addUnreadableKey,
   batchDeleted,
   centuryFromNow,
-  copyDir,
   deleteRequests,
   edfFile,
   edfHeader,
@@ -53,10 +44,8 @@ import {
   objectPath,
   readJson,
   removeTempDirs,
-  runScrub as runScrubUngated,
   seedManifest,
   sha256,
-  startPublicEndpoint,
   withCtx,
   writeGitVerified,
   writeJson,
@@ -68,132 +57,10 @@ useDeleteHarness();
 /**
  * The tests of a describe block run together, each in lanes of its own: a stand-in at the shared
  * state, a public endpoint, and a pristine copy of the working directory. Nothing one test does
- * can reach another. At most `GATE` stage processes run at a time, whatever the number of
+ * can reach another. At most four stage processes run at a time, whatever the number of
  * tests, because the machine has few cores and the files of the suite run in parallel.
  */
-const GATE = 4;
-let running = 0;
-const queue: Array<() => void> = [];
-async function gated<T>(fn: () => Promise<T>): Promise<T> {
-  if (running >= GATE) await new Promise<void>((resolve) => queue.push(resolve));
-  else running += 1;
-  try {
-    return await fn();
-  } finally {
-    const next = queue.shift();
-    if (next) next();
-    else running -= 1;
-  }
-}
-
-const runScrub = (
-  standin: S3Standin,
-  args: string[],
-  env?: Record<string, string>,
-  opts?: { anyPublicBase?: boolean },
-): Promise<RunResult> => gated(() => runScrubUngated(standin, args, env, opts));
-
-/** Run the cases together; wait for all of them, then report the first failure. */
-async function together(cases: Array<() => Promise<void>>): Promise<void> {
-  const settled = await Promise.allSettled(cases.map((c) => c()));
-  const failed = settled.find((s) => s.status === "rejected");
-  if (failed) throw (failed as PromiseRejectedResult).reason;
-}
-
-interface Lane {
-  standin: S3Standin;
-  pub: PublicEndpoint;
-  dir: string;
-  deleteArgs(extra?: string[], publicBase?: string): string[];
-  executeArgs(extra?: string[]): string[];
-  assembledSha(): string;
-  writeProofs(count?: number): void;
-  /** The proof the `zarr` stage leaves, made by the REAL stage over this lane's stand-in. */
-  proveZarr(over?: Partial<ZarrVerifiedFile>): Promise<void>;
-  versionIdsOf(key: string): string[];
-  /** Nothing was deleted: every old version and marker is still there. */
-  expectOldIntact(): void;
-}
-
-function makeLane(state: Snapshot, from: string, mine: Lane[]): Lane {
-  const standin = startS3Standin();
-  standin.restore(state);
-  const pub = startPublicEndpoint();
-  const dir = copyDir(from);
-  const lane: Lane = {
-    standin,
-    pub,
-    dir,
-    deleteArgs: (extra = [], publicBase = pub.url) => [
-      "delete-old",
-      "--dir",
-      dir,
-      "--confirm-dataset",
-      DATASET,
-      "--public-base",
-      publicBase,
-      "--concurrency",
-      "8",
-      ...extra,
-    ],
-    executeArgs: (extra = []) => lane.deleteArgs(["--execute", ...extra]),
-    assembledSha: () => sha256(readFileSync(path.join(dir, "assembled.json"))),
-    writeProofs(count = 2) {
-      writeJson(dir, "verified.json", {
-        version: 1,
-        dataset: DATASET,
-        verifiedAt: new Date().toISOString(),
-        assembledSha256: lane.assembledSha(),
-        counts: { keys: count, headersChecked: count, rangesCompared: 0 },
-      });
-      writeJson(dir, "new-hash-verified.json", {
-        version: 1,
-        dataset: DATASET,
-        assembledSha256: lane.assembledSha(),
-        count,
-      });
-    },
-    async proveZarr(over = {}) {
-      const r = await runScrub(standin, ["zarr", "--dir", dir, "--execute"]);
-      if (r.exitCode !== 0) throw new Error(`the zarr stage failed: ${r.all}`);
-      if (Object.keys(over).length > 0) {
-        writeJson(dir, "zarr-verified.json", {
-          ...readJson<ZarrVerifiedFile>(dir, "zarr-verified.json"),
-          ...over,
-        });
-      }
-    },
-    versionIdsOf: (key) => standin.versions(BUCKET, objectPath(key)).map((v) => v.versionId),
-    expectOldIntact() {
-      expect(deleteRequests(standin)).toBe(0);
-      for (const f of [a, b]) {
-        expect(lane.versionIdsOf(f.oldKey).sort()).toEqual(
-          [...(oldIds[f.oldKey] as string[])].sort(),
-        );
-      }
-    },
-  };
-  mine.push(lane);
-  return lane;
-}
-
-/**
- * A test body that is given `lane`, which makes a lane at the shared state. Every lane the test
- * made is stopped when the body ends, whatever the outcome.
- */
-function scoped(fn: (lane: () => Lane) => Promise<void>): () => Promise<void> {
-  return async () => {
-    const mine: Lane[] = [];
-    try {
-      await fn(() => makeLane(snap, built.dir, mine));
-    } finally {
-      for (const l of mine) {
-        l.standin.stop();
-        l.pub.stop();
-      }
-    }
-  };
-}
+const { run: runScrub, scoped } = makeLanes(makeLimiter(4));
 
 // The tests of a `describe.concurrent` block run together, each in lanes of its own. Blocks that
 // follow each other would run as one batch, and the timeout of a test is counted from the start

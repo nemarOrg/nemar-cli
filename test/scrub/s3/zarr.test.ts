@@ -18,6 +18,7 @@ import {
 } from "../../../scripts/scrub/contract";
 import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { makeLimiter } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -71,18 +72,9 @@ afterAll(() => {
 });
 
 const SLOTS = 3;
-let inFlight = 0;
-const waiting: Array<() => void> = [];
-async function runScrub(...args: Parameters<typeof runScrubUnbounded>) {
-  if (inFlight >= SLOTS) await new Promise<void>((resolve) => waiting.push(resolve));
-  inFlight += 1;
-  try {
-    return await runScrubUnbounded(...args);
-  } finally {
-    inFlight -= 1;
-    waiting.shift()?.();
-  }
-}
+const limit = makeLimiter(SLOTS);
+const runScrub = (...args: Parameters<typeof runScrubUnbounded>) =>
+  limit(() => runScrubUnbounded(...args));
 
 /**
  * The working directory the plan stage leaves for the dataset every test below uses (one clean

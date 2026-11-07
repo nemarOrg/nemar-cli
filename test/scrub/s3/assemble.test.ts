@@ -6,7 +6,7 @@
  * hash the hashing stage promised in the key, and with the bytes the stand-in actually stored.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect } from "bun:test";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import {
@@ -18,6 +18,7 @@ import {
   parseKeymap,
 } from "../../../scripts/scrub/contract";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { makeJobPool, makeLimiter } from "./concurrency";
 import { expectStopped } from "./refusal";
 import {
   BUCKET,
@@ -59,68 +60,13 @@ afterAll(removeTempDirs);
 
 /**
  * The test bodies run in the background, at most three at a time and in the order the tests are
- * written, once `startJobs` opens the queue. Each test then waits for its own job, so time spent
- * queued is not counted against its timeout; a job has the whole timeout from the moment it starts.
+ * written, once `startJobs` opens the queue (`concurrency.ts`). Each test then waits for its own
+ * job, so time spent queued is not counted against its timeout. `run` keeps at most three real
+ * CLI runs going at once; CI runners have four cores and other files run beside this one.
  */
-const JOBS = 3;
-const queue: Array<() => void> = [];
-let running = 0;
-let open = false;
-function pump() {
-  while (open && running < JOBS) {
-    const start = queue.shift();
-    if (!start) return;
-    running++;
-    start();
-  }
-}
-function startJobs() {
-  open = true;
-  pump();
-}
+const { job, start: startJobs } = makeJobPool(3);
 beforeAll(startJobs);
-function job(name: string, body: () => Promise<void>, timeout: number) {
-  const done = new Promise<void>((resolve, reject) => {
-    queue.push(() => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const expired = new Promise<never>((_, fail) => {
-        timer = setTimeout(
-          () => fail(new Error(`${name}: not finished after ${timeout} ms`)),
-          timeout,
-        );
-      });
-      Promise.race([body(), expired])
-        .then(resolve, reject)
-        .finally(() => {
-          clearTimeout(timer);
-          running--;
-          pump();
-        });
-    });
-  });
-  // The test below reports a failure; this keeps one that settles first from being "unhandled".
-  done.catch(() => {});
-  test(name, () => done, timeout);
-}
-
-/** At most `n` calls of `fn` at once; CI runners have four cores and other files run beside this. */
-function limiter(n: number) {
-  let active = 0;
-  const waiting: Array<() => void> = [];
-  return async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (active >= n) await new Promise<void>((resolve) => waiting.push(resolve));
-    else active++;
-    try {
-      return await fn();
-    } finally {
-      // Hand the slot straight to the next waiter, so the count never exceeds `n`.
-      const next = waiting.shift();
-      if (next) next();
-      else active--;
-    }
-  };
-}
-const limit = limiter(3);
+const limit = makeLimiter(3);
 const run = (s: S3Standin, args: string[], env: Record<string, string> = {}) =>
   limit(() => runScrub(s, args, env));
 

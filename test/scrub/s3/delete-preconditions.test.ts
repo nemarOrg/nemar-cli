@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { PlanFile, ZarrPlanFile, ZarrVerifiedFile } from "../../../scripts/scrub/contract";
 import { StageError } from "../../../scripts/scrub/s3/s3-lib";
@@ -10,28 +10,24 @@ import {
   checkPublicBase,
   publicObjectUrl,
 } from "../../../scripts/scrub/s3/s3-stages";
-import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { makeLimiter, together } from "./concurrency";
 import {
+  type Lane,
   a,
   b,
-  built,
   cleanStore,
   d,
   dirtyStore,
   firstNewKey,
-  oldIds,
-  snap,
+  makeLanes,
   useDeleteHarness,
 } from "./delete-harness";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
   DATASET,
-  type PublicEndpoint,
-  type RunResult,
   SLOW,
   centuryFromNow,
-  copyDir,
   deleteRequests,
   edfFile,
   edfHeader,
@@ -40,10 +36,7 @@ import {
   objectPath,
   readJson,
   removeTempDirs,
-  runScrub,
   seedManifest,
-  sha256,
-  startPublicEndpoint,
   writeGitVerified,
   writeJson,
 } from "./support";
@@ -55,135 +48,10 @@ useDeleteHarness();
  * Cases that do not depend on each other run at once, each in a lane of its own: a stand-in at
  * the shared state, a public endpoint, and a pristine copy of the working directory. A case that
  * used to follow `standin.restore(snap)` in one shared stand-in is now a lane, so nothing one case
- * does can reach another. At most `GATE` stage processes run at a time, whatever the number of
+ * does can reach another. At most four stage processes run at a time, whatever the number of
  * cases, because the machine has few cores and the files of the suite run in parallel.
  */
-const GATE = 4;
-let running = 0;
-const queue: Array<() => void> = [];
-async function gated<T>(fn: () => Promise<T>): Promise<T> {
-  if (running >= GATE) await new Promise<void>((resolve) => queue.push(resolve));
-  else running += 1;
-  try {
-    return await fn();
-  } finally {
-    const next = queue.shift();
-    if (next) next();
-    else running -= 1;
-  }
-}
-
-/** Run the cases together; wait for all of them, then report the first failure. */
-async function together(cases: Array<() => Promise<void>>): Promise<void> {
-  const settled = await Promise.allSettled(cases.map((c) => c()));
-  const failed = settled.find((s) => s.status === "rejected");
-  if (failed) throw (failed as PromiseRejectedResult).reason;
-}
-
-interface Lane {
-  standin: S3Standin;
-  pub: PublicEndpoint;
-  dir: string;
-  run(
-    args: string[],
-    env?: Record<string, string>,
-    opts?: { anyPublicBase?: boolean },
-  ): Promise<RunResult>;
-  deleteArgs(extra?: string[], publicBase?: string): string[];
-  executeArgs(extra?: string[]): string[];
-  writeProofs(count?: number): void;
-  proveZarr(over?: Partial<ZarrVerifiedFile>): Promise<void>;
-  expectOldIntact(): void;
-  /** A new lane that starts from this lane's stand-in and working directory as they are now. */
-  fork(): Lane;
-}
-
-function makeLane(state: Snapshot, from: string, mine: Lane[]): Lane {
-  const standin = startS3Standin();
-  standin.restore(state);
-  const pub = startPublicEndpoint();
-  const dir = copyDir(from);
-  const lane: Lane = {
-    standin,
-    pub,
-    dir,
-    run: (args, env, opts) => gated(() => runScrub(standin, args, env, opts)),
-    deleteArgs: (extra = [], publicBase = pub.url) => [
-      "delete-old",
-      "--dir",
-      dir,
-      "--confirm-dataset",
-      DATASET,
-      "--public-base",
-      publicBase,
-      "--concurrency",
-      "8",
-      ...extra,
-    ],
-    executeArgs: (extra = []) => lane.deleteArgs(["--execute", ...extra]),
-    writeProofs(count = 2) {
-      const assembledSha = sha256(readFileSync(path.join(dir, "assembled.json")));
-      writeJson(dir, "verified.json", {
-        version: 1,
-        dataset: DATASET,
-        verifiedAt: new Date().toISOString(),
-        assembledSha256: assembledSha,
-        counts: { keys: count, headersChecked: count, rangesCompared: 0 },
-      });
-      writeJson(dir, "new-hash-verified.json", {
-        version: 1,
-        dataset: DATASET,
-        assembledSha256: assembledSha,
-        count,
-      });
-    },
-    // The proof the `zarr` stage leaves, made by the REAL stage over this lane's stand-in; `over`
-    // then replaces fields of it, to make it stale.
-    async proveZarr(over = {}) {
-      const r = await lane.run(["zarr", "--dir", dir, "--execute"]);
-      if (r.exitCode !== 0) throw new Error(`the zarr stage failed: ${r.all}`);
-      if (Object.keys(over).length > 0) {
-        writeJson(dir, "zarr-verified.json", {
-          ...readJson<ZarrVerifiedFile>(dir, "zarr-verified.json"),
-          ...over,
-        });
-      }
-    },
-    expectOldIntact() {
-      expect(deleteRequests(standin)).toBe(0);
-      for (const f of [a, b]) {
-        const ids = standin.versions(BUCKET, objectPath(f.oldKey)).map((v) => v.versionId);
-        expect(ids.sort()).toEqual([...(oldIds[f.oldKey] as string[])].sort());
-      }
-    },
-    fork: () => makeLane(standin.snapshot(), dir, mine),
-  };
-  mine.push(lane);
-  return lane;
-}
-
-/**
- * A test body that is given `lane`, which makes a lane at the shared state with both proofs
- * written for its assembled.json. Every lane the test made, and every fork of one, is stopped
- * when the body ends, whatever the outcome.
- */
-function scoped(fn: (lane: () => Lane) => Promise<void>): () => Promise<void> {
-  return async () => {
-    const mine: Lane[] = [];
-    try {
-      await fn(() => {
-        const l = makeLane(snap, built.dir, mine);
-        l.writeProofs();
-        return l;
-      });
-    } finally {
-      for (const l of mine) {
-        l.standin.stop();
-        l.pub.stop();
-      }
-    }
-  };
-}
+const { scoped } = makeLanes(makeLimiter(4), { proofs: true });
 
 const body = (s: string) => new TextEncoder().encode(s);
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);

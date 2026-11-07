@@ -9,6 +9,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createAwsRunner, isoSeconds, putObjectLocked } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { makeLimiter } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -43,18 +44,9 @@ afterAll(() => {
 });
 
 const SLOTS = 3;
-let inFlight = 0;
-const waiting: Array<() => void> = [];
-async function runScrub(...args: Parameters<typeof runScrubUnbounded>) {
-  if (inFlight >= SLOTS) await new Promise<void>((resolve) => waiting.push(resolve));
-  inFlight += 1;
-  try {
-    return await runScrubUnbounded(...args);
-  } finally {
-    inFlight -= 1;
-    waiting.shift()?.();
-  }
-}
+const limit = makeLimiter(SLOTS);
+const runScrub = (...args: Parameters<typeof runScrubUnbounded>) =>
+  limit(() => runScrubUnbounded(...args));
 
 const prefix = `${DATASET}/canary-k3x9q2/`;
 const canary = (extra: string[] = [], p = prefix) => ["canary", "--prefix", p, ...extra];
