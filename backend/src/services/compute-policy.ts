@@ -163,9 +163,13 @@ export function issuesOf(error: z.ZodError, prefix?: string): PolicyIssue[] {
   }));
 }
 
-/** Partner reservations and unverified partner jobs that a switched-off contract would leave waiting. */
+/**
+ * The partner reservations a switched-off contract would FREEZE: reservations nobody has bound a Tapis job
+ * under. A bound `pending` or `mismatch` row is not frozen (the reaper still verifies and ends it with the
+ * contract off), so it is not counted.
+ */
 export const PARTNER_OPEN_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
-  WHERE source = 'partner' AND state = 'created'`;
+  WHERE source = 'partner' AND state = 'created' AND tapis_uuid IS NULL AND partner_state IS NULL`;
 
 export type PutPolicyResult =
   | {

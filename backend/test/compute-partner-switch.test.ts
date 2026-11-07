@@ -78,6 +78,31 @@ describe("(a) a policy write that would freeze open reservations", () => {
     expect(versions()).toBe(before + 1);
   });
 
+  test("counts only what the switch freezes: bound pending and refused rows are not counted", async () => {
+    const pending = await reserve(w, person);
+    const refused = await reserve(w, person);
+    const open = await reserve(w, person);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET tapis_uuid = 'uuid-pending-1', partner_state = 'pending' WHERE id = ?",
+      )
+      .run(pending.job_id);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET tapis_uuid = 'uuid-refused-1', partner_state = 'mismatch' WHERE id = ?",
+      )
+      .run(refused.job_id);
+    const res = await put(policyWith(undefined));
+    expect([res.status, res.json?.code, res.json?.open]).toEqual([
+      409,
+      "partner_reservations_open",
+      1,
+    ]);
+    // With only bound rows left, the write is not refused.
+    w.h.db.query("UPDATE compute_jobs SET state = 'cancelled' WHERE id = ?").run(open.job_id);
+    expect((await put(policyWith(undefined))).status).toBe(200);
+  });
+
   test("is not refused when nothing is open, when the confirmation stays, or when it was off already", async () => {
     // Nothing open.
     expect((await put(policyWith(undefined))).status).toBe(200);

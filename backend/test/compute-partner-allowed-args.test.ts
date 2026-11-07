@@ -89,6 +89,22 @@ describe("the options an app or a system adds are the owner's exact strings (ite
         "test",
       );
     for (const bad of [
+      ["-G"],
+      ["-G2"],
+      ["-Ggpu:2"],
+      ["--gpus-per-node=2"],
+      ["--gpus-per-task=1"],
+      ["--tres-per-node=gres/gpu:2"],
+      ["--TRES=x"],
+      ["--GPU=1"],
+      ["--Gres=gpu:1"],
+      ["--mem-per-gpu=2G"],
+      ["--gres-flags=x"],
+      ["--g"],
+      ["--gp"],
+      ["--gpu"],
+      ["--gre"],
+      ["--tre"],
       ["--gpus=8"],
       ["--gres=gpu:8"],
       ["has space"],
@@ -101,6 +117,15 @@ describe("the options an app or a system adds are the owner's exact strings (ite
         false,
       ]);
     }
-    expect((await put(["--account=proj-1"])).ok).toBe(true);
+    // What a tenant really merges in is fine, including near neighbors of the refused names.
+    for (const good of [
+      "--account=proj-1",
+      "--tapis-profile=expanse",
+      "-A",
+      "--gid=100",
+      "--tmp=10G",
+    ]) {
+      expect([good, (await put([good])).ok]).toEqual([good, true]);
+    }
   });
 });

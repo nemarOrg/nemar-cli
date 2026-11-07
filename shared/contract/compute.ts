@@ -889,6 +889,24 @@ export const ComputeClientCapsSchema = z
  * offered to people; one without is for NEMAR's pipelines only. Grants and caps are whole numbers
  * of milli-SU, bytes, jobs, days or minutes.
  */
+/**
+ * Whether a scheduler option string could allocate GPUs or generic resources: a `gpu`, `gres` or `tres`
+ * token anywhere in it (any case: `--gpus-per-node`, `--mem-per-gpu`, `--gres`, `--tres-per-task`), the
+ * short option `-G`, or an abbreviation of `--gpus`, `--gres` or `--tres` the scheduler would accept
+ * (`--g`, `--gp`, `--gpu`, `--gre`, `--tre`). The hold bounds GPUs; the owner's list never admits one.
+ */
+export function schedulerOptionNamesGpus(arg: string): boolean {
+  const lower = arg.toLowerCase();
+  if (/gpu|gres|tres/.test(lower)) return true;
+  const rawName = arg.split(/[=\s]/)[0] ?? "";
+  if (rawName.startsWith("-G")) return true;
+  const name = rawName.toLowerCase();
+  if (name.startsWith("--") && name.length >= 3) {
+    return ["--gpus", "--gres", "--tres"].some((long) => long.startsWith(name));
+  }
+  return false;
+}
+
 export const ComputePolicySchema = z
   .object({
     /** What approval opens, per pool, and whether and how often it renews. */
@@ -968,7 +986,7 @@ export const ComputePolicySchema = z
             z
               .string()
               .regex(/^[-A-Za-z0-9=_.:,@/]{1,100}$/)
-              .refine((a) => !a.startsWith("--gpus") && !a.startsWith("--gres"), {
+              .refine((a) => !schedulerOptionNamesGpus(a), {
                 message: "GPUs are bounded by the hold, never allowed by name",
               }),
           )
