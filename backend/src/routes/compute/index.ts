@@ -9,12 +9,21 @@
  *                                             1,000 at a time (an optional `{ "after": path }` body pages on)
  *   POST /compute/observer                    the observer, with a token for one run (phase A7, #2012;
  *                                             no session: see `routes/callbacks/compute-observer.ts`)
+ *   GET  /compute/me                          the caller's access, pools, limits and queue estimates
+ *   GET  /compute/me/usage                    the caller's net charge by day, app, partition and source
+ *   GET  /compute/me/jobs                     the caller's jobs, newest first, paged
+ *   GET  /compute/me/jobs/:id                 one of the caller's jobs (a live one refreshed from Tapis)
+ *   GET  /compute/stats                       platform-wide aggregates, for a partner's CLIENT
+ *                                             (the read routes: `./read.ts`, phase D2, #2023; their
+ *                                             credential rule, a key, the cookie or an access token with
+ *                                             `compute.read` for `/me*` and a client credentials token
+ *                                             with `compute.stats` for `/stats`: `./auth.ts`)
  *
  * The callbacks are registered FIRST and carry no middleware of their own beyond the Worker's global
  * ones: the launcher has no account. Every route that has a person behind it declares its own
  * authentication ON THE ROUTE (`authMiddleware`, then `cookieOriginGuard`, which a write made with a
- * session cookie must pass): there is no `use("*")` here, which would put a session in front of a
- * launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
+ * session cookie must pass; the read routes' own rule is `./auth.ts`): there is no `use("*")` here,
+ * which would put a session in front of a launcher. `backend/test/compute-route-inventory.test.ts` pins every entry of this router.
  *
  * THE ANSWERS ARE CONTRACTS. `shared/contract/compute-responses.ts` declares the answers of `cancel`,
  * `links` and the observer as open schemas, and `backend/test/compute-person-responses.test.ts` parses the
@@ -36,16 +45,17 @@ import {
   COMPUTE_REFUSAL_STATUS,
   COMPUTE_ROUTE_SENTENCES,
   type ComputeRouteSentenceCode,
-} from "../../../shared/compute-state.js";
-import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../shared/contract/compute.js";
-import { authMiddleware, cookieOriginGuard } from "../middleware/auth.js";
-import { getJob } from "../services/compute-jobs.js";
-import { requestComputeCancel } from "../services/compute-lifecycle.js";
-import { mintResultLinks } from "../services/compute-results.js";
-import type { Bindings, Variables } from "../types/bindings.js";
-import { readBoundedJsonObject } from "./callbacks/bounded-json.js";
-import { registerComputeJobCallbackRoutes } from "./callbacks/compute-job-callbacks.js";
-import { registerComputeObserverRoute } from "./callbacks/compute-observer.js";
+} from "../../../../shared/compute-state.js";
+import { COMPUTE_JOB_ID_RE, isSafeComputePath } from "../../../../shared/contract/compute.js";
+import { authMiddleware, cookieOriginGuard } from "../../middleware/auth.js";
+import { getJob } from "../../services/compute-jobs.js";
+import { requestComputeCancel } from "../../services/compute-lifecycle.js";
+import { mintResultLinks } from "../../services/compute-results.js";
+import type { Bindings, Variables } from "../../types/bindings.js";
+import { readBoundedJsonObject } from "../callbacks/bounded-json.js";
+import { registerComputeJobCallbackRoutes } from "../callbacks/compute-job-callbacks.js";
+import { registerComputeObserverRoute } from "../callbacks/compute-observer.js";
+import { registerComputeReadRoutes } from "./read.js";
 
 /** The most bytes the links route reads: a cursor is at most 512 characters, which is 2 KiB at four bytes each. */
 export const LINKS_BODY_MAX_BYTES = 4096;
@@ -54,6 +64,7 @@ export const computeRoutes = new Hono<{ Bindings: Bindings; Variables: Variables
 
 registerComputeJobCallbackRoutes(computeRoutes);
 registerComputeObserverRoute(computeRoutes);
+registerComputeReadRoutes(computeRoutes);
 
 const refuse = (
   c: { json: (body: unknown, status: number) => Response },

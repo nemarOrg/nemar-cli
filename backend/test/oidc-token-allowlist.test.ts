@@ -36,6 +36,15 @@ import { type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 const OIDC_ROUTE_RE =
   /^(\/nemar)?(\/\.well-known\/openid-configuration|\/oauth\/(jwks|token|userinfo|revoke|introspect))$/;
 
+/**
+ * The compute read routes (epic #2021 phase D2, ADR 0119 addendum): the only other paths that accept an
+ * access token, each for the scope `routes/compute/auth.ts` names (`COMPUTE_OIDC_ROUTES`). They are
+ * excluded from the table-wide comparison below, which would otherwise see them answer a token with a
+ * scope refusal and not the key path's; `compute-read-credentials.test.ts` pins what they do answer.
+ * `GET` only: the compute router's writes stay in the comparison and must refuse the token.
+ */
+const COMPUTE_READ_RE = /^(\/nemar)?\/compute\/(me|me\/usage|me\/jobs|me\/jobs\/:id|stats)$/;
+
 /** Where `oidcBearer` may sit: the resource routes that serve a scope. Today, userinfo only. */
 const OIDC_BEARER_ROUTE_RE = /^(\/nemar)?\/oauth\/userinfo$/;
 
@@ -97,6 +106,7 @@ function requestList(): Call[] {
     // without one is a route, called with GET and POST.
     if (route.method === "ALL" && route.path.includes("*")) continue;
     if (OIDC_ROUTE_RE.test(route.path)) continue;
+    if (route.method === "GET" && COMPUTE_READ_RE.test(route.path)) continue;
     const methods = route.method === "ALL" ? ["GET", "POST"] : [route.method];
     const path = route.path
       .replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, name: string) => {
