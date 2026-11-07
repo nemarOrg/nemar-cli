@@ -57,7 +57,11 @@ export interface MappedObservation {
   body: ObserverBody;
   /** Partitions and accounting rows that were valid and were not stored, and why in the code above. */
   skipped: { partitions: number; jobs: number };
-  /** The export lost rows to the observer's 1 MiB bound; the rest are on the next day's export. */
+  /**
+   * The export lost rows to the observer's 1 MiB bound. They are NOT on the next day's export: `sacct`
+   * selects a day with `-S day -E day+1`, so a job that began and ended inside the cut day is on no later
+   * export and stays at its provisional charge until an administrator moves it.
+   */
   truncated: boolean;
 }
 

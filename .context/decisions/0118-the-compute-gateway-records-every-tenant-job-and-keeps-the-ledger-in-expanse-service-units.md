@@ -525,7 +525,8 @@ This amendment supersedes the wire described in item 4 of the amendment of 2026-
 4. **What is skipped is counted, not refused.**
    A partition whose queue was not read (`jobs` is null) is not stored as zero; a row whose job id is not one Slurm job (a pending array `123_[1-5]`), whose partition, state or elapsed time the observer could not read, or whose value is past a column's bound is not a job NEMAR could have submitted as one Slurm job.
    Both are skipped and counted in `skipped` in the answer, so one array on the community account does not stop the rest of the day from settling.
-   A `truncated` export says so in the answer (`truncated: true`); the rows it lost are on a later export.
+   A `truncated` export says so in the answer (`truncated: true`).
+   The rows it lost are NOT on a later export: `sacct -S day -E day+1` selects a job by the day it ran, so a job that began and ended inside the cut day is on no other export and stays at its provisional charge until an administrator moves it.
 5. **A mode is never a dry run.** The observer defines `quick` and `daily`; both are live.
    A `quick` document has no `accounting` and no `sources.sacct` (the schema requires both for `daily`), so it stores the queue and settles whatever earlier rows can now be settled.
    Any other `mode`, and a `schema` word that is not exactly `nemar.observation.v1`, is refused like any malformed body.
