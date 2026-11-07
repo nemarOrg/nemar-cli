@@ -22,6 +22,7 @@ import {
 import { createJob } from "../src/services/compute-jobs";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { COMPUTE_ACCESS_READ_SQL } from "../src/services/compute-submit";
+import type { Bindings } from "../src/types/bindings";
 import { seedEegDataset } from "./helpers/compute-pipeline-fixture";
 import { fundAccount, setPolicy, trace } from "./helpers/compute-seed";
 import {
@@ -40,7 +41,6 @@ import {
   resetWorld,
   startWorld,
 } from "./helpers/compute-submit-world";
-import type { Bindings } from "../src/types/bindings";
 import { logged } from "./helpers/logs";
 
 let w: World;
@@ -765,7 +765,11 @@ describe("the upload window on a repeat, and a store that fails after the hold",
       .query("UPDATE compute_jobs SET created_at = datetime('now', '-61 minutes') WHERE id = ?")
       .run(first.body.job_id);
     const again = await submit(p, bundleRequest(bundle), headers);
-    expect(again.body).toMatchObject({ job_id: first.body.job_id, state: "failed", replayed: true });
+    expect(again.body).toMatchObject({
+      job_id: first.body.job_id,
+      state: "failed",
+      replayed: true,
+    });
     expect(again.body.upload).toBeUndefined();
     expect(jobRow(w, first.body.job_id)).toMatchObject({
       failure_code: "upload_expired",

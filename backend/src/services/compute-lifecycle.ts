@@ -1246,7 +1246,10 @@ async function endUnsubmitted(
   const won = await commitTerminal(
     env,
     job,
-    { ...unsubmittedPlan(job, to, code, detail), recordsUnwrittenOnly: options.recordsUnwrittenOnly },
+    {
+      ...unsubmittedPlan(job, to, code, detail),
+      recordsUnwrittenOnly: options.recordsUnwrittenOnly,
+    },
     await recordsRetentionYears(env),
   );
   if (won) {

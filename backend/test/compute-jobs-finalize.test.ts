@@ -17,7 +17,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { ComputeFinalizeResponseSchema } from "../../shared/contract/compute-submit";
 import { runComputeAdvanceCron } from "../src/services/compute-advance";
 import { getJob } from "../src/services/compute-jobs";
-import { advanceComputeJob, endUploadExpired, submitComputeJob } from "../src/services/compute-lifecycle";
+import {
+  advanceComputeJob,
+  endUploadExpired,
+  submitComputeJob,
+} from "../src/services/compute-lifecycle";
 import {
   ABANDONED_UPLOADS_SQL,
   UPLOAD_EXPIRY_ROWS_PER_TICK,
@@ -447,7 +451,9 @@ describe("the upload window is the only clock before a finalize (the reservation
       platform_failure: 0,
     });
     const held = w.fx.harness.db
-      .query("SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?")
+      .query(
+        "SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?",
+      )
       .get(String(s.p.id)) as { held_milli: number };
     expect(held.held_milli).toBe(0);
     expect(copies()).toEqual([]);
@@ -474,13 +480,20 @@ describe("the release against a finalize (the statement binds records unwritten)
     w.fx.harness.db
       .query("UPDATE compute_jobs SET created_at = datetime('now', '-10 minutes') WHERE id = ?")
       .run(s.id);
-    const done = await finalize(s, s.bundle.manifest, s.p.key, w.env({ COMPUTE_ENABLED: undefined }));
+    const done = await finalize(
+      s,
+      s.bundle.manifest,
+      s.p.key,
+      w.env({ COMPUTE_ENABLED: undefined }),
+    );
     expect(done.body).toMatchObject({ state: "uploading", submitted: false });
     // The release now acts on the stale row: the statement refuses, the job is untouched, the hold stands.
     expect(await endUploadExpired(w.env(), stale)).toBe(false);
     expect(jobRow(w, s.id)).toMatchObject({ state: "uploading", failure_code: null });
     const held = w.fx.harness.db
-      .query("SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?")
+      .query(
+        "SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?",
+      )
       .get(String(s.p.id)) as { held_milli: number };
     expect(held.held_milli).toBe(1000);
   });
@@ -520,7 +533,9 @@ describe("two finalizes at once", () => {
     // The copy is idempotent (the same bytes to the same key), so under concurrency it may be asked for
     // more than once; the record that results is one archive.
     expect(copies().length).toBeGreaterThanOrEqual(1);
-    const copied = new Uint8Array(await (await w.fx.harness.records.get(submittedKey(s.id)))!.arrayBuffer());
+    const copied = new Uint8Array(
+      await (await w.fx.harness.records.get(submittedKey(s.id)))!.arrayBuffer(),
+    );
     expect(copied).toEqual(s.bundle.archive);
     expect(jobRow(w, s.id).state).toBe("submitted");
   });

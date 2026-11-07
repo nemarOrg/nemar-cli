@@ -593,7 +593,9 @@ export async function finalizePersonJob(
     try {
       await records.delete(incomingKey(job.id, BUNDLE_ARCHIVE_NAME));
     } catch (err) {
-      console.error(`[compute-submit] oversize_delete_failed job=${job.id} class=${errorClass(err)}`);
+      console.error(
+        `[compute-submit] oversize_delete_failed job=${job.id} class=${errorClass(err)}`,
+      );
     }
     return refuse("bundle_incomplete");
   }

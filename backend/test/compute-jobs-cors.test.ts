@@ -13,7 +13,10 @@ import { freshDb, realD1 } from "./helpers/d1";
 const env = (): Bindings =>
   ({ DB: realD1(freshDb()), ENVIRONMENT: "production" }) as unknown as Bindings;
 
-const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
+const ctx = {
+  waitUntil: () => {},
+  passThroughOnException: () => {},
+} as unknown as ExecutionContext;
 
 const split = (value: string | null): string[] =>
   (value ?? "").split(",").map((s) => s.trim().toLowerCase());
@@ -48,7 +51,12 @@ describe("CORS on the job routes", () => {
     );
     expect(res.status).toBe(401);
     const exposed = split(res.headers.get("access-control-expose-headers"));
-    for (const name of ["x-nemar-truncated", "idempotent-replayed", "retry-after", "x-request-id"]) {
+    for (const name of [
+      "x-nemar-truncated",
+      "idempotent-replayed",
+      "retry-after",
+      "x-request-id",
+    ]) {
       expect(exposed).toContain(name);
     }
   });
