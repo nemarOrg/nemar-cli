@@ -16,13 +16,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ComputeFinalizeResponseSchema } from "../../shared/contract/compute-submit";
 import { runComputeAdvanceCron } from "../src/services/compute-advance";
-import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
+import { getJob } from "../src/services/compute-jobs";
+import { advanceComputeJob, endUploadExpired, submitComputeJob } from "../src/services/compute-lifecycle";
 import {
   ABANDONED_UPLOADS_SQL,
   UPLOAD_EXPIRY_ROWS_PER_TICK,
   runUploadExpiryCron,
 } from "../src/services/compute-uploads";
-import { setPolicy, trace } from "./helpers/compute-seed";
+import { roundTripD1, setPolicy, trace } from "./helpers/compute-seed";
 import {
   type Bundle,
   type Person,
@@ -400,5 +401,148 @@ describe("whose job it is", () => {
     for (const a of attempts) expect([a.status, a.text]).toEqual([404, none.text]);
     expect(none.body.code).toBe("job_not_found");
     expect(copies()).toEqual([]);
+  });
+});
+
+describe("the upload window is the only clock before a finalize (the reservation wait runs from the finalize)", () => {
+  const ageCreated = (id: string, minutes: number) =>
+    w.fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', ?) WHERE id = ?")
+      .run(`-${minutes} minutes`, id);
+
+  test("a finalize at minute 45 after a real upload succeeds and submits; it is not a platform failure", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    ageCreated(s.id, 45);
+    const r = await finalize(s, s.bundle.manifest);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ state: "submitted", submitted: true });
+    expect(jobRow(w, s.id)).toMatchObject({ failure_code: null, platform_failure: 0 });
+  });
+
+  test("with compute off the wait runs from the finalize: 45 minutes after creation is not overdue, and it is sent once compute is on", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    ageCreated(s.id, 45);
+    const off = w.env({ COMPUTE_ENABLED: undefined });
+    const r = await finalize(s, s.bundle.manifest, s.p.key, off);
+    expect(r.body).toMatchObject({ state: "uploading", submitted: false });
+    // 29 minutes after the finalize it is still inside the reservation wait (30 by default).
+    const inside = await submitComputeJob(off, s.id, Date.now() + 29 * 60_000);
+    expect(inside.outcome).toBe("compute_disabled");
+    expect(jobRow(w, s.id)).toMatchObject({ state: "uploading", failure_code: null });
+    await advanceComputeJob(w.env(), s.id);
+    expect(jobRow(w, s.id).state).toBe("submitted");
+  });
+
+  test("a finalize at minute 61 is 409 upload_expired: the job is ended on the spot, the submitter's code, the hold released, nothing copied", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    ageCreated(s.id, 61);
+    const r = await finalize(s, s.bundle.manifest);
+    expect([r.status, r.body.code]).toEqual([409, "upload_expired"]);
+    expect(jobRow(w, s.id)).toMatchObject({
+      state: "failed",
+      failure_code: "upload_expired",
+      platform_failure: 0,
+    });
+    const held = w.fx.harness.db
+      .query("SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?")
+      .get(String(s.p.id)) as { held_milli: number };
+    expect(held.held_milli).toBe(0);
+    expect(copies()).toEqual([]);
+    expect(w.fx.tapis.jobs.size).toBe(0);
+  });
+
+  test("a job is born uploading, so no bundle job can wait as `created` with a hold and no owner for its release", async () => {
+    const s = await start();
+    expect(jobRow(w, s.id).state).toBe("uploading");
+  });
+});
+
+describe("the release against a finalize (the statement binds records unwritten)", () => {
+  test("a release working from a stale row does not end a job whose finalize has since written its records", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    w.fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-3 hours') WHERE id = ?")
+      .run(s.id);
+    // The release read the row before the finalize (the stale row: records unwritten, old).
+    const stale = (await getJob(w.env().DB, s.id))!;
+    expect(stale.records_written_at).toBeNull();
+    // The finalize runs now, with compute off, so the job stays `uploading` with its records written.
+    w.fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-10 minutes') WHERE id = ?")
+      .run(s.id);
+    const done = await finalize(s, s.bundle.manifest, s.p.key, w.env({ COMPUTE_ENABLED: undefined }));
+    expect(done.body).toMatchObject({ state: "uploading", submitted: false });
+    // The release now acts on the stale row: the statement refuses, the job is untouched, the hold stands.
+    expect(await endUploadExpired(w.env(), stale)).toBe(false);
+    expect(jobRow(w, s.id)).toMatchObject({ state: "uploading", failure_code: null });
+    const held = w.fx.harness.db
+      .query("SELECT held_milli FROM compute_pools WHERE holder_kind = 'account' AND holder_ref = ?")
+      .get(String(s.p.id)) as { held_milli: number };
+    expect(held.held_milli).toBe(1000);
+  });
+});
+
+describe("a larger object than declared", () => {
+  test("is deleted and never copied; a shorter one is left", async () => {
+    const s = await start();
+    await w.fx.harness.records.put(incomingKey(s.id), new Uint8Array(s.bundle.size + 5));
+    const r = await finalize(s, s.bundle.manifest);
+    expect([r.status, r.body.code]).toEqual([409, "bundle_incomplete"]);
+    expect(await w.fx.harness.records.head(incomingKey(s.id))).toBeNull();
+    expect(copies()).toEqual([]);
+    // The person uploads it properly and goes on.
+    expect((await putArchive(s.upload, s.bundle.archive)).status).toBeLessThan(300);
+    expect((await finalize(s, s.bundle.manifest)).status).toBe(200);
+  });
+});
+
+describe("two finalizes at once", () => {
+  const slowEnv = () => ({ ...w.env(), DB: roundTripD1(w.env().DB) });
+
+  test("the same manifest: one submit, one manifest record, the loser gets a clean 200", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    const env = slowEnv();
+    const [a, b] = await Promise.all([
+      finalize(s, s.bundle.manifest, s.p.key, env),
+      finalize(s, s.bundle.manifest, s.p.key, env),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(w.fx.tapis.jobs.size).toBe(1);
+    const manifest = JSON.parse(
+      await (await w.fx.harness.records.get(`records/${s.id}/bundle-manifest.json`))!.text(),
+    );
+    expect(manifest.files).toEqual(s.bundle.manifest.files);
+    // The copy is idempotent (the same bytes to the same key), so under concurrency it may be asked for
+    // more than once; the record that results is one archive.
+    expect(copies().length).toBeGreaterThanOrEqual(1);
+    const copied = new Uint8Array(await (await w.fx.harness.records.get(submittedKey(s.id)))!.arrayBuffer());
+    expect(copied).toEqual(s.bundle.archive);
+    expect(jobRow(w, s.id).state).toBe("submitted");
+  });
+
+  test("different manifests: exactly one is recorded and the job is submitted once; the other is refused cleanly", async () => {
+    const s = await start();
+    await putArchive(s.upload, s.bundle.archive);
+    const one = s.bundle.manifest;
+    const two = { files: [{ ...one.files[0], size: one.files[0].size + 1 }] };
+    const env = slowEnv();
+    const [a, b] = await Promise.all([
+      finalize(s, one, s.p.key, env),
+      finalize(s, two, s.p.key, env),
+    ]);
+    // Exactly one wins; the other is told, cleanly, that the job is not in a state that takes its manifest.
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const lost = a.status === 409 ? a : b;
+    expect(lost.body.code).toBe("bad_state");
+    expect(w.fx.tapis.jobs.size).toBe(1);
+    const manifest = JSON.parse(
+      await (await w.fx.harness.records.get(`records/${s.id}/bundle-manifest.json`))!.text(),
+    );
+    expect([one.files, two.files]).toContainEqual(manifest.files);
   });
 });

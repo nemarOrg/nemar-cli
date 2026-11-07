@@ -184,7 +184,9 @@ export const LIVE_TRANSITION_SQL = `UPDATE compute_jobs SET
  * reason (kept if one is recorded), `?7` platform failure 0 or 1, `?8` verified 0 or 1, `?9` mismatch 0
  * or 1, `?10` Tapis's status (or NULL), `?11` and `?12` and `?13` the submit, start and end times (or
  * NULL), `?14` the Slurm id (or NULL), `?15` the records retention as a SQLite modifier (`+7 years`),
- * `?16` 1 when the job must have no Tapis job (a job that was never submitted). The settlement that
+ * `?16` 1 when the job must have no Tapis job (a job that was never submitted), `?17` 1 when its records
+ * must still be unwritten (the release of an abandoned upload: a finalize that wrote them in the meantime
+ * wins, and this statement then changes nothing). The settlement that
  * follows it in the batch is gated on this row having taken `?3`.
  */
 export const TERMINAL_TRANSITION_SQL = `UPDATE compute_jobs SET
@@ -202,7 +204,8 @@ export const TERMINAL_TRANSITION_SQL = `UPDATE compute_jobs SET
     ended_at = COALESCE(?13, datetime('now')),
     slurm_job_id = COALESCE(slurm_job_id, ?14),
     retention_until = datetime(COALESCE(?13, datetime('now')), ?15)
-  WHERE id = ?1 AND state = ?2 AND (?16 = 0 OR tapis_uuid IS NULL)`;
+  WHERE id = ?1 AND state = ?2 AND (?16 = 0 OR tapis_uuid IS NULL)
+    AND (?17 = 0 OR records_written_at IS NULL)`;
 
 /**
  * The gate of the settlement statement: this job row has taken the terminal state `?` and has not been
@@ -581,6 +584,8 @@ export interface TerminalPlan {
   settlement: Provisional;
   /** The job was never submitted: the statement refuses a row that has a Tapis job. */
   unsubmittedOnly: boolean;
+  /** The statement refuses a row whose records are written (the release of an abandoned upload). */
+  recordsUnwrittenOnly?: boolean;
 }
 
 /**
@@ -622,6 +627,7 @@ async function commitTerminal(
         plan.slurmJobId,
         `+${recordsRetentionYears} years`,
         plan.unsubmittedOnly ? 1 : 0,
+        plan.recordsUnwrittenOnly ? 1 : 0,
       ),
     ...settle,
     db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
@@ -1223,7 +1229,9 @@ export async function endUploadExpired(env: Bindings, job: ComputeJobRow): Promi
   if (job.state !== "uploading" || job.tapis_uuid !== null || job.records_written_at !== null) {
     return false;
   }
-  return endUnsubmitted(env, job, "failed", "upload_expired", null);
+  // The statement itself binds "records unwritten" too: the read above can be stale, and a finalize that
+  // wrote the records since must win (a job that was finalized with compute off waits for the backstop).
+  return endUnsubmitted(env, job, "failed", "upload_expired", null, { recordsUnwrittenOnly: true });
 }
 
 /** End a job that never reached Tapis: failed (the hold is released) or cancelled. True if this call did it. */
@@ -1233,11 +1241,12 @@ async function endUnsubmitted(
   to: "failed" | "cancelled",
   code: ComputeFailureCode | null,
   detail: ComputeFailureDetail | null,
+  options: { recordsUnwrittenOnly?: boolean } = {},
 ): Promise<boolean> {
   const won = await commitTerminal(
     env,
     job,
-    unsubmittedPlan(job, to, code, detail),
+    { ...unsubmittedPlan(job, to, code, detail), recordsUnwrittenOnly: options.recordsUnwrittenOnly },
     await recordsRetentionYears(env),
   );
   if (won) {
@@ -1564,9 +1573,16 @@ export async function submitComputeJob(
   } catch {
     return refused("unavailable");
   }
-  const overdue = ageMinutes(row.created_at, nowMs) > policy.reservationWaitMinutes;
+  // The reservation wait is the time NEMAR has to send a job once it is ready. For a job that waited for
+  // an upload, ready is the moment the upload was finalized (`records_written_at`), NOT the moment the
+  // job was made: the upload window (one hour, the release's clock) is the only clock before that.
+  const readySince =
+    row.state === "uploading" && row.records_written_at !== null
+      ? row.records_written_at
+      : row.created_at;
+  const overdue = ageMinutes(readySince, nowMs) > policy.reservationWaitMinutes;
   // A job still UPLOADING its bundle (records not written) is the person's to finish within the upload
-  // window, and the abandoned-upload release's to end (`releaseAbandonedUploads`, `upload_expired`, the
+  // window, and the abandoned-upload release's to end (`runUploadExpiryCron`, `upload_expired`, the
   // submitter's failure): the reservation wait never turns it into `submit_timeout`, a PLATFORM failure.
   if (row.records_written_at === null && (row.state === "uploading" || !overdue)) {
     return refused("records_not_written");

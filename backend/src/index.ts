@@ -170,7 +170,8 @@ api.use(
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version"],
+    // `Idempotency-Key` is the person's job submission's (phase D3, #2024); the website's job page sends it.
+    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version", "Idempotency-Key"],
     // The rate limit's answer is for browser callers too: a page on a nemar.org host
     // that is refused can read how long to wait.
     exposeHeaders: [
@@ -181,6 +182,9 @@ api.use(
       "X-RateLimit-Reset",
       "X-RateLimit-Bucket",
       "X-RateLimit-Caller",
+      // The job page reads these (phase D3, #2024): a log that was cut, and a submission that was a repeat.
+      "X-Nemar-Truncated",
+      "Idempotent-Replayed",
     ],
     credentials: true,
     maxAge: 86400,

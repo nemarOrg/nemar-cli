@@ -77,6 +77,7 @@ import {
   PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
   type PartitionName,
+  canonicalJobSpec,
   computeSafeInt,
   datasetVersionWithoutTag,
   estimateSuMilli,
@@ -231,6 +232,13 @@ export interface SpecJobInput extends JobInputBase {
    * (ADR 0118, the D1 amendment, item 15), not the first. Refused as `no_compute_access` or `suspended`.
    */
   requireActiveAccess?: boolean;
+  /**
+   * A job with a code bundle is BORN `uploading` (the state is in the job's own INSERT, in the hold's
+   * batch), so no window exists in which a bundle job is `created` with a hold and no one owns its
+   * release: the abandoned-upload release (`runUploadExpiryCron`) sees it from the start. Ignored for a
+   * job with no bundle.
+   */
+  bornUploading?: boolean;
 }
 
 /** A partner's job: its hold body, as the exact text that was sent. */
@@ -404,19 +412,19 @@ export const GATEWAY_USER_INSERT_SQL = `INSERT OR IGNORE INTO compute_gateway_us
  * The job's index row. `?1` id, `?2` account, `?3` Tapis owner, `?4` the pipelines' literal (or NULL,
  * and the pseudonym is then the account's), `?5` key, `?6` source, `?7` client, `?8` kind, `?9` app,
  * `?10` version, `?11` image digest, `?12` spec digest, `?13` partition, `?14` pool, `?15` nodes,
- * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce. It writes
+ * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce, `?22` the state it is born in (NULL for `created`, `uploading` for a bundle job). It writes
  * only if the hold row of this job exists (the EXISTS term: without it a refused hold would leave a
  * job), and links the hold's entry.
  */
 export const JOB_INSERT_SQL = `INSERT INTO compute_jobs
   (id, account_id, tapis_owner, gateway_user, idempotency_key, source, client_id, kind, app_id,
    app_version, image_digest, spec_digest, partition, pool, nodes, cores_per_node, memory_mb, gpus,
-   minutes, hold_ledger_id, held_milli, webhook_nonce)
+   minutes, hold_ledger_id, held_milli, webhook_nonce, state)
   SELECT ?1, ?2, ?3,
          COALESCE(?4, (SELECT g.gateway_user FROM compute_gateway_users g WHERE g.account_id = ?2)),
          ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
          (SELECT l.id FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?1),
-         ?20, ?21
+         ?20, ?21, COALESCE(?22, 'created')
    WHERE ${holdExists(1)}`;
 
 export async function getJob(db: D1Database, id: string): Promise<ComputeJobRow | null> {
@@ -651,7 +659,7 @@ export async function createJob(
       const path = parsed.error.issues[0]?.path ?? [];
       return refusal("invalid_spec", path.length > 0 ? fieldPath(path) : undefined);
     }
-    spec = parsed.data;
+    spec = canonicalJobSpec(parsed.data);
     specText = JSON.stringify(spec);
     resources = spec;
     appId = args.appId as string;
@@ -767,6 +775,9 @@ export async function createJob(
         resources.minutes,
         amountMilli,
         crypto.randomUUID(),
+        input.source !== "partner" && input.bornUploading === true && spec?.bundle !== undefined
+          ? "uploading"
+          : null,
       ),
   );
 

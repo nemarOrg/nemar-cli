@@ -25,7 +25,7 @@
 
 import { COMPUTE_UPLOAD_WINDOW_SECONDS } from "../../../shared/contract/compute-submit.js";
 import type { Bindings } from "../types/bindings.js";
-import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
+import { type ComputeJobRow, LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { STAMP_EXAMINED_SQL, endUploadExpired, errorClassName } from "./compute-lifecycle.js";
 import { isExactProduction } from "./repull-switches.js";
 
@@ -48,6 +48,23 @@ export const ABANDONED_UPLOADS_SQL = `SELECT id FROM compute_jobs INDEXED BY com
     AND records_written_at IS NULL AND cancel_requested_at IS NULL AND source <> 'partner'
     AND created_at < datetime('now', '-${UPLOAD_WINDOW_MINUTES} minutes')
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
+
+/**
+ * Whether the upload window of a job has closed: it is `uploading` (or still `created`) with its records
+ * unwritten and was made more than {@link UPLOAD_WINDOW_MINUTES} ago. The window is the job's own clock,
+ * decided from its creation time wherever it is asked (the submit's replay, the finalize), so it does
+ * not depend on how often the release runs. A job whose upload was finalized is never past it.
+ */
+export function uploadWindowPassed(
+  job: Pick<ComputeJobRow, "state" | "records_written_at" | "created_at">,
+  nowMs: number = Date.now(),
+): boolean {
+  if (job.records_written_at !== null) return false;
+  if (job.state !== "uploading" && job.state !== "created") return false;
+  const raw = job.created_at.replace(" ", "T");
+  const madeMs = Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(raw) ? raw : `${raw}Z`);
+  return Number.isFinite(madeMs) && nowMs - madeMs > UPLOAD_WINDOW_MINUTES * 60_000;
+}
 
 export interface UploadExpiryResult {
   /** Rows taken this tick. */

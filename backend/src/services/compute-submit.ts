@@ -66,7 +66,7 @@ import {
   getJob,
   jobCeilingRefusal,
 } from "./compute-jobs.js";
-import { submitComputeJob } from "./compute-lifecycle.js";
+import { endUploadExpired, submitComputeJob } from "./compute-lifecycle.js";
 import { PERSON_EXCEPT_TERMS } from "./compute-pipeline-eligibility.js";
 import { resolveRun } from "./compute-pipeline.js";
 import { fieldPath, getPolicy } from "./compute-policy.js";
@@ -81,6 +81,7 @@ import {
 } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
 import { ComputeS3Error } from "./compute-s3.js";
+import { uploadWindowPassed } from "./compute-uploads.js";
 import { readRecordedSpec } from "./compute-verify.js";
 import { nemarJobTag } from "./tapis/client.js";
 
@@ -93,10 +94,22 @@ export interface SubmitRefusal {
   code: ComputeSubmitSentenceCode;
   /** The name of the field of the request, for `invalid_spec`; never a value. */
   field?: string;
+  /**
+   * The job the refusal is about, when one EXISTS (its hold stands): only `storage_unavailable` after the
+   * hold. A repeat of the `Idempotency-Key` finishes it; without a key, the job is ended by the upload
+   * window an hour after it was made.
+   */
+  job_id?: string;
 }
 
 const refuse = (code: ComputeSubmitSentenceCode, field?: string): SubmitRefusal =>
   field === undefined ? { ok: false, code } : { ok: false, code, field };
+
+const refuseJob = (code: ComputeSubmitSentenceCode, jobId: string): SubmitRefusal => ({
+  ok: false,
+  code,
+  job_id: jobId,
+});
 
 // --- Step 1: compute access ----------------------------------------------------------------------
 
@@ -257,12 +270,12 @@ async function issueUpload(
       { path: BUNDLE_ARCHIVE_NAME, size: bundle.size, sha256: bundle.sha256 },
     ]);
   } catch (err) {
-    if (err instanceof ComputeS3Error) return refuse("storage_unavailable");
+    if (err instanceof ComputeS3Error) return refuseJob("storage_unavailable", job.id);
     throw err;
   }
   if (!signed.ok) return refuse(signed.code, signed.field);
   const first = signed.uploads[0];
-  if (!first) return refuse("storage_unavailable");
+  if (!first) return refuseJob("storage_unavailable", job.id);
   return {
     ok: true,
     job: fresh,
@@ -284,7 +297,12 @@ async function answerFor(
 ): Promise<{ ok: true; replayed: boolean; body: ComputeSubmitResponse } | SubmitRefusal> {
   let current = job;
   let upload: ComputeUpload | undefined;
-  if (awaitsUpload(current, spec)) {
+  // The window is the job's own clock: a repeat after the hour ends the job here, on the spot, whether or
+  // not the release has run, and is answered with the failed job and no address.
+  if (awaitsUpload(current, spec) && uploadWindowPassed(current)) {
+    await endUploadExpired(env, current);
+    current = (await getJob(env.DB, current.id)) ?? current;
+  } else if (awaitsUpload(current, spec)) {
     const issued = await issueUpload(env, current, spec);
     if (issued.ok === true) {
       current = issued.job;
@@ -380,6 +398,7 @@ export async function submitPersonJob(
     spec,
     idempotencyKey: key,
     requireActiveAccess: true,
+    bornUploading: true,
   };
 
   // 4. A repeated key.
@@ -430,7 +449,7 @@ export async function submitPersonJob(
   if (!created.recordsWritten) {
     // The hold stands and the records did not land: a repeat of the key finishes them. No address.
     console.error(`[compute-submit] records_unavailable job=${created.job.id}`);
-    return refuse("storage_unavailable");
+    return refuseJob("storage_unavailable", created.job.id);
   }
   return answerFor(env, created.job, spec, created.replayed);
 }
@@ -450,7 +469,7 @@ async function replayOf(
     throw err;
   }
   if (!again.ok) return refuse(again.code, again.field);
-  if (!again.recordsWritten) return refuse("storage_unavailable");
+  if (!again.recordsWritten) return refuseJob("storage_unavailable", again.job.id);
   return answerFor(env, again.job, spec, true);
 }
 
@@ -524,6 +543,14 @@ export async function finalizePersonJob(
     };
   }
   if (job.cancel_requested_at !== null) return refuse("bad_state");
+  // The upload window is the only clock before a finalize. A finalize that arrives after it ends the job
+  // here, on the spot, as the submitter's `upload_expired` with the hold released (the release may not
+  // have run yet), and is refused; one that arrives inside it is never a platform failure, however long
+  // the reservation wait is.
+  if (uploadWindowPassed(job)) {
+    await endUploadExpired(env, job);
+    return refuse("upload_expired");
+  }
 
   let spec: JobSpec | null;
   try {
@@ -558,7 +585,19 @@ export async function finalizePersonJob(
   } catch {
     return refuse("storage_unavailable");
   }
-  if (uploaded === null || uploaded.size !== spec.bundle.size) return refuse("bundle_incomplete");
+  if (uploaded === null) return refuse("bundle_incomplete");
+  if (uploaded.size > spec.bundle.size) {
+    // LARGER than declared can only be a wrong or a hostile object, and no PUT of this address can make
+    // it (the length is signed): it is deleted, so it holds no space and is never copied. A SHORTER one
+    // is left, because the person may still be uploading.
+    try {
+      await records.delete(incomingKey(job.id, BUNDLE_ARCHIVE_NAME));
+    } catch (err) {
+      console.error(`[compute-submit] oversize_delete_failed job=${job.id} class=${errorClass(err)}`);
+    }
+    return refuse("bundle_incomplete");
+  }
+  if (uploaded.size !== spec.bundle.size) return refuse("bundle_incomplete");
 
   let finalized: Awaited<ReturnType<typeof finalizeBundle>>;
   try {

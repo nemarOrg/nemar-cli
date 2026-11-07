@@ -40,6 +40,7 @@ import {
   resetWorld,
   startWorld,
 } from "./helpers/compute-submit-world";
+import type { Bindings } from "../src/types/bindings";
 import { logged } from "./helpers/logs";
 
 let w: World;
@@ -85,6 +86,10 @@ describe("a script job with a code bundle", () => {
     // The key is fixed by the Worker, in the path of the address, and no other.
     expect(new URL(up.url).pathname.endsWith(`/incoming/${id}/bundle.tar.gz`)).toBe(true);
     expect(Object.keys(up.headers)).toEqual(["x-amz-checksum-sha256"]);
+    // The length is signed and not handed back: the client sends Content-Length itself.
+    expect(new URL(up.url).searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-length;host;x-amz-checksum-sha256",
+    );
     // Valid for an hour: short, from now.
     const lives = Date.parse(up.expires_at) - before;
     expect(lives).toBeGreaterThan(55 * 60_000);
@@ -121,12 +126,20 @@ describe("a script job with a code bundle", () => {
     );
   });
 
-  test("the checksum is signed: a body that is not the declared archive is refused by the store", async () => {
+  test("the checksum and the length are signed: a body that is not the declared archive is refused by the store", async () => {
     const p = await newPerson(w);
     const bundle = makeBundle();
     const r = await submit(p, bundleRequest(bundle));
+    // The same length with other bytes: the signed checksum refuses it.
+    const same = new Uint8Array(bundle.size).fill(66);
+    expect((await putArchive(r.body.upload, same)).status).toBe(400);
+    // Another length: the signed Content-Length refuses it (the store checks the signature of a signed
+    // header; the stand-in does, and whether R2 does on a presigned PUT is not verified).
+    const longer = new Uint8Array(bundle.size + 10).fill(66);
     const other = new TextEncoder().encode("not the archive at all, and of another length");
-    expect((await putArchive(r.body.upload, other)).status).toBe(400);
+    expect((await putArchive(r.body.upload, longer)).status).toBe(403);
+    expect((await putArchive(r.body.upload, other)).status).toBe(403);
+    expect(await w.fx.harness.records.head(`incoming/${r.body.job_id}/bundle.tar.gz`)).toBeNull();
   });
 });
 
@@ -739,6 +752,122 @@ describe("the Idempotency-Key", () => {
       replayed: true,
     });
     expect(again.body.upload).toBeUndefined();
+  });
+});
+
+describe("the upload window on a repeat, and a store that fails after the hold", () => {
+  test("a repeat at minute 61, before the release has run, ends the job on the spot and returns it failed with no address", async () => {
+    const p = await newPerson(w);
+    const bundle = makeBundle();
+    const headers = { "Idempotency-Key": "key-0010-abcdef" };
+    const first = await submit(p, bundleRequest(bundle), headers);
+    w.fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-61 minutes') WHERE id = ?")
+      .run(first.body.job_id);
+    const again = await submit(p, bundleRequest(bundle), headers);
+    expect(again.body).toMatchObject({ job_id: first.body.job_id, state: "failed", replayed: true });
+    expect(again.body.upload).toBeUndefined();
+    expect(jobRow(w, first.body.job_id)).toMatchObject({
+      failure_code: "upload_expired",
+      platform_failure: 0,
+    });
+    // Inside the hour the repeat still gets an address.
+    const second = await submit(p, bundleRequest(makeBundle([{ path: "run.py", content: "n" }])), {
+      "Idempotency-Key": "key-0011-abcdef",
+    });
+    w.fx.harness.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-59 minutes') WHERE id = ?")
+      .run(second.body.job_id);
+    const ok = await submit(p, bundleRequest(makeBundle([{ path: "run.py", content: "n" }])), {
+      "Idempotency-Key": "key-0011-abcdef",
+    });
+    expect(ok.body.upload?.url).toBeDefined();
+  });
+
+  /** The records bucket with every write failing: the hold commits, the records cannot be written. */
+  const failingRecords = (): Bindings => {
+    const real = w.fx.harness.records;
+    const broken = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "put") {
+          return async () => {
+            throw new Error("the store is down");
+          };
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return { ...w.env(), COMPUTE_RECORDS: broken };
+  };
+
+  test("503 storage_unavailable after the hold names the job and says a repeat finishes it; the repeat does, with a key", async () => {
+    const p = await newPerson(w);
+    const bundle = makeBundle();
+    const headers = { "Idempotency-Key": "key-0012-abcdef" };
+    const down = await call(w, "POST", "/compute/jobs", {
+      key: p.key,
+      json: bundleRequest(bundle),
+      headers,
+      env: failingRecords(),
+    });
+    expect([down.status, down.body.code]).toEqual([503, "storage_unavailable"]);
+    expect(down.body.job_id).toMatch(/^job_[0-9a-f]{24}$/);
+    expect(down.body.note).toContain("Idempotency-Key");
+    expect(ComputeSubmitErrorSchema.safeParse(down.body).success).toBe(true);
+    expect(down.body.upload).toBeUndefined();
+    expect((await trace(w.env().DB)).holds).toBe(1);
+    // The same key, the store back: it finishes the job it made, with an address.
+    const again = await submit(p, bundleRequest(bundle), headers);
+    expect(again.status).toBe(201);
+    expect(again.body.job_id).toBe(down.body.job_id);
+    expect(again.body.upload?.url).toBeDefined();
+    expect((await trace(w.env().DB)).holds).toBe(1);
+  });
+
+  test("without a key the 503 still names the job (the key stays optional)", async () => {
+    const p = await newPerson(w);
+    const down = await call(w, "POST", "/compute/jobs", {
+      key: p.key,
+      json: bundleRequest(makeBundle()),
+      env: failingRecords(),
+    });
+    expect([down.status, down.body.code]).toEqual([503, "storage_unavailable"]);
+    expect(down.body.job_id).toBeDefined();
+  });
+});
+
+describe("the request hash does not depend on how the caller ordered a record", () => {
+  test("the same environment written in another order is a replay, not an idempotency_conflict", async () => {
+    const p = await newPerson(w);
+    const bundle = makeBundle();
+    const headers = { "Idempotency-Key": "key-0013-abcdef" };
+    const first = await submit(
+      p,
+      bundleRequest(bundle, { env: { OMP_NUM_THREADS: "2", MKL_NUM_THREADS: "3" } }),
+      headers,
+    );
+    const again = await submit(
+      p,
+      bundleRequest(bundle, { env: { MKL_NUM_THREADS: "3", OMP_NUM_THREADS: "2" } }),
+      headers,
+    );
+    expect([again.status, again.body.job_id, again.body.replayed]).toEqual([
+      201,
+      first.body.job_id,
+      true,
+    ]);
+    // A different value is still another request.
+    const other = await submit(
+      p,
+      bundleRequest(bundle, { env: { MKL_NUM_THREADS: "4", OMP_NUM_THREADS: "2" } }),
+      headers,
+    );
+    expect(other.body.code).toBe("idempotency_conflict");
+    const spec = JSON.parse(
+      await (await w.fx.harness.records.get(`records/${first.body.job_id}/spec.json`))!.text(),
+    );
+    expect(Object.keys(spec.env)).toEqual(["MKL_NUM_THREADS", "OMP_NUM_THREADS"]);
   });
 });
 

@@ -80,7 +80,7 @@ async function submit(c: ComputeCtx): Promise<Response> {
     if (err instanceof ComputePolicyUnreadable) return refuseWith(c, "policy_unavailable");
     throw err;
   }
-  if (!result.ok) return refuseWith(c, result.code, result.field);
+  if (!result.ok) return refuseWith(c, result.code, result.field, undefined, result.job_id);
   return c.json(result.body, 201, {
     ...NO_STORE,
     ...(result.replayed ? { [COMPUTE_REPLAYED_HEADER]: "true" } : {}),

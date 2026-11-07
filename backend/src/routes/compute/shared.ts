@@ -6,6 +6,7 @@
 import type { Context } from "hono";
 import { COMPUTE_REFUSAL_STATUS } from "../../../../shared/compute-state.js";
 import {
+  COMPUTE_JOB_STANDS_NOTE,
   COMPUTE_SUBMIT_SENTENCES,
   type ComputeSubmitSentenceCode,
 } from "../../../../shared/contract/compute-submit.js";
@@ -31,9 +32,16 @@ export function refuseWith(
   code: ComputeSubmitSentenceCode,
   field?: string,
   status: number = COMPUTE_REFUSAL_STATUS[code],
+  jobId?: string,
 ): Response {
   return c.json(
-    { error: COMPUTE_SUBMIT_SENTENCES[code], code, ...(field === undefined ? {} : { field }) },
+    {
+      error: COMPUTE_SUBMIT_SENTENCES[code],
+      code,
+      ...(field === undefined ? {} : { field }),
+      // A refusal after the hold names the job that stands and what finishes it (phase D3, #2024).
+      ...(jobId === undefined ? {} : { job_id: jobId, note: COMPUTE_JOB_STANDS_NOTE }),
+    },
     status,
     { ...NO_STORE },
   );

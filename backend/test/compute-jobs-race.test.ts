@@ -117,3 +117,28 @@ describe("two submissions for the last SU", () => {
     expect(await w.fx.harness.keys(w.fx.harness.records)).toEqual([]);
   });
 });
+
+describe("the same Idempotency-Key at once", () => {
+  test("four parallel requests make one job and one hold, and every one is answered with it", async () => {
+    const p = await newPerson(w, { grant: 100_000 });
+    const bundle = makeBundle();
+    const env = slow();
+    const replies = await Promise.all(
+      [1, 2, 3, 4].map(() =>
+        call(w, "POST", "/compute/jobs", {
+          key: p.key,
+          json: bundleRequest(bundle),
+          headers: { "Idempotency-Key": "key-race-abcdef" },
+          env,
+        }),
+      ),
+    );
+    for (const r of replies) expect([r.status, r.body.state]).toEqual([201, "uploading"]);
+    expect(new Set(replies.map((r) => r.body.job_id)).size).toBe(1);
+    const t = await trace(w.env().DB);
+    expect([t.jobs, t.holds]).toEqual([1, 1]);
+    // Exactly one of the four was the original; the rest are replays of it.
+    expect(replies.filter((r) => r.body.replayed === undefined).length).toBeLessThanOrEqual(1);
+    for (const r of replies) expect(r.body.upload?.url).toBeDefined();
+  });
+});

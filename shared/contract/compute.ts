@@ -854,6 +854,18 @@ export const JobSpecSchema = z
 
 export type JobSpec = z.infer<typeof JobSpecSchema>;
 
+/**
+ * The specification in one canonical spelling, so that its digest (the job row's `spec_digest`, which is
+ * also the request hash of an idempotency key) does not depend on the order a caller wrote `env` in:
+ * `env` is the one record in a specification (every other object has the schema's fixed key order, which
+ * zod writes), so its names are put in sorted order. Everything else is unchanged, so the digest of a job
+ * with no environment, or one name, is what it always was. Pure.
+ */
+export function canonicalJobSpec(spec: JobSpec): JobSpec {
+  const entries = Object.entries(spec.env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return { ...spec, env: Object.fromEntries(entries) as JobSpec["env"] };
+}
+
 // --- The owner policy --------------------------------------------------------------------------
 
 const CLIENT_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;

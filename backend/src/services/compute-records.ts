@@ -632,6 +632,9 @@ export async function presignIncomingUploads(
     const signed = await presignPut(s3, "records", incomingKey(jobId, file.path), {
       expiresIn: COMPUTE_UPLOAD_SECONDS,
       ...(file.sha256 === undefined ? {} : { sha256Hex: file.sha256 }),
+      // A code bundle's length is SIGNED, so the store refuses a body of another length. A partner's
+      // files are phase D4's to decide.
+      ...(job.source === "partner" ? {} : { contentLength: file.size }),
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     uploads.push({ path: file.path, url: signed.url, headers: signed.headers });

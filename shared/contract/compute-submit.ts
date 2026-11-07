@@ -176,10 +176,21 @@ export type ComputeResultsResponse = z.infer<typeof ComputeResultsResponseSchema
 
 /** A refusal: the sentence, the word and, for `invalid_spec`, the name of the field (never its value). */
 export const ComputeSubmitErrorSchema = z
-  .object({ error: z.string(), code: z.string(), field: z.string().optional() })
+  .object({
+    error: z.string(),
+    code: z.string(),
+    field: z.string().optional(),
+    /** Present on a `storage_unavailable` that came AFTER the hold: the job exists, and `note` says what finishes it. */
+    job_id: z.string().optional(),
+    note: z.string().optional(),
+  })
   .passthrough();
 
 export type ComputeSubmitError = z.infer<typeof ComputeSubmitErrorSchema>;
+
+/** The note beside a `job_id` on a refusal after the hold: the job stands, and a repeat finishes it. */
+export const COMPUTE_JOB_STANDS_NOTE =
+  "The job was made and its hold stands. Repeat the request with the same Idempotency-Key to finish it, or cancel the job; without a key it ends by itself when its upload hour is over.";
 
 // --- Sentences ---------------------------------------------------------------------------------
 
