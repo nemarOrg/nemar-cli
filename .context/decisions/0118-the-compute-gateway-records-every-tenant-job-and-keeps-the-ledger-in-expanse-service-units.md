@@ -544,3 +544,24 @@ This amendment supersedes the wire described in item 4 of the amendment of 2026-
    The observer is not changed here; the dispatch phase has to choose between a row cap in the observer, a larger Worker bound, or accepting the refusal and re-reading the day in parts.
 8. **Not verified.** The observer's formats were written from the Slurm manual and the public user guide, not captured from a cluster (nemar-process `docs/unverified.md`), so this schema describes what the observer emits and not what a cluster has been seen to print.
    A quick post is made every 15 minutes and a token is good for one post, so a token per quick run must be minted; that is the operator's procedure and is not decided here.
+
+## Review fixes of 2026-11-06 (implementer A)
+
+The three-reviewer review of the epic's pull request found money loops and silent failures in the compute services.
+Each item below says what changed and what was decided; the owner decisions of 2026-11-06 are final.
+
+1. **The Workers subrequest limit for the compute crons is 10,000, not the project's older 1,000.**
+   The 1,000-subrequest model used elsewhere in this project is not the compute limit, and the compute crons are NOT restructured and get no shared operation budget.
+   The first week's observability counts (the per-tick lines of the advance, cancellation, tenant, pipeline and ACCESS crons) should confirm the larger limit; a count that approaches it is a reason to reopen this, not to guess.
+2. **An ACCESS report whose call never left the Worker is retried, not ended `outcome_unknown`.**
+   A throw of `fetch` was classified as no answer, and no answer is never resent, so a call the runtime refused before it was made (the invocation's subrequest limit) lost its report for good.
+   The runtime gives no code or class for that refusal, only its message, so `throwedBeforeSend` recognizes exactly that message (a closed list) and nothing else.
+   A timeout, a reset, a refused or lost connection and every other throw stay unknown and are never resent: a runtime cannot tell them from a reset after the request left, and ACCESS is not known to ignore a duplicate.
+   The conservative choice is therefore explicit: only a throw that proves nothing was sent is retried, through the ordinary retry (an attempt is spent, the delay applies, the bound still ends it, the word is `unavailable`), and the tick stops claiming after one, since every later row would meet the same limit.
+3. **An observer run is spent before its rows are stored; the re-mint path is manual and is documented.**
+   `CLAIM_RUN_SQL` spends the run, then the rows are stored; the run is reopened only when the store throws.
+   A worker that is killed between the two leaves a run `ingested` with no rows, and the token is good for one post.
+   The recovery is to mint a new run (`POST /admin/compute/observer-runs`) and post again; the stored rows are keyed by Slurm job id and the upsert is idempotent, so a repeated day is safe.
+   Nothing is redesigned.
+   A run left `ingested` with no stored rows is the signal to look for in the observer-runs listing; the listing is the reporting module's, and the count is not added here.
+   The public runbook on docs.nemar.org should carry the same two sentences.
