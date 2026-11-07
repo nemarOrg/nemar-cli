@@ -1004,7 +1004,7 @@ jobs:
       # `feature/issue-1-epic-process`, the integration branch of that repository, where the copy lands
       # through its own pull request. Move this to its `main` when that epic merges. Until the pull
       # request that adds the schema there has merged, this step finds no such files and the test FAILS
-      # (NEMAR_REQUIRE_PROCESS_DRIFT below), which is deliberate: a broken checkout must not quietly
+      # (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT below), which is deliberate: a broken checkout must not quietly
       # disable the comparison.
       - name: Check out nemar-process's observation schema and fixtures
         uses: actions/checkout@v4
@@ -1102,8 +1102,8 @@ jobs:
           NEMAR_WEBSITE_REVIEW_COPY: website-copy/src/lib/publication-review-copy.ts
           # The nemar-process checkout above, for the observation schema and fixtures. A path that is
           # not there FAILS, as above.
-          NEMAR_PROCESS_DIR: process-copy
-          NEMAR_REQUIRE_PROCESS_DRIFT: "1"
+          NEMAR_PROCESS_OBSERVATION_DIR: process-copy
+          NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT: "1"
           NEMAR_DATASET_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/onboard-openneuro.yml
           NEMAR_PR_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-pr-review.yml
           NEMAR_PUBLICATION_REVIEW_WORKFLOW_LIVE: dataset-workflows-live/.github/workflows/run-publication-review.yml

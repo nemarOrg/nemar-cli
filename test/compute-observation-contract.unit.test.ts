@@ -8,9 +8,9 @@
  *    expected verdict written beside it, on a corpus of valid and invalid documents (so two schemas that
  *    agree on a wrong answer still fail);
  *  - the two documents the observer itself wrote (`test/fixtures/compute-observation/`) are valid;
- *  - the DRIFT TEST: when `NEMAR_PROCESS_DIR` names a nemar-process checkout, the schema and the two
+ *  - the DRIFT TEST: when `NEMAR_PROCESS_OBSERVATION_DIR` names a nemar-process checkout, the schema and the two
  *    fixtures are compared with that checkout's copies byte for byte. Without one the comparison skips
- *    with its reason; with `NEMAR_REQUIRE_PROCESS_DRIFT=1` a missing checkout is a failure. CI
+ *    with its reason; with `NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT=1` a missing checkout is a failure. CI
  *    (`.github/workflows/test.yml`, the unit-pure shards) checks out nemar-process's integration branch
  *    `feature/issue-1-epic-process` (public, sparse, no token) and sets both variables, so the
  *    comparison runs there against that branch's HEAD, not against a pinned commit. What CI does NOT
@@ -451,14 +451,14 @@ describe("the JSON Schema and the zod schema agree", () => {
 });
 
 describe("drift against nemar-process", () => {
-  const dir = process.env.NEMAR_PROCESS_DIR;
-  const required = process.env.NEMAR_REQUIRE_PROCESS_DRIFT === "1";
+  const dir = process.env.NEMAR_PROCESS_OBSERVATION_DIR;
+  const required = process.env.NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT === "1";
   const checkout = dir && existsSync(join(dir, PROCESS_SCHEMA_PATH)) ? dir : null;
 
   test.skipIf(checkout !== null || !required)(
-    "NEMAR_REQUIRE_PROCESS_DRIFT=1 needs NEMAR_PROCESS_DIR to name a nemar-process checkout",
+    "NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT=1 needs NEMAR_PROCESS_OBSERVATION_DIR to name a nemar-process checkout",
     () => {
-      throw new Error(`no ${PROCESS_SCHEMA_PATH} under NEMAR_PROCESS_DIR=${dir ?? "(unset)"}`);
+      throw new Error(`no ${PROCESS_SCHEMA_PATH} under NEMAR_PROCESS_OBSERVATION_DIR=${dir ?? "(unset)"}`);
     },
   );
 
