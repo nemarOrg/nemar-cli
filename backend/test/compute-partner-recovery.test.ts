@@ -577,6 +577,38 @@ describe("a recovery and a blind cancel cannot both win (M2)", () => {
     expect(row(w, hold.job_id).partner_cancel_sent_at).toBeNull();
   });
 
+  test("the READABLE cancel of an unverifiable row is stamped too, and a recovery landing first sends none (minor 3)", async () => {
+    const { hold } = await refusedBeforeCancel();
+    // A cancel is recorded, so the readable job is cancelled rather than recovered; its cancel fails.
+    expect((await requestComputeCancel(fx.env(), hold.job_id, "user")).ok).toBe(true);
+    fx.tapis.clearFailures();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    await reapExpiredHolds(fx.env());
+    expect(row(w, hold.job_id)).toMatchObject({ state: "created", partner_state: "mismatch" });
+    expect(row(w, hold.job_id).partner_cancel_sent_at).not.toBeNull();
+
+    // Another call recovered the job after this one re-read the row (the second read) and before its stamp: nothing is sent.
+    const second = await refusedBeforeCancel();
+    expect((await requestComputeCancel(fx.env(), second.hold.job_id, "user")).ok).toBe(true);
+    fx.tapis.clearFailures();
+    const before = fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/:uuid/cancel").length;
+    const recover = async () => {
+      w.h.db
+        .query(
+          "UPDATE compute_jobs SET partner_state = 'verified', partner_flag = NULL, state = 'submitted' WHERE id = ?",
+        )
+        .run(second.hold.job_id);
+    };
+    const out = await finishMismatch(
+      fx.env({ DB: raceAfterRead(fx.env().DB, "FROM compute_jobs WHERE id = ?1", recover, 2) }),
+      second.hold.job_id,
+    );
+    expect(out).toBe("skipped");
+    expect(fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/:uuid/cancel").length).toBe(
+      before,
+    );
+  });
+
   test("the request path sends no blind cancel: a report for an unverifiable row it cannot read cancels nothing", async () => {
     const { hold, uuid } = await refusedBeforeCancel();
     const before = fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/:uuid/cancel").length;

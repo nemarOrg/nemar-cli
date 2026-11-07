@@ -671,6 +671,17 @@ export async function finishMismatch(
       }
     }
   } else if (rec !== null && !TAPIS_ENDED.has(rec.status)) {
+    // ANY cancel of an `unverifiable` row is stamped first, the readable one too: a recovery that has not
+    // committed must not follow a cancel that is on the wire.
+    if (unverifiable) {
+      const stamped = await env.DB.prepare(STAMP_BLIND_CANCEL_SQL).bind(job.id, uuid).run();
+      if (
+        (stamped.meta?.changes ?? 0) === 0 &&
+        (await getJob(env.DB, job.id))?.partner_state !== "mismatch"
+      ) {
+        return "skipped";
+      }
+    }
     try {
       await cancelJob(ctx, uuid);
     } catch (err) {
@@ -703,7 +714,7 @@ export async function finishMismatch(
   return won ? "ended" : "skipped";
 }
 
-/** The blind cancel is on the record before it is sent. `?1` the job, `?2` the uuid. */
+/** A cancel of an unverifiable row is on the record before it is sent. `?1` the job, `?2` the uuid. */
 export const STAMP_BLIND_CANCEL_SQL = `UPDATE compute_jobs SET partner_cancel_sent_at = datetime('now')
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'mismatch' AND partner_flag = 'unverifiable'
     AND state = 'created'`;
