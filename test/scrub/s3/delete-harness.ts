@@ -6,7 +6,7 @@
  * can reach another.
  */
 
-import { afterAll, beforeAll, beforeEach, expect } from "bun:test";
+import { afterAll, beforeAll, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ZarrVerifiedFile } from "../../../scripts/scrub/contract";
@@ -37,8 +37,6 @@ import {
 } from "./support";
 
 let standin: S3Standin;
-export let pub: PublicEndpoint;
-export let dir: string;
 export let snap: Snapshot;
 export let built: Assembled;
 
@@ -199,15 +197,13 @@ export function makeLanes(limit: Limiter, opts: { proofs?: boolean } = {}) {
 }
 
 /**
- * Register the file's hooks: build the dataset once (`beforeAll`), then give every test the
- * stand-in as it was and a pristine copy of the working directory (`beforeEach`). A hook registered at the top
+ * Register the file's hooks: build the dataset once (`beforeAll`). A hook registered at the top
  * level of an IMPORTED module binds to the first importing file only, so each test file calls
  * this itself.
  */
 export function useDeleteHarness(): void {
   beforeAll(async () => {
     standin = startS3Standin();
-    pub = startPublicEndpoint();
     built = await buildAssembled(standin, [a, b, d], {
       // Older versions and a delete marker: more than one thing to delete per key.
       A: { olderVersions: 2, marker: true },
@@ -242,12 +238,5 @@ export function useDeleteHarness(): void {
 
   afterAll(() => {
     standin?.stop();
-    pub?.stop();
-  });
-
-  beforeEach(() => {
-    standin.restore(snap);
-    pub.reset();
-    dir = copyDir(built.dir);
   });
 }
