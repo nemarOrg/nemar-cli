@@ -48,6 +48,8 @@ import {
   OIDC_SCOPE_NAMES,
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
+  OIDC_SECRET_MIN_LENGTH,
+  OIDC_SECRET_PREFIX,
   OIDC_SIGN_IN_RULES,
   type OidcAccountEndReason,
   type OidcConsentMode,
@@ -64,6 +66,7 @@ import {
   listOidcKeys,
   listOidcLogoutDeliveries,
   oidcErrorCode,
+  oidcSecretWord,
   revokeOidcKey,
   rotateOidcClientSecret,
   rotateOidcKeys,
@@ -89,6 +92,12 @@ function hintsFor(error: unknown, afterNetworkError?: string): Record<number, st
   if (isRouteNotFound(error)) {
     hints[404] =
       "The server does not serve this route: the OpenID Connect provider is off there (no OIDC_SECRET), or the API URL is not the issuer's own host, or the server is older than this command.";
+    const word = oidcSecretWord(error);
+    if (word === "unset") {
+      hints[404] = "The OpenID Connect provider is off on this server: OIDC_SECRET is unset.";
+    } else if (word === "malformed") {
+      hints[404] = `The OpenID Connect provider is off on this server: OIDC_SECRET is set but is not in the ${OIDC_SECRET_PREFIX} form (${OIDC_SECRET_PREFIX} and at least ${OIDC_SECRET_MIN_LENGTH} characters in all).`;
+    }
   }
   // A refusal of a rotation says what to do about it; 409 is the status of all of them.
   const code = oidcErrorCode(error);
@@ -349,6 +358,11 @@ trail records it.
 Before it promotes a key, the Worker proves it can decrypt it. A key that was encrypted under a
 different OIDC_SECRET is refused and nothing changes: set OIDC_SECRET before the first rotation, and
 do not change it afterwards (every stored key becomes unreadable).
+
+OIDC_SECRET is valid only as \`${OIDC_SECRET_PREFIX}\` followed by random characters, ${OIDC_SECRET_MIN_LENGTH} or more in all:
+\`${OIDC_SECRET_PREFIX}\` and the output of \`openssl rand -hex 32\`. Dev and production use different values. A Worker
+whose value is absent or in another form answers these commands as the provider being off, and the
+command says "unset" or "malformed" (never the value).
 
 Exit codes:
   0  rotated, or the first keys were made.

@@ -161,6 +161,17 @@ export async function listOidcLogoutDeliveries(
   );
 }
 
+/**
+ * The word an owner's 404 carries when the provider is off for want of a usable secret:
+ * `unset` or `malformed` (`rawBody.oidc_secret`), never a value. Undefined for any other answer
+ * and for a Worker that predates the word.
+ */
+export function oidcSecretWord(error: unknown): "unset" | "malformed" | undefined {
+  if (!(error instanceof ApiError) || error.statusCode !== 404) return undefined;
+  const word = (error.rawBody as { oidc_secret?: unknown } | undefined)?.oidc_secret;
+  return word === "unset" || word === "malformed" ? word : undefined;
+}
+
 /** The closed word of a refusal (`rawBody.code`), when the Worker sent one. */
 export function oidcErrorCode(error: unknown): string | undefined {
   if (!(error instanceof ApiError)) return undefined;
