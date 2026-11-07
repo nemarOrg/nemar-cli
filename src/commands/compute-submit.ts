@@ -40,7 +40,7 @@ import { EXIT_STILL_LIVE, failCompute, failText, refuseLocally } from "../lib/co
 import type { SpecFlags } from "../lib/compute/header.js";
 import { type Prepared, prepareSubmission } from "../lib/compute/prepare.js";
 import { uploadBundle } from "../lib/compute/upload.js";
-import { type WaitOutcome, waitForJob } from "../lib/compute/wait.js";
+import { READ_TIMEOUT_MS, type WaitOutcome, waitForJob } from "../lib/compute/wait.js";
 import { plain } from "../lib/terminal-text.js";
 import { suFixed } from "./compute-read.js";
 
@@ -281,8 +281,8 @@ Exit codes:
   1  NEMAR refused or could not take the job, the job failed or was canceled, or you are not signed in.
   2  refused on this machine before anything about the job was sent: an invalid option or job, a file or folder that
      cannot be packed, over a size limit, or a credential in the code.
-  3  with --wait, the wait ended with the job still live (you pressed Ctrl-C, or NEMAR could not be
-     reached); the job goes on.
+  3  with --wait, the wait ended with the job still live (you pressed Ctrl-C, NEMAR could not be
+     reached, or the job outlasted its time limit by 30 minutes); the job goes on.
 
 Examples:
   $ nemar compute submit analysis.py --wait
@@ -480,6 +480,12 @@ function reportOutcome(outcome: WaitOutcome, jobId: string, json: boolean): void
         `NEMAR could not be reached (${plain(outcome.detail)}), so the wait ended. Job ${jobId} may still be running.\n  Look at it: nemar compute status ${jobId}`,
       );
       return;
+    case "ceiling":
+      process.exitCode = EXIT_STILL_LIVE;
+      console.error(
+        `Stopped waiting: the job's time limit and a 30-minute allowance have passed and it is still live. Job ${jobId} was not canceled.\n  Look at it: nemar compute status ${jobId}   Stop it: nemar compute cancel ${jobId}`,
+      );
+      return;
     case "refused":
       failCompute(outcome.error, "Could not read the job.");
       return;
@@ -494,8 +500,8 @@ async function waitAndReport(
   const say = notice(json);
   let latest: ComputeUserJobResponse | null = null;
   const outcome = await waitForJob({
-    fetchJob: async () => {
-      const read = await getMyComputeJob(jobId);
+    fetchJob: async (signal) => {
+      const read = await getMyComputeJob(jobId, { signal, timeoutMs: READ_TIMEOUT_MS });
       latest = read;
       return read;
     },

@@ -527,13 +527,21 @@ export async function listMyComputeJobs(
   return request(`/compute/me/jobs${queryString(params)}`, {}, true, ComputeUserJobsResponseSchema);
 }
 
-/** `GET /compute/me/jobs/:id`: one of the caller's jobs; a live one is refreshed from Tapis when stale. */
-export async function getMyComputeJob(jobId: string): Promise<ComputeUserJobResponse> {
+/**
+ * `GET /compute/me/jobs/:id`: one of the caller's jobs; a live one is refreshed from Tapis when stale.
+ * `signal` and `timeoutMs` are for a poll: an abort or a hung connection ends the read as a network failure.
+ */
+export async function getMyComputeJob(
+  jobId: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ComputeUserJobResponse> {
   return request(
     `/compute/me/jobs/${encodeURIComponent(jobId)}`,
-    {},
+    options.signal ? { signal: options.signal } : {},
     true,
     ComputeUserJobResponseSchema,
+    "json",
+    options.timeoutMs,
   );
 }
 

@@ -10,16 +10,21 @@
  * cut a sleep short; and nothing in the module can cancel a job.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ComputeUserJob } from "../shared/contract/compute-user";
+import { request } from "../src/lib/api/client";
 import { ApiError } from "../src/lib/api/errors";
 import {
+  CEILING_ALLOWANCE_MS,
   CONSECUTIVE_FAILURE_LIMIT,
+  DEFAULT_CEILING_MS,
   MAX_INTERVAL_MS,
+  MAX_RETRY_AFTER_MS,
   MIN_INTERVAL_MS,
   type WaitOptions,
+  ceilingOf,
   waitForJob,
 } from "../src/lib/compute/wait";
 
@@ -41,6 +46,10 @@ const job = (state: string): ComputeUserJob =>
     failure_code: null,
     cancel_requested: false,
   }) as ComputeUserJob;
+
+/** The SIGINT listeners that were not there before: the wait's own. (Other code in this process may hold some.) */
+const ours = (before: Array<(...args: never[]) => void>) =>
+  process.listeners("SIGINT").filter((l) => !before.includes(l));
 
 type Step = string | { stale: string } | Error;
 
@@ -201,7 +210,7 @@ describe("a read that fails", () => {
 
 describe("detaching leaves the job running", () => {
   test("SIGINT during a sleep detaches, removes its listener, and reads nothing more", async () => {
-    const before = process.listenerCount("SIGINT");
+    const before = process.listeners("SIGINT");
     let sleeping: () => void = () => {};
     const entered = new Promise<void>((r) => {
       sleeping = r;
@@ -217,11 +226,11 @@ describe("detaching leaves the job running", () => {
     });
     const waiting = waitForJob(h.options);
     await entered;
-    expect(process.listenerCount("SIGINT")).toBe(before + 1);
+    expect(ours(before)).toHaveLength(1);
     process.emit("SIGINT");
     const outcome = await waiting;
     expect(outcome).toMatchObject({ kind: "detached", job: { state: "running" } });
-    expect(process.listenerCount("SIGINT")).toBe(before);
+    expect(ours(before)).toHaveLength(0);
     expect(h.reader.calls).toEqual([0]);
   });
 
@@ -249,7 +258,7 @@ describe("detaching leaves the job running", () => {
   });
 
   test("the listener is removed on every way out", async () => {
-    const before = process.listenerCount("SIGINT");
+    const before = process.listeners("SIGINT");
     for (const steps of [["finished"], [new ApiError(404, "no")], ["running"]] as Step[][]) {
       const h = harness(steps, { listenForSigint: true });
       if (steps[0] === "running") {
@@ -258,7 +267,7 @@ describe("detaching leaves the job running", () => {
         };
       }
       await waitForJob(h.options);
-      expect(process.listenerCount("SIGINT")).toBe(before);
+      expect(ours(before)).toHaveLength(0);
     }
   });
 
@@ -268,5 +277,135 @@ describe("detaching leaves the job running", () => {
       "utf8",
     );
     expect(source).not.toMatch(/cancel[A-Z]|\/cancel|api\/compute/);
+  });
+});
+
+describe("the ceiling of the wait", () => {
+  test("a job still live after its time limit and 30 minutes is no longer waited for", async () => {
+    // the job view says 60 minutes: the ceiling is 90
+    const h = harness(["running"]);
+    const outcome = await waitForJob(h.options);
+    expect(outcome).toMatchObject({ kind: "ceiling", job: { state: "running" } });
+    expect(outcome.waitedMs).toBe((60 + 30) * 60_000);
+    expect(CEILING_ALLOWANCE_MS).toBe(30 * 60_000);
+    // it never slept past the ceiling
+    expect(h.sleeps.reduce((n, ms) => n + ms, 0)).toBe(outcome.waitedMs);
+  });
+
+  test("the ceiling follows the job's own minutes, and is conservative when there is no view yet", () => {
+    const long = { ...job("running"), resources: { ...job("running").resources, minutes: 2880 } };
+    expect(ceilingOf(long as ComputeUserJob)).toBe(2880 * 60_000 + CEILING_ALLOWANCE_MS);
+    expect(ceilingOf(null)).toBe(DEFAULT_CEILING_MS);
+    expect(DEFAULT_CEILING_MS).toBe(48 * 3_600_000 + CEILING_ALLOWANCE_MS);
+    const noResources = { ...job("running"), resources: undefined } as unknown as ComputeUserJob;
+    expect(ceilingOf(noResources)).toBe(DEFAULT_CEILING_MS);
+  });
+
+  test("a job that ends before the ceiling is the end, not the ceiling", async () => {
+    const h = harness(["running", "running", "finished"]);
+    expect((await waitForJob(h.options)).kind).toBe("terminal");
+  });
+});
+
+describe("a 429 is a failed read that asks to be waited out", () => {
+  const tooMany = (retryAfter?: number) => {
+    const e = new ApiError(429, "slow down");
+    if (retryAfter !== undefined) e.retryAfterSeconds = retryAfter;
+    return e;
+  };
+
+  test("it is waited out for the Retry-After, not refused, and the wait goes on", async () => {
+    const h = harness([tooMany(90), "finished"]);
+    const outcome = await waitForJob(h.options);
+    expect(outcome.kind).toBe("terminal");
+    expect(h.sleeps).toEqual([90_000]);
+  });
+
+  test("a long Retry-After is capped; a short one never shortens the backoff", async () => {
+    const h = harness([tooMany(100_000), tooMany(1), "finished"]);
+    await waitForJob(h.options);
+    expect(h.sleeps).toEqual([MAX_RETRY_AFTER_MS, 11250]);
+  });
+
+  test("it counts toward the cap, and ends as unavailable, never as refused", async () => {
+    const h = harness([tooMany(), tooMany(), tooMany(), tooMany(), tooMany()]);
+    expect(await waitForJob(h.options)).toMatchObject({ kind: "unavailable", detail: "HTTP 429" });
+  });
+});
+
+describe("a second Ctrl-C while detaching leaves at once", () => {
+  test("the first aborts; the second exits with code 3", async () => {
+    const codes: number[] = [];
+    let sleeping: () => void = () => {};
+    const entered = new Promise<void>((r) => {
+      sleeping = r;
+    });
+    const h = harness(["running"], {
+      listenForSigint: true,
+      exit: (code) => {
+        codes.push(code);
+        return undefined as never;
+      },
+      sleep: (_ms, signal) =>
+        new Promise((resolve) => {
+          sleeping();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    });
+    const waiting = waitForJob(h.options);
+    await entered;
+    process.emit("SIGINT");
+    expect(codes).toEqual([]);
+    process.emit("SIGINT");
+    expect(codes).toEqual([3]);
+    expect((await waiting).kind).toBe("detached");
+  });
+});
+
+describe("a hung connection cannot hold the wait", () => {
+  let requests = 0;
+  const hung = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => {
+      requests++;
+      return new Promise<Response>(() => {});
+    },
+  });
+  afterAll(() => hung.stop(true));
+  const previous = process.env.TEST_API_URL;
+  beforeEach(() => {
+    requests = 0;
+    process.env.TEST_API_URL = `http://127.0.0.1:${hung.port}`;
+  });
+  afterEach(() => {
+    if (previous === undefined) process.env.TEST_API_URL = undefined;
+    else process.env.TEST_API_URL = previous;
+    // biome-ignore lint/performance/noDelete: an unset variable must be absent, not the string "undefined"
+    if (previous === undefined) delete process.env.TEST_API_URL;
+  });
+
+  const read = (signal: AbortSignal, timeoutMs: number) =>
+    request<never>("/compute/me/jobs/x", { signal }, false, undefined, "json", timeoutMs);
+
+  test("the client's timeout turns a hung read into a failed read, five of which end the wait", async () => {
+    const h = harness([], { fetchJob: (signal) => read(signal, 150) });
+    const started = Date.now();
+    const outcome = await waitForJob(h.options);
+    expect(outcome.kind).toBe("unavailable");
+    expect(requests).toBe(5);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  test("Ctrl-C during a hung read detaches at once", async () => {
+    const before = process.listeners("SIGINT");
+    const h = harness([], { listenForSigint: true, fetchJob: (signal) => read(signal, 60_000) });
+    const waiting = waitForJob(h.options);
+    while (requests === 0) await Bun.sleep(10);
+    const started = Date.now();
+    process.emit("SIGINT");
+    expect(await waiting).toMatchObject({ kind: "detached", job: null });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(ours(before)).toHaveLength(0);
   });
 });
