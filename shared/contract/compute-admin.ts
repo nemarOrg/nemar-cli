@@ -591,8 +591,17 @@ export const ComputeAccountReportResponseSchema = z
     account_id: z.number().int(),
     from: z.string(),
     to: z.string(),
-    totals: z.object({ jobs: z.number().int(), charged_milli: z.number().int() }).passthrough(),
-    // Each value is an open object (`jobs`, `charged_milli`): a word the Worker adds is kept.
+    // `unsettled` and `open_hold_milli` are optional so a CLI newer than its Worker still reads the
+    // answer; a job whose hold is open has charged nothing yet, and these say how much it still holds.
+    totals: z
+      .object({
+        jobs: z.number().int(),
+        charged_milli: z.number().int(),
+        unsettled: z.number().int().optional(),
+        open_hold_milli: z.number().int().optional(),
+      })
+      .passthrough(),
+    // Each value is an open object (`jobs`, `charged_milli`, `unsettled`, `open_hold_milli`): a word the Worker adds is kept.
     by_pool: z.record(z.object({}).passthrough()),
     jobs: z.array(z.object({}).passthrough()),
     truncated: z.boolean(),

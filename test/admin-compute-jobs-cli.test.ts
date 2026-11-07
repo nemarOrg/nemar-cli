@@ -39,7 +39,7 @@ import {
 } from "../backend/test/helpers/compute-lifecycle-fixture";
 import { launchSecretForms } from "../backend/test/helpers/launch-secret-forms";
 import { recordKey } from "../backend/src/services/compute-records";
-import { RECORDS_RESULT_MANIFEST_FILE } from "../shared/contract/compute";
+import { RECORDS_RESULT_MANIFEST_FILE, formatSu } from "../shared/contract/compute";
 import {
   ComputeJobAdminResponseSchema,
   ComputeRecordResponseSchema,
@@ -526,7 +526,11 @@ describe("report and access-report", () => {
       "2026-10-31",
     ]);
     expect(text.exitCode).toBe(0);
-    expect(text.stdout).toContain("1 job(s), 1.5 SU");
+    // The job is held and unsettled: the total says so, so a running account does not look cheaper.
+    expect(text.stdout).toMatch(
+      /1 job\(s\), 1\.5 SU charged, 1 not settled \([0-9.]+ SU still held\)/,
+    );
+    expect(text.stdout).toContain("(not settled,");
     clean(text);
     const csv = await runCli("admin", [
       "report",
@@ -539,8 +543,17 @@ describe("report and access-report", () => {
       "--csv",
     ]);
     const lines = csv.stdout.trim().split("\n");
-    expect(lines[0]).toBe("id,created_at,ended_at,state,partition,pool,source,su_charged,flags");
-    expect(lines[1]).toBe(`${a.job.id},2026-10-05 10:00:00,,created,shared,cpu,cli,1.5,`);
+    expect(lines[0]).toBe(
+      "id,created_at,ended_at,state,partition,pool,source,su_charged,settled,su_held,flags",
+    );
+    const held = sql.one<{ h: number }>(
+      "SELECT held_milli AS h FROM compute_jobs WHERE id = ?",
+      a.job.id,
+    ).h;
+    expect(held).toBeGreaterThan(0);
+    expect(lines[1]).toBe(
+      `${a.job.id},2026-10-05 10:00:00,,created,shared,cpu,cli,1.5,no,${formatSu(held)},`,
+    );
     expect(lines).toHaveLength(2);
     expect(csv.stderr.trim()).toBe("");
   });

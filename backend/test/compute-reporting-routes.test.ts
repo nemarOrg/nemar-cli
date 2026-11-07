@@ -373,8 +373,23 @@ describe("report", () => {
     );
     expect(r.status).toBe(200);
     expect(ComputeAccountReportResponseSchema.safeParse(r.body).success).toBe(true);
-    expect(r.body.totals).toEqual({ jobs: 2, charged_milli: 4000 });
-    expect(r.body.by_pool).toEqual({ cpu: { jobs: 2, charged_milli: 4000 } });
+    // Both jobs are still held and unsettled (makeJob leaves the hold open): they have charged what the
+    // test wrote into the column, and the report says they are not final and what they still hold.
+    const held = sql.one<{ h: number }>(
+      "SELECT SUM(held_milli) AS h FROM compute_jobs WHERE account_id = ?",
+      a.accountId,
+    ).h;
+    expect(held).toBeGreaterThan(0);
+    expect(r.body.totals).toEqual({
+      jobs: 2,
+      charged_milli: 4000,
+      unsettled: 2,
+      open_hold_milli: held,
+    });
+    expect(r.body.by_pool).toEqual({
+      cpu: { jobs: 2, charged_milli: 4000, unsettled: 2, open_hold_milli: held },
+    });
+    expect(r.body.jobs.map((j: { settled: boolean }) => j.settled)).toEqual([false, false]);
     expect(r.body.jobs.map((j: { id: string }) => j.id)).toEqual([a.job.id, a2.job.id]);
     expect(r.body.truncated).toBe(false);
     // Outside the range there is nothing.
@@ -383,8 +398,45 @@ describe("report", () => {
       `/compute/report?account=${a.accountId}&from=2026-11-01&to=2026-11-30`,
       "admin",
     );
-    expect(none.body.totals).toEqual({ jobs: 0, charged_milli: 0 });
+    expect(none.body.totals).toEqual({
+      jobs: 0,
+      charged_milli: 0,
+      unsettled: 0,
+      open_hold_milli: 0,
+    });
     expectNoIdentity(r.text);
+  });
+
+  test("a settled job holds nothing and is not counted unsettled; an unsettled one shows its hold", async () => {
+    const settled = await endedJob(fx, 30);
+    const running = await makeJob(fx);
+    sql.run(
+      "UPDATE compute_jobs SET account_id = ? WHERE id = ?",
+      settled.accountId,
+      running.job.id,
+    );
+    const r = await call(
+      "GET",
+      `/compute/report?account=${settled.accountId}&from=2000-01-01&to=2100-01-01`,
+      "admin",
+    );
+    expect(r.status).toBe(200);
+    const byId = Object.fromEntries(r.body.jobs.map((j: { id: string }) => [j.id, j])) as Record<
+      string,
+      { settled: boolean; open_hold_milli: number; charged_milli: number }
+    >;
+    expect(byId[settled.job.id]?.settled).toBe(true);
+    expect(byId[settled.job.id]?.open_hold_milli).toBe(0);
+    expect(byId[settled.job.id]?.charged_milli).toBeGreaterThan(0);
+    expect(byId[running.job.id]?.settled).toBe(false);
+    expect(byId[running.job.id]?.charged_milli).toBe(0);
+    const held = sql.one<{ h: number }>(
+      "SELECT held_milli AS h FROM compute_jobs WHERE id = ?",
+      running.job.id,
+    ).h;
+    expect(byId[running.job.id]?.open_hold_milli).toBe(held);
+    expect(r.body.totals.unsettled).toBe(1);
+    expect(r.body.totals.open_hold_milli).toBe(held);
   });
 
   test("an account, a date that is not one, and a missing parameter are refused", async () => {

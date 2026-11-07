@@ -412,6 +412,14 @@ jobsCommand
     },
   );
 
+/** ", N not settled, X SU still held" for a total or a pool with open holds, and nothing when none is open. */
+function unsettledNote(t: { unsettled?: unknown; open_hold_milli?: unknown }): string {
+  const n = Number(t.unsettled ?? 0);
+  return n > 0
+    ? `, ${n} not settled (${formatSu(Number(t.open_hold_milli ?? 0))} SU still held)`
+    : "";
+}
+
 /** Why a record's value is absent from a summary, in words that keep a missing file apart from a broken one. */
 function recordAbsence(status: string | undefined): string {
   if (status === "missing") return "missing (no such record)";
@@ -422,7 +430,9 @@ function recordAbsence(status: string | undefined): string {
 const REPORT_HELP = `
 One account's jobs created from --from to the end of --to (dates, YYYY-MM-DD), the SU they were charged
 by pool, and one line for each job. --csv prints the lines as comma-separated values (id, created, ended,
-state, partition, pool, source, SU charged, flags) and nothing else. No identity is shown.
+state, partition, pool, source, SU charged, settled, SU still held, flags) and nothing else. A job that is
+not settled yet has charged nothing so far and still holds SU: the totals count those jobs and the SU they
+hold, so a running account does not look cheaper than it is. No identity is shown.
 
 Exit codes:
   0  reported.
@@ -472,6 +482,8 @@ jobsCommand
               "pool",
               "source",
               "su_charged",
+              "settled",
+              "su_held",
               "flags",
             ],
             ...jobs.map((j) => [
@@ -483,23 +495,29 @@ jobsCommand
               String(j.pool),
               String(j.source),
               formatSu(Number(j.charged_milli)),
+              j.settled === false ? "no" : "yes",
+              formatSu(Number(j.open_hold_milli ?? 0)),
               Array.isArray(j.flags) ? j.flags.join(" ") : "",
             ]),
           ]);
           return;
         }
         say(
-          `account ${res.account_id}, ${plain(res.from)} to ${plain(res.to)}: ${res.totals.jobs} job(s), ${formatSu(res.totals.charged_milli)} SU`,
+          `account ${res.account_id}, ${plain(res.from)} to ${plain(res.to)}: ${res.totals.jobs} job(s), ${formatSu(res.totals.charged_milli)} SU charged${unsettledNote(res.totals)}`,
         );
         for (const [pool, t] of Object.entries(res.by_pool)) {
           const row = t as Record<string, unknown>;
           say(
-            `  ${plain(pool)}: ${Number(row.jobs)} job(s), ${formatSu(Number(row.charged_milli))} SU`,
+            `  ${plain(pool)}: ${Number(row.jobs)} job(s), ${formatSu(Number(row.charged_milli))} SU charged${unsettledNote(row)}`,
           );
         }
         for (const j of jobs) {
+          const note =
+            j.settled === false
+              ? `  (not settled, ${formatSu(Number(j.open_hold_milli ?? 0))} SU held)`
+              : "";
           say(
-            `  ${plain(String(j.id))}  ${plain(String(j.state))}  ${plain(String(j.partition))}  ${formatSu(Number(j.charged_milli))} SU  ${plain(String(j.created_at))}`,
+            `  ${plain(String(j.id))}  ${plain(String(j.state))}  ${plain(String(j.partition))}  ${formatSu(Number(j.charged_milli))} SU${note}  ${plain(String(j.created_at))}`,
           );
         }
         if (res.truncated) say("  (the list is cut at 5,000 jobs; narrow the range)");
