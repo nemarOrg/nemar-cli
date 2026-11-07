@@ -108,3 +108,51 @@ export async function partnerExcessStatements(
     db.prepare(PARTNER_EXCESS_MARK_SQL).bind(input.jobId, input.routine ? 0 : 1),
   ];
 }
+
+/** The flag word of a job capped at its hold whose final settlement has not arrived (the excess is not yet billed to anyone). */
+export const PARTNER_CAPPED_PROVISIONAL_FLAG = "capped_provisional";
+
+/** The audit action of that cap. */
+export const PARTNER_CAPPED_PROVISIONAL_ACTION = "compute.partner.provisional_capped";
+
+/** Days a capped job may wait for its final settlement before the status view counts it. */
+export const PARTNER_CAPPED_NO_FINAL_DAYS = 7;
+
+/**
+ * The mark of a job capped at its hold at the PROVISIONAL settlement that has a Slurm id, so its excess is
+ * the final settlement's to write: `flag_overrun` and the word, so the loss is visible while
+ * the final is awaited. Writes only when the job is settled and the person was charged exactly the hold; the
+ * audit row follows only if it changed the row. NO ledger entry. `?1` the job, `?2` the hold, `?3` the job again.
+ */
+export const PARTNER_CAPPED_MARK_SQL = `UPDATE compute_jobs SET flag_overrun = 1,
+    partner_flag = CASE WHEN partner_flag IS NULL THEN '${PARTNER_CAPPED_PROVISIONAL_FLAG}' ELSE partner_flag END
+  WHERE id = ?1 AND source = 'partner' AND settled_provisional_at IS NOT NULL AND settled_final_at IS NULL
+    AND (SELECT COALESCE(SUM(c.charged_delta_milli), 0) FROM compute_ledger c
+          WHERE c.job_id = ?1 AND c.pool_id = (SELECT h.pool_id FROM compute_ledger h
+                                                 WHERE h.kind = 'hold' AND h.job_id = ?1)) = ?2`;
+
+/** The statements (mark, then its audit row) of a provisional cap that leaves the excess to the final settlement. */
+export function partnerCapNoteStatements(
+  db: D1Database,
+  input: { jobId: string; client: string | null; heldMilli: number },
+): D1PreparedStatement[] {
+  return [
+    db.prepare(PARTNER_CAPPED_MARK_SQL).bind(input.jobId, input.heldMilli),
+    db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
+      ...auditLogParams({
+        userId: null,
+        action: PARTNER_CAPPED_PROVISIONAL_ACTION,
+        resourceType: "compute_job",
+        resourceId: input.jobId,
+        details: JSON.stringify({ flag: PARTNER_CAPPED_PROVISIONAL_FLAG, client: input.client }),
+      }),
+    ),
+  ];
+}
+
+/** Capped jobs whose final settlement is overdue: terminal, a Slurm id, no final, a week and more since the end. */
+export const PARTNER_CAPPED_NO_FINAL_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE source = 'partner' AND partner_flag = '${PARTNER_CAPPED_PROVISIONAL_FLAG}'
+    AND slurm_job_id IS NOT NULL AND settled_final_at IS NULL
+    AND state IN ('finished', 'failed', 'cancelled')
+    AND ended_at < datetime('now', '-${PARTNER_CAPPED_NO_FINAL_DAYS} days')`;

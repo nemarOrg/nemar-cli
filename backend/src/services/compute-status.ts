@@ -28,6 +28,7 @@
 import type { ComputeStatusResponse } from "../../../shared/contract/compute-admin";
 import type { Bindings } from "../types/bindings";
 import { CANCEL_PENDING_FAILED_SQL, COPY_ABANDONED_COUNT_SQL } from "./compute-lifecycle";
+import { PARTNER_CAPPED_NO_FINAL_SQL } from "./compute-partner-excess";
 import { pipelinesAccountId } from "./compute-pipeline";
 import { readRuntimeImage } from "./compute-runtime-image";
 import { computeS3 } from "./compute-s3";
@@ -93,6 +94,8 @@ const ATTENTION_COUNTS: ReadonlyArray<readonly [key: string, sql: string]> = [
   ["cancel_pending_failed", CANCEL_PENDING_FAILED_SQL],
   // A terminal row whose copy of the launcher files was never made and no longer will be (flagged `mismatch`).
   ["copy_abandoned", COPY_ABANDONED_COUNT_SQL],
+  // A partner job capped at its hold whose final settlement never came: the excess is billed to no one.
+  ["partner_capped_no_final", PARTNER_CAPPED_NO_FINAL_SQL],
 ];
 
 async function attentionCounts(db: D1Database): Promise<Record<string, number>> {

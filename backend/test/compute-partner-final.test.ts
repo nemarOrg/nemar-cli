@@ -172,13 +172,27 @@ describe("the provisional settlement is capped at the hold, and who writes the e
     const slurm = row(w, hold.job_id).slurm_job_id as string;
     expect(slurm).not.toBeNull();
     // Capped for the person; NO guess of the partner's bill from Tapis's times.
-    expect(row(w, hold.job_id)).toMatchObject({ charged_milli: 4000, partner_flag: null });
+    // Not silent (M-b): the job is marked and one audit row says it, with no ledger entry.
+    expect(row(w, hold.job_id)).toMatchObject({
+      charged_milli: 4000,
+      partner_flag: "capped_provisional",
+      flag_overrun: 1,
+    });
+    expect(
+      w.h.db
+        .query(
+          "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'compute.partner.provisional_capped' AND resource_id = ?",
+        )
+        .get(hold.job_id),
+    ).toEqual({ n: 1 });
     expect(entries(w, hold.job_id).map((e) => e.kind)).toEqual(["hold", "charge"]);
     expect(poolOf(w, "partner", "tenant")).toBeNull();
     // Expanse says 1.25 hours (5 SU): the partner's excess is 1 SU, not the 8 SU Tapis's times implied.
     sacctCpu(slurm, 4500);
     expect((await settleObservedRows(fx.env())).settled).toBe(1);
     expect(row(w, hold.job_id).charged_milli).toBe(4000);
+    // The excess (1 SU) is inside the owner's tolerance: information only, the provisional word is cleared.
+    expect(row(w, hold.job_id)).toMatchObject({ partner_flag: null, flag_overrun: 1 });
     expect((poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli).toBe(1000);
     expect((poolOf(w, "platform", "people") as Record<string, number>).charged_milli).toBe(
       4000 + 1000,
@@ -211,6 +225,56 @@ describe("the provisional settlement is capped at the hold, and who writes the e
     });
     await fx.env().DB.batch(right);
     expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(1);
+  });
+});
+
+describe("a capped job whose final never arrives is counted, and one whose final shows no excess is cleared (M-b)", () => {
+  test("the status view counts a capped job with a Slurm id and no final after a week, not before", async () => {
+    const { PARTNER_CAPPED_NO_FINAL_SQL } = await import("../src/services/compute-partner-excess");
+    const count = () => (w.h.db.query(PARTNER_CAPPED_NO_FINAL_SQL).get() as { n: number }).n;
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    expect(count()).toBe(0);
+    w.h.db
+      .query("UPDATE compute_jobs SET ended_at = datetime('now', '-8 days') WHERE id = ?")
+      .run(hold.job_id);
+    expect(count()).toBe(1);
+    // The final arrives: no longer counted.
+    const slurm = row(w, hold.job_id).slurm_job_id as string;
+    sacctCpu(slurm, 4500);
+    await settleObservedRows(fx.env());
+    expect(count()).toBe(0);
+  });
+
+  test("and the status view carries the count", async () => {
+    const { computeStatus } = await import("../src/services/compute-status");
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    w.h.db
+      .query("UPDATE compute_jobs SET ended_at = datetime('now', '-8 days') WHERE id = ?")
+      .run(hold.job_id);
+    const status = await computeStatus(fx.env());
+    expect(status.attention?.partner_capped_no_final).toBe(1);
+  });
+
+  test("a final that shows the job within its hold clears the provisional word", async () => {
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    expect(row(w, hold.job_id).partner_flag).toBe("capped_provisional");
+    sacctCpu(row(w, hold.job_id).slurm_job_id as string, 2700);
+    await settleObservedRows(fx.env());
+    expect(row(w, hold.job_id)).toMatchObject({ partner_flag: null, charged_milli: 3000 });
+  });
+
+  test("a final far above the hold replaces it with the final's own word", async () => {
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    sacctCpu(row(w, hold.job_id).slurm_job_id as string, 10800);
+    await settleObservedRows(fx.env());
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_flag: "resources_mismatch",
+      charged_milli: 4000,
+    });
   });
 });
 

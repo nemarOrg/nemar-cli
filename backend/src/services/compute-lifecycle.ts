@@ -99,7 +99,7 @@ import {
   unreservedChargeStatements,
 } from "./compute-ledger.js";
 import { isRoutineDifference } from "./compute-observer.js";
-import { partnerExcessStatements } from "./compute-partner-excess.js";
+import { partnerCapNoteStatements, partnerExcessStatements } from "./compute-partner-excess.js";
 import { getPolicy } from "./compute-policy.js";
 import { submitMemoryForQueue } from "./compute-queues.js";
 import {
@@ -646,7 +646,18 @@ async function capPartnerCharge(
   ) {
     return { settlement, after: [] };
   }
-  if (hasSlurm) return { settlement: { ...settlement, milli: job.held_milli }, after: [] };
+  if (hasSlurm) {
+    // The excess is the final settlement's to write (from Expanse's figure), but the loss is not silent: the
+    // job is marked and one audit row says so until the final arrives; no ledger entry.
+    return {
+      settlement: { ...settlement, milli: job.held_milli },
+      after: partnerCapNoteStatements(env.DB, {
+        jobId: job.id,
+        client: job.client_id,
+        heldMilli: job.held_milli,
+      }),
+    };
+  }
   const { policy } = await getPolicy(env.DB);
   const after = await partnerExcessStatements(env.DB, {
     jobId: job.id,

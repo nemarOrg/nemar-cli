@@ -343,7 +343,7 @@ export const ComputeStatusResponseSchema = z
      * like every response here) does not break a released CLI, which prints only the positive counts.
      * Today: `access_reports_failed` (ACCESS reports that ended failed), `cancel_pending_failed` (a
      * recorded cancel still not carried out an hour after it was asked for) and `copy_abandoned` (a
-     * terminal job whose launcher files were never copied and no longer will be).
+     * terminal job whose launcher files were never copied and no longer will be) and `partner_capped_no_final` (a partner job capped at its hold whose final settlement has not come for a week, so its excess is billed to no one).
      */
     attention: z.record(z.unknown()).optional(),
   })
