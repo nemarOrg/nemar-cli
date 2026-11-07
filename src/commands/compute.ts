@@ -4,12 +4,13 @@
  *
  *   nemar compute request-access [--purpose <text>] [--accept-terms] [--json]
  *   nemar compute balance | limits | queue | list | status <job>      (phase D2, ./compute-read.ts)
- *
- * Submission (phase D3) is added to this group by the phase that builds it.
+ *   nemar compute submit [path] [options] [-- args]                  (phase D3b, ./compute-submit.ts)
+ *   nemar compute logs <job> | results <job> | cancel <job>          (phase D3b, ./compute-jobs.ts)
  */
 
 import { Command } from "commander";
 import { requestAccessCommand } from "./compute-access.js";
+import { cancelCommand, logsCommand, resultsCommand } from "./compute-jobs.js";
 import {
   balanceCommand,
   limitsCommand,
@@ -17,9 +18,10 @@ import {
   queueCommand,
   statusCommand,
 } from "./compute-read.js";
+import { submitCommand } from "./compute-submit.js";
 
 export const computeCommand = new Command("compute").description(
-  "Use NEMAR compute: ask for access, see your balance, limits and jobs, and (in later releases) run jobs",
+  "Use NEMAR compute: ask for access, run jobs, and see your balance, limits, jobs and results",
 );
 
 computeCommand.addCommand(requestAccessCommand);
@@ -28,3 +30,7 @@ computeCommand.addCommand(limitsCommand);
 computeCommand.addCommand(queueCommand);
 computeCommand.addCommand(listCommand);
 computeCommand.addCommand(statusCommand);
+computeCommand.addCommand(submitCommand);
+computeCommand.addCommand(logsCommand);
+computeCommand.addCommand(resultsCommand);
+computeCommand.addCommand(cancelCommand);
