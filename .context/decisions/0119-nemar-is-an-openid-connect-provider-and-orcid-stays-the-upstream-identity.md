@@ -446,3 +446,11 @@ It widens rules 4 and 14 by exactly three WRITE paths: every other route of the 
    NEMAR never trusts the owner or the tag alone: the uuid the partner reports, bound by a unique index, and NEMAR's own read of that job are the identity.
 6. **The credential-ending table is unchanged.**
    The three routes add no path that ends a credential; a compute suspension or revocation ends the person's grants that carry a compute scope (so the partner's tokens for that person die), and a reservation of that person is resolved by the partner contract (ADR 0118, the amendment of this phase, items 9 and 10).
+
+### Review round (PR #2077): two words and one rule for the three partner routes
+
+`tapis_job_unreadable` (422, `NEMAR is not allowed to read that Tapis job.`) and `partner_not_enabled` (503, `The partner contract is not enabled yet.`) are added to `COMPUTE_PARTNER_ERROR_STATUS`, and `unverifiable` joins the mismatch words of `report_mismatch`.
+The hold's answer gains the optional `state` of the job.
+A write route refuses a bearer whose audience does not name this API before it is read; that rule is unchanged.
+The words are stated once, in `shared/contract/compute-partner.ts`, and the website transcribes them.
+
