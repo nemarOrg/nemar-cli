@@ -225,6 +225,124 @@ describe("a refusal records no cancel intent of its own (C1)", () => {
   });
 });
 
+/** A matching job reported during an outage: bound `pending`, Tapis up again. */
+async function pendingJob() {
+  const hold = await reserve(w, person);
+  const uuid = await partnerLaunch(w, hold, person);
+  fx.tapis.advance(uuid, "QUEUED");
+  fx.tapis.advance(uuid, "RUNNING");
+  setTapisTimes(fx, uuid, 30 * MINUTE, null);
+  fx.tapis.down();
+  expect((await report(hold, uuid)).status).toBe(202);
+  fx.tapis.up();
+  return { hold, uuid };
+}
+
+describe("a pending job the person cancelled is not verified into a live one (M-a)", () => {
+  function expectRefusedAndStopped(hold: Hold, uuid: string, reason: string) {
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "cancelled",
+      partner_state: "mismatch",
+      partner_flag: "hold_ended",
+      cancel_reason: reason,
+    });
+    // The Tapis job was actually cancelled, the hold released, the use the partner's; the person pays nothing.
+    expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+    expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
+    expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
+    expect(tenant()?.charged_milli).toBeGreaterThan(0);
+  }
+
+  test("the person cancels while it is pending: the tick refuses it as hold_ended and cancels it at Tapis", async () => {
+    const { hold, uuid } = await pendingJob();
+    expect((await requestComputeCancel(fx.env(), hold.job_id, "user")).ok).toBe(true);
+    expect(cancels()).toHaveLength(0);
+    const tick = await reapExpiredHolds(fx.env());
+    expect(tick).toMatchObject({ verified: 0, refused: 1, ended: 1 });
+    expectRefusedAndStopped(hold, uuid, "user");
+  });
+
+  test("an account suspended and granted again before the tick: the cascade's cancel stands", async () => {
+    const { hold, uuid } = await pendingJob();
+    await fx.env().DB.batch(
+      computeReleaseStatements(person.id).map((s) =>
+        fx
+          .env()
+          .DB.prepare(s.sql)
+          .bind(...s.binds),
+      ),
+    );
+    // Granted again: the person is `active` once more when the tick reads the job.
+    w.h.db.query("UPDATE users SET compute_access = 'active' WHERE id = ?").run(person.id);
+    const tick = await reapExpiredHolds(fx.env());
+    expect(tick).toMatchObject({ verified: 0, refused: 1, ended: 1 });
+    expectRefusedAndStopped(hold, uuid, "account_ended");
+  });
+
+  test("the report that finds a cancel recorded is told hold_cancelled and the job is stopped", async () => {
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person);
+    fx.tapis.advance(uuid, "QUEUED");
+    fx.tapis.advance(uuid, "RUNNING");
+    setTapisTimes(fx, uuid, 30 * MINUTE, null);
+    const cancel = async () => {
+      w.h.db
+        .query(
+          "UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
+        )
+        .run(hold.job_id);
+    };
+    const res = await partnerCall(w, "POST", `/compute/jobs/${hold.job_id}/report`, {
+      token: person.token,
+      json: { tapis_job_id: uuid },
+      env: { DB: raceAfterRead(w.env().DB, "FROM compute_jobs WHERE id = ?1", cancel, 2) } as never,
+    });
+    expect([res.status, res.json?.code]).toEqual([409, "hold_cancelled"]);
+    expectRefusedAndStopped(hold, uuid, "user");
+  });
+});
+
+describe("the verifying statement re-checks the person and the cancel itself (minor 4)", () => {
+  /** Run one verification whose read of the account is followed by `during`; the statement must refuse. */
+  async function raced(during: (id: string) => void) {
+    const { hold } = await pendingJob();
+    const hooked = raceAfterRead(
+      fx.env().DB,
+      "SELECT 1 AS ok FROM users",
+      async () => during(hold.job_id),
+      1,
+    );
+    const out = await verifyBoundJob(fx.env({ DB: hooked }), hold.job_id, {
+      read: TICK_READ,
+      tick: true,
+    });
+    return { hold, out };
+  }
+
+  test("a person revoked after the up-front check is not verified by the statement", async () => {
+    const { hold, out } = await raced(() =>
+      w.h.db.query("UPDATE users SET compute_access = 'revoked' WHERE id = ?").run(person.id),
+    );
+    expect(out.kind).toBe("skipped");
+    expect(row(w, hold.job_id)).toMatchObject({ partner_state: "pending", state: "created" });
+    // The next tick refuses and ends it.
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ verified: 0, ended: 1 });
+  });
+
+  test("a cancel recorded after the up-front check is not verified by the statement", async () => {
+    const { hold, out } = await raced((id) =>
+      w.h.db
+        .query(
+          "UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
+        )
+        .run(id),
+    );
+    expect(out.kind).toBe("skipped");
+    expect(row(w, hold.job_id)).toMatchObject({ partner_state: "pending", state: "created" });
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ verified: 0, ended: 1 });
+  });
+});
+
 describe("a pending job is not verified into a live one for a person whose compute ended", () => {
   test("revoked with no cascade recorded: the tick refuses it as hold_ended and ends it, the use is the partner's", async () => {
     const hold = await reserve(w, person);

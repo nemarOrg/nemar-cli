@@ -245,8 +245,10 @@ export function isNemarsOwnJob(
  * The match: `pending` to `verified`, the job `submitted` (and its times as Tapis reports them), in one
  * conditional UPDATE. `?1` the job, `?2` the bound uuid, `?3` Tapis's status, `?4` and `?5` the submit and
  * start times (or NULL), `?6` the Slurm id (or NULL). It writes only for the row that is still `pending`
- * with this uuid and `created`, so a repeat or a concurrent verifier changes nothing. A cancel intent
- * already recorded stays: the generic cancel carries it out now that the job is an ordinary one.
+ * with this uuid and `created`, so a repeat or a concurrent verifier changes nothing, with NO cancel
+ * recorded by anyone (a person's cancel, an administrator's, the end of an account: a job the person
+ * cancelled while it was unverified is refused and ended, never verified into a live one that is then
+ * cancelled and charged to the person), and whose person's compute is `active` in this statement.
  */
 export const VERIFIED_SQL = `UPDATE compute_jobs SET
     partner_state = 'verified', partner_flag = NULL, partner_verified_at = datetime('now'),
@@ -257,6 +259,7 @@ export const VERIFIED_SQL = `UPDATE compute_jobs SET
     slurm_job_id = COALESCE(slurm_job_id, ?6),
     partner_read_failures = 0, partner_first_failed_at = NULL
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending' AND state = 'created'
+    AND cancel_requested_at IS NULL
     AND EXISTS (SELECT 1 FROM users u WHERE u.id = compute_jobs.account_id
                   AND u.compute_access = 'active' AND u.deleted_at IS NULL)`;
 
@@ -393,10 +396,15 @@ export async function verifyBoundJob(
 
   const pin = (await getPolicy(env.DB)).policy.partner;
   const verdict = checkReport(job, rec, pinOf(pin));
-  if (verdict.ok && !(await personActive(env.DB, job.account_id))) {
-    // The person's compute ended (or the account was deleted) after the job was bound: a job is not
-    // verified into a live one for a person who no longer has compute. It is refused and ended, and the
-    // use is the partner's. (The verifying statement re-checks this atomically.)
+  if (
+    verdict.ok &&
+    (job.cancel_requested_at !== null || !(await personActive(env.DB, job.account_id)))
+  ) {
+    // A cancel was recorded while the job was unverified (the person's, an administrator's, the end of an
+    // account), or the person's compute ended (or the account was deleted) after the job was bound: a job
+    // is not verified into a live one. It is refused (`hold_ended`), CANCELLED at Tapis by the caller's
+    // `finishMismatch` so that it actually stops, and ended; the use is the partner's. (The verifying
+    // statement re-checks both atomically.)
     job = await recordMismatch(env, job, uuid, "hold_ended", rec);
     return job.partner_state === "mismatch"
       ? { kind: "mismatch", flag: "hold_ended", job }
