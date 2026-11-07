@@ -379,7 +379,7 @@ describe("an administrator's pipeline run, to a record anyone can read", () => {
     expect(posted.status).toBe(200);
     expect(await posted.json()).toMatchObject({
       snapshots: 1,
-      sacctRows: 1,
+      sacct_rows: 1,
       skipped: 0,
       settled: 1,
       mismatched: 0,

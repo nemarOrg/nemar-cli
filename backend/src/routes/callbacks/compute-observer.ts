@@ -70,10 +70,15 @@ export function registerComputeObserverRoute(router: Router): void {
     console.log(
       `[compute-observer] ingested mode=${parsed.data.mode} snapshots=${result.snapshots} rows=${result.sacctRows} skipped=${skipped.partitions + skipped.jobs} matched=${result.matched} settled=${result.settled} mismatched=${result.mismatched} unmatched=${result.unmatched}`,
     );
+    // The wire is snake_case (`ComputeObserverIngestResponseSchema`); the service's result keeps its
+    // camelCase names, so the two keys are renamed HERE and not spread, which would put them on the wire.
+    const { sacctRows, settlementFailed, ...counts } = result;
     return c.json({
       ok: true,
-      ...result,
+      ...counts,
+      sacct_rows: sacctRows,
       skipped: skipped.partitions + skipped.jobs,
+      ...(settlementFailed ? { settlement_failed: true } : {}),
       ...(truncated ? { truncated: true } : {}),
     });
   });
