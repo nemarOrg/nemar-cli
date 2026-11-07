@@ -74,7 +74,13 @@ import { TAPIS_JOB_UUID_RE } from "./tapis/schemas.js";
  */
 export const UNVERIFIABLE_FLAG = "unverifiable";
 
-/** Minutes a bound job may stay unreadable (a Tapis that is down, a record NEMAR may not read) before it is refused. */
+/**
+ * A bound job is refused as unverifiable only after this many failed reads, each on a SEPARATE tick, the
+ * first of them at least {@link UNVERIFIABLE_AFTER_MINUTES} minutes ago: sustained, not one bad moment.
+ */
+export const UNVERIFIABLE_AFTER_READS = 3;
+
+/** Minutes the failed reads must span (a Tapis that is down, a record NEMAR may not read) before it is refused. */
 export const UNVERIFIABLE_AFTER_MINUTES = 120;
 
 /** The audit action of a refused report: one row, written in the batch that records the mismatch. */
@@ -248,8 +254,38 @@ export const VERIFIED_SQL = `UPDATE compute_jobs SET
     tapis_synced_at = datetime('now'),
     remote_submitted_at = COALESCE(?4, remote_submitted_at),
     started_at = COALESCE(?5, started_at),
-    slurm_job_id = COALESCE(slurm_job_id, ?6)
+    slurm_job_id = COALESCE(slurm_job_id, ?6),
+    partner_read_failures = 0, partner_first_failed_at = NULL
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending' AND state = 'created'`;
+
+/**
+ * A job refused as `unverifiable` that NEMAR can read now, and that matches, is a verified job after all:
+ * `mismatch` to `verified`, the job `submitted`, the cancel intent this refusal recorded withdrawn (one a
+ * person's cancel recorded stays). `?1` the job, `?2` the uuid, `?3` Tapis's status, `?4` and `?5` its submit
+ * and start times, `?6` the Slurm id. It writes only for a row still `mismatch` and `unverifiable`, not over.
+ */
+export const RECOVER_UNVERIFIABLE_SQL = `UPDATE compute_jobs SET
+    partner_state = 'verified', partner_flag = NULL, flag_mismatch = 0,
+    partner_verified_at = datetime('now'),
+    cancel_requested_at = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_requested_at END,
+    cancel_reason = CASE WHEN cancel_reason = 'unreserved' THEN NULL ELSE cancel_reason END,
+    state = 'submitted', submitted_at = datetime('now'), tapis_status = ?3,
+    tapis_synced_at = datetime('now'),
+    remote_submitted_at = COALESCE(?4, remote_submitted_at),
+    started_at = COALESCE(?5, started_at),
+    slurm_job_id = COALESCE(slurm_job_id, ?6),
+    partner_read_failures = 0, partner_first_failed_at = NULL
+  WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'mismatch' AND partner_flag = 'unverifiable'
+    AND state = 'created'`;
+
+/** A failed read of a bound job on a tick: counted, with when the first was. `?1` the job. */
+export const COUNT_FAILED_READ_SQL = `UPDATE compute_jobs SET
+    partner_read_failures = partner_read_failures + 1,
+    partner_first_failed_at = COALESCE(partner_first_failed_at, datetime('now'))
+  WHERE id = ?1 AND partner_state = 'pending'`;
+
+/** The audit action of a job refused as unverifiable that turned out to match. */
+export const PARTNER_RECOVERED_ACTION = "compute.partner.recovered";
 
 /**
  * The mismatch, as intent only: the flag word, the job flagged `mismatch`, the cancel intent (the first
@@ -293,7 +329,12 @@ function mismatchAudit(job: ComputeJobRow, flag: string): AuditLogEntry {
 export async function verifyBoundJob(
   env: Bindings,
   jobId: string,
-  options: { record?: TapisJob; read?: { maxAttempts: number; timeoutMs: number } } = {},
+  options: {
+    record?: TapisJob;
+    read?: { maxAttempts: number; timeoutMs: number };
+    /** The reaper's tick is calling: a failed read is COUNTED (a request's failed read is not). */
+    tick?: boolean;
+  } = {},
 ): Promise<VerifyOutcome> {
   let job = await getJob(env.DB, jobId);
   if (job === null || job.source !== "partner" || job.partner_state !== "pending") {
@@ -304,7 +345,7 @@ export async function verifyBoundJob(
   const ctx = tapisAccess(env, options.read ?? REQUEST_READ);
   let rec = options.record ?? null;
   if (rec === null) {
-    if (ctx === null) return unreadable(env, job, uuid, false);
+    if (ctx === null) return unreadable(env, job, uuid, false, options.tick === true);
     try {
       rec = await getTapisJob(ctx, uuid);
     } catch (err) {
@@ -313,11 +354,17 @@ export async function verifyBoundJob(
       );
       // A 404 is "Tapis has no such job": the tick may withdraw a binding that stays that way. Any other
       // failure is "cannot read it": pending, until the limit, and then refused (`unverifiable`).
-      return unreadable(env, job, uuid, err instanceof TapisError && err.kind === "not_found");
+      return unreadable(
+        env,
+        job,
+        uuid,
+        err instanceof TapisError && err.kind === "not_found",
+        options.tick === true,
+      );
     }
   }
   // Tapis answered for another job than the one bound: that is no read of this job.
-  if (rec.uuid !== uuid) return unreadable(env, job, uuid, false);
+  if (rec.uuid !== uuid) return unreadable(env, job, uuid, false, options.tick === true);
 
   // A record that is NEMAR's own job is never judged or cancelled on a partner's word: the binding is
   // withdrawn (the row is a reservation again) and the partner is told it is in use.
@@ -356,32 +403,46 @@ export async function verifyBoundJob(
   return { kind: "mismatch", flag: verdict.flag, job };
 }
 
-/** Minutes since the job was bound (`submitted_at` is the bind time of a pending partner row). */
-function boundMinutes(job: Pick<ComputeJobRow, "submitted_at" | "created_at">): number {
-  const raw = (job.submitted_at ?? job.created_at).replace(" ", "T");
+/** Minutes since a SQLite time (UTC) given as text. */
+function minutesSince(sqlTime: string | null): number {
+  if (sqlTime === null) return 0;
+  const raw = sqlTime.replace(" ", "T");
   const ms = Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(raw) ? raw : `${raw}Z`);
   return Number.isFinite(ms) ? (Date.now() - ms) / 60_000 : 0;
 }
 
 /**
- * NEMAR could not read the bound job back. Until {@link UNVERIFIABLE_AFTER_MINUTES} it stays `pending`
- * (nothing is charged beyond the hold, no generic path takes the row); past it a job that cannot be shown
- * to match is refused as `unverifiable` (the intent is recorded here, one audit row; `finishMismatch`
- * cancels it, releases the hold and charges the partner's pool). A 404 (`gone`) is the other case: the
- * tick withdraws that binding after a time (`compute-hold-reaper.ts`), since a job Tapis does not have is
- * not running.
+ * NEMAR could not read the bound job back. It stays `pending` (nothing is charged beyond the hold, no
+ * generic path takes the row) while the failure is not SUSTAINED: a failed read on the reaper's tick is
+ * counted, and the job is refused as `unverifiable` only after {@link UNVERIFIABLE_AFTER_READS} failed
+ * reads on separate ticks, the first at least {@link UNVERIFIABLE_AFTER_MINUTES} minutes ago (the intent is
+ * recorded here, one audit row; `finishMismatch` cancels it, releases the hold and charges the partner's
+ * pool, and reconsiders it if NEMAR can read it by then). A request's failed read is not counted, so one
+ * outage counted by a request and a tick together does not refuse a job. A 404 (`gone`) is the other case:
+ * the tick withdraws that binding after a time (`compute-hold-reaper.ts`), since a job Tapis does not have
+ * is not running.
  */
 async function unreadable(
   env: Bindings,
   job: ComputeJobRow,
   uuid: string,
   gone: boolean,
+  tick: boolean,
 ): Promise<VerifyOutcome> {
-  if (gone || boundMinutes(job) < UNVERIFIABLE_AFTER_MINUTES) {
-    return { kind: "pending", job, ...(gone ? { gone: true } : {}) };
+  if (gone) return { kind: "pending", job, gone: true };
+  let current = job;
+  if (tick) {
+    await env.DB.prepare(COUNT_FAILED_READ_SQL).bind(job.id).run();
+    current = (await getJob(env.DB, job.id)) ?? job;
+  }
+  if (
+    current.partner_read_failures < UNVERIFIABLE_AFTER_READS ||
+    minutesSince(current.partner_first_failed_at) < UNVERIFIABLE_AFTER_MINUTES
+  ) {
+    return { kind: "pending", job: current };
   }
   console.warn("[compute-partner] unverifiable");
-  const refused = await recordMismatch(env, job, uuid, UNVERIFIABLE_FLAG, null);
+  const refused = await recordMismatch(env, current, uuid, UNVERIFIABLE_FLAG, null);
   return refused.partner_state === "mismatch"
     ? { kind: "mismatch", flag: UNVERIFIABLE_FLAG, job: refused }
     : { kind: "skipped", job: refused };
@@ -468,6 +529,8 @@ export type MismatchEnd =
   | "ended"
   /** The cancel is not shown to have taken, or the record is unreadable: kept, the next tick asks again. */
   | "pending"
+  /** A job refused as unverifiable could be read, matched, and is a verified job again (it is not cancelled). */
+  | "recovered"
   /** Nothing was owed here. */
   | "skipped";
 
@@ -476,7 +539,12 @@ export type MismatchEnd =
  * shows is NEMAR's own is never cancelled (the binding is withdrawn), a live one is cancelled (a 409 is
  * "already over"), and the row is ended only when a read shows the job has ended, with the record's own
  * resources priced by `provisionalCharge`. Never throws for what Tapis does; nothing is released on an
- * error.
+ * error. TWO CASES OF AN `unverifiable` ROW are decided here: when the read now SUCCEEDS the job is judged
+ * by what it shows (a job that matches and is not cancelled is recovered to `verified` and is NOT cancelled;
+ * one that does not is a real mismatch, with its word); when NEMAR still cannot read it, it is cancelled
+ * blind, and a cancel Tapis DEFINITIVELY refuses (HTTP 400, 403 or 404: a retry will not change it) ends the
+ * row too, with the hold's worth charged to the partner's pool and a warn line for a person, so that no row
+ * pins a person's slot for ever.
  */
 export async function finishMismatch(
   env: Bindings,
@@ -521,11 +589,29 @@ export async function finishMismatch(
     return "skipped";
   }
 
+  // An unverifiable row that can be read now is judged by the record, not by the outage that refused it.
+  // A job this refusal itself cancelled (CANCELLED) stays refused: it did not get to run.
+  if (unverifiable && rec !== null && rec.status !== "CANCELLED") {
+    const verdict = checkReport(job, rec, pinOf((await getPolicy(env.DB)).policy.partner));
+    if (verdict.ok)
+      return (await recoverUnverifiable(env, ctx, job, uuid, rec)) ? "recovered" : "skipped";
+    await env.DB.prepare(REWORD_UNVERIFIABLE_SQL).bind(job.id, verdict.flag).run();
+  }
+
   if (unread) {
     try {
       await cancelJob(ctx, uuid);
     } catch (err) {
-      if (!(err instanceof TapisError && err.status === 409)) {
+      if (err instanceof TapisError && err.status === 409) {
+        // Already over.
+      } else if (
+        err instanceof TapisError &&
+        (err.status === 400 || err.status === 403 || err.status === 404)
+      ) {
+        // A definitive refusal: a retry will not change it. The row ends (below) so it cannot pin the
+        // person's slot for ever, and a person is told to look.
+        console.warn(`[compute-partner] cancel_refused job=${job.id} status=${err.status}`);
+      } else {
         console.warn(
           `[compute-partner] cancel_unclear job=${job.id} kind=${err instanceof TapisError ? err.kind : errorClassName(err)}`,
         );
@@ -553,15 +639,59 @@ export async function finishMismatch(
   }
 
   // What ran is priced from what the RECORD shows where it is readable (its queue and its GPUs), else from
-  // the hold; a job that could not be read at all is charged the minimum (it cannot be shown not to have run).
+  // the hold; a job that could not be read at all is charged the WHOLE hold to the partner (it cannot be
+  // shown not to have run, and the fail-closed rule is that nothing it may have used goes unbilled).
   const priced = pricedAs(job, rec);
   const settlement: Provisional = unread
-    ? { kind: "charge", milli: RATE_TABLE_V1.minChargeMilli, seconds: 0, fallback: true }
+    ? { kind: "charge", milli: job.held_milli, seconds: 0, fallback: true }
     : rec === null
       ? partnerLostSettlement(job)
       : provisionalCharge(priced.job, rec);
   const won = await commitPartnerMismatchEnd(env, job, rec, settlement, priced.pool);
   return won ? "ended" : "skipped";
+}
+
+/** A refusal that turned out to be another word: the repeat is told what the record showed. `?1` the job, `?2` the word. */
+export const REWORD_UNVERIFIABLE_SQL = `UPDATE compute_jobs SET partner_flag = ?2
+  WHERE id = ?1 AND partner_state = 'mismatch' AND partner_flag = 'unverifiable' AND state = 'created'`;
+
+/**
+ * An `unverifiable` refusal that NEMAR can read and that matches: `mismatch` to `verified` in ONE batch (the
+ * job `submitted`, the cancel this refusal recorded withdrawn, the ACCESS report owed when a Slurm id shows,
+ * one audit row), then NEMAR's webhook. True when this writer recovered it.
+ */
+async function recoverUnverifiable(
+  env: Bindings,
+  ctx: TapisContext,
+  job: ComputeJobRow,
+  uuid: string,
+  rec: TapisJob,
+): Promise<boolean> {
+  const slurm =
+    typeof rec.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
+  const audit = auditLogParams({
+    userId: null,
+    action: PARTNER_RECOVERED_ACTION,
+    resourceType: "compute_job",
+    resourceId: job.id,
+    details: JSON.stringify({ client: job.client_id, partition: job.partition }),
+  });
+  const results = await env.DB.batch([
+    env.DB.prepare(RECOVER_UNVERIFIABLE_SQL).bind(
+      job.id,
+      uuid,
+      rec.status,
+      sqliteTime(rec.remoteSubmitted),
+      sqliteTime(rec.remoteStarted),
+      slurm,
+    ),
+    env.DB.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(...audit),
+    ...(slurm === null ? [] : [env.DB.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
+  ]);
+  if ((results[0]?.meta?.changes ?? 0) === 0) return false;
+  const fresh = (await getJob(env.DB, job.id)) ?? job;
+  await subscribeVerifiedJob(env, ctx, fresh, uuid);
+  return true;
 }
 
 /**

@@ -80,6 +80,16 @@ ALTER TABLE compute_jobs ADD COLUMN partner_verified_at TEXT;
 --     job cannot be given upload addresses for ever-new path sets.
 ALTER TABLE compute_jobs ADD COLUMN partner_expires_at TEXT;
 
+--   * `partner_read_failures` and `partner_first_failed_at`: how many times the reaper's tick could not read
+--     a bound, unverified job back, on separate ticks, and when the first of them was. A job is refused as
+--     `unverifiable` only after at least three failed reads spanning two hours; a read that succeeds ends the
+--     question (the row is verified or refused for what the record shows), so one outage cannot refuse a
+--     job that matches.
+ALTER TABLE compute_jobs ADD COLUMN partner_read_failures INTEGER NOT NULL DEFAULT 0
+  CONSTRAINT compute_jobs_partner_read_failures CHECK (partner_read_failures BETWEEN 0 AND 1000000);
+
+ALTER TABLE compute_jobs ADD COLUMN partner_first_failed_at TEXT;
+
 ALTER TABLE compute_jobs ADD COLUMN partner_files_digest TEXT
   CONSTRAINT compute_jobs_partner_files_digest CHECK (
     partner_files_digest IS NULL OR (length(partner_files_digest) = 64

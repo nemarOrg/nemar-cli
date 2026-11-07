@@ -206,6 +206,9 @@ export interface ComputeJobRow {
   partner_verified_at: string | null;
   /** When a partner's reservation expires: written once at creation from the owner's wait then. */
   partner_expires_at: string | null;
+  /** Failed reads of a bound, unverified job on separate ticks, and when the first was (see migration 0134). */
+  partner_read_failures: number;
+  partner_first_failed_at: string | null;
   /** The SHA-256 of the first list of files a report declared; a later report may repeat it and no other. */
   partner_files_digest: string | null;
 }
@@ -379,7 +382,7 @@ const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key,
   flag_overrun, retention_until, legal_hold, webhook_nonce, launch_spec_digest, results_verified_at,
   outputs_completed_at, results_bytes, result_records_at, platform_failure, examined_at,
   submit_claimed_at, orphan_tapis_uuid, partner_state, partner_flag, partner_verified_at, partner_expires_at,
-  partner_files_digest`;
+  partner_read_failures, partner_first_failed_at, partner_files_digest`;
 
 export const JOB_BY_ID_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs WHERE id = ?1`;
 

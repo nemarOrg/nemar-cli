@@ -264,6 +264,30 @@ describe("the review round's columns and the reaper's plans (M3, Sonnet)", () =>
     },
   );
 
+  onEveryEngine(
+    "partner_read_failures is a count from 0, 0 on a row that predates it",
+    async (e) => {
+      const rows = await e.all<Record<string, unknown>>(
+        `SELECT partner_read_failures, partner_first_failed_at FROM compute_jobs
+        WHERE id = 'job_00000000000000000000aaaa'`,
+      );
+      expect(rows).toEqual([{ partner_read_failures: 0, partner_first_failed_at: null }]);
+      const bad = (n: unknown) =>
+        e.run(
+          `INSERT INTO compute_jobs (id, source, kind, app_id, app_version, spec_digest, partition, pool,
+           nodes, cores_per_node, minutes, partner_read_failures)
+         VALUES (?, 'partner', 'batch', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, ?)`,
+          `job_${(++seq + 9000).toString(16).padStart(24, "0")}`,
+          HASH,
+          n,
+        );
+      expect(await bad(3)).toBeNull();
+      for (const n of [-1, 1_000_001, null]) {
+        expect([n, await bad(n)]).toEqual([n, expect.stringMatching(/CHECK|NOT NULL/)]);
+      }
+    },
+  );
+
   onEveryEngine("partner_files_digest is a lowercase SHA-256 or nothing", async (e) => {
     const base = (digest: string | null) => {
       seq += 1;

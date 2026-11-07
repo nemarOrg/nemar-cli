@@ -277,8 +277,10 @@ export interface HoldReaperResult {
   refused: number;
   /** Withdrawn bindings (a Tapis job that never existed). */
   withdrawn: number;
-  /** Bound jobs NEMAR could not read for two hours, refused as `unverifiable`. */
+  /** Bound jobs NEMAR could not read, on three ticks over two hours, refused as `unverifiable`. */
   unverifiable: number;
+  /** Jobs refused as `unverifiable` that could be read, matched and were verified after all. */
+  recovered: number;
   /** Empty searches that were NOT acted on because the owner has not confirmed NEMAR can see the tenant. */
   unconfirmed: number;
   /** Idempotency keys deleted. */
@@ -302,6 +304,7 @@ const empty = (): HoldReaperResult => ({
   refused: 0,
   withdrawn: 0,
   unverifiable: 0,
+  recovered: 0,
   unconfirmed: 0,
   pruned: 0,
   mismatches: 0,
@@ -408,15 +411,22 @@ async function resolveReservation(
     // verified into a live one. It is refused, cancelled at Tapis and charged to the partner.
     await recordMismatch(env, row, rec.uuid, "hold_ended", rec);
     r.refused++;
-    if ((await finishMismatch(env, job.id, TICK_READ)) === "ended") r.ended++;
+    await carryOut(env, job.id, r);
     return;
   }
   const outcome = await verifyBoundJob(env, job.id, { record: rec, read: TICK_READ });
   if (outcome.kind === "verified") r.verified++;
   else if (outcome.kind === "mismatch") {
     r.refused++;
-    if ((await finishMismatch(env, job.id, TICK_READ)) === "ended") r.ended++;
+    await carryOut(env, job.id, r);
   }
+}
+
+/** Carry a recorded refusal out, and count how it ended. */
+async function carryOut(env: Bindings, id: string, r: HoldReaperResult): Promise<void> {
+  const outcome = await finishMismatch(env, id, TICK_READ);
+  if (outcome === "ended") r.ended++;
+  else if (outcome === "recovered") r.recovered++;
 }
 
 const STANDING_SQL = "SELECT compute_access FROM users WHERE id = ?1 AND deleted_at IS NULL";
@@ -438,13 +448,13 @@ async function resolvePending(
   r: HoldReaperResult,
 ): Promise<void> {
   r.pending++;
-  const outcome = await verifyBoundJob(env, job.id, { read: TICK_READ });
+  const outcome = await verifyBoundJob(env, job.id, { read: TICK_READ, tick: true });
   if (outcome.kind === "verified") {
     r.verified++;
   } else if (outcome.kind === "mismatch") {
     r.refused++;
     if (outcome.flag === "unverifiable") r.unverifiable++;
-    if ((await finishMismatch(env, job.id, TICK_READ)) === "ended") r.ended++;
+    await carryOut(env, job.id, r);
   } else if (outcome.kind === "pending" && outcome.gone === true && job.tapis_uuid !== null) {
     const boundAt = Date.parse(`${(job.submitted_at ?? job.created_at).replace(" ", "T")}Z`);
     if (Number.isFinite(boundAt) && Date.now() - boundAt > PENDING_GONE_GIVE_UP_MINUTES * 60_000) {
@@ -496,7 +506,7 @@ export async function reapExpiredHolds(env: Bindings): Promise<HoldReaperResult 
         if (job?.partner_state === "pending") await resolvePending(env, job, r);
         else if (job?.partner_state === "mismatch") {
           r.mismatches++;
-          if ((await finishMismatch(env, id, TICK_READ)) === "ended") r.ended++;
+          await carryOut(env, id, r);
         }
       } catch (err) {
         r.errors.push("unverified_failed");
@@ -535,13 +545,18 @@ export function holdReaperLogLine(
     r.mismatches +
     r.withdrawn +
     r.unverifiable +
+    r.recovered +
     r.unconfirmed +
     r.pruned;
   if (acted === 0 && r.errors.length === 0) return null;
   const level =
     r.errors.length > 0
       ? "error"
-      : r.unreachable > 0 || r.ambiguous > 0 || r.unverifiable > 0 || r.unconfirmed > 0
+      : r.unreachable > 0 ||
+          r.ambiguous > 0 ||
+          r.unverifiable > 0 ||
+          r.recovered > 0 ||
+          r.unconfirmed > 0
         ? "warn"
         : "info";
   return {
@@ -550,7 +565,7 @@ export function holdReaperLogLine(
       `[compute-reaper] examined=${r.examined} released=${r.released} adopted=${r.adopted}` +
       ` ambiguous=${r.ambiguous} unreachable=${r.unreachable} pending=${r.pending}` +
       ` verified=${r.verified} refused=${r.refused} withdrawn=${r.withdrawn}` +
-      ` unverifiable=${r.unverifiable} unconfirmed=${r.unconfirmed} pruned=${r.pruned}` +
+      ` unverifiable=${r.unverifiable} recovered=${r.recovered} unconfirmed=${r.unconfirmed} pruned=${r.pruned}` +
       ` mismatches=${r.mismatches} ended=${r.ended}` +
       ` errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}${r.errorClass === null ? "" : ` class=${r.errorClass}`}`,
   };

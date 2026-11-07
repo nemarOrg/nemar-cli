@@ -172,6 +172,8 @@ export interface TapisStandin {
   /** How many tokens it has minted, by route. */
   mints(): { password: number; service: number };
   /** Forget jobs, subscriptions, outputs, the log, tokens and every failure mode. */
+  /** Clear every injected failure mode, keeping the jobs. */
+  clearFailures(): void;
   reset(): void;
   stop(): void;
 }
@@ -980,6 +982,10 @@ export function startTapisStandin(options: TapisStandinOptions = {}): TapisStand
       server = listen();
     },
     mints: () => ({ ...mintCounts }),
+    clearFailures() {
+      behaviours = [];
+      rejectAll = false;
+    },
     reset() {
       log.length = 0;
       jobs.clear();

@@ -537,10 +537,11 @@ const PIN_FILES_SQL = `UPDATE compute_jobs SET partner_files_digest = ?2
  *   4. the key (`idempotency_conflict`);
  *   5. NEMAR reads the Tapis job (8 seconds): a job Tapis does not have, or answers for as another uuid, is
  *      `tapis_job_not_found`; one NEMAR may not read (a refusal of its credential) is
- *      `tapis_job_unreadable`; neither is bound. A job that is NEMAR's own, or another reservation's, is
+ *      `tapis_job_unreadable`, as is any answer that is not what Tapis's specification says; neither is
+ *      bound. A job that is NEMAR's own, or another reservation's, is
  *      `tapis_job_in_use` and is never bound or cancelled. Only a Tapis that is TRANSIENTLY unable to answer
- *      (unavailable) binds the row `pending` (202) for the tick, and a job still unreadable two hours later
- *      is refused (`unverifiable`);
+ *      (unavailable) binds the row `pending` (202) for the tick, and a job the tick could not read on three
+ *      separate ticks over two hours is refused (`unverifiable`), unless a later read shows it matches;
  *   6. the bind (one conditional UPDATE, a unique index behind it), then the verification: a match is
  *      `verified` (200), a mismatch is `report_mismatch` (409, the Tapis job being cancelled);
  *   7. the files, only after the match.
@@ -606,28 +607,30 @@ export async function reportJob(
   let unreadable = false;
   if (job.tapis_uuid === null) {
     const ctx = tapisAccess(env, REQUEST_READ);
-    if (ctx === null) unreadable = true;
-    else {
-      try {
-        rec = await getTapisJob(ctx, uuid);
-      } catch (err) {
-        if (err instanceof TapisError && err.kind === "not_found") {
-          return refuse("tapis_job_not_found");
-        }
-        // A refusal of NEMAR's credential, or any other 4xx, is a decision and not a moment: a job NEMAR is
-        // not allowed to read can never be verified, so it is not bound (it would run unbilled while it
-        // pinned the person's hold). Only a Tapis that cannot answer just now binds `pending`.
-        if (err instanceof TapisError && (err.kind === "unauthorized" || err.kind === "rejected")) {
-          return refuse("tapis_job_unreadable");
-        }
-        unreadable = true;
+    // NEMAR's own Tapis access is not configured: nothing can be read back, so nothing is bound.
+    if (ctx === null) return refuse("tapis_job_unreadable");
+
+    try {
+      rec = await getTapisJob(ctx, uuid);
+    } catch (err) {
+      if (err instanceof TapisError && err.kind === "not_found") {
+        return refuse("tapis_job_not_found");
       }
-      // Tapis answered for another job than the one reported: that is no read of it.
-      if (rec !== null && rec.uuid !== uuid) return refuse("tapis_job_not_found");
-      // NEMAR's own job, or another reservation's: never bound, never cancelled on a partner's word.
-      if (rec !== null && isNemarsOwnJob(ctx, rec, job.id)) {
-        return refuse("tapis_job_in_use");
+      // Only a Tapis that cannot answer JUST NOW (`unavailable`: a timeout, a 5xx, no connection) binds
+      // `pending`. Everything else, a refusal of NEMAR's credential, any other 4xx, an answer that is not
+      // what Tapis's specification says, or an error that is not Tapis's, is a decision and not a moment:
+      // a job NEMAR cannot read cannot be verified, so it is not bound (it would run unbilled while it
+      // pinned the person's hold).
+      if (!(err instanceof TapisError && err.kind === "unavailable")) {
+        return refuse("tapis_job_unreadable");
       }
+      unreadable = true;
+    }
+    // Tapis answered for another job than the one reported: that is no read of it.
+    if (rec !== null && rec.uuid !== uuid) return refuse("tapis_job_not_found");
+    // NEMAR's own job, or another reservation's: never bound, never cancelled on a partner's word.
+    if (rec !== null && isNemarsOwnJob(ctx, rec, job.id)) {
+      return refuse("tapis_job_in_use");
     }
     if ((await db.prepare(UUID_TAKEN_SQL).bind(uuid, job.id).first()) !== null) {
       return refuse("tapis_job_in_use");

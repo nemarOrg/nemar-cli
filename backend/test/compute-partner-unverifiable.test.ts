@@ -84,11 +84,34 @@ function run30(uuid: string) {
   setTapisTimes(fx, uuid, 30 * MINUTE, null);
 }
 
-/** Pretend the job was bound `minutes` ago (the give-up clock runs from the bind). */
-const boundAgo = (jobId: string, minutes: number) =>
+/** Pretend the first failed read of the job was `minutes` ago (the two hours run from it). */
+const firstFailedAgo = (jobId: string, minutes: number) =>
   w.h.db
-    .query("UPDATE compute_jobs SET submitted_at = datetime('now', ?) WHERE id = ?")
+    .query("UPDATE compute_jobs SET partner_first_failed_at = datetime('now', ?) WHERE id = ?")
     .run(`-${minutes} minutes`, jobId);
+
+/**
+ * A matching job the partner reported while Tapis was down (bound `pending`), whose record NEMAR may not
+ * read from then on (HTTP 403) although the cancel needs only its uuid.
+ */
+async function unreadableJob() {
+  const hold = await reserve(w, person);
+  const uuid = await partnerLaunch(w, hold, person);
+  run30(uuid);
+  fx.tapis.down();
+  expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
+  fx.tapis.up();
+  fx.tapis.fail("GET /v3/jobs/:uuid", 403, 1000);
+  return { hold, uuid };
+}
+
+/** Three failed ticks over two hours: the third refuses the job. Returns the third tick's result. */
+async function refuse3(jobId: string) {
+  await reapExpiredHolds(fx.env());
+  firstFailedAgo(jobId, 130);
+  await reapExpiredHolds(fx.env());
+  return reapExpiredHolds(fx.env());
+}
 
 describe("a job NEMAR cannot read (C1)", () => {
   test("a refusal of NEMAR's credential is 422 tapis_job_unreadable and binds nothing (the hold stays releasable)", async () => {
@@ -107,22 +130,21 @@ describe("a job NEMAR cannot read (C1)", () => {
     expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
   });
 
-  test("a job still unreadable two hours after the bind is refused as unverifiable: cancelled blind, released, charged to the partner", async () => {
-    const hold = await reserve(w, person);
-    const uuid = await partnerLaunch(w, hold, person);
-    run30(uuid);
-    fx.tapis.down();
-    expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
-    fx.tapis.up();
-    // From now on NEMAR may not read the job (its record is not shared), but the cancel needs only the uuid.
-    fx.tapis.fail("GET /v3/jobs/:uuid", 403, 1000);
-    boundAgo(hold.job_id, 119);
-    const early = await reapExpiredHolds(fx.env());
-    expect(early).toMatchObject({ pending: 1, unverifiable: 0, refused: 0 });
-    expect(row(w, hold.job_id)).toMatchObject({ partner_state: "pending", state: "created" });
+  test("a job the tick could not read on three separate ticks over two hours is refused as unverifiable: cancelled blind, released, the whole hold charged to the partner", async () => {
+    const { hold, uuid } = await unreadableJob();
+    const first = await reapExpiredHolds(fx.env());
+    expect(first).toMatchObject({ pending: 1, unverifiable: 0, refused: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_read_failures: 1,
+      partner_state: "pending",
+    });
+    expect(row(w, hold.job_id).partner_first_failed_at).not.toBeNull();
+    // The first failure is old enough, but only two ticks have failed: still pending.
+    firstFailedAgo(hold.job_id, 130);
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ unverifiable: 0, refused: 0 });
+    expect(row(w, hold.job_id).partner_read_failures).toBe(2);
     expect(cancels()).toHaveLength(0);
 
-    boundAgo(hold.job_id, 121);
     const late = await reapExpiredHolds(fx.env());
     expect(late).toMatchObject({ pending: 1, unverifiable: 1, refused: 1, ended: 1 });
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
@@ -133,10 +155,12 @@ describe("a job NEMAR cannot read (C1)", () => {
       charged_milli: 0,
       gateway_user: null,
     });
-    // The person's hold is released whole and never charged; the partner's pool takes the minimum.
+    // The person's hold is released whole and never charged; the partner's pool takes the WHOLE hold (a job
+    // that cannot be shown not to have run is not billed at a minimum).
     expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
     expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
-    expect(tenant()?.charged_milli).toBe(RATE_TABLE_V1.minChargeMilli);
+    expect(tenant()?.charged_milli).toBe(row(w, hold.job_id).held_milli);
+    expect(tenant()?.charged_milli).toBeGreaterThan(RATE_TABLE_V1.minChargeMilli);
     const audit = w.h.db
       .query(
         "SELECT details FROM audit_log WHERE action = 'compute.partner.mismatch' AND resource_id = ?",
@@ -153,17 +177,48 @@ describe("a job NEMAR cannot read (C1)", () => {
     ]);
   });
 
-  test("an unverifiable job whose cancel does not take keeps the row, the hold and the slot; the next tick finishes it", async () => {
+  test("the two hours are measured from the FIRST failed read: three failures spanning 119 minutes are not enough, 121 are", async () => {
+    const { hold } = await unreadableJob();
+    await reapExpiredHolds(fx.env());
+    await reapExpiredHolds(fx.env());
+    firstFailedAgo(hold.job_id, 119);
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ unverifiable: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_state: "pending",
+      partner_read_failures: 3,
+    });
+    firstFailedAgo(hold.job_id, 121);
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ unverifiable: 1, ended: 1 });
+  });
+
+  test("a failed read at the REPORT is not counted (only the tick counts), and a read that succeeds ends the count", async () => {
     const hold = await reserve(w, person);
     const uuid = await partnerLaunch(w, hold, person);
     run30(uuid);
     fx.tapis.down();
     expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
+    // A repeat of the report while Tapis is down reads again and counts nothing.
+    expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_read_failures: 0,
+      partner_first_failed_at: null,
+    });
+    await reapExpiredHolds(fx.env());
+    await reapExpiredHolds(fx.env());
+    expect(row(w, hold.job_id).partner_read_failures).toBe(2);
     fx.tapis.up();
-    fx.tapis.fail("GET /v3/jobs/:uuid", 403, 1000);
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({ verified: 1, unverifiable: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_state: "verified",
+      partner_read_failures: 0,
+      partner_first_failed_at: null,
+    });
+  });
+
+  test("an unverifiable job whose cancel does not take keeps the row, the hold and the slot; the next tick finishes it", async () => {
+    const { hold, uuid } = await unreadableJob();
     fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 2);
-    boundAgo(hold.job_id, 130);
-    const stuck = await reapExpiredHolds(fx.env());
+    const stuck = await refuse3(hold.job_id);
     expect(stuck).toMatchObject({ unverifiable: 1, refused: 1, ended: 0 });
     expect(row(w, hold.job_id)).toMatchObject({
       state: "created",
@@ -194,6 +249,7 @@ describe("a job NEMAR cannot read (C1)", () => {
       refused: 1,
       withdrawn: 0,
       unverifiable: 1,
+      recovered: 0,
       unconfirmed: 0,
       pruned: 0,
       mismatches: 0,
@@ -406,5 +462,156 @@ describe("the ending of a refusal binds the state it read (M1, Sonnet)", () => {
         hold.job_id,
       ),
     ).toBe(1);
+  });
+});
+
+describe("an unverifiable refusal is reconsidered when NEMAR can read the job (item 3b)", () => {
+  /** An unverifiable row whose cancel Tapis has not taken: it is `mismatch` and still `created`. */
+  async function stuckUnverifiable() {
+    const { hold, uuid } = await unreadableJob();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    await refuse3(hold.job_id);
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "created",
+      partner_state: "mismatch",
+      partner_flag: "unverifiable",
+    });
+    return { hold, uuid };
+  }
+
+  test("a job that matches, read once Tapis recovers, is verified again and NOT cancelled; the person is charged only what it uses", async () => {
+    const { hold, uuid } = await unreadableJob();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    await refuse3(hold.job_id);
+    expect(row(w, hold.job_id).partner_flag).toBe("unverifiable");
+    // Tapis answers again; clear the injected failures but keep the job.
+    fx.tapis.clearFailures();
+    const subsBefore = fx.tapis.subscriptions.length;
+    const tick = await reapExpiredHolds(fx.env());
+    expect(tick).toMatchObject({ mismatches: 1, recovered: 1, ended: 0 });
+    expect(cancels().filter((c) => c.status < 400)).toHaveLength(0);
+    expect(fx.tapis.jobs.get(uuid)?.status).toBe("RUNNING");
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "submitted",
+      partner_state: "verified",
+      partner_flag: null,
+      flag_mismatch: 0,
+      cancel_requested_at: null,
+      cancel_reason: null,
+      partner_read_failures: 0,
+    });
+    expect(kinds(hold.job_id)).toEqual(["hold"]);
+    expect(own().held_milli).toBeGreaterThan(0);
+    expect(fx.tapis.subscriptions.length).toBe(subsBefore + 1);
+    expect(
+      w.h.db
+        .query(
+          "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'compute.partner.recovered' AND resource_id = ?",
+        )
+        .get(hold.job_id),
+    ).toEqual({ n: 1 });
+    // From here it is an ordinary job: it finishes and the person pays what it used.
+    fx.tapis.advance(uuid, "FINISHED");
+    setTapisTimes(fx, uuid, 30 * MINUTE, 0);
+    await runComputeAdvanceCron(fx.env());
+    expect(row(w, hold.job_id).state).toBe("finished");
+    expect(kinds(hold.job_id)).toEqual(["hold", "charge"]);
+    expect(tenant()).toBeNull();
+  });
+
+  test("a job that does NOT match when it can be read is a real mismatch with its own word, cancelled and charged to the partner", async () => {
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person, { owner: "someone-else" });
+    run30(uuid);
+    fx.tapis.down();
+    expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
+    fx.tapis.up();
+    fx.tapis.fail("GET /v3/jobs/:uuid", 403, 1000);
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    await refuse3(hold.job_id);
+    expect(row(w, hold.job_id).partner_flag).toBe("unverifiable");
+    fx.tapis.clearFailures();
+    const tick = await reapExpiredHolds(fx.env());
+    expect(tick).toMatchObject({ mismatches: 1, ended: 1, recovered: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "cancelled",
+      partner_flag: "owner_mismatch",
+    });
+    expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+    expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
+    expect(tenant()?.charged_milli).toBeGreaterThan(0);
+  });
+
+  test("a job that is CANCELLED when it can be read stays refused (it did not get to run)", async () => {
+    const { hold, uuid } = await stuckUnverifiable();
+    fx.tapis.clearFailures();
+    fx.tapis.advance(uuid, "CANCELLED");
+    const tick = await reapExpiredHolds(fx.env());
+    expect(tick).toMatchObject({ mismatches: 1, ended: 1, recovered: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({ state: "cancelled", partner_flag: "unverifiable" });
+    expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
+  });
+});
+
+describe("a report whose read is not a moment's outage binds nothing (item 4)", () => {
+  test("an answer that is not what Tapis's specification says, and a 400, are 422 tapis_job_unreadable", async () => {
+    for (const inject of [
+      () => fx.tapis.nonJson("GET /v3/jobs/:uuid", 5),
+      () => fx.tapis.fail("GET /v3/jobs/:uuid", 400, 5),
+    ]) {
+      const hold = await reserve(w, person);
+      const uuid = await partnerLaunch(w, hold, person);
+      inject();
+      const res = await report(hold, { tapis_job_id: uuid });
+      expect([res.status, res.json?.code]).toEqual([422, "tapis_job_unreadable"]);
+      expect(row(w, hold.job_id)).toMatchObject({ tapis_uuid: null, partner_state: null });
+      fx.tapis.clearFailures();
+    }
+  });
+
+  test("a Tapis that is down at the moment (a 503, no connection) still binds pending", async () => {
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person);
+    fx.tapis.fail("GET /v3/jobs/:uuid", 503, 5);
+    expect((await report(hold, { tapis_job_id: uuid })).status).toBe(202);
+    expect(row(w, hold.job_id).partner_state).toBe("pending");
+  });
+
+  test("with Tapis access not configured nothing is bound", async () => {
+    const hold = await reserve(w, person);
+    const uuid = await partnerLaunch(w, hold, person);
+    const res = await partnerCall(w, "POST", `/compute/jobs/${hold.job_id}/report`, {
+      token: person.token,
+      json: { tapis_job_id: uuid },
+      env: { TAPIS_TENANT_ID: undefined } as never,
+    });
+    expect([res.status, res.json?.code]).toEqual([422, "tapis_job_unreadable"]);
+  });
+});
+
+describe("a cancel Tapis definitively refuses ends the row (item 4)", () => {
+  for (const status of [400, 403, 404]) {
+    test(`HTTP ${status} on the blind cancel: the hold is released, the WHOLE hold charged to the partner, a warn line; the slot is free`, async () => {
+      const { hold } = await unreadableJob();
+      fx.tapis.fail("POST /v3/jobs/:uuid/cancel", status, 1000);
+      const tick = await refuse3(hold.job_id);
+      expect(tick).toMatchObject({ unverifiable: 1, refused: 1, ended: 1 });
+      expect(row(w, hold.job_id)).toMatchObject({
+        state: "cancelled",
+        partner_state: "mismatch",
+        partner_flag: "unverifiable",
+      });
+      expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
+      expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
+      expect(tenant()?.charged_milli).toBe(row(w, hold.job_id).held_milli);
+    });
+  }
+
+  test("a transient failure of the cancel (a 500) still keeps the row", async () => {
+    const { hold } = await unreadableJob();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 500, 1000);
+    const tick = await refuse3(hold.job_id);
+    expect(tick).toMatchObject({ unverifiable: 1, ended: 0 });
+    expect(row(w, hold.job_id).state).toBe("created");
   });
 });
