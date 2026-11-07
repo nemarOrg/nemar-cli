@@ -278,6 +278,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listMyComputeJobs",
     "listUnmatchedComputeRows",
     "mintComputeObserverRun",
+    "moveComputeCharge",
     "placeComputeHold",
     "putComputePolicy",
     "readComputeRecord",
@@ -454,6 +455,7 @@ const POST_SPLIT_ADDITIONS = [
   "listComputeAccessReports", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "requeueComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "mintComputeObserverRun", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "moveComputeCharge", // epic #2021 phase D4: POST /admin/compute/jobs/:id/move-charge (owner)
   "createOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients (shared/contract/oidc-admin.ts)
   "listOidcClients", // epic #2014 phase #2016: GET /admin/oidc/clients
   "getOidcClient", // epic #2014 phase #2016: GET /admin/oidc/clients/:client_id
