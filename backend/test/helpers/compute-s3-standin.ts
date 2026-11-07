@@ -75,6 +75,11 @@ export interface StandinFailure {
   code?: string;
   /** How many matching requests answer the error before it clears. Default 1. */
   times?: number;
+  /**
+   * Runs when the failure fires, before the error is answered: what a CONCURRENT writer did while this
+   * request was in flight (for example, the object it refuses to overwrite was written by the other).
+   */
+  beforeAnswer?: () => void | Promise<void>;
 }
 
 export interface ComputeS3Standin {
@@ -303,6 +308,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
 
     const injected = takeFailure(entry.op, entry.bucket, entry.key);
     if (injected) {
+      await injected.beforeAnswer?.();
       entry.code = injected.code ?? "InternalError";
       return errorXml(entry.code, "an injected failure", injected.status);
     }

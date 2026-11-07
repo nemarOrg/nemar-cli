@@ -362,6 +362,8 @@ describe("fixed words", () => {
       "unreserved",
       "unattributed",
       "scheduler",
+      "partner_release",
+      "hold_expired",
     ]);
     expect([...RESULT_REFUSAL_DETAILS]).toEqual([
       "results_too_large",
@@ -459,6 +461,7 @@ describe("ledger reasons", () => {
       "expired",
       "final_settlement",
       "unreserved_usage",
+      "charge_moved",
     ]);
     expect(new Set(COMPUTE_LEDGER_REASONS).size).toBe(COMPUTE_LEDGER_REASONS.length);
     for (const w of COMPUTE_LEDGER_REASONS) expect(COMPUTE_WORD_RE.test(w), w).toBe(true);

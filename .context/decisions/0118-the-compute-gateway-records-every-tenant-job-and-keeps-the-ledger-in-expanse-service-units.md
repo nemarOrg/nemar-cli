@@ -857,3 +857,185 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
 8. **Deviations from the phase issue, recorded.**
    The header parser is the shared one (item 2); a dataset needs its version (item 2); `--dry-run --json` prints the request, not "the Worker's answer", because there is none; `logs --json` wraps the text because the answer is not JSON; `cancel` of an ended job exits 0 (the Worker's 200); `cancel` asks for confirmation on a terminal and needs `--yes` with `--json` or without one; the job ids of `logs`, `results` and `cancel` are checked locally (exit 2, where `status` of phase D2 exits 1).
    Not verified: a real R2 PUT of an archive (the S3 interface is a stand-in built from the specification); a real SIGINT on a terminal (the test sends the signal to the process); Windows paths.
+
+## Amendment 2026-11-07 (#2025): the partner contract, holds, reports, release, the reaper and the move of a charge (phase D4)
+
+Migration `0134_compute_partner.sql`, `backend/src/routes/compute/partner.ts`, `backend/src/services/compute-partner.ts`, `compute-report-verify.ts`, `compute-hold-reaper.ts`, `shared/contract/compute-partner.ts` and `compute-partner-request.ts`, the `moveCharge` operation of `compute-ledger.ts` and `nemar admin compute move-charge` build the partner half of the epic (#2021).
+"Item N" means the numbered item of THIS amendment.
+The partner (`compute.nemar.org`, run by another institution) is treated as potentially hostile or compromised: it can mint a Tapis token for any username, so a Tapis job's `owner` and its tag prove nothing alone.
+Only the bound Tapis uuid and NEMAR's own read of that job prove what ran.
+
+1. **Three routes, one credential.**
+   `POST /compute/holds`, `POST /compute/jobs/:id/report` and `DELETE /compute/holds/:id` accept ONE credential: an access token for a person carrying `compute.reserve`, through `oidcBearer` (the amendment of ADR 0119 of the same date lists the refusal words and the audience decision).
+   The person is the token's account and the client is the token's client; a reservation is the person's AND the client's, and any job that is not both is `job_not_found`, the same answer as an absent one, on every route.
+   Every write needs an `Idempotency-Key` (`^[A-Za-z0-9._:-]{1,64}$`, else 400 `idempotency_key_required`).
+2. **Migration 0134 writes only what was absent.**
+   Read first and found: the unique index on the bound Tapis uuid exists (`compute_jobs.tapis_uuid TEXT UNIQUE`, 0115), as do the orphan slot, the rotation stamp (`examined_at`), the cancel intent and reason and the four flags; the client's caps exist twice (item 4).
+   It adds the table `compute_idempotency_keys (scope, key, request_hash, job_id, created_at)` with the primary key `(scope, key)`, the scope `client:<public client id>`; three columns of `compute_jobs` (`partner_state`: NULL for a reservation, `pending`, `verified`, `mismatch`; `partner_flag`: a fixed word; `partner_verified_at`); and three partial indexes (the client's live jobs, the open reservations, the unverified rows).
+   Epic A keys a PERSON's job by `(account_id, idempotency_key)` and compares `spec_digest`; that path is not retrofitted, and a partner's keys never meet a person's.
+3. **A reservation is one conditional insert.**
+   `createJob` takes a partner's job as its hold body BYTE FOR BYTE (the exact text is `spec.json`, its digest `spec_digest`), for a person's account.
+   The hold's own WHERE carries the person's compute access (`requireActiveAccess`), the person's live-job limit, the client's open-reservation cap, the client's UTC-day cap and the balances; the idempotency claim is the batch's last statement, gated on the hold, so two requests with one key make one hold and a request that loses a race writes nothing.
+   `HoldGuard` could take the client predicates as it stood, so no second hold path was added: `PartnerJobInput` gained `caps`, `idempotency` and `requireActiveAccess`, and the refusal is classified AFTER the insert (`over_concurrency` before `client_cap_reached`, the order the contract states).
+   The order of refusal of `POST /compute/holds`: the person's access (`no_compute_access` for none, requested, denied, revoked and a deleted account; `suspended`), the body (`invalid_spec` naming the field), a repeated key (the original reservation, or `idempotency_conflict`), the owner's ceilings (`partition_not_offered`, `over_job_limit`), the person's live jobs (`over_concurrency`), then the hold (`no_compute_access` or `suspended` again if access ended in between, `insufficient_balance`, `platform_budget_exhausted`, `over_concurrency`, `client_cap_reached`).
+   The answer is 201 `{ job_id, hold_id, tag, expires_at }`; `hold_id` is `hold_` and the job's 24 hex digits (never a row number, so it is no oracle), and `expires_at` is the creation plus the owner's `reservationWaitMinutes`.
+4. **The client's caps: the owner's policy first, closed by default.**
+   The client's record has `cap_open_reservations` and `cap_su_per_day` (NULL means "none set yet", ADR 0119 rule 8) and the owner's policy has `clients[<client id>] = { maxOpenReservations, maxReservedMilliPerDay }`.
+   The policy is the source (strict, versioned, audited, set with `nemar admin compute policy set`): a client the policy does not list has NO reservations (`client_cap_reached`), as the policy's other defaults are closed; the client's own record is a second ceiling when it is set, and the smaller of the two stands.
+   Open reservations count the client's live partner jobs (running ones included); the day's SU counts every hold taken since UTC midnight, a released one included, so reserving and releasing in a loop does not dodge it.
+   No new column or admin command: there are no defaults in code, and zero is what an unlisted client gets.
+5. **A report binds, then NEMAR reads the job back (`reportJob`).**
+   The job must be the caller's (404 otherwise); then the key (`idempotency_conflict`); a reservation that was refused before is `report_mismatch` again (and the cancel is asked again); an unbound one that ended is `hold_released`, one the person cancelled is `hold_cancelled`, and one whose person's compute ended is `suspended` or `no_compute_access`.
+   The declared files are judged first and whole (item 8).
+   A bound uuid is a repeat (replay) or `already_bound` (409).
+   For a new uuid NEMAR reads the Tapis job (one attempt, 8 seconds): a job Tapis does not have is `tapis_job_not_found` (422) and binds nothing; a job that is NEMAR's own (owned by the NEMAR service identity, or naming another NEMAR job in its tags) or that another row holds as its job or its orphan is `tapis_job_in_use` (409), and is never bound or cancelled on a partner's word; a Tapis that cannot be read just now binds the row `pending` and answers 202 (a refusal of NEMAR's credential is `tapis_job_unreadable` and binds nothing; item 17).
+   The bind is one conditional UPDATE (a reservation that is `created`, unbound, not cancelled, whose person's compute is `active` in the same statement), with the unique index behind it for a race the pre-check cannot close.
+6. **Verification (`checkReport`).**
+   The record's owner is the person's Tapis username (`tapisUsernameForSub`: the OIDC `sub` itself, the identity transform; the day the partner names a fixed reversible transform, that one function learns it), the application and its version are the reservation's, the queue is the reservation's partition, the nodes, the cores per node, the minutes and (when the hold named one) the memory do not exceed the hold's, and the record's resources priced for every minute it may run (`suMilliFor`) do not exceed the hold.
+   A figure the record does not carry cannot be shown within the hold, so it fails.
+   The GPUs are not on the job record; the review round reads the scheduler options through a narrow accessor and holds them to an allowlist (item 17).
+   A match is ONE batch (`pending` to `verified`, the job `submitted`, the ACCESS report owed when a Slurm id shows), after which NEMAR's webhook is subscribed (a Tapis call is never inside a batch); the ordinary lifecycle follows the job from there.
+   Until then NOTHING is charged beyond the hold, and no generic path reads, cancels or settles the row (`isUnverifiedPartnerJob` is checked in `advanceComputeJob`, `driveCancel`, `applyTapisJob` and the lists of the tick and of the cancel sweep).
+7. **A mismatch is refused, cancelled, flagged and charged to the partner, never to the person.**
+   The batch records the intent only (`partner_state = mismatch`, the flag word `owner_mismatch`, `app_mismatch` or `resources_mismatch`, the job flagged `mismatch`, the cancel intent, one audit row `compute.partner.mismatch` of fixed words); the Tapis cancel and the ending are `finishMismatch`'s, run at once and retried by the tick until a read shows the job over.
+   A job the record shows is NEMAR's own is never cancelled; one whose record is gone is settled by the row's own evidence (`partnerLostSettlement`), and a job that cannot be shown not to have run is never released with no charge (the `tapis_record_lost` rule).
+   The end is ONE batch (`commitPartnerMismatchEnd`): the terminal transition (`cancelled`), the person's hold RELEASED in full, what ran priced by `provisionalCharge` over the record's actual resources as an `overrun` of the partner pool `tenant` (`unreservedChargeStatements`, counted against the `people` budget once), the settled stamp, and the row's pseudonym cleared and its `charged_milli` set to 0.
+   The phase issue said to price what ran "with Epic A's settle function" and write an `overrun` entry; `settleStatements` charges the hold's pool, which is the person's, and the epic's own acceptance criterion and decision 5 say no path charges a person for a job NEMAR has not verified.
+   The entry is therefore the unreserved overrun of the partner pool, once per job (`job:<id>:unreserved`), and the formula is `provisionalCharge`, unchanged.
+8. **A partner's files enter `records/` only after the match.**
+   A report's `files` (`{ path, size, sha256 }`, at most 500, the owner's file and total limits, the path rule in any encoding) are judged before anything is bound and refused whole.
+   A verified job is given the copy if every declared file is in `incoming/<id>/` at its declared size, else upload addresses (the declared length is signed); a job NEMAR could not read back yet is given addresses and nothing is copied; a refused job gets neither.
+   The same report again, once uploaded, copies each file once (`finalizeSubmittedFiles`, wired now: its gate is `partner_state = verified`, in the function itself, because a copy into the locked records cannot be undone) and writes the manifest.
+   `presignIncomingUploads` serves a partner's live job in any state and signs the declared length.
+9. **Release, a person's cancel, the cascade (the open points (a) to (d) of the A8 amendment).**
+   `DELETE /compute/holds/:id` ends a reservation with no Tapis job through the lifecycle's own release (the job `cancelled`, reason `partner_release`, the ledger reason `released`); a repeat is 200; a reservation a Tapis job is bound to (in any state of the verification, or ended) is `hold_bound`.
+   The release statement binds "no Tapis job" itself, so a report that bound one in the meantime wins; a release makes no Tapis call.
+   (a) The reaper expires an unlaunched reservation (item 10).
+   (b) A person's cancel of a reservation still records the intent and leaves the hold open; the reaper resolves it at any age (a Tapis job found under the tag of a cancelled reservation is refused, `hold_ended`), and a report on it is `hold_cancelled`.
+   (c) The cascade still fails open on an unbound reservation, and the fail-closed is at the report (a late report of a person whose compute ended is refused, and the token itself ends with the compute grant) and in the reaper and the sweep (a job found under the reservation of a person whose compute ended is refused, `hold_ended`, and charged to the partner).
+   (d) A stuck reservation is listed by `nemar admin compute jobs list --state created`, and a refused or ambiguous one by `--flag mismatch`; the job view carries `partner_state` and `partner_flag`.
+10. **The hold reaper (`reapExpiredHolds`, the 30-minute tick, production only, not in `DEV_CRON_ALLOWLIST`, reads no switch).**
+    Twenty-five rows of each of three lists a tick, in rotation by `examined_at`, stamped before the step.
+    Reservations past the owner's wait (or with a cancel recorded) are looked up in Tapis BY THEIR TAG first: no Tapis job that no row accounts for, affirmatively (the search succeeded), releases the hold with the ledger reason `expired` (job `cancelled`, reason `hold_expired`); one is bound and verified like a report, or refused when it is another owner's, the reservation was cancelled or the person's compute ended; several are flagged `ambiguous_tag` and the hold is KEPT (the tenant sweep then accounts for the jobs that skipped the reservation, and the next tick releases); ANY Tapis error keeps the hold, records `tapis_unreachable` and retries.
+    NOTHING IS EVER RELEASED ON AN ERROR, and a Tapis call is never inside a batch.
+    The same tick verifies `pending` rows (a binding whose job Tapis keeps answering 404 for four hours is withdrawn, back to a reservation) and carries out `mismatch` rows.
+11. **The tenant sweep leaves a partner's job under a live reservation to its report.** (Replaced by item 20.)
+    A Tapis job no row is bound to is left alone when its tag names exactly one partner reservation that is unbound, not cancelled, not flagged, not older than the wait plus an hour, and the job's owner is that reservation's Tapis username (`isAwaitingPartnerReport`, counted as `awaiting_report`); otherwise it skipped the reservation, as before.
+    A tag proves nothing, so the owner must agree; without this a sweep landing between a launch and its report would cancel a legitimate job and the report would be refused `tapis_job_in_use`.
+12. **Moving a charge (`POST /admin/compute/jobs/:id/move-charge`, `nemar admin compute move-charge <job> --to <account id>`, OWNER only).**
+    The ledger operation the A7 amendment promised, for a job the tenant sweep charged to the partner pool.
+    Two `adjust` entries in ONE batch, with an audit row `compute.charge.move` and the reason `charge_moved`: the first LOWERS the partner pool's charge by the figure of the job's unreserved entry, the second RAISES the person's pool of the same word by that figure, and NEITHER names a budget.
+    The budget is counted once because the unreserved entry counted the consumption; `adjustPool` names the budget on a raise (which there is new consumption) and a move is not, so the naive form (the person's raise naming the `people` budget) counts it twice, and the partner's lowering naming it would give budget back.
+    The invariants, each tested: both pools move by the same figure; no stored total is negative; the people budget's charged total is the same before and after; a refusal writes nothing and a failure of the second half leaves nothing of the first; the entries' keys are made of the job (`move:<job>:out`, `move:<job>:in`), so a charge moves once (a repeat is a replay, another account is `already_moved`).
+    Refused: a job that was reserved (`job_reserved`, the flag is its own term), one with no unreserved charge or not over (`no_unreserved_charge`), an account that is absent, deleted or not in good standing (a verified or approved account), or without a pool of the word (`target_has_no_pool`).
+    The job must have been indexed from Tapis by the sweep and be over, so no person is charged for a job NEMAR has not seen and followed to its end; WHO ran it is the owner's evidence, outside the system.
+    It is owner-only, not admin-level as the phase issue said, because raising a person's charge is the owner's under the interim rule of `routes/admin/compute.ts` (easy to loosen).
+    The person's available may go negative; holds are refused until a grant brings it back.
+13. **Lifecycle changes the partner needed.**
+    A partner job's Tapis `FINISHED` stands without the launcher's documents (it has no NEMAR launcher; `planFromTapis`), and no "results are ready" mail is sent for it (there are no results in NEMAR's bucket).
+    `TerminalPlan.releaseReason` lets the reaper's release carry the ledger reason `expired`.
+    The new cancel reasons are `partner_release` and `hold_expired`, the new ledger reason `charge_moved`.
+14. **The compute switch is not read here** (`compute-source-scan.test.ts` holds it): with compute off the routes work, a hold is taken and the reaper expires it, as for a person's submission.
+    The three routes are writes, so `read-only` maintenance refuses them (503) like any write; the crons, the reaper included, do not read the maintenance mode.
+15. **Deviations from the phase issue, recorded.**
+    The issue's states say `held`: the real word is `created`, and `partner_state` says where the verification is.
+    The issue's migration number 0128 is 0134 (the epic's range moved); the unique index it asked for if absent was present.
+    The mismatch overrun is on the partner pool and the hold is released (item 7), not an overrun on the person's pool.
+    The client's pool identity the issue asked to add is the existing partner pool `tenant` (one partner today); a pool per client would be a change of the A7 sweep as well.
+    The route's `files` entries carry a `sha256` as the issue said, recorded as the partner's claim.
+    The move of a charge is owner-only (item 12).
+16. **Not verified, and listed so nobody reads it as fact.**
+    Whether the tenant credential can search by tag and read another owner's job: the stand-in's `shareJob` models an arrangement of the real tenant (the partner shares its jobs with NEMAR's service identity, or the credential is a tenant administrator's); if the search cannot see them, an empty search is not affirmative and the reaper would release a reservation whose job exists (the sweep cannot see it either). Item 18 makes this the owner's explicit confirmation, closed by default.
+    Which Tapis username the partner gives a person (design question 13): the identity transform of the `sub` is assumed (item 6), and the A7 sweep's mapping of an owner to an account (by the gateway pseudonym) is not the same assumption.
+    The GPU count of a partner's job is not on the record; item 17 reads the scheduler options and caps the final charge.
+    R2's enforcement of a signed content length on a presigned PUT (the size read back at finalize is the bound either way).
+    There is no cap on the bytes a partner may hold in `incoming/` at once (each reservation is bounded by 500 files and the owner's limits, a client by its open-reservation cap, and the bucket empties `incoming/` after two days); idempotency rows older than seven days are pruned (item 21).
+
+## Amendment 2026-11-07 (review of PR #2077): what the review round of phase D4 settled
+
+An independent adversarial review and an atomicity review of the first D4 pull request found two critical and several important faults.
+They are settled here; each item names the test that kills it.
+"Item N" below means the item of this amendment; the items above are amended where they said otherwise.
+
+17. **A job NEMAR cannot read is never left bound for ever (C1), and the person is never charged for resources NEMAR did not verify (C2).**
+    A refusal of NEMAR's own credential reading a reported job (HTTP 401 or 403, or any other 4xx) is `tapis_job_unreadable` (422) and binds NOTHING; a job Tapis does not have, or answers for as another uuid, is `tapis_job_not_found`; only a Tapis that cannot answer just now (a timeout, a 5xx, no connection) binds the row `pending` and answers 202.
+    A bound job the tick could not read on three separate ticks over two hours (item 27) is refused as a mismatch with the new fixed word `unverifiable`: the intent is recorded with its audit row, the Tapis job is cancelled blind (the cancel needs only the uuid), the person's hold is released, the whole hold is an `overrun` of the partner pool (item 29), and the tick logs it at warn.
+    A cancel that fails transiently keeps the row, the hold and the slot, and `cancel_pending_failed` counts it after an hour (the status view and the cancel sweep's line carry it); nothing is released on an error. A cancel Tapis refuses for good ends the row (item 28).
+    The scheduler options of a record (`parameterSet.schedulerOptions`, the only part of `parameterSet` that is read, through `schedulerArgsOf`) are held to an allowlist: none, or exactly one `--gpus=N` with N no more than the hold's GPUs; anything else, and an option list NEMAR cannot read, is a `resources_mismatch`.
+    The owner may pin the execution system (`policy.partner.execSystemId`); a record on another system is a `resources_mismatch`.
+    The verification cannot see everything Expanse allocates, so the observer's final settlement CAPS a partner job's charge to the person at the hold the person made (`held_milli`); the excess is an `overrun` of the partner pool, once (key `job:<id>:unreserved`), the job is flagged `resources_mismatch`, and one audit row `compute.partner.final_capped` records it.
+    Killed by `compute-partner-unverifiable.test.ts` and `compute-partner-final.test.ts`.
+18. **The partner contract is closed until the owner confirms NEMAR can see the tenant (I2).**
+    `policy.partner = { tapisVisibilityConfirmed, execSystemId? }` is optional and absent means off; a confirmed block must name the execution system.
+    While it is not true `POST /compute/holds` is 503 `partner_not_enabled` and the reaper NEVER releases a reservation on an empty search (an empty answer is evidence only when the identity can see the jobs): it keeps the hold, counts `unconfirmed` and logs at warn.
+    The same switch keeps a development Worker from reaching a production Tapis through this contract, because the policy is per environment.
+    Whether the tenant credential can search by tag and read another owner's job remains the owner's to confirm; the confirmation is what the owner sets once it has.
+19. **A person reads a partner job's output only once NEMAR verified it (I1).**
+    `GET /compute/jobs/:id/logs` is `logs_not_available` for a partner row whose `partner_state` is not `verified`.
+    A refused or unmatched job may be another owner's, and its output is not the person's.
+    A refused job's end also stamps `result_records_at` (nothing of NEMAR's launcher exists to copy, and another owner's output must never be copied into the person's locked records) and owes no ACCESS report row.
+20. **The sweep shelters only what can be shown to be a legitimate launch (I2, Opus; M2, Sonnet).**
+    Item 11 is replaced.
+    A Tapis job no row is bound to is left to its report only when its owner is the Tapis username of an open reservation, NEMAR's read of it shows exactly ONE NEMAR tag, a search of the tenant by that tag finds exactly ONE job, the tag names a reservation that is unbound, not cancelled, not flagged and owned by that same username, the read passes `checkReport`, and the job is inside the reservation's STORED expiry plus an hour (extended by one reaper tick for each 25 reservations ahead of it in the reaper's line, at most six ticks, so a backlog the reaper has not drained does not outrun the shelter).
+    The sheltered jobs are removed BEFORE the run's slice of 25, so they never use a slot; at most 100 candidates are read in full a run.
+    An ambiguity of one reservation counts only the jobs owned by the reservation's Tapis username, so a tagged job another owner adds cannot keep a hold open.
+21. **Stored expiry, keys, files (M3, M4, m2, m3, m4, M7).**
+    `compute_jobs.partner_expires_at` is written once at creation from the owner's wait then; the answer, the reaper and the sweep all use it.
+    The client's daily cap is bound to the start of the UTC day read once before the batch.
+    A request that fails its cheap checks (the files, the state refusals) does not claim its key; a key already used for another request is still `idempotency_conflict` first.
+    A repeat of a hold's key after the hold ended without a job is `hold_released` or `hold_cancelled`, and any other repeat carries the job's `state`.
+    A refused reservation's repeat is told what happened: `hold_ended` is `hold_cancelled`, never an owner mismatch.
+    A key that names a job removed after its retention is `idempotency_conflict`, never a 500.
+    `compute_idempotency_keys` older than seven days are deleted by the reaper, 500 a tick.
+    The first accepted list of files is pinned to the job by its digest (`partner_files_digest`): a later report may repeat it and no other.
+    At the copy the store's SHA-256 of an object is compared with the declared one where the store returns it; where it does not, the declaration is checked by size, as before.
+    A copy the store refuses because a concurrent report already wrote the destination at the declared size counts as copied.
+    A Tapis job id the contract takes is the table's (1 to 64 letters, digits and `-`).
+22. **The reaper's lists name their indexes (M3, Sonnet).**
+    `OPEN_RESERVATIONS_SQL` and `UNVERIFIED_ROWS_SQL` use `INDEXED BY`, the unverified index states `state = 'created'`, and `compute-partner-migration.test.ts` pins both plans (the index, no temporary b-tree).
+23. **Moving a charge states whose it is (m6, Opus).**
+    Item 12 gains one rule.
+    The target account must be the one the job's Tapis owner was attributed to when the sweep indexed it; any other account, and any account for a job nothing attributed, needs the owner's explicit `confirm_unproven_owner` (`--confirm-unproven-owner`), else 409 `owner_not_proven`, told only for a move that would otherwise be made.
+    The audit row records the attributed account, whether the owner was proven and whether the owner confirmed an unproven one, and the answer carries `attributed_account_id` and `owner_proven`.
+    The batch's success is judged by `changes > 0`, because D1 counts the rows a trigger writes.
+24. **Not changed, and why.**
+    The pull request's other findings that were reviewed and kept: the dev Worker's reach is closed by item 18 and not by a second gate in the report route; the reaper's per-list bound stays 25; `settleFinal` is not changed (the cap is applied by its caller, so its single-writer contract stays).
+
+## Amendment 2026-11-07 (second review round of PR #2077)
+
+An Opus review of the first round's changes found one critical fault and several others.
+They are settled here; "item N" continues the numbering above.
+
+25. **`parameterSet` is read in both wire forms (critical).**
+    The Jobs specification types `parameterSet` as a JSON STRING and the documentation's examples show an object; the first round read only the object, which would have refused every spec-shaped partner job as a `resources_mismatch` and cancelled it.
+    `schedulerArgsOf` now parses a string under a bound (262,144 characters) and reads only `schedulerOptions`; a string that is not JSON, is over the bound, or holds no readable list is unreadable and never verified.
+    The Tapis stand-in serves the specification's string by default (`parameterSetAs("object")` for the other form), so every happy path of the partner suites covers the specification.
+26. **The owner lists the options a tenant merges in.**
+    `policy.partner.allowedSchedulerArgs` (exact strings, at most 20, default none, never a `--gpus` or `--gres` option) are accepted in addition to at most one `--gpus=N` within the hold.
+    The owner must read ONE real job record of the tenant and copy the options it shows (and its execution system) BEFORE turning `tapisVisibilityConfirmed` on; the rest stay a `resources_mismatch`.
+27. **`unverifiable` needs sustained failure, and is reconsidered.**
+    The reaper's tick counts a failed read of a bound job (`partner_read_failures`, `partner_first_failed_at`); a request's failed read counts nothing.
+    A job is refused only after at least three failed reads on separate ticks, the first at least two hours ago; a read that succeeds ends the count.
+    A job refused as `unverifiable` that NEMAR can read later, and that matches and is not `CANCELLED`, is moved from `mismatch` to `verified` in one batch (the cancel intent that refusal recorded is withdrawn, one audit row `compute.partner.recovered`, NEMAR's webhook subscribed) and is NOT cancelled; one that does not match is a real mismatch with its own word.
+28. **A report binds `pending` only for an unavailable Tapis; a cancel Tapis refuses for good ends the row.**
+    Any other error at the report (an answer that is not what the specification says, a 4xx, Tapis access not configured) is `tapis_job_unreadable` (422) and binds nothing.
+    In the blind cancel of an `unverifiable` row, HTTP 400, 403 or 404 on the cancel is definitive: the row ends (the hold released, the WHOLE hold charged to the partner's pool, a warn line `cancel_refused`) so that it cannot pin the person's slot for ever; any other failure of the cancel keeps the row as before (item 17's "a cancel that does not take" means a transient one).
+29. **An unread job is charged the whole hold, to the partner.**
+    The unread settlement of item 17 charged the minimum, against the fail-closed rule; it charges `held_milli` as an `overrun` of the partner pool, once by its key.
+30. **The shelter and the ambiguity count the same way.**
+    The sweep's tag search keeps only the jobs the reservation's Tapis username owns, that are not over and that no row accounts for, and requires exactly one; the reaper ignores an ended first attempt when a live retry exists.
+    A failed first attempt that was resubmitted is sheltered and its report binds; a foreign-owned job carrying the tag does not unshelter the person's own.
+    The shelter is evaluated lazily while the run's slice fills and stops reading once it is full.
+31. **Turning the partner contract off.**
+    A policy write that drops or flips `tapisVisibilityConfirmed`, or omits the block (a file written before it existed does), is refused with 409 `partner_reservations_open` and the count while partner reservations are open, unless `--force-partner-off` (`force_partner_off`) is given; the answer then says how many are frozen.
+    While it is off the reaper still never releases on an empty search, but a reservation a day past its expiry whose person's compute ended, or whose cancel was asked for, is released WITHOUT a Tapis call (`released_unseen`).
+    A repeat of a hold's key replays the reservation (with its state) whether or not the contract is on; only a new reservation is `partner_not_enabled`.
+32. **The cap applies at both settlements.**
+    The provisional settlement charges a partner job's person at most `held_milli` and puts the rest on the partner pool (`compute-partner-excess.ts`, shared with the observer; whichever writes the unreserved entry first wins its key, so the partner is charged the first figure and never twice).
+    The flag word `resources_mismatch` and the audit row need a difference above the hold beyond the owner's settle tolerance; inside it the job is only marked `flag_overrun`.
+    The final stamp reads the person's pool only.
+    A job with no Slurm id and no final settlement is charged to the person by its provisional settlement alone, which never exceeds the hold.
+33. **Staging.**
+    The partner policy is per environment: the development Worker's policy stays unconfirmed (`tapisVisibilityConfirmed` absent or false), so the contract answers 503 there, and the development Worker never holds production tenant credentials.
+    A staging test of the contract confirms the policy in staging only, against the stand-in or a non-production tenant.
+

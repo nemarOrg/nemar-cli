@@ -36,6 +36,7 @@ import {
 import { runAccessReportCron } from "../src/services/access-attributes";
 import { archiveRetrySweep } from "../src/services/archive-retry";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
+import { reapExpiredHolds } from "../src/services/compute-hold-reaper";
 import { runUploadExpiryCron } from "../src/services/compute-uploads";
 import {
   DEV_EPHEMERAL_BAND_END,
@@ -579,6 +580,55 @@ describe("the release of abandoned uploads refuses outside exact production (#20
     ).toMatchObject({ examined: 0, expired: 0, errors: [] });
     const p = untouched();
     await runUploadExpiryCron({ ENVIRONMENT: "production", DB: p.db } as unknown as Bindings);
+    expect(p.touched()).toBe(true);
+  });
+});
+
+describe("the partner's hold reaper refuses outside exact production (#2025)", () => {
+  // The reaper looks reservations up in a Tapis tenant, cancels the jobs of a refusal there and moves the
+  // allocation ledger, and the development database shares real users. It tests `ENVIRONMENT` for the exact
+  // string `production`, so an unset or misspelled binding leaves it off. A D1 that throws on first use
+  // proves nothing was read or written.
+  const untouched = () => {
+    let touched = false;
+    const db = {
+      prepare() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+      batch() {
+        touched = true;
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    return { db, touched: () => touched };
+  };
+
+  for (const environment of [
+    "development",
+    "staging",
+    "test",
+    "",
+    undefined,
+    "prod",
+    "Production",
+    " production",
+  ]) {
+    test(`ENVIRONMENT=${JSON.stringify(environment)}: it returns null with D1 untouched`, async () => {
+      const p = untouched();
+      const e = { ENVIRONMENT: environment, DB: p.db } as unknown as Bindings;
+      expect(await reapExpiredHolds(e)).toBeNull();
+      expect(p.touched()).toBe(false);
+    });
+  }
+
+  test("in production it reaches D1, so the probe above is not vacuous", async () => {
+    const db = realD1(freshDb());
+    expect(
+      await reapExpiredHolds({ ENVIRONMENT: "production", DB: db } as unknown as Bindings),
+    ).toMatchObject({ examined: 0, released: 0, errors: [] });
+    const p = untouched();
+    await reapExpiredHolds({ ENVIRONMENT: "production", DB: p.db } as unknown as Bindings);
     expect(p.touched()).toBe(true);
   });
 });

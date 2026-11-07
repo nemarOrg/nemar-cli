@@ -25,10 +25,17 @@
  * reservation the partner will launch its own Tapis job under (phase D4), and NEMAR never writes a launch
  * specification or takes a submit lease for it, so "never reached Tapis" below is TRUE of it whether or
  * not the partner has launched: ending it would release a hold for a job that may be running. The cascade
- * neither records an intent on it, cancels it nor releases its hold; the pools are frozen all the same,
- * and the reservation is the partner contract's to resolve (an open point for D4's brief). A partner job
- * that HAS a Tapis job is an ordinary live job here: it records the intent and the retried sweep cancels
- * it at Tapis, because NEMAR owns every Tapis job.
+ * neither records an intent on it, cancels it nor releases its hold; the pools are frozen all the same.
+ * The reservation is the partner contract's (phase D4, #2025, ADR 0118): the hold reaper
+ * (`reapExpiredHolds`) resolves it after the owner's reservation wait, looking in Tapis by its tag FIRST;
+ * and the cascade's "fails open" (open point (c) of the A8 amendment) is closed there, not here: a late
+ * report of a person whose compute ended is refused (`suspended`, `no_compute_access`; the token itself
+ * ends with the grant), and the reaper refuses a job it finds under such a reservation (`hold_ended`:
+ * cancelled at Tapis, the hold released, what ran charged to the partner's pool). A person's cancel of a
+ * reservation records the intent and the reaper resolves it at any age. A partner job that HAS a Tapis job
+ * and is verified is an ordinary live job here: it records the intent and the retried sweep cancels it at
+ * Tapis, because NEMAR owns every Tapis job; one NOT yet verified or refused is the partner contract's too
+ * (`isUnverifiedPartnerJob`), because the generic cancel would settle its hold against the person.
  *
  * DELIBERATELY NOT CALLED, and a later reader should not "fix" either:
  *  - A ROLE DEMOTION. Compute has nothing to do with an admin's standing: a person demoted to member is

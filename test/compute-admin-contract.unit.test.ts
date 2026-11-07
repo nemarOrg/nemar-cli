@@ -186,6 +186,13 @@ const VALID: Record<string, unknown> = {
     job_id: "job_0123456789abcdef01234567",
     previous: "outcome_unknown",
   },
+  ComputeMoveChargeResponseSchema: {
+    job_id: "job_0123456789abcdef01234567",
+    to_account_id: 5,
+    pool: "cpu",
+    moved_milli: 2000,
+    replayed: false,
+  },
   ComputeObserverRunResponseSchema: {
     run_id: "11111111-2222-3333-4444-555555555555",
     token: "x.y",

@@ -59,6 +59,7 @@ import {
   runComputeAdvanceCron,
   sweepComputeCancellations,
 } from "./services/compute-advance";
+import { holdReaperLogLine, reapExpiredHolds } from "./services/compute-hold-reaper";
 import {
   pipelineDispatchLogLine,
   runComputePipelineDispatchCron,
@@ -1287,6 +1288,31 @@ export default {
             .catch((err) =>
               console.error(
                 "[access-report] tick failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // #2025 (epic #2021 phase D4, ADR 0118): the partner's hold reaper. A reservation no Tapis job was
+        // reported under, older than the owner's reservation wait, is looked up in Tapis BY ITS TAG and
+        // only then released (no Tapis job found: released; one: bound and verified like a report; several:
+        // flagged and kept; any Tapis error: kept, nothing is ever released on an error). The same tick
+        // verifies a Tapis job whose report could not be read back when it was made and carries out a
+        // refusal (the Tapis job cancelled, the hold released, what ran charged to the partner's pool).
+        // PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it cancels jobs in a tenant and
+        // moves the ledger, and the dev database shares real users. It also refuses outside exact
+        // production on its own and reads no switch. Bounded, and a Tapis call is never inside a batch.
+        // One log line, only when it acted or failed: counts and fixed words.
+        ctx.waitUntil(
+          reapExpiredHolds(env)
+            .then((r) => {
+              const log = r ? holdReaperLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log?.level === "warn") console.warn(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-reaper] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),

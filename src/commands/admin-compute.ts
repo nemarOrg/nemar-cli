@@ -63,7 +63,7 @@ import {
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
 import { accessCommand } from "./admin-compute-access.js";
-import { jobsCommand, observerCommand } from "./admin-compute-jobs.js";
+import { jobsCommand, moveChargeCommand, observerCommand } from "./admin-compute-jobs.js";
 import { pipelineCommand } from "./admin-compute-pipeline.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
@@ -198,6 +198,12 @@ not a policy sends nothing. Every version is kept; the highest is in force. The 
 
 Owner only. --note records why (1 to 500 characters).
 
+The partner contract (policy.partner) is off unless tapisVisibilityConfirmed is true, and a file written
+before that block existed omits it. A write that would turn it off while partner reservations are open is
+refused (they would be frozen: the reaper releases none on an empty search); --force-partner-off writes it
+anyway and says how many are frozen. Before turning tapisVisibilityConfirmed on, read ONE real job record
+of the tenant and copy its execution system and the scheduler options it shows (allowedSchedulerArgs).
+
 Exit codes:
   0  written; the new version is printed.
   1  the file could not be read or is not a policy, the Worker refused (you are not an owner) or
@@ -240,65 +246,83 @@ policyCommand
   .description("Write the next version of the compute policy from a JSON file")
   .option("--file <path>", "The policy, as JSON")
   .option("--note <text>", "Why this version was written (1 to 500 characters)")
+  .option(
+    "--force-partner-off",
+    "Write a policy that turns the partner contract off although partner reservations are open (they are frozen)",
+  )
   .option("--json", "Print the Worker's answer as JSON")
   .addHelpText("after", POLICY_SET_HELP)
-  .action(async (o: { file?: string; note?: string; json?: boolean }) => {
-    const json = o.json === true;
-    if (!requireSignedIn(json)) return;
-    if (o.file === undefined) {
-      failMessage("--file <path> names the policy to write.", { json, answered: true });
-      return;
-    }
-    if (o.note !== undefined && (o.note.length < 1 || o.note.length > NOTE_MAX)) {
-      failMessage(`--note is 1 to ${NOTE_MAX} characters.`, { json, answered: true });
-      return;
-    }
-    let text: string;
-    try {
-      if (statSync(o.file).size > POLICY_FILE_MAX_BYTES) {
-        failMessage(`${o.file} is over ${POLICY_FILE_MAX_BYTES / 1024} KiB, which no policy is.`, {
+  .action(
+    async (o: { file?: string; note?: string; forcePartnerOff?: boolean; json?: boolean }) => {
+      const json = o.json === true;
+      if (!requireSignedIn(json)) return;
+      if (o.file === undefined) {
+        failMessage("--file <path> names the policy to write.", { json, answered: true });
+        return;
+      }
+      if (o.note !== undefined && (o.note.length < 1 || o.note.length > NOTE_MAX)) {
+        failMessage(`--note is 1 to ${NOTE_MAX} characters.`, { json, answered: true });
+        return;
+      }
+      let text: string;
+      try {
+        if (statSync(o.file).size > POLICY_FILE_MAX_BYTES) {
+          failMessage(
+            `${o.file} is over ${POLICY_FILE_MAX_BYTES / 1024} KiB, which no policy is.`,
+            {
+              json,
+              answered: true,
+            },
+          );
+          return;
+        }
+        text = readFileSync(o.file, "utf8");
+      } catch (err) {
+        failMessage(`Cannot read ${o.file}: ${(err as NodeJS.ErrnoException).code ?? "failed"}.`, {
           json,
           answered: true,
         });
         return;
       }
-      text = readFileSync(o.file, "utf8");
-    } catch (err) {
-      failMessage(`Cannot read ${o.file}: ${(err as NodeJS.ErrnoException).code ?? "failed"}.`, {
-        json,
-        answered: true,
-      });
-      return;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      failMessage(`${o.file} is not valid JSON.`, { json, answered: true });
-      return;
-    }
-    const checked = ComputePolicySchema.safeParse(parsed);
-    if (!checked.success) {
-      const lines = checked.error.issues
-        .slice(0, 10)
-        .map((i) => `  ${i.path.join(".") || "policy"}: ${i.message}`);
-      failMessage(
-        `${o.file} is not a valid compute policy; nothing was sent:\n${lines.join("\n")}`,
-        {
-          json,
-          answered: true,
-        },
-      );
-      return;
-    }
-    try {
-      const res = await putComputePolicy(checked.data, o.note);
-      if (json) console.log(JSON.stringify(res, null, 2));
-      else say(`Compute policy version ${res.version} set.`);
-    } catch (err) {
-      failWith(err, null, "Could not write the compute policy.", undefined, { json });
-    }
-  });
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        failMessage(`${o.file} is not valid JSON.`, { json, answered: true });
+        return;
+      }
+      const checked = ComputePolicySchema.safeParse(parsed);
+      if (!checked.success) {
+        const lines = checked.error.issues
+          .slice(0, 10)
+          .map((i) => `  ${i.path.join(".") || "policy"}: ${i.message}`);
+        failMessage(
+          `${o.file} is not a valid compute policy; nothing was sent:\n${lines.join("\n")}`,
+          {
+            json,
+            answered: true,
+          },
+        );
+        return;
+      }
+      try {
+        const res = await putComputePolicy(checked.data, o.note, o.forcePartnerOff === true);
+        if (json) console.log(JSON.stringify(res, null, 2));
+        else {
+          say(`Compute policy version ${res.version} set.`);
+          const frozen = (res as { partner_reservations_frozen?: unknown })
+            .partner_reservations_frozen;
+          if (typeof frozen === "number" && frozen > 0) {
+            say(
+              `The partner contract is off: ${frozen} partner reservation${frozen === 1 ? " is" : "s are"} frozen until it is confirmed again (one past its expiry for a day whose person's compute ended or who cancelled is released without a search).`,
+            );
+          }
+        }
+      } catch (err) {
+        failWith(err, null, "Could not write the compute policy.", undefined, { json });
+      }
+    },
+  );
 
 // ---------------------------------------------------------------------------------------------
 // pool
@@ -669,5 +693,6 @@ computeCommand.addCommand(poolCommand);
 computeCommand.addCommand(statusCommand);
 computeCommand.addCommand(observerCommand);
 computeCommand.addCommand(jobsCommand);
+computeCommand.addCommand(moveChargeCommand);
 computeCommand.addCommand(pipelineCommand);
 computeCommand.addCommand(accessCommand);

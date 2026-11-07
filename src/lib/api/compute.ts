@@ -32,6 +32,8 @@ import {
   ComputeJobAdminResponseSchema,
   type ComputeJobsListResponse,
   ComputeJobsListResponseSchema,
+  type ComputeMoveChargeResponse,
+  ComputeMoveChargeResponseSchema,
   type ComputeObserverRunResponse,
   ComputeObserverRunResponseSchema,
   type ComputePipelineRunRequest,
@@ -99,10 +101,18 @@ export async function getComputePolicy(): Promise<ComputePolicyResponse> {
 export async function putComputePolicy(
   policy: unknown,
   note?: string,
+  forcePartnerOff = false,
 ): Promise<ComputePolicyResponse> {
   return request(
     "/admin/compute/policy",
-    { method: "PUT", body: JSON.stringify(note === undefined ? { policy } : { policy, note }) },
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        policy,
+        ...(note === undefined ? {} : { note }),
+        ...(forcePartnerOff ? { force_partner_off: true } : {}),
+      }),
+    },
     true,
     ComputePolicyResponseSchema,
   );
@@ -227,6 +237,30 @@ export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJo
     { method: "POST" },
     true,
     ComputeJobAdminResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner): move the charge of a job that skipped the reservation
+ * from the partner's pool to one account's pool. One batch on the Worker; a repeat of the same move is a
+ * replay.
+ */
+export async function moveComputeCharge(
+  jobId: string,
+  toAccountId: number,
+  confirmUnprovenOwner = false,
+): Promise<ComputeMoveChargeResponse> {
+  return request(
+    `/admin/compute/jobs/${encodeURIComponent(jobId)}/move-charge`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        to_account_id: toAccountId,
+        ...(confirmUnprovenOwner ? { confirm_unproven_owner: true } : {}),
+      }),
+    },
+    true,
+    ComputeMoveChargeResponseSchema,
   );
 }
 

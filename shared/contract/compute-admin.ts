@@ -92,6 +92,14 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "record_missing",
   "compute_disabled",
   "audit_failed",
+  // Phase D4 (#2025): moving the charge of a job that skipped the reservation to a person.
+  "job_reserved",
+  "no_unreserved_charge",
+  "already_moved",
+  "target_not_in_good_standing",
+  "target_has_no_pool",
+  "owner_not_proven",
+  "partner_reservations_open",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -120,6 +128,13 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   record_missing: 404,
   compute_disabled: 503,
   audit_failed: 500,
+  job_reserved: 409,
+  no_unreserved_charge: 409,
+  already_moved: 409,
+  target_not_in_good_standing: 409,
+  target_has_no_pool: 409,
+  owner_not_proven: 409,
+  partner_reservations_open: 409,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -128,6 +143,8 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
 export interface ComputePolicyPutRequest {
   policy: unknown;
   note?: string;
+  /** Write a policy that turns the partner contract off although partner reservations are open (they are frozen). */
+  force_partner_off?: boolean;
 }
 
 /** `POST /admin/compute/pools/.../grant`: SU into one pool. The reason is a fixed word. */
@@ -371,6 +388,18 @@ export const ComputeJobViewSchema = z
     results_verified: z.boolean(),
     results_bytes: z.number().int().nullable(),
     records_copied: z.boolean(),
+    /**
+     * A partner's reservation (phase D4, #2025): `pending` (a Tapis job is bound and not verified yet),
+     * `verified` or `mismatch` (refused); null for a reservation nothing was reported under and for a job
+     * that is not a partner's. Optional: an older Worker does not send it.
+     */
+    partner_state: nullableString.optional(),
+    /**
+     * The fixed word an administrator is shown for a partner's job: `owner_mismatch`, `app_mismatch`,
+     * `resources_mismatch`, `hold_ended` (why a report was refused), `ambiguous_tag`, `tapis_unreachable`
+     * or `tapis_job_in_use`.
+     */
+    partner_flag: nullableString.optional(),
   })
   .passthrough();
 
@@ -735,3 +764,26 @@ export const ComputeObserverRunResponseSchema = z
   .passthrough();
 
 export type ComputeObserverRunResponse = z.infer<typeof ComputeObserverRunResponseSchema>;
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner only, phase D4, #2025): the charge of a job that
+ * skipped the reservation, which the tenant sweep wrote to the partner's pool `tenant`, moved to a
+ * person's pool. `moved_milli` is the whole of that charge, in milli-SU; `pool` is the word of the two
+ * pools; `replayed` is true when the move had already been made to this account. The `people` budget is
+ * counted once: the unreserved entry counted the consumption, and the move does not count it again.
+ */
+export const ComputeMoveChargeResponseSchema = z
+  .object({
+    job_id: z.string(),
+    to_account_id: z.number().int(),
+    pool: z.string(),
+    moved_milli: z.number().int(),
+    replayed: z.boolean(),
+    /** The account the job's Tapis owner mapped to, or null; the move names another only on the owner's word. */
+    attributed_account_id: z.number().int().nullable().optional(),
+    /** Whether the target is the account the job was attributed to. */
+    owner_proven: z.boolean().optional(),
+  })
+  .passthrough();
+
+export type ComputeMoveChargeResponse = z.infer<typeof ComputeMoveChargeResponseSchema>;

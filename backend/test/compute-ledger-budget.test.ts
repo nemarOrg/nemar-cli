@@ -48,6 +48,7 @@ import {
   expireUnused,
   finalKey,
   grantPool,
+  moveCharge,
   placeHold,
   releaseHold,
   settleFinal,
@@ -474,6 +475,54 @@ describe("which operations lower the people budget's consumption", () => {
           chargeMilli: 2000,
         });
         return statement?.run();
+      },
+    },
+    {
+      name: "the move of an unreserved job's charge from the partner's pool to a person (two adjustments that name no budget)",
+      // The unreserved entry COUNTED the consumption against the budget when it was written (the set-up).
+      // The move is a correction between two pools: it lowers the partner's pool and raises the person's, and
+      // names the budget on neither side, so the budget is counted once and nothing gives it back.
+      effect: "none",
+      writes: ["adjust"],
+      setup: async (s) => {
+        const job = jobId(next());
+        const tenant = await ensurePool(s.w.d1, "partner", "tenant", "cpu");
+        const account = Number(s.holder.holder_ref);
+        s.w.db
+          .query(
+            `INSERT INTO users (id, username, email, password_hash, status, role) VALUES (?, ?, ?, 'x', 'approved', 'member')`,
+          )
+          .run(account, `mover${account}`, `mover${account}@example.org`);
+        s.w.db
+          .query(
+            `INSERT INTO compute_jobs (id, source, client_id, kind, state, app_id, app_version, spec_digest,
+               partition, pool, nodes, cores_per_node, minutes, flag_unreserved)
+             VALUES (?, 'partner', 'tenant', 'batch', 'cancelled', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, 1)`,
+          )
+          .run(job, "0".repeat(64));
+        const [statement] = unreservedChargeStatements(s.w.d1, {
+          jobId: job,
+          poolId: tenant.id,
+          budgetPoolId: s.budget.id,
+          chargeMilli: 2000,
+        });
+        await statement?.run();
+        return job;
+      },
+      act: async (s, job) => {
+        const moved = await moveCharge(s.w.d1, {
+          jobId: job,
+          toAccountId: Number(s.holder.holder_ref),
+          actorUserId: 9,
+          confirmUnprovenOwner: true,
+        });
+        expect(moved).toMatchObject({ ok: true, replayed: false, movedMilli: 2000 });
+        const tenant = (await s.w.d1
+          .prepare("SELECT * FROM compute_pools WHERE holder_ref = 'tenant'")
+          .first<PoolRow>()) as PoolRow;
+        // The partner's pool fell by what the person's rose by.
+        expect(tenant.charged_milli).toBe(0);
+        expect((await reread(s.w, s.holder)).charged_milli).toBe(2000);
       },
     },
     {

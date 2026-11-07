@@ -54,7 +54,6 @@
  *    no per-person guard.
  */
 
-import { z } from "zod";
 import {
   COMPUTE_KINDS,
   COMPUTE_SOURCES,
@@ -68,17 +67,20 @@ import {
 } from "../../../shared/compute-state.js";
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
 import {
+  COMPUTE_HOLD_BODY_MAX_BYTES,
+  type ComputeHoldRequest,
+  ComputeHoldRequestSchema,
+} from "../../../shared/contract/compute-partner-request.js";
+import {
   COMPUTE_IMAGE_DIGEST_RE,
   type ComputePolicy,
   type ComputePool,
   type JobSpec,
   JobSpecSchema,
   PARTITIONS,
-  PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
   type PartitionName,
   canonicalJobSpec,
-  computeSafeInt,
   datasetVersionWithoutTag,
   estimateSuMilli,
 } from "../../../shared/contract/compute.js";
@@ -194,6 +196,21 @@ export interface ComputeJobRow {
   submit_claimed_at: string | null;
   /** A Tapis job NEMAR made that no row owns, whose cancel is still owed. */
   orphan_tapis_uuid: string | null;
+  /**
+   * Phase D4 (migration 0134): NULL for a reservation and for a job that is not a partner's; `pending`
+   * (bound, not verified), `verified` or `mismatch` (refused) for a partner's Tapis job.
+   */
+  partner_state: "pending" | "verified" | "mismatch" | null;
+  /** A fixed word an administrator is shown: why a report was refused, or what the reaper met. */
+  partner_flag: string | null;
+  partner_verified_at: string | null;
+  /** When a partner's reservation expires: written once at creation from the owner's wait then. */
+  partner_expires_at: string | null;
+  /** Failed reads of a bound, unverified job on separate ticks, and when the first was (see migration 0134). */
+  partner_read_failures: number;
+  partner_first_failed_at: string | null;
+  /** The SHA-256 of the first list of files a report declared; a later report may repeat it and no other. */
+  partner_files_digest: string | null;
 }
 
 export type ComputeJobsEnv = ComputeRecordsEnv;
@@ -241,6 +258,28 @@ export interface SpecJobInput extends JobInputBase {
   bornUploading?: boolean;
 }
 
+/**
+ * A partner client's caps, decided INSIDE the hold's own statement (phase D4, #2025): the most live
+ * reservations and running jobs the client may have, and the most milli-SU it may reserve in a UTC day
+ * (every hold taken today counts, a released one included, so reserving and releasing in a loop cannot
+ * dodge it). Two requests racing for the last unit cannot both pass, as for the balance.
+ */
+export interface PartnerCaps {
+  maxOpenReservations: number;
+  maxReservedMilliPerDay: number;
+}
+
+/**
+ * The partner's idempotency claim (phase D4, #2025): the row of `compute_idempotency_keys` for scope
+ * `client:<id>` is written IN THE HOLD'S BATCH, gated on the hold existing, so two requests with one key
+ * make one hold. `requestHash` is the SHA-256 of the request (method, path, person, exact body).
+ */
+export interface PartnerIdempotency {
+  scope: string;
+  key: string;
+  requestHash: string;
+}
+
 /** A partner's job: its hold body, as the exact text that was sent. */
 export interface PartnerJobInput extends JobInputBase {
   source: "partner";
@@ -250,50 +289,27 @@ export interface PartnerJobInput extends JobInputBase {
   kind?: undefined;
   appId?: undefined;
   appVersion?: undefined;
+  /** The person's compute access must be `active` in the hold's own statement (the person's reservation). */
+  requireActiveAccess?: boolean;
+  /** The client's caps, applied in the hold's statement. Required for a reservation made for a person. */
+  caps?: PartnerCaps;
+  /** The key's claim, written with the hold. */
+  idempotency?: PartnerIdempotency;
+  bornUploading?: undefined;
 }
 
 export type CreateJobInput = SpecJobInput | PartnerJobInput;
 
 /** The most bytes of a hold body: it is nine small fields. */
-export const PARTNER_HOLD_BODY_MAX_BYTES = 8192;
+export const PARTNER_HOLD_BODY_MAX_BYTES = COMPUTE_HOLD_BODY_MAX_BYTES;
 
 /**
- * What a partner's hold says (`POST /compute/holds`, #2025): the application, its version, the kind and
- * the resources, per node. Strict, like every request. The route (phase D4) may move this schema into
- * its own contract module; the fields are the ones the partner contract names.
+ * What a partner's hold says (`POST /compute/holds`, #2025): the schema is the partner contract's
+ * (`shared/contract/compute-partner-request.ts`), kept here under its earlier name.
  */
-export const PartnerHoldBodySchema = z
-  .object({
-    app_id: z.string().regex(/^[A-Za-z0-9._-]{1,80}$/),
-    app_version: z.string().regex(/^[A-Za-z0-9._+-]{1,64}$/),
-    kind: z.enum(COMPUTE_KINDS),
-    partition: z.enum(PARTITION_NAMES),
-    nodes: computeSafeInt(1, 64),
-    cores: computeSafeInt(0, 256),
-    memory_mb: computeSafeInt(1, 16_777_216).nullish(),
-    gpus: computeSafeInt(0, 8),
-    minutes: computeSafeInt(1, 10080),
-  })
-  .strict()
-  .superRefine((body, ctx) => {
-    const gpuPool = PARTITIONS[body.partition].pool === "gpu";
-    if (gpuPool && body.gpus < 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["gpus"],
-        message: "a GPU partition needs a GPU",
-      });
-    }
-    if (!gpuPool && body.gpus !== 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["gpus"],
-        message: "a CPU partition takes no GPU",
-      });
-    }
-  });
+export const PartnerHoldBodySchema = ComputeHoldRequestSchema;
 
-export type PartnerHoldBody = z.infer<typeof PartnerHoldBodySchema>;
+export type PartnerHoldBody = ComputeHoldRequest;
 
 export type CreateJobRefusal = Extract<
   ComputeRefusalCode,
@@ -308,6 +324,11 @@ export type CreateJobRefusal = Extract<
   | "platform_budget_exhausted"
   | "over_concurrency"
 >;
+
+/** A partner's reservation can also be refused by the client's own caps (phase D4, #2025). */
+export type PartnerCreateResult =
+  | Extract<CreateJobResult, { ok: true }>
+  | { ok: false; code: CreateJobRefusal | "client_cap_reached"; field?: string };
 
 export type CreateJobResult =
   | {
@@ -360,7 +381,8 @@ const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key,
   settled_provisional_at, settled_final_at, flag_unreserved, flag_unattributed, flag_mismatch,
   flag_overrun, retention_until, legal_hold, webhook_nonce, launch_spec_digest, results_verified_at,
   outputs_completed_at, results_bytes, result_records_at, platform_failure, examined_at,
-  submit_claimed_at, orphan_tapis_uuid`;
+  submit_claimed_at, orphan_tapis_uuid, partner_state, partner_flag, partner_verified_at, partner_expires_at,
+  partner_read_failures, partner_first_failed_at, partner_files_digest`;
 
 export const JOB_BY_ID_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs WHERE id = ?1`;
 
@@ -396,6 +418,55 @@ export const ACCESS_ACTIVE_GUARD_SQL = `(SELECT COUNT(*) FROM users
 /** The account's access state, read after a refusal to say which word it was. */
 export const ACCESS_STATE_SQL = "SELECT compute_access FROM users WHERE id = ?1";
 
+/**
+ * The client's open reservations and running jobs against its cap (phase D4): the live partner jobs of the
+ * client, counted INSIDE the hold's statement. Plain `?` placeholders: the client, then the cap. It states
+ * `source = 'partner'` and the live list verbatim, so the partial index `compute_jobs_client_live` answers it.
+ */
+export const CLIENT_OPEN_GUARD_SQL = `(SELECT COUNT(*) FROM compute_jobs
+   WHERE source = 'partner' AND client_id = ? AND state IN (${LIVE_STATES_SQL})) < ?`;
+
+/**
+ * What the client has reserved today (UTC), and this hold, against its daily cap in milli-SU: the sum of
+ * every hold entry of the client's jobs since UTC midnight, released ones included. Plain `?` placeholders:
+ * the start of the UTC day (read ONCE before the batch, and used by the refusal's read as well, so a
+ * refusal that lands just after midnight is explained by the day it was judged in), the client, this hold's
+ * amount, the cap.
+ */
+export const CLIENT_DAY_GUARD_SQL = `(SELECT COALESCE(SUM(l.held_delta_milli), 0) FROM compute_ledger l
+   JOIN compute_jobs j ON j.id = l.job_id
+   WHERE l.kind = 'hold' AND l.created_at >= ?
+     AND j.source = 'partner' AND j.client_id = ?) + ? <= ?`;
+
+/** The counts the two client guards are judged by, read after a refusal to say which one refused. */
+export const CLIENT_CAP_FACTS_SQL = `SELECT
+  (SELECT COUNT(*) FROM compute_jobs
+    WHERE source = 'partner' AND client_id = ?1 AND state IN (${LIVE_STATES_SQL})) AS open,
+  (SELECT COALESCE(SUM(l.held_delta_milli), 0) FROM compute_ledger l
+    JOIN compute_jobs j ON j.id = l.job_id
+    WHERE l.kind = 'hold' AND l.created_at >= ?2
+      AND j.source = 'partner' AND j.client_id = ?1) AS reserved_today`;
+
+/** The start of the UTC day on the database's clock. */
+export const UTC_DAY_START_SQL = "SELECT date('now') AS day";
+
+/** The live jobs of one account, against the person's limit: read after a refusal to name the guard. */
+export const ACCOUNT_LIVE_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE account_id = ?1 AND state IN (${LIVE_STATES_SQL})`;
+
+/** A partner's key, by scope and key: `?1` the scope, `?2` the key. */
+export const IDEMPOTENCY_BY_KEY_SQL = `SELECT scope, key, request_hash, job_id FROM compute_idempotency_keys
+  WHERE scope = ?1 AND key = ?2`;
+
+/**
+ * A partner's key claimed WITH the hold: `?1` scope, `?2` key, `?3` request hash, `?4` the job. It writes
+ * only if the hold row of this job exists, and the primary key refuses a second claim of the pair, which
+ * refuses the whole batch (one transaction): nothing of the second request remains.
+ */
+export const IDEMPOTENCY_INSERT_SQL = `INSERT INTO compute_idempotency_keys (scope, key, request_hash, job_id)
+  SELECT ?1, ?2, ?3, ?4
+   WHERE EXISTS (SELECT 1 FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?4)`;
+
 /** The hold row of a job exists: the one gate both of the batch's later statements wait behind. */
 const holdExists = (jobParam: number): string =>
   `EXISTS (SELECT 1 FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?${jobParam})`;
@@ -412,19 +483,21 @@ export const GATEWAY_USER_INSERT_SQL = `INSERT OR IGNORE INTO compute_gateway_us
  * The job's index row. `?1` id, `?2` account, `?3` Tapis owner, `?4` the pipelines' literal (or NULL,
  * and the pseudonym is then the account's), `?5` key, `?6` source, `?7` client, `?8` kind, `?9` app,
  * `?10` version, `?11` image digest, `?12` spec digest, `?13` partition, `?14` pool, `?15` nodes,
- * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce, `?22` the state it is born in (NULL for `created`, `uploading` for a bundle job). It writes
+ * `?16` cores, `?17` memory, `?18` GPUs, `?19` minutes, `?20` held, `?21` webhook nonce, `?22` the state it is born in (NULL for `created`, `uploading` for a bundle job), `?23` the
+ * minutes a partner's reservation lives (the owner's wait now), NULL for any other job. It writes
  * only if the hold row of this job exists (the EXISTS term: without it a refused hold would leave a
  * job), and links the hold's entry.
  */
 export const JOB_INSERT_SQL = `INSERT INTO compute_jobs
   (id, account_id, tapis_owner, gateway_user, idempotency_key, source, client_id, kind, app_id,
    app_version, image_digest, spec_digest, partition, pool, nodes, cores_per_node, memory_mb, gpus,
-   minutes, hold_ledger_id, held_milli, webhook_nonce, state)
+   minutes, hold_ledger_id, held_milli, webhook_nonce, state, partner_expires_at)
   SELECT ?1, ?2, ?3,
          COALESCE(?4, (SELECT g.gateway_user FROM compute_gateway_users g WHERE g.account_id = ?2)),
          ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
          (SELECT l.id FROM compute_ledger l WHERE l.kind = 'hold' AND l.job_id = ?1),
-         ?20, ?21, COALESCE(?22, 'created')
+         ?20, ?21, COALESCE(?22, 'created'),
+         CASE WHEN ?23 IS NULL THEN NULL ELSE datetime('now', '+' || ?23 || ' minutes') END
    WHERE ${holdExists(1)}`;
 
 export async function getJob(db: D1Database, id: string): Promise<ComputeJobRow | null> {
@@ -524,8 +597,10 @@ function readHoldBody(text: string): HoldBodyRead {
 
 const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(err));
 
-const refusal = (code: CreateJobRefusal, field?: string): CreateJobResult =>
-  field === undefined ? { ok: false, code } : { ok: false, code, field };
+const refusal = (
+  code: CreateJobRefusal | "client_cap_reached",
+  field?: string,
+): PartnerCreateResult => (field === undefined ? { ok: false, code } : { ok: false, code, field });
 
 /**
  * The owner's per-job ceilings, for a job a PERSON runs: `partition_not_offered` when the partition has
@@ -598,6 +673,47 @@ async function replay(
   return { ok: true, replayed: true, job, recordsWritten };
 }
 
+/**
+ * The reservation a partner's key already names, as a replay, or null when the key is new. The same
+ * request (the same hash) is that reservation, its records finished if they were not; any other request
+ * under the key throws `idempotency_conflict` and writes nothing.
+ */
+async function partnerClaimed(
+  env: ComputeJobsEnv,
+  claim: PartnerIdempotency,
+  specText: string,
+  uploads: boolean,
+): Promise<CreateJobResult | null> {
+  const row = await env.DB.prepare(IDEMPOTENCY_BY_KEY_SQL)
+    .bind(claim.scope, claim.key)
+    .first<{ request_hash: string; job_id: string }>();
+  if (row === null) return null;
+  if (row.request_hash !== claim.requestHash) {
+    throw new ComputeJobError(
+      "idempotency_conflict",
+      "that idempotency key was used for a different request",
+    );
+  }
+  const existing = await getJob(env.DB, row.job_id);
+  if (existing === null) {
+    // The job the key named is gone (removed after its retention): the key can answer nothing, and it must
+    // not be taken for a new request either, so it is a conflict, never a 500.
+    throw new ComputeJobError(
+      "idempotency_conflict",
+      "that idempotency key named a job that is no longer there",
+    );
+  }
+  let job = existing;
+  let recordsWritten = existing.records_written_at !== null;
+  if (!recordsWritten) {
+    // The hold body is the job's `spec.json`, and the specification is created once, so a replay of a
+    // reservation whose records were lost writes only what is missing (never what exists).
+    recordsWritten = await writeRecords(env, existing, specText, uploads);
+    job = (await getJob(env.DB, existing.id)) ?? existing;
+  }
+  return { ok: true, replayed: true, job, recordsWritten };
+}
+
 // --- createJob -------------------------------------------------------------------------------------
 
 /** What a hold prices and a job row records of the resources, per node. */
@@ -622,10 +738,15 @@ const imageDigestOf = (image: string | undefined): string | null => {
  * an argument the table cannot take, for a key reused for another request, and for a platform pool
  * that is missing, and the ledger's own error for a pool it cannot find.
  */
+export function createJob(
+  env: ComputeJobsEnv,
+  input: PartnerJobInput,
+): Promise<PartnerCreateResult>;
+export function createJob(env: ComputeJobsEnv, input: SpecJobInput): Promise<CreateJobResult>;
 export async function createJob(
   env: ComputeJobsEnv,
   input: CreateJobInput,
-): Promise<CreateJobResult> {
+): Promise<CreateJobResult | PartnerCreateResult> {
   const args = checkInput(input);
   if (!env.COMPUTE_RECORDS) return refusal("compute_disabled");
 
@@ -668,7 +789,7 @@ export async function createJob(
   }
   // The text is made ONCE; its digest is the job row's, and the same text is written after the commit.
   const specDigest = await sha256Hex(new TextEncoder().encode(specText));
-  const requireActive = input.source !== "partner" && input.requireActiveAccess === true;
+  const requireActive = input.requireActiveAccess === true;
   if (requireActive && args.accountId === null) {
     invalid("an access guard needs the account it guards");
   }
@@ -677,6 +798,19 @@ export async function createJob(
   // and the files of a partner's batch job. An interactive session is its own record.
   const uploads = spec?.bundle !== undefined || (args.source === "partner" && kind === "batch");
   const db = env.DB;
+  const partnerInput = input.source === "partner" ? input : null;
+  const caps = partnerInput?.caps;
+  const claim = partnerInput?.idempotency;
+  if (claim !== undefined && args.accountId === null) {
+    invalid("a partner's idempotency claim is for a reservation made for a person");
+  }
+
+  // A PARTNER'S KEY finds its reservation first: nothing below is asked again, so a replay does not depend
+  // on the world having stayed the same. The same request is that reservation; any other is a conflict.
+  if (claim !== undefined) {
+    const found = await partnerClaimed(env, claim, specText, uploads);
+    if (found !== null) return found;
+  }
 
   if (args.key !== null && args.accountId !== null) {
     const existing = await db
@@ -742,6 +876,18 @@ export async function createJob(
   if (requireActive && args.accountId !== null) {
     guards.push({ sql: ACCESS_ACTIVE_GUARD_SQL, binds: [args.accountId] });
   }
+  let dayStart = "";
+  if (caps !== undefined) {
+    if (args.clientId === null) invalid("a client's caps need the client");
+    dayStart = (await db.prepare(UTC_DAY_START_SQL).first<{ day: string }>())?.day ?? "";
+    guards.push(
+      { sql: CLIENT_OPEN_GUARD_SQL, binds: [args.clientId, caps.maxOpenReservations] },
+      {
+        sql: CLIENT_DAY_GUARD_SQL,
+        binds: [dayStart, args.clientId, amountMilli, caps.maxReservedMilliPerDay],
+      },
+    );
+  }
   const hold = { poolId, budgetPoolId, amountMilli, jobId, extraGuards: guards };
 
   const statements = [...holdStatements(db, hold)];
@@ -778,8 +924,14 @@ export async function createJob(
         input.source !== "partner" && input.bornUploading === true && spec?.bundle !== undefined
           ? "uploading"
           : null,
+        input.source === "partner" ? policy.reservationWaitMinutes : null,
       ),
   );
+  if (claim !== undefined) {
+    statements.push(
+      db.prepare(IDEMPOTENCY_INSERT_SQL).bind(claim.scope, claim.key, claim.requestHash, jobId),
+    );
+  }
 
   let changes: number;
   try {
@@ -787,6 +939,10 @@ export async function createJob(
   } catch (err) {
     // Another request with this key got there first: the batch was refused as a whole (it is one
     // transaction), so nothing of this one remains, and the first one's job is the answer.
+    if (looksUnique(err) && claim !== undefined) {
+      const found = await partnerClaimed(env, claim, specText, uploads);
+      if (found !== null) return found;
+    }
     if (looksUnique(err) && args.key !== null && args.accountId !== null) {
       const existing = await db
         .prepare(JOB_BY_KEY_SQL)
@@ -797,6 +953,13 @@ export async function createJob(
     throw err;
   }
   if (changes === 0) {
+    // A request with this partner key may have won the race while this one was being refused: the winner's
+    // hold now counts against every cap and the balance, so naming a refusal would tell a retrying client
+    // that its request failed when it succeeded. The key is asked again before any refusal is named.
+    if (claim !== undefined) {
+      const found = await partnerClaimed(env, claim, specText, uploads);
+      if (found !== null) return found;
+    }
     // Compute access is the FIRST thing a person's submission asks, so a refusal for it is reported
     // whatever else also failed (a frozen pool, a balance): read from the account after the fact.
     if (requireActive && args.accountId !== null) {
@@ -809,7 +972,29 @@ export async function createJob(
       }
     }
     const why = await holdRefusalReason(db, hold);
-    return refusal(why === "guard_refused" ? "over_concurrency" : why);
+    if (why !== "guard_refused") return refusal(why);
+    // The person's live-job limit is named before the client's caps (the order the contract states).
+    // A cap is read AFTER the refusal and never decided by a pre-check.
+    if (caps !== undefined && args.clientId !== null) {
+      const live =
+        args.accountId === null
+          ? 0
+          : ((await db.prepare(ACCOUNT_LIVE_COUNT_SQL).bind(args.accountId).first<{ n: number }>())
+              ?.n ?? 0);
+      if (live >= policy.maxLiveJobsPerPerson) return refusal("over_concurrency");
+      const facts = await db
+        .prepare(CLIENT_CAP_FACTS_SQL)
+        .bind(args.clientId, dayStart)
+        .first<{ open: number; reserved_today: number }>();
+      if (
+        facts !== null &&
+        (facts.open >= caps.maxOpenReservations ||
+          facts.reserved_today + amountMilli > caps.maxReservedMilliPerDay)
+      ) {
+        return refusal("client_cap_reached");
+      }
+    }
+    return refusal("over_concurrency");
   }
 
   const created = await getJob(db, jobId);

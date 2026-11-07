@@ -940,6 +940,47 @@ export const ComputePolicySchema = z
         maxFileBytes: safeInt(1),
       })
       .strict(),
+    /**
+     * The partner contract's two owner confirmations (phase D4, #2025). OPTIONAL, so a stored version that
+     * predates it still parses, and CLOSED by default: absent means off.
+     *  - `tapisVisibilityConfirmed`: the owner has confirmed that NEMAR's service identity can search the
+     *    tenant's jobs by tag AND read a job another owner submitted. Until it is true no reservation is made
+     *    (`POST /compute/holds` is 503 `partner_not_enabled`) and the hold reaper never releases a
+     *    reservation on an EMPTY search (an empty answer is only evidence of nothing when the identity can
+     *    see the jobs).
+     *  - `execSystemId`: the execution system a partner's job must run on; a record on another system is a
+     *    `resources_mismatch`. Required while the confirmation is true.
+     *  - `allowedSchedulerArgs`: exact scheduler option strings (for example an account or a profile the app
+     *    or the system adds, which Tapis merges into the record) that are accepted IN ADDITION to at most one
+     *    `--gpus=N` within the hold. Default none; any other option is a `resources_mismatch`. The owner
+     *    reads ONE real job record of the tenant and copies the options it shows BEFORE turning
+     *    `tapisVisibilityConfirmed` on. A `--gpus` option can never be listed (the hold bounds GPUs).
+     */
+    partner: z
+      .object({
+        tapisVisibilityConfirmed: z.boolean(),
+        execSystemId: z
+          .string()
+          .regex(/^[A-Za-z0-9._-]{1,80}$/)
+          .optional(),
+        allowedSchedulerArgs: z
+          .array(
+            z
+              .string()
+              .regex(/^[-A-Za-z0-9=_.:,@/]{1,100}$/)
+              .refine((a) => !a.startsWith("--gpus") && !a.startsWith("--gres"), {
+                message: "GPUs are bounded by the hold, never allowed by name",
+              }),
+          )
+          .max(20)
+          .optional(),
+      })
+      .strict()
+      .refine((p) => !p.tapisVisibilityConfirmed || p.execSystemId !== undefined, {
+        message: "a confirmed partner names the execution system",
+        path: ["execSystemId"],
+      })
+      .optional(),
   })
   .strict();
 

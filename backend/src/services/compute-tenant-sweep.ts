@@ -62,6 +62,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
+import { partnerShelter } from "./compute-hold-reaper.js";
 import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
 import {
@@ -132,6 +133,8 @@ export interface TenantSweepResult {
   cancelled: number;
   /** Unbound jobs left for the next run (over the bound). */
   deferred: number;
+  /** A partner's jobs left alone because their live reservation is waiting for the report (phase D4, #2025). */
+  awaitingReport: number;
   /** Own rows taken to their end and charged to the tenant pool. */
   finished: number;
   /** Own rows closed after their record stayed unreadable. */
@@ -157,6 +160,7 @@ const emptyResult = (mode: TenantSweepMode): TenantSweepResult => ({
   unattributed: 0,
   cancelled: 0,
   deferred: 0,
+  awaitingReport: 0,
   finished: 0,
   gaveUp: 0,
   settledFinal: 0,
@@ -648,8 +652,19 @@ export async function sweepTenantJobs(
       scope.map((j) => j.uuid),
     );
     r.bound = scope.filter((j) => bound.has(j.uuid)).length;
-    const unbound = scope.filter((j) => !bound.has(j.uuid));
-    for (const job of unbound.slice(0, TENANT_NEW_PER_RUN)) {
+    const unboundAll = scope.filter((j) => !bound.has(j.uuid));
+    // A partner's job launched under a live reservation whose report has not come yet is left for the report
+    // (or the reaper). It is checked LAZILY while the run's slice fills: a sheltered job never uses a slot,
+    // and nothing is read once the slice is full (the rest is the next run's).
+    const sheltered = partnerShelter(env, ctx);
+    const slice: TapisJob[] = [];
+    let next = 0;
+    for (; next < unboundAll.length && slice.length < TENANT_NEW_PER_RUN; next++) {
+      const job = unboundAll[next] as TapisJob;
+      if (await sheltered(job)) r.awaitingReport++;
+      else slice.push(job);
+    }
+    for (const job of slice) {
       try {
         await handleUnbound(env, ctx, job, r);
       } catch (err) {
@@ -657,7 +672,7 @@ export async function sweepTenantJobs(
         r.errorClass = tapisWord(err);
       }
     }
-    r.deferred = Math.max(0, unbound.length - TENANT_NEW_PER_RUN);
+    r.deferred = unboundAll.length - next;
 
     // This sweep's own rows, in rotation.
     const rows = (
@@ -708,7 +723,14 @@ export function tenantLogLine(
   const cutMatters = r.truncated && (r.mode === "week" || r.liveMayHide);
   const needsPerson = r.errors.length > 0 || cutMatters || r.deferred > 0 || accessFailed > 0;
   const acted =
-    r.indexed + r.raced + r.duplicates + r.cancelled + r.finished + r.gaveUp + r.settledFinal;
+    r.indexed +
+    r.raced +
+    r.duplicates +
+    r.cancelled +
+    r.finished +
+    r.gaveUp +
+    r.settledFinal +
+    r.awaitingReport;
   if (!needsPerson && acted === 0) return null;
   const parts = [
     "[compute-tenant]",
@@ -723,6 +745,7 @@ export function tenantLogLine(
     `finished=${r.finished}`,
     `gave_up=${r.gaveUp}`,
     `deferred=${r.deferred}`,
+    ...(r.awaitingReport > 0 ? [`awaiting_report=${r.awaitingReport}`] : []),
     `truncated=${r.truncated ? 1 : 0}`,
     `live_may_hide=${r.liveMayHide ? 1 : 0}`,
     ...(r.mode === "week" ? [`settled_final=${r.settledFinal}`] : []),

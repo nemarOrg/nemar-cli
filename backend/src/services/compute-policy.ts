@@ -163,9 +163,19 @@ export function issuesOf(error: z.ZodError, prefix?: string): PolicyIssue[] {
   }));
 }
 
+/** Partner reservations and unverified partner jobs that a switched-off contract would leave waiting. */
+export const PARTNER_OPEN_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE source = 'partner' AND state = 'created'`;
+
 export type PutPolicyResult =
-  | { ok: true; version: number }
+  | {
+      ok: true;
+      version: number;
+      /** Partner reservations left waiting because the write turned the partner contract off (`forcePartnerOff`). */
+      partnerFrozen?: number;
+    }
   | { ok: false; code: "not_owner" }
+  | { ok: false; code: "partner_reservations_open"; open: number }
   | { ok: false; code: "invalid_note" }
   | { ok: false; code: "invalid_policy"; issues: PolicyIssue[] };
 
@@ -181,6 +191,7 @@ export async function putPolicy(
   input: unknown,
   note?: string | null,
   issuePrefix?: string,
+  options: { forcePartnerOff?: boolean } = {},
 ): Promise<PutPolicyResult> {
   const text = note ?? null;
   if (
@@ -201,6 +212,25 @@ export async function putPolicy(
       issues: [{ path: under(issuePrefix, ""), code: "too_large" }],
     };
   }
+  // TURNING THE PARTNER CONTRACT OFF with reservations open freezes them: the reaper never releases on an
+  // empty search while the owner has not confirmed NEMAR can see the tenant. A write that drops the
+  // confirmation (flips it to false, or omits the block, which is what a policy file written before the
+  // block existed does) is refused while any are open, unless the owner says so (`forcePartnerOff`), and
+  // then the number frozen is told.
+  let partnerFrozen = 0;
+  if (parsed.data.partner?.tapisVisibilityConfirmed !== true) {
+    // A stored policy that cannot be read is not a confirmation (and a write replaces it).
+    const current = await getPolicy(db).catch(() => null);
+    if (current?.policy.partner?.tapisVisibilityConfirmed === true) {
+      const open = (await db.prepare(PARTNER_OPEN_COUNT_SQL).first<{ n: number }>())?.n ?? 0;
+      if (open > 0) {
+        if (options.forcePartnerOff !== true) {
+          return { ok: false, code: "partner_reservations_open", open };
+        }
+        partnerFrozen = open;
+      }
+    }
+  }
   const results = await db.batch([
     db.prepare(POLICY_INSERT_SQL).bind(json, text, ownerId),
     db.prepare(AUDIT_POLICY_SET_SQL).bind(ownerId),
@@ -210,5 +240,5 @@ export async function putPolicy(
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
     throw new Error("a policy version that was just written has no id");
   }
-  return { ok: true, version };
+  return { ok: true, version, ...(partnerFrozen > 0 ? { partnerFrozen } : {}) };
 }

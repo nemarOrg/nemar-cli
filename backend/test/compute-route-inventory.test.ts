@@ -17,7 +17,9 @@ import { computeRoutes } from "../src/routes/compute";
 import {
   COMPUTE_OIDC_ROUTES,
   PERSON_OIDC,
+  RESERVE_OIDC,
   STATS_OIDC,
+  computePartnerCredential,
   computePersonCredential,
   computeStatsCredential,
 } from "../src/routes/compute/auth";
@@ -54,6 +56,12 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "GET /jobs/:id/logs": 2,
   "GET /jobs/:id/results": 2,
   "POST /jobs/:id/results/renew": 3,
+  // The partner contract (epic #2021 phase D4, #2025): an OpenID Connect access token for a PERSON carrying
+  // `compute.reserve` through `computePartnerCredential` (a CLI key or the cookie is `forbidden_credential`),
+  // then the handler. Any job that is not the caller's person AND client is `job_not_found`.
+  "POST /holds": 2,
+  "POST /jobs/:id/report": 2,
+  "DELETE /holds/:id": 2,
 };
 
 const tableOf = () => {
@@ -71,7 +79,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(33);
+    expect(computeRoutes.routes.length).toBe(39);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -110,7 +118,25 @@ describe("compute route inventory", () => {
     }
   });
 
-  test("every write is a POST, and every read route is a GET of the read table", () => {
+  test("each partner route names its credential rule, then the handler; nothing else sits in front", () => {
+    const handlersOf = (method: string, path: string) =>
+      computeRoutes.routes
+        .filter((r) => r.method === method && r.path === path)
+        .map((r) => r.handler);
+    for (const [method, path] of [
+      ["POST", "/holds"],
+      ["POST", "/jobs/:id/report"],
+      ["DELETE", "/holds/:id"],
+    ] as const) {
+      const [first, second, ...rest] = handlersOf(method, path);
+      expect([method, path, first]).toEqual([method, path, computePartnerCredential]);
+      expect(typeof second).toBe("function");
+      expect(rest).toEqual([]);
+    }
+    expect(oidcBearerScopes(RESERVE_OIDC)).toEqual(["compute.reserve"]);
+  });
+
+  test("every write is a POST (or the partner's DELETE), and every read route is a GET of the read table", () => {
     const reads = Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("GET "));
     expect(reads.sort()).toEqual(
       [
@@ -124,7 +150,9 @@ describe("compute route inventory", () => {
       ].sort(),
     );
     for (const key of Object.keys(EXPECTED_ENTRIES)) {
-      expect(key.startsWith("POST ") || key.startsWith("GET ")).toBe(true);
+      expect(key.startsWith("POST ") || key.startsWith("GET ") || key === "DELETE /holds/:id").toBe(
+        true,
+      );
     }
   });
 
@@ -152,6 +180,9 @@ describe("compute route inventory", () => {
       "GET /me/jobs": "compute.read",
       "GET /me/jobs/:id": "compute.read",
       "GET /stats": "compute.stats",
+      "POST /holds": "compute.reserve",
+      "POST /jobs/:id/report": "compute.reserve",
+      "DELETE /holds/:id": "compute.reserve",
     });
     // The two `oidcBearer` instances carry exactly the scope the table names, and no other.
     expect(oidcBearerScopes(PERSON_OIDC)).toEqual(["compute.read"]);
@@ -162,13 +193,17 @@ describe("compute route inventory", () => {
     const reads = Object.keys(EXPECTED_ENTRIES).filter(
       (k) => k.startsWith("GET ") && !k.startsWith("GET /jobs/"),
     );
-    expect(Object.keys(COMPUTE_OIDC_ROUTES).sort()).toEqual(reads.sort());
+    const partner = ["POST /holds", "POST /jobs/:id/report", "DELETE /holds/:id"];
+    expect(Object.keys(COMPUTE_OIDC_ROUTES).sort()).toEqual([...reads, ...partner].sort());
   });
 
-  test("the writes (cancel, links, the launcher's callbacks, the observer) accept no OpenID Connect token", () => {
-    // None of them is in the OIDC table; the end-to-end proof (a token is refused on cancel) is in
-    // `compute-read-credentials.test.ts`.
-    for (const key of Object.keys(EXPECTED_ENTRIES).filter((k) => k.startsWith("POST "))) {
+  test("the writes (cancel, links, the launcher's callbacks, the observer) accept no OpenID Connect token; the partner's three do", () => {
+    // None of them is in the OIDC table but the partner's; the end-to-end proof (a token is refused on
+    // cancel) is in `compute-read-credentials.test.ts`.
+    const partner = new Set(["POST /holds", "POST /jobs/:id/report"]);
+    for (const key of Object.keys(EXPECTED_ENTRIES).filter(
+      (k) => k.startsWith("POST ") && !partner.has(k),
+    )) {
       expect(Object.keys(COMPUTE_OIDC_ROUTES)).not.toContain(key);
     }
   });
