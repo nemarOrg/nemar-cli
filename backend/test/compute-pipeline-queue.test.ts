@@ -226,7 +226,7 @@ describe("a dataset that keeps failing", () => {
     ]);
   });
 
-  test("failures that are the platform's or the registry's never count: three on three days block nothing", async () => {
+  test("failures that are the platform's or the registry's and consumed nothing never count: three on three days block nothing", async () => {
     const env = await world(["nm000104"]);
     for (const [i, code] of [
       "create_failed",
@@ -244,6 +244,71 @@ describe("a dataset that keeps failing", () => {
     }
     // Five platform-coded failures, the freshest a day old: inside the cooldown and over the cap, if counted.
     expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  /**
+   * One real dispatch, then the job ends the way a launcher run can end (a word, a charge) and the real
+   * sync fails the stamp. `ageDays` backdates the stamp so a cooldown can be stepped past.
+   */
+  async function failedRun(
+    env: ReturnType<typeof fx.env>,
+    word: string,
+    chargedMilli: number,
+    ageDays = 0,
+  ): Promise<void> {
+    const dispatched = await dispatchPipelineJob(env, {
+      recipe: "nemar-floor",
+      datasetId: "nm000104",
+      actor: ADMIN,
+    });
+    if (!dispatched.ok) throw new Error(`not dispatched: ${JSON.stringify(dispatched)}`);
+    await env.DB.prepare(
+      "UPDATE compute_jobs SET state = 'failed', failure_code = ?2, charged_milli = ?3 WHERE id = ?1",
+    )
+      .bind(dispatched.jobId, word, chargedMilli)
+      .run();
+    await syncPipelineStamps(env);
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', ?2) WHERE id = ?1",
+    )
+      .bind(dispatched.stampId, `-${ageDays} days`)
+      .run();
+  }
+
+  test("a run that failed AFTER consuming units is not dispatched again the next day", async () => {
+    const env = await world(["nm000104"]);
+    await failedRun(env, "result_upload_failed", 4000);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
+    // Past the cooldown it is a candidate again (the cap is 3, one failure so far).
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_stamps SET updated_at = datetime('now', '-8 days')",
+    ).run();
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  test("a verification failure and any charged failed job also count; an uncharged platform failure does not", async () => {
+    const env = await world(["nm000104"]);
+    await failedRun(env, "result_verification_failed", 0);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
+    await env.DB.prepare("DELETE FROM compute_pipeline_stamps").run();
+    await failedRun(env, "launch_failed", 2500);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
+    await env.DB.prepare("DELETE FROM compute_pipeline_stamps").run();
+    // Nothing charged and an early word: an immediate candidate, as before.
+    await failedRun(env, "tapis_submit_failed", 0);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+    await env.DB.prepare("DELETE FROM compute_pipeline_stamps").run();
+    await failedRun(env, "staging_failed", 0);
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(1);
+  });
+
+  test("the third consumed failure stops the dataset for good", async () => {
+    const env = await world(["nm000104"]);
+    for (let i = 0; i < MAX_FAILED_ATTEMPTS; i++) {
+      await failedRun(env, "result_upload_failed", 4000, RETRY_COOLDOWN_DAYS + 5 + i);
+    }
+    // Every stamp is outside the cooldown; only the cap holds.
+    expect(await pipelineCandidates(env.DB, floor, 10)).toHaveLength(0);
   });
 
   test("failures a dataset causes do count: three on three days block it", async () => {
