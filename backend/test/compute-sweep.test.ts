@@ -16,6 +16,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { sendAccessReport } from "../src/services/access-attributes";
 import { runComputeAdvanceCron, sweepComputeCancellations } from "../src/services/compute-advance";
 import {
   advanceComputeJob,
@@ -241,6 +242,72 @@ describe("a job that skipped the reservation", () => {
         account_id: null,
       });
     }
+  });
+
+  const reports = () =>
+    fx.harness.db
+      .query(
+        "SELECT r.job_id, r.state, r.last_error_code, j.gateway_user, j.tapis_uuid FROM compute_access_reports r JOIN compute_jobs j ON j.id = r.job_id",
+      )
+      .all() as Array<{
+      job_id: string;
+      state: string;
+      last_error_code: string | null;
+      gateway_user: string | null;
+      tapis_uuid: string;
+    }>;
+
+  const accessEnv = () =>
+    env({
+      ACCESS_GATEWAY_ATTRIBUTES_KEY: "access-test-key-0123456789abcdef",
+      ACCESS_RESOURCE_NAME: "example-resource-name",
+    });
+
+  test("an indexed job whose record shows a Slurm id owes an ACCESS report under its account's pseudonym (decision 9)", async () => {
+    const person = await seedUser(env().DB);
+    const pseudonym = "gw_abcdefghijklmnopqrst";
+    fx.harness.db.run(
+      "INSERT INTO compute_gateway_users (account_id, gateway_user) VALUES (?, ?)",
+      [person, pseudonym],
+    );
+    const uuid = await foreign({ owner: pseudonym, startedMsAgo: 30 * MINUTE });
+    await sweepTenantJobs(env(), "live");
+    expect(reports()).toEqual([
+      expect.objectContaining({ tapis_uuid: uuid, state: "pending", gateway_user: pseudonym }),
+    ]);
+    // Running the sweep again adds nothing.
+    await sweepTenantJobs(env(), "week");
+    expect(reports()).toHaveLength(1);
+  });
+
+  test("the report is owed from the moment the row is written, not only when it closes: a row still live has it", async () => {
+    const uuid = await foreign({ startedMsAgo: 30 * MINUTE });
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);
+    await sweepTenantJobs(env(), "live");
+    expect(row(uuid)).toMatchObject({ state: "running" });
+    expect(reports()).toEqual([expect.objectContaining({ tapis_uuid: uuid, state: "pending" })]);
+  });
+
+  test("a partner job that maps to no account is reported `no_gateway_user`, so the gap is visible", async () => {
+    const uuid = await foreign({ owner: "someone-elses-user", startedMsAgo: 30 * MINUTE });
+    await sweepTenantJobs(env(), "live");
+    const [only] = reports();
+    expect(only).toMatchObject({ tapis_uuid: uuid, state: "pending", gateway_user: null });
+    expect(await sendAccessReport(accessEnv(), only?.job_id as string)).toBe("no_gateway_user");
+    expect(reports()[0]).toMatchObject({ state: "failed", last_error_code: "no_gateway_user" });
+  });
+
+  test("a Slurm id that first shows at the END of the row's life still owes its report (the close makes it)", async () => {
+    const uuid = await foreign();
+    fx.tapis.fail("POST /v3/jobs/:uuid/cancel", 503, 1);
+    await sweepTenantJobs(env(), "live");
+    expect(row(uuid)?.slurm_job_id).toBeNull();
+    expect(reports()).toHaveLength(0);
+    const record = fx.tapis.jobs.get(uuid)?.record;
+    if (record) record.remoteJobId = "4242424";
+    await sweepTenantJobs(env(), "live");
+    expect(row(uuid)).toMatchObject({ state: "cancelled", slurm_job_id: "4242424" });
+    expect(reports()).toEqual([expect.objectContaining({ tapis_uuid: uuid, state: "pending" })]);
   });
 
   test("a job that never started is cancelled and recorded, and used nothing", async () => {

@@ -60,6 +60,7 @@ import {
   PIPELINES_TAPIS_OWNER,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
+import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
 import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
@@ -177,13 +178,16 @@ const BOUND_CHUNK = 90;
  * `?18` the scheduler's submit time (or NULL), `?19` its start time (or NULL), `?20` unattributed 0 or 1,
  * `?21` the retention as a SQLite modifier. Source `partner` and client `tenant`: the use is the tenant
  * pool's. `OR` nothing: the uuid is UNIQUE, so a second writer's row is a conflict that does nothing.
+ * `gateway_user` is the mapped account's pseudonym, copied as for a NEMAR job, and NULL for an owner that
+ * maps to no account (that job's ACCESS report then ends `no_gateway_user`, so the gap is visible).
  */
 export const INSERT_UNRESERVED_SQL = `INSERT INTO compute_jobs
-  (id, account_id, tapis_owner, source, client_id, kind, state, cancel_reason, cancel_requested_at,
+  (id, account_id, tapis_owner, gateway_user, source, client_id, kind, state, cancel_reason, cancel_requested_at,
    tapis_uuid, tapis_status, slurm_job_id, app_id, app_version, spec_digest, partition, pool, nodes,
    cores_per_node, memory_mb, gpus, minutes, submitted_at, remote_submitted_at, started_at,
    tapis_synced_at, flag_unreserved, flag_unattributed, retention_until)
-  VALUES (?1, ?2, ?3, 'partner', '${COMPUTE_TENANT_POOL_REF}', 'batch', ?4, ?5, datetime('now'),
+  VALUES (?1, ?2, ?3, (SELECT g.gateway_user FROM compute_gateway_users g WHERE g.account_id = ?2),
+          'partner', '${COMPUTE_TENANT_POOL_REF}', 'batch', ?4, ?5, datetime('now'),
           ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, datetime('now'), ?18, ?19,
           datetime('now'), 1, ?20, datetime('now', ?21))
   ON CONFLICT (tapis_uuid) DO NOTHING`;
@@ -424,8 +428,10 @@ async function handleUnbound(
   const live = isTerminalComputeState(state) ? "submitted" : state;
   const policy = (await getPolicy(env.DB)).policy;
   const id = newJobId();
-  const wrote = await env.DB.prepare(INSERT_UNRESERVED_SQL)
-    .bind(
+  // The ACCESS report is owed in the same batch as the row, `OR IGNORE` and with no network call (decision 9):
+  // it is made only if the row has a Slurm id NOW, and the close of the row makes it for an id that comes later.
+  const [wrote] = await env.DB.batch([
+    env.DB.prepare(INSERT_UNRESERVED_SQL).bind(
       id,
       mapped?.id ?? null,
       fields.owner === "" ? null : fields.owner,
@@ -447,9 +453,10 @@ async function handleUnbound(
       sqliteTime(rec.remoteStarted),
       unattributed ? 1 : 0,
       `+${policy.retention.recordsYears} years`,
-    )
-    .run();
-  if ((wrote.meta?.changes ?? 0) === 1) {
+    ),
+    env.DB.prepare(ACCESS_REPORT_PENDING_SQL).bind(id),
+  ]);
+  if ((wrote?.meta?.changes ?? 0) === 1) {
     r.indexed++;
     if (unattributed) r.unattributed++;
   } else {
@@ -593,6 +600,10 @@ async function closeRow(
       ),
     ...charge,
     db.prepare(STAMP_UNRESERVED_SQL).bind(id, to),
+    // The report ACCESS is owed for an id that first shows at the END (as the lifecycle's close does).
+    db
+      .prepare(ACCESS_REPORT_PENDING_SQL)
+      .bind(id),
   ]);
   // True only when THIS call moved the row: a no-op transition (another run closed it) is not counted.
   return (results[0]?.meta?.changes ?? 0) > 0;
