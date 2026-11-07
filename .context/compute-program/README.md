@@ -203,6 +203,23 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
 - [ ] Register compute.nemar.org as an OIDC client after Epic B merges, and send its credentials to the SDSC colleague.
 - [ ] Turn on `COMPUTE_ENABLED` and, later, `COMPUTE_PIPELINES_DISPATCH_ENABLED`, in production.
 
+### Before the first launch: the prerequisites, in order
+
+`nemar admin compute status` prints each of these as yes or no (never a value) under "Prerequisites", plus the Tapis, storage and ACCESS lines, so the order below can be checked from a terminal.
+The checks marked (status) are the ones it prints.
+The gated runbooks at `docs.nemar.org/admin/` are reachable with `nemar admin docs` for an administrator (the systems inventory was fetched on 2026-11-06), but the ones that exist say nothing about compute, so this list is the only written procedure; where a step says "not written down", the owner decides it.
+
+1. [ ] The Tapis credentials are set as Worker secrets and the tenant answers: `token: ok` and `health: ok` (status).
+2. [ ] `PRESCREEN_CALLBACK_SECRET` is set (status: callback secret) and `API_BASE_URL` is set (status: API base address). The one secret signs every compute token, so read the rotation rule before ever changing it: rotating it ends the `job_token` inside every running job's launch specification and the Tapis webhook addresses, so drain the running jobs first (ADR 0118, the amendment of 2026-11-06 on the callback secret).
+3. [ ] `COMPUTE_RUNTIME_IMAGE` is set to ONE digest-pinned reference and is absent from `wrangler-sccn.toml` (status: runtime image valid, with its digest). A `python` job and every pipeline recipe stay `created` until it is.
+4. [ ] NEMAR's pipelines service account exists: username `nemar-pipelines`, account kind `service`, status `approved`, not deleted (status: pipelines service account). How the account is created is not written down in this repository; create it as the owner would any other service account and check the line.
+5. [ ] The first owner policy version is set with `nemar admin compute policy set --file <json>` (owner; status: owner policy "set"). Until a version exists the default applies, so a recorded version is the owner's decision on the record: the tolerances, the retention periods and the reservation wait are in it.
+6. [ ] The `people` and `pipelines` platform pools are granted (`nemar admin compute pool grant`, owner for a platform budget; status: people pool and pipelines pool granted), and each person who may run a job has an account pool granted. A hold on a person's job needs both the person's pool and the `people` budget.
+7. [ ] The observer's token procedure is decided and written down by the owner. A token is `nemar admin compute observer mint`'s output, good for one hour and ONE post, and the observer posts a quick document every 15 minutes, so a fresh token has to be minted for every post; ADR 0118 leaves who mints it, where it is kept and how it reaches the observer undecided, and nothing in this repository does it.
+8. [ ] `nemar admin compute status` shows every line yes or ok, no "Reconciliation paused" line that was not intended, and no "Attention" line.
+9. [ ] Turn on `COMPUTE_ENABLED`. While it is off the tenant sweep is paused (status prints "Reconciliation paused"), so the final settlement against Expanse, the failed ACCESS report listing and the following of jobs nobody reserved wait.
+10. [ ] Epic D hand-off, before the switch is turned on for people: the mail sent when a job's results are ready links to `<APP_BASE_URL>/compute/jobs/<job id>` (`computeJobPageUrl` in `compute-results.ts`, never to a file), so that page must exist on the website first (issue nemarOrg/website#495, the compute dashboard). A mail whose link is a 404 is the first thing a person sees of the service.
+
 ## 9. Starting the driver
 
 Open Claude Code in the primary nemar-cli checkout with Haiku at maximum effort, and give it:
