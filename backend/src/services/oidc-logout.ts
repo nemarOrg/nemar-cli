@@ -61,7 +61,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { errorClassName } from "./github/dispatch.js";
 import { isLocalOrLiteral, isLoopbackHost } from "./oidc-clients.js";
-import { oidcIssuer } from "./oidc-config.js";
+import { oidcIssuer, oidcSecret, oidcSecretStatus } from "./oidc-config.js";
 import { randomHex } from "./oidc-encoding.js";
 import { signJwt } from "./oidc-keys.js";
 import {
@@ -360,6 +360,11 @@ export interface LogoutTally {
   errors: number;
   /** The class of the last error, a fixed word, or null. */
   errorClass: string | null;
+  /**
+   * Set only when the run was skipped whole because `OIDC_SECRET` is not usable (`unset` or
+   * `malformed`): nothing was read, claimed or written. Absent on every other run.
+   */
+  skipped?: "oidc_secret_unset" | "oidc_secret_malformed";
 }
 
 /** The most deliveries one run takes: a run is bounded, and the next tick takes the rest. */
@@ -389,6 +394,16 @@ export async function attemptDueLogouts(
     errors: 0,
     errorClass: null,
   };
+  // With no usable secret no logout token can be signed, and a claim costs an attempt: five claims
+  // that each fail to sign would end a pending delivery for good. So nothing is claimed, read or
+  // written until the secret is valid again (ADR 0119 addendum). Every caller passes through here:
+  // the retry tick, the first attempt after an ending and the test-account sweep.
+  if (oidcSecret(env) === null) {
+    const state = oidcSecretStatus(env);
+    tally.skipped = state === "unset" ? "oidc_secret_unset" : "oidc_secret_malformed";
+    console.warn(`[oidc-logout] skipped reason=${tally.skipped}`);
+    return tally;
+  }
   let rows: DueDelivery[];
   try {
     rows = await dueDeliveries(env.DB, options.limit ?? LOGOUT_ROWS_PER_RUN, options.userId);
@@ -480,6 +495,8 @@ export async function runOidcLogoutRetryTick(
 ): Promise<LogoutTally | null> {
   if (!isExactProduction(env)) return null;
   const tally = await attemptDueLogouts(env, options);
+  // Skipped for want of a secret: not even the prune writes (the warning was logged once already).
+  if (tally.skipped) return tally;
   try {
     tally.pruned = await pruneDeliveries(env.DB);
   } catch (err) {
