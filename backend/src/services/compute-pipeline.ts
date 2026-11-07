@@ -615,6 +615,10 @@ export interface SyncResult {
   failed: number;
   /** Stamps with a job that was created but never linked, found again by its key. */
   linked: number;
+  /** Stamps left open because what decides them could not be read yet (the next sync tries again). */
+  later: number;
+  /** Stamps whose sync threw (a database fault, say): left as they were, and counted so the line is not blind to them. */
+  errored: number;
 }
 
 /** The open stamps, oldest update first: the partial index `compute_pipeline_stamps_open` serves it. */
@@ -703,7 +707,14 @@ export async function syncPipelineStamps(
   limit: number = SYNC_STAMPS_PER_CALL,
 ): Promise<SyncResult> {
   const db = env.DB;
-  const result: SyncResult = { examined: 0, succeeded: 0, failed: 0, linked: 0 };
+  const result: SyncResult = {
+    examined: 0,
+    succeeded: 0,
+    failed: 0,
+    linked: 0,
+    later: 0,
+    errored: 0,
+  };
   const open = (await db.prepare(OPEN_STAMPS_SQL).bind(limit).all<StampRow>()).results;
   for (const stamp of open) {
     result.examined++;
@@ -756,6 +767,7 @@ export async function syncPipelineStamps(
         console.error(
           `[compute-pipeline] sync_later stamp=${stamp.id} dataset=${stamp.dataset_id} reason=${read.reason}`,
         );
+        result.later++;
         continue;
       }
       if (read.kind === "failed") {
@@ -807,6 +819,7 @@ export async function syncPipelineStamps(
       console.error(
         `[compute-pipeline] sync_failed stamp=${stamp.id} error=${err instanceof Error ? err.name : "unknown"}`,
       );
+      result.errored++;
     }
   }
   return result;

@@ -228,12 +228,21 @@ export function pipelineDispatchLogLine(
 ): { level: "info" | "warn" | "error"; line: string } | null {
   if (r.outcome === "off") return null;
   const skipped = r.recipes.filter((x) => x.skipped !== null || x.stopped_by !== null);
-  if (r.dispatched === 0 && r.errors.length === 0 && skipped.length === 0) return null;
+  const syncTrouble = r.synced !== null && (r.synced.later > 0 || r.synced.errored > 0);
+  if (r.dispatched === 0 && r.errors.length === 0 && skipped.length === 0 && !syncTrouble) {
+    return null;
+  }
   const parts = [
     `dispatched=${r.dispatched}`,
     `today=${r.today}`,
     ...(r.synced
-      ? [`synced_succeeded=${r.synced.succeeded}`, `synced_failed=${r.synced.failed}`]
+      ? [
+          `synced_succeeded=${r.synced.succeeded}`,
+          `synced_failed=${r.synced.failed}`,
+          // Only when there is something to say, so a clean run's line is unchanged.
+          ...(r.synced.later > 0 ? [`synced_later=${r.synced.later}`] : []),
+          ...(r.synced.errored > 0 ? [`synced_errored=${r.synced.errored}`] : []),
+        ]
       : []),
     ...r.recipes.flatMap((x) => [
       ...(x.skipped ? [`${x.recipe}_skipped=${x.skipped}`] : []),
@@ -242,7 +251,12 @@ export function pipelineDispatchLogLine(
     ...(r.errors.length > 0 ? [`errors=${r.errors.join(",")}`] : []),
   ];
   const drift = r.recipes.some((x) => x.skipped === "registry_drift");
+  // A sync that threw is as loud as any other error; one that could not decide yet is a warning.
   const level =
-    r.errors.length > 0 ? "error" : drift || r.recipes.some((x) => x.stopped_by) ? "warn" : "info";
+    r.errors.length > 0 || (r.synced?.errored ?? 0) > 0
+      ? "error"
+      : drift || syncTrouble || r.recipes.some((x) => x.stopped_by)
+        ? "warn"
+        : "info";
   return { level, line: `[compute-pipeline-dispatch] ${parts.join(" ")}` };
 }

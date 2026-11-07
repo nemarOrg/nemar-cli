@@ -476,7 +476,7 @@ describe("a result that does not carry the tuple it was dispatched with", () => 
 describe("the log line", () => {
   const base: PipelineCronResult = {
     outcome: "ran",
-    synced: { examined: 0, succeeded: 0, failed: 0, linked: 0 },
+    synced: { examined: 0, succeeded: 0, failed: 0, linked: 0, later: 0, errored: 0 },
     today: 0,
     dispatched: 0,
     recipes: [{ recipe: "nemar-floor", dispatched: 0, skipped: null, stopped_by: null }],
@@ -494,5 +494,21 @@ describe("the log line", () => {
       "[compute-pipeline-dispatch] dispatched=3 today=1 synced_succeeded=0 synced_failed=0",
     );
     expect(line?.line).not.toMatch(/nm\d{6}|job_|sha256|@/);
+  });
+
+  test("a sync that could not decide, or threw, is in the line: a warning for the first, an error for the second (MUTATION: leave either out)", () => {
+    const later = pipelineDispatchLogLine({
+      ...base,
+      synced: { ...(base.synced as NonNullable<typeof base.synced>), later: 2 },
+    });
+    expect(later?.level).toBe("warn");
+    expect(later?.line).toContain("synced_later=2");
+    expect(later?.line).not.toContain("synced_errored");
+    const errored = pipelineDispatchLogLine({
+      ...base,
+      synced: { ...(base.synced as NonNullable<typeof base.synced>), errored: 1, later: 1 },
+    });
+    expect(errored?.level).toBe("error");
+    expect(errored?.line).toContain("synced_errored=1");
   });
 });

@@ -868,6 +868,37 @@ describe("the stamp follows its job to the end", () => {
     expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
   });
 
+  test("a sync that could not decide counts `later`, and one that threw counts `errored`; neither is `failed` and the stamp stays open (MUTATION: count neither)", async () => {
+    const { env, jobId, stampId } = await dispatched();
+    await finishAtTapis(fx, env, jobId, { outputs: floorOutputs() });
+    let later = null as Awaited<ReturnType<typeof syncPipelineStamps>> | null;
+    await logged(async () => {
+      later = await syncPipelineStamps(fx.env({ COMPUTE_RESULTS: undefined }));
+    });
+    expect(later).toMatchObject({ examined: 1, failed: 0, later: 1, errored: 0 });
+    // A database fault on the job read: the sync threw for this stamp.
+    const faulty = new Proxy(env.DB, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql: string) => {
+            if (sql.startsWith("SELECT id, state, failure_code FROM compute_jobs")) {
+              throw new Error("injected: database fault");
+            }
+            return target.prepare(sql);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as D1Database;
+    let errored = null as Awaited<ReturnType<typeof syncPipelineStamps>> | null;
+    await logged(async () => {
+      errored = await syncPipelineStamps({ ...env, DB: faulty } as Bindings);
+    });
+    expect(errored).toMatchObject({ examined: 1, failed: 0, later: 0, errored: 1 });
+    expect((await getStamp(env.DB, stampId))?.state).toBe("dispatched");
+  });
+
   test("a rewritten tuple whose ATTEMPT number is taken (no live stamp holds it) is tuple_attempt_taken, not tuple_already_stamped", async () => {
     const { env, jobId, stampId } = await dispatched();
     // History only: a failed stamp of the tuple the record will name, with this stamp's attempt number.
