@@ -98,8 +98,12 @@ describe("(a) a policy write that would freeze open reservations", () => {
       "partner_reservations_open",
       1,
     ]);
-    // With only bound rows left, the write is not refused.
+    // With no unbound reservation left, `open` is 0; the pending row is the BOUND count (the pin is loosened
+    // by dropping the block), and the plain refused row is in neither.
     w.h.db.query("UPDATE compute_jobs SET state = 'cancelled' WHERE id = ?").run(open.job_id);
+    const bound = await put(policyWith(undefined));
+    expect([bound.status, bound.json?.open, bound.json?.bound]).toEqual([409, 0, 1]);
+    w.h.db.query("UPDATE compute_jobs SET state = 'cancelled' WHERE id = ?").run(pending.job_id);
     expect((await put(policyWith(undefined))).status).toBe(200);
   });
 
@@ -117,6 +121,57 @@ describe("(a) a policy write that would freeze open reservations", () => {
     // Already off: another write that leaves it off freezes nothing new.
     await put(policyWith(undefined), { force_partner_off: true });
     expect((await put(policyWith({ tapisVisibilityConfirmed: false }))).status).toBe(200);
+  });
+});
+
+describe("(a2) a write that loosens what bound jobs are verified against (minor 2)", () => {
+  const bind = async (state: "pending" | "unverifiable") => {
+    const hold = await reserve(w, person);
+    w.h.db
+      .query(
+        state === "pending"
+          ? "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'pending' WHERE id = ?"
+          : "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'mismatch', partner_flag = 'unverifiable' WHERE id = ?",
+      )
+      .run(`uuid-${state}-bound`, hold.job_id);
+  };
+
+  test("dropping the block, changing the execution system or the listed options is refused with the bound count named; keeping the pin is not", async () => {
+    await put(policyWith(PARTNER_CONFIRMED));
+    await bind("pending");
+    await bind("unverifiable");
+    for (const partner of [
+      undefined,
+      { ...PARTNER_CONFIRMED, execSystemId: "another-system" },
+      { ...PARTNER_CONFIRMED, allowedSchedulerArgs: ["--account=p1"] },
+    ]) {
+      const res = await put(policyWith(partner));
+      expect([
+        JSON.stringify(partner),
+        res.status,
+        res.json?.code,
+        res.json?.open,
+        res.json?.bound,
+      ]).toEqual([JSON.stringify(partner), 409, "partner_reservations_open", 0, 2]);
+    }
+    // The same pin again is not a change.
+    expect((await put(policyWith(PARTNER_CONFIRMED))).status).toBe(200);
+    // The owner's word writes it.
+    expect(
+      (
+        await put(policyWith({ ...PARTNER_CONFIRMED, execSystemId: "another-system" }), {
+          force_partner_off: true,
+        })
+      ).status,
+    ).toBe(200);
+  });
+
+  test("with no bound row waiting a pin change is free", async () => {
+    await put(policyWith(PARTNER_CONFIRMED));
+    await reserve(w, person);
+    expect(
+      (await put(policyWith({ ...PARTNER_CONFIRMED, execSystemId: "another-system" }))).status,
+    ).toBe(200);
   });
 });
 
