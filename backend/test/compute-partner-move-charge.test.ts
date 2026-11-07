@@ -177,6 +177,18 @@ describe("what it refuses, and writes nothing for", () => {
     });
   });
 
+  test("a job that is reserved is refused even when an unreserved entry exists for it (the flag is its own term)", async () => {
+    // The state a bug would make: the job reads as reserved while the ledger holds an unreserved entry
+    // under its key. The move reads the job, not only the entry, so it still moves nothing.
+    const job = await unreservedJob();
+    const person = await newPartnerPerson(w);
+    w.h.db.query("UPDATE compute_jobs SET flag_unreserved = 0 WHERE id = ?").run(job);
+    await unchanged(async () => {
+      const res = await move(job, person.id);
+      expect([res.status, res.json?.code]).toEqual([409, "job_reserved"]);
+    });
+  });
+
   test("a job with no unreserved charge, and an unknown job, are refused", async () => {
     const person = await newPartnerPerson(w);
     // A swept job whose charge is 0 (it never ran): nothing to move.
