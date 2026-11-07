@@ -65,6 +65,7 @@ import {
 } from "./services/compute-pipeline-dispatch";
 import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
 import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
+import { runUploadExpiryCron, uploadExpiryLogLine } from "./services/compute-uploads";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
@@ -1238,6 +1239,26 @@ export default {
             .catch((err) =>
               console.error(
                 "[compute-cancel] sweep failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // #2024 (epic #2021 phase D3, ADR 0118): the release of abandoned uploads. A person's job with a
+        // code bundle that is still `uploading` an hour after it was made is failed `upload_expired`
+        // and its hold released, ten rows a tick. PRODUCTION-ONLY, and deliberately NOT in
+        // DEV_CRON_ALLOWLIST: it moves the allocation ledger, and the dev database shares real users.
+        // It also refuses outside exact production on its own and reads no switch. One log line, only
+        // when it took a row or failed: counts and fixed words.
+        ctx.waitUntil(
+          runUploadExpiryCron(env)
+            .then((r) => {
+              const log = r ? uploadExpiryLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-uploads] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),

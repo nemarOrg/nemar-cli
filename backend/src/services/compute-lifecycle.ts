@@ -1213,6 +1213,19 @@ function unsubmittedPlan(
   };
 }
 
+/**
+ * End a job whose code bundle was never finalized: `failed` with the SUBMITTER's code `upload_expired`,
+ * the hold released with no charge, as for any job that never started. Refused (false) for a row that
+ * has a Tapis job, that has moved on or whose records are written (the statement binds the state the
+ * caller read; a row that finished its upload in the meantime is not ended). True if this call did it.
+ */
+export async function endUploadExpired(env: Bindings, job: ComputeJobRow): Promise<boolean> {
+  if (job.state !== "uploading" || job.tapis_uuid !== null || job.records_written_at !== null) {
+    return false;
+  }
+  return endUnsubmitted(env, job, "failed", "upload_expired", null);
+}
+
 /** End a job that never reached Tapis: failed (the hold is released) or cancelled. True if this call did it. */
 async function endUnsubmitted(
   env: Bindings,
@@ -1552,7 +1565,12 @@ export async function submitComputeJob(
     return refused("unavailable");
   }
   const overdue = ageMinutes(row.created_at, nowMs) > policy.reservationWaitMinutes;
-  if (row.records_written_at === null && !overdue) return refused("records_not_written");
+  // A job still UPLOADING its bundle (records not written) is the person's to finish within the upload
+  // window, and the abandoned-upload release's to end (`releaseAbandonedUploads`, `upload_expired`, the
+  // submitter's failure): the reservation wait never turns it into `submit_timeout`, a PLATFORM failure.
+  if (row.records_written_at === null && (row.state === "uploading" || !overdue)) {
+    return refused("records_not_written");
+  }
 
   const ctx = tapisAccess(env, TICK_READ);
   if (ctx === null) return refused("unconfigured");
