@@ -98,6 +98,8 @@ import {
   settleStatements,
   unreservedChargeStatements,
 } from "./compute-ledger.js";
+import { isRoutineDifference } from "./compute-observer.js";
+import { partnerExcessStatements } from "./compute-partner-excess.js";
 import { getPolicy } from "./compute-policy.js";
 import { submitMemoryForQueue } from "./compute-queues.js";
 import {
@@ -621,6 +623,40 @@ export interface TerminalPlan {
   releaseReason?: "released" | "expired";
 }
 
+/** The gate of a partner's excess entry, placed AFTER the stamp: the row has taken the state and is settled. */
+const SETTLED_GATE_SQL = `EXISTS (SELECT 1 FROM compute_jobs
+    WHERE id = ? AND state = ? AND settled_provisional_at IS NOT NULL)`;
+
+/**
+ * A PARTNER job's charge to the person never exceeds the hold the person made: the figure is capped at
+ * `held_milli`, and what was used above it is the partner's (`partnerExcessStatements`, written AFTER the
+ * stamp in the same batch, so the row's `charged_milli` stays the person's). Any other job is unchanged.
+ */
+async function capPartnerCharge(
+  env: Bindings,
+  job: ComputeJobRow,
+  settlement: Provisional,
+  state: string,
+): Promise<{ settlement: Provisional; after: D1PreparedStatement[] }> {
+  if (
+    job.source !== "partner" ||
+    settlement.kind !== "charge" ||
+    settlement.milli <= job.held_milli
+  ) {
+    return { settlement, after: [] };
+  }
+  const { policy } = await getPolicy(env.DB);
+  const after = await partnerExcessStatements(env.DB, {
+    jobId: job.id,
+    pool: job.pool,
+    client: job.client_id,
+    excessMilli: settlement.milli - job.held_milli,
+    routine: isRoutineDifference(settlement.milli, job.held_milli, policy.settle),
+    gate: { sql: SETTLED_GATE_SQL, binds: [job.id, state] },
+  });
+  return { settlement: { ...settlement, milli: job.held_milli }, after };
+}
+
 /**
  * Commit a terminal transition and its settlement as ONE batch. The first statement is the state
  * change `WHERE state = <from>`; the settlement (a charge, or a release for a job that never started)
@@ -636,10 +672,11 @@ async function commitTerminal(
 ): Promise<boolean> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, plan.to] };
+  const capped = await capPartnerCharge(env, job, plan.settlement, plan.to);
   const settle =
-    plan.settlement.kind === "release"
+    capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id, reason: plan.releaseReason }, gate)
-      : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate);
+      : settleStatements(db, { jobId: job.id, chargeMilli: capped.settlement.milli }, gate);
   const results = await db.batch([
     db
       .prepare(TERMINAL_TRANSITION_SQL)
@@ -667,6 +704,7 @@ async function commitTerminal(
     // The report ACCESS is owed for a job whose record first shows its Slurm id at its END (phase A8,
     // #2013): the same batch as the write that gave the row the id, `OR IGNORE`, and no network call.
     ...(plan.slurmJobId === null ? [] : [db.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
+    ...capped.after,
   ]);
   return (results[0]?.meta?.changes ?? 0) === 1;
 }
@@ -679,11 +717,16 @@ async function commitSettlementOnly(
 ): Promise<void> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, job.state] };
+  const capped = await capPartnerCharge(env, job, settlement, job.state);
   const settle =
-    settlement.kind === "release"
+    capped.settlement.kind === "release"
       ? releaseStatements(db, { jobId: job.id }, gate)
-      : settleStatements(db, { jobId: job.id, chargeMilli: settlement.milli }, gate);
-  await db.batch([...settle, db.prepare(SETTLED_STAMP_SQL).bind(job.id, job.state)]);
+      : settleStatements(db, { jobId: job.id, chargeMilli: capped.settlement.milli }, gate);
+  await db.batch([
+    ...settle,
+    db.prepare(SETTLED_STAMP_SQL).bind(job.id, job.state),
+    ...capped.after,
+  ]);
 }
 
 // --- Reading what ended --------------------------------------------------------------------------

@@ -54,12 +54,8 @@ import {
 } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { TERMINAL_STATES_SQL } from "./compute-jobs.js";
-import {
-  ensurePool,
-  platformPool,
-  settleFinal,
-  unreservedChargeStatements,
-} from "./compute-ledger.js";
+import { settleFinal } from "./compute-ledger.js";
+import { partnerExcessStatements } from "./compute-partner-excess.js";
 import { getPolicy } from "./compute-policy.js";
 import { NO_NONCE, signComputeToken, verifyComputeToken } from "./compute-tokens.js";
 
@@ -200,24 +196,20 @@ export const CANDIDATE_ROWS_SQL = `SELECT s.slurm_job_id, s.partition AS sacct_p
     AND EXISTS (SELECT 1 FROM compute_ledger c WHERE c.job_id = j.id AND c.kind = 'charge')
   ORDER BY s.ingested_at ASC, s.slurm_job_id ASC LIMIT ?1`;
 
-/** Stamp a job's final settlement from the ledger: `?1` the job, `?2` 1 to flag a mismatch. */
+/**
+ * Stamp a job's final settlement from the ledger: `?1` the job, `?2` 1 to flag a mismatch. The charge it
+ * records is the one on the POOL OF THE HOLD (the person's): what a partner job used above its hold is the
+ * partner's entry, in another pool, and is not the person's charge.
+ */
 export const STAMP_FINAL_SQL = `UPDATE compute_jobs SET
     settled_final_at = datetime('now'),
     charged_milli = (SELECT COALESCE(SUM(e.charged_delta_milli), 0) FROM compute_ledger e
-                      WHERE e.job_id = ?1),
+                      WHERE e.job_id = ?1
+                        AND e.pool_id = (SELECT h.pool_id FROM compute_ledger h
+                                          WHERE h.kind = 'hold' AND h.job_id = ?1)),
     flag_mismatch = CASE WHEN ?2 = 1 THEN 1 ELSE flag_mismatch END
   WHERE id = ?1 AND settled_final_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger f WHERE f.idempotency_key = 'job:' || ?1 || ':final')`;
-
-/**
- * The mark of a partner job whose Expanse figure exceeded what its reservation held: the flag word an
- * administrator is shown. The job is `verified` (it matched at the read-back), so `partner_flag` is free.
- */
-export const RESOURCES_EXCEEDED_SQL = `UPDATE compute_jobs SET partner_flag = 'resources_mismatch', flag_mismatch = 1
-  WHERE id = ?1 AND source = 'partner'`;
-
-/** The audit action of a partner job whose final figure was capped at its hold. */
-export const PARTNER_OVERRUN_ACTION = "compute.partner.final_capped";
 
 export const FLAG_ONLY_SQL = "UPDATE compute_jobs SET flag_mismatch = 1 WHERE id = ?1";
 
@@ -472,38 +464,6 @@ export function expanseFigureMilli(c: Candidate): number | null {
   }
 }
 
-/**
- * The statements that put what a partner's job used beyond its hold on the partner: the `overrun` of the
- * pool `tenant` (once, by its key), the audit row (only if the overrun was written), and the flag.
- */
-async function excessStatements(
-  db: D1Database,
-  c: Candidate,
-  excess: number,
-): Promise<D1PreparedStatement[]> {
-  const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, c.job_pool);
-  const people = await platformPool(db, "people", c.job_pool);
-  if (!people) throw new Error("the platform people budget is missing");
-  return [
-    ...unreservedChargeStatements(db, {
-      jobId: c.job_id,
-      poolId: tenant.id,
-      budgetPoolId: people.id,
-      chargeMilli: excess,
-    }),
-    db.prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL).bind(
-      ...auditLogParams({
-        userId: null,
-        action: PARTNER_OVERRUN_ACTION,
-        resourceType: "compute_job",
-        resourceId: c.job_id,
-        details: JSON.stringify({ flag: "resources_mismatch", client: c.job_client }),
-      }),
-    ),
-    db.prepare(RESOURCES_EXCEEDED_SQL).bind(c.job_id),
-  ];
-}
-
 export interface SettlePassResult {
   matched: number;
   settled: number;
@@ -542,8 +502,12 @@ export async function settleObservedRows(
     const capped = c.job_source === "partner" && figure > c.job_held_milli;
     const personFigure = capped ? c.job_held_milli : figure;
     const excess = capped ? figure - c.job_held_milli : 0;
+    // Above the hold by no more than a routine difference is information (the job is marked), not a flag
+    // word and an audit row; the cap applies either way.
+    const routineExcess = capped && isRoutineDifference(figure, c.job_held_milli, policy.settle);
     const mismatch =
-      !isRoutineDifference(personFigure, c.provisional_milli, policy.settle) || capped;
+      !isRoutineDifference(personFigure, c.provisional_milli, policy.settle) ||
+      (capped && !routineExcess);
     const result = await settleFinal(env.DB, { jobId: c.job_id, finalMilli: personFigure });
     if (result.ok || result.code === "already_final") {
       // The stamp reads the job's ledger entries, so it comes BEFORE the partner's overrun is written: the
@@ -552,7 +516,17 @@ export async function settleObservedRows(
         env.DB.prepare(STAMP_FINAL_SQL).bind(c.job_id, mismatch ? 1 : 0),
         env.DB.prepare(APPLIED_SQL).bind(c.slurm_job_id),
       ];
-      if (excess > 0) batch.push(...(await excessStatements(env.DB, c, excess)));
+      if (excess > 0) {
+        batch.push(
+          ...(await partnerExcessStatements(env.DB, {
+            jobId: c.job_id,
+            pool: c.job_pool,
+            client: c.job_client,
+            excessMilli: excess,
+            routine: routineExcess,
+          })),
+        );
+      }
       await env.DB.batch(batch);
       out.settled++;
       if (mismatch) out.mismatched++;
