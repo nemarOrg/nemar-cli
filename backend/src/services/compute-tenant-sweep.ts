@@ -133,6 +133,8 @@ export interface TenantSweepResult {
   cancelled: number;
   /** Unbound jobs left for the next run (over the bound). */
   deferred: number;
+  /** A partner's jobs left alone because their live reservation is waiting for the report (phase D4, #2025). */
+  awaitingReport: number;
   /** Own rows taken to their end and charged to the tenant pool. */
   finished: number;
   /** Own rows closed after their record stayed unreadable. */
@@ -158,6 +160,7 @@ const emptyResult = (mode: TenantSweepMode): TenantSweepResult => ({
   unattributed: 0,
   cancelled: 0,
   deferred: 0,
+  awaitingReport: 0,
   finished: 0,
   gaveUp: 0,
   settledFinal: 0,
@@ -388,7 +391,7 @@ async function handleUnbound(
   // report that is about to bind it, or the hold reaper after the reservation's wait, accounts for it. It is
   // left for the next run; once the reservation is past its wait and grace it is a job that skipped it.
   if (await isAwaitingPartnerReport(env, rec)) {
-    r.deferred++;
+    r.awaitingReport++;
     return;
   }
 
@@ -717,7 +720,14 @@ export function tenantLogLine(
   const cutMatters = r.truncated && (r.mode === "week" || r.liveMayHide);
   const needsPerson = r.errors.length > 0 || cutMatters || r.deferred > 0 || accessFailed > 0;
   const acted =
-    r.indexed + r.raced + r.duplicates + r.cancelled + r.finished + r.gaveUp + r.settledFinal;
+    r.indexed +
+    r.raced +
+    r.duplicates +
+    r.cancelled +
+    r.finished +
+    r.gaveUp +
+    r.settledFinal +
+    r.awaitingReport;
   if (!needsPerson && acted === 0) return null;
   const parts = [
     "[compute-tenant]",
@@ -732,6 +742,7 @@ export function tenantLogLine(
     `finished=${r.finished}`,
     `gave_up=${r.gaveUp}`,
     `deferred=${r.deferred}`,
+    ...(r.awaitingReport > 0 ? [`awaiting_report=${r.awaitingReport}`] : []),
     `truncated=${r.truncated ? 1 : 0}`,
     `live_may_hide=${r.liveMayHide ? 1 : 0}`,
     ...(r.mode === "week" ? [`settled_final=${r.settledFinal}`] : []),
