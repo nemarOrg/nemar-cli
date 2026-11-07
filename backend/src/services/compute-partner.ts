@@ -401,7 +401,9 @@ const UUID_TAKEN_SQL = `SELECT 1 AS taken FROM compute_jobs
  */
 export const BIND_REPORT_SQL = `UPDATE compute_jobs SET
     tapis_uuid = ?2, partner_state = 'pending', partner_flag = NULL,
-    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL
+    tapis_status = COALESCE(?3, tapis_status), submitted_at = datetime('now'), examined_at = NULL,
+    partner_read_failures = 0, partner_first_failed_at = NULL, partner_refused_at = NULL,
+    partner_cancel_sent_at = NULL
   WHERE id = ?1 AND source = 'partner' AND state = 'created' AND tapis_uuid IS NULL
     AND partner_state IS NULL AND cancel_requested_at IS NULL
     AND EXISTS (SELECT 1 FROM users u WHERE u.id = compute_jobs.account_id
@@ -589,10 +591,14 @@ export async function reportJob(
     }
   }
 
-  // A reservation that was refused is refused again, and the cancel is asked again (idempotent).
+  // A reservation that was refused is refused again, and the cancel is asked again (idempotent). The
+  // request path sends no blind cancel (the tick's), and the row is READ AGAIN afterwards: the carrying out
+  // may have recovered the job (a refusal as unverifiable that NEMAR can now read and that matches), and a
+  // partner told "refused" about a job that is verified would abandon it while the person is charged.
   if (job.partner_state === "mismatch") {
-    await finishMismatch(env, job.id, REQUEST_READ);
-    return refusedAgain(job);
+    await finishMismatch(env, job.id, REQUEST_READ, { blindCancel: false });
+    job = (await getJob(db, job.id)) ?? job;
+    if (job.partner_state === "mismatch") return refusedAgain(job);
   }
   if (job.tapis_uuid === null) {
     if (isTerminalComputeState(job.state)) return refuse("hold_released");
@@ -680,7 +686,10 @@ export async function reportJob(
     job = outcome.job ?? job;
     if (outcome.kind === "mismatch") {
       // The intent is recorded; the cancel is made now, and retried by the tick if Tapis does not take it.
-      await finishMismatch(env, job.id, REQUEST_READ);
+      await finishMismatch(env, job.id, REQUEST_READ, { blindCancel: false });
+      // A job refused because its person's compute ended before it could be verified is the same word a
+      // reservation that ended is told.
+      if (outcome.flag === "hold_ended") return refuse("hold_cancelled", { job_id: job.id });
       return refuse("report_mismatch", { mismatch: outcome.flag, job_id: job.id });
     }
     if (outcome.kind === "verified") verification = "verified";

@@ -107,15 +107,33 @@ describe("the cap is flagged only when the difference is not routine (item 9)", 
   });
 });
 
-describe("the provisional settlement is capped at the hold too (item 9)", () => {
-  test("a job Tapis let run three hours on a one-hour hold: the person pays the hold, the partner the rest, and the final settlement adds nothing", async () => {
-    const hold = await reserve(w, person);
-    const uuid = await partnerLaunch(w, hold, person);
-    fx.tapis.advance(uuid, "QUEUED");
-    fx.tapis.advance(uuid, "RUNNING");
-    fx.tapis.advance(uuid, "FINISHED");
-    setTapisTimes(fx, uuid, 180 * MINUTE, 0);
-    expect((await report(hold, uuid)).status).toBe(200);
+/** A verified partner job Tapis let run three hours on a one-hour hold, found FINISHED by the tick. */
+async function threeHourJob(options: { slurm: boolean }) {
+  const hold = await reserve(w, person);
+  const uuid = await partnerLaunch(w, hold, person);
+  fx.tapis.advance(uuid, "QUEUED");
+  fx.tapis.advance(uuid, "RUNNING");
+  fx.tapis.advance(uuid, "FINISHED");
+  setTapisTimes(fx, uuid, 180 * MINUTE, 0);
+  if (!options.slurm) {
+    (fx.tapis.jobs.get(uuid)?.record as Record<string, unknown>).remoteJobId = null;
+  }
+  expect((await report(hold, uuid)).status).toBe(200);
+  return { hold, uuid };
+}
+
+const sacctCpu = (slurm: string, seconds: number) =>
+  w.h.db
+    .query(
+      `INSERT INTO compute_sacct_rows (slurm_job_id, run_id, partition, state, elapsed_seconds, alloc_nodes,
+         alloc_cpus, alloc_gpus, alloc_mem_mb, charged_milli)
+       VALUES (?, '00000000-0000-0000-0000-000000000000', 'shared', 'COMPLETED', ?, 1, 4, 0, 8000, NULL)`,
+    )
+    .run(slurm, seconds);
+
+describe("the provisional settlement is capped at the hold, and who writes the excess (M3)", () => {
+  test("a job with NO Slurm id has nothing to correct its excess: the provisional settlement puts it on the partner", async () => {
+    const { hold } = await threeHourJob({ slurm: false });
     await runComputeAdvanceCron(fx.env());
     const job = row(w, hold.job_id);
     expect(job).toMatchObject({
@@ -123,9 +141,9 @@ describe("the provisional settlement is capped at the hold too (item 9)", () => 
       held_milli: 4000,
       charged_milli: 4000,
       flag_overrun: 1,
+      slurm_job_id: null,
     });
     expect(job.partner_flag).toBe("resources_mismatch");
-    // The person's pool has exactly the hold; the overrun is the partner's.
     expect(entries(w, hold.job_id).map((e) => [e.kind, e.charged_delta_milli])).toEqual([
       ["hold", 0],
       ["charge", 4000],
@@ -135,24 +153,9 @@ describe("the provisional settlement is capped at the hold too (item 9)", () => 
       charged_milli: 4000,
       held_milli: 0,
     });
-    const tenantCharged = (poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli;
-    expect(tenantCharged).toBeGreaterThan(7000);
-    // Expanse's own figure comes in later: the person's charge stays the hold, the partner's entry is the
-    // one already written (once per job), and the row still reads what the PERSON was charged.
-    w.h.db.query("UPDATE compute_jobs SET slurm_job_id = '515151' WHERE id = ?").run(hold.job_id);
-    w.h.db
-      .query(
-        `INSERT INTO compute_sacct_rows (slurm_job_id, run_id, partition, state, elapsed_seconds, alloc_nodes,
-           alloc_cpus, alloc_gpus, alloc_mem_mb, charged_milli)
-         VALUES ('515151', '00000000-0000-0000-0000-000000000000', 'shared', 'COMPLETED', 10800, 1, 4, 0, 8000, NULL)`,
-      )
-      .run();
-    expect((await settleObservedRows(fx.env())).settled).toBe(1);
-    expect(row(w, hold.job_id).charged_milli).toBe(4000);
-    expect((poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli).toBe(
-      tenantCharged,
-    );
-    expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(1);
+    expect(
+      (poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli,
+    ).toBeGreaterThan(7000);
     expect(
       w.h.db
         .query(
@@ -161,18 +164,59 @@ describe("the provisional settlement is capped at the hold too (item 9)", () => 
         .get(hold.job_id),
     ).toEqual({ n: 1 });
   });
+
+  test("a job that reaches accounting: the provisional settlement only caps the person; Expanse's figure makes the partner's excess", async () => {
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    const slurm = row(w, hold.job_id).slurm_job_id as string;
+    expect(slurm).not.toBeNull();
+    // Capped for the person; NO guess of the partner's bill from Tapis's times.
+    expect(row(w, hold.job_id)).toMatchObject({ charged_milli: 4000, partner_flag: null });
+    expect(entries(w, hold.job_id).map((e) => e.kind)).toEqual(["hold", "charge"]);
+    expect(poolOf(w, "partner", "tenant")).toBeNull();
+    // Expanse says 1.25 hours (5 SU): the partner's excess is 1 SU, not the 8 SU Tapis's times implied.
+    sacctCpu(slurm, 4500);
+    expect((await settleObservedRows(fx.env())).settled).toBe(1);
+    expect(row(w, hold.job_id).charged_milli).toBe(4000);
+    expect((poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli).toBe(1000);
+    expect((poolOf(w, "platform", "people") as Record<string, number>).charged_milli).toBe(
+      4000 + 1000,
+    );
+    expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(1);
+  });
+
+  test("the excess is gated on the person having been charged exactly the hold", async () => {
+    const { partnerExcessStatements } = await import("../src/services/compute-partner-excess");
+    const { hold } = await threeHourJob({ slurm: true });
+    await runComputeAdvanceCron(fx.env());
+    // A statement built for a DIFFERENT hold figure writes nothing: the person's charge is not that.
+    const wrong = await partnerExcessStatements(fx.env().DB, {
+      jobId: hold.job_id,
+      pool: "cpu",
+      client: null,
+      excessMilli: 500,
+      routine: true,
+      heldMilli: 3999,
+    });
+    await fx.env().DB.batch(wrong);
+    expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(0);
+    const right = await partnerExcessStatements(fx.env().DB, {
+      jobId: hold.job_id,
+      pool: "cpu",
+      client: null,
+      excessMilli: 500,
+      routine: true,
+      heldMilli: 4000,
+    });
+    await fx.env().DB.batch(right);
+    expect(entries(w, hold.job_id).filter((e) => e.kind === "overrun")).toHaveLength(1);
+  });
 });
 
-describe("the repair of an unsettled terminal row caps a partner job too (item 9)", () => {
-  test("a verified partner job found over and unsettled is settled at the hold, the rest on the partner", async () => {
+describe("the repair of an unsettled terminal row caps a partner job too", () => {
+  test("a verified partner job with no Slurm id, found over and unsettled, is settled at the hold, the rest on the partner", async () => {
     const { advanceComputeJob } = await import("../src/services/compute-lifecycle");
-    const hold = await reserve(w, person);
-    const uuid = await partnerLaunch(w, hold, person);
-    fx.tapis.advance(uuid, "QUEUED");
-    fx.tapis.advance(uuid, "RUNNING");
-    fx.tapis.advance(uuid, "FINISHED");
-    setTapisTimes(fx, uuid, 180 * MINUTE, 0);
-    expect((await report(hold, uuid)).status).toBe(200);
+    const { hold } = await threeHourJob({ slurm: false });
     // The row is over but its first batch never settled it.
     w.h.db
       .query("UPDATE compute_jobs SET state = 'finished', ended_at = datetime('now') WHERE id = ?")
@@ -186,6 +230,21 @@ describe("the repair of an unsettled terminal row caps a partner job too (item 9
     expect(
       (poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli,
     ).toBeGreaterThan(7000);
+  });
+});
+
+describe("the repair path leaves a job with a Slurm id to the final settlement", () => {
+  test("capped for the person, nothing written for the partner yet", async () => {
+    const { advanceComputeJob } = await import("../src/services/compute-lifecycle");
+    const { hold } = await threeHourJob({ slurm: true });
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET state = 'finished', ended_at = datetime('now'), slurm_job_id = '616161' WHERE id = ?",
+      )
+      .run(hold.job_id);
+    await advanceComputeJob(fx.env(), hold.job_id);
+    expect(row(w, hold.job_id)).toMatchObject({ charged_milli: 4000 });
+    expect(poolOf(w, "partner", "tenant")).toBeNull();
   });
 });
 

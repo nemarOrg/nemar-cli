@@ -6,17 +6,21 @@
  * (`unreservedChargeStatements`, once per job by its key), counted against the `people` budget, with the job
  * flagged and, when the difference is more than a routine one, a flag word and one audit row.
  *
- * Both settlements use it: the provisional one (`compute-lifecycle.ts`) and the observer's final one
- * (`compute-observer.ts`). Whichever writes the entry first wins the key; the other adds nothing, so the
- * partner is charged the first figure and never twice. A job with no Slurm id and no final settlement is
- * charged to the person by its provisional settlement only, which never exceeds the hold.
+ * WHO WRITES THE ENTRY. The figure of the observer's final settlement is Expanse's own, so for a job that
+ * reaches accounting (it has a Slurm id) the FINAL settlement writes the excess, and the provisional one
+ * (`compute-lifecycle.ts`) only caps the person at the hold: a provisional figure built from Tapis's times
+ * (a fallback end time, walltime rounding) must never be the partner's bill when a truer one is coming, and
+ * the entry is written once per job by its key, so a provisional one could never be corrected (the budget
+ * would end above what was truly consumed). A job with NO Slurm id has nothing to correct it, so its
+ * provisional settlement writes the excess; and if no final ever arrives for a job that has one, the person
+ * is charged the hold (never more) and the partner's excess is not billed. The entry is gated on the
+ * person's charge being exactly the hold.
  */
 
 import { COMPUTE_TENANT_POOL_REF } from "../../../shared/compute-state.js";
 import type { ComputePool } from "../../../shared/contract/compute.js";
 import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
-import type { HoldGuard } from "./compute-ledger.js";
 
 /** The audit action of a partner job whose charge to the person was capped at its hold. */
 export const PARTNER_CAPPED_ACTION = "compute.partner.final_capped";
@@ -32,9 +36,19 @@ export const PARTNER_EXCESS_MARK_SQL = `UPDATE compute_jobs SET flag_overrun = 1
     AND EXISTS (SELECT 1 FROM compute_ledger u WHERE u.idempotency_key = 'job:' || ?1 || ':unreserved')`;
 
 /**
+ * The gate of the excess entry: the person's charge on the pool of their hold is EXACTLY the hold. The
+ * entry is written only after the settlement that capped the person at the hold is in the batch (or already
+ * on the ledger), and never for a job whose person was charged anything else. Plain `?`s: the job twice and
+ * the hold.
+ */
+export const PERSON_AT_HOLD_SQL = `(SELECT COALESCE(SUM(c.charged_delta_milli), 0) FROM compute_ledger c
+    WHERE c.job_id = ? AND c.pool_id = (SELECT h.pool_id FROM compute_ledger h
+                                         WHERE h.kind = 'hold' AND h.job_id = ?)) = ?`;
+
+/**
  * The statements that put `excessMilli` on the partner, for a batch of the caller's own, in the order
- * charge, audit (only if the charge was written and `routine` is false), mark. `gate` is ANDed into the
- * charge. `routine` true writes the charge and the information flag only.
+ * charge, audit (only if the charge was written and `routine` is false), mark. The charge is gated on
+ * {@link PERSON_AT_HOLD_SQL}. `routine` true writes the charge and the information flag only.
  */
 export async function partnerExcessStatements(
   db: D1Database,
@@ -44,7 +58,8 @@ export async function partnerExcessStatements(
     client: string | null;
     excessMilli: number;
     routine: boolean;
-    gate?: HoldGuard;
+    /** The hold the person made (`held_milli`): the person must have been charged exactly this. */
+    heldMilli: number;
   },
 ): Promise<D1PreparedStatement[]> {
   const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, input.pool);
@@ -58,7 +73,7 @@ export async function partnerExcessStatements(
       budgetPoolId: people.id,
       chargeMilli: input.excessMilli,
     },
-    input.gate,
+    { sql: PERSON_AT_HOLD_SQL, binds: [input.jobId, input.jobId, input.heldMilli] },
   );
   return [
     ...charge,

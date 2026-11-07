@@ -271,7 +271,9 @@ const REACHABLE_SQL = `UPDATE compute_jobs SET partner_flag = NULL
 
 /** A binding withdrawn: the row is a reservation again. `?1` the job, `?2` the uuid. */
 const WITHDRAW_SQL = `UPDATE compute_jobs SET tapis_uuid = NULL, partner_state = NULL,
-    partner_flag = 'tapis_job_not_found', tapis_status = NULL, flag_mismatch = 1
+    partner_flag = 'tapis_job_not_found', tapis_status = NULL, flag_mismatch = 1,
+    partner_read_failures = 0, partner_first_failed_at = NULL, partner_refused_at = NULL,
+    partner_cancel_sent_at = NULL
   WHERE id = ?1 AND tapis_uuid = ?2 AND partner_state = 'pending' AND state = 'created'`;
 
 export interface HoldReaperResult {

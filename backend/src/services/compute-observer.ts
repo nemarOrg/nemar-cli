@@ -524,6 +524,7 @@ export async function settleObservedRows(
             client: c.job_client,
             excessMilli: excess,
             routine: routineExcess,
+            heldMilli: c.job_held_milli,
           })),
         );
       }
