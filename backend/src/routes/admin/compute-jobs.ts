@@ -96,7 +96,10 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
     const id = c.req.param("id");
     if (!COMPUTE_JOB_ID_RE.test(id)) return refuse(c, "job_not_found");
     const parsed = z
-      .object({ to_account_id: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) })
+      .object({
+        to_account_id: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        confirm_unproven_owner: z.boolean().optional(),
+      })
       .strict()
       .safeParse(await readJson(c));
     if (!parsed.success) {
@@ -109,6 +112,7 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
       jobId: id,
       toAccountId: parsed.data.to_account_id,
       actorUserId: c.get("user").id,
+      confirmUnprovenOwner: parsed.data.confirm_unproven_owner === true,
     });
     if (!result.ok) return refuse(c, result.code);
     const body: ComputeMoveChargeResponse = {
@@ -117,6 +121,8 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
       pool: result.pool,
       moved_milli: result.movedMilli,
       replayed: result.replayed,
+      attributed_account_id: result.attributedAccountId,
+      owner_proven: result.attributedAccountId === parsed.data.to_account_id,
     };
     return c.json(body);
   });

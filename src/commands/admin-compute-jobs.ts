@@ -856,7 +856,9 @@ account is refused), the platform's people budget is counted once, and an audit 
 Owner only. Refused when the job was reserved, has no charge to the partner's pool, is not over, or when
 the account is deleted, not in good standing or has no pool of the charge's word. The person's balance
 may go below zero: it is a fact that already happened, and holds are refused until a grant brings it back.
---json prints the Worker's answer as it is.
+The account must be the one the job's Tapis owner was attributed to when the sweep indexed it; any other
+account (and any account, for a job nothing attributed) needs --confirm-unproven-owner, and the audit row
+records that the owner was not proven. --json prints the Worker's answer as it is.
 
 Exit codes:
   0  moved, or already moved to this account.
@@ -866,9 +868,13 @@ const moveChargeCommand = new Command("move-charge")
   .description("Move the charge of a job that skipped the reservation to a person (owner)")
   .argument("<job>", "The job's id (job_ and 24 lowercase hexadecimal digits)")
   .requiredOption("--to <account id>", "The account that is charged (its number)")
+  .option(
+    "--confirm-unproven-owner",
+    "Charge an account that is not the one the job's Tapis owner was attributed to (or any account, for an unattributed job)",
+  )
   .option("--json", "Print the Worker's answer as JSON")
   .addHelpText("after", MOVE_CHARGE_HELP)
-  .action(async (id: string, o: { to: string; json?: boolean }) => {
+  .action(async (id: string, o: { to: string; json?: boolean; confirmUnprovenOwner?: boolean }) => {
     const json = o.json === true;
     if (!requireSignedIn(json)) return;
     const jobId = jobIdArg(id, json);
@@ -882,7 +888,7 @@ const moveChargeCommand = new Command("move-charge")
       return;
     }
     try {
-      const res = await moveComputeCharge(jobId, account);
+      const res = await moveComputeCharge(jobId, account, o.confirmUnprovenOwner === true);
       if (json) {
         console.log(JSON.stringify(res, null, 2));
         return;

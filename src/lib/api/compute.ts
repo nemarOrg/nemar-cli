@@ -240,10 +240,17 @@ export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJo
 export async function moveComputeCharge(
   jobId: string,
   toAccountId: number,
+  confirmUnprovenOwner = false,
 ): Promise<ComputeMoveChargeResponse> {
   return request(
     `/admin/compute/jobs/${encodeURIComponent(jobId)}/move-charge`,
-    { method: "POST", body: JSON.stringify({ to_account_id: toAccountId }) },
+    {
+      method: "POST",
+      body: JSON.stringify({
+        to_account_id: toAccountId,
+        ...(confirmUnprovenOwner ? { confirm_unproven_owner: true } : {}),
+      }),
+    },
     true,
     ComputeMoveChargeResponseSchema,
   );

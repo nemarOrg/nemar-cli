@@ -98,6 +98,7 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "already_moved",
   "target_not_in_good_standing",
   "target_has_no_pool",
+  "owner_not_proven",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -131,6 +132,7 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   already_moved: 409,
   target_not_in_good_standing: 409,
   target_has_no_pool: 409,
+  owner_not_proven: 409,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -773,6 +775,10 @@ export const ComputeMoveChargeResponseSchema = z
     pool: z.string(),
     moved_milli: z.number().int(),
     replayed: z.boolean(),
+    /** The account the job's Tapis owner mapped to, or null; the move names another only on the owner's word. */
+    attributed_account_id: z.number().int().nullable().optional(),
+    /** Whether the target is the account the job was attributed to. */
+    owner_proven: z.boolean().optional(),
   })
   .passthrough();
 

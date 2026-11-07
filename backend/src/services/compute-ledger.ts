@@ -785,7 +785,9 @@ export const MOVE_IN_INSERT_SQL = `INSERT INTO compute_ledger
 export const MOVE_AUDIT_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
   SELECT ?1, '${MOVE_CHARGE_ACTION}', 'compute_job', ?2,
          json_object('to_account', CAST(?3 AS INTEGER), 'pool', p.pool,
-                     'moved_milli', i.charged_delta_milli, 'reason', i.reason)
+                     'moved_milli', i.charged_delta_milli, 'reason', i.reason,
+                     'attributed_account', ?4, 'owner_proven', CASE WHEN ?4 = CAST(?3 AS INTEGER) THEN 1 ELSE 0 END,
+                     'confirmed_unproven_owner', ?5)
     FROM compute_ledger i JOIN compute_pools p ON p.id = i.pool_id
    WHERE i.idempotency_key = 'move:' || ?2 || ':in' AND changes() > 0`;
 
@@ -797,15 +799,24 @@ export type MoveRefusal =
   | "account_not_found"
   | "target_not_in_good_standing"
   | "target_has_no_pool"
+  | "owner_not_proven"
   | "would_go_negative"
   | "would_exceed_limit";
 
 export type MoveResult =
-  | { ok: true; replayed: boolean; pool: ComputePool; movedMilli: number }
+  | {
+      ok: true;
+      replayed: boolean;
+      pool: ComputePool;
+      movedMilli: number;
+      /** The account the job's Tapis owner mapped to when the sweep indexed it, or null (unattributed). */
+      attributedAccountId: number | null;
+    }
   | { ok: false; code: MoveRefusal };
 
 interface MoveFacts {
   job_id: string | null;
+  job_account: number | null;
   flag_unreserved: number | null;
   state: string | null;
   charge_milli: number | null;
@@ -822,6 +833,7 @@ interface MoveFacts {
 
 const MOVE_FACTS_SQL = `SELECT
   (SELECT id FROM compute_jobs WHERE id = ?1) AS job_id,
+  (SELECT account_id FROM compute_jobs WHERE id = ?1) AS job_account,
   (SELECT flag_unreserved FROM compute_jobs WHERE id = ?1) AS flag_unreserved,
   (SELECT state FROM compute_jobs WHERE id = ?1) AS state,
   (SELECT charged_delta_milli FROM compute_ledger WHERE idempotency_key = 'job:' || ?1 || ':unreserved') AS charge_milli,
@@ -852,34 +864,57 @@ const MOVE_FACTS_SQL = `SELECT
  */
 export async function moveCharge(
   db: D1Database,
-  input: { jobId: string; toAccountId: number; actorUserId: number },
+  input: {
+    jobId: string;
+    toAccountId: number;
+    actorUserId: number;
+    /** The owner's explicit word that the account is not the one the job's Tapis owner mapped to. */
+    confirmUnprovenOwner?: boolean;
+  },
 ): Promise<MoveResult> {
   const job = jobIdArg(input.jobId);
   const account = positiveId("an account", input.toAccountId);
   const actor = positiveId("an actor", input.actorUserId);
   const ref = String(account);
-  const results = await db.batch([
-    db.prepare(MOVE_OUT_INSERT_SQL).bind(job, ref, actor, REASON.moved),
-    db.prepare(MOVE_IN_INSERT_SQL).bind(job, ref, actor, REASON.moved),
-    db.prepare(MOVE_AUDIT_SQL).bind(actor, job, ref),
-  ]);
-  const wroteOut = (results[0]?.meta?.changes ?? 0) === 1;
-  const wroteIn = (results[1]?.meta?.changes ?? 0) === 1;
-  if (wroteOut !== wroteIn) {
-    // Unreachable by construction (the second half is gated on the first, and a table refusal rolls the
-    // batch back); if it is ever reached the books are inconsistent and nothing may go on quietly.
-    throw new Error("a charge move wrote one half of its pair");
+  const confirmed = input.confirmUnprovenOwner === true;
+  // WHO THE JOB WAS: the account the sweep mapped the job's Tapis owner to, or none. A tag or an owner
+  // proves little (a partner can mint any username), so charging a DIFFERENT account, or any account for a
+  // job nothing attributed, is the owner's explicit word and is recorded in the audit row. Without the word
+  // the batch is not run at all; every other refusal is still told first, so `owner_not_proven` is only
+  // ever the answer for a move that would otherwise have been made.
+  const before = await db.prepare(MOVE_FACTS_SQL).bind(job, ref).first<MoveFacts>();
+  const attributed = before?.job_account ?? null;
+  const proven = attributed === account;
+  let wroteOut = false;
+  if (proven || confirmed) {
+    const results = await db.batch([
+      db.prepare(MOVE_OUT_INSERT_SQL).bind(job, ref, actor, REASON.moved),
+      db.prepare(MOVE_IN_INSERT_SQL).bind(job, ref, actor, REASON.moved),
+      db.prepare(MOVE_AUDIT_SQL).bind(actor, job, ref, attributed, confirmed && !proven ? 1 : 0),
+    ]);
+    // D1 counts the rows a trigger writes in a statement's changes, so "written" is more than none, never
+    // exactly one.
+    wroteOut = (results[0]?.meta?.changes ?? 0) > 0;
+    const wroteIn = (results[1]?.meta?.changes ?? 0) > 0;
+    if (wroteOut !== wroteIn) {
+      // Unreachable by construction (the second half is gated on the first, and a table refusal rolls the
+      // batch back); if it is ever reached the books are inconsistent and nothing may go on quietly.
+      throw new Error("a charge move wrote one half of its pair");
+    }
   }
   const facts = await db.prepare(MOVE_FACTS_SQL).bind(job, ref).first<MoveFacts>();
   if (facts === null || facts.job_id === null) return { ok: false, code: "job_not_found" };
   const pool = (facts.pool_word ?? "cpu") as ComputePool;
-  if (wroteOut) {
-    return { ok: true, replayed: false, pool, movedMilli: facts.charge_milli ?? 0 };
-  }
+  const done = (replayed: boolean): MoveResult => ({
+    ok: true,
+    replayed,
+    pool,
+    movedMilli: facts.charge_milli ?? 0,
+    attributedAccountId: facts.job_account ?? null,
+  });
+  if (wroteOut) return done(false);
   if (facts.out_account !== null) {
-    return facts.moved_to === ref
-      ? { ok: true, replayed: true, pool, movedMilli: facts.charge_milli ?? 0 }
-      : { ok: false, code: "already_moved" };
+    return facts.moved_to === ref ? done(true) : { ok: false, code: "already_moved" };
   }
   if (facts.flag_unreserved !== 1) return { ok: false, code: "job_reserved" };
   if (
@@ -901,6 +936,12 @@ export async function moveCharge(
   if (facts.target_pool_charged + facts.charge_milli > TOTAL_MAX) {
     return { ok: false, code: "would_exceed_limit" };
   }
+  if ((facts.charge_pool_charged ?? 0) < facts.charge_milli) {
+    return { ok: false, code: "would_go_negative" };
+  }
+  // Everything else holds: the one thing missing is the owner's word about an account the job was not
+  // attributed to.
+  if (!proven && !confirmed) return { ok: false, code: "owner_not_proven" };
   return { ok: false, code: "would_go_negative" };
 }
 

@@ -178,7 +178,7 @@ describe("the owner moves a charge", () => {
     const before = charged("partner", "tenant");
     expect(before).toBeGreaterThanOrEqual(2000);
     seen = [];
-    const r = await runCli("owner", [job, "--to", String(person)]);
+    const r = await runCli("owner", [job, "--to", String(person), "--confirm-unproven-owner"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain(`of cpu moved to account ${person}`);
     expect(r.stdout).toMatch(/^[0-9.]+ SU of cpu moved/m);
@@ -191,7 +191,13 @@ describe("the owner moves a charge", () => {
     const job = await unreservedJob();
     const person = await seedUser(fx.env().DB);
     await fundAccount(fx.env().DB, person, 50_000);
-    const r = await runCli("owner", [job, "--to", String(person), "--json"]);
+    const r = await runCli("owner", [
+      job,
+      "--to",
+      String(person),
+      "--json",
+      "--confirm-unproven-owner",
+    ]);
     expect(r.exitCode).toBe(0);
     const body = JSON.parse(r.stdout);
     expect(ComputeMoveChargeResponseSchema.safeParse(body).success).toBe(true);
@@ -208,9 +214,9 @@ describe("the owner moves a charge", () => {
     const job = await unreservedJob();
     const person = await seedUser(fx.env().DB);
     await fundAccount(fx.env().DB, person, 50_000);
-    await runCli("owner", [job, "--to", String(person)]);
+    await runCli("owner", [job, "--to", String(person), "--confirm-unproven-owner"]);
     const after = charged("account", String(person));
-    const again = await runCli("owner", [job, "--to", String(person)]);
+    const again = await runCli("owner", [job, "--to", String(person), "--confirm-unproven-owner"]);
     expect(again.exitCode).toBe(0);
     expect(again.stdout).toContain("already moved");
     expect(charged("account", String(person))).toBe(after);
@@ -265,11 +271,23 @@ describe("what it refuses", () => {
     expect(b.stdout + b.stderr).toContain("That account is deleted or not in good standing.");
   });
 
+  test("an account the job was not attributed to is refused without --confirm-unproven-owner, and nothing moves (m6)", async () => {
+    const job = await unreservedJob();
+    const person = await seedUser(fx.env().DB);
+    await fundAccount(fx.env().DB, person, 50_000);
+    const r = await runCli("owner", [job, "--to", String(person)]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("not the one the job's Tapis owner");
+    expect(charged("account", String(person))).toBe(0);
+    expect(charged("partner", "tenant")).toBeGreaterThanOrEqual(2000);
+  });
+
   test("its help says it is the owner's and what it keeps", async () => {
     const r = await runCli("owner", ["--help-all"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Owner only.");
     expect(r.stdout).toContain("counted once");
     expect(r.stdout).toContain("Exit codes:");
+    expect(r.stdout).toContain("--confirm-unproven-owner");
   });
 });

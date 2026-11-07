@@ -75,10 +75,11 @@ async function unreservedJob(): Promise<string> {
   return found.id;
 }
 
-const move = (jobId: string, to: unknown, key: string | null = OWNER_KEY) =>
+/** The move, with the owner's explicit confirmation by default: the unreserved jobs below are unattributed. */
+const move = (jobId: string, to: unknown, key: string | null = OWNER_KEY, confirm = true) =>
   w.h.call("POST", `/admin/compute/jobs/${jobId}/move-charge`, {
     key,
-    body: { to_account_id: to },
+    body: { to_account_id: to, ...(confirm ? { confirm_unproven_owner: true } : {}) },
   });
 
 const count = (table: string) =>
@@ -105,6 +106,8 @@ describe("the move", () => {
       pool: "cpu",
       moved_milli: charged,
       replayed: false,
+      attributed_account_id: null,
+      owner_proven: false,
     });
     expect(tenant().charged_milli).toBe(0);
     expect((poolOf(w, "account", String(person.id)) as Record<string, number>).charged_milli).toBe(
@@ -137,6 +140,9 @@ describe("the move", () => {
       pool: "cpu",
       moved_milli: charged,
       reason: "charge_moved",
+      attributed_account: null,
+      owner_proven: 0,
+      confirmed_unproven_owner: 1,
     });
   });
 
@@ -317,7 +323,12 @@ describe("the pair is one batch", () => {
     w.h.db.exec(`CREATE TRIGGER test_refuse_move_in BEFORE INSERT ON compute_ledger
       WHEN NEW.idempotency_key LIKE 'move:%:in' BEGIN SELECT RAISE(ABORT, 'test: the second half refused'); END;`);
     await expect(
-      moveCharge(w.env().DB, { jobId: job, toAccountId: person.id, actorUserId: fx.ownerId }),
+      moveCharge(w.env().DB, {
+        jobId: job,
+        toAccountId: person.id,
+        actorUserId: fx.ownerId,
+        confirmUnprovenOwner: true,
+      }),
     ).rejects.toThrow();
     w.h.db.exec("DROP TRIGGER test_refuse_move_in");
     expect(count("compute_ledger") - entries(w, job).length).toBeGreaterThan(0);
@@ -331,5 +342,61 @@ describe("the pair is one batch", () => {
     expect(await totalsDisagreements(w.env().DB)).toEqual([]);
     // And the move still works afterwards: nothing was left half done.
     expect((await move(job, person.id)).status).toBe(200);
+  });
+});
+
+describe("the owner is proven, or the owner says so (m6, Opus)", () => {
+  const audit = () =>
+    (
+      w.h.db
+        .query("SELECT details FROM audit_log WHERE action = 'compute.charge.move'")
+        .all() as Array<{ details: string }>
+    ).map((r) => JSON.parse(r.details) as DbRow);
+
+  test("an unattributed job, or another account than the one it was attributed to, needs the explicit confirmation and writes nothing without it", async () => {
+    const job = await unreservedJob();
+    const a = await newPartnerPerson(w);
+    const b = await newPartnerPerson(w);
+    const before = [count("compute_ledger"), count("audit_log")];
+    const refused = await move(job, a.id, OWNER_KEY, false);
+    expect([refused.status, refused.json?.code]).toEqual([409, "owner_not_proven"]);
+    // Attributed to A, asked for B: also refused.
+    w.h.db.query("UPDATE compute_jobs SET account_id = ? WHERE id = ?").run(a.id, job);
+    const other = await move(job, b.id, OWNER_KEY, false);
+    expect([other.status, other.json?.code]).toEqual([409, "owner_not_proven"]);
+    expect([count("compute_ledger"), count("audit_log")]).toEqual(before);
+  });
+
+  test("the account the job was attributed to needs no confirmation, and the audit row says the owner was proven", async () => {
+    const job = await unreservedJob();
+    const a = await newPartnerPerson(w);
+    w.h.db.query("UPDATE compute_jobs SET account_id = ? WHERE id = ?").run(a.id, job);
+    const res = await move(job, a.id, OWNER_KEY, false);
+    expect(res.status).toBe(200);
+    expect(res.json).toMatchObject({ attributed_account_id: a.id, owner_proven: true });
+    expect(audit()).toEqual([
+      expect.objectContaining({
+        attributed_account: a.id,
+        owner_proven: 1,
+        confirmed_unproven_owner: 0,
+      }),
+    ]);
+  });
+
+  test("a different account moved on the owner's word is recorded as unproven and confirmed", async () => {
+    const job = await unreservedJob();
+    const a = await newPartnerPerson(w);
+    const b = await newPartnerPerson(w);
+    w.h.db.query("UPDATE compute_jobs SET account_id = ? WHERE id = ?").run(a.id, job);
+    const res = await move(job, b.id);
+    expect(res.status).toBe(200);
+    expect(res.json).toMatchObject({ attributed_account_id: a.id, owner_proven: false });
+    expect(audit()).toEqual([
+      expect.objectContaining({
+        attributed_account: a.id,
+        owner_proven: 0,
+        confirmed_unproven_owner: 1,
+      }),
+    ]);
   });
 });

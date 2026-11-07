@@ -514,6 +514,7 @@ describe("which operations lower the people budget's consumption", () => {
           jobId: job,
           toAccountId: Number(s.holder.holder_ref),
           actorUserId: 9,
+          confirmUnprovenOwner: true,
         });
         expect(moved).toMatchObject({ ok: true, replayed: false, movedMilli: 2000 });
         const tenant = (await s.w.d1

@@ -114,6 +114,8 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   already_moved: "That job's charge was moved already.",
   target_not_in_good_standing: "That account is deleted or not in good standing.",
   target_has_no_pool: "That account has no pool of the word the charge is in.",
+  owner_not_proven:
+    "That account is not the one the job's Tapis owner was attributed to; send the explicit confirmation to charge it anyway.",
 };
 
 export function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: object = {}) {
