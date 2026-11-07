@@ -38,6 +38,7 @@
  */
 
 import { z } from "zod";
+import { SACCT_COLUMN_MAX } from "../../../shared/contract/compute-observation.js";
 import {
   type ComputePolicy,
   PARTITION_NAMES,
@@ -122,11 +123,11 @@ export const ObserverSacctRowSchema = z
       .string()
       .regex(/^[A-Z_]{1,32}(?:[ +][ -~]{0,48})?$/)
       .transform((v) => (/^[A-Z_]+/.exec(v) as RegExpExecArray)[0]),
-    elapsed_seconds: count(31_536_000),
-    alloc_nodes: count(100_000),
-    alloc_cpus: count(10_000_000),
-    alloc_gpus: count(1_000_000),
-    alloc_mem_mb: count(1_000_000_000),
+    elapsed_seconds: count(SACCT_COLUMN_MAX.elapsedSeconds),
+    alloc_nodes: count(SACCT_COLUMN_MAX.nodes),
+    alloc_cpus: count(SACCT_COLUMN_MAX.cpus),
+    alloc_gpus: count(SACCT_COLUMN_MAX.gpus),
+    alloc_mem_mb: count(SACCT_COLUMN_MAX.memMb),
     submit_time: timeText.nullish(),
     start_time: timeText.nullish(),
     end_time: timeText.nullish(),

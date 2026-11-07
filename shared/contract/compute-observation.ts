@@ -176,12 +176,26 @@ export type ObservationAccountingJob = z.infer<typeof AccountingJobSchema>;
 
 // --- Slurm's allocation text ---------------------------------------------------------------------------------
 
-/** What an allocation figure may be: the bounds of the `compute_sacct_rows` columns. */
-export const TRES_MAX = {
+/**
+ * The upper bound of each numeric column of `compute_sacct_rows` (migration 0118, the CHECK of each
+ * column; the Worker's row schema in `services/compute-observer.ts` takes these same numbers). An
+ * allocation figure past one would make the D1 insert throw after the run was spent, so the reader below
+ * refuses it first. `test/compute-observer.test.ts` reads the migration and holds the two equal.
+ */
+export const SACCT_COLUMN_MAX = {
+  elapsedSeconds: 31_536_000,
   nodes: 100_000,
   cpus: 10_000_000,
   gpus: 1_000_000,
   memMb: 1_000_000_000,
+} as const;
+
+/** What an allocation figure may be: the column bounds above, and nothing else. */
+export const TRES_MAX = {
+  nodes: SACCT_COLUMN_MAX.nodes,
+  cpus: SACCT_COLUMN_MAX.cpus,
+  gpus: SACCT_COLUMN_MAX.gpus,
+  memMb: SACCT_COLUMN_MAX.memMb,
 } as const;
 
 /** What `parseAllocTres` read; `null` is an item that is not there (never zero). Memory is in MB. */

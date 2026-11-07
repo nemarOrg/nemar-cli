@@ -25,6 +25,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
+import { SACCT_COLUMN_MAX, TRES_MAX } from "../../shared/contract/compute-observation";
 import dailyFixture from "../../test/fixtures/compute-observation/daily.v1.json";
 import quickFixture from "../../test/fixtures/compute-observation/quick.v1.json";
 import { advanceComputeJob, submitComputeJob } from "../src/services/compute-lifecycle";
@@ -1364,6 +1365,68 @@ describe("migration 0118", () => {
         "11111111-2222-3333-4444-555555555556",
       ),
     ).toMatch(/compute_queue_snapshots_pending/);
+  });
+
+  test("the column bounds the Worker checks are the migration's own, and a row at every bound is stored while one past it is refused (MUTATION: change a bound in one place)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const sql = readFileSync(
+      join(import.meta.dir, "../src/db/migrations/0118_compute_observer.sql"),
+      "utf-8",
+    );
+    const bound = (column: string) => {
+      const found = new RegExp(`${column} BETWEEN 0 AND (\\d+)`).exec(sql);
+      return Number(found?.[1]);
+    };
+    expect({
+      elapsedSeconds: bound("elapsed_seconds"),
+      nodes: bound("alloc_nodes"),
+      cpus: bound("alloc_cpus"),
+      gpus: bound("alloc_gpus"),
+      memMb: bound("alloc_mem_mb"),
+    }).toEqual(SACCT_COLUMN_MAX);
+    expect(TRES_MAX).toEqual({
+      nodes: SACCT_COLUMN_MAX.nodes,
+      cpus: SACCT_COLUMN_MAX.cpus,
+      gpus: SACCT_COLUMN_MAX.gpus,
+      memMb: SACCT_COLUMN_MAX.memMb,
+    });
+    // At every bound the insert succeeds (a CHECK that threw would fail the post after the run was spent).
+    const slurm = nextSlurm();
+    const atBound = acct(slurm, {
+      elapsed_seconds: SACCT_COLUMN_MAX.elapsedSeconds,
+      alloc_tres: {
+        node: String(SACCT_COLUMN_MAX.nodes),
+        cpu: String(SACCT_COLUMN_MAX.cpus),
+        "gres/gpu": String(SACCT_COLUMN_MAX.gpus),
+        mem: `${SACCT_COLUMN_MAX.memMb}M`,
+      },
+    });
+    expect((await post((await mint()).token, daily([atBound]))).status).toBe(200);
+    expect(
+      fx.harness.db
+        .query(
+          "SELECT elapsed_seconds, alloc_nodes, alloc_cpus, alloc_gpus, alloc_mem_mb FROM compute_sacct_rows WHERE slurm_job_id = ?",
+        )
+        .get(slurm),
+    ).toEqual({
+      elapsed_seconds: SACCT_COLUMN_MAX.elapsedSeconds,
+      alloc_nodes: SACCT_COLUMN_MAX.nodes,
+      alloc_cpus: SACCT_COLUMN_MAX.cpus,
+      alloc_gpus: SACCT_COLUMN_MAX.gpus,
+      alloc_mem_mb: SACCT_COLUMN_MAX.memMb,
+    });
+    // One past an allocation bound is refused (the post, not the row).
+    for (const over of [
+      { node: String(SACCT_COLUMN_MAX.nodes + 1), cpu: "4" },
+      { node: "1", cpu: String(SACCT_COLUMN_MAX.cpus + 1) },
+      { node: "1", cpu: "4", "gres/gpu": String(SACCT_COLUMN_MAX.gpus + 1) },
+      { node: "1", cpu: "4", mem: `${SACCT_COLUMN_MAX.memMb + 1}M` },
+    ]) {
+      const run = await mint();
+      const res = await post(run.token, daily([acct(nextSlurm(), { alloc_tres: over })]));
+      expect([JSON.stringify(over), res.status]).toEqual([JSON.stringify(over), 400]);
+    }
   });
 
   test("the file's GLOB patterns are within D1's 50 characters, and no table names a person", async () => {
