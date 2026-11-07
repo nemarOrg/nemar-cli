@@ -29,13 +29,13 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { DEFAULT_COMPUTE_POLICY, PARTITION_NAMES } from "../../shared/contract/compute";
 import {
   COMPUTE_PARTNER_ERROR_STATUS,
   type ComputePartnerErrorCode,
   ComputePartnerHoldResponseSchema,
   holdIdForJob,
 } from "../../shared/contract/compute-partner";
-import { DEFAULT_COMPUTE_POLICY, PARTITION_NAMES } from "../../shared/contract/compute";
 import { adjustPool, platformPool } from "../src/services/compute-ledger";
 import { type LifecycleFixture, startLifecycleFixture } from "./helpers/compute-lifecycle-fixture";
 import {
@@ -69,10 +69,19 @@ beforeEach(async () => {
 
 const count = (table: string) =>
   (w.h.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
-const snapshot = () => [count("compute_ledger"), count("compute_jobs"), count("compute_idempotency_keys")];
+const snapshot = () => [
+  count("compute_ledger"),
+  count("compute_jobs"),
+  count("compute_idempotency_keys"),
+];
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-const post = (person: PartnerPerson, json: unknown, key?: string | null, env?: Record<string, unknown>) =>
+const post = (
+  person: PartnerPerson,
+  json: unknown,
+  key?: string | null,
+  env?: Record<string, unknown>,
+) =>
   partnerCall(w, "POST", "/compute/holds", { token: person.token, json, key, env: env as never });
 
 /** One request that must be refused with `code`, and must write nothing. */
@@ -156,7 +165,10 @@ describe("a reservation", () => {
     expect(await spec?.text()).toBe(text);
     expect(await fx.harness.records.head(`records/${body.job_id}/identity.json`)).not.toBeNull();
     // The key is claimed for the client, with the hash of the request.
-    const claim = w.h.db.query("SELECT * FROM compute_idempotency_keys").get() as Record<string, string>;
+    const claim = w.h.db.query("SELECT * FROM compute_idempotency_keys").get() as Record<
+      string,
+      string
+    >;
     expect(claim).toMatchObject({ scope: `client:${w.client.clientId}`, job_id: body.job_id });
     expect(claim.request_hash).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -171,7 +183,11 @@ describe("a reservation", () => {
   test("the GPU form reserves on the gpu pool", async () => {
     const person = await newPartnerPerson(w);
     // The pool of a person who was granted only cpu does not exist for gpu: no balance.
-    await refused(person, holdBody({ partition: "gpu-shared", cores: 10, gpus: 1, memory_mb: 90_000 }), "insufficient_balance");
+    await refused(
+      person,
+      holdBody({ partition: "gpu-shared", cores: 10, gpus: 1, memory_mb: 90_000 }),
+      "insufficient_balance",
+    );
   });
 });
 
@@ -211,8 +227,15 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
       const res = await refused(person, json, "invalid_spec", field);
       expect(res.text).not.toContain(secret);
     }
-    const notJson = await partnerCall(w, "POST", "/compute/holds", { token: person.token, raw: "{nope" });
-    expect([notJson.status, notJson.json?.code, notJson.json?.field]).toEqual([400, "invalid_spec", "body"]);
+    const notJson = await partnerCall(w, "POST", "/compute/holds", {
+      token: person.token,
+      raw: "{nope",
+    });
+    expect([notJson.status, notJson.json?.code, notJson.json?.field]).toEqual([
+      400,
+      "invalid_spec",
+      "body",
+    ]);
     const huge = await partnerCall(w, "POST", "/compute/holds", {
       token: person.token,
       raw: JSON.stringify(holdBody({ app_id: "a".repeat(9000) })),
@@ -228,7 +251,9 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
 
   test("partition_not_offered and over_job_limit follow the owner's ceilings", async () => {
     const person = await newPartnerPerson(w);
-    const pipelinesOnly = PARTITION_NAMES.find((n) => DEFAULT_COMPUTE_POLICY.ceilings[n] === undefined) as string;
+    const pipelinesOnly = PARTITION_NAMES.find(
+      (n) => DEFAULT_COMPUTE_POLICY.ceilings[n] === undefined,
+    ) as string;
     await refused(person, holdBody({ partition: pipelinesOnly }), "partition_not_offered");
     await refused(person, holdBody({ nodes: 4 }), "over_job_limit");
     await refused(person, holdBody({ minutes: 49 * 60 }), "over_job_limit");
@@ -259,7 +284,6 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
     const exact = await newPartnerPerson(w, { grant: 4000 });
     expect((await post(exact, holdBody())).status).toBe(201);
     const nothing = await newPartnerPerson(w, { grant: 1 });
-    w.h.db.exec(`DELETE FROM compute_ledger WHERE 0`);
     await refused(nothing, holdBody(), "insufficient_balance");
   });
 
@@ -287,7 +311,6 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
     // The daily cap: 4 SU fit once (every hold taken today counts, a released one included).
     await caps(10, 4000);
     w.h.db.exec("UPDATE compute_jobs SET state = 'cancelled' WHERE source = 'partner'");
-    w.h.db.exec("DELETE FROM compute_ledger WHERE 0");
     const third = await newPartnerPerson(w);
     // The first hold above is already in today's sum (4000): nothing more fits.
     await refused(third, holdBody(), "client_cap_reached");
@@ -307,10 +330,16 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
     const person = await newPartnerPerson(w);
     const second = await newPartnerPerson(w);
     await caps(10, 1_000_000);
-    w.h.db.query("UPDATE oidc_clients SET cap_open_reservations = 1 WHERE client_id = ?").run(w.client.clientId);
+    w.h.db
+      .query("UPDATE oidc_clients SET cap_open_reservations = 1 WHERE client_id = ?")
+      .run(w.client.clientId);
     await reserve(w, person);
     await refused(second, holdBody(), "client_cap_reached");
-    w.h.db.query("UPDATE oidc_clients SET cap_open_reservations = NULL, cap_su_per_day = 5 WHERE client_id = ?").run(w.client.clientId);
+    w.h.db
+      .query(
+        "UPDATE oidc_clients SET cap_open_reservations = NULL, cap_su_per_day = 5 WHERE client_id = ?",
+      )
+      .run(w.client.clientId);
     // 5 SU a day, 4 reserved: the next 4 SU do not fit.
     await refused(second, holdBody(), "client_cap_reached");
   });
@@ -382,7 +411,13 @@ describe("races are decided in the hold's own statement", () => {
     const loser = a.status === 409 ? a : b;
     expect(loser.json?.code).toBe("insufficient_balance");
     expect(count("compute_jobs")).toBe(1);
-    expect((w.h.db.query("SELECT COUNT(*) AS n FROM compute_ledger WHERE kind = 'hold'").get() as { n: number }).n).toBe(1);
+    expect(
+      (
+        w.h.db.query("SELECT COUNT(*) AS n FROM compute_ledger WHERE kind = 'hold'").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1);
     expect(count("compute_idempotency_keys")).toBe(1);
     const own = poolOf(w, "account", String(person.id)) as Record<string, number>;
     expect(own.held_milli).toBe(4000);
@@ -418,7 +453,13 @@ describe("races are decided in the hold's own statement", () => {
     expect(x.json?.job_id).toBe(y.json?.job_id);
     expect([x, y].filter((r) => r.json?.replayed === true)).toHaveLength(1);
     expect(count("compute_jobs")).toBe(1);
-    expect((w.h.db.query("SELECT COUNT(*) AS n FROM compute_ledger WHERE kind = 'hold'").get() as { n: number }).n).toBe(1);
+    expect(
+      (
+        w.h.db.query("SELECT COUNT(*) AS n FROM compute_ledger WHERE kind = 'hold'").get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(1);
     expect(count("compute_idempotency_keys")).toBe(1);
   });
 });
@@ -431,7 +472,11 @@ describe("idempotency", () => {
     const again = await post(person, holdBody(), "replay-key");
     expect(again.status).toBe(201);
     expect(again.headers.get("Idempotent-Replayed")).toBe("true");
-    expect(again.json).toMatchObject({ job_id: first.json?.job_id, hold_id: first.json?.hold_id, replayed: true });
+    expect(again.json).toMatchObject({
+      job_id: first.json?.job_id,
+      hold_id: first.json?.hold_id,
+      replayed: true,
+    });
     expect(first.json?.replayed).toBeUndefined();
     expect(snapshot()).toEqual(before);
   });
@@ -486,7 +531,11 @@ describe("idempotency", () => {
     const { tokenFor } = await import("./helpers/compute-partner-world");
     const first = await post(person, holdBody(), "client-key");
     const token = await tokenFor(w, person, "openid compute.reserve", other);
-    const second = await partnerCall(w, "POST", "/compute/holds", { token, json: holdBody(), key: "client-key" });
+    const second = await partnerCall(w, "POST", "/compute/holds", {
+      token,
+      json: holdBody(),
+      key: "client-key",
+    });
     expect(second.status).toBe(201);
     expect(second.json?.job_id).not.toBe(first.json?.job_id);
     expect(count("compute_idempotency_keys")).toBe(2);

@@ -62,6 +62,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
+import { isAwaitingPartnerReport } from "./compute-hold-reaper.js";
 import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
 import {
@@ -75,7 +76,6 @@ import {
   sqliteTime,
   tapisAccess,
 } from "./compute-lifecycle.js";
-import { isAwaitingPartnerReport } from "./compute-hold-reaper.js";
 import { settleObservedRows } from "./compute-observer.js";
 import { getPolicy } from "./compute-policy.js";
 import { sha256Hex } from "./compute-records.js";

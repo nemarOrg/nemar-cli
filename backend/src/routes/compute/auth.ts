@@ -29,16 +29,16 @@
 
 import type { Context, MiddlewareHandler } from "hono";
 import {
+  COMPUTE_PARTNER_ERROR_STATUS,
+  COMPUTE_PARTNER_SENTENCES,
+  COMPUTE_RESERVE_SCOPE,
+} from "../../../../shared/contract/compute-partner.js";
+import {
   COMPUTE_READ_SCOPE,
   COMPUTE_STATS_SCOPE,
   COMPUTE_USER_ERROR_STATUS,
   COMPUTE_USER_SENTENCES,
 } from "../../../../shared/contract/compute-user.js";
-import {
-  COMPUTE_PARTNER_ERROR_STATUS,
-  COMPUTE_PARTNER_SENTENCES,
-  COMPUTE_RESERVE_SCOPE,
-} from "../../../../shared/contract/compute-partner.js";
 import { OIDC_ACCESS_TOKEN_PREFIX } from "../../../../shared/oidc.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { oidcBearer } from "../../middleware/oidc-bearer.js";
@@ -250,7 +250,9 @@ export const computePartnerCredential: MiddlewareHandler<Env> = async (c, next) 
   }
   const value = bearerValue(header);
   if (value === null) {
-    return refusePartner(c, "invalid_token", { "WWW-Authenticate": 'Bearer error="invalid_token"' });
+    return refusePartner(c, "invalid_token", {
+      "WWW-Authenticate": 'Bearer error="invalid_token"',
+    });
   }
   if (!isOidcValue(value)) return refusePartner(c, "forbidden_credential");
   return viaOidc(c, next, RESERVE_OIDC, (token) =>

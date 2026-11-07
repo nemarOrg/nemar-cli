@@ -21,15 +21,6 @@ import type { Bindings } from "../../src/types/bindings";
 import { type LifecycleFixture, startLifecycleFixture } from "./compute-lifecycle-fixture";
 import { fundAccount, seedUser, setPolicy } from "./compute-seed";
 import {
-  BYPASS,
-  ISSUER,
-  OIDC_TEST_SECRET,
-  OWNER_KEY,
-  type Answer,
-  type OidcHarness,
-  harnessOver,
-} from "./oidc-harness";
-import {
   type RegisteredClient,
   authorize,
   basic,
@@ -39,6 +30,15 @@ import {
   rotateKeys,
   sessionCookie,
 } from "./oidc-flow";
+import {
+  type Answer,
+  BYPASS,
+  ISSUER,
+  OIDC_TEST_SECRET,
+  OWNER_KEY,
+  type OidcHarness,
+  harnessOver,
+} from "./oidc-harness";
 
 export interface PartnerWorld {
   fx: LifecycleFixture;
@@ -50,7 +50,13 @@ export interface PartnerWorld {
 
 export const AUDIENCE = `${ISSUER}/compute`;
 
-export const PARTNER_SCOPES = ["openid", "profile", "compute.reserve", "compute.read", "offline_access"];
+export const PARTNER_SCOPES = [
+  "openid",
+  "profile",
+  "compute.reserve",
+  "compute.read",
+  "offline_access",
+];
 
 /** Build the world on a fixture that has just been reset. */
 export async function buildPartnerWorld(
@@ -118,7 +124,12 @@ export async function newPartnerPerson(
     .run();
   await fundAccount(env.DB, id, over.grant ?? 100_000);
   const cookie = await sessionCookie(w.h, id);
-  const token = await tokenFor(w, { id, cookie }, over.scope ?? "openid compute.reserve", over.client);
+  const token = await tokenFor(
+    w,
+    { id, cookie },
+    over.scope ?? "openid compute.reserve",
+    over.client,
+  );
   const row = w.h.db
     .query<{ oidc_subject: string }, [number]>("SELECT oidc_subject FROM users WHERE id = ?")
     .get(id);
@@ -194,7 +205,9 @@ export async function partnerCall(
   return w.h.call(method, path, {
     key: opts.token ?? null,
     ...(opts.json !== undefined ? { body: opts.json } : {}),
-    ...(opts.raw !== undefined ? { rawBody: opts.raw, headers: { ...headers, "Content-Type": "application/json" } } : { headers }),
+    ...(opts.raw !== undefined
+      ? { rawBody: opts.raw, headers: { ...headers, "Content-Type": "application/json" } }
+      : { headers }),
     ...(opts.env === undefined ? {} : { env: opts.env }),
   });
 }
@@ -279,21 +292,33 @@ export async function partnerLaunch(
   return uuid;
 }
 
+/** A row of a table, read by column name in a test (its columns are the schema's, which the migrations own). */
+// biome-ignore lint/suspicious/noExplicitAny: a test reads columns of every type from a row by name
+export type DbRow = Record<string, any>;
+
 /** The row of a job. */
-export function row(w: PartnerWorld, id: string): Record<string, any> {
-  return w.h.db.query("SELECT * FROM compute_jobs WHERE id = ?").get(id) as Record<string, any>;
+export function row(w: PartnerWorld, id: string): DbRow {
+  return w.h.db.query("SELECT * FROM compute_jobs WHERE id = ?").get(id) as DbRow;
 }
 
 /** Every ledger entry of a job, in order. */
-export function entries(w: PartnerWorld, id: string): Array<Record<string, any>> {
+export function entries(w: PartnerWorld, id: string): DbRow[] {
   return w.h.db
     .query("SELECT * FROM compute_ledger WHERE job_id = ? ORDER BY id")
-    .all(id) as Array<Record<string, any>>;
+    .all(id) as DbRow[];
 }
 
 /** A pool's row for a holder. */
 export function poolOf(w: PartnerWorld, kind: string, ref: string, pool = "cpu") {
   return w.h.db
     .query("SELECT * FROM compute_pools WHERE holder_kind = ? AND holder_ref = ? AND pool = ?")
-    .get(kind, ref, pool) as Record<string, any> | null;
+    .get(kind, ref, pool) as DbRow | null;
+}
+
+/** One upload address of a report's answer. */
+export interface ReportUpload {
+  path: string;
+  url: string;
+  method: string;
+  headers: Record<string, string>;
 }

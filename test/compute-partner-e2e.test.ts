@@ -69,7 +69,8 @@ beforeEach(async () => {
 const report = (jobId: string, body: unknown, who: PartnerPerson = person) =>
   partnerCall(w, "POST", `/compute/jobs/${jobId}/report`, { token: who.token, json: body });
 const kinds = (id: string) => entries(w, id).map((e) => e.kind);
-const own = (p: PartnerPerson = person) => poolOf(w, "account", String(p.id)) as Record<string, number>;
+const own = (p: PartnerPerson = person) =>
+  poolOf(w, "account", String(p.id)) as Record<string, number>;
 const age = (id: string, minutes: number) =>
   w.h.db
     .query("UPDATE compute_jobs SET created_at = datetime('now', ?) WHERE id = ?")
@@ -168,7 +169,9 @@ describe("the partner's story", () => {
     }
     // The person was charged for none of it.
     expect(own()).toMatchObject({ held_milli: 0, charged_milli: 0 });
-    expect((poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli).toBeGreaterThan(0);
+    expect(
+      (poolOf(w, "partner", "tenant") as Record<string, number>).charged_milli,
+    ).toBeGreaterThan(0);
   });
 
   test("a suspended person's reserve is refused with `suspended`", async () => {
@@ -181,11 +184,24 @@ describe("the partner's story", () => {
     const token = await tokenFor(w, person, "openid compute.reserve");
     const res = await partnerCall(w, "POST", "/compute/holds", {
       token,
-      json: { app_id: "partner-app", app_version: "2.1.0", kind: "batch", partition: "shared", nodes: 1, cores: 4, gpus: 0, minutes: 60 },
+      json: {
+        app_id: "partner-app",
+        app_version: "2.1.0",
+        kind: "batch",
+        partition: "shared",
+        nodes: 1,
+        cores: 4,
+        gpus: 0,
+        minutes: 60,
+      },
     });
     expect([res.status, res.json?.code]).toEqual([403, "suspended"]);
     expect(
-      (w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE source = 'partner'").get() as { n: number }).n,
+      (
+        w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE source = 'partner'").get() as {
+          n: number;
+        }
+      ).n,
     ).toBe(0);
   });
 
@@ -229,7 +245,11 @@ describe("the reaper's cases", () => {
     const hold = await reserve(w, person);
     const uuid = await partnerLaunch(w, hold, person);
     age(hold.job_id, 31);
-    expect(await reapExpiredHolds(fx.env())).toMatchObject({ adopted: 1, verified: 1, released: 0 });
+    expect(await reapExpiredHolds(fx.env())).toMatchObject({
+      adopted: 1,
+      verified: 1,
+      released: 0,
+    });
     expect(row(w, hold.job_id)).toMatchObject({ tapis_uuid: uuid, partner_state: "verified" });
   });
 
@@ -246,7 +266,10 @@ describe("the reaper's cases", () => {
     age(hold.job_id, 31);
     fx.tapis.fail("POST /v3/jobs/search", 500, 2);
     expect(await reapExpiredHolds(fx.env())).toMatchObject({ unreachable: 1, released: 0 });
-    expect(row(w, hold.job_id)).toMatchObject({ state: "created", partner_flag: "tapis_unreachable" });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "created",
+      partner_flag: "tapis_unreachable",
+    });
     expect(kinds(hold.job_id)).toEqual(["hold"]);
   });
 
@@ -265,6 +288,9 @@ describe("the reaper's cases", () => {
     age(hold.job_id, 31);
     expect(await reapExpiredHolds(fx.env())).toMatchObject({ adopted: 1, refused: 1, ended: 1 });
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
-    expect(row(w, hold.job_id)).toMatchObject({ partner_flag: "owner_mismatch", state: "cancelled" });
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_flag: "owner_mismatch",
+      state: "cancelled",
+    });
   });
 });

@@ -59,11 +59,11 @@ import {
   runComputeAdvanceCron,
   sweepComputeCancellations,
 } from "./services/compute-advance";
+import { holdReaperLogLine, reapExpiredHolds } from "./services/compute-hold-reaper";
 import {
   pipelineDispatchLogLine,
   runComputePipelineDispatchCron,
 } from "./services/compute-pipeline-dispatch";
-import { holdReaperLogLine, reapExpiredHolds } from "./services/compute-hold-reaper";
 import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
 import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
 import { runUploadExpiryCron, uploadExpiryLogLine } from "./services/compute-uploads";

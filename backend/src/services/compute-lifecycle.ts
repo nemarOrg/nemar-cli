@@ -454,7 +454,8 @@ export function isUnverifiedPartnerJob(
   job: Pick<ComputeJobRow, "source" | "partner_state">,
 ): boolean {
   return (
-    job.source === "partner" && (job.partner_state === "pending" || job.partner_state === "mismatch")
+    job.source === "partner" &&
+    (job.partner_state === "pending" || job.partner_state === "mismatch")
   );
 }
 
@@ -2231,7 +2232,12 @@ export async function commitPartnerMismatchEnd(
     statements.push(
       ...unreservedChargeStatements(
         db,
-        { jobId: job.id, poolId: tenant.id, budgetPoolId: people.id, chargeMilli: settlement.milli },
+        {
+          jobId: job.id,
+          poolId: tenant.id,
+          budgetPoolId: people.id,
+          chargeMilli: settlement.milli,
+        },
         gate,
       ),
     );

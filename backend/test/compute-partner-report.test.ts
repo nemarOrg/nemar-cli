@@ -47,9 +47,11 @@ import {
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
 import {
+  type DbRow,
   type Hold,
   type PartnerPerson,
   type PartnerWorld,
+  type ReportUpload,
   buildPartnerWorld,
   entries,
   newPartnerPerson,
@@ -76,12 +78,7 @@ beforeEach(async () => {
   person = await newPartnerPerson(w);
 }, 60_000);
 
-const report = (
-  hold: Hold,
-  body: unknown,
-  who: PartnerPerson = person,
-  key?: string | null,
-) =>
+const report = (hold: Hold, body: unknown, who: PartnerPerson = person, key?: string | null) =>
   partnerCall(w, "POST", `/compute/jobs/${hold.job_id}/report`, {
     token: who.token,
     json: body,
@@ -94,7 +91,8 @@ const kinds = (id: string) => entries(w, id).map((e) => e.kind);
 const count = (table: string) =>
   (w.h.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 const tenant = () => poolOf(w, "partner", "tenant") as Record<string, number> | null;
-const own = (p: PartnerPerson = person) => poolOf(w, "account", String(p.id)) as Record<string, number>;
+const own = (p: PartnerPerson = person) =>
+  poolOf(w, "account", String(p.id)) as Record<string, number>;
 
 /** Make a partner job RUN for 30 minutes on its four cores (2 SU) at the stand-in. */
 function run30(uuid: string, ended = false) {
@@ -110,7 +108,11 @@ describe("a report that matches", () => {
     const uuid = await partnerLaunch(w, hold, person);
     const res = await report(hold, { tapis_job_id: uuid });
     expect(res.status).toBe(200);
-    expect(res.json).toMatchObject({ job_id: hold.job_id, verification: "verified", state: "submitted" });
+    expect(res.json).toMatchObject({
+      job_id: hold.job_id,
+      verification: "verified",
+      state: "submitted",
+    });
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(row(w, hold.job_id)).toMatchObject({
       tapis_uuid: uuid,
@@ -139,7 +141,11 @@ describe("a report that matches", () => {
     run30(uuid, true);
     const tick = await runComputeAdvanceCron(fx.env());
     expect(tick?.errors).toEqual([]);
-    expect(row(w, hold.job_id)).toMatchObject({ state: "finished", failure_code: null, platform_failure: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "finished",
+      failure_code: null,
+      platform_failure: 0,
+    });
     expect(kinds(hold.job_id)).toEqual(["hold", "charge"]);
     // 30 minutes of four cores is 2 SU, charged to the PERSON's pool and counted against the people budget.
     expect(row(w, hold.job_id).charged_milli).toBeGreaterThanOrEqual(2000);
@@ -197,7 +203,11 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
     expect((await report(hold, { tapis_job_id: uuid })).status).toBe(200);
     const res = await report(other, { tapis_job_id: uuid });
     expect([res.status, res.json?.code]).toEqual([409, "tapis_job_in_use"]);
-    expect(row(w, other.job_id)).toMatchObject({ tapis_uuid: null, partner_state: null, state: "created" });
+    expect(row(w, other.job_id)).toMatchObject({
+      tapis_uuid: null,
+      partner_state: null,
+      state: "created",
+    });
     expect(row(w, hold.job_id).tapis_uuid).toBe(uuid);
     expect(cancels()).toHaveLength(0);
   });
@@ -213,7 +223,11 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
     expect([x.status, y.status].sort()).toEqual([200, 409]);
     expect([x, y].find((r) => r.status === 409)?.json?.code).toBe("tapis_job_in_use");
     expect(
-      (w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE tapis_uuid = ?").get(uuid) as { n: number }).n,
+      (
+        w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE tapis_uuid = ?").get(uuid) as {
+          n: number;
+        }
+      ).n,
     ).toBe(1);
     expect(cancels()).toHaveLength(0);
   });
@@ -231,7 +245,11 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
     const res = await report(b, { tapis_job_id: uuid });
     w.h.db.exec("DROP TRIGGER test_other_request");
     expect([res.status, res.json?.code]).toEqual([409, "tapis_job_in_use"]);
-    expect(row(w, b.job_id)).toMatchObject({ tapis_uuid: null, partner_state: null, state: "created" });
+    expect(row(w, b.job_id)).toMatchObject({
+      tapis_uuid: null,
+      partner_state: null,
+      state: "created",
+    });
     expect(cancels()).toHaveLength(0);
   });
 
@@ -300,7 +318,7 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
 describe("a report that does not match is cancelled, flagged and charged to the partner", () => {
   /** Each mismatch: what the partner launched, and the word NEMAR answers. */
   const CASES: Array<[string, Record<string, unknown>, string]> = [
-    ["owner", { owner: "nmu_" + "f".repeat(32) }, "owner_mismatch"],
+    ["owner", { owner: `nmu_${"f".repeat(32)}` }, "owner_mismatch"],
     ["application", { appId: "another-app" }, "app_mismatch"],
     ["version", { appVersion: "9.9.9" }, "app_mismatch"],
     ["queue", { queue: "compute" }, "resources_mismatch"],
@@ -342,7 +360,7 @@ describe("a report that does not match is cancelled, flagged and charged to the 
       expect(job.settled_provisional_at).not.toBeNull();
       // The hold was RELEASED in full; what ran is an overrun of the partner pool, counted against the budget.
       expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
-      const overrun = entries(w, hold.job_id)[2] as Record<string, any>;
+      const overrun = entries(w, hold.job_id)[2] as DbRow;
       expect(overrun).toMatchObject({
         reason: "unreserved_usage",
         idempotency_key: `job:${hold.job_id}:unreserved`,
@@ -353,7 +371,9 @@ describe("a report that does not match is cancelled, flagged and charged to the 
       expect(job.flag_overrun).toBe(1);
       // One audit row, with the word and nothing the partner sent.
       const audit = w.h.db
-        .query("SELECT details FROM audit_log WHERE action = 'compute.partner.mismatch' AND resource_id = ?")
+        .query(
+          "SELECT details FROM audit_log WHERE action = 'compute.partner.mismatch' AND resource_id = ?",
+        )
         .all(hold.job_id) as Array<{ details: string }>;
       expect(audit).toHaveLength(1);
       expect(JSON.parse(audit[0]?.details as string)).toEqual({
@@ -435,7 +455,8 @@ describe("a report that does not match is cancelled, flagged and charged to the 
       charged_milli: 0,
     });
     const me = await w.h.call("GET", "/compute/me", { key: readToken });
-    const cpu = (me.json as { pools: { cpu: { charged_milli: number; held_milli: number } } }).pools.cpu;
+    const cpu = (me.json as { pools: { cpu: { charged_milli: number; held_milli: number } } }).pools
+      .cpu;
     expect([cpu.charged_milli, cpu.held_milli]).toEqual([0, 0]);
   });
 
@@ -460,7 +481,11 @@ describe("Tapis cannot be read at the report", () => {
     const res = await report(hold, { tapis_job_id: uuid });
     expect(res.status).toBe(202);
     expect(res.json).toMatchObject({ verification: "pending", state: "created" });
-    expect(row(w, hold.job_id)).toMatchObject({ tapis_uuid: uuid, partner_state: "pending", state: "created" });
+    expect(row(w, hold.job_id)).toMatchObject({
+      tapis_uuid: uuid,
+      partner_state: "pending",
+      state: "created",
+    });
     expect(kinds(hold.job_id)).toEqual(["hold"]);
     expect(subscriptions()).toBe(0);
     fx.tapis.up();
@@ -469,7 +494,11 @@ describe("Tapis cannot be read at the report", () => {
     await runComputeAdvanceCron(fx.env());
     const advanced = await advanceComputeJob(fx.env(), hold.job_id);
     expect(advanced.outcome).toBe("nothing_to_do");
-    expect(row(w, hold.job_id)).toMatchObject({ partner_state: "pending", state: "created", charged_milli: 0 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      partner_state: "pending",
+      state: "created",
+      charged_milli: 0,
+    });
     expect(kinds(hold.job_id)).toEqual(["hold"]);
     // The hold reaper's tick verifies it.
     const reaped = await reapExpiredHolds(fx.env());
@@ -492,7 +521,11 @@ describe("Tapis cannot be read at the report", () => {
     const reaped = await reapExpiredHolds(fx.env());
     expect(reaped).toMatchObject({ pending: 1, refused: 1, ended: 1, errors: [] });
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
-    expect(row(w, hold.job_id)).toMatchObject({ state: "cancelled", partner_state: "mismatch", partner_flag: "owner_mismatch" });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "cancelled",
+      partner_state: "mismatch",
+      partner_flag: "owner_mismatch",
+    });
     expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
     expect(own().charged_milli).toBe(0);
   });
@@ -521,7 +554,9 @@ describe("a late report", () => {
   test("after a release is 409 hold_released, binds nothing, and the Tapis job it names is the sweep's", async () => {
     const hold = await reserve(w, person);
     const uuid = await partnerLaunch(w, hold, person);
-    const released = await partnerCall(w, "DELETE", `/compute/holds/${hold.hold_id}`, { token: person.token });
+    const released = await partnerCall(w, "DELETE", `/compute/holds/${hold.hold_id}`, {
+      token: person.token,
+    });
     expect(released.status).toBe(200);
     const res = await report(hold, { tapis_job_id: uuid });
     expect([res.status, res.json?.code]).toEqual([409, "hold_released"]);
@@ -533,7 +568,11 @@ describe("a late report", () => {
   test("after the person's own cancel is 409 hold_cancelled", async () => {
     const hold = await reserve(w, person);
     const uuid = await partnerLaunch(w, hold, person);
-    w.h.db.query("UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?").run(hold.job_id);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
+      )
+      .run(hold.job_id);
     const res = await report(hold, { tapis_job_id: uuid });
     expect([res.status, res.json?.code]).toEqual([409, "hold_cancelled"]);
     expect(row(w, hold.job_id).tapis_uuid).toBeNull();
@@ -555,7 +594,11 @@ describe("a late report", () => {
     const { BIND_REPORT_SQL } = await import("../src/services/compute-partner");
     const hold = await reserve(w, person);
     w.h.db.query("UPDATE users SET compute_access = 'suspended' WHERE id = ?").run(person.id);
-    const bound = await w.env().DB.prepare(BIND_REPORT_SQL).bind(hold.job_id, "some-uuid-1", null).run();
+    const bound = await w
+      .env()
+      .DB.prepare(BIND_REPORT_SQL)
+      .bind(hold.job_id, "some-uuid-1", null)
+      .run();
     expect(bound.meta?.changes).toBe(0);
     expect(row(w, hold.job_id).tapis_uuid).toBeNull();
   });
@@ -573,9 +616,13 @@ describe("a report's files", () => {
       sha256: new Bun.CryptoHasher("sha256").update(f.body).digest("hex"),
     }));
   const submittedKeys = async (id: string) =>
-    (await fx.harness.keys(fx.harness.records)).filter((k) => k.startsWith(`records/${id}/submitted/`));
+    (await fx.harness.keys(fx.harness.records)).filter((k) =>
+      k.startsWith(`records/${id}/submitted/`),
+    );
 
-  async function putAll(uploads: Array<{ path: string; url: string; headers: Record<string, string> }>) {
+  async function putAll(
+    uploads: Array<{ path: string; url: string; headers: Record<string, string> }>,
+  ) {
     for (const u of uploads) {
       const f = FILES.find((x) => x.path === u.path) as (typeof FILES)[number];
       const put = await fetch(u.url, { method: "PUT", headers: u.headers, body: f.body });
@@ -588,7 +635,7 @@ describe("a report's files", () => {
     const uuid = await partnerLaunch(w, hold, person);
     const first = await report(hold, { tapis_job_id: uuid, files: declared() });
     expect(first.status).toBe(200);
-    const files = (first.json as { files: { state: string; uploads: any[] } }).files;
+    const files = (first.json as { files: { state: string; uploads: ReportUpload[] } }).files;
     expect(files.state).toBe("awaiting_upload");
     expect(files.uploads.map((u) => u.path)).toEqual(FILES.map((f) => f.path));
     for (const u of files.uploads) {
@@ -624,7 +671,7 @@ describe("a report's files", () => {
     fx.tapis.down();
     const pending = await report(hold, { tapis_job_id: uuid, files: declared() });
     expect(pending.status).toBe(202);
-    const files = (pending.json as { files: { state: string; uploads: any[] } }).files;
+    const files = (pending.json as { files: { state: string; uploads: ReportUpload[] } }).files;
     expect(files.state).toBe("awaiting_upload");
     await putAll(files.uploads);
     expect(await submittedKeys(hold.job_id)).toEqual([]);
@@ -649,15 +696,70 @@ describe("a report's files", () => {
     const sha = "a".repeat(64);
     const bad: Array<[string, unknown, number, string, string | undefined]> = [
       ["traversal", [{ path: "../x", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
-      ["encoded traversal", [{ path: "%2e%2e/x", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
-      ["double-encoded traversal", [{ path: "%252e%252e/x", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
-      ["absolute", [{ path: "/etc/passwd", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
+      [
+        "encoded traversal",
+        [{ path: "%2e%2e/x", size: 1, sha256: sha }],
+        400,
+        "invalid_spec",
+        "files.0.path",
+      ],
+      [
+        "double-encoded traversal",
+        [{ path: "%252e%252e/x", size: 1, sha256: sha }],
+        400,
+        "invalid_spec",
+        "files.0.path",
+      ],
+      [
+        "absolute",
+        [{ path: "/etc/passwd", size: 1, sha256: sha }],
+        400,
+        "invalid_spec",
+        "files.0.path",
+      ],
       ["backslash", [{ path: "a\\b", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
-      ["empty segment", [{ path: "a//b", size: 1, sha256: sha }], 400, "invalid_spec", "files.0.path"],
-      ["duplicate", [{ path: "a", size: 1, sha256: sha }, { path: "a", size: 1, sha256: sha }], 400, "invalid_spec", "files.1.path"],
-      ["oversize", [{ path: "big.bin", size: 26 * 1024 * 1024, sha256: sha }], 413, "bundle_too_large", undefined],
-      ["total over", Array.from({ length: 5 }, (_, i) => ({ path: `f${i}`, size: 24 * 1024 * 1024, sha256: sha })), 413, "bundle_too_large", undefined],
-      ["too many", Array.from({ length: 501 }, (_, i) => ({ path: `f${i}`, size: 1, sha256: sha })), 400, "invalid_spec", "files"],
+      [
+        "empty segment",
+        [{ path: "a//b", size: 1, sha256: sha }],
+        400,
+        "invalid_spec",
+        "files.0.path",
+      ],
+      [
+        "duplicate",
+        [
+          { path: "a", size: 1, sha256: sha },
+          { path: "a", size: 1, sha256: sha },
+        ],
+        400,
+        "invalid_spec",
+        "files.1.path",
+      ],
+      [
+        "oversize",
+        [{ path: "big.bin", size: 26 * 1024 * 1024, sha256: sha }],
+        413,
+        "bundle_too_large",
+        undefined,
+      ],
+      [
+        "total over",
+        Array.from({ length: 5 }, (_, i) => ({
+          path: `f${i}`,
+          size: 24 * 1024 * 1024,
+          sha256: sha,
+        })),
+        413,
+        "bundle_too_large",
+        undefined,
+      ],
+      [
+        "too many",
+        Array.from({ length: 501 }, (_, i) => ({ path: `f${i}`, size: 1, sha256: sha })),
+        400,
+        "invalid_spec",
+        "files",
+      ],
     ];
     for (const [name, files, status, code, field] of bad) {
       const res = await report(hold, { tapis_job_id: uuid, files });

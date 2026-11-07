@@ -29,11 +29,13 @@
  * NOTHING THE PARTNER SENT IS LOGGED: a log line carries a job id and a fixed word.
  */
 
-import {
-  canUseCompute,
-  isComputeAccessState,
-} from "../../../shared/compute-access-state.js";
+import { canUseCompute, isComputeAccessState } from "../../../shared/compute-access-state.js";
 import { isTerminalComputeState } from "../../../shared/compute-state.js";
+import {
+  ComputeHoldRequestSchema,
+  type ComputeReportFile,
+  type ComputeReportRequest,
+} from "../../../shared/contract/compute-partner-request.js";
 import {
   COMPUTE_PARTNER_TAG_PREFIX,
   type ComputePartnerErrorCode,
@@ -44,11 +46,6 @@ import {
   holdIdForJob,
   jobIdForHold,
 } from "../../../shared/contract/compute-partner.js";
-import {
-  ComputeHoldRequestSchema,
-  type ComputeReportFile,
-  type ComputeReportRequest,
-} from "../../../shared/contract/compute-partner-request.js";
 import { COMPUTE_JOB_ID_RE, type ComputePolicy } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import {
@@ -62,7 +59,7 @@ import {
   getJob,
   jobCeilingRefusal,
 } from "./compute-jobs.js";
-import { endPartnerReservation, REQUEST_READ, tapisAccess } from "./compute-lifecycle.js";
+import { REQUEST_READ, endPartnerReservation, tapisAccess } from "./compute-lifecycle.js";
 import { fieldPath, getPolicy } from "./compute-policy.js";
 import {
   type DeclaredFile,
@@ -95,7 +92,10 @@ export interface PartnerRefusal {
   job_id?: string;
 }
 
-const refuse = (code: ComputePartnerErrorCode, extra: Partial<PartnerRefusal> = {}): PartnerRefusal => ({
+const refuse = (
+  code: ComputePartnerErrorCode,
+  extra: Partial<PartnerRefusal> = {},
+): PartnerRefusal => ({
   ok: false,
   code,
   ...extra,
@@ -123,7 +123,8 @@ export async function requestHash(
 
 // --- A person's standing ---------------------------------------------------------------------------
 
-const ACCOUNT_FACTS_SQL = `SELECT compute_access, oidc_subject FROM users WHERE id = ?1 AND deleted_at IS NULL`;
+const ACCOUNT_FACTS_SQL =
+  "SELECT compute_access, oidc_subject FROM users WHERE id = ?1 AND deleted_at IS NULL";
 
 interface AccountFacts {
   compute_access: string | null;
@@ -164,7 +165,8 @@ export async function effectiveCaps(
   let maxOpen = stated.maxOpenReservations;
   let maxMilli = stated.maxReservedMilliPerDay;
   const client = await getClient(env.DB, clientId);
-  if (client?.cap_open_reservations != null) maxOpen = Math.min(maxOpen, client.cap_open_reservations);
+  if (client?.cap_open_reservations != null)
+    maxOpen = Math.min(maxOpen, client.cap_open_reservations);
   if (client?.cap_su_per_day != null) {
     maxMilli = Math.min(maxMilli, client.cap_su_per_day * 1000);
   }
@@ -552,7 +554,10 @@ export async function reportJob(
       return refuse("tapis_job_in_use");
     }
     try {
-      const bound = await db.prepare(BIND_REPORT_SQL).bind(job.id, uuid, rec?.status ?? null).run();
+      const bound = await db
+        .prepare(BIND_REPORT_SQL)
+        .bind(job.id, uuid, rec?.status ?? null)
+        .run();
       if ((bound.meta?.changes ?? 0) !== 1) {
         const now = await getJob(db, job.id);
         if (now?.tapis_uuid === uuid) {
@@ -622,9 +627,7 @@ export async function reportJob(
 
 // --- A release ----------------------------------------------------------------------------------------
 
-export type ReleaseResult =
-  | { ok: true; body: ComputePartnerReleaseResponse }
-  | PartnerRefusal;
+export type ReleaseResult = { ok: true; body: ComputePartnerReleaseResponse } | PartnerRefusal;
 
 /**
  * `DELETE /compute/holds/:id`. The id is the hold id the reservation was answered with. A reservation

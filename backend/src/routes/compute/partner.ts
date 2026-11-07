@@ -20,17 +20,17 @@
 
 import type { Context, Hono } from "hono";
 import {
+  COMPUTE_HOLD_BODY_MAX_BYTES,
+  COMPUTE_REPORT_BODY_MAX_BYTES,
+  ComputeReportRequestSchema,
+} from "../../../../shared/contract/compute-partner-request.js";
+import {
   COMPUTE_PARTNER_ERROR_STATUS,
   COMPUTE_PARTNER_IDEMPOTENCY_HEADER,
   COMPUTE_PARTNER_KEY_RE,
   COMPUTE_PARTNER_REPLAYED_HEADER,
   COMPUTE_PARTNER_SENTENCES,
 } from "../../../../shared/contract/compute-partner.js";
-import {
-  COMPUTE_HOLD_BODY_MAX_BYTES,
-  COMPUTE_REPORT_BODY_MAX_BYTES,
-  ComputeReportRequestSchema,
-} from "../../../../shared/contract/compute-partner-request.js";
 import {
   type PartnerCaller,
   type PartnerRefusal,
@@ -103,7 +103,10 @@ async function bodyText(c: Ctx, max: number): Promise<{ ok: true; text: string }
   }
   if (raw === null) return bad(c, "invalid_spec", "body");
   try {
-    return { ok: true, text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw) };
+    return {
+      ok: true,
+      text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw),
+    };
   } catch {
     return bad(c, "invalid_spec", "body");
   }
@@ -153,7 +156,14 @@ async function report(c: Ctx): Promise<Response> {
     return bad(c, "invalid_spec", path.length > 0 ? fieldPath(path) : "body");
   }
   return guarded(c, async () => {
-    const result = await reportJob(c.env, caller, c.req.param("id") ?? "", key, read.text, parsed.data);
+    const result = await reportJob(
+      c.env,
+      caller,
+      c.req.param("id") ?? "",
+      key,
+      read.text,
+      parsed.data,
+    );
     if (!result.ok) return refusal(c, result);
     return c.json(result.body, result.status, {
       ...NO_STORE,

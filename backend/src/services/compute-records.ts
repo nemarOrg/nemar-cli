@@ -620,7 +620,8 @@ export async function presignIncomingUploads(
   // A person's bundle is asked for before the job starts. A partner's files are records only, uploaded
   // beside a job that is already running, so any live state may ask for an address (the copy into the
   // records, which is the lock, waits for the verification: `finalizeSubmittedFiles`).
-  const askable = job.source === "partner" ? isLiveState(job.state) : UPLOAD_STATES.includes(job.state);
+  const askable =
+    job.source === "partner" ? isLiveState(job.state) : UPLOAD_STATES.includes(job.state);
   if (job.records_written_at !== null || !askable) {
     return refuse("bad_state");
   }

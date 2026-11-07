@@ -585,8 +585,7 @@ const looksUnique = (err: unknown) => /UNIQUE constraint failed/i.test(String(er
 const refusal = (
   code: CreateJobRefusal | "client_cap_reached",
   field?: string,
-): PartnerCreateResult =>
-  field === undefined ? { ok: false, code } : { ok: false, code, field };
+): PartnerCreateResult => (field === undefined ? { ok: false, code } : { ok: false, code, field });
 
 /**
  * The owner's per-job ceilings, for a job a PERSON runs: `partition_not_offered` when the partition has
@@ -719,7 +718,10 @@ const imageDigestOf = (image: string | undefined): string | null => {
  * an argument the table cannot take, for a key reused for another request, and for a platform pool
  * that is missing, and the ledger's own error for a pool it cannot find.
  */
-export function createJob(env: ComputeJobsEnv, input: PartnerJobInput): Promise<PartnerCreateResult>;
+export function createJob(
+  env: ComputeJobsEnv,
+  input: PartnerJobInput,
+): Promise<PartnerCreateResult>;
 export function createJob(env: ComputeJobsEnv, input: SpecJobInput): Promise<CreateJobResult>;
 export async function createJob(
   env: ComputeJobsEnv,

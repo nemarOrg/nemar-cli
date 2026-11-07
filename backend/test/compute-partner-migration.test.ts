@@ -123,20 +123,16 @@ afterAll(async () => {
 });
 
 function onEveryEngine(name: string, body: (e: Engine) => Promise<void>) {
-  test(
-    name,
-    async () => {
-      expect(ENGINES).toHaveLength(2);
-      for (const e of ENGINES) {
-        try {
-          await body(e);
-        } catch (err) {
-          throw new Error(`${e.name}: ${err instanceof Error ? err.message : String(err)}`);
-        }
+  test(name, async () => {
+    expect(ENGINES).toHaveLength(2);
+    for (const e of ENGINES) {
+      try {
+        await body(e);
+      } catch (err) {
+        throw new Error(`${e.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
-    },
-    60_000,
-  );
+    }
+  }, 60_000);
 }
 
 const CHECK = /CHECK constraint failed/;
@@ -180,14 +176,17 @@ describe("compute_idempotency_keys", () => {
     expect(await claim(e, { key: "a".repeat(64) })).toBeNull();
   });
 
-  onEveryEngine("refuses a hash that is not 64 lowercase hex digits and a job id that is none", async (e) => {
-    for (const request_hash of ["", "A".repeat(64), "a".repeat(63), `${"a".repeat(63)}g`]) {
-      expect(await claim(e, { request_hash })).toMatch(CHECK);
-    }
-    for (const job_id of ["", "job_zz", `job_${"A".repeat(24)}`, `jobs_${"a".repeat(23)}`]) {
-      expect(await claim(e, { job_id })).toMatch(CHECK);
-    }
-  });
+  onEveryEngine(
+    "refuses a hash that is not 64 lowercase hex digits and a job id that is none",
+    async (e) => {
+      for (const request_hash of ["", "A".repeat(64), "a".repeat(63), `${"a".repeat(63)}g`]) {
+        expect(await claim(e, { request_hash })).toMatch(CHECK);
+      }
+      for (const job_id of ["", "job_zz", `job_${"A".repeat(24)}`, `jobs_${"a".repeat(23)}`]) {
+        expect(await claim(e, { job_id })).toMatch(CHECK);
+      }
+    },
+  );
 });
 
 describe("the new columns of compute_jobs", () => {
@@ -243,10 +242,13 @@ describe("the new columns of compute_jobs", () => {
     }
   });
 
-  onEveryEngine("the unique index on the bound Tapis uuid is still there (0115, not rewritten)", async (e) => {
-    expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toBeNull();
-    expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toMatch(UNIQUE);
-  });
+  onEveryEngine(
+    "the unique index on the bound Tapis uuid is still there (0115, not rewritten)",
+    async (e) => {
+      expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toBeNull();
+      expect(await insertJob(e, { tapis_uuid: "uuid-shared-1" })).toMatch(UNIQUE);
+    },
+  );
 });
 
 describe("the indexes and the file", () => {
@@ -256,7 +258,11 @@ describe("the indexes and the file", () => {
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'compute_jobs_%'",
       )
     ).map((r) => r.name);
-    for (const n of ["compute_jobs_client_live", "compute_jobs_partner_open", "compute_jobs_partner_unverified"]) {
+    for (const n of [
+      "compute_jobs_client_live",
+      "compute_jobs_partner_open",
+      "compute_jobs_partner_unverified",
+    ]) {
       expect(names).toContain(n);
     }
   });

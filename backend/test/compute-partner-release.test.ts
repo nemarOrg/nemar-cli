@@ -93,11 +93,17 @@ describe("a release", () => {
     const same = await del(hold.hold_id, "release-key-1");
     expect([same.status, same.json?.replayed]).toEqual([200, true]);
     const other = await del(hold.hold_id);
-    expect([other.status, other.json?.released, other.json?.state]).toEqual([200, true, "cancelled"]);
+    expect([other.status, other.json?.released, other.json?.state]).toEqual([
+      200,
+      true,
+      "cancelled",
+    ]);
     expect([entries(w, hold.job_id).length, tapisCalls()]).toEqual(before);
     // A reservation the reaper expired answers 200 as well.
     const old = await reserve(w, person);
-    w.h.db.query("UPDATE compute_jobs SET created_at = datetime('now', '-31 minutes') WHERE id = ?").run(old.job_id);
+    w.h.db
+      .query("UPDATE compute_jobs SET created_at = datetime('now', '-31 minutes') WHERE id = ?")
+      .run(old.job_id);
     const { reapExpiredHolds } = await import("../src/services/compute-hold-reaper");
     expect((await reapExpiredHolds(fx.env()))?.released).toBe(1);
     const late = await del(old.hold_id);
@@ -110,7 +116,12 @@ describe("a bound job is not released", () => {
   for (const verify of ["pending", "verified", "mismatch"] as const) {
     test(`${verify}: 409 hold_bound and the hold is untouched`, async () => {
       const hold = await reserve(w, person);
-      const uuid = await partnerLaunch(w, hold, person, verify === "mismatch" ? { owner: "someone-else" } : {});
+      const uuid = await partnerLaunch(
+        w,
+        hold,
+        person,
+        verify === "mismatch" ? { owner: "someone-else" } : {},
+      );
       if (verify === "pending") fx.tapis.down();
       if (verify === "mismatch") {
         // A refusal whose cancel Tapis does not take stays a bound `mismatch` row.
@@ -191,10 +202,14 @@ describe("the release statement binds 'no Tapis job' itself", () => {
     const { endPartnerReservation } = await import("../src/services/compute-lifecycle");
     const { getJob } = await import("../src/services/compute-jobs");
     const hold = await reserve(w, person);
-    const stale = (await getJob(w.env().DB, hold.job_id)) as NonNullable<Awaited<ReturnType<typeof getJob>>>;
+    const stale = (await getJob(w.env().DB, hold.job_id)) as NonNullable<
+      Awaited<ReturnType<typeof getJob>>
+    >;
     // The bind lands after the release read the row.
     w.h.db
-      .query("UPDATE compute_jobs SET tapis_uuid = 'bound-between-1', partner_state = 'pending' WHERE id = ?")
+      .query(
+        "UPDATE compute_jobs SET tapis_uuid = 'bound-between-1', partner_state = 'pending' WHERE id = ?",
+      )
       .run(hold.job_id);
     expect(stale.tapis_uuid).toBeNull();
     expect(await endPartnerReservation(w.env(), stale, "partner_release")).toBe(false);

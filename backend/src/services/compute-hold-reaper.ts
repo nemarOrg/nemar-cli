@@ -103,7 +103,9 @@ export async function isAwaitingPartnerReport(env: Bindings, rec: TapisJob): Pro
   }
   const wait = (await getPolicy(env.DB)).policy.reservationWaitMinutes;
   const madeMs = Date.parse(`${row.created_at.replace(" ", "T")}Z`);
-  return Number.isFinite(madeMs) && Date.now() - madeMs < (wait + SWEEP_DEFER_GRACE_MINUTES) * 60_000;
+  return (
+    Number.isFinite(madeMs) && Date.now() - madeMs < (wait + SWEEP_DEFER_GRACE_MINUTES) * 60_000
+  );
 }
 
 /** Rows of each list one tick takes at most. */
@@ -128,7 +130,8 @@ export const UNVERIFIED_ROWS_SQL = `SELECT id FROM compute_jobs
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /** A Tapis uuid some row accounts for (as its job or its orphan): not the reaper's to adopt. `?1` the uuid. */
-const ACCOUNTED_SQL = "SELECT 1 AS accounted FROM compute_jobs WHERE tapis_uuid = ?1 OR orphan_tapis_uuid = ?1 LIMIT 1";
+const ACCOUNTED_SQL =
+  "SELECT 1 AS accounted FROM compute_jobs WHERE tapis_uuid = ?1 OR orphan_tapis_uuid = ?1 LIMIT 1";
 
 /** The flag a reservation carries while Tapis could not be asked. `?1` the job. */
 const UNREACHABLE_SQL = `UPDATE compute_jobs SET partner_flag = 'tapis_unreachable'
@@ -256,12 +259,14 @@ async function resolveReservation(
     await db.prepare(AMBIGUOUS_SQL).bind(job.id).run();
     return;
   }
-  const bound = await db.prepare(BIND_ADOPT_SQL).bind(job.id, rec.uuid, rec.status).run().catch(
-    (err) => {
+  const bound = await db
+    .prepare(BIND_ADOPT_SQL)
+    .bind(job.id, rec.uuid, rec.status)
+    .run()
+    .catch((err) => {
       if (/UNIQUE constraint failed/i.test(String(err))) return null;
       throw err;
-    },
-  );
+    });
   if (bound === null || (bound.meta?.changes ?? 0) !== 1) return; // accounted since, or the row moved
   r.adopted++;
   const row = (await getJob(db, job.id)) as ComputeJobRow;
@@ -282,17 +287,24 @@ async function resolveReservation(
   }
 }
 
-const STANDING_SQL = `SELECT compute_access FROM users WHERE id = ?1 AND deleted_at IS NULL`;
+const STANDING_SQL = "SELECT compute_access FROM users WHERE id = ?1 AND deleted_at IS NULL";
 
 /** Whether the person's compute is no longer `active` (suspended, revoked, denied, or the account deleted). */
 async function personStandingEnded(db: D1Database, job: ComputeJobRow): Promise<boolean> {
   if (job.account_id === null) return true;
-  const row = await db.prepare(STANDING_SQL).bind(job.account_id).first<{ compute_access: string }>();
+  const row = await db
+    .prepare(STANDING_SQL)
+    .bind(job.account_id)
+    .first<{ compute_access: string }>();
   return row?.compute_access !== "active";
 }
 
 /** Verify one `pending` row, or withdraw a binding Tapis keeps saying it does not have. */
-async function resolvePending(env: Bindings, job: ComputeJobRow, r: HoldReaperResult): Promise<void> {
+async function resolvePending(
+  env: Bindings,
+  job: ComputeJobRow,
+  r: HoldReaperResult,
+): Promise<void> {
   r.pending++;
   const outcome = await verifyBoundJob(env, job.id, { read: TICK_READ });
   if (outcome.kind === "verified") {
@@ -369,15 +381,10 @@ export function holdReaperLogLine(
   r: HoldReaperResult,
 ): { level: "info" | "warn" | "error"; line: string } | null {
   const acted =
-    r.released +
-    r.adopted +
-    r.ambiguous +
-    r.unreachable +
-    r.pending +
-    r.mismatches +
-    r.withdrawn;
+    r.released + r.adopted + r.ambiguous + r.unreachable + r.pending + r.mismatches + r.withdrawn;
   if (acted === 0 && r.errors.length === 0) return null;
-  const level = r.errors.length > 0 ? "error" : r.unreachable > 0 || r.ambiguous > 0 ? "warn" : "info";
+  const level =
+    r.errors.length > 0 ? "error" : r.unreachable > 0 || r.ambiguous > 0 ? "warn" : "info";
   return {
     level,
     line:

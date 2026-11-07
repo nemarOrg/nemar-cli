@@ -172,7 +172,10 @@ describe("a Tapis error keeps the hold: nothing is released on an error", () => 
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ examined: 2, unreachable: 2, released: 0 });
     for (const h of [a, b]) {
-      expect(row(w, h.job_id)).toMatchObject({ state: "created", partner_flag: "tapis_unreachable" });
+      expect(row(w, h.job_id)).toMatchObject({
+        state: "created",
+        partner_flag: "tapis_unreachable",
+      });
       expect(kinds(h.job_id)).toEqual(["hold"]);
     }
     fx.tapis.up();
@@ -196,7 +199,9 @@ describe("a Tapis error keeps the hold: nothing is released on an error", () => 
   test("Tapis not configured keeps the hold too", async () => {
     const hold = await reserve(w, person);
     age(hold, 31);
-    const r = await reapExpiredHolds(fx.env({ TAPIS_USERNAME: undefined, TAPIS_PASSWORD: undefined }));
+    const r = await reapExpiredHolds(
+      fx.env({ TAPIS_USERNAME: undefined, TAPIS_PASSWORD: undefined }),
+    );
     expect(r).toMatchObject({ unreachable: 1, released: 0 });
     expect(row(w, hold.job_id).state).toBe("created");
   });
@@ -210,7 +215,11 @@ describe("several Tapis jobs under one tag", () => {
     age(hold, 31);
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ examined: 1, ambiguous: 1, released: 0, adopted: 0 });
-    expect(row(w, hold.job_id)).toMatchObject({ state: "created", partner_flag: "ambiguous_tag", flag_mismatch: 1 });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "created",
+      partner_flag: "ambiguous_tag",
+      flag_mismatch: 1,
+    });
     expect(kinds(hold.job_id)).toEqual(["hold"]);
     // The reaper cancelled nothing. The sweep indexes both as jobs that skipped the reservation, cancels
     // them and charges the PARTNER's pool.
@@ -264,7 +273,11 @@ describe("a job under the tag that is not the person's", () => {
     const other = await reserve(w, person);
     // A job under MY tag that another row holds as its job (a row the sweep indexed, say).
     const uuid = await partnerLaunch(w, mine, person);
-    w.h.db.query("UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'verified', state = 'submitted' WHERE id = ?").run(uuid, other.job_id);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET tapis_uuid = ?, partner_state = 'verified', state = 'submitted' WHERE id = ?",
+      )
+      .run(uuid, other.job_id);
     age(mine, 31);
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ examined: 1, released: 1, adopted: 0 });
@@ -294,10 +307,18 @@ describe("a cancelled reservation and one whose person's compute ended", () => {
     fx.tapis.advance(uuid, "QUEUED");
     fx.tapis.advance(uuid, "RUNNING");
     setTapisTimes(fx, uuid, 30 * MINUTE, null);
-    w.h.db.query("UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?").run(hold.job_id);
+    w.h.db
+      .query(
+        "UPDATE compute_jobs SET cancel_requested_at = datetime('now'), cancel_reason = 'user' WHERE id = ?",
+      )
+      .run(hold.job_id);
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ adopted: 1, refused: 1, ended: 1 });
-    expect(row(w, hold.job_id)).toMatchObject({ state: "cancelled", partner_flag: "hold_ended", cancel_reason: "user" });
+    expect(row(w, hold.job_id)).toMatchObject({
+      state: "cancelled",
+      partner_flag: "hold_ended",
+      cancel_reason: "user",
+    });
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
     expect(kinds(hold.job_id)).toEqual(["hold", "release", "overrun"]);
     expect(own().charged_milli).toBe(0);
@@ -322,7 +343,10 @@ describe("a cancelled reservation and one whose person's compute ended", () => {
     age(busy, 31);
     const r = await reapExpiredHolds(production());
     expect(r).toMatchObject({ released: 1, adopted: 1, refused: 1 });
-    expect(row(w, quiet.job_id)).toMatchObject({ state: "cancelled", cancel_reason: "hold_expired" });
+    expect(row(w, quiet.job_id)).toMatchObject({
+      state: "cancelled",
+      cancel_reason: "hold_expired",
+    });
     expect(row(w, busy.job_id)).toMatchObject({ state: "cancelled", partner_flag: "hold_ended" });
     expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
     expect(own().held_milli).toBe(0);
@@ -354,10 +378,13 @@ describe("the sweep and the reaper agree about a partner's job", () => {
     // A flagged one (the reaper met several) is not waited for either.
     const flagged = await reserve(w, person);
     const many = await partnerLaunch(w, flagged, person);
-    w.h.db.query("UPDATE compute_jobs SET partner_flag = 'ambiguous_tag' WHERE id = ?").run(flagged.job_id);
+    w.h.db
+      .query("UPDATE compute_jobs SET partner_flag = 'ambiguous_tag' WHERE id = ?")
+      .run(flagged.job_id);
     const swept = await sweepTenantJobs(fx.env(), "live");
     expect(swept).toMatchObject({ indexed: 3, awaitingReport: 0 });
-    for (const uuid of [foreign, late, many]) expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
+    for (const uuid of [foreign, late, many])
+      expect(fx.tapis.jobs.get(uuid)?.status).toBe("CANCELLED");
   });
 });
 
@@ -378,7 +405,11 @@ describe("the tick is bounded, in rotation, production only, and reads no switch
     const second = await reapExpiredHolds(production());
     expect(second).toMatchObject({ examined: 5, released: 5 });
     expect(
-      (w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE state = 'created'").get() as { n: number }).n,
+      (
+        w.h.db.query("SELECT COUNT(*) AS n FROM compute_jobs WHERE state = 'created'").get() as {
+          n: number;
+        }
+      ).n,
     ).toBe(0);
   }, 60_000);
 

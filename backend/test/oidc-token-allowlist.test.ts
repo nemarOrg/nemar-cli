@@ -264,7 +264,8 @@ describe("an OIDC access token is refused by every route that is not an OIDC rou
 
   test("the partner's three routes are the only compute writes left out of the walk, and they are in the router", () => {
     const walked = requestList().map(
-      (c) => `${c.method} ${c.path.replace(PRIVATE_DATASET, ":id").replace(/job_[0-9a-f]{24}|x/, ":id")}`,
+      (c) =>
+        `${c.method} ${c.path.replace(PRIVATE_DATASET, ":id").replace(/job_[0-9a-f]{24}|x/, ":id")}`,
     );
     const table = __workerRouteTable().map((r) => `${r.method} ${r.path}`);
     for (const route of COMPUTE_PARTNER_ROUTES) {

@@ -1397,9 +1397,12 @@ describe("finalizeSubmittedFiles (a partner's own files)", () => {
       ]);
     }
     expect(cp("CopyObject")).toHaveLength(0);
-    for (const [path] of FILES) expect(await h.records.head(submittedKey(made.id, path))).toBeNull();
+    for (const [path] of FILES)
+      expect(await h.records.head(submittedKey(made.id, path))).toBeNull();
     expect((await h.records.list({ prefix: `records/${made.id}/submitted/` })).objects).toEqual([]);
-    expect(h.db.query("SELECT records_written_at FROM compute_jobs WHERE id = ?").get(made.id)).toEqual({
+    expect(
+      h.db.query("SELECT records_written_at FROM compute_jobs WHERE id = ?").get(made.id),
+    ).toEqual({
       records_written_at: null,
     });
   });

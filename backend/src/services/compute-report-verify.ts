@@ -29,8 +29,12 @@
 
 import { isTerminalComputeState } from "../../../shared/compute-state.js";
 import type { ComputeReportMismatch } from "../../../shared/contract/compute-partner.js";
-import { RATE_TABLE_V1, type PartitionName, suMilliFor } from "../../../shared/contract/compute.js";
-import { type AuditLogEntry, AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
+import { type PartitionName, RATE_TABLE_V1, suMilliFor } from "../../../shared/contract/compute.js";
+import {
+  AUDIT_IF_PREVIOUS_CHANGED_SQL,
+  type AuditLogEntry,
+  auditLogParams,
+} from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { type ComputeJobRow, getJob } from "./compute-jobs.js";
@@ -153,7 +157,11 @@ export function carriesForeignNemarTag(rec: Pick<TapisJob, "tags">, jobId: strin
  * service identity (a partner's job is owned by a person's Tapis username) or it names another NEMAR job
  * in its tags. NEMAR must never cancel, bind or charge such a job on a partner's word.
  */
-export function isNemarsOwnJob(ctx: Pick<TapisContext, "owner">, rec: TapisJob, jobId: string): boolean {
+export function isNemarsOwnJob(
+  ctx: Pick<TapisContext, "owner">,
+  rec: TapisJob,
+  jobId: string,
+): boolean {
   return rec.owner === ctx.owner || carriesForeignNemarTag(rec, jobId);
 }
 
@@ -273,9 +281,7 @@ export async function verifyBoundJob(
       // After the commit, never inside it: NEMAR's own webhook is a hint, subscribed once.
       await subscribeVerifiedJob(env, ctx, job, uuid);
     }
-    return job.partner_state === "verified"
-      ? { kind: "verified", job }
-      : { kind: "skipped", job };
+    return job.partner_state === "verified" ? { kind: "verified", job } : { kind: "skipped", job };
   }
 
   job = await recordMismatch(env, job, uuid, verdict.flag, rec);

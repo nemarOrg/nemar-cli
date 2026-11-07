@@ -23,19 +23,18 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { sweepTenantJobs } from "../src/services/compute-tenant-sweep";
 import { moveCharge } from "../src/services/compute-ledger";
-import { ADMIN_KEY } from "./helpers/oidc-harness";
+import { sweepTenantJobs } from "../src/services/compute-tenant-sweep";
 import { hashApiKey } from "../src/services/token";
 import { totalsDisagreements } from "./helpers/compute-ledger";
 import {
-  MINUTE,
   type LifecycleFixture,
+  MINUTE,
   setTapisTimes,
   startLifecycleFixture,
 } from "./helpers/compute-lifecycle-fixture";
-import { fundAccount, seedUser } from "./helpers/compute-seed";
 import {
+  type DbRow,
   type PartnerWorld,
   buildPartnerWorld,
   entries,
@@ -45,6 +44,8 @@ import {
   reserve,
   row,
 } from "./helpers/compute-partner-world";
+import { fundAccount, seedUser } from "./helpers/compute-seed";
+import { ADMIN_KEY } from "./helpers/oidc-harness";
 import { OWNER_KEY } from "./helpers/oidc-harness";
 
 let fx: LifecycleFixture;
@@ -116,8 +117,10 @@ describe("the move", () => {
     // Two adjustments, no job, no budget on either side, the fixed reason word, the owner as actor.
     const moves = w.h.db
       .query("SELECT * FROM compute_ledger WHERE idempotency_key LIKE 'move:%' ORDER BY id")
-      .all() as Array<Record<string, any>>;
-    expect(moves.map((e) => [e.kind, e.charged_delta_milli, e.budget_pool_id, e.job_id, e.reason])).toEqual([
+      .all() as DbRow[];
+    expect(
+      moves.map((e) => [e.kind, e.charged_delta_milli, e.budget_pool_id, e.job_id, e.reason]),
+    ).toEqual([
       ["adjust", -charged, null, null, "charge_moved"],
       ["adjust", charged, null, null, "charge_moved"],
     ]);
@@ -162,9 +165,19 @@ describe("the move", () => {
 
 describe("what it refuses, and writes nothing for", () => {
   const unchanged = async (run: () => Promise<unknown>) => {
-    const before = [count("compute_ledger"), count("audit_log"), tenant().charged_milli, people().charged_milli];
+    const before = [
+      count("compute_ledger"),
+      count("audit_log"),
+      tenant().charged_milli,
+      people().charged_milli,
+    ];
     await run();
-    expect([count("compute_ledger"), count("audit_log"), tenant().charged_milli, people().charged_milli]).toEqual(before);
+    expect([
+      count("compute_ledger"),
+      count("audit_log"),
+      tenant().charged_milli,
+      people().charged_milli,
+    ]).toEqual(before);
   };
 
   test("a job that was RESERVED is job_reserved, however clear whose it is", async () => {
@@ -255,8 +268,14 @@ describe("what it refuses, and writes nothing for", () => {
   test("owner only: an administrator and a person are refused before the body is read", async () => {
     const job = await unreservedJob();
     const person = await newPartnerPerson(w);
-    w.h.db.query("INSERT INTO users (username, email, password_hash, status, role, email_verified) VALUES ('mvadmin', 'mvadmin@example.org', 'x', 'approved', 'admin', 1)").run();
-    const adminId = (w.h.db.query("SELECT id FROM users WHERE username = 'mvadmin'").get() as { id: number }).id;
+    w.h.db
+      .query(
+        "INSERT INTO users (username, email, password_hash, status, role, email_verified) VALUES ('mvadmin', 'mvadmin@example.org', 'x', 'approved', 'admin', 1)",
+      )
+      .run();
+    const adminId = (
+      w.h.db.query("SELECT id FROM users WHERE username = 'mvadmin'").get() as { id: number }
+    ).id;
     w.h.db
       .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
       .run(adminId, await hashApiKey(ADMIN_KEY), ADMIN_KEY.slice(0, 8));
@@ -270,12 +289,22 @@ describe("what it refuses, and writes nothing for", () => {
 
   test("a body that is not exactly { to_account_id } is refused", async () => {
     const job = await unreservedJob();
-    for (const body of [{}, { to_account_id: "5" }, { to_account_id: 1.5 }, { to_account_id: 0 }, { to_account_id: 2, extra: 1 }]) {
+    for (const body of [
+      {},
+      { to_account_id: "5" },
+      { to_account_id: 1.5 },
+      { to_account_id: 0 },
+      { to_account_id: 2, extra: 1 },
+    ]) {
       const res = await w.h.call("POST", `/admin/compute/jobs/${job}/move-charge`, {
         key: OWNER_KEY,
         body,
       });
-      expect([JSON.stringify(body), res.status, res.json?.code]).toEqual([JSON.stringify(body), 400, "invalid_body"]);
+      expect([JSON.stringify(body), res.status, res.json?.code]).toEqual([
+        JSON.stringify(body),
+        400,
+        "invalid_body",
+      ]);
     }
   });
 });
@@ -292,7 +321,11 @@ describe("the pair is one batch", () => {
     ).rejects.toThrow();
     w.h.db.exec("DROP TRIGGER test_refuse_move_in");
     expect(count("compute_ledger") - entries(w, job).length).toBeGreaterThan(0);
-    expect(w.h.db.query("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'move:%'").get()).toEqual({ n: 0 });
+    expect(
+      w.h.db
+        .query("SELECT COUNT(*) AS n FROM compute_ledger WHERE idempotency_key LIKE 'move:%'")
+        .get(),
+    ).toEqual({ n: 0 });
     expect(tenant().charged_milli).toBe(tenantBefore);
     expect(row(w, job).account_id).toBeNull();
     expect(await totalsDisagreements(w.env().DB)).toEqual([]);

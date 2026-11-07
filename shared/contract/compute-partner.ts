@@ -145,7 +145,8 @@ export const COMPUTE_PARTNER_SENTENCES = {
   over_job_limit: "The request asks for more than one job may have on that partition.",
   over_concurrency: "The person already has as many jobs running or waiting as they may.",
   insufficient_balance: "The person's compute balance is used up.",
-  platform_budget_exhausted: "The shared compute budget has no room for this reservation right now.",
+  platform_budget_exhausted:
+    "The shared compute budget has no room for this reservation right now.",
   client_cap_reached: "This client has reached the limit the owner set for it.",
   job_not_found: "No such job.",
   already_bound: "A different Tapis job is already reported under this reservation.",

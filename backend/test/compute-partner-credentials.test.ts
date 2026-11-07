@@ -80,9 +80,10 @@ const jobCount = () =>
 interface Route {
   name: string;
   /** Call the route with `token` (and the shape it needs), for a job reserved by `owner`. */
-  call(token: string | null, over?: { headers?: Record<string, string>; key?: string | null }): Promise<
-    Awaited<ReturnType<typeof partnerCall>>
-  >;
+  call(
+    token: string | null,
+    over?: { headers?: Record<string, string>; key?: string | null },
+  ): Promise<Awaited<ReturnType<typeof partnerCall>>>;
 }
 
 /** The three routes, aimed at a reservation `owner` holds (the report and the release need one). */
@@ -208,7 +209,9 @@ describe("the credential matrix on all three routes", () => {
     });
     const token = await machineToken(w, machine);
     // Widen the live token by hand, to reach the account test behind the scope test.
-    w.h.db.query("UPDATE oidc_tokens SET scopes = ? WHERE user_id IS NULL").run('["compute.reserve"]');
+    w.h.db
+      .query("UPDATE oidc_tokens SET scopes = ? WHERE user_id IS NULL")
+      .run('["compute.reserve"]');
     for (const route of await routes(owner)) {
       expectRefusal(await route.call(token), "forbidden_credential", route.name);
     }
@@ -239,7 +242,8 @@ describe("the credential matrix on all three routes", () => {
       body: {},
     });
     expect(disabled.status).toBe(200);
-    for (const route of list) expectRefusal(await route.call(owner.token), "invalid_token", route.name);
+    for (const route of list)
+      expectRefusal(await route.call(owner.token), "invalid_token", route.name);
   });
 
   test("a compute suspension ends the person's grants: the old token is 401, and a person who signs in again is told suspended", async () => {
@@ -250,7 +254,8 @@ describe("the credential matrix on all three routes", () => {
       body: { reason: "test" },
     });
     expect(decided.status).toBe(200);
-    for (const route of list) expectRefusal(await route.call(owner.token), "invalid_token", route.name);
+    for (const route of list)
+      expectRefusal(await route.call(owner.token), "invalid_token", route.name);
     // Signing in does not need compute access (ADR 0119 rule 7), so a new token exists, and it is refused by state.
     const again = await tokenFor(w, owner, "openid compute.reserve");
     const before = [ledgerCount(), jobCount()];
@@ -280,11 +285,18 @@ describe("the client and the person bind a reservation", () => {
       token: theirs,
       json: { tapis_job_id: uuid },
     });
-    const absent = await partnerCall(w, "POST", "/compute/jobs/job_000000000000000000000abc/report", {
+    const absent = await partnerCall(
+      w,
+      "POST",
+      "/compute/jobs/job_000000000000000000000abc/report",
+      {
+        token: theirs,
+        json: { tapis_job_id: uuid },
+      },
+    );
+    const release = await partnerCall(w, "DELETE", `/compute/holds/${hold.hold_id}`, {
       token: theirs,
-      json: { tapis_job_id: uuid },
     });
-    const release = await partnerCall(w, "DELETE", `/compute/holds/${hold.hold_id}`, { token: theirs });
     expectRefusal(report, "job_not_found", "report");
     expectRefusal(release, "job_not_found", "release");
     // The same answer as a job that does not exist: no oracle.
@@ -368,7 +380,11 @@ describe("every write needs an Idempotency-Key of the contract's shape", () => {
           key,
           ...(key === "" ? { headers: { "Idempotency-Key": "" } } : {}),
         });
-        expectRefusal(res, "idempotency_key_required", `${method} ${path} key=${JSON.stringify(key)}`);
+        expectRefusal(
+          res,
+          "idempotency_key_required",
+          `${method} ${path} key=${JSON.stringify(key)}`,
+        );
       }
     }
     expect([ledgerCount(), jobCount()]).toEqual(before);
