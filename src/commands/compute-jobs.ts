@@ -42,6 +42,7 @@ import {
   renewComputeResults,
 } from "../lib/api/compute.js";
 import { failCompute, refuseLocally } from "../lib/compute/fail.js";
+import { markReportedExit } from "../lib/debug-log.js";
 import { plain } from "../lib/terminal-text.js";
 
 interface JsonOption {
@@ -167,7 +168,10 @@ function sha256File(path: string): string {
 }
 
 /** Download one file to `dir` and verify its size and SHA-256. Returns null on success, or a short reason. */
-async function downloadOne(dir: string, file: ResultFile): Promise<"ok" | "skipped" | string> {
+export async function downloadOne(
+  dir: string,
+  file: ResultFile,
+): Promise<"ok" | "skipped" | string> {
   if (!safeResultPath(file.path)) return "the path is not one that may be written";
   const root = resolve(dir);
   const dest = resolve(root, file.path);
@@ -295,6 +299,8 @@ export const resultsCommand = new Command("results")
         chalk.red(`${failed} of ${results.files.length} files could not be fetched and verified.`),
       );
       process.exitCode = 1;
+      // A file that did not match is a verdict about the file, not a fault in the command.
+      markReportedExit();
     }
   });
 
