@@ -38,12 +38,9 @@
 
 import { canUseCompute, isComputeAccessState } from "../../../shared/compute-access-state.js";
 import { type ComputeState, isTerminalComputeState } from "../../../shared/compute-state.js";
-import {
-  BUNDLE_ARCHIVE_FILE,
-  BundleManifestSchema,
-  checkBundleManifest,
-} from "../../../shared/contract/compute-bundle.js";
+import { checkBundleManifest } from "../../../shared/contract/compute-bundle.js";
 import { launchSpecFits } from "../../../shared/contract/compute-launch.js";
+import { BundleManifestSchema } from "../../../shared/contract/compute-submit-request.js";
 import type {
   ComputeFinalizeResponse,
   ComputeSubmitResponse,

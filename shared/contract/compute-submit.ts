@@ -15,8 +15,10 @@
  * field in the request body, never a value. The status of each word is `COMPUTE_REFUSAL_STATUS`
  * (`../compute-state.ts`); the sentences are {@link COMPUTE_SUBMIT_SENTENCES}.
  *
- * Responses are open (`.passthrough()`): a released reader keeps working when the Worker adds a key. The
- * request is closed, so a typo is refused instead of dropped.
+ * Responses are open (`.passthrough()`): a released reader keeps working when the Worker adds a key. This
+ * file declares no strict schema and imports none (`test/contract-schemas.test.ts` holds that). The REQUESTS,
+ * which the Worker validates as they come in and which are closed so a typo is refused instead of dropped,
+ * are `./compute-submit-request.ts`.
  */
 
 import { z } from "zod";
@@ -25,8 +27,6 @@ import {
   COMPUTE_ROUTE_SENTENCES,
   type ComputeRefusalCode,
 } from "../compute-state.js";
-import { BundleManifestSchema } from "./compute-bundle.js";
-import { JobSpecSchema } from "./compute.js";
 
 // --- Names and bounds ---------------------------------------------------------------------------
 
@@ -61,30 +61,6 @@ export const COMPUTE_RESULT_LINK_SECONDS = 7 * 24 * 3600;
 /** The sentence a results answer carries beside its links. */
 export const COMPUTE_BEARER_NOTICE =
   "Anyone who holds a link can download that file until the link expires; keep them private.";
-
-// --- Requests ----------------------------------------------------------------------------------
-
-/**
- * `POST /compute/jobs`. `spec` is the job specification exactly as `spec.json` records it (its `name`
- * included: the name is part of the specification, not a column), and `manifest` is the
- * `bundle-manifest.json` of the archive: required when `spec.bundle` is present, refused when it is not.
- * The archive itself is not in the request; the Worker answers with the address to PUT it to.
- */
-export const ComputeSubmitRequestSchema = z
-  .object({ spec: JobSpecSchema, manifest: BundleManifestSchema.optional() })
-  .strict();
-
-export type ComputeSubmitRequest = z.infer<typeof ComputeSubmitRequestSchema>;
-
-/**
- * `POST /compute/jobs/:id/finalize`: `bundle-manifest.json` again (the Worker keeps nothing of the
- * request between the two calls but the specification, so the manifest it records is the one in THIS
- * call, checked against the same caps and the job's `entry`). An empty body is accepted only for a job
- * that is already past the upload, which the Worker answers unchanged.
- */
-export const ComputeFinalizeRequestSchema = BundleManifestSchema;
-
-export type ComputeFinalizeRequest = z.infer<typeof ComputeFinalizeRequestSchema>;
 
 // --- Responses ---------------------------------------------------------------------------------
 

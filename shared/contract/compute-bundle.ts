@@ -20,10 +20,11 @@
  * Worker; a refusal names a field and a fixed word, never a path or a value. If the owner RAISES a limit,
  * a CLI released before the change keeps refusing locally at the constants, which is the safe direction.
  *
- * This module imports only the contract's path and digest predicates, so a CLI and a browser can load it.
+ * This module imports only the contract's path and digest predicates, and holds no zod schema, so a CLI and
+ * a browser can load it and nothing here can be strict. The manifest's ZOD schema, a request document the
+ * Worker validates as it comes in, is `./compute-submit-request.ts`.
  */
 
-import { z } from "zod";
 import { COMPUTE_SHA256_RE, isSafeComputePath } from "./compute.js";
 
 // --- The caps ---------------------------------------------------------------------------------------
@@ -67,24 +68,6 @@ export const BUNDLE_DEFAULT_LIMITS: Readonly<BundleLimits> = Object.freeze({
 });
 
 // --- The manifest ------------------------------------------------------------------------------------
-
-/** One file inside the archive. Closed: a typo is refused, not dropped from the record. */
-export const BundleManifestFileSchema = z
-  .object({
-    path: z.string().min(1).max(BUNDLE_PATH_MAX),
-    size: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    sha256: z.string().regex(COMPUTE_SHA256_RE),
-  })
-  .strict();
-
-export type BundleManifestFile = z.infer<typeof BundleManifestFileSchema>;
-
-/** `bundle-manifest.json` as the CLI builds it and the Worker receives it. */
-export const BundleManifestSchema = z
-  .object({ files: z.array(BundleManifestFileSchema).min(1) })
-  .strict();
-
-export type BundleManifest = z.infer<typeof BundleManifestSchema>;
 
 /** Why a manifest is refused: a fixed word of the compute refusals and, for `invalid_spec`, the field. */
 export type BundleManifestRefusal =

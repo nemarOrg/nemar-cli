@@ -44,3 +44,5 @@ export * from "./compute-user.js";
 // the OPEN responses (epic #2021 phase D3, #2024).
 export * from "./compute-bundle.js";
 export * from "./compute-submit.js";
+// The strict-by-design REQUESTS of the same routes (the Worker validates them as they come in).
+export * from "./compute-submit-request.js";

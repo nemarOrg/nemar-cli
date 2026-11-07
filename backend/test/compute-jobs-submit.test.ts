@@ -16,9 +16,9 @@ import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { BUNDLE_MAX_FILES } from "../../shared/contract/compute-bundle";
 import {
   ComputeSubmitErrorSchema,
-  ComputeSubmitRequestSchema,
   ComputeSubmitResponseSchema,
 } from "../../shared/contract/compute-submit";
+import { ComputeSubmitRequestSchema } from "../../shared/contract/compute-submit-request";
 import { createJob } from "../src/services/compute-jobs";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { COMPUTE_ACCESS_READ_SQL } from "../src/services/compute-submit";

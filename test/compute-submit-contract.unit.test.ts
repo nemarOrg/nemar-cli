@@ -19,15 +19,17 @@ import {
   BUNDLE_MAX_FILE_BYTES,
   BUNDLE_MAX_TOTAL_BYTES,
   BUNDLE_PATH_MAX,
-  BundleManifestSchema,
   checkBundleManifest,
 } from "../shared/contract/compute-bundle";
 import {
   COMPUTE_SUBMIT_KEY_RE,
   COMPUTE_SUBMIT_SENTENCES,
-  ComputeSubmitRequestSchema,
   submitRefusal,
 } from "../shared/contract/compute-submit";
+import {
+  BundleManifestSchema,
+  ComputeSubmitRequestSchema,
+} from "../shared/contract/compute-submit-request";
 
 const sha = "a".repeat(64);
 const file = (path: string, size = 10) => ({ path, size, sha256: sha });
