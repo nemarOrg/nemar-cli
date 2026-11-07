@@ -17,6 +17,7 @@ import { adminRoutes } from "../src/routes/admin";
 import { authOidcRoutes } from "../src/routes/auth-oidc";
 import { oauthRoutes } from "../src/routes/oauth";
 import { oidcDiscoveryRoutes } from "../src/routes/oidc-discovery";
+import { EncryptionError, decrypt, encrypt } from "../src/services/encryption";
 import { checkAuthorization, decideConsent } from "../src/services/oidc-authorize";
 import { oidcEnabled, oidcSecret, oidcSecretStatus } from "../src/services/oidc-config";
 import { signJwt } from "../src/services/oidc-keys";
@@ -297,5 +298,36 @@ describe("the authorization service itself never signs a cookie or token with a 
         /OIDC_SECRET/,
       );
     }
+  });
+});
+
+describe("the accessor hands back the stored bytes, never an altered copy", () => {
+  // What was encrypted before this rule used the raw binding string as the key. The accessor must
+  // return that same string for a valid value (so every stored key stays readable) and null, never a
+  // trimmed or case-folded copy, for a value that is not exactly it.
+  test("a blob encrypted under the raw secret decrypts under oidcSecret(env)", async () => {
+    const raw = fakeOidcSecret("old-path-blob");
+    const blob = await encrypt("private-key-material", raw);
+    const key = oidcSecret({ OIDC_SECRET: raw });
+    expect(key).toBe(raw);
+    expect(await decrypt(blob, key as string)).toBe("private-key-material");
+  });
+
+  test.each([
+    ["a leading space", (v: string) => ` ${v}`],
+    ["a trailing newline", (v: string) => `${v}\n`],
+    ["a trailing CRLF", (v: string) => `${v}\r\n`],
+    ["a trailing NUL", (v: string) => `${v}\0`],
+    ["an uppercase body", (v: string) => v.toUpperCase()],
+    ["an uppercase prefix", (v: string) => `NMSSO-${v.slice(OIDC_SECRET_PREFIX.length)}`],
+  ])("the same secret with %s is rejected, not repaired", async (_what, spoil) => {
+    const raw = fakeOidcSecret("old-path-blob");
+    const blob = await encrypt("private-key-material", raw);
+    const spoiled = spoil(raw);
+    expect(spoiled).not.toBe(raw);
+    expect(oidcSecret({ OIDC_SECRET: spoiled })).toBeNull();
+    expect(oidcEnabled({ OIDC_SECRET: spoiled })).toBe(false);
+    // And a repaired copy would not have been the same key anyway.
+    await expect(decrypt(blob, spoiled)).rejects.toBeInstanceOf(EncryptionError);
   });
 });
