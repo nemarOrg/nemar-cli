@@ -163,6 +163,8 @@ export const computeAccessAccountSchema = z
     account_kind: z.string().optional(),
     compute_access: z.string(),
     compute_access_requested_at: z.string().nullable().optional(),
+    /** When an administrator was told; NULL with an open request means nobody was, and the next call re-sends. */
+    compute_access_notified_at: z.string().nullable().optional(),
     compute_access_granted_at: z.string().nullable().optional(),
     compute_access_granted_by: z.number().int().nullable().optional(),
     compute_purpose: z.string().nullable().optional(),
