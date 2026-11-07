@@ -277,6 +277,114 @@ const CASES: readonly Case[] = [
   ["a document that is null", null, false],
 ];
 
+// --- the bounds, each at the limit and one past it ----------------------------------------------------
+// A bound changed in one schema only (a `.max(6000)` in zod, a `maxItems` in the JSON Schema) must fail
+// here: the corpus holds every bound at its limit (valid) and at limit + 1 (invalid).
+
+const times = <T>(n: number, make: (i: number) => T): T[] =>
+  Array.from({ length: n }, (_, i) => make(i));
+const EMPTY_PARTITION = { available: null, nodes: null, jobs: null, pending_reasons: null };
+const manyPartitions = (n: number) =>
+  Object.fromEntries(times(n, (i) => [`p${i}`, EMPTY_PARTITION]));
+const dailyJobs = (n: number) =>
+  set(
+    set(
+      DAILY,
+      "accounting.jobs",
+      times(n, (i) => ({ ...DAILY.accounting.jobs[0], job_id: String(i + 1) })),
+    ),
+    "accounting.rows_total",
+    n,
+  );
+const pendingStarts = (n: number) =>
+  times(n, (i) => ({
+    job_id: String(i + 1),
+    partition: "shared",
+    state: "PENDING",
+    expected_start: null,
+  }));
+const projects = (n: number) =>
+  times(n, (i) => ({ project: `prj${i}`, used: 0, available: 0, used_by_project: 0 }));
+const MAX_COUNT = 999_999_999_999;
+
+const BOUND_CASES: readonly Case[] = [
+  ["5000 accounting jobs", dailyJobs(5000), true],
+  ["5001 accounting jobs", dailyJobs(5001), false],
+  ["5000 partitions", set(QUICK, "partitions", manyPartitions(5000)), true],
+  ["5001 partitions", set(QUICK, "partitions", manyPartitions(5001)), false],
+  ["5000 pending starts", set(QUICK, "pending_starts", pendingStarts(5000)), true],
+  ["5001 pending starts", set(QUICK, "pending_starts", pendingStarts(5001)), false],
+  [
+    "1000 balance projects",
+    set(QUICK, "balance.expanse", { status: "parsed", projects: projects(1000) }),
+    true,
+  ],
+  [
+    "1001 balance projects",
+    set(QUICK, "balance.expanse", { status: "parsed", projects: projects(1001) }),
+    false,
+  ],
+  [
+    "50 raw balance lines of 200 characters",
+    set(QUICK, "balance.expanse", {
+      status: "unparsed",
+      raw_lines: times(50, () => "x".repeat(200)),
+    }),
+    true,
+  ],
+  ["an observer version of 32 characters", set(QUICK, "observer_version", "v".repeat(32)), true],
+  ["an observer version of 33 characters", set(QUICK, "observer_version", "v".repeat(33)), false],
+  [
+    "a pending start state of 32 characters",
+    set(QUICK, "pending_starts.0.state", "S".repeat(32)),
+    true,
+  ],
+  [
+    "a pending start state of 33 characters",
+    set(QUICK, "pending_starts.0.state", "S".repeat(33)),
+    false,
+  ],
+  [
+    "an availability word of 32 characters",
+    set(QUICK, "partitions.shared.available", "a".repeat(32)),
+    true,
+  ],
+  [
+    "an availability word of 33 characters",
+    set(QUICK, "partitions.shared.available", "a".repeat(33)),
+    false,
+  ],
+  [
+    "a partition name of 128 characters",
+    set(QUICK, `partitions.${"p".repeat(128)}`, EMPTY_PARTITION),
+    true,
+  ],
+  ["a job id of 64 characters", set(DAILY, "accounting.jobs.0.job_id", "1".repeat(64)), true],
+  ["a job id of 65 characters", set(DAILY, "accounting.jobs.0.job_id", "1".repeat(65)), false],
+  [
+    "an allocation value of 64 characters",
+    set(DAILY, "accounting.jobs.0.alloc_tres", { cpu: "1".repeat(64) }),
+    true,
+  ],
+  ["a count at the largest", set(QUICK, "partitions.shared.jobs.PENDING.jobs", MAX_COUNT), true],
+  [
+    "a count past the largest",
+    set(QUICK, "partitions.shared.jobs.PENDING.jobs", MAX_COUNT + 1),
+    false,
+  ],
+  [
+    "a malformed-row count past the largest",
+    set(QUICK, "sources.sinfo.malformed_rows", MAX_COUNT + 1),
+    false,
+  ],
+  [
+    "a balance amount past the largest",
+    set(QUICK, "balance.expanse.projects.0.used", MAX_COUNT + 1),
+    false,
+  ],
+  ["a quick document with accounting null", set(QUICK, "accounting", null), false],
+];
+
 describe("the JSON Schema and the zod schema agree", () => {
   test("the schema is draft 2020-12, has the schema word as a constant, and compiles in strict mode", () => {
     expect((observationSchema as { $schema: string }).$schema).toBe(
@@ -304,6 +412,15 @@ describe("the JSON Schema and the zod schema agree", () => {
     };
     walk(observationSchema, "$");
     expect(open).toEqual([]);
+  });
+
+  test("Ajv and zod give every bound the same verdict at its limit and one past it (MUTATION: change a bound in one schema)", () => {
+    expect(BOUND_CASES.filter(([, , valid]) => valid).length).toBeGreaterThan(8);
+    expect(BOUND_CASES.filter(([, , valid]) => !valid).length).toBeGreaterThan(8);
+    for (const [label, doc, valid] of BOUND_CASES) {
+      expect(validateAjv(doc), `JSON Schema: ${label}`).toBe(valid);
+      expect(validateZod(doc), `zod: ${label}`).toBe(valid);
+    }
   });
 
   test("Ajv and zod give every document the verdict written beside it", () => {
