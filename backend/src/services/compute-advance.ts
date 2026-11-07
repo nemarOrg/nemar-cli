@@ -54,6 +54,7 @@ import type { Bindings } from "../types/bindings.js";
 import { LIVE_STATES_SQL } from "./compute-jobs.js";
 import {
   CLEAR_NONCES_SQL,
+  MARK_COPY_ABANDONED_SQL,
   STAMP_CANCEL_ATTEMPT_SQL,
   STAMP_EXAMINED_SQL,
   TICK_READ,
@@ -132,6 +133,11 @@ export interface ComputeTickResult {
   repaired: number;
   /** Webhook nonces cleared. */
   cleared: number;
+  /**
+   * Terminal rows this tick found past the days their copy of the launcher files is retried and still
+   * uncopied (flagged `mismatch` once; `countCopyAbandoned` is the running total). Error level.
+   */
+  copy_abandoned: number;
   /** Fixed words; never a message. */
   errors: string[];
   errorClass: string | null;
@@ -146,6 +152,7 @@ const emptyResult = (): ComputeTickResult => ({
   unknown_status: 0,
   repaired: 0,
   cleared: 0,
+  copy_abandoned: 0,
   errors: [],
   errorClass: null,
 });
@@ -200,6 +207,7 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
     ).results;
     const cleared = await env.DB.prepare(CLEAR_NONCES_SQL).run();
     r.cleared = cleared.meta?.changes ?? 0;
+    r.copy_abandoned = (await env.DB.prepare(MARK_COPY_ABANDONED_SQL).run()).meta?.changes ?? 0;
 
     // Every row taken is stamped BEFORE its step: whatever the step does (a read that fails, a
     // submit that cannot go, an exception) the row has had its turn and goes to the back of the line.
@@ -237,7 +245,7 @@ export async function runComputeAdvanceCron(env: Bindings): Promise<ComputeTickR
 export function computeAdvanceLogLine(
   r: ComputeTickResult,
 ): { level: "info" | "error"; line: string } | null {
-  const failed = r.errors.length > 0;
+  const failed = r.errors.length > 0 || r.copy_abandoned > 0;
   const acted = r.submitted + r.advanced + r.repaired + r.cleared + r.unknown_status;
   if (!failed && acted === 0) return null;
   const line = [
@@ -250,6 +258,7 @@ export function computeAdvanceLogLine(
     `unknown_status=${r.unknown_status}`,
     `repaired=${r.repaired}`,
     `nonces_cleared=${r.cleared}`,
+    `copy_abandoned=${r.copy_abandoned}`,
     `errors=${r.errors.length > 0 ? r.errors.join(",") : "none"}`,
     r.errorClass === null ? "" : `class=${r.errorClass}`,
   ]

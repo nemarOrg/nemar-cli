@@ -361,6 +361,31 @@ export async function countCancelPendingFailed(db: D1Database): Promise<number> 
   return (await db.prepare(CANCEL_PENDING_FAILED_SQL).first<{ n: number }>())?.n ?? 0;
 }
 
+/**
+ * Terminal rows whose copy of the launcher files and logs was never made and no longer will be: past the
+ * {@link RECORDS_COPY_RETRY_DAYS} days {@link UNCOPIED_TERMINAL_SQL} retries it (its exact complement), and
+ * not yet reduced by retention. Without this the failure was a `console.error` and the row dropped out of
+ * the list for good. Each such row is flagged `mismatch` ONCE (so `jobs list` and the status view show it
+ * to an administrator, and it is not counted again), and the tick counts the rows it newly flagged as
+ * `copy_abandoned` and logs them at error level. `?` nothing.
+ */
+export const MARK_COPY_ABANDONED_SQL = `UPDATE compute_jobs SET flag_mismatch = 1
+  WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL
+    AND flag_mismatch = 0
+    AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
+
+/** The rows {@link MARK_COPY_ABANDONED_SQL} describes, flagged or not: the number an administrator is shown. */
+export const COPY_ABANDONED_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL
+    AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
+
+/** {@link COPY_ABANDONED_COUNT_SQL} as a number. */
+export async function countCopyAbandoned(db: D1Database): Promise<number> {
+  return (await db.prepare(COPY_ABANDONED_COUNT_SQL).first<{ n: number }>())?.n ?? 0;
+}
+
 /** The cancel sweep took this row: `?1` the job. Its own rotation (`cancel_attempted_at`), apart from the tick's. */
 export const STAMP_CANCEL_ATTEMPT_SQL =
   "UPDATE compute_jobs SET cancel_attempted_at = datetime('now') WHERE id = ?1";

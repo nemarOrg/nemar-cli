@@ -56,9 +56,11 @@ import type { ComputeJobRow } from "../src/services/compute-jobs";
 import { releaseStatements, settleStatements } from "../src/services/compute-ledger";
 import {
   SETTLEMENT_GATE_SQL,
+  UNCOPIED_TERMINAL_SQL,
   advanceComputeJob,
   applyTapisJob,
   copyResultRecords,
+  countCopyAbandoned,
   provisionalCharge,
   requestComputeCancel,
   sqliteTime,
@@ -2377,6 +2379,47 @@ describe("the 30-minute tick", () => {
       1,
     ]);
     expect(kinds(await ledgerOf(c.env, c.made.job.id))).toEqual(["hold", "release"]);
+  });
+
+  test("a terminal row whose copy is not made in the three days it is retried is COUNTED `copy_abandoned`, flagged once, and the line is error level (MUTATION: move the boundary, or count nothing)", async () => {
+    const inside = await submittedJob();
+    await finishJob(inside);
+    const outside = await submittedJob();
+    await finishJob(outside);
+    // Neither copy was made; one ended two days and 23 hours ago, the other three days and an hour ago.
+    for (const [s, ago] of [
+      [inside, "-71 hours"],
+      [outside, "-73 hours"],
+    ] as const) {
+      await s.env.DB.prepare(
+        "UPDATE compute_jobs SET result_records_at = NULL, ended_at = datetime('now', ?2) WHERE id = ?1",
+      )
+        .bind(s.made.job.id, ago)
+        .run();
+    }
+    expect(await countCopyAbandoned(fx.env().DB)).toBe(1);
+    // The row inside the window is on the retry list; the abandoned one is not.
+    const listed = (
+      await inside.env.DB.prepare(UNCOPIED_TERMINAL_SQL).bind(10).all<{ id: string }>()
+    ).results.map((r) => r.id);
+    expect(listed).toContain(inside.made.job.id);
+    expect(listed).not.toContain(outside.made.job.id);
+    let tick = null as Awaited<ReturnType<typeof runComputeAdvanceCron>>;
+    await logged(async () => {
+      tick = await runComputeAdvanceCron(inside.env);
+    });
+    expect(tick).toMatchObject({ copy_abandoned: 1, errors: [] });
+    const line = tick ? computeAdvanceLogLine(tick) : null;
+    expect(line?.level).toBe("error");
+    expect(line?.line).toContain("copy_abandoned=1");
+    expect(line?.line).not.toContain(outside.made.job.id);
+    // The row past the window is flagged for an administrator; the one inside it is not.
+    expect((await reread(inside.env, outside.made.job.id)).flag_mismatch).toBe(1);
+    expect((await reread(inside.env, inside.made.job.id)).flag_mismatch).toBe(0);
+    // Flagged once: the next tick does not count it again, and the running total still shows it.
+    const again = await runComputeAdvanceCron(inside.env);
+    expect(again).toMatchObject({ copy_abandoned: 0 });
+    expect(await countCopyAbandoned(fx.env().DB)).toBe(1);
   });
 
   test("the webhook nonce is cleared one day after the job is terminal, and not before", async () => {
