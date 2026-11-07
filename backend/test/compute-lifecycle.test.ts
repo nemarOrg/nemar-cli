@@ -489,6 +489,25 @@ describe("submit", () => {
     expect((await peopleBudget(made.env)).held_milli).toBe(0);
   });
 
+  test("a proxy's 408 or 302 on the submit is NOT a rejection: the job stays `created` with its hold, and the 400 beside it still ends it (MUTATION: map 408 and 3xx to rejected)", async () => {
+    for (const status of [408, 302]) {
+      const made = await makeJob(fx);
+      fx.tapis.fail("POST /v3/jobs/submit", status);
+      expect((await submitComputeJob(made.env, made.job.id)).outcome).toBe("unavailable");
+      const job = await reread(made.env, made.job.id);
+      expect([status, job.state, job.failure_code]).toEqual([status, "created", null]);
+      expect(kinds(await ledgerOf(made.env, job.id))).toEqual(["hold"]);
+    }
+    for (const status of [400, 405, 409]) {
+      const made = await makeJob(fx);
+      fx.tapis.fail("POST /v3/jobs/submit", status);
+      expect(await submitComputeJob(made.env, made.job.id)).toEqual({
+        ok: false,
+        outcome: "failed",
+      });
+    }
+  });
+
   test("an unavailable Tapis leaves the job `created` and the ledger as it was", async () => {
     const made = await makeJob(fx);
     fx.tapis.fail("POST /v3/jobs/submit", 503);

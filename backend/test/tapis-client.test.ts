@@ -1377,7 +1377,8 @@ describe("bounds", () => {
         Location: `http://127.0.0.1:${elsewhere.port}/x`,
       });
       const err = await failure(() => getJob(ctx(env), job.uuid));
-      expect(err.kind).toBe("rejected");
+      // A redirect is a proxy's answer, not Tapis's decision: retryable later, never followed.
+      expect(err.kind).toBe("unavailable");
       expect(err.status).toBe(302);
       expect(reached).toEqual([]);
     } finally {

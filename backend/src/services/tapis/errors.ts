@@ -12,8 +12,11 @@
  *                     fit it (a password-strategy submit for another owner); nothing was sent
  *   unauthorized      Tapis refused the credential: 401 (after the one refresh) and 403
  *   not_found         404
- *   rejected          another 4xx: Tapis understood the request and said no (400, 409, ...)
- *   unavailable       a timeout, a network failure, 429 or 5xx: it may work later
+ *   rejected          another 4xx: Tapis understood the request and said no (400, 405, 409, ...)
+ *   unavailable       a timeout, a network failure, 408, 429, 5xx or a redirect (3xx, which is never
+ *                     followed): a proxy or a gateway answered, not Tapis's decision on the request, so
+ *                     it may work later (review fixes of 2026-11-06: a submit that met a proxy's 302 or
+ *                     408 ended the job for good as `tapis_submit_failed`)
  *   invalid_response  Tapis answered something that is not what its specification says (not JSON, a
  *                     body that fails its schema, one over the size bound): never partly trusted
  *
@@ -111,7 +114,7 @@ export function errorForStatus(status: number, what: string): TapisError {
       ? "unauthorized"
       : status === 404
         ? "not_found"
-        : status === 429 || status >= 500
+        : status === 408 || status === 429 || status >= 500 || status < 400
           ? "unavailable"
           : "rejected";
   return new TapisError(kind, what, { status, cause });
