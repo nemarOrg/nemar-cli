@@ -63,7 +63,7 @@ import {
 } from "../lib/api/compute.js";
 import { plain } from "../lib/terminal-text.js";
 import { accessCommand } from "./admin-compute-access.js";
-import { jobsCommand, observerCommand } from "./admin-compute-jobs.js";
+import { jobsCommand, moveChargeCommand, observerCommand } from "./admin-compute-jobs.js";
 import { pipelineCommand } from "./admin-compute-pipeline.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
@@ -669,5 +669,6 @@ computeCommand.addCommand(poolCommand);
 computeCommand.addCommand(statusCommand);
 computeCommand.addCommand(observerCommand);
 computeCommand.addCommand(jobsCommand);
+computeCommand.addCommand(moveChargeCommand);
 computeCommand.addCommand(pipelineCommand);
 computeCommand.addCommand(accessCommand);

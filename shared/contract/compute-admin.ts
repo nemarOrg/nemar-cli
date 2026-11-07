@@ -92,6 +92,12 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "record_missing",
   "compute_disabled",
   "audit_failed",
+  // Phase D4 (#2025): moving the charge of a job that skipped the reservation to a person.
+  "job_reserved",
+  "no_unreserved_charge",
+  "already_moved",
+  "target_not_in_good_standing",
+  "target_has_no_pool",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -120,6 +126,11 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   record_missing: 404,
   compute_disabled: 503,
   audit_failed: 500,
+  job_reserved: 409,
+  no_unreserved_charge: 409,
+  already_moved: 409,
+  target_not_in_good_standing: 409,
+  target_has_no_pool: 409,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -735,3 +746,22 @@ export const ComputeObserverRunResponseSchema = z
   .passthrough();
 
 export type ComputeObserverRunResponse = z.infer<typeof ComputeObserverRunResponseSchema>;
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner only, phase D4, #2025): the charge of a job that
+ * skipped the reservation, which the tenant sweep wrote to the partner's pool `tenant`, moved to a
+ * person's pool. `moved_milli` is the whole of that charge, in milli-SU; `pool` is the word of the two
+ * pools; `replayed` is true when the move had already been made to this account. The `people` budget is
+ * counted once: the unreserved entry counted the consumption, and the move does not count it again.
+ */
+export const ComputeMoveChargeResponseSchema = z
+  .object({
+    job_id: z.string(),
+    to_account_id: z.number().int(),
+    pool: z.string(),
+    moved_milli: z.number().int(),
+    replayed: z.boolean(),
+  })
+  .passthrough();
+
+export type ComputeMoveChargeResponse = z.infer<typeof ComputeMoveChargeResponseSchema>;

@@ -32,6 +32,8 @@ import {
   ComputeJobAdminResponseSchema,
   type ComputeJobsListResponse,
   ComputeJobsListResponseSchema,
+  type ComputeMoveChargeResponse,
+  ComputeMoveChargeResponseSchema,
   type ComputeObserverRunResponse,
   ComputeObserverRunResponseSchema,
   type ComputePipelineRunRequest,
@@ -227,6 +229,23 @@ export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJo
     { method: "POST" },
     true,
     ComputeJobAdminResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner): move the charge of a job that skipped the reservation
+ * from the partner's pool to one account's pool. One batch on the Worker; a repeat of the same move is a
+ * replay.
+ */
+export async function moveComputeCharge(
+  jobId: string,
+  toAccountId: number,
+): Promise<ComputeMoveChargeResponse> {
+  return request(
+    `/admin/compute/jobs/${encodeURIComponent(jobId)}/move-charge`,
+    { method: "POST", body: JSON.stringify({ to_account_id: toAccountId }) },
+    true,
+    ComputeMoveChargeResponseSchema,
   );
 }
 

@@ -109,6 +109,11 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   record_missing: "That record is not there.",
   compute_disabled: "Compute storage is not configured.",
   audit_failed: "The audit row could not be written, so nothing was read.",
+  job_reserved: "That job was reserved, so its charge is not the partner's to move.",
+  no_unreserved_charge: "That job has no charge to the partner's pool to move.",
+  already_moved: "That job's charge was moved already.",
+  target_not_in_good_standing: "That account is deleted or not in good standing.",
+  target_has_no_pool: "That account has no pool of the word the charge is in.",
 };
 
 export function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: object = {}) {
