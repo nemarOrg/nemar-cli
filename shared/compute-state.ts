@@ -22,8 +22,9 @@ export const COMPUTE_WORD_RE = /^[a-z0-9_]{1,64}$/;
  */
 export const COMPUTE_STATES = [
   "created",
-  // `uploading` has NO writer yet: no code moves a job into it. Epic D (the partner contract, which wires
-  // `presignIncomingUploads`, `finalizeBundle` and `finalizeSubmittedFiles`) is what makes a job wait here.
+  // `uploading` is written by the person's submit route (phase D3, #2024: `POST /compute/jobs` for a job
+  // with a code bundle, after the hold and before the upload address is issued). The partner contract's
+  // per-file upload (phase D4) is what makes a partner's batch job wait here.
   "uploading",
   "submitted",
   "queued",
@@ -248,6 +249,15 @@ export const PLATFORM_FAILURE_CODES = [
 export type PlatformFailureCode = (typeof PLATFORM_FAILURE_CODES)[number];
 
 /**
+ * Failures the SUBMITTER caused and that are no launcher code: `upload_expired`, a job whose code bundle
+ * was never finalized within the hour (phase D3, #2024). Never a platform failure (the person did not
+ * finish the upload), so `isPlatformFailure` is false for it; the hold is released, nothing is charged.
+ */
+export const SUBMITTER_FAILURE_CODES = ["upload_expired"] as const;
+
+export type SubmitterFailureCode = (typeof SUBMITTER_FAILURE_CODES)[number];
+
+/**
  * Why NEMAR refused to take a job's results, recorded as the detail of `result_upload_failed`.
  * The submitter caused each, so such a job is not attributed to the platform. Each is also a refusal
  * code, since the outputs route answers with it.
@@ -408,7 +418,7 @@ export const PLATFORM_LAUNCHER_DETAILS = [
   "complete_refused",
 ] as const;
 
-export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode;
+export type ComputeFailureCode = LauncherFailureCode | PlatformFailureCode | SubmitterFailureCode;
 
 /**
  * A detail the launcher itself wrote in `result.json` that {@link LAUNCHER_DETAILS} does not declare for
@@ -424,12 +434,13 @@ export type WorkerFailureDetail = LauncherDetail | VerifyReason | typeof RECORDS
 /** What `failure_detail` may hold when the Worker writes it: a closed word, or the launcher's own undeclared one. */
 export type ComputeFailureDetail = WorkerFailureDetail | LauncherWord;
 
-/** Every code a failed job may carry, each once: the launcher's seven, then the platform's rest. */
+/** Every code a failed job may carry, each once: the launcher's seven, the platform's rest, then the submitter's. */
 export const COMPUTE_FAILURE_CODES: readonly ComputeFailureCode[] = [
   ...LAUNCHER_FAILURE_CODES,
   ...PLATFORM_FAILURE_CODES.filter(
     (c) => !(LAUNCHER_FAILURE_CODES as readonly string[]).includes(c),
   ),
+  ...SUBMITTER_FAILURE_CODES,
 ];
 
 /**
@@ -527,6 +538,18 @@ export const COMPUTE_REFUSAL_CODES = [
   // transient fault of its database. 503 like `compute_disabled`, but a DIFFERENT word, because that one
   // says the platform is switched off and a caller told so stops retrying.
   "policy_unavailable",
+  // Phase D3 (#2024), the person's submit routes. The first three are the dataset gate the pipeline's
+  // `resolveRun` already applies (the same words, one rule); the rest are the submit, finalize, log and
+  // idempotency routes' own.
+  "version_not_found",
+  "version_untagged",
+  "too_many_files",
+  "entry_not_in_bundle",
+  "bundle_incomplete",
+  "idempotency_conflict",
+  "logs_not_available",
+  "upload_expired",
+  "storage_unavailable",
 ] as const;
 
 export type ComputeRefusalCode = (typeof COMPUTE_REFUSAL_CODES)[number];
@@ -568,6 +591,18 @@ export const COMPUTE_REFUSAL_STATUS = {
   guard_refused: 409,
   results_incomplete: 409,
   policy_unavailable: 503,
+  // 422: the request names something outside what is offered (a version, an entry that is not in the
+  // bundle, a key already used for another request). 409: the job is in a state that refuses it
+  // (an upload that is not all there, an upload window that closed). 404: no log yet. 503: storage.
+  version_not_found: 422,
+  version_untagged: 422,
+  too_many_files: 422,
+  entry_not_in_bundle: 422,
+  bundle_incomplete: 409,
+  idempotency_conflict: 422,
+  logs_not_available: 404,
+  upload_expired: 409,
+  storage_unavailable: 503,
 } as const satisfies Record<ComputeRefusalCode, number>;
 
 /**
