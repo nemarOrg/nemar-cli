@@ -196,6 +196,14 @@ export interface ComputeJobRow {
   submit_claimed_at: string | null;
   /** A Tapis job NEMAR made that no row owns, whose cancel is still owed. */
   orphan_tapis_uuid: string | null;
+  /**
+   * Phase D4 (migration 0134): NULL for a reservation and for a job that is not a partner's; `pending`
+   * (bound, not verified), `verified` or `mismatch` (refused) for a partner's Tapis job.
+   */
+  partner_state: "pending" | "verified" | "mismatch" | null;
+  /** A fixed word an administrator is shown: why a report was refused, or what the reaper met. */
+  partner_flag: string | null;
+  partner_verified_at: string | null;
 }
 
 export type ComputeJobsEnv = ComputeRecordsEnv;
@@ -366,7 +374,7 @@ const JOB_COLUMNS = `id, account_id, tapis_owner, gateway_user, idempotency_key,
   settled_provisional_at, settled_final_at, flag_unreserved, flag_unattributed, flag_mismatch,
   flag_overrun, retention_until, legal_hold, webhook_nonce, launch_spec_digest, results_verified_at,
   outputs_completed_at, results_bytes, result_records_at, platform_failure, examined_at,
-  submit_claimed_at, orphan_tapis_uuid`;
+  submit_claimed_at, orphan_tapis_uuid, partner_state, partner_flag, partner_verified_at`;
 
 export const JOB_BY_ID_SQL = `SELECT ${JOB_COLUMNS} FROM compute_jobs WHERE id = ?1`;
 

@@ -83,6 +83,7 @@ export const ADVANCE_ROWS_PER_TICK = 10;
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL AND flag_unreserved = 0
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
@@ -119,6 +120,7 @@ export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
     AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY cancel_attempted_at ASC, cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {

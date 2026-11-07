@@ -49,6 +49,7 @@
  */
 
 import {
+  COMPUTE_TENANT_POOL_REF,
   type ComputeFailureCode,
   type ComputeFailureDetail,
   type ComputeState,
@@ -89,7 +90,13 @@ import {
   TERMINAL_STATES_SQL,
   getJob,
 } from "./compute-jobs.js";
-import { releaseStatements, settleStatements } from "./compute-ledger.js";
+import {
+  ensurePool,
+  platformPool,
+  releaseStatements,
+  settleStatements,
+  unreservedChargeStatements,
+} from "./compute-ledger.js";
 import { getPolicy } from "./compute-policy.js";
 import { submitMemoryForQueue } from "./compute-queues.js";
 import {
@@ -358,6 +365,7 @@ export const CANCEL_PENDING_FAILED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
     AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
+    AND (partner_state IS NULL OR partner_state = 'verified')
     AND cancel_requested_at < datetime('now', '-${CANCEL_PENDING_FAILED_MINUTES} minutes')`;
 
 /** {@link CANCEL_PENDING_FAILED_SQL} as a number. */
@@ -433,6 +441,22 @@ export function logSafeStatus(status: unknown): string {
 /** The error's class name: all a log line ever says of a failure. */
 export const errorClassName = (err: unknown): string =>
   err instanceof Error ? err.name : typeof err;
+
+/**
+ * A partner's Tapis job that NEMAR has bound and NOT verified (`pending`), or refused (`mismatch`): the
+ * partner contract's own (`compute-report-verify.ts`). Nothing generic reads such a row back from
+ * Tapis, cancels it as an ordinary job or settles it, because the generic path charges the job's hold to
+ * the person and no path may charge a person for a job NEMAR has not bound AND verified (ADR 0118, phase
+ * D4). A `verified` partner job and a reservation are not this: the first is an ordinary live job, and the
+ * second has no Tapis job.
+ */
+export function isUnverifiedPartnerJob(
+  job: Pick<ComputeJobRow, "source" | "partner_state">,
+): boolean {
+  return (
+    job.source === "partner" && (job.partner_state === "pending" || job.partner_state === "mismatch")
+  );
+}
 
 /** The tag word of a Tapis error, for a log line: the kind and whether the outcome is unknown. */
 function tapisWord(err: unknown): string {
@@ -586,6 +610,11 @@ export interface TerminalPlan {
   unsubmittedOnly: boolean;
   /** The statement refuses a row whose records are written (the release of an abandoned upload). */
   recordsUnwrittenOnly?: boolean;
+  /**
+   * The ledger reason of a release (a word of `COMPUTE_LEDGER_REASONS`); the default is `released`. A
+   * partner's reservation that went unreported past the owner's wait is released with `expired`.
+   */
+  releaseReason?: "released" | "expired";
 }
 
 /**
@@ -605,7 +634,7 @@ async function commitTerminal(
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, plan.to] };
   const settle =
     plan.settlement.kind === "release"
-      ? releaseStatements(db, { jobId: job.id }, gate)
+      ? releaseStatements(db, { jobId: job.id, reason: plan.releaseReason }, gate)
       : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate);
   const results = await db.batch([
     db
@@ -770,6 +799,10 @@ async function planFromTapis(
       mismatch: base.mismatch || failure.mismatch,
     };
   }
+  // A PARTNER'S job (phase D4, #2025) is the partner's own application, run under a reservation NEMAR
+  // verified from Tapis's record: it has no NEMAR launcher, so it uploads no launcher documents and there
+  // is nothing of the launcher's to verify. Its results are the partner's. Tapis's FINISHED stands.
+  if (job.source === "partner") return { ...base, to: "finished", verified: false };
   // Tapis says FINISHED: it stands only after the upload is verified.
   if (!env.COMPUTE_RESULTS || !env.COMPUTE_RECORDS) {
     return {
@@ -812,7 +845,8 @@ export type ApplyOutcome =
   | "stale"
   | "lost"
   | "unknown_status"
-  | "record_mismatch";
+  | "record_mismatch"
+  | "unverified";
 
 export interface ApplyResult {
   /** This call moved the row (or settled it). */
@@ -874,6 +908,8 @@ async function applyOnce(
     becameFinished: false,
   });
   if (job.tapis_uuid !== null && rec.uuid !== job.tapis_uuid) return unchanged("record_mismatch");
+  // A partner's job that is not verified is never advanced, settled or charged from here.
+  if (isUnverifiedPartnerJob(job)) return unchanged("unverified");
 
   if (isTerminalComputeState(job.state)) {
     if (job.settled_provisional_at === null) {
@@ -946,7 +982,8 @@ async function afterTerminal(env: Bindings, job: ComputeJobRow, plan: TerminalPl
       `[compute-lifecycle] records_copy_failed job=${job.id} class=${errorClassName(err)}`,
     );
   }
-  if (plan.to === "finished") {
+  // A partner's job has no results in NEMAR's bucket: the mail links to a results page it does not have.
+  if (plan.to === "finished" && job.source !== "partner") {
     try {
       await sendComputeResultsReadyEmail(env, job);
     } catch (err) {
@@ -1814,6 +1851,9 @@ export async function driveCancel(
   // A job that skipped the reservation is the tenant sweep's, which cancels it and follows it to its end
   // (phase A7): the lifecycle's read-back would verify results a foreign job never uploaded.
   if (job.flag_unreserved === 1) return "skipped";
+  // A partner's job NEMAR has not verified is the partner contract's (`finishMismatch`, the verification
+  // tick): the generic cancel would settle its hold against the person.
+  if (isUnverifiedPartnerJob(job)) return "skipped";
   if (job.tapis_uuid === null) {
     if (job.state !== "created" && job.state !== "uploading") return "skipped";
     // A PARTNER'S RESERVATION is the partner contract's (phase D4), never ended here. NEMAR does not take
@@ -1952,6 +1992,8 @@ export async function advanceComputeJob(
   if (!job) return { outcome: "job_not_found", job: null };
   // The tenant sweep owns a job that skipped the reservation (phase A7): nothing here reads it back.
   if (job.flag_unreserved === 1) return { outcome: "nothing_to_do", job };
+  // A partner's unverified job is the partner contract's: nothing here reads it back (phase D4, #2025).
+  if (isUnverifiedPartnerJob(job)) return { outcome: "nothing_to_do", job };
 
   // A cancel that is recorded and not yet carried out is carried out here too: the cancel sweep is
   // production-only, so on staging (where no cron runs) a cancel Tapis could not take at the time would
@@ -2087,6 +2129,128 @@ async function repairTerminal(
     (!needsCopy || current.result_records_at !== null);
   return { outcome: "terminal", job: current, repair: done ? "finished" : "incomplete" };
 }
+
+// --- A partner's reservation (phase D4, #2025) -------------------------------------------------------
+
+/**
+ * Subscribe NEMAR's own webhook to a Tapis job it has verified the partner reported: a hint only, so a
+ * failure is a fixed word and nothing more (see {@link subscribe}). Called after the verification commits,
+ * never inside a batch.
+ */
+export async function subscribeVerifiedJob(
+  env: Bindings,
+  ctx: TapisContext,
+  job: ComputeJobRow,
+  uuid: string,
+): Promise<void> {
+  await subscribe(env, ctx, job, uuid);
+}
+
+/**
+ * End a partner's RESERVATION that has no Tapis job: `cancelled`, the whole hold released, nothing
+ * charged. `how` is the partner's own release or the reaper's expiry (which writes the ledger reason
+ * `expired`). The statement binds "no Tapis job" itself (`unsubmittedOnly`), so a report that bound a
+ * job in the meantime wins and this changes nothing: a job that may be running is never released. True
+ * when this call ended the row.
+ */
+export async function endPartnerReservation(
+  env: Bindings,
+  job: ComputeJobRow,
+  how: "partner_release" | "hold_expired",
+): Promise<boolean> {
+  if (job.source !== "partner" || job.tapis_uuid !== null || job.state !== "created") return false;
+  const plan: TerminalPlan = {
+    ...unsubmittedPlan(job, "cancelled", null, null),
+    cancelReason: job.cancel_reason ?? how,
+    releaseReason: how === "hold_expired" ? "expired" : "released",
+  };
+  const won = await commitTerminal(env, job, plan, await recordsRetentionYears(env));
+  if (won) {
+    try {
+      await copyResultRecords(env, (await getJob(env.DB, job.id)) ?? job);
+    } catch (err) {
+      console.error(
+        `[compute-lifecycle] records_copy_failed job=${job.id} class=${errorClassName(err)}`,
+      );
+    }
+  }
+  return won;
+}
+
+/**
+ * End a partner's job that did NOT match its reservation, after NEMAR cancelled it at Tapis: the row is
+ * `cancelled`, the person's hold is RELEASED in full (the person is never charged for a job NEMAR did not
+ * verify), and what the job actually used is an `overrun` of the partner's pool `tenant` (the ledger
+ * entry of a job that skipped the reservation, `unreservedChargeStatements`), counted against the
+ * `people` budget once. All in ONE batch: the terminal transition, the release, the charge (when the
+ * job ran) and the stamp. `settlement` prices what the Tapis record shows ran with the job's ACTUAL
+ * resources (`provisionalCharge`); a job nothing shows ran is released with no charge. The row's
+ * pseudonym is cleared (the person is not proven to have run it) and its `charged_milli` is 0, which is
+ * what the person is charged; the overrun is in the ledger. True when this writer ended the row.
+ */
+export async function commitPartnerMismatchEnd(
+  env: Bindings,
+  job: ComputeJobRow,
+  rec: TapisJob | null,
+  settlement: Provisional,
+): Promise<boolean> {
+  const db = env.DB;
+  const years = await recordsRetentionYears(env);
+  const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, "cancelled"] };
+  const slurm =
+    typeof rec?.remoteJobId === "string" && rec.remoteJobId !== "" ? rec.remoteJobId : null;
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(TERMINAL_TRANSITION_SQL)
+      .bind(
+        job.id,
+        job.state,
+        "cancelled",
+        null,
+        null,
+        job.cancel_reason ?? "unreserved",
+        0,
+        0,
+        1,
+        rec?.status ?? null,
+        sqliteTime(rec?.remoteSubmitted),
+        sqliteTime(rec?.remoteStarted),
+        sqliteTime(rec?.remoteEnded) ?? sqliteTime(rec?.ended),
+        slurm,
+        `+${years} years`,
+        0,
+        0,
+      ),
+    ...releaseStatements(db, { jobId: job.id }, gate),
+  ];
+  if (settlement.kind === "charge") {
+    const tenant = await ensurePool(db, "partner", COMPUTE_TENANT_POOL_REF, job.pool);
+    const people = await platformPool(db, "people", job.pool);
+    if (!people) throw new Error("the people budget is missing");
+    statements.push(
+      ...unreservedChargeStatements(
+        db,
+        { jobId: job.id, poolId: tenant.id, budgetPoolId: people.id, chargeMilli: settlement.milli },
+        gate,
+      ),
+    );
+  }
+  statements.push(
+    db.prepare(SETTLED_STAMP_SQL).bind(job.id, "cancelled"),
+    db.prepare(PARTNER_MISMATCH_PERSON_SQL).bind(job.id),
+    ...(slurm === null ? [] : [db.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
+  );
+  const results = await db.batch(statements);
+  return (results[0]?.meta?.changes ?? 0) === 1;
+}
+
+/**
+ * The person's side of a refused partner job, after its settlement: the row names nobody (attribution
+ * was not proven, so ACCESS is not told a pseudonym for it) and the person's job view reads a charge of
+ * 0. Only a row that is a refused partner job. `?1` the job.
+ */
+export const PARTNER_MISMATCH_PERSON_SQL = `UPDATE compute_jobs SET gateway_user = NULL, charged_milli = 0
+  WHERE id = ?1 AND source = 'partner' AND partner_state = 'mismatch' AND state = 'cancelled'`;
 
 // --- What an administrator is shown ----------------------------------------------------------------
 

@@ -46,7 +46,7 @@
  *    `CopyObject` each, so it is bounded at `PARTNER_FILES_MAX` files whatever the owner's limit.
  */
 
-import type { ComputeState } from "../../../shared/compute-state.js";
+import { type ComputeState, LIVE_COMPUTE_STATES } from "../../../shared/compute-state.js";
 import {
   COMPUTE_DOT_SEGMENT_RE,
   COMPUTE_JOB_ID_RE,
@@ -397,7 +397,7 @@ export async function writeSpec(
 
 // --- What the jobs table says about a job's records -----------------------------------------------
 
-export const JOB_RECORDS_SQL = `SELECT id, source, state, account_id, records_written_at
+export const JOB_RECORDS_SQL = `SELECT id, source, state, account_id, records_written_at, partner_state
   FROM compute_jobs WHERE id = ?1`;
 
 interface JobRecordsRow {
@@ -406,6 +406,8 @@ interface JobRecordsRow {
   state: ComputeState;
   account_id: number | null;
   records_written_at: string | null;
+  /** A partner's job is verified (`verified`) before any file of it enters the locked records. */
+  partner_state: string | null;
 }
 
 /** The job's records are complete; only when this is set may a job be submitted (phase A5). */
@@ -414,6 +416,10 @@ export const RECORDS_WRITTEN_SQL = `UPDATE compute_jobs SET records_written_at =
 
 /** The states in which a job's upload may still be asked for and finalized: it has not started. */
 const UPLOAD_STATES: readonly ComputeState[] = ["created", "uploading"];
+
+/** A state in which a job has not ended: a partner's files may still be addressed for it. */
+const isLiveState = (state: ComputeState): boolean =>
+  (LIVE_COMPUTE_STATES as readonly string[]).includes(state);
 
 async function jobRow(env: ComputeRecordsEnv, jobId: string): Promise<JobRecordsRow | null> {
   return env.DB.prepare(JOB_RECORDS_SQL).bind(jobId).first<JobRecordsRow>();
@@ -590,7 +596,11 @@ export async function presignIncomingUploads(
   if (typeof jobId !== "string" || !COMPUTE_JOB_ID_RE.test(jobId)) return refuse("job_not_found");
   const job = await jobRow(env, jobId);
   if (!job) return refuse("job_not_found");
-  if (job.records_written_at !== null || !UPLOAD_STATES.includes(job.state)) {
+  // A person's bundle is asked for before the job starts. A partner's files are records only, uploaded
+  // beside a job that is already running, so any live state may ask for an address (the copy into the
+  // records, which is the lock, waits for the verification: `finalizeSubmittedFiles`).
+  const askable = job.source === "partner" ? isLiveState(job.state) : UPLOAD_STATES.includes(job.state);
+  if (job.records_written_at !== null || !askable) {
     return refuse("bad_state");
   }
   const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
@@ -632,9 +642,10 @@ export async function presignIncomingUploads(
     const signed = await presignPut(s3, "records", incomingKey(jobId, file.path), {
       expiresIn: COMPUTE_UPLOAD_SECONDS,
       ...(file.sha256 === undefined ? {} : { sha256Hex: file.sha256 }),
-      // A code bundle's length is SIGNED, so the store refuses a body of another length. A partner's
-      // files are phase D4's to decide.
-      ...(job.source === "partner" ? {} : { contentLength: file.size }),
+      // The declared length is SIGNED for a code bundle and for a partner's file alike, so a store that
+      // checks a signed header refuses a body of another length; the size read back at finalize is the
+      // bound either way (R2's enforcement of a signed header is not verified).
+      contentLength: file.size,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     uploads.push({ path: file.path, url: signed.url, headers: signed.headers });
@@ -786,11 +797,14 @@ export async function finalizeBundle(
  * manifest (`archive: null`) is written and the records marked written. Idempotent as `finalizeBundle`
  * is.
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (a partner's own files) wires it.
+// Called by the partner's report (phase D4, #2025), and ONLY for a job NEMAR has verified: a copy into
+// `records/` is a lock that cannot be undone, so nothing a partner uploaded enters it before the read-back
+// has matched. Any state of a verified job is allowed (the files are records, uploaded beside a job that
+// may already be running).
 export async function finalizeSubmittedFiles(
   env: ComputeRecordsEnv,
   jobId: string,
-  input: { files: Array<{ path: string; size: number }> },
+  input: { files: Array<{ path: string; size: number; sha256?: string }> },
 ): Promise<FinalizeResult> {
   const bucket = env.COMPUTE_RECORDS;
   const s3 = computeS3(env);
@@ -803,7 +817,7 @@ export async function finalizeSubmittedFiles(
   const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
   const checked = checkFiles(input?.files, limits, {
     maxCount: partnerFileCap(limits),
-    digest: false,
+    digest: true,
     keysOf: jobId,
   });
   if (!checked.ok) return checked;
@@ -814,7 +828,8 @@ export async function finalizeSubmittedFiles(
       ? { ok: true, replayed: true, files: checked.files.length }
       : refuse("bad_state");
   }
-  if (!UPLOAD_STATES.includes(job.state)) return refuse("bad_state");
+  // NOTHING ENTERS THE RECORDS BEFORE THE VERIFICATION: the lock on `records/` cannot be undone.
+  if (job.partner_state !== "verified") return refuse("bad_state");
 
   const incoming = await sizesUnder(bucket, `incoming/${jobId}/`);
   const submitted = await sizesUnder(bucket, `records/${jobId}/submitted/`);
