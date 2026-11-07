@@ -91,17 +91,60 @@ export const QUEUE_WAITS_SQL = `SELECT
   ORDER BY started_at DESC
   LIMIT ${COMPUTE_QUEUE_SAMPLE_CAP}`;
 
-/** The estimates of the named partitions, read from the job index. A failed read throws; it is never zero. */
+/** How long one partition's estimate is reused, and how many partitions one database's cache holds. */
+export const QUEUE_CACHE_MS = 30_000;
+export const QUEUE_CACHE_MAX = 32;
+
+/** The size the cache is held to; a test lowers it. */
+export const queueCacheLimits = { max: QUEUE_CACHE_MAX };
+
+/** The clock the cache reads; a test moves it, nothing else does. */
+export const queueEstimateClock = { now: (): number => Date.now() };
+
+type Estimate = ReturnType<typeof buildQueueEstimates>[number];
+
+/**
+ * Best-effort and per isolate, per database binding (one database's figures are never served for
+ * another's): the platform's queue changes slowly and every call of `GET /compute/me` asks for every
+ * offered partition, so an estimate is reused for 30 seconds from the time it was READ. A second isolate,
+ * or a binding that is not the same object twice, only means one more read.
+ */
+const queueCaches = new WeakMap<object, Map<string, { at: number; estimate: Estimate }>>();
+
+/**
+ * The estimates of the named partitions, read from the job index (all partitions at once, each from the
+ * cache while it is under 30 seconds old). A failed read throws; it is never zero.
+ */
 export async function computeQueueEstimates(
   db: D1Database,
   partitions: readonly string[],
 ): Promise<ComputeQueueEstimate[]> {
-  const rows: QueueWait[] = [];
-  for (const partition of partitions) {
-    const waits = (
-      await db.prepare(QUEUE_WAITS_SQL).bind(partition).all<{ wait_seconds: number }>()
-    ).results;
-    for (const w of waits) rows.push({ partition, waitSeconds: w.wait_seconds });
+  let cache = queueCaches.get(db);
+  if (!cache) {
+    cache = new Map();
+    queueCaches.set(db, cache);
   }
-  return buildQueueEstimates(rows, partitions);
+  const held = cache;
+  const nowMs = queueEstimateClock.now();
+  return Promise.all(
+    partitions.map(async (partition) => {
+      const hit = held.get(partition);
+      if (hit && nowMs - hit.at < QUEUE_CACHE_MS) return hit.estimate;
+      const waits = (
+        await db.prepare(QUEUE_WAITS_SQL).bind(partition).all<{ wait_seconds: number }>()
+      ).results;
+      const [estimate] = buildQueueEstimates(
+        waits.map((w) => ({ partition, waitSeconds: w.wait_seconds })),
+        [partition],
+      );
+      held.delete(partition);
+      held.set(partition, { at: nowMs, estimate: estimate as Estimate });
+      while (held.size > queueCacheLimits.max) {
+        const oldest = held.keys().next().value;
+        if (oldest === undefined) break;
+        held.delete(oldest);
+      }
+      return estimate as Estimate;
+    }),
+  );
 }

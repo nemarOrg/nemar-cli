@@ -9,19 +9,24 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   COMPUTE_QUEUE_MIN_SAMPLES,
   COMPUTE_QUEUE_SAMPLE_CAP,
   COMPUTE_QUEUE_WINDOW_DAYS,
 } from "../../shared/contract/compute-user";
 import {
+  QUEUE_CACHE_MAX,
+  QUEUE_CACHE_MS,
+  QUEUE_WAITS_SQL,
   buildQueueEstimates,
   computeQueueEstimates,
   nearestRankPercentile,
+  queueCacheLimits,
+  queueEstimateClock,
 } from "../src/services/compute-queue-estimates";
 import { insertJob, sqliteAt } from "./helpers/compute-user-seed";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, wrapD1 } from "./helpers/d1";
 
 const DAY = 86_400_000;
 
@@ -222,4 +227,100 @@ describe("computeQueueEstimates reads the job index", () => {
     },
     { timeout: 60_000 },
   );
+});
+
+describe("the 30-second cache of an estimate", () => {
+  let db: Database;
+  let queries: string[];
+  let d1: D1Database;
+  let nowMs: number;
+  const realNow = queueEstimateClock.now;
+
+  beforeEach(() => {
+    db = freshDb();
+    queries = [];
+    // One database object, as a Worker's binding is: the cache is per database.
+    d1 = wrapD1(realD1(db), (sql, binds) => {
+      if (sql === QUEUE_WAITS_SQL) queries.push(String(binds[0]));
+    });
+    nowMs = Date.now();
+    queueEstimateClock.now = () => nowMs;
+  });
+  afterEach(() => {
+    queueEstimateClock.now = realNow;
+    queueCacheLimits.max = QUEUE_CACHE_MAX;
+  });
+
+  function startedJobs(partition: string, n: number, wait: number) {
+    for (let i = 0; i < n; i++) {
+      const at = Date.now() - 3_600_000;
+      insertJob(db, {
+        partition,
+        started_at: sqliteAt(at),
+        remote_submitted_at: sqliteAt(at - wait * 1000),
+      });
+    }
+  }
+
+  test("a second call within 30 seconds runs no queue query and answers the same; after 30 seconds it does", async () => {
+    startedJobs("shared", 5, 10);
+    const first = await computeQueueEstimates(d1, ["shared", "compute"]);
+    expect(queries.sort()).toEqual(["compute", "shared"]);
+    // New jobs change what a fresh read would say; the cached answer does not.
+    startedJobs("shared", 5, 500);
+    nowMs += QUEUE_CACHE_MS - 1;
+    const second = await computeQueueEstimates(d1, ["shared", "compute"]);
+    expect(queries).toHaveLength(2);
+    expect(second).toEqual(first);
+    nowMs += 1;
+    const third = await computeQueueEstimates(d1, ["shared", "compute"]);
+    expect(queries).toHaveLength(4);
+    expect(third[0]?.count).toBe(10);
+    expect(third[0]?.p90_seconds).toBe(500);
+  });
+
+  test("the partitions are read together, not one after the other", async () => {
+    let open = 0;
+    let most = 0;
+    const slow = wrapD1(realD1(db), async (sql) => {
+      if (sql !== QUEUE_WAITS_SQL) return;
+      open += 1;
+      most = Math.max(most, open);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      open -= 1;
+    });
+    await computeQueueEstimates(slow, ["shared", "compute", "debug", "gpu"]);
+    expect(most).toBe(4);
+  });
+
+  test("another database's cache is not this one's, and the cache is bounded", async () => {
+    startedJobs("shared", 5, 10);
+    await computeQueueEstimates(d1, ["shared"]);
+    const otherDb = freshDb();
+    const other = await computeQueueEstimates(realD1(otherDb), ["shared"]);
+    expect(other[0]?.count).toBe(0);
+    const many = Array.from({ length: QUEUE_CACHE_MAX + 5 }, (_, i) => `p${i}`);
+    queries.length = 0;
+    await computeQueueEstimates(d1, many);
+    expect(queries).toHaveLength(many.length);
+    queries.length = 0;
+    // The oldest were forgotten (and read again); the newest are still held.
+    await computeQueueEstimates(d1, many);
+    expect(queries.length).toBe(many.length - QUEUE_CACHE_MAX);
+  });
+
+  test("an entry that is read again is the newest: the one forgotten is the one read longest ago", async () => {
+    queueCacheLimits.max = 2;
+    await computeQueueEstimates(d1, ["p1"]); // t0
+    nowMs += 20_000;
+    await computeQueueEstimates(d1, ["p2"]); // t0 + 20 s
+    nowMs += 11_000;
+    await computeQueueEstimates(d1, ["p1"]); // t0 + 31 s: p1 had expired, is read again and is now the newest
+    nowMs += 1_000;
+    await computeQueueEstimates(d1, ["p3"]); // t0 + 32 s: the cache is over its size; p2 (read at 20 s) goes
+    queries.length = 0;
+    nowMs += 1_000;
+    await computeQueueEstimates(d1, ["p1", "p2", "p3"]); // t0 + 33 s: p1 and p3 are held, p2 is not
+    expect(queries).toEqual(["p2"]);
+  });
 });
