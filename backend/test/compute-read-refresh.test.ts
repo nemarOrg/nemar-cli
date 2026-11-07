@@ -13,11 +13,13 @@
  *  - the refresh does not depend on the compute switch.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { ComputeUserJobResponseSchema } from "../../shared/contract/compute-user";
+import { refreshClock, refreshLimits } from "../src/routes/compute/read";
 import { JOB_BY_ID_SQL } from "../src/services/compute-jobs";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { hashApiKey } from "../src/services/token";
+import type { Bindings } from "../src/types/bindings";
 import { endedJob } from "./helpers/compute-ended";
 import {
   type LifecycleFixture,
@@ -54,13 +56,18 @@ async function keyFor(accountId: number): Promise<string> {
   return key;
 }
 
-async function detail(made: MadeJob, over: Parameters<LifecycleFixture["env"]>[0] = {}) {
+async function detail(
+  made: MadeJob,
+  over: Parameters<LifecycleFixture["env"]>[0] = {},
+  /** One bindings object for several reads: the debounce is kept per database binding, as in a Worker. */
+  env: Bindings = fx.env(over),
+) {
   const key = await keyFor(made.accountId);
   const res = await routes(
     new Request(`http://api.test/compute/me/jobs/${made.job.id}`, {
       headers: { Authorization: `Bearer ${key}` },
     }),
-    fx.env(over),
+    env,
   );
   return { status: res.status, body: (await res.json()) as Record<string, any> };
 }
@@ -187,5 +194,125 @@ describe("what is not read back", () => {
     expect(res.body.stale).toBe(false);
     expect(fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/submit")).toHaveLength(0);
     expect(fx.tapis.jobs.size).toBe(0);
+  });
+});
+
+describe("one attempt a minute per job, whether it worked or not", () => {
+  const realNow = refreshClock.now;
+  const realMax = refreshLimits.attemptsMax;
+  afterEach(() => {
+    refreshClock.now = realNow;
+    refreshLimits.attemptsMax = realMax;
+  });
+
+  test("five reads while Tapis is down make one call to Tapis, and every one says stale", async () => {
+    const { made } = await runningAtTapis();
+    stale(made.job.id);
+    fx.tapis.fail("GET /v3/jobs/:uuid", 500, 100);
+    const env = fx.env();
+    const before = jobReads();
+    const answers = [];
+    for (let i = 0; i < 5; i++) answers.push(await detail(made, {}, env));
+    expect(jobReads() - before).toBe(1);
+    for (const a of answers) expect(a.body.stale).toBe(true);
+    // The last GOOD read is untouched by a failed one: the lost-by-age clock runs on it.
+    const row = await reread(made.env, made.job.id);
+    expect(row.tapis_synced_at).not.toBeNull();
+    expect(Date.parse(`${row.tapis_synced_at?.replace(" ", "T")}Z`)).toBeLessThan(
+      Date.now() - 120_000,
+    );
+  });
+
+  test("parallel reads of one job make one call to Tapis, and all get the refreshed record", async () => {
+    const { made } = await runningAtTapis();
+    stale(made.job.id);
+    const env = fx.env();
+    const before = jobReads();
+    const answers = await Promise.all(Array.from({ length: 5 }, () => detail(made, {}, env)));
+    expect(jobReads() - before).toBe(1);
+    for (const a of answers) {
+      expect(a.body.job.state).toBe("running");
+      expect(a.body.stale).toBe(false);
+    }
+  });
+
+  test("the window is 60 seconds: inside it nothing is asked, after it a healthy Tapis is asked again", async () => {
+    const { made, uuid } = await runningAtTapis();
+    stale(made.job.id);
+    const t0 = Date.now();
+    refreshClock.now = () => t0;
+    const env = fx.env();
+    fx.tapis.fail("GET /v3/jobs/:uuid", 500, 1);
+    const before = jobReads();
+    expect((await detail(made, {}, env)).body.stale).toBe(true);
+    refreshClock.now = () => t0 + 59_000;
+    expect((await detail(made, {}, env)).body.stale).toBe(true);
+    expect(jobReads() - before).toBe(1);
+    // Tapis is healthy again and the job has moved on there.
+    fx.tapis.advance(uuid, "ARCHIVING");
+    refreshClock.now = () => t0 + 61_000;
+    const later = await detail(made, {}, env);
+    expect(jobReads() - before).toBe(2);
+    expect(later.body.stale).toBe(false);
+    expect(later.body.job.state).toBe("archiving");
+  });
+
+  test("a different job is not held back by another's attempt", async () => {
+    const a = await runningAtTapis();
+    const b = await runningAtTapis();
+    stale(a.made.job.id);
+    stale(b.made.job.id);
+    fx.tapis.fail("GET /v3/jobs/:uuid", 500, 1);
+    const env = fx.env();
+    const before = jobReads();
+    await detail(a.made, {}, env);
+    await detail(b.made, {}, env);
+    expect(jobReads() - before).toBe(2);
+  });
+
+  test("an attempt that is made again is the newest: the one forgotten is the one attempted longest ago", async () => {
+    refreshLimits.attemptsMax = 2;
+    const [a, b, c] = [await runningAtTapis(), await runningAtTapis(), await runningAtTapis()] as [
+      Awaited<ReturnType<typeof runningAtTapis>>,
+      Awaited<ReturnType<typeof runningAtTapis>>,
+      Awaited<ReturnType<typeof runningAtTapis>>,
+    ];
+    for (const j of [a, b, c]) stale(j.made.job.id);
+    fx.tapis.fail("GET /v3/jobs/:uuid", 500, 100);
+    const env = fx.env();
+    const t0 = Date.now();
+    const at = (offsetMs: number) => {
+      refreshClock.now = () => t0 + offsetMs;
+    };
+    at(0);
+    await detail(a.made, {}, env);
+    at(50_000);
+    await detail(b.made, {}, env);
+    at(61_000); // a's window has passed: it is attempted again and is now the newest
+    await detail(a.made, {}, env);
+    at(62_000); // c is new; the memory is over its size and forgets b (attempted at 50 s), not a
+    await detail(c.made, {}, env);
+    at(63_000);
+    const before = jobReads();
+    await detail(a.made, {}, env); // attempted 2 s ago: held
+    expect(jobReads() - before).toBe(0);
+    await detail(b.made, {}, env); // attempted 13 s ago but forgotten: asked again
+    expect(jobReads() - before).toBe(1);
+  });
+
+  test("the memory is bounded: the oldest attempt is forgotten first", async () => {
+    refreshLimits.attemptsMax = 2;
+    const jobs = [await runningAtTapis(), await runningAtTapis(), await runningAtTapis()];
+    for (const j of jobs) stale(j.made.job.id);
+    const env = fx.env();
+    fx.tapis.fail("GET /v3/jobs/:uuid", 500, 100);
+    for (const j of jobs) await detail(j.made, {}, env);
+    const before = jobReads();
+    // The newest two are held (nothing is asked); the first was forgotten and is asked again.
+    await detail(jobs[2]?.made as MadeJob, {}, env);
+    await detail(jobs[1]?.made as MadeJob, {}, env);
+    expect(jobReads() - before).toBe(0);
+    await detail(jobs[0]?.made as MadeJob, {}, env);
+    expect(jobReads() - before).toBe(1);
   });
 });

@@ -98,7 +98,52 @@ function wholeNumber(text: string): number | null {
   return /^[0-9]{1,9}$/.test(text) ? Number(text) : null;
 }
 
-/** Parse a live job's staleness from the stored read time (UTC text) and refresh it from Tapis once. */
+/** The clock the refresh debounce reads; a test moves it, nothing else does. */
+export const refreshClock = { now: (): number => Date.now() };
+
+/** The most jobs one isolate remembers an attempt for (the oldest attempt is forgotten first); a test lowers it. */
+export const refreshLimits = { attemptsMax: 1000 };
+
+interface RefreshState {
+  /** When the refresh of a job was last ATTEMPTED, and how it ended, whether it worked or not. */
+  attempts: Map<string, { at: number; stale: boolean }>;
+  /** A refresh that is running now, so that parallel reads of one job make one call. */
+  inflight: Map<string, Promise<{ stale: boolean }>>;
+}
+
+/**
+ * Best-effort, per isolate and per database binding (so one database's attempts are never another's): a
+ * second isolate, or a binding object that is not stable, only means one more call. `tapis_synced_at` is
+ * NOT used for this and is never changed by it: it is the last GOOD read, and the lost-by-age clock runs on
+ * it, so a failed read must not advance it.
+ */
+const refreshStates = new WeakMap<object, RefreshState>();
+
+function refreshStateOf(db: object): RefreshState {
+  let state = refreshStates.get(db);
+  if (!state) {
+    state = { attempts: new Map(), inflight: new Map() };
+    refreshStates.set(db, state);
+  }
+  return state;
+}
+
+function rememberAttempt(state: RefreshState, jobId: string, at: number, stale: boolean): void {
+  // Delete first so the map's insertion order is the order of the latest attempts.
+  state.attempts.delete(jobId);
+  state.attempts.set(jobId, { at, stale });
+  while (state.attempts.size > refreshLimits.attemptsMax) {
+    const oldest = state.attempts.keys().next().value;
+    if (oldest === undefined) break;
+    state.attempts.delete(oldest);
+  }
+}
+
+/**
+ * Read a live job back from Tapis at most once a minute, whether the last try worked or not, and once for
+ * any number of parallel reads. Without the attempt stamp, a Tapis that is down would be asked (8 seconds
+ * each, and a write to the job row each time) by every read of the page.
+ */
 async function refreshLiveJob(
   env: Bindings,
   job: UserJobRecord,
@@ -114,15 +159,35 @@ async function refreshLiveJob(
     return { stale: false };
   }
   if (maintenanceRefuses(env.MAINTENANCE_MODE, "write")) return { stale: true };
+  const state = refreshStateOf(env.DB);
+  const running = state.inflight.get(job.id);
+  if (running) return running;
+  const last = state.attempts.get(job.id);
+  if (last && nowMs - last.at <= JOB_REFRESH_AFTER_MS) return { stale: last.stale };
+
+  const attempt = (async (): Promise<{ stale: boolean }> => {
+    try {
+      // `advanceComputeJob` does not hand back whether this call made the job `finished`
+      // (`applyTapisJob`'s `becameFinished`), so the "results are ready" notice cannot be sent from here.
+      // A later notification phase must wire it where the transition is made; a refresh from a GET can
+      // finish a job, settle the ledger and copy its records, and says nothing about it.
+      const advanced = await advanceComputeJob(env, job.id, { nowMs });
+      return { stale: !FRESH_OUTCOMES.has(advanced.outcome) };
+    } catch (err) {
+      // The class of the failure only: a Tapis error may carry an address or a body.
+      console.warn(
+        `[compute-read] refresh failed job=${job.id} class=${(err as Error)?.name ?? "Error"}`,
+      );
+      return { stale: true };
+    }
+  })();
+  state.inflight.set(job.id, attempt);
   try {
-    const advanced = await advanceComputeJob(env, job.id, { nowMs });
-    return { stale: !FRESH_OUTCOMES.has(advanced.outcome) };
-  } catch (err) {
-    // The class of the failure only: a Tapis error may carry an address or a body.
-    console.warn(
-      `[compute-read] refresh failed job=${job.id} class=${(err as Error)?.name ?? "Error"}`,
-    );
-    return { stale: true };
+    const result = await attempt;
+    rememberAttempt(state, job.id, nowMs, result.stale);
+    return result;
+  } finally {
+    state.inflight.delete(job.id);
   }
 }
 
@@ -189,7 +254,7 @@ export function registerComputeReadRoutes(routes: Hono<Env>): void {
     // statement carries the account, so none of them finds a row.
     const found = await getUserJob(c.env.DB, accountId, id);
     if (!found) return refuse(c, "job_not_found");
-    const { stale } = await refreshLiveJob(c.env, found, Date.now());
+    const { stale } = await refreshLiveJob(c.env, found, refreshClock.now());
     // Read again: the refresh may have moved the job (and settled it).
     const job = (await getUserJob(c.env.DB, accountId, id)) ?? found;
     c.header("Cache-Control", "private, no-store");
