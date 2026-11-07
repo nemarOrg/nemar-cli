@@ -623,6 +623,29 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
       for (const uuid of sheltered) expect(fx.tapis.jobs.get(uuid)?.status).toBe("PENDING");
     }, 120_000);
 
+    test("the shelter is checked lazily: once the slice is full no sheltered candidate is read or searched (item 8)", async () => {
+      // 25 jobs that skipped the reservation come first in the listing (the stand-in lists oldest first) and
+      // fill the slice; the sheltered candidates come after them.
+      for (let i = 0; i < 25; i++) {
+        await partnerLaunch(w, null, null, { owner: `stranger-${i}`, tags: [] });
+      }
+      const sheltered: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const hold = await reserve(w, person);
+        sheltered.push(await partnerLaunch(w, hold, person));
+      }
+      const before = fx.tapis.log.length;
+      const swept = await sweepTenantJobs(fx.env(), "live");
+      expect(swept).toMatchObject({ awaitingReport: 0, indexed: 25, deferred: 3 });
+      const mine = fx.tapis.log
+        .slice(before)
+        .filter(
+          (q) => sheltered.some((u) => q.path.includes(u)) || q.route === "POST /v3/jobs/search",
+        );
+      expect(mine).toEqual([]);
+      for (const uuid of sheltered) expect(fx.tapis.jobs.get(uuid)?.status).toBe("PENDING");
+    }, 120_000);
+
     test("a backlog the reaper has not drained extends the shelter, a tick for each 25 ahead; without one it ends at the hour", async () => {
       const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
       await setPartnerPolicy(w.env().DB, fx.ownerId, {

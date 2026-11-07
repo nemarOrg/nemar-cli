@@ -130,37 +130,39 @@ const OPEN_OWNERS_SQL = `SELECT DISTINCT tapis_owner FROM compute_jobs INDEXED B
  *     backlog it has not drained, at most {@link SWEEP_DEFER_BACKLOG_MAX_MINUTES});
  *   - and the read passes the report check (`checkReport`), so a job that is the wrong application, queue
  *     or size is not sheltered.
- * The caller removes these BEFORE it takes its per-run slice, so a sheltered job never uses a slot. At most
- * {@link SWEEP_DEFER_MAX_READS} candidates are read in full; one past that is not deferred (it goes the
+ * The caller checks the candidates LAZILY while it fills its per-run slice (a sheltered job never uses a
+ * slot, and it stops reading when the slice is full), so a run reads no more than it needs; at most
+ * {@link SWEEP_DEFER_MAX_READS} candidates are read in full, one past that is not deferred (it goes the
  * sweep's own way, which is the safe one).
  */
-export async function awaitingPartnerReports(
+export function partnerShelter(
   env: Bindings,
   ctx: TapisContext,
-  candidates: TapisJob[],
-): Promise<Set<string>> {
-  const awaiting = new Set<string>();
-  if (candidates.length === 0) return awaiting;
-  const owners = new Set(
-    (await env.DB.prepare(OPEN_OWNERS_SQL).all<{ tapis_owner: string }>()).results.map(
-      (r) => r.tapis_owner,
-    ),
-  );
-  if (owners.size === 0) return awaiting;
-  const policy = (await getPolicy(env.DB)).policy;
-  const pin = policy.partner;
-  const wait = policy.reservationWaitMinutes;
+): (cand: TapisJob) => Promise<boolean> {
+  let loaded: { owners: Set<string>; pin: ReturnType<typeof pinOf>; wait: number } | null = null;
   let reads = 0;
-  for (const cand of candidates) {
-    if (typeof cand.owner !== "string" || !owners.has(cand.owner)) continue;
-    if (reads >= SWEEP_DEFER_MAX_READS) break;
+  const load = async () => {
+    if (loaded !== null) return loaded;
+    const owners = new Set(
+      (await env.DB.prepare(OPEN_OWNERS_SQL).all<{ tapis_owner: string }>()).results.map(
+        (r) => r.tapis_owner,
+      ),
+    );
+    const policy = (await getPolicy(env.DB)).policy;
+    loaded = { owners, pin: pinOf(policy.partner), wait: policy.reservationWaitMinutes };
+    return loaded;
+  };
+  return async (cand) => {
+    const { owners, pin, wait } = await load();
+    if (typeof cand.owner !== "string" || !owners.has(cand.owner)) return false;
+    if (reads >= SWEEP_DEFER_MAX_READS) return false;
     reads++;
     try {
       const full = await getTapisJob(ctx, cand.uuid);
       const tags = nemarTagsOf(full);
       const id = tags[0];
-      if (full.uuid !== cand.uuid || tags.length !== 1 || id === undefined) continue;
-      if (!/^job_[0-9a-f]{24}$/.test(id)) continue;
+      if (full.uuid !== cand.uuid || tags.length !== 1 || id === undefined) return false;
+      if (!/^job_[0-9a-f]{24}$/.test(id)) return false;
       const row = await getJob(env.DB, id);
       if (
         row === null ||
@@ -175,11 +177,11 @@ export async function awaitingPartnerReports(
         full.owner !== row.tapis_owner ||
         isNemarsOwnJob(ctx, full, row.id)
       ) {
-        continue;
+        return false;
       }
       const expiresAt = row.partner_expires_at ?? plusMinutesOf(row.created_at, wait);
       const expiresMs = Date.parse(`${expiresAt.replace(" ", "T")}Z`);
-      if (!Number.isFinite(expiresMs)) continue;
+      if (!Number.isFinite(expiresMs)) return false;
       let grace = SWEEP_DEFER_GRACE_MINUTES;
       if (Date.now() >= expiresMs) {
         const ahead =
@@ -189,7 +191,7 @@ export async function awaitingPartnerReports(
           Math.floor(ahead / REAPER_ROWS_PER_LIST) * REAPER_TICK_MINUTES,
         );
       }
-      if (Date.now() >= expiresMs + grace * 60_000) continue;
+      if (Date.now() >= expiresMs + grace * 60_000) return false;
       // The same rule as the reaper's ambiguity: only the jobs the reservation's Tapis username owns, that
       // are not over and that no row accounts for, count. A failed first attempt that was resubmitted does
       // not hide the retry, and a job another owner tagged does not unshelter the person's own.
@@ -200,13 +202,13 @@ export async function awaitingPartnerReports(
       for (const t of tagged) {
         if ((await env.DB.prepare(ACCOUNTED_SQL).bind(t.uuid).first()) === null) open.push(t);
       }
-      if (open.length !== 1 || open[0]?.uuid !== cand.uuid) continue;
-      if (checkReport(row, full, pinOf(pin)).ok) awaiting.add(cand.uuid);
+      if (open.length !== 1 || open[0]?.uuid !== cand.uuid) return false;
+      return checkReport(row, full, pin).ok;
     } catch {
       // Not read: not deferred. The job goes through the sweep's own path, which reads it again.
+      return false;
     }
-  }
-  return awaiting;
+  };
 }
 
 function plusMinutesOf(sqlTime: string, minutes: number): string {

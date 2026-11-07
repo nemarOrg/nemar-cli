@@ -62,7 +62,7 @@ import {
 import type { Bindings } from "../types/bindings.js";
 import { ACCESS_REPORT_PENDING_SQL } from "./access-attributes.js";
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
-import { awaitingPartnerReports } from "./compute-hold-reaper.js";
+import { partnerShelter } from "./compute-hold-reaper.js";
 import { LIVE_STATES_SQL, getJob } from "./compute-jobs.js";
 import { ensurePool, platformPool, unreservedChargeStatements } from "./compute-ledger.js";
 import {
@@ -654,11 +654,17 @@ export async function sweepTenantJobs(
     r.bound = scope.filter((j) => bound.has(j.uuid)).length;
     const unboundAll = scope.filter((j) => !bound.has(j.uuid));
     // A partner's job launched under a live reservation whose report has not come yet is left for the report
-    // (or the reaper): taken out BEFORE the slice, so a sheltered job never uses one of the run's slots.
-    const awaiting = await awaitingPartnerReports(env, ctx, unboundAll);
-    r.awaitingReport = awaiting.size;
-    const unbound = unboundAll.filter((j) => !awaiting.has(j.uuid));
-    for (const job of unbound.slice(0, TENANT_NEW_PER_RUN)) {
+    // (or the reaper). It is checked LAZILY while the run's slice fills: a sheltered job never uses a slot,
+    // and nothing is read once the slice is full (the rest is the next run's).
+    const sheltered = partnerShelter(env, ctx);
+    const slice: TapisJob[] = [];
+    let next = 0;
+    for (; next < unboundAll.length && slice.length < TENANT_NEW_PER_RUN; next++) {
+      const job = unboundAll[next] as TapisJob;
+      if (await sheltered(job)) r.awaitingReport++;
+      else slice.push(job);
+    }
+    for (const job of slice) {
       try {
         await handleUnbound(env, ctx, job, r);
       } catch (err) {
@@ -666,7 +672,7 @@ export async function sweepTenantJobs(
         r.errorClass = tapisWord(err);
       }
     }
-    r.deferred = Math.max(0, unbound.length - TENANT_NEW_PER_RUN);
+    r.deferred = unboundAll.length - next;
 
     // This sweep's own rows, in rotation.
     const rows = (
