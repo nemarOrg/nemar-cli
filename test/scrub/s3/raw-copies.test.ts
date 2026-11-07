@@ -36,7 +36,7 @@ import {
 import { AwsCliError, type PrefixEntry } from "../../../scripts/scrub/s3/s3-lib";
 import { type DeletedFile, classifyObjects } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
-import { makeJobPool, makeLimiter } from "./concurrency";
+import { makeJobPool, makeLimiter, settleAll } from "./concurrency";
 import { expectStopped } from "./refusal";
 import {
   BUCKET,
@@ -248,8 +248,7 @@ async function withLane<T>(fn: (l: Lane) => Promise<T>): Promise<T> {
  * the real programs). Every case finishes before the first failure is raised.
  */
 async function sideBySide<T>(cases: T[], fn: (c: T, l: Lane) => Promise<void>): Promise<void> {
-  const settled = await Promise.allSettled(cases.map((c) => withLane((l) => fn(c, l))));
-  for (const r of settled) if (r.status === "rejected") throw r.reason;
+  await settleAll(cases.map((c) => withLane((l) => fn(c, l))));
 }
 
 /** A test on a lane of its own; its body runs as a background job. */

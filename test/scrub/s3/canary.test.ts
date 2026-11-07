@@ -9,7 +9,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createAwsRunner, isoSeconds, putObjectLocked } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BATCH_SLOW, makeLimiter } from "./concurrency";
+import { BATCH_SLOW, makeLimiter, settleAll } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -98,7 +98,7 @@ describe("canary", () => {
       }
       // Every refusal comes before any S3 call and none depends on another, so they run
       // together (`runScrub` bounds how many at once).
-      await Promise.all(
+      await settleAll(
         runs.map(async ([bad, extra]) => {
           const r = await runScrub(standin, canary(extra, bad));
           const label = `${JSON.stringify(bad)} ${extra}`;
@@ -125,7 +125,7 @@ describe("canary", () => {
         const r = await runScrub(standin, canary([], ok));
         expect(r.exitCode, `${ok}: ${r.all}`).toBe(0);
       });
-      await Promise.all(accepted);
+      await settleAll(accepted);
       expect(standin.log.length).toBe(0);
     },
     SLOW,

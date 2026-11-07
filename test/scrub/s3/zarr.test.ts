@@ -18,7 +18,7 @@ import {
 } from "../../../scripts/scrub/contract";
 import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
-import { BATCH_SLOW, makeLimiter } from "./concurrency";
+import { BATCH_SLOW, makeLimiter, settleAll } from "./concurrency";
 import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
@@ -721,7 +721,7 @@ describe("zarr-public: the check from outside after publication", () => {
       const { dir, standin, pub } = await published();
       const outside = { [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "" };
       // Only hosts no request can reach: a regression here must not send one to the real bucket.
-      await Promise.all(
+      await settleAll(
         [pub.url, "https://evil.example"].map(async (base) => {
           const args = publicArgs(dir, pub);
           args[args.length - 1] = base;

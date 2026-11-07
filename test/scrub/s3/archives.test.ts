@@ -17,6 +17,7 @@ import path from "node:path";
 import type { ZarrVerifiedFile } from "../../../scripts/scrub/contract";
 import type { ArchivesDroppedFile } from "../../../scripts/scrub/s3/archives-stage";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { settleAll } from "./concurrency";
 import { expectStopped } from "./refusal";
 import {
   BUCKET,
@@ -125,10 +126,7 @@ async function concurrently<T>(
   run: (item: T, s: S3Standin) => Promise<void>,
 ): Promise<void> {
   for (let i = 0; i < items.length; i += POOL) {
-    const round = await Promise.allSettled(
-      items.slice(i, i + POOL).map((item, j) => run(item, pool[j] as S3Standin)),
-    );
-    for (const r of round) if (r.status === "rejected") throw r.reason;
+    await settleAll(items.slice(i, i + POOL).map((item, j) => run(item, pool[j] as S3Standin)));
   }
 }
 

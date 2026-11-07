@@ -10,7 +10,7 @@ import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
 import { buildKey } from "../../../scripts/scrub/contract";
 import type { PlanFile } from "../../../scripts/scrub/contract";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { makeJobPool, makeLimiter } from "./concurrency";
+import { makeJobPool, makeLimiter, settleAll } from "./concurrency";
 import { expectStopped } from "./refusal";
 import {
   BUCKET,
@@ -306,7 +306,7 @@ describe("plan", () => {
         "SHA256E-",
       ];
       // Each name has its own stand-in and directory, so they run side by side (`run` bounds them).
-      await Promise.all(
+      await settleAll(
         names.map(async (name) => {
           const standin = startS3Standin();
           try {
@@ -379,7 +379,7 @@ describe("plan", () => {
     async () => {
       const names = ["v1.0.0-final.json", "notes.json", "v1.0.0.json.bak", "v1.0.0-beta.1.json"];
       // Each name has its own stand-in and directory, so they run side by side (`run` bounds them).
-      await Promise.all(
+      await settleAll(
         names.map(async (name) => {
           const standin = startS3Standin();
           try {
