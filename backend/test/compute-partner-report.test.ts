@@ -218,6 +218,23 @@ describe("one Tapis job per reservation, and no Tapis job that is already accoun
     expect(cancels()).toHaveLength(0);
   });
 
+  test("a uuid bound to another reservation between the pre-check and the bind is tapis_job_in_use (the unique index is the backstop)", async () => {
+    // The race a pre-check cannot close: another request binds this uuid to reservation A AFTER b's request
+    // read that nobody holds it and BEFORE its bind. A trigger on b's bind plays that other request (it
+    // binds A first, inside b's own statement), so the unique index is what refuses b.
+    const a = await reserve(w, person);
+    const b = await reserve(w, person);
+    const uuid = await partnerLaunch(w, b, person);
+    w.h.db.exec(`CREATE TRIGGER test_other_request BEFORE UPDATE OF tapis_uuid ON compute_jobs
+      WHEN NEW.id = '${b.job_id}' AND OLD.tapis_uuid IS NULL AND NEW.tapis_uuid IS NOT NULL
+      BEGIN UPDATE compute_jobs SET tapis_uuid = NEW.tapis_uuid WHERE id = '${a.job_id}'; END;`);
+    const res = await report(b, { tapis_job_id: uuid });
+    w.h.db.exec("DROP TRIGGER test_other_request");
+    expect([res.status, res.json?.code]).toEqual([409, "tapis_job_in_use"]);
+    expect(row(w, b.job_id)).toMatchObject({ tapis_uuid: null, partner_state: null, state: "created" });
+    expect(cancels()).toHaveLength(0);
+  });
+
   test("a job NEMAR itself submitted is tapis_job_in_use, and is neither bound nor cancelled", async () => {
     const hold = await reserve(w, person);
     const made = await makeJob(fx, { account: { status: "approved" } });
