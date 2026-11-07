@@ -51,6 +51,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { ACCOUNT_COPY } from "../shared/contract/account-copy.js";
 import {
+  COMPUTE_PURPOSE_MAX_CHARS,
+  COMPUTE_PURPOSE_MIN_CHARS,
+} from "../shared/contract/compute-access.js";
+import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
 } from "../shared/contract/user.js";
@@ -139,6 +143,13 @@ describe("the copy table's own rules", () => {
     // honest when the bounds move.
     expect(ACCOUNT_COPY["upload_access.request.why_hint"]).toBe(
       `Describe what you intend to upload in ${UPLOAD_ACCESS_WHY_MIN_CHARS}-${UPLOAD_ACCESS_WHY_MAX_CHARS} characters`,
+    );
+  });
+
+  test("the compute purpose hint's written-out bounds still match the constants", () => {
+    // Epic #2021 phase D1: the same rule 1, for the compute request's purpose text.
+    expect(ACCOUNT_COPY["compute_access.request.purpose_hint"]).toBe(
+      `Describe what you intend to compute in ${COMPUTE_PURPOSE_MIN_CHARS}-${COMPUTE_PURPOSE_MAX_CHARS} characters`,
     );
   });
 

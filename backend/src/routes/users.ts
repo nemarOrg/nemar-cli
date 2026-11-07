@@ -15,16 +15,36 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
+import type { ComputeAccessState } from "../../../shared/compute-access-state.js";
+import {
+  COMPUTE_ACCESS_ERROR_STATUS,
+  type ComputeAccessRefusal,
+  computeAccessRequestSchema,
+} from "../../../shared/contract/compute-access.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, cookieOriginGuard } from "../middleware/auth";
+import {
+  ALREADY_ACTIVE_REFUSAL,
+  COMPUTE_ACCESS_NOTIFIED_SQL,
+  COMPUTE_ACCESS_REQUEST_ROW_SQL,
+  COMPUTE_ACCESS_REQUEST_UPDATE_SQL,
+  TERMS_UNPUBLISHED_REFUSAL,
+  asState,
+  checkComputeAccessRequest,
+  closedRefusalFor,
+  requestAuditDetails,
+  termsUnpublished,
+} from "../services/compute-access";
 import {
   getAdminEmailsForCategory,
   isAdminNotificationAllowed,
   resolveEmailConfig,
+  sendComputeAccessRequestEmail,
   sendUploadAccessRequestEmail,
 } from "../services/email";
+import { appBase } from "../services/environment";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { profileGapsForRow } from "../services/profile-gaps";
@@ -66,6 +86,10 @@ userRoutes.get("/me", async (c) => {
       github_username,
       city,
       country,
+      affiliation,
+      compute_access,
+      compute_access_requested_at,
+      compute_access_granted_at,
       username_auto_assigned,
       sandbox_completed,
       sandbox_completed_at,
@@ -100,6 +124,13 @@ userRoutes.get("/me", async (c) => {
       github_username: string | null;
       city: string | null;
       country: string | null;
+      // Read for the compute-access gap (epic #2021 phase D1): without it every account would be
+      // reported as missing an affiliation.
+      affiliation: string | null;
+      // Compute access (migration 0131): its own grant, never `service_access`.
+      compute_access: ComputeAccessState;
+      compute_access_requested_at: string | null;
+      compute_access_granted_at: string | null;
       username_auto_assigned: number;
       sandbox_completed: number;
       sandbox_completed_at: string | null;
@@ -152,6 +183,12 @@ userRoutes.get("/me", async (c) => {
       sandbox_dataset_id: userDetails?.sandbox_dataset_id,
       // Tiered access (website ADR 0010): admin-granted permission to upload/compute.
       service_access: !!userDetails?.service_access,
+      // Compute access is a grant of its OWN (epic #2021 phase D1, ADR 0118): the state and when it
+      // was asked for and granted. Optional on the wire and never defaulted: absent means the row
+      // could not be read, and a CLI that predates the field reads "unknown", never "not granted".
+      compute_access: userDetails?.compute_access,
+      compute_access_requested_at: userDetails?.compute_access_requested_at,
+      compute_access_granted_at: userDetails?.compute_access_granted_at,
       // What this account is still missing, computed by the SAME function the
       // upload-access preconditions use (#1268, ADR 0045) -- so `nemar auth
       // status` can never list a different set of fields from the one a request
@@ -539,6 +576,278 @@ userRoutes.post(
     } catch (err) {
       console.error("[users] /me/upload-access/request failed", err);
       return c.json({ error: "Failed to submit upload access request" }, 500);
+    }
+  },
+);
+
+// ---------------------------------------------------------------
+// POST /users/me/compute-access/request  (epic #2021 phase D1, #2022; ADR 0118)
+// ---------------------------------------------------------------
+
+/** The columns the compute review card is built from, and the state the request turns on. */
+interface ComputeRequestRow {
+  id: number;
+  username: string | null;
+  email: string;
+  given_name: string | null;
+  family_name: string | null;
+  github_username: string | null;
+  city: string | null;
+  country: string | null;
+  affiliation: string | null;
+  orcid: string | null;
+  account_kind: AccountKind;
+  email_verified: number;
+  compute_access: string;
+  compute_access_requested_at: string | null;
+  compute_access_notified_at: string | null;
+  /** The purpose as stored. A retry reads the card's body from here. */
+  compute_purpose: string | null;
+  /** The terms version the person accepted, read back for a retry of the notification. */
+  compute_terms_version: string | null;
+  /** The EXISTENCE of an `oauth_identities` row for provider `orcid` (0 or 1): the proof of who they are. */
+  orcid_proven: number;
+}
+
+/**
+ * The refusal of a request, with its status. The statuses are `COMPUTE_ACCESS_ERROR_STATUS`, the one
+ * table (the website renders these and the CLI prints them).
+ */
+function refuseCompute(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  r: ComputeAccessRefusal,
+) {
+  return c.json(r, COMPUTE_ACCESS_ERROR_STATUS[r.error]);
+}
+
+/**
+ * Mail the admins one compute review card and stamp `compute_access_notified_at` when at least one of
+ * them received it. Shared by the first request and by a retry, so the two cannot drift on what "notified"
+ * means; never throws, because the request row has committed by the time this runs (it REPORTS, so the
+ * caller can say `email_sent: false` and the next call re-sends). `purpose` and `termsVersion` are passed
+ * on the first request and read back from the row on a retry.
+ */
+async function notifyAdminsOfComputeRequest(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+  row: ComputeRequestRow,
+  purpose: string,
+  termsVersion: string,
+): Promise<{ delivered: number; attempted: number }> {
+  const db = c.env.DB;
+  try {
+    const adminEmails = await getAdminEmailsForCategory(db, "compute_requests", c.env);
+    if (adminEmails.length === 0) {
+      if (isAdminNotificationAllowed(c.env)) {
+        console.error(
+          `[compute-access] no admin recipients for compute_requests; request from id=${row.id} stored but nobody was told`,
+        );
+      }
+      return { delivered: 0, attempted: 0 };
+    }
+
+    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
+    const outcome = await sendComputeAccessRequestEmail(
+      adminEmails,
+      {
+        id: row.id,
+        username: row.username?.trim() || null,
+        given_name: (row.given_name ?? "").trim(),
+        family_name: (row.family_name ?? "").trim(),
+        email: row.email,
+        orcid: row.orcid,
+        affiliation: (row.affiliation ?? "").trim(),
+        city: (row.city ?? "").trim(),
+        country: (row.country ?? "").trim(),
+        purpose,
+        terms_version: termsVersion,
+        adminUrl: `${appBase(c.env)}/admin/compute`,
+      },
+      c.env.RESEND_API_KEY,
+      fromEmail,
+      replyTo,
+      isDev,
+      c.env,
+    );
+
+    if (outcome.delivered > 0) {
+      await db.prepare(COMPUTE_ACCESS_NOTIFIED_SQL).bind(row.id).run();
+    } else {
+      console.error(
+        `[compute-access] no admin received the request from id=${row.id} (${outcome.attempted} attempted, ${outcome.failures.length} failed); it will be re-sent on the next attempt`,
+      );
+    }
+    return { delivered: outcome.delivered, attempted: outcome.attempted };
+  } catch (emailErr) {
+    console.error("[compute-access] admin notification failed", emailErr);
+    return { delivered: 0, attempted: 0 };
+  }
+}
+
+/**
+ * Ask for compute access, once (ADR 0042's shape, for a grant of its own).
+ *
+ * The account row carries the whole request: `compute_access` is the state, `compute_access_requested_at`
+ * is when, `compute_purpose` is what for, and an administrator's decision moves the state. There is no
+ * request table because there is no second request: `denied` and `revoked` answer 409 `access_closed`
+ * (and so does `suspended`, which is access that was paused, not a request to repeat), and re-opening one
+ * is an administrator's grant. A request made with a session cookie must carry a NEMAR Origin (403
+ * `origin_not_allowed` otherwise); a bearer key need not. The route works whether or not the compute switch is on: it is bookkeeping,
+ * and spends nothing and calls no Tapis.
+ *
+ * Outcomes:
+ *   201 + `{ ok: true }`                 the request was opened and mailed
+ *   200 + `{ already_requested: true }`  one is already open; re-mailed only if nobody was told
+ *   409 `already_active`                 the grant is already held
+ *   409 `access_closed`                  the request was answered (denied, revoked) or access is suspended
+ *   503 `terms_unpublished`              exact production, while `COMPUTE_TERMS_PUBLISHED` is false
+ *
+ * Idempotency is enforced by the conditional UPDATE, not by the SELECT above it: `WHERE compute_access =
+ * 'none'` means exactly one of two concurrent requests writes the state, and `meta.changes` decides which
+ * one mails. Mail is non-fatal and outside the write; the audit row is the shape of the event only.
+ */
+userRoutes.post(
+  "/me/compute-access/request",
+  // A write made with a session cookie must come from a NEMAR page (#1603, ADR 0105 decision 10), as on
+  // the admin router and the cookie writes of routes/compute.ts: `authMiddleware` runs first (the router's
+  // `use`), then this guard, then the body is read. A bearer key is not asked for an Origin.
+  cookieOriginGuard,
+  zValidator("json", computeAccessRequestSchema),
+  async (c) => {
+    const authUser = c.get("user");
+    const db = c.env.DB;
+    const body = c.req.valid("json");
+    const purpose = body.purpose.trim();
+
+    try {
+      const row = await db
+        .prepare(COMPUTE_ACCESS_REQUEST_ROW_SQL)
+        .bind(authUser.id)
+        .first<ComputeRequestRow>();
+
+      if (!row) {
+        // The credential resolved but the row is gone (tombstoned mid-request).
+        return c.json({ error: "Account not found" }, 403);
+      }
+
+      const state = asState(row.compute_access);
+      if (state === "active") return refuseCompute(c, ALREADY_ACTIVE_REFUSAL);
+      if (state === "denied" || state === "revoked" || state === "suspended") {
+        return refuseCompute(c, closedRefusalFor(state));
+      }
+
+      // Answered BEFORE the preconditions: an open request is already on an admin's desk, and telling
+      // its owner to go fix their profile would imply it had failed. ...unless nobody was told:
+      // `compute_access_notified_at` NULL means every admin send failed, and short-circuiting on that
+      // row would turn request-once into request-never, so a repeat call RETRIES the notification.
+      if (state === "requested") {
+        if (row.compute_access_notified_at) {
+          return c.json({
+            ok: true,
+            already_requested: true,
+            requested_at: row.compute_access_requested_at,
+            email_sent: true,
+            admins_notified: null,
+          });
+        }
+        const retry = await notifyAdminsOfComputeRequest(
+          c,
+          row,
+          (row.compute_purpose ?? "").trim(),
+          row.compute_terms_version ?? "",
+        );
+        return c.json({
+          ok: true,
+          already_requested: true,
+          requested_at: row.compute_access_requested_at,
+          email_sent: retry.delivered > 0,
+          admins_notified: retry.delivered,
+        });
+      }
+
+      // Nobody can accept terms that do not exist yet: no new request is opened in the exact
+      // production environment while they are unpublished.
+      if (termsUnpublished(c.env)) return refuseCompute(c, TERMS_UNPUBLISHED_REFUSAL);
+
+      const refusal = checkComputeAccessRequest(
+        {
+          email_verified: row.email_verified,
+          orcid_proven: row.orcid_proven === 1,
+          account_kind: row.account_kind,
+          given_name: row.given_name,
+          family_name: row.family_name,
+          affiliation: row.affiliation,
+          city: row.city,
+          country: row.country,
+        },
+        { purpose, accept_terms_version: body.accept_terms_version },
+      );
+      if (refusal) return refuseCompute(c, refusal);
+
+      const stamped = await db
+        .prepare(COMPUTE_ACCESS_REQUEST_UPDATE_SQL)
+        .bind(purpose, body.accept_terms_version, row.id)
+        .run();
+
+      if ((stamped.meta?.changes ?? 0) === 0) {
+        // Lost the race to a concurrent request (or to an administrator's decision in the same
+        // instant). Either way one request is open or answered and this call must not mail a second copy.
+        const current = await db
+          .prepare("SELECT compute_access, compute_access_requested_at FROM users WHERE id = ?")
+          .bind(row.id)
+          .first<{ compute_access: string; compute_access_requested_at: string | null }>();
+        if (current?.compute_access === "active") return refuseCompute(c, ALREADY_ACTIVE_REFUSAL);
+        if (current && current.compute_access !== "requested") {
+          return refuseCompute(c, closedRefusalFor(asState(current.compute_access)));
+        }
+        return c.json({
+          ok: true,
+          already_requested: true,
+          requested_at: current?.compute_access_requested_at ?? null,
+        });
+      }
+
+      // Outside the write, and non-fatal: the request HAS landed by now, and rolling it back over a
+      // failed audit insert is the worse outcome. Loud in the log instead.
+      try {
+        await auditLogStatement(db, {
+          userId: row.id,
+          action: "compute_access_requested",
+          resourceType: "user",
+          resourceId: String(row.id),
+          // The text itself is on the row and in the admin's inbox; the audit row carries the shape
+          // of the event, not a second copy of the prose (ADR 0036).
+          details: requestAuditDetails(purpose, c.get("authMethod") === "cookie" ? "web" : "cli"),
+        }).run();
+      } catch (auditErr) {
+        console.error(
+          `AUDIT GAP: compute_access_requested row not written for id=${row.id} (the request DID land):`,
+          auditErr,
+        );
+      }
+
+      // Admins only. The requester gets no mail here: they know they asked, and the answer they are
+      // waiting for is the decision mail. The request is stored either way and visible in
+      // `nemar admin compute access list --state requested`; the caller is TOLD which happened, and an
+      // undelivered one is retried by the next call.
+      const notified = await notifyAdminsOfComputeRequest(
+        c,
+        row,
+        purpose,
+        body.accept_terms_version,
+      );
+
+      return c.json(
+        {
+          ok: true,
+          already_requested: false,
+          email_sent: notified.delivered > 0,
+          admins_notified: notified.delivered,
+        },
+        201,
+      );
+    } catch (err) {
+      console.error("[users] /me/compute-access/request failed", err);
+      return c.json({ error: "Failed to submit compute access request" }, 500);
     }
   },
 );

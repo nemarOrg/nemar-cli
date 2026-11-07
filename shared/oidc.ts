@@ -297,9 +297,9 @@ export const OIDC_PUBLIC_DOCUMENT_PATHS: readonly string[] = [OIDC_DISCOVERY_PAT
  *   account_revoked    an administrator revoked the account (`finalizeRevocation`)
  *   account_deleted    the owner soft-deleted it, or the sweep of the live tests' accounts did
  *   account_merged     the owner ended the loser of a manual merge (ADR 0043)
- *   compute_suspended  compute was suspended; only grants that carry a `compute.` scope end. No path
- *                      writes this word yet: the compute access phase of the compute program adds the
- *                      caller, and the filter it needs ({@link OIDC_COMPUTE_SCOPE_PREFIX}) is built
+ *   compute_suspended  an administrator suspended or revoked a person's compute access; only grants that
+ *                      carry a `compute.` scope end ({@link OIDC_COMPUTE_SCOPE_PREFIX}). The caller is
+ *                      `endComputeStatements` (`services/compute-access.ts`)
  *   orcid_changed      the ORCID iD was unlinked or replaced; only grants of clients that sign in by
  *                      `person_proven_orcid` end
  *   kind_changed       the account's kind was changed away from `person`; the same grants end

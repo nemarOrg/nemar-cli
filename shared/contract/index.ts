@@ -34,3 +34,6 @@ export * from "./compute.js";
 // The routes of the compute allocation ledger and owner policy: error words, request shapes and
 // the OPEN response schemas the CLI parses (epic #2005 phase A2).
 export * from "./compute-admin.js";
+// Compute access: a person's one request and an administrator's decisions (epic #2021 phase D1).
+export * from "./compute-access.js";
+export * from "./compute-terms.js";

@@ -44,6 +44,10 @@ export interface ProfileGapRow {
   github_username: string | null;
   city: string | null;
   country: string | null;
+  /** REQUIRED, like every field here, and `string | null`, never optional: an absent affiliation reads
+   *  as blank, so a SELECT that forgot the column would raise the compute-access gap for every account
+   *  (epic #2021 phase D1). Required makes that a compile error at the call site instead. */
+  affiliation: string | null;
 }
 
 /** Compute `profile_gaps` for one account row. */
@@ -59,5 +63,6 @@ export function profileGapsForRow(row: ProfileGapRow): ProfileGapEntry[] {
     github_username: row.github_username,
     city: row.city,
     country: row.country,
+    affiliation: row.affiliation,
   });
 }

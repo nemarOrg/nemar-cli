@@ -26,6 +26,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -40,6 +41,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -59,6 +61,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -78,6 +81,19 @@ describe("parseEmailPreferences", () => {
     expect(parseEmailPreferences(JSON.stringify({ identifier_sweep: false })).support_tickets).toBe(
       true,
     );
+  });
+
+  test("an explicit compute_requests: false is honored, and a row that predates it opts in", () => {
+    // Epic #2021 phase D1 (ADR 0118): compute access requests are their own category, opted in by
+    // default like every one above. MUTATION: write `=== true` for the parse and a stored row from
+    // before the key existed would receive no compute request at all.
+    expect(
+      parseEmailPreferences(JSON.stringify({ compute_requests: false })).compute_requests,
+    ).toBe(false);
+    expect(parseEmailPreferences(JSON.stringify({ support_tickets: false })).compute_requests).toBe(
+      true,
+    );
+    expect(parseEmailPreferences(null).compute_requests).toBe(true);
   });
 
   test("an explicit identifier_sweep: false is honored, and a row that predates it opts in", () => {
@@ -100,6 +116,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -112,6 +129,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -124,6 +142,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -136,6 +155,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -148,6 +168,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -162,6 +183,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -176,6 +198,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 
@@ -191,6 +214,7 @@ describe("parseEmailPreferences", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
     });
   });
 });

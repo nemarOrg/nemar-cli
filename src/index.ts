@@ -27,6 +27,7 @@ import {
   switchAction,
 } from "./commands/auth.js";
 import { completionCommand } from "./commands/completion.js";
+import { computeCommand } from "./commands/compute.js";
 import { createDownloadCommand, createUploadCommand, datasetCommand } from "./commands/dataset.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
@@ -204,6 +205,7 @@ Support:
 program.addCommand(authCommand);
 program.addCommand(datasetCommand);
 program.addCommand(sandboxCommand);
+program.addCommand(computeCommand);
 program.addCommand(adminCommand);
 program.addCommand(doctorCommand);
 program.addCommand(completionCommand);
@@ -239,6 +241,7 @@ const signupFlags = (cmd: Command): Command =>
     .option("--github <handle>", "GitHub username")
     .option("--city <city>", "City")
     .option("--country <country>", "Country")
+    .option("--affiliation <text>", "Institution (asked for by compute access)")
     .option("--why <text>", "What you intend to upload (20-500 characters)")
     .option("--no-upload-access", "Skip the upload-access request")
     .option("--no-open", "Print the sign-in link instead of trying to open a browser")

@@ -313,6 +313,28 @@ describe("upload-access request: preconditions", () => {
     expect(body.missing).toEqual(["family_name"]);
   });
 
+  test("an account lacking only its affiliation is not refused: that row blocks compute alone", async () => {
+    // Epic #2021 phase D1 added `affiliation` to the gap matrix with the block `compute_access` ONLY.
+    // The upload-access `missing` list is the matrix filtered to `upload_access`, so it must come out
+    // exactly as it did before the row existed: a person is not turned away from upload access for
+    // a field only compute asks for. MUTATION: drop the block argument of `profileGapFields` in
+    // `checkUploadAccessRequest`, and this account is refused with `missing: ["affiliation"]`.
+    await seedRequester({ affiliation: null });
+
+    const res = await withFakeResend(() => requestWithToken());
+    expect(res.status).toBe(201);
+  });
+
+  test("the missing list is unchanged when the affiliation is blank beside other gaps", async () => {
+    await seedRequester({ affiliation: null, username: null, country: null });
+
+    const res = await requestWithToken();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("profile_incomplete");
+    expect(body.missing).toEqual(["username", "country"]);
+  });
+
   test("an unverified ORCID iD is refused, by name", async () => {
     // The gate #1271 adds: `nemar auth signup` takes a TYPED iD and leaves the
     // flag at 0, so a CLI account can claim someone else's. An admin reviewing
