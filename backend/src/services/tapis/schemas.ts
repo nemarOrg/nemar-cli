@@ -93,6 +93,7 @@ export const TapisJobSchema = z
     appId: text,
     appVersion: text,
     execSystemLogicalQueue: text,
+    execSystemId: text,
     tags: z.array(z.string()).nullish(),
     nodeCount: z.number().nullish(),
     coresPerNode: z.number().nullish(),
@@ -111,12 +112,42 @@ export const TapisJobSchema = z
  * a key Tapis adds is `unknown`.
  */
 const TapisJobPublicSchema = TapisJobSchema.omit({ parameterSet: true, subscriptions: true });
-export type TapisJob = z.infer<typeof TapisJobPublicSchema>;
+export type TapisJob = z.infer<typeof TapisJobPublicSchema> & {
+  /**
+   * The `arg` of each scheduler option the job was submitted with (phase D4, #2025): the ONE part of
+   * `parameterSet` that is read, through `schedulerArgsOf`, because a partner chooses it (GPUs, memory,
+   * exclusivity) and the accounting charges it. Absent on a record that has no `parameterSet` (a search
+   * summary); `null` when it is there and is not a list of options NEMAR can read, which is never
+   * verified. The launch specification and the webhook addresses beside it are still dropped.
+   */
+  schedulerArgs?: string[] | null;
+};
+
+/**
+ * The scheduler options of a record's `parameterSet`, through a narrow accessor: `undefined` when the record
+ * has no `parameterSet`, `null` when `schedulerOptions` is present and is not a list of objects with a
+ * string `arg`, else the list of `arg`s. Nothing else of `parameterSet` is read.
+ */
+export function schedulerArgsOf(parameterSet: unknown): string[] | null | undefined {
+  if (parameterSet === undefined || parameterSet === null) return undefined;
+  if (typeof parameterSet !== "object" || Array.isArray(parameterSet)) return null;
+  const options = (parameterSet as { schedulerOptions?: unknown }).schedulerOptions;
+  if (options === undefined || options === null) return [];
+  if (!Array.isArray(options)) return null;
+  const args: string[] = [];
+  for (const option of options) {
+    const arg = (option as { arg?: unknown } | null)?.arg;
+    if (typeof arg !== "string") return null;
+    args.push(arg);
+  }
+  return args;
+}
 
 /** Drop the fields of a job record that can hold the launch specification or a webhook address. */
 export function withoutSecretFields(job: z.infer<typeof TapisJobSchema>): TapisJob {
-  const { parameterSet: _parameterSet, subscriptions: _subscriptions, ...rest } = job;
-  return rest;
+  const { parameterSet, subscriptions: _subscriptions, ...rest } = job;
+  const schedulerArgs = schedulerArgsOf(parameterSet);
+  return schedulerArgs === undefined ? rest : { ...rest, schedulerArgs };
 }
 
 // Compile-time checks, in a file `tsc -p backend` covers (the tests are outside that project): they

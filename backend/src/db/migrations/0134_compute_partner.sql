@@ -72,6 +72,19 @@ ALTER TABLE compute_jobs ADD COLUMN partner_flag TEXT
 
 ALTER TABLE compute_jobs ADD COLUMN partner_verified_at TEXT;
 
+--   * `partner_expires_at`: when the reservation expires, written ONCE at creation from the owner's wait
+--     then (a policy change does not move a reservation already made: the answer the partner was given and
+--     the reaper's clock are the same stored time). NULL for a job that is not a partner's reservation.
+--   * `partner_files_digest`: the SHA-256 of the first accepted list of declared files (path, size and
+--     digest of each, in order). A partner's later report may repeat that list and no other, so a verified
+--     job cannot be given upload addresses for ever-new path sets.
+ALTER TABLE compute_jobs ADD COLUMN partner_expires_at TEXT;
+
+ALTER TABLE compute_jobs ADD COLUMN partner_files_digest TEXT
+  CONSTRAINT compute_jobs_partner_files_digest CHECK (
+    partner_files_digest IS NULL OR (length(partner_files_digest) = 64
+      AND partner_files_digest NOT GLOB '*[^0-9a-f]*'));
+
 -- The client's open reservations and running jobs, counted INSIDE the hold's own statement against the
 -- client's cap: the live partner jobs of one client. A query uses a partial index only if it states the
 -- same terms, so the cap's count states `source = 'partner'` and the live list verbatim.
@@ -80,9 +93,12 @@ CREATE INDEX compute_jobs_client_live ON compute_jobs (client_id)
     AND state IN ('created', 'uploading', 'submitted', 'queued', 'running', 'archiving', 'unreported');
 
 -- The reaper's list: reservations nobody has reported a Tapis job under, in rotation (never examined
--- first, then the longest ago), and the unverified rows (`pending`, `mismatch`) the same tick finishes.
+-- first, then the longest ago), and the unverified rows (`pending`, `mismatch`) the same tick finishes. The
+-- statements NAME their index (`INDEXED BY`), because left to choose the planner took the unique index on
+-- the Tapis uuid and a temporary b-tree; the plan is pinned by `compute-partner-migration.test.ts`. An
+-- ended refusal leaves the second index (its `state` is part of the predicate).
 CREATE INDEX compute_jobs_partner_open ON compute_jobs (examined_at, created_at)
   WHERE source = 'partner' AND tapis_uuid IS NULL AND state = 'created';
 
 CREATE INDEX compute_jobs_partner_unverified ON compute_jobs (examined_at, created_at)
-  WHERE partner_state IN ('pending', 'mismatch');
+  WHERE partner_state IN ('pending', 'mismatch') AND state = 'created';

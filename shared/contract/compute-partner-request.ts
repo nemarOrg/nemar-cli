@@ -69,8 +69,8 @@ export const ComputeReportFileSchema = z
 
 export type ComputeReportFile = z.infer<typeof ComputeReportFileSchema>;
 
-/** A Tapis job id as the contract takes it: what Tapis uses, 1 to 128 characters. */
-export const COMPUTE_TAPIS_JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** A Tapis job id as the contract takes it: what the job table's column takes, 1 to 64 letters, digits and `-`. */
+export const COMPUTE_TAPIS_JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
 /**
  * `POST /compute/jobs/:id/report`: the Tapis job the partner launched under the reservation, and

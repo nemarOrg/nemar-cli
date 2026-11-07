@@ -102,6 +102,7 @@ export const COMPUTE_PARTNER_ERROR_STATUS = {
   already_bound: 409,
   tapis_job_in_use: 409,
   tapis_job_not_found: 422,
+  tapis_job_unreadable: 422,
   hold_released: 409,
   hold_cancelled: 409,
   hold_bound: 409,
@@ -110,6 +111,7 @@ export const COMPUTE_PARTNER_ERROR_STATUS = {
   bundle_too_many_files: 413,
   bundle_too_large: 413,
   // The platform.
+  partner_not_enabled: 503,
   compute_disabled: 503,
   policy_unavailable: 503,
   storage_unavailable: 503,
@@ -122,6 +124,9 @@ export const COMPUTE_REPORT_MISMATCHES = [
   "owner_mismatch",
   "app_mismatch",
   "resources_mismatch",
+  // NEMAR could not read the Tapis job back for two hours after it was bound, so it cannot be shown to match
+  // (the partner did not share it with NEMAR's service identity, or NEMAR may not read it).
+  "unverifiable",
 ] as const;
 
 export type ComputeReportMismatch = (typeof COMPUTE_REPORT_MISMATCHES)[number];
@@ -152,6 +157,7 @@ export const COMPUTE_PARTNER_SENTENCES = {
   already_bound: "A different Tapis job is already reported under this reservation.",
   tapis_job_in_use: "That Tapis job is already accounted for.",
   tapis_job_not_found: "NEMAR could not find that Tapis job.",
+  tapis_job_unreadable: "NEMAR is not allowed to read that Tapis job.",
   hold_released: "The reservation has ended.",
   hold_cancelled: "The reservation was cancelled.",
   hold_bound: "A Tapis job is reported under this reservation, so it cannot be released.",
@@ -159,6 +165,7 @@ export const COMPUTE_PARTNER_SENTENCES = {
     "The Tapis job does not match the reservation, so NEMAR is cancelling it and it is not charged to the person.",
   bundle_too_many_files: "The report declares more files than the limit allows.",
   bundle_too_large: "A declared file, or the files together, are over the size limit.",
+  partner_not_enabled: "The partner contract is not enabled yet.",
   compute_disabled: "Compute storage is not configured.",
   policy_unavailable: "The platform could not read its limits just now; ask again shortly.",
   storage_unavailable: "Compute storage could not be reached just now; ask again shortly.",
@@ -191,6 +198,8 @@ export const ComputePartnerHoldResponseSchema = z
     hold_id: z.string(),
     tag: z.string(),
     expires_at: z.string(),
+    /** The reservation's state (`created` while nothing is reported; the job's state once one is). */
+    state: z.string().optional(),
     replayed: z.literal(true).optional(),
   })
   .passthrough();
