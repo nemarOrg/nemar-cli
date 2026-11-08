@@ -11,7 +11,8 @@
  *  - `GET .../commits/refs/tags/<tag>`: the commit in `tags` (`<id>@<tag>`) as a bare id when the
  *    request asks for `application/vnd.github.sha`, as `{ sha }` otherwise; 422 when absent;
  *  - `GET .../compare/<base>...<head>`: `{ status }` from `compares` (`<id>:<base>...<head>`),
- *    `ahead` by default, or that HTTP status when the entry is a number;
+ *    `identical` for equal ids and `ahead` otherwise by default, or that HTTP status when the entry is
+ *    a number;
  *  - `POST /repos/nemarDatasets/.github/dispatches`: recorded in `dispatches`, answered
  *    `dispatchStatus`;
  *  - `GET .../git/ref/heads/main`: the commit in `mainRefs` (`<id>`) as a ref object, or that HTTP
@@ -349,7 +350,8 @@ export function startRepullGitHub(o: { defaultHead?: string | null } = {}): Repu
           url.pathname,
         );
       if (m) {
-        const answer = gh.compares[`${m[1]}:${m[2]}...${m[3]}`] ?? "ahead";
+        const answer =
+          gh.compares[`${m[1]}:${m[2]}...${m[3]}`] ?? (m[2] === m[3] ? "identical" : "ahead");
         return typeof answer === "number"
           ? json({ message: "no" }, answer)
           : json({ status: answer });

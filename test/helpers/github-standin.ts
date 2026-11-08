@@ -331,7 +331,10 @@ export function startGitHubStandin(): GitHubStandin {
         req.method === "GET" &&
         /^\/repos\/nemarDatasets\/[^/]+\/commits\/tags\//.test(url.pathname)
       ) {
-        return Response.json({ message: "No commit found for SHA" }, { status: 422 });
+        return Response.json(
+          { message: `No commit found for SHA: ${url.pathname.split("/commits/")[1]}` },
+          { status: 422 },
+        );
       }
       const tag = url.pathname.match(
         /^\/repos\/nemarDatasets\/([^/]+)\/commits\/refs\/tags\/(.+)$/,
