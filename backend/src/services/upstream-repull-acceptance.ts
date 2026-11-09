@@ -1,6 +1,7 @@
 /**
- * An administrator's acceptance of a re-pull's squash merge made without its trailers (epic #1046;
- * ADR 0111, the amendment of 2026-10-29; issue #1996), and the one ledger line NEMAR writes for it.
+ * An administrator's acceptance of a re-pull's merge made without its trailers, a squash or a plain
+ * merge commit of its pull request (epic #1046; ADR 0111, the amendments of 2026-10-29 and
+ * 2026-11-09; issue #1996), and the one ledger line NEMAR writes for it.
  *
  *   POST /admin/repulls/:id/merge-trailers/accept   { pr, merge_sha, reason? }
  *
@@ -329,7 +330,7 @@ export async function acceptRepullMerge(
     );
   }
 
-  // 3. The merge commit: one parent, the base or an enrichment-moved descendant of it.
+  // 3. The merge commit: the base or an enrichment-moved descendant of it as its first or only parent.
   const merge = await readCommit(env, row, body.merge_sha);
   if (!merge.ok) return unread(merge, row);
   if (merge.value === null) {

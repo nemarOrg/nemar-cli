@@ -1,7 +1,7 @@
 /**
  * `nemar admin repull resume <id> --accept-merge-trailers "<reason>"`: the acceptance of a re-pull's
- * squash merge made without its trailers (epic #1046; ADR 0111, the amendment of 2026-10-29; issue
- * #1996), as the release step takes it on from `merged` or `patch_merged` (`release.ts`).
+ * squash merge, or plain merge commit of its pull request, made without its trailers (epic #1046;
+ * ADR 0111, the amendments of 2026-10-29 and 2026-11-09; issue #1996), as the release step takes it on from `merged` or `patch_merged` (`release.ts`).
  *
  * The merge gate writes the squash message so that its last paragraph is the re-pull commit's
  * trailers, which the privacy ledger's fresh-clone proof (ADR 0085) reads; a merge made with
@@ -313,7 +313,7 @@ function verifiedLines(row: RepullRow, pr: RepullPullRequest, v: Verified): stri
   const base = (pr === "n0" ? row.base_sha : row.patch_base_sha) as string;
   return [
     "Verified by this run, with your GitHub token and NEMAR's repository:",
-    `  - it is GitHub's ${v.shape === "squash" ? "squash merge" : "plain merge commit"} of pull request #${v.number} (${v.branch} into main of ${NEMAR_DATASETS_ORG}/${row.dataset_id}), merged at ${short(v.mergedHead)}, ${v.headMoved ? `which enrichment moved the recorded head ${short(recordedHead)} to` : "the recorded head"};`,
+    `  - it is ${v.shape === "squash" ? "GitHub's squash merge" : "a plain merge commit"} of pull request #${v.number} (${v.branch} into main of ${NEMAR_DATASETS_ORG}/${row.dataset_id}), merged at ${short(v.mergedHead)}, ${v.headMoved ? `which enrichment moved the recorded head ${short(recordedHead)} to` : "the recorded head"};`,
     `  - its ${v.shape === "squash" ? "one parent" : `first parent (its second is the merged head ${short(v.mergedHead)})`} ${short(v.parent)} is ${v.parentMoved ? `the record's base ${short(base)} moved by enrichment only` : "the record's base"};`,
     `  - its tree is the re-pull's ${pr === "n0" ? "commit" : "gated N.0.1 head"} ${short(v.anchor)} outside .nemar/ and .github/;`,
     `  - it ${ledgerPhrase(v.ledger)};`,

@@ -1,6 +1,6 @@
 /**
- * A re-pull's squash merge made without its trailers, accepted on evidence (ADR 0111, the
- * amendment of 2026-10-29). Pure, and the one definition of each rule below:
+ * A re-pull's squash merge, or plain merge commit of its pull request, made without its trailers,
+ * accepted on evidence (ADR 0111, the amendments of 2026-10-29 and 2026-11-09). Pure, and the one definition of each rule below:
  *  - the ledger's words and fixed values a re-pull writes (`LEDGER_REPO_PATH`,
  *    `SCRUB_LEDGER_ACTIONS`, `MERGE_ACCEPTED_ACTION`, `MERGE_ACCEPTED_VERIFICATION`,
  *    `REPULL_LEDGER_ACTOR`), which the ledger's validator (`scripts/scrub/ledger.ts`), the delta
@@ -116,7 +116,7 @@ export interface MergeAcceptanceFacts {
   dataset: string;
   /** The version the merge released, bare (`2.0.0`); the line names it as a tag. */
   version: string;
-  /** The accepted squash merge commit, in full. */
+  /** The accepted merge commit (a squash or a plain merge), in full. */
   mergeSha: string;
   /** The record's plan digest (`sha256:<64 hex>`): which reviewed plan the merge carried. */
   planDigest: string;
