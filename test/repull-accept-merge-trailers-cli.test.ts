@@ -721,7 +721,114 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     await nothingWritten(merge);
   });
 
-  test("a merge commit with two parents: merge-not-squash, by the CLI and by the Worker", async () => {
+  /**
+   * What GitHub's merge button writes (ADR 0111, the amendment of 2026-11-09): a commit on `main`
+   * with the gated head's tree, `main`'s tip as its first parent, and `others` after it. The pull
+   * request is then marked merged at that commit, as GitHub answers for a merge made on its page.
+   */
+  async function mergeCommitOnGitHub(others: (head: string, tree: string) => Promise<string[]>) {
+    await w.restore(gated);
+    const origin = w.fx.originRepo;
+    const head = w.row().head_sha as string;
+    const main = await mainHead();
+    const tree = (await gitIn(origin, ["rev-parse", `${head}^{tree}`])).trim();
+    const parents = [main, ...(await others(head, tree))];
+    const merge = (
+      await runCommand(
+        [
+          "git",
+          "commit-tree",
+          tree,
+          ...parents.flatMap((p) => ["-p", p]),
+          "-m",
+          "Merge pull request",
+        ],
+        { cwd: origin, env: GIT_ID },
+      )
+    ).stdout.trim();
+    await gitIn(origin, ["update-ref", "refs/heads/main", merge, main]);
+    const pull = w.gh.pulls[prKey(w)];
+    if (!pull) throw new Error("no pull request");
+    Object.assign(pull, { merged: true, state: "closed", mergeCommitSha: merge });
+    await tagged();
+    return { merge, head, main, tree };
+  }
+
+  /** A commit of the given tree that is not on any history the record knows. */
+  const strangerCommit = async (tree: string, parent?: string) =>
+    (
+      await runCommand(
+        ["git", "commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", "stranger"],
+        { cwd: w.fx.originRepo, env: GIT_ID },
+      )
+    ).stdout.trim();
+
+  test("GitHub's plain merge of the pull request (two parents, the merged head second) is accepted, attested and released", async () => {
+    const { merge } = await mergeCommitOnGitHub(async (head) => [head]);
+    const ledgerAtMerge = await gitIn(w.fx.originRepo, ["show", `${merge}:${LEDGER}`]);
+    // Before the acceptance the dataset fails the proof, as it does for any merge without trailers.
+    expect(await proof()).toMatchObject({ notAlone: 1, accepted: 0 });
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("Verified by this run");
+    expect(run.all).toContain(
+      `is GitHub's plain merge commit of pull request #${w.row().pr_number}`,
+    );
+    expect(run.all).toContain("its first parent (its second is the merged head");
+    expect(run.all).not.toContain("squash merge of pull request");
+    expect(run.all).toContain("is complete");
+    const row = w.row();
+    expect(row).toMatchObject({ status: "complete", tag_sha: merge, last_error: null });
+    const [accepted, ...more] = acceptances();
+    expect(more).toEqual([]);
+    expect(accepted).toMatchObject({ pr: "n0", merge_sha: merge, reason: REASON });
+    // The one line NEMAR wrote names the merge, and the proof now vouches for exactly that merge.
+    const ledgerOnMain = await gitIn(w.fx.originRepo, ["show", `${await mainHead()}:${LEDGER}`]);
+    expect(ledgerOnMain.startsWith(ledgerAtMerge)).toBe(true);
+    const added = ledgerOnMain.slice(ledgerAtMerge.length).split("\n").filter(Boolean);
+    expect(added).toHaveLength(1);
+    expect(validateLedgerEntry(JSON.parse(added[0] as string) as LedgerEntry)).toMatchObject({
+      action: "repull-merge-accepted",
+      commit: merge,
+    });
+    expect(await proof()).toMatchObject({ notAlone: 0, unmatched: 0, invalid: 0, accepted: 1 });
+  });
+
+  test("a merge commit of three parents: merge-not-squash, by the CLI and by the Worker", async () => {
+    const { merge, main } = await mergeCommitOnGitHub(async (head, tree) => [
+      head,
+      await strangerCommit(tree),
+    ]);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-not-squash");
+    expect(acceptRequests()).toHaveLength(1); // refused by the CLI, before any reason was sent
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-not-squash",
+    });
+    await nothingWritten(merge);
+    expect(main).not.toBe(merge);
+  });
+
+  test("two parents whose second is not the merged head: merge-second-parent-foreign, by the CLI and by the Worker", async () => {
+    // The same tree as the gated head, so that the shape is the only thing that is wrong.
+    const { merge } = await mergeCommitOnGitHub(async (_head, tree) => [
+      await strangerCommit(tree),
+    ]);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-second-parent-foreign");
+    expect(acceptRequests()).toHaveLength(1);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-second-parent-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("two parents with the merged head FIRST and main second are not GitHub's merge: refused", async () => {
+    // The order is the rule: the first parent is what the base is compared with.
     await w.restore(gated);
     const origin = w.fx.originRepo;
     const head = w.row().head_sha as string;
@@ -729,7 +836,7 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     const tree = (await gitIn(origin, ["rev-parse", `${head}^{tree}`])).trim();
     const merge = (
       await runCommand(
-        ["git", "commit-tree", tree, "-p", main, "-p", head, "-m", "Merge pull request"],
+        ["git", "commit-tree", tree, "-p", head, "-p", main, "-m", "Merge pull request"],
         { cwd: origin, env: GIT_ID },
       )
     ).stdout.trim();
@@ -740,11 +847,10 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     await tagged();
     const run = await accepting();
     expect(run.exitCode, run.all).toBe(1);
-    expect(run.all).toContain("merge-not-squash");
-    expect(acceptRequests()).toHaveLength(1); // refused by the CLI, before any reason was sent
+    expect(run.all).toContain("merge-second-parent-foreign");
     expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
       status: 409,
-      code: "merge-not-squash",
+      code: "merge-second-parent-foreign",
     });
     await nothingWritten(merge);
   });
