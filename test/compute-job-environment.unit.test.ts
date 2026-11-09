@@ -67,3 +67,18 @@ describe("the help block and the dry-run line say the same paths", () => {
     expect(JOB_ENVIRONMENT_HELP).not.toMatch(/expanse|tapis|\/home\/|\/Users\/|@/i);
   });
 });
+
+describe("third-party compute stays apart from NEMAR's own pipelines", () => {
+  test("no `nemar compute` command takes a first-party option", async () => {
+    const { computeCommand } = await import("../src/commands/compute");
+    const flags: string[] = [];
+    const walk = (cmd: import("commander").Command): void => {
+      for (const o of cmd.options) flags.push(o.long ?? o.short ?? "");
+      for (const sub of cmd.commands) walk(sub);
+    };
+    walk(computeCommand);
+    for (const flag of flags) {
+      expect(flag).not.toMatch(/recipe|pipeline|platform|service|first-party/i);
+    }
+  });
+});

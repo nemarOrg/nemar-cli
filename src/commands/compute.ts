@@ -21,7 +21,7 @@ import {
 import { submitCommand } from "./compute-submit.js";
 
 export const computeCommand = new Command("compute").description(
-  "Use NEMAR compute: ask for access, run jobs, and see your balance, limits, jobs and results",
+  "Use NEMAR compute: ask for access, run your own jobs, and see your balance, limits, jobs and results (NEMAR's own processing is a separate administrator path)",
 );
 
 computeCommand.addCommand(requestAccessCommand);
