@@ -32,6 +32,16 @@ The copy and the canary send the flag, and the write guard refuses a `copy-objec
 ADR 0063 records the same denial for the content-recovery copy.*
 *Annotated 2026-10-29: and by the amendment of that date (#1996): a re-pull merged outside NEMAR's gate is accepted on evidence the CLI and the Worker each read, and the privacy ledger names the accepted merge in a line NEMAR writes, which the fresh-clone proof reads.*
 
+*Annotated 2026-11-09: and by the amendment of that date: the acceptance also takes a merge commit of two parents, when it is GitHub's plain merge of the re-pull's own pull request.*
+*The first parent must be the record's base, or a commit enrichment moved it to, as for a squash.*
+*The second parent must be the head GitHub reports for the merged pull request, which the record's gated head, or an enrichment-shaped descendant of it, already has to be.*
+*The merge's tree must be the re-pull's commit outside `.nemar/**` and `.github/**`, and its effect on the privacy ledger must be nothing or a scrub's appended lines, both unchanged.*
+*Any other shape is refused: no parent or three or more parents with `merge-not-squash`, and two parents whose second is not the merged head (including the head first) with `merge-second-parent-foreign`.*
+*Why: a re-pull merged with GitHub's merge button produced a merge commit that the amendment of 2026-10-29 refused, although its tree was identical to the gated head's, and rewriting `main` was not an option once the tag and the version DOI named it.*
+*The fresh-clone proof reads a merge's first-parent diff, so a `repull-merge-accepted` line that names the merge vouches for it as it does for a squash.*
+*The line keeps the verification word `squash-merge-verified` for both shapes, because a ledger validator already deployed accepts that word and no other, and the line names the merge by its full id, so the shape is read from the commit.*
+*One predicate, `classifyMergeParents` in `shared/repull-merge-acceptance.ts`, decides the shape for the CLI and the Worker.*
+
 ## Context
 
 ADR 0006 fixed the policy for an upstream re-pull and left the machinery to epic #1046.
@@ -919,6 +929,7 @@ It does so only when that commit carries decision 2's `Upstream-Snapshot:` and `
 GitHub's default squash message lists each commit of the pull request as a bullet, so the re-pull commit's trailers end up mid-message; the proof reads no trailers in such a merge and fails the dataset with `ledger-commit-not-alone`.
 Phase 6f writes the squash message itself so that it ends with both trailers.
 *Annotated 2026-10-29: a squash merge made without them, with GitHub's own button, passes the proof only when a `repull-merge-accepted` line, which NEMAR's Worker writes after an administrator accepted the merge on evidence, names it (the amendment of 2026-10-29).*
+*Annotated 2026-11-09: the same holds for GitHub's plain merge commit of the pull request, whose first-parent diff is the one the proof reads (the amendment of 2026-11-09).*
 Neither scrub word can be typed: `ledger-cli.ts append` refuses `import-scrubbed` and `repull-scrubbed`, which only the scrub that wrote them, in the commit that carries what it scrubbed, may write.
 *Annotated 2026-10-29: nor can `repull-merge-accepted`, which only NEMAR's Worker writes (`action-written-by-nemar-only`).*
 Decision 10's retarget of an unreleased import still refuses any line but the importer's own, `repull-scrubbed` included.
