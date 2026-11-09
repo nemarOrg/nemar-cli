@@ -520,3 +520,34 @@ describe("the help says what each exit code means", () => {
     expect(r.stdout).toContain("has no override");
   });
 });
+
+describe("the job environment is documented where a person looks (#2092)", () => {
+  test("submit's help states where data, code and results are", async () => {
+    const r = await run(["submit", "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Job environment (under development");
+    expect(r.stdout).toContain("/data/<id>");
+    expect(r.stdout).toContain("/work/outputs");
+    expect(r.stdout).toContain("$NEMAR_OUT");
+    expect(r.stdout).toContain("Not promised yet:");
+  });
+
+  test("results' and logs' help say what comes back and what the log is", async () => {
+    const results = await run(["results", "--help-all"]);
+    expect(results.stdout).toContain("only regular files under $NEMAR_OUT (/work/outputs)");
+    const logs = await run(["logs", "--help-all"]);
+    expect(logs.stdout).toContain("standard output and standard error");
+  });
+
+  test("a dry run prints the paths, and the JSON answer is unchanged", async () => {
+    put("run.py", "print(1)\n");
+    const human = await run(["submit", ".", "--entry", "run.py", "--dry-run"]);
+    expect(human.exitCode).toBe(0);
+    expect(human.stdout).toContain("Paths:");
+    expect(human.stdout).toContain("/data/<id> (read-only)");
+    expect(human.stdout).toContain("/work/outputs ($NEMAR_OUT)");
+    const json = await run(["submit", ".", "--entry", "run.py", "--dry-run", "--json"]);
+    expect(json.stdout).not.toContain("Paths:");
+    expect(JSON.parse(json.stdout).dry_run).toBe(true);
+  });
+});

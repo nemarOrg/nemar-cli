@@ -83,7 +83,8 @@ export function lastLines(text: string, n: number): string {
 
 const LOGS_HELP = `
 Description:
-  Prints the log of one of your jobs (what the job wrote to its output): at most the FIRST 1 MiB, with a
+  Prints the log of one of your jobs (what your code wrote to standard output and standard error, not the
+  files it made, which nemar compute results lists): at most the FIRST 1 MiB, with a
   note on standard error when it was cut. A job that has not started has no log yet. A running job's log
   is read as it is now. --tail <n> keeps only the last n lines of what was returned.
 
@@ -161,6 +162,10 @@ Description:
   overwritten (it is reported) unless you pass --force. Nothing is written outside <dir>, through a
   symbolic link or otherwise, and a link that is not https, or that redirects, is refused. Two results whose
   names differ only in case cannot both be written on a case-insensitive disk: the later one is reported.
+
+  What a job returns: only regular files under $NEMAR_OUT (/work/outputs) inside the job. Anything else
+  the job leaves in /work or /tmp is discarded, and a symbolic link or special file is deleted. See
+  nemar compute submit --help-all for the job environment.
 
   The links are BEARER links: anyone who holds one can download that file until it expires, seven days
   after it was made. This command prints no link unless you ask with --json; keep them private. --renew
