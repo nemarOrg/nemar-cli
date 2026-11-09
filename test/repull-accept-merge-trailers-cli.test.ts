@@ -763,17 +763,20 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
       )
     ).stdout.trim();
 
-  test("GitHub's plain merge of the pull request (two parents, the merged head second) is accepted, attested and released", async () => {
-    const { merge } = await mergeCommitOnGitHub(async (head) => [head]);
+  test("a plain merge of the pull request (two parents, the merged head second) is accepted, attested and released", async () => {
+    await w.restore(gated);
+    const merge = await w.mergeOnGitHub({ method: "merge" });
+    expect(
+      (await gitIn(w.fx.originRepo, ["rev-list", "--parents", "-n", "1", merge])).trim().split(" "),
+    ).toHaveLength(3);
+    await tagged();
     const ledgerAtMerge = await gitIn(w.fx.originRepo, ["show", `${merge}:${LEDGER}`]);
     // Before the acceptance the dataset fails the proof, as it does for any merge without trailers.
     expect(await proof()).toMatchObject({ notAlone: 1, accepted: 0 });
     const run = await accepting();
     expect(run.exitCode, run.all).toBe(0);
     expect(run.all).toContain("Verified by this run");
-    expect(run.all).toContain(
-      `is GitHub's plain merge commit of pull request #${w.row().pr_number}`,
-    );
+    expect(run.all).toContain(`is a plain merge commit of pull request #${w.row().pr_number}`);
     expect(run.all).toContain("its first parent (its second is the merged head");
     expect(run.all).not.toContain("squash merge of pull request");
     expect(run.all).toContain("is complete");
@@ -794,8 +797,93 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
     expect(await proof()).toMatchObject({ notAlone: 0, unmatched: 0, invalid: 0, accepted: 1 });
   });
 
+  test("a plain merge on a main that enrichment moved is accepted, said as a parent moved by enrichment", async () => {
+    await w.restore(gated);
+    await w.commitOnto(
+      "refs/heads/main",
+      ".nemar/metadata.json",
+      await enrichedMetadata(w.fx.originRepo, "refs/heads/main"),
+      "Update NEMAR metadata",
+    );
+    const merge = await w.mergeOnGitHub({ method: "merge" });
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(0);
+    expect(run.all).toContain("moved by enrichment only");
+    expect(run.all).toContain("is a plain merge commit");
+    expect(w.row()).toMatchObject({ status: "complete", merge_sha: merge });
+    expect(await proof()).toMatchObject({ notAlone: 0, unmatched: 0, accepted: 1 });
+  });
+
+  test("a plain merge whose first parent is main moved by anything but enrichment: merge-parent-foreign, by the CLI and by the Worker", async () => {
+    await w.restore(gated);
+    await w.commitOnto("refs/heads/main", "README.md", "Changed by hand on main.\n");
+    const merge = await w.mergeOnGitHub({ method: "merge" });
+    await tagged();
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-parent-foreign");
+    expect(acceptRequests()).toHaveLength(1);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-parent-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a plain merge of a head enrichment moved is accepted; of a head moved by any other commit is refused", async () => {
+    await w.restore(gated);
+    const branch = `refs/heads/${w.row().branch}`;
+    await w.commitOnto(
+      branch,
+      ".nemar/metadata.json",
+      await enrichedMetadata(w.fx.originRepo, branch),
+      "Update NEMAR metadata",
+    );
+    await w.mergeOnGitHub({ method: "merge" });
+    await tagged();
+    const ok = await accepting();
+    expect(ok.exitCode, ok.all).toBe(0);
+    expect(ok.all).toContain("which enrichment moved the recorded head");
+    expect(w.row().status).toBe("complete");
+
+    await w.restore(gated);
+    await w.commitOnto(branch, "README.md", "Changed by hand on the release branch.\n");
+    const merge = await w.mergeOnGitHub({ method: "merge" });
+    await tagged();
+    const foreign = await accepting();
+    expect(foreign.exitCode, foreign.all).toBe(1);
+    expect(foreign.all).toContain("merge-head-foreign");
+    expect(acceptRequests()).toHaveLength(1);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-head-foreign",
+    });
+    await nothingWritten(merge);
+  });
+
+  test("a plain merge whose tree is not the re-pull's commit: merge-tree-mismatch, by the CLI and by the Worker", async () => {
+    await w.restore(gated);
+    const merge = await w.mergeOnGitHub({ method: "merge" });
+    await tagged();
+    expect((await resume()).exitCode).toBe(3); // records the merge; refuses merge-trailers
+    // The record's synthesized commit, as if it were another: the base's.
+    const base = w.row().base_sha;
+    const baseTree = (await gitIn(w.fx.originRepo, ["rev-parse", `${base}^{tree}`])).trim();
+    w.db().run("UPDATE upstream_repulls SET synth_sha = ?, synth_tree = ?", [base, baseTree]);
+    const run = await accepting();
+    expect(run.exitCode, run.all).toBe(1);
+    expect(run.all).toContain("merge-tree-mismatch");
+    await nothingWritten(merge);
+    expect(await acceptRoute({ pr: "n0", merge_sha: merge, reason: REASON })).toEqual({
+      status: 409,
+      code: "merge-tree-mismatch",
+    });
+    await nothingWritten(merge);
+  });
+
   test("a merge commit of three parents: merge-not-squash, by the CLI and by the Worker", async () => {
-    const { merge, main } = await mergeCommitOnGitHub(async (head, tree) => [
+    const { merge } = await mergeCommitOnGitHub(async (head, tree) => [
       head,
       await strangerCommit(tree),
     ]);
@@ -808,7 +896,6 @@ describe.skipIf(!awsInstalled)("a merge made outside the gate", () => {
       code: "merge-not-squash",
     });
     await nothingWritten(merge);
-    expect(main).not.toBe(merge);
   });
 
   test("two parents whose second is not the merged head: merge-second-parent-foreign, by the CLI and by the Worker", async () => {
