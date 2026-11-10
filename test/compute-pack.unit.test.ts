@@ -1,7 +1,8 @@
 /**
  * The bundle packer (epic #2021 phase D3b, #2024; `src/lib/compute/pack.ts`): real folders on a real disk,
- * the real archive, and Python's own standard-library `tarfile` (3.9, under `uv run --no-project`) reading
- * it back. Nothing is stood in for.
+ * the real archive, read back two ways that share no code with the packer: a strict ustar reader written in
+ * this file (it checks every header checksum), and the system `tar` listing the names. Nothing is stood in
+ * for, and nothing here needs Python.
  *
  * What is pinned:
  *  - what is left out (the ignore table) and what is counted as left out;
@@ -9,7 +10,7 @@
  *  - the Worker's caps are refused here, with the Worker's word, by the one shared rule: the file count,
  *    the per-file size, the running total, an unsafe path, a hidden traversal, an entry that is not there;
  *  - the same input makes the same bytes, whatever the clock, the file times or the folder's own name;
- *  - Python reads the archive and finds exactly the manifest's files, sizes, digests and modes.
+ *  - an independent reader finds exactly the manifest's files, sizes, digests and modes.
  * The same refusals by the Worker itself, with the same constants, are `compute-pack-worker.test.ts`.
  */
 
@@ -341,31 +342,92 @@ describe("the archive is deterministic", () => {
   });
 });
 
-/** The archive read by Python 3.9's standard library, as JSON on its standard output. */
-function readWithPython(archive: Uint8Array): Array<Record<string, unknown>> {
-  const path = join(root, `a${++counter}.tar.gz`);
-  writeFileSync(path, archive);
-  const script = [
-    "import hashlib, json, sys, tarfile",
-    "out = []",
-    "with tarfile.open(sys.argv[1], 'r:gz', encoding='utf-8') as t:",
-    "    for m in t:",
-    "        d = {'name': m.name, 'size': m.size, 'mode': m.mode, 'uid': m.uid, 'gid': m.gid,",
-    "             'uname': m.uname, 'gname': m.gname, 'mtime': m.mtime, 'isreg': m.isreg(), 'isdir': m.isdir()}",
-    "        if m.isreg():",
-    "            d['sha256'] = hashlib.sha256(t.extractfile(m).read()).hexdigest()",
-    "        out.append(d)",
-    "print(json.dumps(out))",
-  ].join("\n");
-  const run = Bun.spawnSync(
-    ["uv", "run", "--no-project", "--python", "3.9", "python", "-I", "-c", script, path],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  if (run.exitCode !== 0) throw new Error(`python failed: ${run.stderr.toString()}`);
-  return JSON.parse(run.stdout.toString());
+/** One member of an archive, as an independent ustar reader sees it. */
+type Member = {
+  name: string;
+  size: number;
+  mode: number;
+  uid: number;
+  gid: number;
+  uname: string;
+  gname: string;
+  mtime: number;
+  isreg: boolean;
+  isdir: boolean;
+  sha256?: string;
+};
+
+/**
+ * The archive read by a ustar parser that shares no code with the packer. It checks every header's checksum,
+ * joins the `prefix` field to the name as a reader must, stops at the two zero blocks, and refuses anything
+ * that is not a regular file or a directory.
+ */
+function readArchive(archive: Uint8Array): Member[] {
+  const tar = Bun.gunzipSync(archive);
+  const text = new TextDecoder("utf-8", { fatal: true });
+  const field = (block: Uint8Array, at: number, len: number): string => {
+    const raw = block.subarray(at, at + len);
+    const nul = raw.indexOf(0);
+    return text.decode(nul < 0 ? raw : raw.subarray(0, nul));
+  };
+  const octal = (block: Uint8Array, at: number, len: number): number =>
+    Number.parseInt(field(block, at, len).trim() || "0", 8);
+  const members: Member[] = [];
+  let offset = 0;
+  while (offset + 512 <= tar.length) {
+    const block = tar.subarray(offset, offset + 512);
+    if (block.every((b) => b === 0)) break;
+    const stored = octal(block, 148, 8);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : (block[i] as number);
+    if (sum !== stored) throw new Error(`bad header checksum at ${offset}`);
+    if (field(block, 257, 6) !== "ustar") throw new Error(`not ustar at ${offset}`);
+    const prefix = field(block, 345, 155);
+    const name = prefix ? `${prefix}/${field(block, 0, 100)}` : field(block, 0, 100);
+    const type = String.fromCharCode(block[156] as number);
+    const isreg = type === "0" || type === "\0";
+    const isdir = type === "5";
+    if (!isreg && !isdir)
+      throw new Error(`member ${name} is neither a file nor a folder (${type})`);
+    const size = octal(block, 124, 12);
+    const member: Member = {
+      name: isdir && name.endsWith("/") ? name.slice(0, -1) : name,
+      size,
+      mode: octal(block, 100, 8),
+      uid: octal(block, 108, 8),
+      gid: octal(block, 116, 8),
+      uname: field(block, 265, 32),
+      gname: field(block, 297, 32),
+      mtime: octal(block, 136, 12),
+      isreg,
+      isdir,
+    };
+    offset += 512;
+    if (isreg) {
+      member.sha256 = createHash("sha256")
+        .update(tar.subarray(offset, offset + size))
+        .digest("hex");
+      offset += Math.ceil(size / 512) * 512;
+    }
+    members.push(member);
+  }
+  return members;
 }
 
-describe("Python's tarfile (3.9) reads the archive back", () => {
+/** The names the system `tar` lists for the archive: a second reader, written by someone else. */
+function listWithSystemTar(archive: Uint8Array): string[] {
+  const path = join(root, `a${++counter}.tar.gz`);
+  writeFileSync(path, archive);
+  const run = Bun.spawnSync(["tar", "-tzf", path], { stdout: "pipe", stderr: "pipe" });
+  if (run.exitCode !== 0) throw new Error(`tar failed: ${run.stderr.toString()}`);
+  return run.stdout
+    .toString()
+    .split("\n")
+    .filter(Boolean)
+    .map((n) => (n.endsWith("/") ? n.slice(0, -1) : n));
+}
+
+describe("an independent reader reads the archive back", () => {
   test("regular files and folders only, sorted, owner and times zero, the manifest matches the contents", () => {
     const dir = folder({
       "run.py": "print(1)\n",
@@ -377,7 +439,8 @@ describe("Python's tarfile (3.9) reads the archive back", () => {
     chmodSync(join(dir, "run.py"), 0o755);
     const r = packCollected(collect(dir), { entry: "run.py" });
     if (!r.ok) throw new Error("not packed");
-    const members = readWithPython(r.bundle.archive);
+    const members = readArchive(r.bundle.archive);
+    expect(listWithSystemTar(r.bundle.archive)).toEqual(members.map((m) => m.name));
 
     expect(members.every((m) => m.isreg === true || m.isdir === true)).toBe(true);
     expect(members.map((m) => m.name)).toEqual([
@@ -418,7 +481,7 @@ describe("Python's tarfile (3.9) reads the archive back", () => {
     };
     const r = packCollected(collect(folder(files)), { entry: "run.py" });
     if (!r.ok) throw new Error("not packed");
-    const names = readWithPython(r.bundle.archive)
+    const names = readArchive(r.bundle.archive)
       .filter((m) => m.isreg)
       .map((m) => m.name);
     expect(names).toEqual(r.bundle.manifest.files.map((f) => f.path));

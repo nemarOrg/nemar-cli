@@ -38,6 +38,7 @@ import {
 import { ApiError, MaintenanceError } from "../lib/api/errors.js";
 import { EXIT_STILL_LIVE, failCompute, failText, refuseLocally } from "../lib/compute/fail.js";
 import type { SpecFlags } from "../lib/compute/header.js";
+import { JOB_ENVIRONMENT_HELP, JOB_PATHS_SUMMARY } from "../lib/compute/job-environment.js";
 import { type Prepared, prepareSubmission } from "../lib/compute/prepare.js";
 import { uploadBundle } from "../lib/compute/upload.js";
 import { READ_TIMEOUT_MS, type WaitOutcome, waitForJob } from "../lib/compute/wait.js";
@@ -189,6 +190,7 @@ function printDryRun(prepared: Prepared, json: boolean): void {
   if (spec.datasets.length > 0) {
     out(`  Datasets:   ${spec.datasets.map((d) => `${d.id}@${d.version}`).join(", ")}`);
   }
+  out(`  Paths:      ${JOB_PATHS_SUMMARY}`);
   const command = spec.command ?? spec.args;
   if (command.length > 0)
     out(`  ${spec.command ? "Command" : "Arguments"}:  ${command.map(plain).join(" ")}`);
@@ -275,6 +277,8 @@ Description:
   With --json standard output is only the answer: NEMAR's answer to the submission (or, with --wait, the
   job's last state); with --dry-run it is the request that would have been sent. Failures are on standard
   error.
+
+${JOB_ENVIRONMENT_HELP}
 
 Exit codes:
   0  the job was submitted (with --wait: it finished); with --dry-run, what would be sent was printed.
