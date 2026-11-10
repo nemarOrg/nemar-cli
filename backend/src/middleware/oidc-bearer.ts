@@ -6,10 +6,10 @@
  * it (`resolveApiKeyUser` answers `oidc_token` for an `nmo_` bearer). This middleware is the
  * acceptance: a route that serves a scope names it here, and it is the only thing in the Worker that
  * lets an access token AUTHENTICATE a request. (Revocation and introspection read tokens too, as form
- * parameters a client passes about a token, never as the credential of the request.) Today it is on
- * `/oauth/userinfo` (`openid`); the compute routes that serve
- * `compute.*` are the compute epics', and `test/oidc-token-allowlist.test.ts` fails when this
- * middleware appears on a route it does not list.
+ * parameters a client passes about a token, never as the credential of the request.) It is on
+ * `/oauth/userinfo` (`openid`) and, in `routes/compute/auth.ts`, on three instances for the compute
+ * routes that serve `compute.*` (`compute.read`, `compute.stats` and `compute.reserve`), and
+ * `test/oidc-token-allowlist.test.ts` fails when this middleware appears on a route it does not list.
  *
  * WHAT IT CHECKS, READ LIVE AT EVERY CALL (`TOKEN_LOOKUP_SQL`): the token is an `nmo_at_` access
  * token NEMAR issued, not revoked and not expired, its client is active, and, for a token that names
