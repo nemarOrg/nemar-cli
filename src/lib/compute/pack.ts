@@ -16,7 +16,7 @@
  * counted in `skipped`, so the command can say so.
  *
  * WHAT THE ARCHIVE IS. A ustar archive of regular files and directories only, gzip-compressed with
- * `Bun.gzipSync` (no dependency; Python 3.9's `tarfile` reads it). The same input makes the same bytes:
+ * `Bun.gzipSync` (no dependency; any standard tar reader reads it). The same input makes the same bytes:
  * entries sorted by name (UTF-8 byte order), owner and group zero and unnamed, times zero, mode 0644 or
  * 0755 (the executable bit survives: an image job runs `/code/<entry>` directly), and the gzip header's
  * time and operating-system bytes written as zero and 255. The archive's SHA-256 is of the compressed
