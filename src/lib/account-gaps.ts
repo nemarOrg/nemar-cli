@@ -19,6 +19,7 @@
 
 import chalk from "chalk";
 import { ACCOUNT_COPY } from "../../shared/contract/account-copy.js";
+import { COMPUTE_TERMS_PUBLISHED } from "../../shared/contract/compute-terms.js";
 import {
   type ProfileGapWireEntry,
   type ResolvedProfileGap,
@@ -124,4 +125,43 @@ export function printGapList(
   for (const gap of gaps) {
     console.log(`${indent}  ${chalk.yellow(gap.label)} ${profileGapTail(gap)}`);
   }
+}
+
+/**
+ * What `nemar auth signup` does about the institution (epic #2021 phase D1).
+ *
+ * The institution stops compute access alone, so it is OFFERED, never required, and only once the
+ * compute terms are published: while `COMPUTE_TERMS_PUBLISHED` is false a compute request answers
+ * 503 `terms_unpublished`, and asking a new account for something "needed for compute access" would
+ * point it at a thing it cannot do (the owner's ruling, the same one `computeProfileGaps` applies to
+ * `profile_gaps`). `published` defaults to the constant and is a parameter only so a test can show
+ * both branches.
+ *
+ *   `flag`    `--affiliation` was given: it is the person's own answer, so it is saved whatever the
+ *             terms say (a flag nobody asked for is not a nudge, and dropping it silently would be
+ *             worse than saving a profile field).
+ *   `prompt`  a terminal, the gap is on the list, and the terms are published: ask, Enter skips.
+ *   `none`    everything else: no prompt, nothing printed, nothing saved.
+ */
+export function signupAffiliationStep(input: {
+  readonly flag?: string;
+  readonly gapFields: ReadonlySet<string>;
+  readonly interactive: boolean;
+  readonly published?: boolean;
+}): "flag" | "prompt" | "none" {
+  if (input.flag) return "flag";
+  const published = input.published ?? COMPUTE_TERMS_PUBLISHED;
+  return published && input.interactive && input.gapFields.has("affiliation") ? "prompt" : "none";
+}
+
+/**
+ * The "Compute access" row of `nemar auth profile`'s "Where to change each" list, or none while the
+ * compute terms are unpublished (see {@link signupAffiliationStep}; `published` is a test seam).
+ */
+export function computeAccessChangeLines(published: boolean = COMPUTE_TERMS_PUBLISHED): string[] {
+  return published
+    ? [
+        `  Compute access         ${chalk.dim("one-time admin approval; nemar compute request-access")}`,
+      ]
+    : [];
 }

@@ -347,7 +347,24 @@ describe("nemar auth profile", () => {
         "Affiliation is missing: needed to request compute access. Set it in Settings or run `nemar auth profile set-affiliation`.",
       );
       expect(result.stdout).toContain("nemar auth profile set-affiliation <institution>");
-      expect(result.stdout).toContain("nemar compute request-access");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("while the compute terms are unpublished, the change list does not point at a compute request", async () => {
+    // Owner decision (epic #2021 phase D1): third-party compute must not confuse anyone before it is
+    // open, and a request answers 503 `terms_unpublished` until then. `COMPUTE_TERMS_PUBLISHED` is
+    // false, so a real `nemar auth profile` run, whatever the account's gaps, says nothing of it.
+    // The published branch is proved on the helper in test/compute-nudges.unit.test.ts.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: false, profile_gaps: [] });
+    try {
+      const result = await runCli(["auth", "profile"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Upload access");
+      expect(result.stdout).not.toContain("Compute access");
+      expect(result.stdout).not.toContain("nemar compute request-access");
     } finally {
       server.stop();
     }

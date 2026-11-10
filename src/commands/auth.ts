@@ -28,7 +28,12 @@ import {
   UPLOAD_ACCESS_WHY_MAX_CHARS,
   UPLOAD_ACCESS_WHY_MIN_CHARS,
 } from "../../shared/contract/user.js";
-import { printGapList, printProfileGaps } from "../lib/account-gaps.js";
+import {
+  computeAccessChangeLines,
+  printGapList,
+  printProfileGaps,
+  signupAffiliationStep,
+} from "../lib/account-gaps.js";
 import {
   type ProfilePatchRequest,
   type UploadAccessRequestResponse,
@@ -732,22 +737,25 @@ async function completeProfile(options: SignupCompletionOptions): Promise<void> 
   }
 
   // The affiliation stops compute access alone (epic #2021 phase D1), not upload access, which is what
-  // this flow is for: so it is OFFERED. A flag sets it; a terminal may answer or press Enter to skip;
-  // with no terminal it is left alone (and the list below still names it) rather than failing a signup
-  // that a script runs.
-  if (gapFields.has("affiliation")) {
-    if (options.affiliation) {
-      patch.affiliation = options.affiliation;
-    } else if (process.stdin.isTTY === true) {
-      const { value } = await inquirer.prompt([
-        {
-          type: "input",
-          name: "value",
-          message: "Institution (needed for compute access; Enter to skip):",
-        },
-      ]);
-      if (String(value).trim()) patch.affiliation = String(value).trim();
-    }
+  // this flow is for: so it is OFFERED, and only once the compute terms are published (see
+  // `signupAffiliationStep`). A flag sets it whatever the terms say; a terminal may answer or press
+  // Enter to skip; with no terminal it is left alone rather than failing a signup that a script runs.
+  const affiliationStep = signupAffiliationStep({
+    flag: options.affiliation,
+    gapFields,
+    interactive: process.stdin.isTTY === true,
+  });
+  if (affiliationStep === "flag") {
+    patch.affiliation = options.affiliation;
+  } else if (affiliationStep === "prompt") {
+    const { value } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "value",
+        message: "Institution (needed for compute access; Enter to skip):",
+      },
+    ]);
+    if (String(value).trim()) patch.affiliation = String(value).trim();
   }
 
   if (Object.keys(patch).length > 0) {
@@ -2057,9 +2065,8 @@ export async function profileAction(): Promise<void> {
   console.log(
     `  Upload access          ${chalk.dim("one-time admin approval; nemar auth request-upload-access")}`,
   );
-  console.log(
-    `  Compute access         ${chalk.dim("one-time admin approval; nemar compute request-access")}`,
-  );
+  // Withheld until the compute terms are published: the request answers 503 until then.
+  for (const line of computeAccessChangeLines()) console.log(line);
   console.log();
   console.log(
     chalk.dim(
