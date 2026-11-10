@@ -10,7 +10,7 @@
  * answers 404 (`onOidcSurface`) rather than a document naming an issuer it is not.
  *
  * THE PROVIDER IS ON ONLY WITH A SECRET. `OIDC_SECRET` encrypts the private signing keys at rest,
- * so with none (or one under 32 characters) there is nothing safe to sign with and every OIDC
+ * so with none (or one that is not `nmsso-` and a body, 32 characters or more: `isOidcSecret`) there is nothing safe to sign with and every OIDC
  * surface answers 404, indistinguishable from a route that does not exist.
  *
  * Pure functions of the bindings and a URL: no I/O, so the tables here are unit-testable without
@@ -24,11 +24,13 @@ import {
   OIDC_JWKS_PATH,
   OIDC_REVOKE_PATH,
   OIDC_SCOPE_NAMES,
-  OIDC_SECRET_MIN_LENGTH,
   OIDC_SIGNING_ALG,
   OIDC_TOKEN_PATH,
   OIDC_USERINFO_PATH,
+  type OidcSecretState,
+  isOidcSecret,
   oidcClaimsSupported,
+  oidcSecretState,
 } from "../../../shared/oidc.js";
 import type { Bindings } from "../types/bindings.js";
 import { appBase } from "./environment.js";
@@ -41,9 +43,27 @@ export function oidcIssuer(env: Pick<Bindings, "API_BASE_URL">): string {
   return (env.API_BASE_URL ?? "").trim().replace(/\/+$/, "");
 }
 
-/** True only when `OIDC_SECRET` is set and at least 32 characters. */
+/**
+ * THE ONE READER OF `OIDC_SECRET`. The secret when it passes `isOidcSecret` (`nmsso-` and a body, 32
+ * characters or more), otherwise null: a value in any other form behaves exactly like an unset one,
+ * and is never used, not even as a fallback. Everything that signs, encrypts, decrypts or MACs for
+ * the provider takes its secret from here, so no code path can use a value that fails the check.
+ */
+export function oidcSecret(env: Pick<Bindings, "OIDC_SECRET">): string | null {
+  return isOidcSecret(env.OIDC_SECRET) ? env.OIDC_SECRET : null;
+}
+
+/** True only when `OIDC_SECRET` is valid (`oidcSecret` is not null). */
 export function oidcEnabled(env: Pick<Bindings, "OIDC_SECRET">): boolean {
-  return typeof env.OIDC_SECRET === "string" && env.OIDC_SECRET.length >= OIDC_SECRET_MIN_LENGTH;
+  return oidcSecret(env) !== null;
+}
+
+/**
+ * `ok`, `unset` or `malformed`: a fixed word for the owner, never the value or its length. Only the
+ * owner routes say it (`routes/admin/oidc.ts`); every public surface stays an ordinary 404.
+ */
+export function oidcSecretStatus(env: Pick<Bindings, "OIDC_SECRET">): OidcSecretState {
+  return oidcSecretState(env.OIDC_SECRET);
 }
 
 /** The issuer's hostname, or null when `API_BASE_URL` is not a URL. */
@@ -74,7 +94,19 @@ export function onOidcSurface(
   requestUrl: string,
   routedPath?: string,
 ): boolean {
-  if (!oidcEnabled(env)) return false;
+  return oidcEnabled(env) && onIssuerHost(env, requestUrl, routedPath);
+}
+
+/**
+ * The host and mount half of {@link onOidcSurface}: the request names the issuer's host and is not
+ * under the legacy mount. The owner routes use it alone to tell a request that WOULD be on the
+ * surface (so the secret is what is missing) from one that never could be.
+ */
+export function onIssuerHost(
+  env: Pick<Bindings, "API_BASE_URL">,
+  requestUrl: string,
+  routedPath?: string,
+): boolean {
   const issuerHost = issuerHostname(env);
   if (issuerHost === null) return false;
   let request: URL;

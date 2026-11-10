@@ -196,7 +196,7 @@ The full rules are `AGENTS.md`, `.rules/` and the ADRs; these are the ones this 
   done; unset v
   ```
 
-  Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder and are copied the same way. No AWS bucket or IAM user is needed for compute.
+  Later compute secrets (Tapis credentials, the ACCESS attributes key, `OIDC_SECRET`) go in the same folder and are copied the same way. `OIDC_SECRET` must be `nmsso-` followed by `openssl rand -hex 32` (70 characters, different for dev and production); any other form leaves the OpenID Connect provider off (ADR 0119 addendum, 2026-11-07). No AWS bucket or IAM user is needed for compute.
 - [ ] Set the Tapis credentials as Worker secrets for dev and production once the tenant exists.
 - [ ] Generate the ACCESS gateway attributes key for the community account and set it as the Worker secret `ACCESS_GATEWAY_ATTRIBUTES_KEY`, and set the name ACCESS knows the cluster by as `ACCESS_RESOURCE_NAME` (design question 14). Confirm the header that carries the key and the body's spelling against the real interface: both are unverified constants in `backend/src/services/access-attributes.ts`.
 - [ ] Take the policies and the official-request procedure (Epic D, phase 5) to UC San Diego counsel.

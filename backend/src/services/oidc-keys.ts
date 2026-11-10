@@ -58,17 +58,17 @@ import {
 import { applyEditWithAudit, auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { EncryptionError, decrypt, encrypt } from "./encryption.js";
-import { oidcEnabled } from "./oidc-config.js";
+import { oidcSecret } from "./oidc-config.js";
 import { randomHex, toBase64Url } from "./oidc-encoding.js";
 
 // ---------------------------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------------------------
 
-/** `OIDC_SECRET` is unset or too short: nothing safe can be signed or stored. */
+/** `OIDC_SECRET` is unset or not in the `nmsso-` form: nothing safe can be signed or stored. */
 export class OidcNotConfiguredError extends Error {
   constructor() {
-    super("OIDC_SECRET is not set, or is shorter than 32 characters");
+    super("OIDC_SECRET is not set, or is not in the required form");
     this.name = "OidcNotConfiguredError";
   }
 }
@@ -93,8 +93,9 @@ export class KeyMismatchError extends Error {
 }
 
 function requireSecret(env: Pick<Bindings, "OIDC_SECRET">): string {
-  if (!oidcEnabled(env)) throw new OidcNotConfiguredError();
-  return env.OIDC_SECRET as string;
+  const secret = oidcSecret(env);
+  if (secret === null) throw new OidcNotConfiguredError();
+  return secret;
 }
 
 const textBytes = (s: string): Uint8Array => new TextEncoder().encode(s);

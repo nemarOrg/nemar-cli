@@ -135,6 +135,7 @@ describe("the token endpoint exists only on the OIDC surface with the __Host- fl
       ["flag off", "/oauth/token", { HOST_PREFIXED_SESSION_COOKIE: undefined }],
       ["flag not exactly 1", "/oauth/token", { HOST_PREFIXED_SESSION_COOKIE: "true" }],
       ["no secret", "/oauth/token", { OIDC_SECRET: undefined }],
+      ["a secret not in the nmsso- form", "/oauth/token", { OIDC_SECRET: "s".repeat(70) }],
       ["legacy mount", "/nemar/oauth/token", {}],
     ] as const) {
       const res = await formPost(h, path, form, { authorization: auth, env });

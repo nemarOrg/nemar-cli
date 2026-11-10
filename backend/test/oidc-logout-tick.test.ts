@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { DEV_CRON_ALLOWLIST } from "../src/index";
 import {
   LOGOUT_ROWS_PER_RUN,
+  attemptDueLogouts,
   logoutTickLogLine,
   runOidcLogoutRetryTick,
 } from "../src/services/oidc-logout";
@@ -36,6 +37,7 @@ import {
 import { rotateKeys } from "./helpers/oidc-flow";
 import { type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 import { type LogoutStandin, startLogoutStandin } from "./helpers/oidc-logout-standin";
+import { BAD_OIDC_SECRETS } from "./helpers/oidc-secret";
 
 let h: OidcHarness;
 let partner: LogoutStandin;
@@ -276,5 +278,92 @@ describe("the wiring", () => {
 
   test("the name does not carry the word sweep, which would ask cron-sweep-wiring for an entry", () => {
     expect("runOidcLogoutRetryTick".toLowerCase()).not.toContain("sweep");
+  });
+});
+
+describe("with no usable OIDC_SECRET the tick claims nothing", () => {
+  // A claim costs an attempt and signing fails without a secret, so five ticks would end a pending
+  // delivery for good. The early return is in `attemptDueLogouts`, which the tick, the first attempt
+  // and the test-account sweep all pass through.
+  const bad = BAD_OIDC_SECRETS.filter(([what]) =>
+    [
+      "unset",
+      "empty",
+      "null",
+      "long but no prefix",
+      "an uppercase prefix",
+      "a trailing newline",
+    ].includes(what),
+  );
+
+  test.each(bad.map(([what, value]) => [what, value] as const))(
+    "%s: attempts stay 0 across ticks, nothing is sent, nothing is pruned, one fixed-word warning each",
+    async (_what, value) => {
+      queue(3);
+      // A finished delivery past its retention window: the prune would delete it.
+      h.db
+        .query(
+          `INSERT INTO oidc_logout_deliveries (client_id, sub, reason, status, attempts, next_attempt_at, sent_at, created_at)
+           VALUES (?, ?, 'account_revoked', 'sent', 1, NULL, datetime('now', '-400 days'), datetime('now', '-400 days'))`,
+        )
+        .run(clientRow, sub);
+      const before = deliveries(h).map((d) => [d.id, d.status, d.attempts]);
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        for (let tick = 0; tick < 7; tick++) {
+          const tally = await runOidcLogoutRetryTick(
+            { ...production(), OIDC_SECRET: value } as never,
+            { fetchImpl: viaStandin() },
+          );
+          expect(tally?.skipped).toMatch(/^oidc_secret_(unset|malformed)$/);
+          expect(tally).toMatchObject({ examined: 0, sent: 0, retried: 0, failed: 0, pruned: 0 });
+          expect(logoutTickLogLine(tally as never)).toBeNull();
+        }
+        const lines = warn.mock.calls.map((c) => String(c[0]));
+        expect(lines).toHaveLength(7);
+        for (const line of lines) {
+          expect(line).toMatch(/^\[oidc-logout\] skipped reason=oidc_secret_(unset|malformed)$/);
+          if (typeof value === "string" && value !== "") expect(line).not.toContain(value);
+        }
+      } finally {
+        warn.mockRestore();
+      }
+      expect(deliveries(h).map((d) => [d.id, d.status, d.attempts])).toEqual(before);
+      expect(asked).toEqual([]);
+      expect(partner.requests.length).toBe(0);
+    },
+  );
+
+  test("the first attempt after an ending is skipped the same way, and the word names the state", async () => {
+    queue(1);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const unset = await attemptDueLogouts({ ...h.env, OIDC_SECRET: undefined } as never, {
+        fetchImpl: viaStandin(),
+      });
+      const malformed = await attemptDueLogouts(
+        { ...h.env, OIDC_SECRET: "x".repeat(70) } as never,
+        {
+          fetchImpl: viaStandin(),
+        },
+      );
+      expect(unset.skipped).toBe("oidc_secret_unset");
+      expect(malformed.skipped).toBe("oidc_secret_malformed");
+    } finally {
+      warn.mockRestore();
+    }
+    expect(deliveries(h).map((d) => d.attempts)).toEqual([0]);
+  });
+
+  test("once the secret is valid again the pending delivery is sent, with all five attempts still unspent", async () => {
+    queue(1);
+    await runOidcLogoutRetryTick({ ...production(), OIDC_SECRET: undefined } as never, {
+      fetchImpl: viaStandin(),
+    });
+    expect(deliveries(h).map((d) => d.attempts)).toEqual([0]);
+    const tally = await runOidcLogoutRetryTick(production(), { fetchImpl: viaStandin() });
+    expect(tally).toMatchObject({ examined: 1, sent: 1 });
+    expect(tally?.skipped).toBeUndefined();
+    expect(count("sent")).toBe(1);
   });
 });

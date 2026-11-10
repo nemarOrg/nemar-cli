@@ -13,6 +13,84 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.32 - 2026-11-09
+
+A re-pull merged with GitHub's merge button using the merge method, which makes a two-parent commit, can now be accepted.
+It changes the Worker's acceptance route and the CLI; it carries no migration, sets no Worker variable or secret, and leaves the re-pull switches and caps as they were.
+
+### Fixed
+
+- **`--accept-merge-trailers` takes a plain merge commit of the re-pull's own pull request (#2108).**
+  The first use of the acceptance, on on000117 (re-pull #5), met a merge made with the merge method: two parents, the record's base and the pull request's head.
+  The CLI and the Worker both refused it as `merge-not-squash`, so the record stayed at `merged` and the dataset failed the fresh-clone privacy proof with no way to finish.
+  Both now accept one parent, or two with the merged head second, through one predicate, `classifyMergeParents`.
+  Every other check is unchanged: the pull request, the base, the head, the tree outside `.nemar/**` and `.github/**`, the effect on the privacy ledger, and the administrator-only rule.
+  Three or more parents stay `merge-not-squash`, and two parents whose second is not the merged head are the new `merge-second-parent-foreign`.
+  The acceptance line keeps the verification word `squash-merge-verified` for both shapes, because a ledger validator already deployed accepts that word and no other.
+  ADR 0111 has an amendment section for it.
+
+## 0.10.31 - 2026-11-08
+
+CI and release tooling only, brought from `dev` so that `main` stops needing an administrator override and stops being slower than `dev`.
+It carries no migration, no change to the Worker or the CLI, sets no variable or secret, and leaves the re-pull switches as they were.
+
+### Changed
+
+- **`main` has `dev`'s CI workflows (#2106 and the work before it on `dev`).**
+  `integration-dev` runs as six shards balanced by `test/integration-timings.json` (the unsharded job took 26 minutes), and the production deploy gate runs the same six `unit-pure` shards as the pull request check plus a static leg for typecheck, lint and the process tier, so a test that depends on file order fails the pull request and not the release (what stopped 0.10.28's deploy).
+  The `process-tier` job and its lister, `scripts/ci/process-files.sh`, now exist on `main`, so every required check of branch protection runs on a pull request to `main`; until now `process-tier` did not, and each of 0.10.28 to 0.10.30 had to be merged with an override.
+  The two composite actions `install-git-annex` and `german-locale` and the classifier scripts come with them.
+  `oidc-conformance.yml` and its scripts stay on `dev` with the sign-in epic.
+- **`sync-dev` resolves a hotfix's version conflict (#2106).**
+  A hotfix released from `main` conflicts with `dev` on `package.json` and `backend/package.json`.
+  `scripts/ci/sync-dev-merge.sh` now resolves a conflict whose every conflicting hunk is a `"version"` line to `main`'s side with a three-way merge, which keeps what `dev` changed elsewhere in those files, and aborts for a person on anything else.
+
+## 0.10.30 - 2026-11-08
+
+The first two production re-pulls met a second fault in the release step, one the stand-ins' tags hid.
+It carries no migration, sets no Worker variable or secret, and leaves the re-pull switches and caps off.
+
+### Fixed
+
+- **Release sends the commit an annotated tag names, not the tag object (#2101).**
+  After 0.10.28 the Worker could read the tag, and `nemar admin repull resume` was then refused as `tag-mismatch`: `git ls-remote origin refs/tags/v2.0.0` lists only the annotated tag's own object, and shows the peeled commit line only when `refs/tags/v2.0.0^{}` is also asked for by name.
+  The release read and the upstream-tag check in the executor now ask for both.
+  The test world's tags are annotated now, as the dataset workflow's are, so the suites read the peeled line.
+  An automatic re-pull runs the published CLI, so this release is the one that has to ship before the switches go on.
+
+## 0.10.29 - 2026-11-08
+
+0.10.28's production deploy stopped at its test gate, so this release carries the same fix with the gate made passable.
+It carries no migration, sets no Worker variable or secret, and leaves the re-pull switches and caps off.
+
+### Fixed
+
+- **The re-pull help test no longer depends on test file order (#2104).**
+  `src/lib/help.ts` replaces every "after" help text with a one-line hint once it is loaded, so the deploy gate, which runs the pure tier in one process and loads that module first, failed four cases of `test/repull-command-text.unit.test.ts` that the sharded pull request run passed.
+  The test now reads each help through the real entry point in its own process with `--help-all`.
+  There is no change to the CLI or the Worker beyond a comment on the tag read; 0.10.28's fix (the tag is read by its full ref) is what this release deploys.
+
+## 0.10.28 - 2026-11-08
+
+A one-fix release, cut from `main` and not from `dev`, so that the first two production re-pulls can be released.
+It carries no migration, sets no Worker variable or secret, and leaves the re-pull switches and caps as they were (off and at their defaults).
+It also carries the sign-in consent copy strings that the website's `staging` branch already holds (below), because the release check compares the two repositories' copy tables and fails a pull request to `main` until they agree (ADR 0046).
+
+### Fixed
+
+- **A merged re-pull can be released: the tag is read by its full ref (#2101, #2102).**
+  The release step read the tag's commit at `commits/tags/<tag>`, and GitHub answers 422 to that spelling, so `nemar admin repull resume` refused every merged re-pull with `tag-missing` although the tag existed and pointed at the merge commit.
+  It happened to on003645 and on004362, whose records stopped at `merged`.
+  The read is now `commits/refs/tags/<tag>`.
+  Both re-pull GitHub stand-ins had accepted the short form, which is why the suites passed; they now refuse it as GitHub does, and a direct test on each pins that.
+  Until this release an automatic re-pull would have merged, minted a version DOI, and then failed to release.
+
+### Changed
+
+- **The account copy table mirrors the website's sign-in copy (ADR 0119, from the sign-in epic #2014).**
+  `shared/contract/account-copy.ts` gains the `oidc.consent.*`, `oidc.rule.*` and `oidc.error.*` strings and the `{client}` and `{redirect_host}` placeholders, taken unchanged from `dev`.
+  Nothing on `main` reads them yet, so no behavior changes; the sign-in feature itself ships with the release that carries the epic.
+
 ## 0.10.27 - 2026-10-29
 
 The production canary and the first production re-pulls found three faults that this release fixes, and the release carries the phrase-search rework with them.

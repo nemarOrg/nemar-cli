@@ -80,7 +80,7 @@ import { timingSafeEqual } from "../lib/constant-time.js";
 import type { Bindings } from "../types/bindings.js";
 import { generateGrantCode, hashGrantCode } from "./docs-auth.js";
 import { isFirstPartyRedirect } from "./oidc-clients.js";
-import { oidcIssuer } from "./oidc-config.js";
+import { oidcIssuer, oidcSecret } from "./oidc-config.js";
 import { toBase64Url } from "./oidc-encoding.js";
 import { idTokenHintSubject } from "./oidc-id-token.js";
 import { ORCID_PROVEN_SQL, SIGN_IN_RULE_SQL, signInRuleRefusal } from "./oidc-identity.js";
@@ -420,11 +420,11 @@ export async function verifyAuthAfterMarker(
 }
 
 function requireSecret(env: AuthorizeEnv): string {
-  // The routes are unreachable without it (`oidcEnabled`); this is the statement of that fact.
-  if (typeof env.OIDC_SECRET !== "string" || env.OIDC_SECRET === "") {
-    throw new Error("OIDC_SECRET is not set");
-  }
-  return env.OIDC_SECRET;
+  // The routes are unreachable without a valid one (`oidcEnabled`); this is the statement of that
+  // fact, and it reads through the one accessor, so a value in the wrong form is never used.
+  const secret = oidcSecret(env);
+  if (secret === null) throw new Error("OIDC_SECRET is not set, or is not in the required form");
+  return secret;
 }
 
 // ---------------------------------------------------------------------------------------------

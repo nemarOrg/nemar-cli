@@ -46,6 +46,7 @@ import {
   OWNER_KEY,
   seedUser,
 } from "../backend/test/helpers/oidc-harness";
+import { fakeOidcSecret } from "../backend/test/helpers/oidc-secret";
 import {
   OIDC_FORCE_MIN_NEXT_AGE_MINUTES,
   OIDC_GRANTS,
@@ -56,6 +57,7 @@ import {
   OIDC_SCOPE_NAMES,
   OIDC_SECRET_GRACE_HOURS_DEFAULT,
   OIDC_SECRET_GRACE_HOURS_MAX,
+  OIDC_SECRET_PREFIX,
 } from "../shared/oidc";
 import { endAccountQuestion } from "../src/commands/admin-oidc";
 import { help } from "./help-output";
@@ -570,6 +572,34 @@ describe("who may run it", () => {
     }
     expect(clientRows()).toHaveLength(0);
   });
+
+  test("the command says unset or malformed, a fixed word, and never echoes the value", async () => {
+    signIn(OWNER_KEY);
+    const bad = "rig-oidc-secret-0123456789abcdef0123456789abcdef";
+    for (const [secret, word] of [
+      [undefined, "unset"],
+      ["", "unset"],
+      [bad, "malformed"],
+      [`NMSSO-${"0".repeat(64)}`, "malformed"],
+    ] as const) {
+      extraEnv = { OIDC_SECRET: secret };
+      for (const args of [
+        ["keys", "list"],
+        ["clients", "list"],
+      ]) {
+        const refused = await failsBothWays(args);
+        for (const out of [refused.plain, refused.json]) {
+          expect(out).toContain(
+            word === "unset" ? "is unset" : `not in the ${OIDC_SECRET_PREFIX} form`,
+          );
+          expect(out).not.toContain(word === "unset" ? "not in the" : "is unset");
+          if (secret) expect(out).not.toContain(secret);
+        }
+      }
+    }
+    // A Worker that predates the word still gets the general explanation.
+    extraEnv = { OIDC_SECRET: undefined };
+  });
 });
 
 describe("help", () => {
@@ -928,7 +958,7 @@ describe("nemar admin oidc keys rotate --force", () => {
     signIn(OWNER_KEY);
     await runCli(["keys", "rotate"]);
     ageNext(25 * 60);
-    extraEnv = { OIDC_SECRET: "another-oidc-secret-0123456789abcdef0123456789" };
+    extraEnv = { OIDC_SECRET: fakeOidcSecret("another-oidc-secret") };
     const refused = await failsBothWays(["keys", "rotate"]);
     expect(refused.plain).toMatch(/different OIDC_SECRET/);
     expect(refused.json).toMatch(/different OIDC_SECRET/);
@@ -1061,6 +1091,9 @@ describe("help says what the constants say", () => {
     expect(out).toMatch(/--emergency/);
     expect(out).not.toMatch(/--yes/);
     expect(out).toMatch(/OIDC_SECRET/);
+    expect(out).toContain(OIDC_SECRET_PREFIX);
+    expect(out).toContain("openssl rand -hex 32");
+    expect(out).toMatch(/"unset" or "malformed"/);
   });
 
   test("keys revoke: what it does and does not do", async () => {

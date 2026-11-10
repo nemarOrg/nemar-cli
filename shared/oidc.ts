@@ -206,8 +206,54 @@ export const OIDC_PUBLIC_DOCUMENT_MAX_AGE_SECONDS = 300;
  */
 export const OIDC_FORCE_MIN_NEXT_AGE_MINUTES = 6;
 
-/** `OIDC_SECRET` encrypts the private keys at rest: shorter than this and the provider is off. */
+/**
+ * `OIDC_SECRET` encrypts the private keys at rest: shorter than this (the prefix included) and the
+ * provider is off.
+ */
 export const OIDC_SECRET_MIN_LENGTH = 32;
+
+/**
+ * THE SECRET FAMILY'S PREFIX (owner decision, 2026-11-07). `OIDC_SECRET` is valid only when it
+ * starts with this, so a wrong or placeholder value cannot switch the provider on. Make one with
+ * `nmsso-` followed by `openssl rand -hex 32` (70 characters); dev and production hold different
+ * values.
+ *
+ * Any further secret the OpenID Connect handshake ever needs uses the same prefix. It is added as a
+ * new constant beside this one and a new pure check beside {@link isOidcSecret} (the prefix, a
+ * minimum length and the same body alphabet), never as a second format.
+ */
+export const OIDC_SECRET_PREFIX = "nmsso-";
+
+/** What may follow the prefix: letters, digits, underscore and hyphen (the shipped values are hex). */
+const OIDC_SECRET_BODY_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * True only for a string that starts with {@link OIDC_SECRET_PREFIX} in exactly that case, is at
+ * least {@link OIDC_SECRET_MIN_LENGTH} characters in all, and whose body is `[A-Za-z0-9_-]`: no
+ * space, newline or other character. This is the ONE test of validity; the Worker reads the secret
+ * only through `oidcSecret` (`backend/src/services/oidc-config.ts`), which calls it.
+ */
+export function isOidcSecret(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= OIDC_SECRET_MIN_LENGTH &&
+    value.startsWith(OIDC_SECRET_PREFIX) &&
+    OIDC_SECRET_BODY_RE.test(value.slice(OIDC_SECRET_PREFIX.length))
+  );
+}
+
+/**
+ * What an operator may be told about `OIDC_SECRET` without hearing the value: `ok`, `unset`
+ * (absent or empty) or `malformed` (set, but not in the `nmsso-` form). A fixed word, never a length.
+ */
+export const OIDC_SECRET_STATES = ["ok", "unset", "malformed"] as const;
+export type OidcSecretState = (typeof OIDC_SECRET_STATES)[number];
+
+/** The {@link OidcSecretState} of a binding's value. */
+export function oidcSecretState(value: unknown): OidcSecretState {
+  if (isOidcSecret(value)) return "ok";
+  return value === undefined || value === null || value === "" ? "unset" : "malformed";
+}
 
 // ---------------------------------------------------------------------------------------------
 // Tokens (ADR 0119 rule 4)

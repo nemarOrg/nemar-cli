@@ -24,6 +24,7 @@ import {
   type OidcHarness,
   startOidcHarness,
 } from "./helpers/oidc-harness";
+import { BAD_OIDC_SECRETS, fakeOidcSecret } from "./helpers/oidc-secret";
 
 let h: OidcHarness;
 
@@ -192,13 +193,13 @@ describe("where they exist", () => {
     });
   });
 
-  test("not with the provider off: no secret, or a short one, is 404 to the owner for every route", async () => {
-    for (const secret of [undefined, "", "s".repeat(31)]) {
+  test("not with the provider off: no secret, or one not in the nmsso- form, is 404 to the owner for every route", async () => {
+    for (const [, secret] of BAD_OIDC_SECRETS) {
       for (const [method, path] of oidcRoutes()) {
         const res = await h.call(method, path, {
           key: OWNER_KEY,
           body: method === "POST" ? {} : undefined,
-          env: { OIDC_SECRET: secret },
+          env: { OIDC_SECRET: secret as string },
         });
         expect(res.status, `${method} ${path} with ${JSON.stringify(secret)}`).toBe(404);
       }
@@ -214,9 +215,9 @@ describe("where they exist", () => {
     expect(admin.status).toBe(403);
   });
 
-  test("the refusal is the API's own unrouted 404, byte for byte", async () => {
+  test("the refusal is the API's own unrouted 404, plus the owner's word for the secret", async () => {
     const off = await h.call("GET", KEYS, { key: OWNER_KEY, env: { OIDC_SECRET: undefined } });
-    expect(off.json).toEqual(notFoundBody("GET", KEYS));
+    expect(off.json).toEqual({ ...notFoundBody("GET", KEYS), oidc_secret: "unset" });
     expect(off.headers.get("Cache-Control")).toBe("no-store");
     const elsewhere = await h.call("GET", KEYS, { key: OWNER_KEY, base: "https://data.nemar.org" });
     expect(elsewhere.status).toBe(404);
@@ -309,7 +310,7 @@ describe("the signing keys, over HTTP", () => {
     h.db.run(
       "UPDATE oidc_signing_keys SET created_at = datetime('now', '-25 hours') WHERE state = 'next'",
     );
-    const other = "another-oidc-secret-0123456789abcdef0123456789";
+    const other = fakeOidcSecret("another-oidc-secret");
     const res = await h.call("POST", "/admin/oidc/keys/rotate", {
       key: OWNER_KEY,
       body: {},

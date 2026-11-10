@@ -454,3 +454,30 @@ The hold's answer gains the optional `state` of the job.
 A write route refuses a bearer whose audience does not name this API before it is read; that rule is unchanged.
 The words are stated once, in `shared/contract/compute-partner.ts`, and the website transcribes them.
 
+## Addendum (2026-11-07): `OIDC_SECRET` has a form
+
+The owner decided that a value in the wrong form must not be able to switch the provider on.
+`OIDC_SECRET` is valid only when it starts with `nmsso-` (lowercase, exactly), is at least 32 characters in all, and has a body of letters, digits, underscore and hyphen.
+Length alone no longer turns the provider on.
+The rule checks form, not strength: `nmsso-` followed by 26 identical characters passes, and the strength comes from making the value with `openssl rand -hex 32`.
+
+- **One test, one reader.**
+  `isOidcSecret` in `shared/oidc.ts` is the only test of validity, and `oidcSecret` in `backend/src/services/oidc-config.ts` is the only code that reads the binding: it returns the value when the test passes and `null` otherwise.
+  `oidcEnabled`, key creation and rotation, signing, and the authorization cookie MACs all take their secret from it, so a value that fails the test behaves exactly like an unset one: the surface answers 404, nothing is signed, encrypted or decrypted, and the bad value is never used as a fallback.
+- **The family convention.**
+  Any further secret the OpenID Connect handshake needs uses the same `nmsso-` prefix.
+  A new one is a new constant beside `OIDC_SECRET_PREFIX` and a new pure check beside `isOidcSecret`, not a new format.
+- **How to make one.**
+  `nmsso-` followed by the output of `openssl rand -hex 32`, which is 70 characters.
+  Dev and production use different values, and `OIDC_SECRET` still differs from `ENCRYPTION_KEY`.
+  A value is made and set by the owner; an agent never reads, prints or sets it.
+- **What the owner is told.**
+  The owner routes (and so `nemar admin oidc`) answer a provider that is off for want of a usable secret with the same 404 plus one field, `oidc_secret`, whose value is `unset` (absent or empty) or `malformed` (set, but not in the form).
+  The word is only ever one of those two, never the value or its length, and only an authenticated owner on the issuer's own host sees it; every public route stays the ordinary unrouted 404.
+- **The retry tick waits.**
+  While the secret is invalid, `attemptDueLogouts` (the retry tick, the first attempt after an ending and the test-account sweep all pass through it) claims nothing, reads nothing and writes nothing, and the tick does not prune either; it logs one fixed-word warning (`oidc_secret_unset` or `oidc_secret_malformed`, never a value).
+  A claim costs an attempt and a token cannot be signed without a secret, so claiming would spend a pending back-channel logout's five attempts and end it as `failed`.
+  The deliveries stay `pending` and are sent once the secret is valid again.
+- **Unchanged.**
+  The secret is for good once a key exists, changing it makes every stored key unreadable, a rotation under another secret is refused with `key_unreadable`, and recovery is the by-hand path in Consequences.
+  A Worker whose existing secret does not have the form goes dark until it is replaced, and replacing it after a key exists is that same recovery; the real values already have the form, so no Worker is affected.

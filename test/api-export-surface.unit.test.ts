@@ -228,6 +228,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listOidcKeys",
     "listOidcLogoutDeliveries",
     "oidcErrorCode",
+    "oidcSecretWord",
     "revokeOidcKey",
     "rotateOidcClientSecret",
     "rotateOidcKeys",
@@ -465,6 +466,7 @@ const POST_SPLIT_ADDITIONS = [
   "rotateOidcKeys", // epic #2014 phase #2016: POST /admin/oidc/keys/rotate
   "revokeOidcKey", // epic #2014 phase #2016: POST /admin/oidc/keys/:kid/revoke
   "oidcErrorCode", // epic #2014 phase #2016: the closed word of an /admin/oidc refusal (rawBody.code)
+  "oidcSecretWord", // ADR 0119 addendum 2026-11-07: `unset` or `malformed`, the owner 404's word for OIDC_SECRET (rawBody.oidc_secret)
   "endOidcAccount", // epic #2014 phase #2019: POST /admin/oidc/accounts/:id/end (shared/contract/oidc-admin.ts)
   "listOidcLogoutDeliveries", // epic #2014 phase #2019: GET /admin/oidc/logout-deliveries
   "lockS3Objects", // #1912 phase 6f: POST /admin/datasets/:id/s3-lock with an explicit list

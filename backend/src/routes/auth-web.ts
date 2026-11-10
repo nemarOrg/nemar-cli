@@ -136,6 +136,19 @@ function isDevOrTest(env: Bindings): boolean {
 }
 
 /**
+ * Email-code sign-in is dormant: ORCID is the only identity people sign in
+ * with (owner ruling, 2026-11-09), and the code path stays only for the
+ * development and test fixtures. The website hides the form in production
+ * (`WEB_SIGNIN_ENABLED`), but a hidden form is not a closed route, so the
+ * Worker refuses here too. Fail closed: any environment that is not exactly
+ * development or test, a missing value included, is closed. The routes keep
+ * their code and tables so the path can be reopened by a reviewed change.
+ */
+function emailCodeSignInOpen(env: Bindings): boolean {
+  return isDevOrTest(env);
+}
+
+/**
  * Map internal user.status to the dashboard-facing two-state value.
  *   verified|approved -> "active"
  *   pending           -> "pending"
@@ -257,6 +270,12 @@ function publicUser(row: {
 authWebRoutes.post("/code/request", zValidator("json", emailSchema), async (c) => {
   const { email } = c.req.valid("json");
   const db = c.env.DB;
+
+  // Dormant outside development and test: answer exactly as for an unknown
+  // address (no enumeration, no code generation, no send).
+  if (!emailCodeSignInOpen(c.env)) {
+    return c.json({ ok: true, masked_email: maskEmail(email) });
+  }
 
   try {
     // #595: only ever email a code to an address that already has a
@@ -444,6 +463,12 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
 
   const { email, code, remember } = c.req.valid("json");
   const db = c.env.DB;
+
+  // Dormant outside development and test (see emailCodeSignInOpen): the same
+  // answer as a wrong code, before the database is read.
+  if (!emailCodeSignInOpen(c.env)) {
+    return c.json({ error: "Invalid or expired code" }, 401);
+  }
 
   try {
     // This route is UNAUTHENTICATED, so "no such code" and "wrong digits"

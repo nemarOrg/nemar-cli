@@ -1171,6 +1171,7 @@ describe("the routes", () => {
       [string, { base?: string; path?: string; env?: Record<string, unknown> }]
     > = [
       ["no secret", { env: { OIDC_SECRET: undefined } }],
+      ["a secret not in the nmsso- form", { env: { OIDC_SECRET: "s".repeat(70) } }],
       ["legacy mount", { path: `/nemar${OIDC_AUTHORIZE_CHECK_PATH}` }],
       ["another host", { base: "https://data.nemar.org" }],
       ["cookie flag off", { env: { HOST_PREFIXED_SESSION_COOKIE: undefined } }],

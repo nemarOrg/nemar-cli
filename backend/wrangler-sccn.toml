@@ -447,13 +447,14 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                                match the org-level secret on nemarDatasets.
 #                                Required before MANIFEST_VIA_CENTRAL_WORKFLOW
 #                                can be flipped to "true" in any environment.)
-# - OIDC_SECRET           (epic #2014 phase #2016, ADR 0119; encrypts the OpenID Connect provider's private signing keys at rest, at
-#                           least 32 characters. Without it the provider is OFF: discovery, the key set and the owner routes answer 404.
+# - OIDC_SECRET           (epic #2014 phase #2016, ADR 0119; encrypts the OpenID Connect provider's private signing keys at rest.
+#                           It MUST differ from ENCRYPTION_KEY and be `nmsso-` followed by the output of `openssl rand -hex 32` (32
+#                           characters or more in all; any other form is treated as unset, ADR 0119 addendum). Without a valid one
+#                           the provider is OFF: discovery, the key set and the owner routes answer 404.
 #                           The authorization routes (/auth/oidc/*) and the /oauth token, userinfo, revocation and introspection
 #                           endpoints also answer 404 until HOST_PREFIXED_SESSION_COOKIE is "1": set both.
 #                           Set it BEFORE the first key rotation (`nemar admin oidc keys rotate`), and do not change it afterwards: every
 #                           stored key becomes unreadable, and no re-encryption path exists yet. Separate values for production and dev.
-#                           It MUST differ from ENCRYPTION_KEY and should be random, for example `openssl rand -base64 48`.
 #                           The owner sets it; an agent never does. Never a [vars] entry.)
 #   OIDC_LOGOUT_DEV_HOSTS (a VAR, optional, absent here; epic #2014 phase #2019, ADR 0119 rule 15): the hostnames a dev or
 #                           staging Worker may send a back-channel logout to besides a loopback address. Unset, a delivery to any
