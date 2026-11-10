@@ -52,6 +52,7 @@
  */
 
 import { ACCOUNT_COPY, type AccountCopyKey, fillCopy } from "./account-copy.js";
+import { COMPUTE_TERMS_PUBLISHED } from "./compute-terms.js";
 import type { AccountKind, AccountStatus } from "./user.js";
 
 /**
@@ -432,20 +433,52 @@ export function gapSurfaces(field: string, orcidVerified = false): GapSurface[] 
 }
 
 /**
+ * Knobs for {@link computeProfileGaps}, there so a test can prove both branches of a compile-time
+ * constant; no caller in the product passes one.
+ */
+export interface ProfileGapOptions {
+  /**
+   * Whether the compute terms are published. Defaults to `COMPUTE_TERMS_PUBLISHED`
+   * (./compute-terms.ts), so changing that constant is the whole switch.
+   *
+   * While it is false the compute half of the matrix is invisible to a surface that LISTS gaps: a gap
+   * that blocks compute access alone (`affiliation`) is not raised, and `compute_access` is not named
+   * among any other entry's blocks, so `profile_gaps` reads exactly as it did before epic #2021. The
+   * owner's ruling is that third-party compute must not confuse anyone before it is open, and an
+   * account nudged toward a request that answers 503 `terms_unpublished` is that confusion.
+   *
+   * It does NOT hide anything from a call that asks for the `compute_access` block by name. That
+   * call is the compute request's own refusal (`checkComputeAccessRequest`), which is the compute
+   * flow itself rather than a nudge toward it: a non-production environment takes requests before
+   * publication, and its refusal must still say what is missing.
+   */
+  readonly computeTermsPublished?: boolean;
+}
+
+/**
  * Every gap on this account, in matrix order.
  *
  * The one computation. `GET /users/me`, `GET /auth/me` and the upload-access
  * request preconditions all call it, which is what makes them unable to
  * disagree — the property epic #1250 phase 8 exists to establish.
+ *
+ * The compute rows are gated on the terms being published; see {@link ProfileGapOptions}.
  */
 export function computeProfileGaps(
   account: ProfileGapAccount,
   block?: GapBlock,
+  options: ProfileGapOptions = {},
 ): ProfileGapEntry[] {
   const orcidVerified = account.orcid_verified === true;
+  const showCompute =
+    (options.computeTermsPublished ?? COMPUTE_TERMS_PUBLISHED) || block === "compute_access";
+  const blocksOf = (field: GapField): readonly GapBlock[] =>
+    showCompute
+      ? PROFILE_GAP_MATRIX[field].blocks
+      : PROFILE_GAP_MATRIX[field].blocks.filter((b) => b !== "compute_access");
   const entry = (field: GapField): ProfileGapEntry => ({
     field,
-    blocks: PROFILE_GAP_MATRIX[field].blocks,
+    blocks: blocksOf(field),
     set_on: gapSurfaces(field, orcidVerified),
   });
 
@@ -456,19 +489,25 @@ export function computeProfileGaps(
   //
   // `block` narrows the list to the gaps that stop ONE thing, for a refusal that is about that thing
   // alone: an upload-access request is not refused for a missing affiliation, and a compute-access
-  // request is not refused for a missing GitHub handle.
+  // request is not refused for a missing GitHub handle. A field left with no block once the compute
+  // ones are withheld stops nothing a surface could name, so it is not a gap.
   return GAP_FIELDS.filter(
     (field) =>
       PROFILE_GAP_MATRIX[field].isMissing?.(account) === true &&
-      (block === undefined || PROFILE_GAP_MATRIX[field].blocks.includes(block)),
+      blocksOf(field).length > 0 &&
+      (block === undefined || blocksOf(field).includes(block)),
   ).map(entry);
 }
 
 /** Just the field names, in matrix order — the shape
  *  `checkUploadAccessRequest` puts in `missing`. With a `block`, only the gaps that stop that
  *  one thing (see {@link computeProfileGaps}). */
-export function profileGapFields(account: ProfileGapAccount, block?: GapBlock): string[] {
-  return computeProfileGaps(account, block).map((gap) => gap.field);
+export function profileGapFields(
+  account: ProfileGapAccount,
+  block?: GapBlock,
+  options: ProfileGapOptions = {},
+): string[] {
+  return computeProfileGaps(account, block, options).map((gap) => gap.field);
 }
 
 /** One gap resolved to everything a surface needs to print it. */

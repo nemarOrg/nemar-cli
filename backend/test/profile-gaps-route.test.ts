@@ -25,6 +25,7 @@ import { userMeResponseSchema, webUserSchema } from "../../shared/contract/user.
 import { authWebRoutes } from "../src/routes/auth-web";
 import { userRoutes } from "../src/routes/users";
 import { hashAuthCode } from "../src/services/auth-code";
+import { type ProfileGapRow, profileGapsForRow } from "../src/services/profile-gaps";
 import { hashApiKey } from "../src/services/token";
 import { checkUploadAccessRequest } from "../src/services/upload-access";
 import { issueSession } from "../src/services/web-session";
@@ -97,6 +98,18 @@ interface Overrides {
    *  account 409s before any precondition is read. */
   service_access?: number;
   username_auto_assigned?: number;
+}
+
+/** The row `profileGapsForRow` reads, selected the way the routes select it. */
+function rowFor(email: string): ProfileGapRow {
+  const row = db
+    .query<ProfileGapRow, [string]>(
+      `SELECT status, account_kind, email_verified, orcid_verified, username, given_name, family_name,
+              github_username, city, country, affiliation FROM users WHERE email = ?`,
+    )
+    .get(email);
+  if (!row) throw new Error("row vanished");
+  return row;
 }
 
 /** A complete account by default; each test blanks the columns it is about. */
@@ -221,21 +234,37 @@ describe("GET /users/me carries profile_gaps", () => {
     await seedUser({ city: null });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual([
-      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
+      { field: "city", blocks: ["upload_access"], set_on: ["web", "cli"] },
     ]);
   });
 
-  test("a missing affiliation is a gap that blocks compute access alone, on every payload", async () => {
-    // Epic #2021 phase D1. MUTATION: drop `affiliation` from the `/users/me` SELECT and EVERY
-    // account reports this gap (an absent value reads as blank); the "complete account" test
-    // above is what catches that, and this one pins the row that should raise it.
+  test("while the compute terms are unpublished, a missing affiliation is not a gap on either payload", async () => {
+    // Epic #2021 phase D1, owner decision: third-party compute must not confuse anyone before it is
+    // open, and an account nudged toward a request that answers 503 `terms_unpublished` is that
+    // confusion. `COMPUTE_TERMS_PUBLISHED` is false, so every payload reads as before epic D: no
+    // affiliation gap, and no `compute_access` among any entry's blocks (the city and name tests
+    // here pin the blocks).
     const id = await seedUser({ affiliation: null });
     const cli = userMeResponseSchema.parse(await (await usersMe()).json());
-    expect(cli.user.profile_gaps).toEqual([
+    expect(cli.user.profile_gaps).toEqual([]);
+    const web = webUserSchema.parse((await (await authMe(id)).json()).user);
+    expect(web.profile_gaps).toEqual([]);
+    expect((await allThree(id)).missing).toEqual([]);
+  });
+
+  test("once the terms are published, the same row raises it on the row adapter both payloads use", async () => {
+    // The published branch of the gate, which a compile-time constant cannot show through a route:
+    // `profileGapsForRow` is what both payloads call. MUTATION: drop `affiliation` from the row it
+    // hands the rule and this stops raising it.
+    await seedUser({ affiliation: null, city: null });
+    const row = rowFor(USER_EMAIL);
+    expect(profileGapsForRow(row, { computeTermsPublished: true })).toEqual([
+      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
       { field: "affiliation", blocks: ["compute_access"], set_on: ["web", "cli"] },
     ]);
-    const web = webUserSchema.parse((await (await authMe(id)).json()).user);
-    expect(web.profile_gaps).toEqual(cli.user.profile_gaps ?? []);
+    expect(profileGapsForRow(row, { computeTermsPublished: false }).map((g) => g.field)).toEqual([
+      "city",
+    ]);
   });
 
   test("a complete account gets an EMPTY list, which is not the same as none", async () => {
@@ -261,7 +290,7 @@ describe("GET /users/me carries profile_gaps", () => {
     expect(body.user.profile_gaps).toEqual([
       {
         field: "given_name",
-        blocks: ["upload_access", "compute_access", "publication"],
+        blocks: ["upload_access", "publication"],
         set_on: ["web"],
       },
     ]);
@@ -413,7 +442,7 @@ describe("one row, three answers", () => {
     // route, not from allThree()'s defaulting.
     const cli = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(cli.user.profile_gaps).toEqual([
-      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
+      { field: "city", blocks: ["upload_access"], set_on: ["web", "cli"] },
     ]);
     const answers = await allThree(id);
     expect(answers.missing).toEqual(["city"]);

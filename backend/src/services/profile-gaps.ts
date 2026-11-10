@@ -15,7 +15,11 @@
  * `role`-based exemption this replaced.
  */
 
-import { type ProfileGapEntry, computeProfileGaps } from "../../../shared/contract/profile-gaps.js";
+import {
+  type ProfileGapEntry,
+  type ProfileGapOptions,
+  computeProfileGaps,
+} from "../../../shared/contract/profile-gaps.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { flag } from "../db/flag";
 
@@ -50,19 +54,31 @@ export interface ProfileGapRow {
   affiliation: string | null;
 }
 
-/** Compute `profile_gaps` for one account row. */
-export function profileGapsForRow(row: ProfileGapRow): ProfileGapEntry[] {
-  return computeProfileGaps({
-    status: row.status,
-    account_kind: row.account_kind,
-    email_verified: flag(row.email_verified),
-    orcid_verified: flag(row.orcid_verified),
-    username: row.username,
-    given_name: row.given_name,
-    family_name: row.family_name,
-    github_username: row.github_username,
-    city: row.city,
-    country: row.country,
-    affiliation: row.affiliation,
-  });
+/**
+ * Compute `profile_gaps` for one account row.
+ *
+ * The compute rows follow `COMPUTE_TERMS_PUBLISHED` (see `ProfileGapOptions`); `options` exists so a
+ * test can show the published branch, and no route passes one.
+ */
+export function profileGapsForRow(
+  row: ProfileGapRow,
+  options: ProfileGapOptions = {},
+): ProfileGapEntry[] {
+  return computeProfileGaps(
+    {
+      status: row.status,
+      account_kind: row.account_kind,
+      email_verified: flag(row.email_verified),
+      orcid_verified: flag(row.orcid_verified),
+      username: row.username,
+      given_name: row.given_name,
+      family_name: row.family_name,
+      github_username: row.github_username,
+      city: row.city,
+      country: row.country,
+      affiliation: row.affiliation,
+    },
+    undefined,
+    options,
+  );
 }

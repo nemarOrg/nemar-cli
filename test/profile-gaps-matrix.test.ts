@@ -30,6 +30,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { ACCOUNT_COPY } from "../shared/contract/account-copy.js";
+import { COMPUTE_TERMS_PUBLISHED } from "../shared/contract/compute-terms.js";
 import {
   DERIVABLE_GAP_FIELDS,
   GAP_FIELDS,
@@ -204,6 +205,10 @@ describe("the matrix agrees with the website's table", () => {
   }
 });
 
+/** The compute half of the matrix is visible only once the terms are published (see the last block
+ *  of this file); the table above is that published view, so its tests ask for it. */
+const PUBLISHED_TERMS = { computeTermsPublished: true } as const;
+
 describe("the block filter (epic #2021 phase D1)", () => {
   test("compute_access is declared after upload_access, in the order the type documents", () => {
     const blocks = new Set<string>();
@@ -228,9 +233,11 @@ describe("the block filter (epic #2021 phase D1)", () => {
     const account = accountMissing(["affiliation"]);
     expect(profileGapFields(account, "upload_access")).toEqual([]);
     expect(profileGapFields(account, "compute_access")).toEqual(["affiliation"]);
-    // Unfiltered, it is the one gap `/users/me` reports.
-    expect(profileGapFields(account)).toEqual(["affiliation"]);
-    expect(computeProfileGaps(account)[0]?.blocks).toEqual(["compute_access"]);
+    // Unfiltered and published, it is the one gap `/users/me` reports.
+    expect(profileGapFields(account, undefined, PUBLISHED_TERMS)).toEqual(["affiliation"]);
+    expect(computeProfileGaps(account, undefined, PUBLISHED_TERMS)[0]?.blocks).toEqual([
+      "compute_access",
+    ]);
   });
 
   test("every other upload gap is unchanged by the filter, in the same order", () => {
@@ -257,8 +264,12 @@ describe("the block filter (epic #2021 phase D1)", () => {
 
   test("an absent affiliation reads as blank: a SELECT that forgot it raises the gap", () => {
     const { affiliation: _omitted, ...withoutIt } = fullAccount();
-    expect(profileGapFields(withoutIt as ProfileGapAccount)).toEqual(["affiliation"]);
-    expect(profileGapFields({ ...fullAccount(), affiliation: "   " })).toEqual(["affiliation"]);
+    expect(profileGapFields(withoutIt as ProfileGapAccount, undefined, PUBLISHED_TERMS)).toEqual([
+      "affiliation",
+    ]);
+    expect(
+      profileGapFields({ ...fullAccount(), affiliation: "   " }, undefined, PUBLISHED_TERMS),
+    ).toEqual(["affiliation"]);
   });
 
   test("the compute_access gap is described in the words of the copy table", () => {
@@ -279,6 +290,76 @@ describe("the block filter (epic #2021 phase D1)", () => {
   });
 });
 
+describe("compute nudges wait for the terms to be published (epic #2021 phase D1, owner decision)", () => {
+  // `COMPUTE_TERMS_PUBLISHED` is a compile-time constant, false in production today, so the rule
+  // takes it as an option and defaults to the constant: the published branch is proved by passing
+  // it, the unpublished one both ways (the default and the explicit false).
+  const PUBLISHED = PUBLISHED_TERMS;
+  const UNPUBLISHED = { computeTermsPublished: false } as const;
+
+  test("the production constant is what the rule defaults to", () => {
+    expect(COMPUTE_TERMS_PUBLISHED).toBe(false);
+    const account = accountMissing(["affiliation", "city"]);
+    expect(computeProfileGaps(account)).toEqual(
+      computeProfileGaps(account, undefined, UNPUBLISHED),
+    );
+  });
+
+  test("unpublished, an account lacking only its affiliation has no gap at all", () => {
+    const account = accountMissing(["affiliation"]);
+    expect(profileGapFields(account, undefined, UNPUBLISHED)).toEqual([]);
+    expect(profileGapFields(account, "upload_access", UNPUBLISHED)).toEqual([]);
+    expect(profileGapFields(account, undefined, PUBLISHED)).toEqual(["affiliation"]);
+  });
+
+  test("unpublished, no entry names compute_access as a block, and nothing else about one changes", () => {
+    const account = accountMissing(DERIVABLE);
+    const before = computeProfileGaps(account, undefined, UNPUBLISHED);
+    expect(before.map((g) => g.field)).toEqual(DERIVABLE.filter((f) => f !== "affiliation"));
+    for (const gap of before) expect([...gap.blocks]).not.toContain("compute_access");
+    // Exactly what the matrix said before epic D: same fields, same order, same blocks.
+    expect(before.map((g) => [g.field, [...g.blocks]])).toEqual([
+      ["email_verified", ["verified", "upload_access"]],
+      ["username", ["upload_access"]],
+      ["given_name", ["upload_access", "publication"]],
+      ["family_name", ["upload_access", "publication"]],
+      ["orcid_verified", ["upload_access"]],
+      ["github_username", ["upload_access", "publication"]],
+      ["city", ["upload_access"]],
+      ["country", ["upload_access"]],
+    ]);
+  });
+
+  test("published, every compute block and the affiliation gap come back", () => {
+    const gaps = computeProfileGaps(accountMissing(DERIVABLE), undefined, PUBLISHED);
+    expect(gaps.map((g) => g.field)).toEqual(DERIVABLE);
+    expect([...(gaps.find((g) => g.field === "affiliation")?.blocks ?? [])]).toEqual([
+      "compute_access",
+    ]);
+    expect([...(gaps.find((g) => g.field === "city")?.blocks ?? [])]).toEqual([
+      "upload_access",
+      "compute_access",
+    ]);
+  });
+
+  test("the compute request's own refusal still lists what it needs, published or not", () => {
+    // `checkComputeAccessRequest` asks for the compute_access block: the request is the compute
+    // flow (a non-production environment takes it before publication), not a nudge toward it.
+    const account = accountMissing(["affiliation"]);
+    expect(profileGapFields(account, "compute_access", UNPUBLISHED)).toEqual(["affiliation"]);
+    expect(profileGapFields(account, "compute_access", PUBLISHED)).toEqual(["affiliation"]);
+  });
+
+  test("an upload-access refusal is the same either way", () => {
+    for (const fields of [["affiliation"], ["city", "affiliation"], [...DERIVABLE]]) {
+      const account = accountMissing(fields);
+      expect(profileGapFields(account, "upload_access", UNPUBLISHED)).toEqual(
+        profileGapFields(account, "upload_access", PUBLISHED),
+      );
+    }
+  });
+});
+
 describe("computeProfileGaps over every field combination", () => {
   // 2^9 = 512 subsets of the derivable fields.
   const subsets: string[][] = [];
@@ -291,7 +372,7 @@ describe("computeProfileGaps over every field combination", () => {
     for (const missing of subsets) {
       // The oracle: the fixture's own order, filtered to what was blanked.
       const expected = TABLE_FIELDS.filter((f) => missing.includes(f));
-      const gaps = computeProfileGaps(accountMissing(missing));
+      const gaps = computeProfileGaps(accountMissing(missing), undefined, PUBLISHED_TERMS);
       expect(gaps.map((g) => g.field)).toEqual(expected);
       // A subset that did NOT blank `orcid_verified` leaves it verified, which
       // moves the two name halves' set-on to the ORCID record. Derived from the
