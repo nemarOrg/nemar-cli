@@ -52,6 +52,7 @@
  */
 
 import { ACCOUNT_COPY, type AccountCopyKey, fillCopy } from "./account-copy.js";
+import { COMPUTE_TERMS_PUBLISHED } from "./compute-terms.js";
 import type { AccountKind, AccountStatus } from "./user.js";
 
 /**
@@ -59,11 +60,12 @@ import type { AccountKind, AccountStatus } from "./user.js";
  *
  * Ordered by how soon the account walks into it: an unverified inbox blocks
  * everything, an upload-access request comes before there is anything to
- * publish. {@link describeProfileGap} names the FIRST of a gap's blocks — the
- * nearest wall, not every wall behind it — which is why the order is part of
+ * publish, and a compute-access request (epic #2021 phase D1; ADR 0118) is its
+ * own review beside upload access, so it sits right after it. {@link describeProfileGap} names the FIRST of a gap's blocks, the
+ * nearest wall, not every wall behind it; which is why the order is part of
  * the data and not incidental.
  */
-export type GapBlock = "verified" | "upload_access" | "publication";
+export type GapBlock = "verified" | "upload_access" | "compute_access" | "publication";
 
 /** The fields this contract knows how to describe. A `profile_gaps` entry
  *  naming anything else still renders (see {@link resolveProfileGap}); it just
@@ -77,6 +79,7 @@ export type GapField =
   | "github_username"
   | "city"
   | "country"
+  | "affiliation"
   | "why";
 
 /**
@@ -141,7 +144,7 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     // Everything past browsing needs a proved inbox, and the upload-access
     // review itself happens over email (`email_not_verified` is its own
     // refusal, ahead of the profile check).
-    blocks: ["verified", "upload_access"],
+    blocks: ["verified", "upload_access", "compute_access"],
     labelKey: "gap.field.email_verified.label",
     webKey: "gap.field.email_verified.set_on.web",
     cliKey: "gap.field.email_verified.set_on.cli",
@@ -164,7 +167,7 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
   given_name: {
     // A DOI cites a person (ADR 0041), so the name outlives the request that
     // first asks for it.
-    blocks: ["upload_access", "publication"],
+    blocks: ["upload_access", "compute_access", "publication"],
     labelKey: "gap.field.given_name.label",
     webKey: "gap.field.given_name.set_on.web",
     cliKey: "gap.field.given_name.set_on.cli",
@@ -176,7 +179,7 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     isMissing: (a) => isBlank(a.given_name),
   },
   family_name: {
-    blocks: ["upload_access", "publication"],
+    blocks: ["upload_access", "compute_access", "publication"],
     labelKey: "gap.field.family_name.label",
     webKey: "gap.field.family_name.set_on.web",
     cliKey: "gap.field.family_name.set_on.cli",
@@ -209,18 +212,32 @@ export const PROFILE_GAP_MATRIX: Record<GapField, ProfileGapDefinition> = {
     isMissing: (a) => isBlank(a.github_username),
   },
   city: {
-    blocks: ["upload_access"],
+    blocks: ["upload_access", "compute_access"],
     labelKey: "gap.field.city.label",
     webKey: "gap.field.city.set_on.web",
     cliKey: "gap.field.city.set_on.cli",
     isMissing: (a) => isBlank(a.city),
   },
   country: {
-    blocks: ["upload_access"],
+    blocks: ["upload_access", "compute_access"],
     labelKey: "gap.field.country.label",
     webKey: "gap.field.country.set_on.web",
     cliKey: "gap.field.country.set_on.cli",
     isMissing: (a) => isBlank(a.country),
+  },
+  affiliation: {
+    // Compute access only (epic #2021 phase D1): the export-control review of a compute grant reads
+    // the institution, and upload access never has, so adding the field must not change what an
+    // upload-access request is refused for (`checkUploadAccessRequest` asks for the `upload_access`
+    // block only, and a test pins that its `missing` list is unchanged).
+    blocks: ["compute_access"],
+    labelKey: "gap.field.affiliation.label",
+    webKey: "gap.field.affiliation.set_on.web",
+    cliKey: "gap.field.affiliation.set_on.cli",
+    // An absent value reads as blank, like every text column here: a row the caller did not select
+    // `affiliation` for raises the gap, so a missed SELECT is loud (the website's Settings page
+    // shows the nudge to everyone) rather than quietly exempting people.
+    isMissing: (a) => isBlank(a.affiliation),
   },
   why: {
     blocks: ["upload_access"],
@@ -248,6 +265,7 @@ export const DERIVABLE_GAP_FIELDS: readonly GapField[] = GAP_FIELDS.filter(
 const GAP_BLOCK_COPY: Record<GapBlock, AccountCopyKey> = {
   verified: "gap.blocks.verified",
   upload_access: "gap.blocks.upload_access",
+  compute_access: "gap.blocks.compute_access",
   publication: "gap.blocks.publication",
 };
 
@@ -257,11 +275,17 @@ const GAP_BLOCK_COPY: Record<GapBlock, AccountCopyKey> = {
 const GAP_BLOCK_NOUNS: Record<GapBlock, AccountCopyKey> = {
   verified: "gap.blocks.noun.verified",
   upload_access: "gap.blocks.noun.upload_access",
+  compute_access: "gap.blocks.noun.compute_access",
   publication: "gap.blocks.noun.publication",
 };
 
 function isGapBlock(value: unknown): value is GapBlock {
-  return value === "verified" || value === "upload_access" || value === "publication";
+  return (
+    value === "verified" ||
+    value === "upload_access" ||
+    value === "compute_access" ||
+    value === "publication"
+  );
 }
 
 /** Whitespace counts as absent, matching `resolveUploaderIdentity`'s trim
@@ -331,6 +355,10 @@ export interface ProfileGapAccount {
   readonly github_username?: string | null;
   readonly city?: string | null;
   readonly country?: string | null;
+  /** Blank raises the `affiliation` row, which blocks compute access only (epic #2021 phase D1).
+   *  `undefined` reads as blank, as for every text column here, so a SELECT that omits it raises
+   *  the gap for everyone. */
+  readonly affiliation?: string | null;
   /** Raises the `orcid_verified` row when it is not `true` (and the kind is
    *  not exempt), and moves the name halves' `set_on` to the ORCID record
    *  when it is. */
@@ -405,17 +433,52 @@ export function gapSurfaces(field: string, orcidVerified = false): GapSurface[] 
 }
 
 /**
+ * Knobs for {@link computeProfileGaps}, there so a test can prove both branches of a compile-time
+ * constant; no caller in the product passes one.
+ */
+export interface ProfileGapOptions {
+  /**
+   * Whether the compute terms are published. Defaults to `COMPUTE_TERMS_PUBLISHED`
+   * (./compute-terms.ts), so changing that constant is the whole switch.
+   *
+   * While it is false the compute half of the matrix is invisible to a surface that LISTS gaps: a gap
+   * that blocks compute access alone (`affiliation`) is not raised, and `compute_access` is not named
+   * among any other entry's blocks, so `profile_gaps` reads exactly as it did before epic #2021. The
+   * owner's ruling is that third-party compute must not confuse anyone before it is open, and an
+   * account nudged toward a request that answers 503 `terms_unpublished` is that confusion.
+   *
+   * It does NOT hide anything from a call that asks for the `compute_access` block by name. That
+   * call is the compute request's own refusal (`checkComputeAccessRequest`), which is the compute
+   * flow itself rather than a nudge toward it: a non-production environment takes requests before
+   * publication, and its refusal must still say what is missing.
+   */
+  readonly computeTermsPublished?: boolean;
+}
+
+/**
  * Every gap on this account, in matrix order.
  *
  * The one computation. `GET /users/me`, `GET /auth/me` and the upload-access
  * request preconditions all call it, which is what makes them unable to
  * disagree — the property epic #1250 phase 8 exists to establish.
+ *
+ * The compute rows are gated on the terms being published; see {@link ProfileGapOptions}.
  */
-export function computeProfileGaps(account: ProfileGapAccount): ProfileGapEntry[] {
+export function computeProfileGaps(
+  account: ProfileGapAccount,
+  block?: GapBlock,
+  options: ProfileGapOptions = {},
+): ProfileGapEntry[] {
   const orcidVerified = account.orcid_verified === true;
+  const showCompute =
+    (options.computeTermsPublished ?? COMPUTE_TERMS_PUBLISHED) || block === "compute_access";
+  const blocksOf = (field: GapField): readonly GapBlock[] =>
+    showCompute
+      ? PROFILE_GAP_MATRIX[field].blocks
+      : PROFILE_GAP_MATRIX[field].blocks.filter((b) => b !== "compute_access");
   const entry = (field: GapField): ProfileGapEntry => ({
     field,
-    blocks: PROFILE_GAP_MATRIX[field].blocks,
+    blocks: blocksOf(field),
     set_on: gapSurfaces(field, orcidVerified),
   });
 
@@ -423,15 +486,28 @@ export function computeProfileGaps(account: ProfileGapAccount): ProfileGapEntry[
   // order, and every rule is a property of the row it belongs to, so a field
   // cannot be described here and un-raisable, or raised in an order the
   // refusal does not share.
-  return GAP_FIELDS.filter((field) => PROFILE_GAP_MATRIX[field].isMissing?.(account) === true).map(
-    entry,
-  );
+  //
+  // `block` narrows the list to the gaps that stop ONE thing, for a refusal that is about that thing
+  // alone: an upload-access request is not refused for a missing affiliation, and a compute-access
+  // request is not refused for a missing GitHub handle. A field left with no block once the compute
+  // ones are withheld stops nothing a surface could name, so it is not a gap.
+  return GAP_FIELDS.filter(
+    (field) =>
+      PROFILE_GAP_MATRIX[field].isMissing?.(account) === true &&
+      blocksOf(field).length > 0 &&
+      (block === undefined || blocksOf(field).includes(block)),
+  ).map(entry);
 }
 
 /** Just the field names, in matrix order — the shape
- *  `checkUploadAccessRequest` puts in `missing`. */
-export function profileGapFields(account: ProfileGapAccount): string[] {
-  return computeProfileGaps(account).map((gap) => gap.field);
+ *  `checkUploadAccessRequest` puts in `missing`. With a `block`, only the gaps that stop that
+ *  one thing (see {@link computeProfileGaps}). */
+export function profileGapFields(
+  account: ProfileGapAccount,
+  block?: GapBlock,
+  options: ProfileGapOptions = {},
+): string[] {
+  return computeProfileGaps(account, block, options).map((gap) => gap.field);
 }
 
 /** One gap resolved to everything a surface needs to print it. */

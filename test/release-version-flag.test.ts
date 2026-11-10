@@ -24,6 +24,7 @@ import { Command, type Option } from "commander";
 import { adminCommand } from "../src/commands/admin";
 import { authCommand } from "../src/commands/auth";
 import { completionCommand } from "../src/commands/completion";
+import { computeCommand } from "../src/commands/compute";
 import {
   createDownloadCommand,
   createUploadCommand,
@@ -50,6 +51,7 @@ const SHARED_GROUPS = [
   adminCommand,
   authCommand,
   completionCommand,
+  computeCommand,
   datasetCommand,
   doctorCommand,
   sandboxCommand,

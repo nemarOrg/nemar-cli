@@ -332,6 +332,58 @@ describe("nemar auth profile", () => {
     }
   });
 
+  test("the affiliation gap is rendered for compute access, and its command is in the change list", async () => {
+    // Epic #2021 phase D1: the row blocks compute access alone, and `set-affiliation` is the command the
+    // sentence names, so the list of "where to change each" has to carry it too.
+    seedAuthenticatedConfig();
+    const server = startMeServer({
+      service_access: false,
+      profile_gaps: [GAP("affiliation", ["compute_access"])],
+    });
+    try {
+      const result = await runCli(["auth", "profile"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(
+        "Affiliation is missing: needed to request compute access. Set it in Settings or run `nemar auth profile set-affiliation`.",
+      );
+      expect(result.stdout).toContain("nemar auth profile set-affiliation <institution>");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("while the compute terms are unpublished, the change list does not point at a compute request", async () => {
+    // Owner decision (epic #2021 phase D1): third-party compute must not confuse anyone before it is
+    // open, and a request answers 503 `terms_unpublished` until then. `COMPUTE_TERMS_PUBLISHED` is
+    // false, so a real `nemar auth profile` run, whatever the account's gaps, says nothing of it.
+    // The published branch is proved on the helper in test/compute-nudges.unit.test.ts.
+    seedAuthenticatedConfig();
+    const server = startMeServer({ service_access: false, profile_gaps: [] });
+    try {
+      const result = await runCli(["auth", "profile"], server.url);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Upload access");
+      expect(result.stdout).not.toContain("Compute access");
+      expect(result.stdout).not.toContain("nemar compute request-access");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("signup and its shortcuts take --affiliation, offered and never required", async () => {
+    for (const args of [
+      ["auth", "signup", "--help"],
+      ["signup", "--help"],
+      ["register", "--help"],
+    ]) {
+      const result = await runCli(args, "http://127.0.0.1:1");
+      expect([args.join(" "), result.stdout]).toEqual([
+        args.join(" "),
+        expect.stringContaining("--affiliation <text>"),
+      ]);
+    }
+  });
+
   test("a verified ORCID iD points the name at orcid.org, not at Settings", async () => {
     seedAuthenticatedConfig();
     const server = startMeServer({

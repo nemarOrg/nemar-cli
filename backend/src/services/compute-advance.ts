@@ -83,15 +83,18 @@ export const ADVANCE_ROWS_PER_TICK = 10;
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL AND flag_unreserved = 0
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
  * The `created` and `uploading` rows with no Tapis job, least recently examined first: the ones to be
  * submitted. A partner's reservation that has no Tapis job yet is the partner contract's, not this
- * tick's.
+ * tick's. A job still `uploading` with its records unwritten is the person's (the upload window) and the
+ * abandoned-upload release's, not this tick's: submitting it would only be refused (phase D3, #2024).
  */
 export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
+    AND NOT (state = 'uploading' AND records_written_at IS NULL)
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
@@ -117,6 +120,7 @@ export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
     AND flag_unreserved = 0
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY cancel_attempted_at ASC, cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {

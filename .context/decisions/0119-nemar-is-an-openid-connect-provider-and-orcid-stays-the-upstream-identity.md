@@ -166,7 +166,7 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     | Admin revocation (`finalizeRevocation`) | Ends all, and sends back-channel logout | The account is cut off; a client must stop honoring it. In the same batch as the other cascades. |
     | Owner soft delete (`tombstoneUserCascade`) | Ends all, and sends back-channel logout | Same, and the subject stays on the row. |
     | Account merge (manual, ADR 0043), through an owner command | Ends all of the loser's, and sends back-channel logout | The loser stops being a person; the winner's grants are untouched. |
-    | Compute suspension | Ends only grants that carry a `compute.` scope, and tells only those clients | The person stays signed in elsewhere. |
+    | Compute suspension or revocation (`endComputeStatements`, an administrator's decision on a person's compute access, ADR 0118 amendment of 2026-11-06) | Ends only grants that carry a `compute.` scope, and tells only those clients; both use the reason `compute_suspended` | The person stays signed in elsewhere. |
     | ORCID unlink or relink | Ends the grants of every client whose rule is `person_proven_orcid`, and sends back-channel logout to those clients | The proof they were granted on is gone, and a client that relied on it should stop honoring the session. |
     | Account kind changed away from `person` (the owner route that holds `KIND_CHANGE_GUARDED_UPDATE_SQL`) | Ends the grants of every client whose rule is `person_proven_orcid`, and sends back-channel logout to those clients | The account no longer meets that rule. A change to `person` ends nothing. |
     | Client disable | Revokes everything the client holds, and sends no logout | The owner has cut the client off; telling it is not owed. |
@@ -182,8 +182,8 @@ Fifteen rules inside that, each of which reopens a hole if reversed.
     The reason of an ending is a closed word, recorded on the revoked tokens and the queued logouts and never sent to a client: `account_revoked`, `account_deleted`, `account_merged`, `compute_suspended`, `orcid_changed` and `kind_changed`.
     A filter narrows an ending to some of the account's grants, and what it selects is GRANTS: everything under a selected grant goes with it, its tokens whatever scopes they carry (a grant accumulates the scopes of every sign-in, and a token carries only those of its own code), its unused codes and its logout.
     `{rule}` selects the grants of the clients that sign people in by that rule (the ORCID unlink and relink and the kind change, with `person_proven_orcid`); `{scopePrefix}` selects the grants that carry a scope with that prefix (the compute suspension, with `compute.`).
-    The compute suspension has no caller yet, because its state does not exist; the compute access phase adds the caller, and the filter is shipped and tested directly.
-    The paths that call it, and their number, are `OIDC_END_CALLERS`, held to the code in both directions by a test that reads the syntax tree, as the docs and private-site counts are held: `finalizeRevocation` (revoke by username and by id), `tombstoneUserCascade` (the owner's soft delete, which runs the statements as they stand, and the sweep of the live tests' accounts, which runs each one conditional on the mask having applied to the row it chose), the ORCID unlink, the ORCID relink, the change of kind away from `person`, and the owner's `nemar admin oidc end-account`.
+    The compute suspension's caller is `endComputeStatements` in `services/compute-access.ts` (epic #2021 phase D1), which runs it for a suspension and for a revocation of compute access, in the batch of the decision and guarded on the state the decision leaves.
+    The paths that call it, and their number, are `OIDC_END_CALLERS`, held to the code in both directions by a test that reads the syntax tree, as the docs and private-site counts are held: `finalizeRevocation` (revoke by username and by id), `tombstoneUserCascade` (the owner's soft delete, which runs the statements as they stand, and the sweep of the live tests' accounts, which runs each one conditional on the mask having applied to the row it chose), the ORCID unlink, the ORCID relink, the change of kind away from `person`, the owner's `nemar admin oidc end-account`, and an administrator's suspension or revocation of compute access (`endComputeStatements`).
     That last command is how a manual merge ends the loser (`--reason merged`) and the tool for an incident (`--reason revoked`); it ends only the OIDC holdings and does not revoke the account.
     Ending the grants does not stop the account signing in again, because its app sessions and keys survive, so it can get a new first-party grant at once (a third-party client asks for consent again).
     For the loser of a merge the owner runs `end-account` and then revokes or deletes that account, which end every grant it holds and leave it unable to sign in; running `end-account` first is what makes the revoked tokens and the queued logouts record the merge and not the revocation, because the revocation or the deletion then finds nothing live to end.
@@ -379,6 +379,80 @@ The client registry, the keys, discovery, authorization, tokens, the cascades an
 - OpenID Connect Core 1.0; RFC 6749 and 7636 (authorization code, PKCE), RFC 7009 (revocation), RFC 7662 (introspection), RFC 9207 (issuer in the authorization response).
 - Rule 12's code and rule 15: issue #2019; migration `0124_oidc_logout_deliveries.sql`, `backend/src/services/oidc-cascade.ts`, `backend/src/services/oidc-logout.ts`, `backend/src/services/oidc-logout-store.ts`, `OIDC_END_CALLERS` and its test `backend/test/oidc-cascade-callers.test.ts`, the retry tick in `scheduled()` (`backend/src/index.ts`); OpenID Connect Back-Channel Logout 1.0; RFC 8725 (JWT best current practices, explicit typing).
 - Rules 13 and 14: issue #2018; migration `0123_oidc_tokens.sql`, `backend/src/services/oidc-tokens.ts`, `backend/src/services/oidc-claims.ts`, `backend/src/routes/oauth.ts`, `backend/src/middleware/oidc-bearer.ts`, `resolveApiKeyUser` in `backend/src/middleware/auth.ts`, the `oauth-ip` bucket in `backend/src/middleware/rateLimit.ts`; RFC 6750 (bearer tokens).
+
+## Amendment 2026-11-06 (#2023): five compute routes accept an access token (phase D2 of epic #2021)
+
+`backend/src/routes/compute/auth.ts` is the credential rule of the `/compute` read routes. This amendment says which routes accept an OpenID Connect access token and for which scope. It narrows nothing in rules 4 and 14 and widens them by exactly these five paths: every other route of the Worker still refuses an `nmo_` token by its prefix, and `backend/test/oidc-token-allowlist.test.ts` lists the five (its `COMPUTE_READ_RE`) as the only paths outside `/oauth` and discovery that may answer a token differently from an unknown key.
+
+| Route | Accepted credentials | Scope | Why |
+|---|---|---|---|
+| `GET /compute/me` | CLI key, session cookie, access token of a person | `compute.read` | The partner shows a person their access state and balances; the CLI and the website read the same body. Answers in every access state. |
+| `GET /compute/me/usage` | same | `compute.read` | Usage over time, for the partner's dashboard and the person's own. |
+| `GET /compute/me/jobs` | same | `compute.read` | The person's jobs from every front door. |
+| `GET /compute/me/jobs/:id` | same | `compute.read` | One job; a stranger's id answers 404 `job_not_found`, the same as an absent one. |
+| `GET /compute/stats` | access token of a CLIENT (client credentials grant) only | `compute.stats` | Platform-wide aggregates for the partner. Carries no account, subject, name or email. |
+
+1. **One resolver, two guards.**
+   `computePersonCredential` guards `/me*`: a bearer value with the `nmo_` prefix goes to `oidcBearer(["compute.read"])` (Epic B's one middleware, instantiated once as `PERSON_OIDC`), anything else to `authMiddleware`, exactly as every signed-in route.
+   `computeStatsCredential` guards `/stats`: only `oidcBearer(["compute.stats"])` (`STATS_OIDC`).
+   Both leave a `ComputeCredential` on the context, `{ kind: "user", userId, via: "key" | "cookie" | "oidc", scopes? }` or `{ kind: "client", clientId }`, and the handlers read the account from it and from nothing the request carries.
+   The two instances are called by the guards and are not route handlers themselves, so the allowlist test's scan for `oidcBearer` on a route (rule 14) still finds `/oauth/userinfo` alone; the five paths are listed by hand in that test, and `backend/test/compute-route-inventory.test.ts` pins each route's guard and the scope of each instance (`COMPUTE_OIDC_ROUTES`, `oidcBearerScopes`).
+2. **The refusals are fixed words with a fixed sentence**, `{ error, code }`, with the RFC 6750 challenge on a bearer refusal and `Cache-Control: no-store`: `invalid_token` (401, not a live access token), `insufficient_scope` (403, a live token without the scope, the challenge names it), `forbidden_credential` (403, the credential is of a kind the route never accepts) and `missing_credential` (401, `/stats` with no `Authorization` header).
+3. **Kinds are refused before scopes where the scope would mislead.**
+   A key on `/stats` is `forbidden_credential` without a lookup, so a valid key and an invalid one are answered alike.
+   A person's live access token on `/stats` is `forbidden_credential` and not `insufficient_scope`: `compute.stats` is machine only, a person cannot hold it, and the second sentence would suggest adding it.
+   A token that nevertheless carries `compute.stats` and names an account is refused by the account test (`accept` returns nothing for it).
+   A client credentials token on a `/me*` route has no `compute.read` and is refused as `insufficient_scope`; one that did carry it is refused as `forbidden_credential` because it names no account.
+4. **Audience is not checked.** A client chooses its audience when the owner registers it, and `compute.read` and `compute.stats` are served by one API; the scope and the live account rule (rule 14: the token, its client, its grant and the account against the client's sign-in rule are read at every call) are the gates. If a second resource server ever shares the scope names, the audience becomes the route's to check.
+5. **`/me*` does not require compute access.** `compute.nemar.org` signs people in without it (rule 7), so a person whose access is `none`, `requested`, `suspended`, `denied` or `revoked` reads their state and why a launch is refused. Submission (phase D3) asks `canUseCompute`.
+6. **A cookie is a credential on `/me*` and not on `/stats`.** The session cookie is host-only (rule 10), so a partner host never holds one; a browser on the app host reads its own data. `/stats` is a client's route and a cookie alone is `missing_credential`.
+7. **Maintenance.** All five are GETs and are served in `read-only`. The refresh of a live job on `GET /me/jobs/:id` is a write, so it is skipped in `read-only` and the stored record is served with `stale: true`.
+
+
+## Amendment 2026-11-07 (#2025): three compute routes accept an access token for `compute.reserve` (phase D4 of epic #2021)
+
+`backend/src/routes/compute/auth.ts` (`computePartnerCredential`, `RESERVE_OIDC`) and `partner.ts` are the credential rule and the routes of the partner contract.
+This amendment says which routes accept an OpenID Connect access token for the scope `compute.reserve` and with which refusals.
+It widens rules 4 and 14 by exactly three WRITE paths: every other route of the Worker, and every other write of the compute router, still refuses an `nmo_` token by its prefix, and `backend/test/oidc-token-allowlist.test.ts` lists the three (`COMPUTE_PARTNER_ROUTES`, by method and path) as the only writes it leaves out of its walk.
+
+| Route | Accepted credential | Scope | What it does |
+|---|---|---|---|
+| `POST /compute/holds` | access token of a PERSON | `compute.reserve` | reserve compute time for the signed-in person: 201 `{ job_id, hold_id, tag, expires_at }` |
+| `POST /compute/jobs/:id/report` | same | `compute.reserve` | report the Tapis job launched under the reservation: 200 `verified` or 202 `pending`; 409 `report_mismatch` for a job that does not match |
+| `DELETE /compute/holds/:id` | same | `compute.reserve` | release a reservation nothing was launched under: 200 |
+
+1. **One guard, one credential.**
+   `computePartnerCredential` is `oidcBearer(["compute.reserve"])` (instantiated once as `RESERVE_OIDC`), mounted on each route the way the `/compute/me*` guards are.
+   A CLI key and the session cookie are 403 `forbidden_credential` (a key without a lookup, so a valid one and an invalid one are answered alike); no credential is 401 `missing_credential`; garbage, a refresh token and a client secret are 401 `invalid_token`; a live token without the scope is 403 `insufficient_scope` (the challenge names it); a client credentials token names no person and is 403 `forbidden_credential` even if it somehow carried the scope.
+   A disabled client, a token whose grant was ended (a compute suspension or revocation ends the grants that carry a `compute.` scope, rule 12) and an account that no longer passes its client's sign-in rule are refused by `oidcBearer` itself at every call, as 401 `invalid_token`.
+2. **Audience IS checked on these routes.**
+   The amendment of phase D2 (item 4) left the audience unchecked on the read routes; the write routes check it, because a reservation moves money and the scope names are shared by every resource server that may ever serve them.
+   The owner chooses a client's audience at registration and the client never does, so the check is on the owner's act: the token's audience must be an address on the same origin as this Worker's own issuer (`API_BASE_URL`; `https://api.nemar.org/compute` and `https://api.nemar.org` both pass), else 403 `wrong_audience`; a Worker with no issuer fails closed.
+   The consequence for registering `compute.nemar.org` is that its audience must name the NEMAR API; a client registered for another resource server cannot reserve.
+   The read routes are unchanged and a test holds both halves.
+3. **The client is the token's, and a reservation is the person's and the client's.**
+   A job that is another person's, another client's, not a partner's or absent is the same 404 `job_not_found`.
+   A client's caps are the owner's policy (`clients`), with the client's own record as a second ceiling; a client the policy does not list can make no reservation (ADR 0118, the amendment of this phase, item 4).
+4. **The refusal words** are a closed list, `COMPUTE_PARTNER_ERROR_STATUS` in `shared/contract/compute-partner.ts`, each answered as `{ error, code }` (with `field` for `invalid_spec`, `mismatch` and `job_id` for `report_mismatch`), `Cache-Control: no-store`:
+   - the credential: `missing_credential` 401, `invalid_token` 401, `forbidden_credential` 403, `insufficient_scope` 403, `wrong_audience` 403;
+   - the request: `idempotency_key_required` 400, `invalid_spec` 400, `idempotency_conflict` 422;
+   - the person and the balances: `no_compute_access` 403, `suspended` 403, `partition_not_offered` 422, `over_job_limit` 422, `over_concurrency` 409, `insufficient_balance` 409, `platform_budget_exhausted` 409, `client_cap_reached` 409;
+   - the reservation: `job_not_found` 404, `already_bound` 409, `tapis_job_in_use` 409, `tapis_job_not_found` 422, `hold_released` 409, `hold_cancelled` 409, `hold_bound` 409, `report_mismatch` 409 (with `mismatch`: `owner_mismatch`, `app_mismatch` or `resources_mismatch`);
+   - the files: `bundle_too_many_files` 413, `bundle_too_large` 413;
+   - the platform: `compute_disabled` 503, `policy_unavailable` 503, `storage_unavailable` 503.
+5. **The partner's side of rule 11.**
+   The Tapis username of a person's compute credential is the `sub` itself (the identity transform); NEMAR compares the Tapis job's owner with it exactly.
+   The partner may apply a fixed reversible transform once it names one, and `tapisUsernameForSub` (`compute-report-verify.ts`) is the one function that learns it.
+   NEMAR never trusts the owner or the tag alone: the uuid the partner reports, bound by a unique index, and NEMAR's own read of that job are the identity.
+6. **The credential-ending table is unchanged.**
+   The three routes add no path that ends a credential; a compute suspension or revocation ends the person's grants that carry a compute scope (so the partner's tokens for that person die), and a reservation of that person is resolved by the partner contract (ADR 0118, the amendment of this phase, items 9 and 10).
+
+### Review round (PR #2077): two words and one rule for the three partner routes
+
+`tapis_job_unreadable` (422, `NEMAR is not allowed to read that Tapis job.`) and `partner_not_enabled` (503, `The partner contract is not enabled yet.`) are added to `COMPUTE_PARTNER_ERROR_STATUS`, and `unverifiable` joins the mismatch words of `report_mismatch`.
+The hold's answer gains the optional `state` of the job.
+A write route refuses a bearer whose audience does not name this API before it is read; that rule is unchanged.
+The words are stated once, in `shared/contract/compute-partner.ts`, and the website transcribes them.
 
 ## Addendum (2026-11-07): `OIDC_SECRET` has a form
 

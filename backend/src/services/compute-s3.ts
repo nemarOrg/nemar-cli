@@ -237,6 +237,12 @@ export interface PresignOptions {
 export interface PresignPutOptions extends PresignOptions {
   /** The object's SHA-256 as 64 lowercase hex digits, signed with the URL as `x-amz-checksum-sha256`. */
   sha256Hex?: string;
+  /**
+   * The object's length in bytes, SIGNED as `content-length`, so a store that checks the signature of a
+   * signed header refuses a body of another length. It is not returned in `headers` (the client sends
+   * `Content-Length` itself). Whether R2 enforces it on a presigned PUT is UNVERIFIED; the stand-in does.
+   */
+  contentLength?: number;
 }
 
 function hexToBase64(hex: string): string {
@@ -253,15 +259,26 @@ async function presign(
   method: "PUT" | "GET",
   options: PresignOptions,
   headers: Record<string, string>,
+  /**
+   * Headers that are SIGNED but not handed back: the client sets them itself (a runtime sets
+   * `Content-Length` from the body, and a browser forbids setting it). aws4fetch leaves
+   * `content-length` out of the signature unless every header is asked for (`allHeaders`).
+   */
+  signedOnly: Record<string, string> = {},
 ): Promise<Presigned> {
   assertKey(key);
   assertExpiry(options.expiresIn);
   // The expiry is in the URL BEFORE signing, so that it is part of the signature.
   const url = `${objectUrl(s3, bucket, key)}?X-Amz-Expires=${options.expiresIn}`;
+  const bound = Object.keys(signedOnly).length > 0;
   const signed = await s3.client.sign(url, {
     method,
-    headers,
-    aws: { signQuery: true, ...(options.now ? { datetime: amzDate(options.now) } : {}) },
+    headers: { ...headers, ...signedOnly },
+    aws: {
+      signQuery: true,
+      ...(bound ? { allHeaders: true } : {}),
+      ...(options.now ? { datetime: amzDate(options.now) } : {}),
+    },
   });
   const when = signedAt(signed.url);
   return {
@@ -285,7 +302,14 @@ export async function presignPut(
     }
     headers["x-amz-checksum-sha256"] = hexToBase64(options.sha256Hex);
   }
-  return presign(s3, bucket, key, "PUT", options, headers);
+  const signedOnly: Record<string, string> = {};
+  if (options.contentLength !== undefined) {
+    if (!Number.isSafeInteger(options.contentLength) || options.contentLength < 0) {
+      throw new ComputeS3Error("digest_invalid", "a length is a whole number of bytes");
+    }
+    signedOnly["content-length"] = String(options.contentLength);
+  }
+  return presign(s3, bucket, key, "PUT", options, headers, signedOnly);
 }
 
 /** A presigned GET of one object, valid `expiresIn` seconds. */

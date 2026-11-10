@@ -25,6 +25,7 @@ import { userMeResponseSchema, webUserSchema } from "../../shared/contract/user.
 import { authWebRoutes } from "../src/routes/auth-web";
 import { userRoutes } from "../src/routes/users";
 import { hashAuthCode } from "../src/services/auth-code";
+import { type ProfileGapRow, profileGapsForRow } from "../src/services/profile-gaps";
 import { hashApiKey } from "../src/services/token";
 import { checkUploadAccessRequest } from "../src/services/upload-access";
 import { issueSession } from "../src/services/web-session";
@@ -78,6 +79,8 @@ interface Overrides {
   github_username?: string | null;
   city?: string | null;
   country?: string | null;
+  /** 'Swartz Center' by default; the compute-access gap is about this one (epic #2021 phase D1). */
+  affiliation?: string | null;
   email_verified?: number;
   orcid_verified?: number;
   status?: string;
@@ -97,6 +100,18 @@ interface Overrides {
   username_auto_assigned?: number;
 }
 
+/** The row `profileGapsForRow` reads, selected the way the routes select it. */
+function rowFor(email: string): ProfileGapRow {
+  const row = db
+    .query<ProfileGapRow, [string]>(
+      `SELECT status, account_kind, email_verified, orcid_verified, username, given_name, family_name,
+              github_username, city, country, affiliation FROM users WHERE email = ?`,
+    )
+    .get(email);
+  if (!row) throw new Error("row vanished");
+  return row;
+}
+
 /** A complete account by default; each test blanks the columns it is about. */
 async function seedUser(overrides: Overrides = {}): Promise<number> {
   const row = {
@@ -106,6 +121,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     github_username: "adarivers",
     city: "San Diego",
     country: "USA",
+    affiliation: "Swartz Center" as string | null,
     email_verified: 1,
     orcid_verified: 1,
     status: "verified",
@@ -120,7 +136,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
                         given_name, family_name, github_username, city, country, affiliation,
                         orcid, orcid_verified, signup_source, service_access,
                         username_auto_assigned, account_kind)
-     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, 'Swartz Center',
+     VALUES (?, ?, 'x', ?, ?, ?, ?, ?, ?, ?, ?, ?,
              '0000-0002-1825-0097', ?, 'web', ?, ?, ?)`,
   ).run(
     row.username,
@@ -133,6 +149,7 @@ async function seedUser(overrides: Overrides = {}): Promise<number> {
     row.github_username,
     row.city,
     row.country,
+    row.affiliation,
     row.orcid_verified,
     row.service_access,
     row.username_auto_assigned,
@@ -221,6 +238,35 @@ describe("GET /users/me carries profile_gaps", () => {
     ]);
   });
 
+  test("while the compute terms are unpublished, a missing affiliation is not a gap on either payload", async () => {
+    // Epic #2021 phase D1, owner decision: third-party compute must not confuse anyone before it is
+    // open, and an account nudged toward a request that answers 503 `terms_unpublished` is that
+    // confusion. `COMPUTE_TERMS_PUBLISHED` is false, so every payload reads as before epic D: no
+    // affiliation gap, and no `compute_access` among any entry's blocks (the city and name tests
+    // here pin the blocks).
+    const id = await seedUser({ affiliation: null });
+    const cli = userMeResponseSchema.parse(await (await usersMe()).json());
+    expect(cli.user.profile_gaps).toEqual([]);
+    const web = webUserSchema.parse((await (await authMe(id)).json()).user);
+    expect(web.profile_gaps).toEqual([]);
+    expect((await allThree(id)).missing).toEqual([]);
+  });
+
+  test("once the terms are published, the same row raises it on the row adapter both payloads use", async () => {
+    // The published branch of the gate, which a compile-time constant cannot show through a route:
+    // `profileGapsForRow` is what both payloads call. MUTATION: drop `affiliation` from the row it
+    // hands the rule and this stops raising it.
+    await seedUser({ affiliation: null, city: null });
+    const row = rowFor(USER_EMAIL);
+    expect(profileGapsForRow(row, { computeTermsPublished: true })).toEqual([
+      { field: "city", blocks: ["upload_access", "compute_access"], set_on: ["web", "cli"] },
+      { field: "affiliation", blocks: ["compute_access"], set_on: ["web", "cli"] },
+    ]);
+    expect(profileGapsForRow(row, { computeTermsPublished: false }).map((g) => g.field)).toEqual([
+      "city",
+    ]);
+  });
+
   test("a complete account gets an EMPTY list, which is not the same as none", async () => {
     await seedUser();
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
@@ -242,7 +288,11 @@ describe("GET /users/me carries profile_gaps", () => {
     await seedUser({ given_name: null, orcid_verified: 1 });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual([
-      { field: "given_name", blocks: ["upload_access", "publication"], set_on: ["web"] },
+      {
+        field: "given_name",
+        blocks: ["upload_access", "publication"],
+        set_on: ["web"],
+      },
     ]);
   });
 
@@ -441,11 +491,12 @@ describe("one row, three answers", () => {
           github_username: string | null;
           city: string | null;
           country: string | null;
+          affiliation: string | null;
         },
         [string]
       >(
         `SELECT status, account_kind, email_verified, orcid_verified, username, given_name, family_name,
-                github_username, city, country FROM users WHERE email = ?`,
+                github_username, city, country, affiliation FROM users WHERE email = ?`,
       )
       .get(USER_EMAIL);
     if (!row) throw new Error("row vanished");
@@ -464,6 +515,7 @@ describe("one row, three answers", () => {
       github_username: row.github_username,
       city: row.city,
       country: row.country,
+      affiliation: row.affiliation,
     });
     const body = userMeResponseSchema.parse(await (await usersMe()).json());
     expect(body.user.profile_gaps).toEqual(expected);

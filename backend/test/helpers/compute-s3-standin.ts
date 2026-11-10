@@ -75,6 +75,11 @@ export interface StandinFailure {
   code?: string;
   /** How many matching requests answer the error before it clears. Default 1. */
   times?: number;
+  /**
+   * Runs when the failure fires, before the error is answered: what a CONCURRENT writer did while this
+   * request was in flight (for example, the object it refuses to overwrite was written by the other).
+   */
+  beforeAnswer?: () => void | Promise<void>;
 }
 
 export interface ComputeS3Standin {
@@ -198,6 +203,9 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
         service: "s3",
         region: STANDIN_REGION,
         signQuery: true,
+        // `content-length` is signed only when the signer is told to sign every header (phase D3, #2024:
+        // a presigned PUT binds the archive's declared length); the request's own value is what is judged.
+        allHeaders: names.includes("content-length"),
         datetime: q.get("X-Amz-Date") as string,
       });
       const signed = await signer.sign();
@@ -236,6 +244,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
       secretAccessKey,
       service: "s3",
       region: STANDIN_REGION,
+      allHeaders: names.includes("content-length"),
       datetime: req.headers.get("x-amz-date") as string,
     });
     const header = (await signer.authHeader()) as string;
@@ -299,6 +308,7 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
 
     const injected = takeFailure(entry.op, entry.bucket, entry.key);
     if (injected) {
+      await injected.beforeAnswer?.();
       entry.code = injected.code ?? "InternalError";
       return errorXml(entry.code, "an injected failure", injected.status);
     }

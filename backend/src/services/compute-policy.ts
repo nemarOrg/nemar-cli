@@ -163,9 +163,31 @@ export function issuesOf(error: z.ZodError, prefix?: string): PolicyIssue[] {
   }));
 }
 
+/**
+ * The partner reservations a switched-off contract would FREEZE: reservations nobody has bound a Tapis job
+ * under. A bound `pending` or `mismatch` row is not frozen (the reaper still verifies and ends it with the
+ * contract off), so it is not counted.
+ */
+export const PARTNER_OPEN_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE source = 'partner' AND state = 'created' AND tapis_uuid IS NULL AND partner_state IS NULL`;
+
+/**
+ * The bound partner jobs still waiting on NEMAR's verification: `pending`, or refused as `unverifiable`
+ * (which a later read can recover). A change of the pin applies to them.
+ */
+export const PARTNER_BOUND_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE source = 'partner' AND state = 'created' AND tapis_uuid IS NOT NULL
+    AND (partner_state = 'pending' OR (partner_state = 'mismatch' AND partner_flag = 'unverifiable'))`;
+
 export type PutPolicyResult =
-  | { ok: true; version: number }
+  | {
+      ok: true;
+      version: number;
+      /** Partner reservations left waiting because the write turned the partner contract off (`forcePartnerOff`). */
+      partnerFrozen?: number;
+    }
   | { ok: false; code: "not_owner" }
+  | { ok: false; code: "partner_reservations_open"; open: number; bound: number }
   | { ok: false; code: "invalid_note" }
   | { ok: false; code: "invalid_policy"; issues: PolicyIssue[] };
 
@@ -181,6 +203,7 @@ export async function putPolicy(
   input: unknown,
   note?: string | null,
   issuePrefix?: string,
+  options: { forcePartnerOff?: boolean } = {},
 ): Promise<PutPolicyResult> {
   const text = note ?? null;
   if (
@@ -201,6 +224,38 @@ export async function putPolicy(
       issues: [{ path: under(issuePrefix, ""), code: "too_large" }],
     };
   }
+  // CHANGING THE PARTNER CONTRACT under open work. Two things can go wrong, and the guard names each number:
+  //  - `open`: turning it OFF (dropping the confirmation, or omitting the block, which is what a policy file
+  //    written before the block existed does) FREEZES the reservations nobody has bound a job under: the
+  //    reaper never releases on an empty search while the owner has not confirmed NEMAR can see the tenant;
+  //  - `bound`: dropping the block, or changing its execution system or its listed scheduler options, LOOSENS
+  //    the verification of the bound jobs still waiting (`pending`, or refused as `unverifiable` and
+  //    recoverable), which the reaper keeps verifying under the NEW pin.
+  // Either is refused unless the owner says so (`forcePartnerOff`), and then the numbers are told.
+  let partnerFrozen: number | undefined;
+  // A stored policy that cannot be read is not a confirmation (and a write replaces it).
+  const current = await getPolicy(db).catch(() => null);
+  const before = current?.policy.partner;
+  if (before?.tapisVisibilityConfirmed === true) {
+    const after = parsed.data.partner;
+    const off = after?.tapisVisibilityConfirmed !== true;
+    const pinChanged =
+      after?.execSystemId !== before.execSystemId ||
+      JSON.stringify(after?.allowedSchedulerArgs ?? []) !==
+        JSON.stringify(before.allowedSchedulerArgs ?? []);
+    if (off || pinChanged) {
+      const open = off
+        ? ((await db.prepare(PARTNER_OPEN_COUNT_SQL).first<{ n: number }>())?.n ?? 0)
+        : 0;
+      const bound = (await db.prepare(PARTNER_BOUND_COUNT_SQL).first<{ n: number }>())?.n ?? 0;
+      if (open > 0 || bound > 0) {
+        if (options.forcePartnerOff !== true) {
+          return { ok: false, code: "partner_reservations_open", open, bound };
+        }
+        partnerFrozen = open;
+      }
+    }
+  }
   const results = await db.batch([
     db.prepare(POLICY_INSERT_SQL).bind(json, text, ownerId),
     db.prepare(AUDIT_POLICY_SET_SQL).bind(ownerId),
@@ -210,5 +265,9 @@ export async function putPolicy(
   if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
     throw new Error("a policy version that was just written has no id");
   }
-  return { ok: true, version };
+  return {
+    ok: true,
+    version,
+    ...(partnerFrozen !== undefined && partnerFrozen > 0 ? { partnerFrozen } : {}),
+  };
 }

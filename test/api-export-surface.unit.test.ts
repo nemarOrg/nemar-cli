@@ -254,29 +254,46 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "adjustAccountComputePool",
     "adjustPlatformComputePool",
     "advanceComputeJobAsAdmin",
+    "cancelComputeJob",
     "cancelComputeJobAsAdmin",
     "computeRefusalCode",
+    "finalizeComputeJob",
     "getAccountComputePools",
     "getComputeAccessReport",
     "getComputeAccountReport",
+    "getComputeLogs",
+    "getComputeMe",
     "getComputePipelineStatus",
     "getComputePolicy",
     "getComputeRecord",
+    "getComputeResults",
     "getComputeStatus",
+    "getComputeUsage",
+    "getMyComputeJob",
     "grantAccountComputePool",
     "grantPlatformComputePool",
     "listComputeAccessReports",
     "listComputeHolds",
     "listComputeJobs",
     "listComputePools",
+    "listMyComputeJobs",
     "listUnmatchedComputeRows",
     "mintComputeObserverRun",
+    "moveComputeCharge",
     "placeComputeHold",
     "putComputePolicy",
     "readComputeRecord",
     "releaseComputeHold",
+    "renewComputeResults",
+    "requestComputeAccess",
     "requeueComputeAccessReport",
     "runComputePipeline",
+    "submitComputeJob",
+  ],
+  "compute-access-admin": [
+    "computeAccessAdminErrorCode",
+    "decideComputeAccess",
+    "listComputeAccess",
   ],
 };
 
@@ -399,6 +416,20 @@ const POST_SPLIT_ADDITIONS = [
   "acceptRepullMergeTrailers", // #1996, ADR 0111 2026-10-29: POST /admin/repulls/:id/merge-trailers/accept
   "getRepullSwitches", // #1913 phase 7h: GET /admin/repulls/switches
   "listRepullDispatches", // #1913 phase 7h: GET /admin/repulls/dispatches
+  "requestComputeAccess", // epic #2021 phase D1: POST /users/me/compute-access/request
+  "getComputeMe", // epic #2021 phase D2: GET /compute/me
+  "getComputeUsage", // epic #2021 phase D2: GET /compute/me/usage
+  "listMyComputeJobs", // epic #2021 phase D2: GET /compute/me/jobs
+  "getMyComputeJob", // epic #2021 phase D2: GET /compute/me/jobs/:id
+  "submitComputeJob", // epic #2021 phase D3b: POST /compute/jobs
+  "finalizeComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/finalize
+  "getComputeLogs", // epic #2021 phase D3b: GET /compute/jobs/:id/logs (plain text)
+  "getComputeResults", // epic #2021 phase D3b: GET /compute/jobs/:id/results
+  "renewComputeResults", // epic #2021 phase D3b: POST /compute/jobs/:id/results/renew
+  "cancelComputeJob", // epic #2021 phase D3b: POST /compute/jobs/:id/cancel
+  "listComputeAccess", // epic #2021 phase D1: GET /admin/compute/access
+  "decideComputeAccess", // epic #2021 phase D1: POST /admin/compute/access/{grant|deny|suspend|revoke}/...
+  "computeAccessAdminErrorCode", // epic #2021 phase D1: reads a compute-access refusal's word (no request)
   "getComputePolicy", // epic #2005 phase A2: GET /admin/compute/policy
   "putComputePolicy", // epic #2005 phase A2: PUT /admin/compute/policy
   "getComputeStatus", // epic #2005 phase A4: GET /admin/compute/status
@@ -425,6 +456,7 @@ const POST_SPLIT_ADDITIONS = [
   "listComputeAccessReports", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "requeueComputeAccessReport", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
   "mintComputeObserverRun", // epic #2005 phase A7: reporting, holds, ACCESS reports and the observer (admin/compute)
+  "moveComputeCharge", // epic #2021 phase D4: POST /admin/compute/jobs/:id/move-charge (owner)
   "createOidcClient", // epic #2014 phase #2016: POST /admin/oidc/clients (shared/contract/oidc-admin.ts)
   "listOidcClients", // epic #2014 phase #2016: GET /admin/oidc/clients
   "getOidcClient", // epic #2014 phase #2016: GET /admin/oidc/clients/:client_id

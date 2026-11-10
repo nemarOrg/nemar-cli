@@ -46,7 +46,7 @@
  *    `CopyObject` each, so it is bounded at `PARTNER_FILES_MAX` files whatever the owner's limit.
  */
 
-import type { ComputeState } from "../../../shared/compute-state.js";
+import { type ComputeState, LIVE_COMPUTE_STATES } from "../../../shared/compute-state.js";
 import {
   COMPUTE_DOT_SEGMENT_RE,
   COMPUTE_JOB_ID_RE,
@@ -397,7 +397,7 @@ export async function writeSpec(
 
 // --- What the jobs table says about a job's records -----------------------------------------------
 
-export const JOB_RECORDS_SQL = `SELECT id, source, state, account_id, records_written_at
+export const JOB_RECORDS_SQL = `SELECT id, source, state, account_id, records_written_at, partner_state
   FROM compute_jobs WHERE id = ?1`;
 
 interface JobRecordsRow {
@@ -406,6 +406,8 @@ interface JobRecordsRow {
   state: ComputeState;
   account_id: number | null;
   records_written_at: string | null;
+  /** A partner's job is verified (`verified`) before any file of it enters the locked records. */
+  partner_state: string | null;
 }
 
 /** The job's records are complete; only when this is set may a job be submitted (phase A5). */
@@ -414,6 +416,10 @@ export const RECORDS_WRITTEN_SQL = `UPDATE compute_jobs SET records_written_at =
 
 /** The states in which a job's upload may still be asked for and finalized: it has not started. */
 const UPLOAD_STATES: readonly ComputeState[] = ["created", "uploading"];
+
+/** A state in which a job has not ended: a partner's files may still be addressed for it. */
+const isLiveState = (state: ComputeState): boolean =>
+  (LIVE_COMPUTE_STATES as readonly string[]).includes(state);
 
 async function jobRow(env: ComputeRecordsEnv, jobId: string): Promise<JobRecordsRow | null> {
   return env.DB.prepare(JOB_RECORDS_SQL).bind(jobId).first<JobRecordsRow>();
@@ -515,9 +521,20 @@ function manifestText(
   return JSON.stringify({
     job_id: jobId,
     archive,
-    files: files.map((f) => ({ path: f.path, size: f.size })),
+    // A file's digest is recorded when the declarer gave one: the packer's claim for a person's bundle (the
+    // Worker does not hash a file inside the archive), and a partner's claim for its own files, which
+    // `finalizeSubmittedFiles` compares with the digest the store holds for the object where the store
+    // returns one (an object uploaded with a signed SHA-256 checksum) and otherwise checks by size only.
+    files: files.map((f) =>
+      f.sha256 === undefined
+        ? { path: f.path, size: f.size }
+        : { path: f.path, size: f.size, sha256: f.sha256 },
+    ),
   });
 }
+
+const toHex = (buffer: ArrayBuffer): string =>
+  [...new Uint8Array(buffer)].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 /** The size of every object under a prefix of a bucket, by key (a listing is one subrequest per 1,000). */
 async function sizesUnder(bucket: R2Bucket, prefix: string): Promise<Map<string, number>> {
@@ -543,6 +560,27 @@ async function recordedSpec(bucket: R2Bucket, jobId: string): Promise<JobSpec | 
   }
   const parsed = JobSpecSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Whether a partner's declared files are acceptable, BEFORE anything is bound, signed or written: the
+ * count against the partner cap, every path against the path rule in any encoding and as a key of this job,
+ * every size against the owner's file and total limits and every digest against its shape. Pure of
+ * effects. Returns the refusal, or null. A report that declares files it may not is refused whole, so a
+ * hostile list leaves no binding behind.
+ */
+export async function checkPartnerFiles(
+  env: ComputeRecordsEnv,
+  jobId: string,
+  files: unknown,
+): Promise<RecordsRefusal | null> {
+  const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
+  const checked = checkFiles(files, limits, {
+    maxCount: partnerFileCap(limits),
+    digest: true,
+    keysOf: jobIdOrThrow(jobId),
+  });
+  return checked.ok ? null : checked;
 }
 
 // --- Upload addresses --------------------------------------------------------------------------------
@@ -571,7 +609,7 @@ export type IncomingUploadsResult =
  * never made, and one whose records are written: never after the job is complete. `options.now` is the
  * moment to sign as of, which only a test sets (to make an address that has already expired).
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (the per-file upload) wires it.
+// Called by `POST /compute/jobs` for a job with a code bundle (phase D3, #2024) and by `POST /compute/jobs/:id/report` for a partner's declared files (phase D4, #2025).
 export async function presignIncomingUploads(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -584,7 +622,12 @@ export async function presignIncomingUploads(
   if (typeof jobId !== "string" || !COMPUTE_JOB_ID_RE.test(jobId)) return refuse("job_not_found");
   const job = await jobRow(env, jobId);
   if (!job) return refuse("job_not_found");
-  if (job.records_written_at !== null || !UPLOAD_STATES.includes(job.state)) {
+  // A person's bundle is asked for before the job starts. A partner's files are records only, uploaded
+  // beside a job that is already running, so any live state may ask for an address (the copy into the
+  // records, which is the lock, waits for the verification: `finalizeSubmittedFiles`).
+  const askable =
+    job.source === "partner" ? isLiveState(job.state) : UPLOAD_STATES.includes(job.state);
+  if (job.records_written_at !== null || !askable) {
     return refuse("bad_state");
   }
   const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
@@ -626,6 +669,10 @@ export async function presignIncomingUploads(
     const signed = await presignPut(s3, "records", incomingKey(jobId, file.path), {
       expiresIn: COMPUTE_UPLOAD_SECONDS,
       ...(file.sha256 === undefined ? {} : { sha256Hex: file.sha256 }),
+      // The declared length is SIGNED for a code bundle and for a partner's file alike, so a store that
+      // checks a signed header refuses a body of another length; the size read back at finalize is the
+      // bound either way (R2's enforcement of a signed header is not verified).
+      contentLength: file.size,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
     uploads.push({ path: file.path, url: signed.url, headers: signed.headers });
@@ -641,8 +688,8 @@ export type FinalizeResult = { ok: true; replayed: boolean; files: number } | Re
 export interface BundleFinalizeInput {
   /** The archive's own SHA-256 and size, which must be those the job was made with. */
   archive: { sha256: string; size: number };
-  /** The files inside the archive, as the packer lists them. */
-  files: Array<{ path: string; size: number }>;
+  /** The files inside the archive, as the packer lists them; a digest is recorded as given, never re-checked. */
+  files: Array<{ path: string; size: number; sha256?: string }>;
 }
 
 /** Whether the manifest already recorded is the one this request would write: a replay, or not. */
@@ -701,7 +748,7 @@ async function completeRecords(
  * never overwritten. A copy the store refuses throws `ComputeS3Error` (`copy_failed`): the caller
  * answers 503 and asks again.
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (a code bundle's finalize) wires it.
+// Called by `POST /compute/jobs/:id/finalize` (phase D3, #2024).
 export async function finalizeBundle(
   env: ComputeRecordsEnv,
   jobId: string,
@@ -729,7 +776,7 @@ export async function finalizeBundle(
     return refuse("invalid_spec", "archive");
   }
   if (archive.size > copyableLimit(limits.maxTotalBytes)) return refuse("bundle_too_large");
-  const checked = checkFiles(input.files, limits, { maxCount: limits.maxFiles, digest: false });
+  const checked = checkFiles(input.files, limits, { maxCount: limits.maxFiles, digest: true });
   if (!checked.ok) return checked;
   const text = manifestText(jobId, { sha256: archive.sha256, size: archive.size }, checked.files);
 
@@ -777,11 +824,14 @@ export async function finalizeBundle(
  * manifest (`archive: null`) is written and the records marked written. Idempotent as `finalizeBundle`
  * is.
  */
-// NOT CALLED YET: no route reaches this; Epic D's partner contract (a partner's own files) wires it.
+// Called by the partner's report (phase D4, #2025), and ONLY for a job NEMAR has verified: a copy into
+// `records/` is a lock that cannot be undone, so nothing a partner uploaded enters it before the read-back
+// has matched. Any state of a verified job is allowed (the files are records, uploaded beside a job that
+// may already be running).
 export async function finalizeSubmittedFiles(
   env: ComputeRecordsEnv,
   jobId: string,
-  input: { files: Array<{ path: string; size: number }> },
+  input: { files: Array<{ path: string; size: number; sha256?: string }> },
 ): Promise<FinalizeResult> {
   const bucket = env.COMPUTE_RECORDS;
   const s3 = computeS3(env);
@@ -794,7 +844,7 @@ export async function finalizeSubmittedFiles(
   const { bundleLimits: limits } = (await getPolicy(env.DB)).policy;
   const checked = checkFiles(input?.files, limits, {
     maxCount: partnerFileCap(limits),
-    digest: false,
+    digest: true,
     keysOf: jobId,
   });
   if (!checked.ok) return checked;
@@ -805,7 +855,8 @@ export async function finalizeSubmittedFiles(
       ? { ok: true, replayed: true, files: checked.files.length }
       : refuse("bad_state");
   }
-  if (!UPLOAD_STATES.includes(job.state)) return refuse("bad_state");
+  // NOTHING ENTERS THE RECORDS BEFORE THE VERIFICATION: the lock on `records/` cannot be undone.
+  if (job.partner_state !== "verified") return refuse("bad_state");
 
   const incoming = await sizesUnder(bucket, `incoming/${jobId}/`);
   const submitted = await sizesUnder(bucket, `records/${jobId}/submitted/`);
@@ -815,17 +866,33 @@ export async function finalizeSubmittedFiles(
     const size = incoming.get(incomingKey(jobId, file.path));
     if (size === undefined) return refuse("bad_state", `files.${i}.path`);
     if (size !== file.size) return refuse("invalid_spec", `files.${i}.size`);
+    if (file.sha256 !== undefined) {
+      // Where the store knows the object's SHA-256 it must be the declared one; where it does not, the
+      // declaration is checked by size only (what the contract documents).
+      const held = (await bucket.head(incomingKey(jobId, file.path)))?.checksums?.sha256;
+      if (held !== undefined && toHex(held) !== file.sha256) {
+        return refuse("invalid_spec", `files.${i}.sha256`);
+      }
+    }
     const there = submitted.get(submittedKey(jobId, file.path));
     if (there === undefined) toCopy.push(file);
     else if (there !== file.size) return refuse("bad_state", `files.${i}.path`);
   }
 
   for (const file of toCopy) {
-    await copyObject(
-      s3,
-      { bucket: "records", key: incomingKey(jobId, file.path) },
-      { bucket: "records", key: submittedKey(jobId, file.path) },
-    );
+    try {
+      await copyObject(
+        s3,
+        { bucket: "records", key: incomingKey(jobId, file.path) },
+        { bucket: "records", key: submittedKey(jobId, file.path) },
+      );
+    } catch (err) {
+      // A concurrent replay of the same report may have copied this file between the listing and here, and
+      // the destination is locked once written: a store that refuses the second copy has not failed to
+      // hold the file. The file counts as copied only when it is there at its declared size.
+      const there = await bucket.head(submittedKey(jobId, file.path));
+      if (there === null || there.size !== file.size) throw err;
+    }
   }
   if (toCopy.length > 0) {
     const after = await sizesUnder(bucket, `records/${jobId}/submitted/`);

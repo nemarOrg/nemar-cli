@@ -11,6 +11,11 @@
  */
 
 import {
+  type ComputeAccessRequestBody,
+  type ComputeAccessRequestResponse,
+  computeAccessRequestResponseSchema,
+} from "../../../shared/contract/compute-access.js";
+import {
   type ComputeAccessReportResponse,
   ComputeAccessReportResponseSchema,
   type ComputeAccessReportsResponse,
@@ -27,6 +32,8 @@ import {
   ComputeJobAdminResponseSchema,
   type ComputeJobsListResponse,
   ComputeJobsListResponseSchema,
+  type ComputeMoveChargeResponse,
+  ComputeMoveChargeResponseSchema,
   type ComputeObserverRunResponse,
   ComputeObserverRunResponseSchema,
   type ComputePipelineRunRequest,
@@ -54,6 +61,34 @@ import {
   type ComputeUnmatchedResponse,
   ComputeUnmatchedResponseSchema,
 } from "../../../shared/contract/compute-admin.js";
+import {
+  type ComputeCancelResponse,
+  ComputeCancelResponseSchema,
+} from "../../../shared/contract/compute-responses.js";
+import type {
+  ComputeFinalizeRequest,
+  ComputeSubmitRequest,
+} from "../../../shared/contract/compute-submit-request.js";
+import {
+  COMPUTE_IDEMPOTENCY_HEADER,
+  COMPUTE_TRUNCATED_HEADER,
+  type ComputeFinalizeResponse,
+  ComputeFinalizeResponseSchema,
+  type ComputeResultsResponse,
+  ComputeResultsResponseSchema,
+  type ComputeSubmitResponse,
+  ComputeSubmitResponseSchema,
+} from "../../../shared/contract/compute-submit.js";
+import {
+  type ComputeMeResponse,
+  ComputeMeResponseSchema,
+  type ComputeUsageResponse,
+  ComputeUsageResponseSchema,
+  type ComputeUserJobResponse,
+  ComputeUserJobResponseSchema,
+  type ComputeUserJobsResponse,
+  ComputeUserJobsResponseSchema,
+} from "../../../shared/contract/compute-user.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
@@ -66,10 +101,18 @@ export async function getComputePolicy(): Promise<ComputePolicyResponse> {
 export async function putComputePolicy(
   policy: unknown,
   note?: string,
+  forcePartnerOff = false,
 ): Promise<ComputePolicyResponse> {
   return request(
     "/admin/compute/policy",
-    { method: "PUT", body: JSON.stringify(note === undefined ? { policy } : { policy, note }) },
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        policy,
+        ...(note === undefined ? {} : { note }),
+        ...(forcePartnerOff ? { force_partner_off: true } : {}),
+      }),
+    },
     true,
     ComputePolicyResponseSchema,
   );
@@ -194,6 +237,30 @@ export async function advanceComputeJobAsAdmin(jobId: string): Promise<ComputeJo
     { method: "POST" },
     true,
     ComputeJobAdminResponseSchema,
+  );
+}
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner): move the charge of a job that skipped the reservation
+ * from the partner's pool to one account's pool. One batch on the Worker; a repeat of the same move is a
+ * replay.
+ */
+export async function moveComputeCharge(
+  jobId: string,
+  toAccountId: number,
+  confirmUnprovenOwner = false,
+): Promise<ComputeMoveChargeResponse> {
+  return request(
+    `/admin/compute/jobs/${encodeURIComponent(jobId)}/move-charge`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        to_account_id: toAccountId,
+        ...(confirmUnprovenOwner ? { confirm_unproven_owner: true } : {}),
+      }),
+    },
+    true,
+    ComputeMoveChargeResponseSchema,
   );
 }
 
@@ -441,4 +508,179 @@ export function computeRefusalCode(
     ? blocked.filter((t): t is string => typeof t === "string")
     : [];
   return { code, blockedBy };
+}
+
+/**
+ * `POST /users/me/compute-access/request` (the signed-in person): ask for compute access, once (epic
+ * #2021 phase D1, ADR 0118). A refusal is `{ error: <code>, message, missing }` like upload access's:
+ * the code is `ApiError.code` (one of `COMPUTE_ACCESS_ERROR_CODES`), the sentence is `ApiError.message`
+ * and the account fields still to fix are `ApiError.missing`. The answer is read with an open schema.
+ */
+export async function requestComputeAccess(
+  body: ComputeAccessRequestBody,
+): Promise<ComputeAccessRequestResponse> {
+  return request(
+    "/users/me/compute-access/request",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+    computeAccessRequestResponseSchema,
+  );
+}
+
+// --- A person's own reads (epic #2021 phase D2, #2023) ------------------------------------------------------
+//
+// `/compute/me*` answer for the signed-in account in every access state. A refusal is `{ error: <sentence>,
+// code: <word> }` (`computeRefusalCode` reads the word). The responses are `shared/contract/compute-user.ts`,
+// parsed open. `listMyComputeJobs` and `getMyComputeJob` carry "My" because `listComputeJobs` above is the
+// administrator's listing of every account's jobs.
+
+/** `GET /compute/me`: access, pools, limits and queue estimates. */
+export async function getComputeMe(): Promise<ComputeMeResponse> {
+  return request("/compute/me", {}, true, ComputeMeResponseSchema);
+}
+
+/** `GET /compute/me/usage`: the net charge by `group` (day, app, partition, source) over `from` to `to` (UTC days). */
+export async function getComputeUsage(
+  q: { from?: string; to?: string; group?: string[] } = {},
+): Promise<ComputeUsageResponse> {
+  const params = new URLSearchParams();
+  if (q.from) params.set("from", q.from);
+  if (q.to) params.set("to", q.to);
+  if (q.group && q.group.length > 0) params.set("group", q.group.join(","));
+  return request(`/compute/me/usage${queryString(params)}`, {}, true, ComputeUsageResponseSchema);
+}
+
+/** `GET /compute/me/jobs`: the caller's jobs, newest first; `after` is the previous page's `next_after`. */
+export async function listMyComputeJobs(
+  q: { state?: string; limit?: number; after?: string } = {},
+): Promise<ComputeUserJobsResponse> {
+  const params = new URLSearchParams();
+  if (q.state) params.set("state", q.state);
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.after) params.set("after", q.after);
+  return request(`/compute/me/jobs${queryString(params)}`, {}, true, ComputeUserJobsResponseSchema);
+}
+
+/**
+ * `GET /compute/me/jobs/:id`: one of the caller's jobs; a live one is refreshed from Tapis when stale.
+ * `signal` and `timeoutMs` are for a poll: an abort or a hung connection ends the read as a network failure.
+ */
+export async function getMyComputeJob(
+  jobId: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ComputeUserJobResponse> {
+  return request(
+    `/compute/me/jobs/${encodeURIComponent(jobId)}`,
+    options.signal ? { signal: options.signal } : {},
+    true,
+    ComputeUserJobResponseSchema,
+    "json",
+    options.timeoutMs,
+  );
+}
+
+// --- A person's own jobs: submit, upload, logs, results, cancel (epic #2021 phase D3b, #2024) --------------------
+//
+// `shared/contract/compute-submit.ts` has the open responses and `compute-submit-request.ts` the strict
+// requests. A refusal is `{ error: <sentence>, code: <word> }` (`computeRefusalCode` reads the word); a
+// `503 storage_unavailable` that came after the hold also carries `job_id` in `rawBody`.
+
+/**
+ * `POST /compute/jobs`: submit a job. `Idempotency-Key` makes a repeat of this call (after a lost answer, a
+ * 503) the same job again, and the same key with another body `422 idempotency_conflict`. A bundle job is
+ * answered `uploading` with the one `upload` address; an image job is submitted at once.
+ */
+export async function submitComputeJob(
+  body: ComputeSubmitRequest,
+  idempotencyKey: string,
+): Promise<ComputeSubmitResponse> {
+  return request(
+    "/compute/jobs",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { [COMPUTE_IDEMPOTENCY_HEADER]: idempotencyKey },
+    },
+    true,
+    ComputeSubmitResponseSchema,
+  );
+}
+
+/** `POST /compute/jobs/:id/finalize`: the bundle is uploaded; the manifest is sent again and the job is submitted. */
+export async function finalizeComputeJob(
+  jobId: string,
+  manifest: ComputeFinalizeRequest,
+): Promise<ComputeFinalizeResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/finalize`,
+    { method: "POST", body: JSON.stringify(manifest) },
+    true,
+    ComputeFinalizeResponseSchema,
+  );
+}
+
+/** The log of a job: at most its first 1 MiB, and whether the Worker cut it (`X-Nemar-Truncated: true`). */
+export interface ComputeLogAnswer {
+  text: string;
+  truncated: boolean;
+}
+
+/** `GET /compute/jobs/:id/logs`: plain text, not JSON. `404 logs_not_available` before the job started. */
+export async function getComputeLogs(jobId: string): Promise<ComputeLogAnswer> {
+  const answer = await request<{ text: string; headers: Headers }>(
+    `/compute/jobs/${encodeURIComponent(jobId)}/logs`,
+    {},
+    true,
+    undefined,
+    "text",
+  );
+  return {
+    text: answer.text,
+    truncated: answer.headers.get(COMPUTE_TRUNCATED_HEADER)?.toLowerCase() === "true",
+  };
+}
+
+const afterQuery = (after?: string) =>
+  after === undefined ? "" : `?${new URLSearchParams({ after }).toString()}`;
+
+/**
+ * `GET /compute/jobs/:id/results[?after=]`: seven-day BEARER links to a finished job's outputs, at most
+ * 1,000 a page; `next_after` continues. `410 results_expired` once they are past retention.
+ */
+export async function getComputeResults(
+  jobId: string,
+  after?: string,
+): Promise<ComputeResultsResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/results${afterQuery(after)}`,
+    {},
+    true,
+    ComputeResultsResponseSchema,
+  );
+}
+
+/** `POST /compute/jobs/:id/results/renew[?after=]`: the same links, made again while the objects exist. */
+export async function renewComputeResults(
+  jobId: string,
+  after?: string,
+): Promise<ComputeResultsResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/results/renew${afterQuery(after)}`,
+    { method: "POST" },
+    true,
+    ComputeResultsResponseSchema,
+  );
+}
+
+/**
+ * `POST /compute/jobs/:id/cancel`: cancel one of your jobs. A job that had already ended is a 200 with its
+ * state unchanged and `cancelled: false`.
+ */
+export async function cancelComputeJob(jobId: string): Promise<ComputeCancelResponse> {
+  return request(
+    `/compute/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+    true,
+    ComputeCancelResponseSchema,
+  );
 }

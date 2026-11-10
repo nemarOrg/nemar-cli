@@ -34,3 +34,19 @@ export * from "./compute.js";
 // The routes of the compute allocation ledger and owner policy: error words, request shapes and
 // the OPEN response schemas the CLI parses (epic #2005 phase A2).
 export * from "./compute-admin.js";
+// Compute access: a person's one request and an administrator's decisions (epic #2021 phase D1).
+export * from "./compute-access.js";
+export * from "./compute-terms.js";
+// A person's compute read routes and the partner's aggregate: bounds, error words and the OPEN response
+// schemas (epic #2021 phase D2).
+export * from "./compute-user.js";
+// A person's job submission and the code bundle it carries: the caps, the manifest rule, the request and
+// the OPEN responses (epic #2021 phase D3, #2024).
+export * from "./compute-bundle.js";
+export * from "./compute-submit.js";
+// The strict-by-design REQUESTS of the same routes (the Worker validates them as they come in).
+export * from "./compute-submit-request.js";
+// The partner contract: a partner's reserve, report and release, the OPEN responses, the refusal words
+// and their sentences (epic #2021 phase D4, #2025), and the strict-by-design REQUESTS beside them.
+export * from "./compute-partner.js";
+export * from "./compute-partner-request.js";

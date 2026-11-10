@@ -18,10 +18,17 @@
 import { z } from "zod";
 
 /**
- * `POST /compute/jobs/:id/cancel`, 200: the intent is recorded, or the job was already cancelled. The
- * refusals (`bad_state`, `job_not_found`) are the `{ error, code }` answers of the other statuses.
+ * `POST /compute/jobs/:id/cancel`, 200: the intent is recorded, the job was already cancelled, or it had
+ * already ended another way (`already_ended`, `cancelled: false`). The one refusal left is `job_not_found`,
+ * the `{ error, code }` answer of status 404.
  */
-export const COMPUTE_CANCEL_OUTCOMES = ["cancel_requested", "already_cancelled"] as const;
+export const COMPUTE_CANCEL_OUTCOMES = [
+  "cancel_requested",
+  "already_cancelled",
+  // Phase D3 (#2024): the job had already ended some other way; it is answered 200 with its unchanged
+  // state and `cancelled: false`, not refused.
+  "already_ended",
+] as const;
 
 export const ComputeCancelResponseSchema = z
   .object({
@@ -30,6 +37,12 @@ export const ComputeCancelResponseSchema = z
     state: z.string().nullable(),
     /** One of `COMPUTE_CANCEL_OUTCOMES` today. */
     outcome: z.string(),
+    /**
+     * True when the job is now cancelled or a cancel is recorded for it; false when it had already
+     * ended another way (finished or failed), which the call did not change. Absent from an answer
+     * of a Worker older than phase D3.
+     */
+    cancelled: z.boolean().optional(),
   })
   .passthrough();
 

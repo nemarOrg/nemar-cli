@@ -458,7 +458,9 @@ describe("drift against nemar-process", () => {
   test.skipIf(checkout !== null || !required)(
     "NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT=1 needs NEMAR_PROCESS_OBSERVATION_DIR to name a nemar-process checkout",
     () => {
-      throw new Error(`no ${PROCESS_SCHEMA_PATH} under NEMAR_PROCESS_OBSERVATION_DIR=${dir ?? "(unset)"}`);
+      throw new Error(
+        `no ${PROCESS_SCHEMA_PATH} under NEMAR_PROCESS_OBSERVATION_DIR=${dir ?? "(unset)"}`,
+      );
     },
   );
 

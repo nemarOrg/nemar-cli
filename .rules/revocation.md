@@ -27,7 +27,7 @@ A role demotion and an API key revocation deliberately leave `private` sessions 
 
 ## Compute follows the same rule
 
-`services/compute-release.ts` does the same for an account's compute: two callers, `finalizeRevocation` and `tombstoneUserCascade`, a role demotion and a key revocation deliberately outside it, and `backend/test/compute-end-callers.test.ts` fails when a new path that revokes all of a user's keys and sessions through the statement shapes it recognises (named in its header) runs neither those statements nor a named exception.
+`services/compute-release.ts` does the same for an account's compute: three callers, `finalizeRevocation`, `tombstoneUserCascade` and the compute access path (`endComputeStatements` in `services/compute-access.ts`, an administrator's suspension or revocation of compute access, which ends compute and nothing else), a role demotion and a key revocation deliberately outside it, and `backend/test/compute-end-callers.test.ts` fails when a new path that revokes all of a user's keys and sessions through the statement shapes it recognises (named in its header) runs neither those statements nor a named exception.
 
 ## One secret signs every compute token: rotate it only with no job running
 

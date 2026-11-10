@@ -571,6 +571,13 @@ async function finalizeRevocation(
   // just decided about. Clearing both means a re-instated account asks
   // again, which is the right shape: the review is of a person at a moment,
   // and revocation ends that moment.
+  //
+  // COMPUTE ACCESS is a grant of its own (epic #2021 phase D1, ADR 0118) and is ended here too: any
+  // state but `none` becomes `revoked`, so a former grantee, a suspended account and an open request
+  // are all closed (the pools were frozen by the batch above). It is NOT cleared like the upload
+  // stamps: its stamps are history, never cleared by a decision, and an administrator who puts the
+  // account back must grant compute again. `none` stays `none`, because there was nothing to end and
+  // marking it `revoked` would close a request the person never made. The stamps and the purpose stay.
   await db
     .prepare(
       `
@@ -581,6 +588,7 @@ async function finalizeRevocation(
         service_access_granted_by = NULL,
         upload_access_requested_at = NULL,
         upload_access_notified_at = NULL,
+        compute_access = CASE WHEN compute_access = 'none' THEN 'none' ELSE 'revoked' END,
         revoked_at = datetime('now'),
         updated_at = datetime('now')
     WHERE id = ?
@@ -1930,6 +1938,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     identifier_sweep: z.boolean().optional(),
     /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
     support_tickets: z.boolean().optional(),
+    /** Epic #2021 phase D1 (ADR 0118): a person asked for compute access. */
+    compute_requests: z.boolean().optional(),
   });
 
   /**
@@ -1981,6 +1991,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
       identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
       support_tickets: body.support_tickets ?? current.support_tickets,
+      compute_requests: body.compute_requests ?? current.compute_requests,
     };
 
     await db

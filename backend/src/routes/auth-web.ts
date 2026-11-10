@@ -47,6 +47,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
+import type { ComputeAccessState } from "../../../shared/compute-access-state.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
@@ -202,6 +203,12 @@ function publicUser(row: {
    *  wire (webUserSchema carries no such field; that would force a website
    *  change this phase does not need). */
   account_kind: AccountKind;
+  /** Compute access (epic #2021 phase D1; migration 0131): its own grant, never `service_access`.
+   *  The state and the two dates behind it go on the wire as OPTIONAL fields (`webUserSchema`), so the
+   *  dashboard can render its compute card; nothing here is defaulted. */
+  compute_access: ComputeAccessState;
+  compute_access_requested_at: string | null;
+  compute_access_granted_at: string | null;
 }) {
   return {
     id: row.id,
@@ -244,6 +251,11 @@ function publicUser(row: {
     // `row.status` is the INTERNAL status, not the two-state value above it:
     // "pending" is what the unverified tier is spelled as in the matrix.
     profile_gaps: profileGapsForRow(row),
+    // Compute access (migration 0131), a grant of its own: the state and when it was asked for and
+    // granted. `compute_access_notified_at` stays off for the reason `upload_access_notified_at` does.
+    compute_access: row.compute_access,
+    compute_access_requested_at: row.compute_access_requested_at,
+    compute_access_granted_at: row.compute_access_granted_at,
     // Whether the username above was derived rather than chosen, so onboarding
     // and Settings can offer to change it once without making that offer to
     // someone who typed their own (#1268, ADR 0045).
@@ -490,7 +502,8 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
                 given_name, family_name, orcid, orcid_verified,
                 github_username, city, country, affiliation, service_access,
                 username, username_auto_assigned,
-                service_access_granted_at, upload_access_requested_at, account_kind
+                service_access_granted_at, upload_access_requested_at, account_kind,
+                compute_access, compute_access_requested_at, compute_access_granted_at
            FROM users WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL LIMIT 1`,
       )
       .bind(email)
@@ -522,6 +535,10 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
         // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
         // #1284; ADR 0048).
         account_kind: AccountKind;
+        // Compute access (migration 0131): its own grant, never `service_access`.
+        compute_access: ComputeAccessState;
+        compute_access_requested_at: string | null;
+        compute_access_granted_at: string | null;
       }>();
     if (!userRow) {
       // No live users row for a matched code. Normally impossible
@@ -726,6 +743,9 @@ authWebRoutes.post("/code/verify", zValidator("json", verifySchema), async (c) =
       service_access_granted_at: userRow.service_access_granted_at,
       upload_access_requested_at: userRow.upload_access_requested_at,
       account_kind: userRow.account_kind,
+      compute_access: userRow.compute_access,
+      compute_access_requested_at: userRow.compute_access_requested_at,
+      compute_access_granted_at: userRow.compute_access_granted_at,
     };
 
     if (promoted) {
@@ -1399,7 +1419,8 @@ async function fetchPublicUserById(
               given_name, family_name, orcid, orcid_verified,
               github_username, city, country, affiliation, service_access,
               username, username_auto_assigned,
-              service_access_granted_at, upload_access_requested_at, account_kind
+              service_access_granted_at, upload_access_requested_at, account_kind,
+                compute_access, compute_access_requested_at, compute_access_granted_at
          FROM users WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     )
     .bind(userId)
@@ -1430,6 +1451,10 @@ async function fetchPublicUserById(
       // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
       // #1284; ADR 0048).
       account_kind: AccountKind;
+      // Compute access (migration 0131): its own grant, never `service_access`.
+      compute_access: ComputeAccessState;
+      compute_access_requested_at: string | null;
+      compute_access_granted_at: string | null;
     }>();
   if (!row) return null;
   return publicUser({
@@ -1452,6 +1477,9 @@ async function fetchPublicUserById(
     service_access_granted_at: row.service_access_granted_at,
     upload_access_requested_at: row.upload_access_requested_at,
     account_kind: row.account_kind,
+    compute_access: row.compute_access,
+    compute_access_requested_at: row.compute_access_requested_at,
+    compute_access_granted_at: row.compute_access_granted_at,
   });
 }
 

@@ -132,20 +132,25 @@ export function checkUploadAccessRequest(
   // than computed twice: the inbox has its own refusal code and its own
   // endpoint, and it comes FIRST in matrix order, so the remaining entries are
   // exactly the profile half in exactly the order the clients render.
-  const gaps = profileGapFields({
-    email_verified: profile.email_verified === 1,
-    // An unverified iD refuses the request by CONSTRUCTION rather than by a
-    // check of its own here (#1271): the row is in the matrix, and this list is
-    // the matrix's output.
-    orcid_verified: profile.orcid_verified === 1,
-    account_kind: profile.account_kind,
-    username: profile.username,
-    given_name: profile.given_name,
-    family_name: profile.family_name,
-    github_username: profile.github_username,
-    city: profile.city,
-    country: profile.country,
-  });
+  const gaps = profileGapFields(
+    {
+      email_verified: profile.email_verified === 1,
+      // An unverified iD refuses the request by CONSTRUCTION rather than by a
+      // check of its own here (#1271): the row is in the matrix, and this list is
+      // the matrix's output.
+      orcid_verified: profile.orcid_verified === 1,
+      account_kind: profile.account_kind,
+      username: profile.username,
+      given_name: profile.given_name,
+      family_name: profile.family_name,
+      github_username: profile.github_username,
+      city: profile.city,
+      country: profile.country,
+    },
+    // Only the gaps that stop UPLOAD access (epic #2021 phase D1): the matrix also holds rows that stop
+    // compute access alone (`affiliation`), and a request for upload access is not refused for them.
+    "upload_access",
+  );
 
   if (gaps.includes("email_verified")) {
     return {
