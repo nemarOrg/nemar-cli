@@ -19,9 +19,12 @@
  * judged (so it never learns "add compute.stats": a person cannot hold it).
  *
  * What it does NOT change: every other route of the Worker keeps refusing an OpenID Connect token by its
- * `nmo_` prefix (`resolveApiKeyUser`), and `test/oidc-token-allowlist.test.ts` lists exactly the five
- * paths below as the ones that may accept one. Audiences are not checked: a client chooses its audience
- * when the owner registers it, and the scope and the live account rule are the gates.
+ * `nmo_` prefix (`resolveApiKeyUser`), and `test/oidc-token-allowlist.test.ts` lists exactly the eight
+ * paths of `COMPUTE_OIDC_ROUTES` as the ones that may accept one: the four `GET /me*` reads, `GET /stats`,
+ * and the partner's three routes (`POST /holds`, `POST /jobs/:id/report`, `DELETE /holds/:id`). The audience
+ * is not checked on the five read routes: a client chooses its audience when the owner registers it, and the
+ * scope and the live account rule are the gates. The three partner WRITE routes do check it
+ * (`audienceNamesThisApi`, answered `wrong_audience`), because a reservation moves money.
  *
  * Refusals are `{ error: <sentence>, code: <word> }` (`COMPUTE_USER_ERROR_STATUS`), with the RFC 6750
  * `WWW-Authenticate` header on a bearer refusal and `Cache-Control: no-store`.
