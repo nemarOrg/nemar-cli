@@ -35,10 +35,11 @@
  * `links` and the observer as open schemas, and `backend/test/compute-person-responses.test.ts` parses the
  * real output against them. The wire is snake_case throughout.
  *
- * NO CLI COMMAND FOR `cancel` AND `links` YET. They are a person's routes, and a person's front doors are
- * the website's job page and `nemar compute submit`, both Epic D (#2024 is the submit command; the job
- * page is nemarOrg/website#495). An administrator cancels with `nemar admin compute jobs cancel`. A
- * command added here belongs to that epic, built on the contract above.
+ * THE CLI. `cancel` has a command, `nemar compute cancel` (phase D3b, `src/commands/compute-jobs.ts`).
+ * `links` has none: `nemar compute results` reads the job's results through `./jobs.ts` (`GET
+ * /jobs/:id/results` and `POST /jobs/:id/results/renew`, phase D3), not through `links`. A person's other
+ * front door is the website's job page (nemarOrg/website#495). An administrator cancels with
+ * `nemar admin compute jobs cancel`.
  *
  * THE OWNER ONLY. A job is the person's own: any other signed-in account, an administrator included
  * (an administrator has `/admin/compute/jobs/:id/cancel`), is answered `job_not_found`, which never
