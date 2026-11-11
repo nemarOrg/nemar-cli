@@ -139,10 +139,10 @@ export async function versionExists(
 }
 
 // Reject literal `..` segments, empty segments, and absolute paths.
-// URL-encoded variants like `%2E%2E` reach the manifest lookup unchanged
-// and miss every key (the manifest is keyed by raw paths), so they fall
-// through to not_found by construction -- the URL-encoded traversal test
-// in test/data-route.unit.test.ts pins that contract.
+// The file route decodes the path first (`decodeBidsPath`), so `%2E%2E`
+// arrives here as `..` and is rejected; an undecoded `%2E%2E` misses every
+// key (the manifest is keyed by raw paths). The traversal tests in
+// test/data-route.unit.test.ts pin both.
 const FORBIDDEN_SEGMENTS = new Set(["", ".", "..", "__proto__", "constructor", "prototype"]);
 
 // Exported so the QA route can use the same traversal-rejection contract.
@@ -155,6 +155,23 @@ export function normalizeBidsPath(rawPath: string): string | null {
     if (part.startsWith("/")) return null;
   }
   return parts.join("/");
+}
+
+/**
+ * Decode the bids-path of a request URL, once per segment.
+ *
+ * `buildBytesUrl` and the index pages encode each segment with
+ * `encodeURIComponent`, which also escapes reserved characters such as `+`
+ * (`%2B`), `#` and `&`. Hono's `c.req.path` only applies `decodeURI`, which
+ * keeps those escapes, so a manifest URL like `.../aparc%2Baseg.mgz` missed
+ * its key and 404ed. A malformed escape leaves the path as it was, to miss.
+ */
+export function decodeBidsPath(encodedPath: string): string {
+  try {
+    return encodedPath.split("/").map(decodeURIComponent).join("/");
+  } catch {
+    return encodedPath;
+  }
 }
 
 function normalizePath(rawPath: string): string | null {

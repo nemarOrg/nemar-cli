@@ -24,6 +24,7 @@ import {
   buildPersonList,
   buildRedirectUrl,
   contentTypeForBidsPath,
+  decodeBidsPath,
   deriveSessions,
   diffRemovedSince,
   findLastSeenVersion,
@@ -162,11 +163,13 @@ describe("resolveFile", () => {
   });
 
   test("URL-encoded traversal segments do not resolve to anything", () => {
-    // Hono passes the path through without decoding; `%2E%2E` is a literal
-    // segment that misses every manifest key. This test pins the contract
-    // so a future "let's pre-decode the path" refactor fails loudly.
+    // resolveFile never decodes: `%2E%2E` is a literal segment that misses
+    // every manifest key. The route decodes once before it (decodeBidsPath),
+    // and the decoded segments are rejected as plain traversal.
     expect(resolveFile(fixture(), "%2E%2E/etc/passwd").kind).toBe("not_found");
     expect(resolveFile(fixture(), "sub-01%2F..%2Fsub-02").kind).toBe("not_found");
+    expect(resolveFile(fixture(), decodeBidsPath("%2E%2E/etc/passwd")).kind).toBe("not_found");
+    expect(resolveFile(fixture(), decodeBidsPath("sub-01%2F..%2Fsub-02")).kind).toBe("not_found");
   });
 
   test("rejects prototype-pollution-shaped segments", () => {
@@ -442,6 +445,21 @@ describe("buildBytesUrl", () => {
     expect(url).toBe(
       "https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
     );
+  });
+
+  test("decodeBidsPath inverts the encoding, reserved characters included", () => {
+    // FreeSurfer's aparc+aseg.mgz was served as aparc%2Baseg.mgz and 404ed.
+    for (const bidsPath of [
+      "derivatives/freesurfer/sub-01/mri/aparc+aseg.mgz",
+      "sub-01/eeg/sub-01_task-rest events.tsv",
+      "notes/a&b=c;d,e@f$g#1.txt",
+      "notes/100%.txt",
+    ]) {
+      const { pathname } = new URL(buildBytesUrl({ ...common, bidsPath }));
+      expect(decodeBidsPath(pathname.replace("/nm099999/v1.0.0/", ""))).toBe(bidsPath);
+    }
+    expect(decodeBidsPath("mri/aparc+aseg.mgz")).toBe("mri/aparc+aseg.mgz");
+    expect(decodeBidsPath("bad%E0%A4%A.txt")).toBe("bad%E0%A4%A.txt");
   });
 
   test("annex bytes_url is host-invariant (always canonical data.nemar.org)", () => {

@@ -40,6 +40,7 @@ import {
   buildLandingPayload,
   buildRedirectUrl,
   contentTypeForBidsPath,
+  decodeBidsPath,
   diffRemovedSinceResolved,
   findLastSeenVersionBy,
   pickResponseFormat,
@@ -2313,8 +2314,10 @@ dataRoutes.get("/:datasetId/:version/*", (c) => {
     });
   }
   const prefix = `/${datasetId}/${version}/`;
-  const idx = c.req.path.indexOf(prefix);
-  const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
+  // The undecoded pathname, decoded exactly once by decodeBidsPath.
+  const pathname = new URL(c.req.url).pathname;
+  const idx = pathname.indexOf(prefix);
+  const rawPath = idx === -1 ? "" : decodeBidsPath(pathname.slice(idx + prefix.length));
   return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath, deferOf(c));
 });
 
