@@ -2377,3 +2377,100 @@ export async function uploadDataToS3(
 
   return ok({ progress, annexedPaths });
 }
+
+/** The byte size a git-annex key carries (`<BACKEND>-s<size>-...`), or undefined (e.g. URL keys). */
+export function annexKeySize(key: string): number | undefined {
+  const m = /^[A-Za-z0-9]+-s(\d+)(?:-|$)/.exec(key);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) ? n : undefined;
+}
+
+/** What {@link copyAnnexedForPush} did. */
+export type PushCopyResult =
+  | { success: true; total: number; attempted: number; filesCopied: number; renewals: number }
+  | { success: false; error: string; hint?: string };
+
+/**
+ * Local patch for nemarOrg/nemar-cli#2141 (ii): the data copy of `nemar dataset push`,
+ * through the upload's renewing path instead of one `git annex copy --to <remote> .` under one
+ * 2 h credential. The location log says what is pending (`listPendingAtRemote`); the pending
+ * paths go out in bounded batches with the upload's lease (renewed through the same
+ * `POST /datasets/:id/upload-credentials`, at most `DEFAULT_MAX_REFRESHES` times), the files
+ * already recorded at the remote are asked about once, and the result is accepted only when
+ * every annexed file is recorded there (`copyAnnexedToRemote`, unchanged).
+ *
+ * Sizes for batching come from the annex keys, so no file is read. Cached credentials are
+ * cleared before and after. Nothing here touches validation, the identifier preflight,
+ * attestation, publication or the CLI version check; the command pushes git only after this
+ * succeeds.
+ */
+export async function copyAnnexedForPush(args: {
+  absolutePath: string;
+  remote: string;
+  jobs: number;
+  lease: CredentialLease;
+  renewLease: () => Promise<CredentialLease>;
+  onCredentialsRenewed?: (count: number, reason: string) => void;
+  onPlan?: (plan: S3CopyPlan) => void;
+}): Promise<PushCopyResult> {
+  let keys: Map<string, string>;
+  try {
+    keys = await listAnnexedKeys(args.absolutePath);
+  } catch (error) {
+    return { success: false, error: `Could not list annexed files: ${errorDetail(error)}` };
+  }
+  const dataFiles: Array<{ path: string; size: number }> = [];
+  for (const [path, key] of keys) {
+    const size = annexKeySize(key);
+    if (size !== undefined) dataFiles.push({ path, size });
+  }
+  let renewals = 0;
+  await clearAnnexCredentials(args.absolutePath);
+  let outcome: S3CopyOutcome;
+  try {
+    outcome = await copyAnnexedToRemote({
+      absolutePath: args.absolutePath,
+      remote: args.remote,
+      addTargets: [],
+      dataFiles,
+      jobs: args.jobs,
+      credentials: args.lease.credentials,
+      lease: args.lease,
+      renewLease: args.renewLease,
+      onCredentialsRenewed: (count, reason) => {
+        renewals = count;
+        args.onCredentialsRenewed?.(count, reason);
+      },
+      onPlan: args.onPlan,
+    });
+  } finally {
+    await clearAnnexCredentials(args.absolutePath);
+  }
+  switch (outcome.status) {
+    case "ok":
+      return {
+        success: true,
+        total: outcome.total,
+        attempted: outcome.attempted,
+        filesCopied: outcome.confirmed,
+        renewals,
+      };
+    case "incomplete": {
+      const shown = previewPaths(outcome.missing).join("\n");
+      const hint =
+        outcome.notLocal.length > 0
+          ? `${outcome.notLocalKnown ? "" : "At least "}${outcome.notLocal.length} of them have no content in this repository; fetch them with \`git annex get --not --in ${args.remote}\`, then re-run.`
+          : "Re-run the same command to resume copying.";
+      return {
+        success: false,
+        error: `${outcome.missing.length} of ${outcome.total} annexed files are not recorded at ${args.remote}:\n${shown}`,
+        hint,
+      };
+    }
+    case "blocked":
+      return { success: false, error: "git-annex declined some data files (not annexed)" };
+    default:
+      return { success: false, error: outcome.error, hint: "Re-run the same command to retry." };
+  }
+}
