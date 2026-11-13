@@ -13,6 +13,7 @@ import { registerComputeAdminRoutes } from "./compute";
 import { registerComputeJobAdminRoutes } from "./compute-jobs";
 import { registerComputePipelineAdminRoutes } from "./compute-pipeline";
 import { registerComputeReportingRoutes } from "./compute-reporting";
+import { registerComputeRunnerAdminRoutes } from "./compute-runners";
 import { registerDatasetLifecycleRoutes } from "./datasets-lifecycle";
 import { registerDoiRoutes } from "./doi";
 import { registerExemplarRoutes } from "./exemplar";
@@ -98,3 +99,5 @@ registerComputeAdminRoutes(adminRoutes);
 registerComputeJobAdminRoutes(adminRoutes);
 registerComputePipelineAdminRoutes(adminRoutes);
 registerComputeReportingRoutes(adminRoutes);
+// Runner registrations (portable compute, card DM-05): owner only, behind the same router middleware.
+registerComputeRunnerAdminRoutes(adminRoutes);

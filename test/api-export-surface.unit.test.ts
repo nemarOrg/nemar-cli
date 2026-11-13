@@ -278,6 +278,15 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "requeueComputeAccessReport",
     "runComputePipeline",
   ],
+  // Portable compute, card DM-05: the owner's runner registry (`nemar admin compute runners`).
+  "compute-runners": [
+    "RunnerListResponseSchema",
+    "RunnerRevokeResponseSchema",
+    "RunnerViewSchema",
+    "listComputeRunners",
+    "registerComputeRunner",
+    "revokeComputeRunner",
+  ],
 };
 
 /** Exported only for sibling api/* modules; never part of the CLI surface. */
@@ -407,6 +416,12 @@ const POST_SPLIT_ADDITIONS = [
   "runComputePipeline", // epic #2005 phase A6: POST /admin/compute/pipeline/run
   "getComputePipelineStatus", // epic #2005 phase A6: GET /admin/compute/pipeline/status
   "computeRefusalCode", // epic #2005 phase A6: reads a compute refusal's word (no request)
+  "registerComputeRunner", // portable compute, DM-05: POST /admin/compute/runners
+  "listComputeRunners", // portable compute, DM-05: GET /admin/compute/runners
+  "revokeComputeRunner", // portable compute, DM-05: POST /admin/compute/runners/:id/revoke
+  "RunnerViewSchema", // portable compute, DM-05: the open schema of one registration (the listing's row)
+  "RunnerListResponseSchema", // portable compute, DM-05: the open schema of the listing
+  "RunnerRevokeResponseSchema", // portable compute, DM-05: the open schema of a revoke's answer
   "listComputePools", // epic #2005 phase A2: GET /admin/compute/pools
   "getAccountComputePools", // epic #2005 phase A2: GET /admin/compute/pools/by-id/:accountId
   "grantAccountComputePool", // epic #2005 phase A2: POST /admin/compute/pools/by-id/:accountId/grant
