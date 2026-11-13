@@ -37,13 +37,15 @@ import { auditLogStatement } from "../../db/audit-log";
 import { issuesOf } from "../../services/compute-policy";
 import {
   RunnerNameTaken,
+  RunnerOwnerNotStanding,
   type RunnerRow,
   getRunner,
   listRunners,
   registerRunner,
   runnerRevokeStatements,
 } from "../../services/compute-runners";
-import { type Ctx, fail, invalidBody, readJson, requireOwner } from "./compute";
+import { hashApiKey } from "../../services/token";
+import { type Ctx, fail, invalidBody, readJson, refuse, requireOwner } from "./compute";
 import type { AdminRouter } from "./shared";
 
 /** The registry's own refusals: not the protocol's, so declared here with their statuses. */
@@ -82,6 +84,20 @@ function runnerView(row: RunnerRow) {
   };
 }
 
+/**
+ * The id of the API key this request was made with, for the audit row: null when it came with a session
+ * (there is no key) or the key is not found.
+ */
+async function keyIdOf(c: Ctx): Promise<number | null> {
+  if (c.get("authMethod") !== "token") return null;
+  const header = c.req.header("Authorization") ?? "";
+  if (!header.startsWith("Bearer ")) return null;
+  const row = await c.env.DB.prepare("SELECT id FROM tokens WHERE api_key_hash = ? AND user_id = ?")
+    .bind(await hashApiKey(header.substring(7)), c.get("user").id)
+    .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
 export function registerComputeRunnerAdminRoutes(admin: AdminRouter): void {
   admin.post("/compute/runners", requireOwner, async (c) => {
     const parsed = RunnerRegisterRequestSchema.safeParse(await readJson(c));
@@ -96,12 +112,19 @@ export function registerComputeRunnerAdminRoutes(admin: AdminRouter): void {
       );
     }
     try {
-      const { runnerId, secret } = await registerRunner(c.env.DB, c.get("user").id, parsed.data);
+      const { runnerId, secret } = await registerRunner(
+        c.env.DB,
+        c.get("user").id,
+        parsed.data,
+        await keyIdOf(c),
+      );
       c.header("Cache-Control", "no-store");
       const body: RunnerRegisterResponse = { runner_id: runnerId, secret };
       return c.json(body, 201);
     } catch (err) {
       if (err instanceof RunnerNameTaken) return registryRefusal(c, "runner_name_taken");
+      // The owner was ended after this request authenticated: the same answer as any non-owner.
+      if (err instanceof RunnerOwnerNotStanding) return refuse(c, "owner_only");
       return fail(c, err);
     }
   });

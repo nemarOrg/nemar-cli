@@ -1245,8 +1245,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         } catch (error) {
           // The id as well as the handle: a username can be renamed or nulled,
           // and this line is the record of a demoted account that may still
-          // hold a live token or docs session. The batch is atomic, so a failure
-          // here means NONE of the three statements landed.
+          // hold a live token, docs session or runner registration. The batch is atomic, so a
+          // failure here means NONE of its statements landed.
           console.error(
             `SECURITY: Failed to revoke credentials for demoted user ${username} (id=${target.id}):`,
             error,
@@ -1287,7 +1287,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       }
       if (tokenRevocationFailed) {
         response.warning =
-          "Token revocation failed. User may retain elevated session. Manually revoke tokens.";
+          "Credential revocation failed. User may retain elevated session, tokens and runner registrations. Manually revoke tokens, and revoke runners with `nemar admin compute runners list` and `revoke`.";
       }
 
       return c.json(response);

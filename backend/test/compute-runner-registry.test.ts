@@ -25,7 +25,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { z } from "zod";
 import { RUNNER_REFUSALS, RUNNER_REFUSAL_STATUS } from "../../shared/compute-state";
@@ -36,21 +36,32 @@ import {
   RunnerRegisterResponseSchema,
   RunnerTokenResponseSchema,
 } from "../../shared/contract/compute-runner";
-import worker from "../src/index";
+import worker, { __workerRouteTable } from "../src/index";
 import { resolveApiKeyUser } from "../src/middleware/auth";
+import { __limits, __selectBucket } from "../src/middleware/rateLimit";
 import { adminRoutes } from "../src/routes/admin";
 import { computeRunnerRoutes } from "../src/routes/compute-runners";
 import { userRoutes } from "../src/routes/users";
+import { resolvePrincipal } from "../src/rpc/principal";
+import {
+  RunnerOwnerNotStanding,
+  exchangeRunnerSecret,
+  findRunnerBySecret,
+  registerRunner,
+  resolveRunnerAccess,
+} from "../src/services/compute-runners";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { COMPUTE_KEYS, type ComputeWho, seedComputeUsers } from "./helpers/compute-app";
 import { freshDb, realD1 } from "./helpers/d1";
+import { type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 
 /** A row or a JSON body read back by a test, whose fields the assertions name. */
 // biome-ignore lint/suspicious/noExplicitAny: test rows and bodies are read field by field
 type Loose = Record<string, any>;
 
 const MARK = "SECRET-MARKER-7731";
+const SECOND_KEY = "cmp-owner-second-key-0123456789abcdef0123456789";
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.route("/admin", adminRoutes);
@@ -223,12 +234,48 @@ describe("registration", () => {
       resource_type: "compute_runner",
       resource_id: runner_id,
     });
+    const keyId = (
+      db.query("SELECT id FROM tokens WHERE user_id = ?").get(ids.owner) as { id: number }
+    ).id;
     expect(JSON.parse(audit[0]?.details)).toEqual({
       pool: "cpu",
       backend: "local",
       accounting: "none",
       trust: "lab",
+      key_id: keyId,
     });
+  });
+
+  test("the audit row records WHICH key registered it: two keys of one owner leave two different ids", async () => {
+    const secondHash = await sha256(SECOND_KEY);
+    db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+      ids.owner,
+      secondHash,
+      SECOND_KEY.slice(0, 8),
+    );
+    await registered({ name: "by_first" });
+    expect(
+      (
+        await call("POST", "/admin/compute/runners", {
+          bearer: SECOND_KEY,
+          body: { ...REGISTRATION, name: "by_second" },
+        })
+      ).status,
+    ).toBe(201);
+    const keys = db
+      .query("SELECT id, api_key_hash FROM tokens WHERE user_id = ?")
+      .all(ids.owner) as Array<Loose>;
+    const second = keys.find((k) => k.api_key_hash === secondHash)?.id;
+    const logged = (
+      db
+        .query(
+          "SELECT resource_id, details FROM audit_log WHERE action = 'compute.runner.registered' ORDER BY id",
+        )
+        .all() as Array<Loose>
+    ).map((r) => JSON.parse(r.details).key_id);
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).not.toBe(logged[1]);
+    expect(logged[1]).toBe(second);
   });
 
   test("a registration works with the switches off (the owner prepares; the exchange is what is dark)", async () => {
@@ -630,7 +677,7 @@ const lease = () => (++jobSeq).toString(16).padStart(32, "0");
 function seedJob(over: Record<string, unknown>): string {
   const row: Record<string, unknown> = {
     id: jobId(),
-    source: "cli",
+    source: "pipeline",
     kind: "batch",
     app_id: "nemar-launch",
     app_version: "1.0.0",
@@ -821,4 +868,269 @@ describe("revoke", () => {
       expect([id, res.status, res.body.code]).toEqual([id, 404, "runner_not_found"]);
     }
   });
+});
+
+describe("a claim with a cancel on it", () => {
+  test("is not released (it would be live forever); it goes unreported, keeping its runner and claim, with no lease", async () => {
+    const mine = await runnerWithToken();
+    const cancelled = seedJob({
+      runner_id: mine.runnerId,
+      runner_claimed_at: "2026-11-13 10:00:00",
+      lease_id: lease(),
+      lease_expires_at: "2026-11-13 10:10:00",
+      claim_attempts: 1,
+      cancel_requested_at: "2026-11-13 10:02:00",
+      cancel_reason: "user",
+    });
+    const plain = seedJob({
+      runner_id: mine.runnerId,
+      runner_claimed_at: "2026-11-13 10:00:00",
+      lease_id: lease(),
+      lease_expires_at: "2026-11-13 10:10:00",
+    });
+    expect(
+      (await call("POST", `/admin/compute/runners/${mine.runnerId}/revoke`, { who: "owner" }))
+        .status,
+    ).toBe(200);
+    // The row's whole shape: the cancel and the claim stay, the lease goes, and the sweep keys on the
+    // state and the runner's revoked flag, never on a lease expiry.
+    expect(jobRow(cancelled)).toMatchObject({
+      state: "unreported",
+      runner_id: mine.runnerId,
+      runner_claimed_at: "2026-11-13 10:00:00",
+      lease_id: null,
+      lease_expires_at: null,
+      cancel_requested_at: "2026-11-13 10:02:00",
+      cancel_reason: "user",
+      claim_attempts: 1,
+    });
+    // An ordinary claim is still released.
+    expect(jobRow(plain)).toMatchObject({
+      state: "created",
+      runner_id: null,
+      runner_claimed_at: null,
+    });
+  });
+});
+
+describe("the services, directly", () => {
+  const BODY = REGISTRATION as unknown as Parameters<typeof registerRunner>[2];
+
+  test("exchangeRunnerSecret on a revoked registration writes nothing (the INSERT itself names a live registration)", async () => {
+    const { runner_id } = await registered();
+    db.run(
+      "UPDATE compute_runners SET revoked_at = datetime('now'), revoke_reason = 'owner_revoked'",
+    );
+    expect(await exchangeRunnerSecret(realD1(db), runner_id, "0.1.0")).toBeNull();
+    expect(count("SELECT COUNT(*) AS n FROM compute_runner_tokens")).toBe(0);
+    expect(
+      (db.query("SELECT last_seen_at FROM compute_runners").get() as Loose).last_seen_at,
+    ).toBeNull();
+  });
+
+  test("the secret, the exchange and a token each need the owner to still be an approved, undeleted owner", async () => {
+    const { runner_id, secret } = await registered();
+    const d1 = realD1(db);
+    const token = RunnerTokenResponseSchema.parse((await exchange(secret)).body).access_token;
+    expect(await findRunnerBySecret(d1, secret)).toEqual({ id: runner_id });
+    expect((await resolveRunnerAccess(d1, token)).kind).toBe("ok");
+    for (const [what, sql] of [
+      ["demoted", "UPDATE users SET role = 'admin'"],
+      ["revoked", "UPDATE users SET status = 'revoked'"],
+      ["deleted", "UPDATE users SET deleted_at = datetime('now')"],
+    ] as const) {
+      db.run(`${sql} WHERE id = ${ids.owner}`);
+      expect([what, await findRunnerBySecret(d1, secret)]).toEqual([what, null]);
+      expect([what, await exchangeRunnerSecret(d1, runner_id, "0.1.0")]).toEqual([what, null]);
+      expect([what, (await resolveRunnerAccess(d1, token)).kind]).toEqual([what, "unknown"]);
+      expect([what, (await call("GET", "/compute/runners/me", { bearer: token })).status]).toEqual([
+        what,
+        401,
+      ]);
+      expect([what, (await exchange(secret)).status]).toEqual([what, 401]);
+      db.run(
+        `UPDATE users SET role = 'owner', status = 'approved', deleted_at = NULL WHERE id = ${ids.owner}`,
+      );
+      expect([what, (await resolveRunnerAccess(d1, token)).kind]).toEqual([what, "ok"]);
+    }
+  });
+
+  test("registerRunner writes nothing for an owner who does not stand, and no audit row either", async () => {
+    const d1 = realD1(db);
+    for (const [what, sql, id] of [
+      ["an admin", "", ids.admin],
+      ["a member", "", ids.member],
+      ["a demoted owner", `UPDATE users SET role = 'admin' WHERE id = ${ids.owner2}`, ids.owner2],
+      ["a revoked owner", `UPDATE users SET status = 'revoked' WHERE id = ${ids.owner}`, ids.owner],
+    ] as const) {
+      if (sql) db.run(sql);
+      await expect(registerRunner(d1, id, BODY)).rejects.toBeInstanceOf(RunnerOwnerNotStanding);
+      expect([what, count("SELECT COUNT(*) AS n FROM compute_runners")]).toEqual([what, 0]);
+      expect([
+        what,
+        count("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'compute.runner.%'"),
+      ]).toEqual([what, 0]);
+    }
+    // An unknown account too.
+    await expect(registerRunner(d1, 99999, BODY)).rejects.toBeInstanceOf(RunnerOwnerNotStanding);
+    // A standing owner is registered.
+    db.run(`UPDATE users SET status = 'approved' WHERE id = ${ids.owner}`);
+    expect((await registerRunner(d1, ids.owner, BODY)).runnerId).toMatch(/^rnr_/);
+    expect(
+      (db.query("SELECT registered_by FROM compute_runners").get() as Loose).registered_by,
+    ).toBe(ids.owner);
+  });
+});
+
+describe("the service-binding entrypoint and the rate limiter", () => {
+  test("resolvePrincipal resolves a runner secret or token to no one, even if `tokens` holds its hash", async () => {
+    const { secret, token } = await runnerWithToken();
+    for (const value of [secret, token]) {
+      db.query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)").run(
+        ids.owner,
+        await sha256(value),
+        value.slice(0, 8),
+      );
+      expect(await resolvePrincipal(envOf(), { kind: "api_key", value })).toEqual({
+        ok: false,
+        error: "invalid_credential",
+      });
+    }
+    // An ordinary key still resolves, so the refusal above is the prefix and not a broken lookup.
+    expect(
+      (await resolvePrincipal(envOf(), { kind: "api_key", value: COMPUTE_KEYS.owner })).ok,
+    ).toBe(true);
+  });
+
+  test("the secret exchange is in the strict IP bucket, with or without a bearer, at either mount; /me is not", () => {
+    const { secret, token } = { secret: `nmr_${"a".repeat(64)}`, token: `nmra_${"b".repeat(64)}` };
+    for (const path of ["/compute/runners/token", "/nemar/compute/runners/token"]) {
+      for (const bearer of [null, `Bearer ${secret}`]) {
+        const sel = __selectBucket(path, bearer, "10.0.0.1");
+        expect([path, sel.keyKind, sel.maxRequests]).toEqual([
+          path,
+          "auth-ip",
+          __limits.AUTH_MAX_REQUESTS,
+        ]);
+      }
+    }
+    const me = __selectBucket("/compute/runners/me", `Bearer ${token}`, "10.0.0.1");
+    expect(me.keyKind).not.toBe("auth-ip");
+  });
+});
+
+// --- Every route of the Worker --------------------------------------------------------------------
+
+describe("a runner credential authenticates nothing outside the runner routes", () => {
+  let h: OidcHarness;
+  const SECRET = `nmr_${"c".repeat(64)}`;
+  const TOKEN = `nmra_${"d".repeat(64)}`;
+  const UNKNOWN_KEY = `nm_${"Q".repeat(43)}`;
+  const PARAMS: Record<string, string> = {
+    id: "nm000901",
+    datasetId: "nm099900",
+    dataset: "nm099900",
+    version: "1.0.0",
+    client_id: `oc_${"0".repeat(24)}`,
+    kid: "0".repeat(16),
+    sub: `nmu_${"0".repeat(32)}`,
+    userId: "999999",
+    accountId: "999999",
+    jobId: "x",
+    key: "x",
+    token: "x",
+    ref: "x",
+    username: "nobody-zz",
+    login: "nobody-zz",
+    name: "x",
+    pr: "1",
+    slug: "x",
+    sourceId: "ds999999",
+    tag: "x",
+    file: "x",
+  };
+  /** The runner routes (their own door) and the OIDC routes (their own credential) are not in the comparison. */
+  const OWN_DOOR =
+    /^(\/nemar)?(\/compute\/runners\/(token|me)|\/\.well-known\/openid-configuration|\/oauth\/(jwks|token|userinfo|revoke|introspect))$/;
+
+  beforeAll(async () => {
+    h = await startOidcHarness({ HOST_PREFIXED_SESSION_COOKIE: "1" });
+  });
+
+  function requestList(): Array<{ method: string; path: string }> {
+    const seen = new Set<string>();
+    const out: Array<{ method: string; path: string }> = [];
+    for (const route of __workerRouteTable()) {
+      if (route.method === "ALL" && route.path.includes("*")) continue;
+      if (OWN_DOOR.test(route.path)) continue;
+      const methods = route.method === "ALL" ? ["GET", "POST"] : [route.method];
+      const path = route.path
+        .replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, name: string) => PARAMS[name] ?? "x")
+        .replace(/\*/g, "x");
+      for (const method of methods) {
+        if (seen.has(`${method} ${path}`)) continue;
+        seen.add(`${method} ${path}`);
+        out.push({ method, path });
+      }
+    }
+    return out;
+  }
+
+  const stable = (text: string): string => {
+    try {
+      return JSON.stringify(JSON.parse(text), (key, value) =>
+        /time|date|_at$|^at$|request_?id|nonce|etag|_code$|_complete$/i.test(key)
+          ? "<varies>"
+          : value,
+      );
+    } catch {
+      return text.replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>");
+    }
+  };
+
+  test(
+    "every route answers a runner secret and a runner token exactly as it answers an unknown API key, and the key path names the refusal",
+    async () => {
+      const list = requestList();
+      expect(list.length).toBeGreaterThan(300);
+      const mismatches: string[] = [];
+      let refusals = 0;
+      for (const call of list) {
+        const write = !["GET", "HEAD", "OPTIONS"].includes(call.method);
+        const as = (key: string) =>
+          h.call(call.method, call.path, { key, ...(write ? { body: {} } : {}) });
+        const unknown = await as(UNKNOWN_KEY);
+        for (const credential of [SECRET, TOKEN]) {
+          const runner = await as(credential);
+          const label = `${call.method} ${call.path} (${credential.slice(0, 5)})`;
+          if (runner.status !== unknown.status) {
+            mismatches.push(`${label}: status ${runner.status} vs ${unknown.status}`);
+          } else if (unknown.status < 400) {
+            if (stable(runner.text) !== stable(unknown.text)) mismatches.push(`${label}: body`);
+          } else if (unknown.json?.error === "Invalid or expired API key") {
+            if (runner.json?.error !== "runner_credential_not_accepted") {
+              mismatches.push(
+                `${label}: not refused as a runner credential (${runner.text.slice(0, 80)})`,
+              );
+            } else {
+              refusals += 1;
+            }
+          } else if (
+            Object.keys(runner.json ?? {})
+              .sort()
+              .join() !==
+            Object.keys(unknown.json ?? {})
+              .sort()
+              .join()
+          ) {
+            mismatches.push(`${label}: refusal class`);
+          }
+        }
+      }
+      expect(mismatches).toEqual([]);
+      // Most authenticated routes go through the key path; a handful is a sign the credential was not sent.
+      expect(refusals).toBeGreaterThan(200);
+    },
+    { timeout: 180_000 },
+  );
 });

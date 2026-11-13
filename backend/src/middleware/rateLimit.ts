@@ -930,6 +930,11 @@ const AUTH_PATHS = [
   // authenticate a request with. Its own per-row 5-second floor
   // (`DEVICE_POLL_SQL`) answers `slow_down` to anything faster than that
   // without ever 429ing the loop.
+  // A runner's secret exchange (portable compute, card DM-05): credential-less in the sense that the
+  // bearer is a secret being tried, so it is keyed by IP in the strict bucket like the identity routes
+  // above. A runner exchanges once per 15 minutes. `/compute/runners/me` is deliberately NOT here: it
+  // carries an access token and rides the token bucket.
+  "/compute/runners/token",
   "/auth/device/start",
   "/auth/device/lookup",
   "/auth/device/confirm",

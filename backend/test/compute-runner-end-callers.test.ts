@@ -35,6 +35,9 @@ import {
   RUNNER_END_CALLERS,
   RUNNER_END_EXCEPTIONS,
   RUNNER_REVOKE_REASONS,
+  RunnerOwnerNotStanding,
+  hashRunnerCredential,
+  registerRunner,
   runnerEndStatements,
   runnerRevokeStatements,
 } from "../src/services/compute-runners";
@@ -363,7 +366,7 @@ const lease = () => (++jobSeq).toString(16).padStart(32, "0");
 function seedJob(over: Record<string, unknown>): string {
   const row: Record<string, unknown> = {
     id: jobId(),
-    source: "cli",
+    source: "pipeline",
     kind: "batch",
     app_id: "nemar-launch",
     app_version: "1.0.0",
@@ -654,5 +657,83 @@ describe("the guarded call of the scheduled sweep, and replay", () => {
         .get((w.runners[0] as { id: string }).id),
     ).toEqual({ n: 1 });
     expect(job(w.claimed[0] as string).runner_id).not.toBeNull();
+  });
+});
+
+describe("a registration that was past authentication when the owner's cascade committed", () => {
+  const LATE = { ...REGISTRATION, name: "late_one" } as Parameters<typeof registerRunner>[2];
+
+  const PATHS: Array<[string, () => Promise<{ status: number }>]> = [
+    ["an admin revoke (finalizeRevocation)", () => api("POST", "/admin/revoke/rn-target", "actor")],
+    [
+      "a role demotion",
+      () => api("POST", "/admin/users/rn-target/role", "actor", { role: "admin" }),
+    ],
+    [
+      "the owner's soft delete (tombstoneUserCascade)",
+      () => api("DELETE", `/admin/users/by-id/${userIds.target}`, "actor"),
+    ],
+  ];
+
+  for (const [name, end] of PATHS) {
+    test(`after ${name}: the late registration is refused and writes nothing, and a row it would have left is dead`, async () => {
+      expect((await end()).status).toBe(200);
+      // The request authenticated before the cascade; its write now meets an owner who no longer stands.
+      await expect(registerRunner(d1, userIds.target, LATE)).rejects.toBeInstanceOf(
+        RunnerOwnerNotStanding,
+      );
+      expect(db.query("SELECT COUNT(*) AS n FROM compute_runners").get()).toEqual({ n: 0 });
+      expect(
+        db
+          .query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'compute.runner.registered'")
+          .get(),
+      ).toEqual({ n: 0 });
+
+      // And if such a row exists all the same (written before this guard, or by hand), neither its secret
+      // nor its token is honoured: the owner has to stand at every use.
+      const secret = `nmr_${"e".repeat(64)}`;
+      const token = `nmra_${"f".repeat(64)}`;
+      const id = `rnr_${"9".repeat(24)}`;
+      db.run(
+        `INSERT INTO compute_runners (id, name, pool, cores, memory_mb, gpus, scratch_gb, backend, runtimes, arch,
+           accounting, site, trust, secret_hash, registered_by)
+         VALUES (?, 'late_row', 'cpu', 1, 1, 0, 1, 'local', '["docker"]', 'amd64', 'none', 's', 'lab', ?, ?)`,
+        [id, await hashRunnerCredential(secret), userIds.target],
+      );
+      db.run(
+        "INSERT INTO compute_runner_tokens (token_hash, runner_id, expires_at) VALUES (?, ?, datetime('now', '+900 seconds'))",
+        [await hashRunnerCredential(token), id],
+      );
+      const ex = await api(
+        "POST",
+        "/compute/runners/token",
+        null,
+        { protocol: RUNNER_PROTOCOL, runner_version: "0.1.0" },
+        secret,
+      );
+      expect([ex.status, ex.body]).toEqual([401, { error: "runner_unknown" }]);
+      expect((await me(token)).status).toBe(401);
+      expect(
+        db.query("SELECT COUNT(*) AS n FROM compute_runner_tokens WHERE runner_id = ?").get(id),
+      ).toEqual({ n: 1 });
+    });
+  }
+
+  test("a key revocation does NOT take a standing owner's runner or stop a new registration (ADR 0121's deliberate exception is untouched)", async () => {
+    const w = await seedWorld();
+    db.run(
+      "INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, 'late-key-hash', 'latekey1')",
+      [userIds.target],
+    );
+    const key = db.query("SELECT id FROM tokens WHERE api_key_hash = 'late-key-hash'").get() as {
+      id: number;
+    };
+    expect((await api("DELETE", `/admin/users/rn-target/keys/${key.id}`, "actor")).status).toBe(
+      200,
+    );
+    expect((await me((w.runners[0] as { token: string }).token)).status).toBe(200);
+    await expect(registerRunner(d1, userIds.target, LATE)).resolves.toMatchObject({
+      runnerId: expect.stringMatching(/^rnr_/),
+    });
   });
 });

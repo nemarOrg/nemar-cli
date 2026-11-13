@@ -15,13 +15,16 @@
  * credential revocations (the shape of `computeReleaseStatements` and `oidcEndStatements`). In this order,
  * and the order is load-bearing:
  *  1. DELETE the runner's access tokens: a token stops working at once, not at its expiry;
- *  2. RELEASE its unstarted claims: a `created` job with `runner_claimed_at` set and `started_at` NULL has
- *     the claim, the runner and the lease cleared and waits to be claimed by another runner. A claim that
- *     was already counted stays counted (`claim_attempts` is not touched), as an expired lease's does;
- *  3. UNREPORT its started jobs: a live job with `started_at` set, or past `created` (a slurm job
- *     waiting in its scheduler's queue has no `started_at` yet and is not a claim to give away), has its
- *     lease cleared and moves to `unreported`, keeping `runner_id` so the lease sweep can name the
- *     revocation (`runner_revoked`). With
+ *  2. RELEASE its unstarted claims: a `created` job with `runner_claimed_at` set, `started_at` NULL and NO
+ *     cancel recorded has the claim, the runner and the lease cleared and waits to be claimed by another
+ *     runner. A claim that was already counted stays counted (`claim_attempts` is not touched), as an
+ *     expired lease's does. A claim whose cancel was already recorded is NOT released (a waiting job with a
+ *     cancel on it would be live forever, holding a slot, with nothing to end it): it goes down step 3;
+ *  3. UNREPORT its started jobs: a live job with `started_at` set, past `created` (a slurm job waiting in
+ *     its scheduler's queue has no `started_at` yet and is not a claim to give away) or with a cancel
+ *     recorded has its lease cleared and moves to `unreported`, keeping `runner_id` and `runner_claimed_at`
+ *     (and so a NULL `lease_expires_at`), so the sweep keys on the state and the runner's revoked flag, never
+ *     on a lease's expiry, and can name the revocation (`runner_revoked`). With
  *     no lease, neither the lease header nor the job token of the dead runner can land outputs any more;
  *     the job then follows the lease rules of D4 (verified if its outputs completed, else lost);
  *  4. REVOKE the registration (`revoked_at`, `revoke_reason`), LAST, because the owner-keyed statements
@@ -51,18 +54,32 @@
  * key, so ending the key ends nothing the runner holds, and an owner who loses a key still owns the
  * runner. To end a runner, revoke its registration.
  *
+ * THE STOLEN-KEY RESIDUAL, and the incident step it needs: a stolen owner key can register a runner and
+ * the registration then outlives the key's revocation (the exception above, ADR 0121). The registering key
+ * is recorded in the `compute.runner.registered` audit row (`key_id`). So after revoking a leaked owner key,
+ * run `nemar admin compute runners list` and revoke every registration you do not recognize.
+ *
+ * AND THE OWNER MUST STILL STAND. A registration is written only `FROM users` of an approved, undeleted
+ * OWNER, and a secret's exchange and an access token's use join `users` for the same standing, so a request
+ * that was already past authentication when the cascade committed cannot leave a live registration behind
+ * (`registerRunner`, `findRunnerBySecret`, `exchangeRunnerSecret`, `resolveRunnerAccess`).
+ *
  * The one admin route that revokes ONE registration is `POST /admin/compute/runners/:id/revoke`, which
  * runs {@link runnerRevokeStatements}.
  */
 
+import type { ComputeAccounting, RunnerBackend } from "../../../shared/compute-state.js";
 import {
   RUNNER_ACCESS_PREFIX,
   RUNNER_ACCESS_TOKEN_SECONDS,
   RUNNER_ID_RE,
   RUNNER_SECRET_PREFIX,
+  type RunnerArch,
   type RunnerRegisterRequest,
+  type RunnerTrust,
 } from "../../../shared/contract/compute-runner.js";
-import { auditLogStatement } from "../db/audit-log.js";
+import type { ComputePool } from "../../../shared/contract/compute.js";
+import { AUDIT_IF_PREVIOUS_CHANGED_SQL, auditLogParams } from "../db/audit-log.js";
 import { LIVE_STATES_SQL } from "./compute-state-sql.js";
 import { hashApiKey } from "./token.js";
 
@@ -88,6 +105,14 @@ export type RunnerRevokeReason = (typeof RUNNER_REVOKE_REASONS)[number];
 
 /** Which registration a statement selects: the one named by `?`, or every live one of an owner (`?`). */
 const BY_RUNNER = "= ?";
+
+/**
+ * The standing a registration's owner must keep, over `users` as `u`: an approved, undeleted OWNER. Part of
+ * every statement that writes or honours a registration, so a request that was past authentication when the
+ * owner's cascade committed cannot leave a usable one behind.
+ */
+export const OWNER_STANDING_SQL =
+  "u.role = 'owner' AND u.status = 'approved' AND u.deleted_at IS NULL";
 const BY_OWNER =
   "IN (SELECT id FROM compute_runners WHERE registered_by = ? AND revoked_at IS NULL)";
 
@@ -96,11 +121,11 @@ const tokensSql = (r: string) => `DELETE FROM compute_runner_tokens WHERE runner
 const releaseSql = (r: string) => `UPDATE compute_jobs SET
     runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL
   WHERE runner_id ${r} AND state = 'created' AND runner_claimed_at IS NOT NULL
-    AND started_at IS NULL`;
+    AND started_at IS NULL AND cancel_requested_at IS NULL`;
 
 const unreportSql = (r: string) => `UPDATE compute_jobs SET
     lease_id = NULL, lease_expires_at = NULL, state = 'unreported'
-  WHERE runner_id ${r} AND state IN (${LIVE_STATES_SQL}) AND (started_at IS NOT NULL OR state <> 'created')`;
+  WHERE runner_id ${r} AND state IN (${LIVE_STATES_SQL}) AND (started_at IS NOT NULL OR state <> 'created' OR cancel_requested_at IS NOT NULL)`;
 
 /**
  * 1. A single registration's access tokens (`?` the runner id). ONE CALLER: {@link runnerRevokeStatements}
@@ -223,17 +248,17 @@ export const hashRunnerCredential = hashApiKey;
 export interface RunnerRow {
   id: string;
   name: string;
-  pool: string;
+  pool: ComputePool;
   cores: number;
   memory_mb: number;
   gpus: number;
   scratch_gb: number;
-  backend: string;
+  backend: RunnerBackend;
   runtimes: string;
-  arch: string;
-  accounting: string;
+  arch: RunnerArch;
+  accounting: ComputeAccounting;
   site: string;
-  trust: string;
+  trust: RunnerTrust;
   registered_by: number;
   registered_at: string;
   revoked_at: string | null;
@@ -251,17 +276,17 @@ const VIEW_COLUMNS = `id, name, pool, cores, memory_mb, gpus, scratch_gb, backen
 export interface RunnerPrincipal {
   id: string;
   name: string;
-  pool: string;
+  pool: ComputePool;
   cores: number;
   memory_mb: number;
   gpus: number;
   scratch_gb: number;
-  backend: string;
+  backend: RunnerBackend;
   runtimes: string[];
-  arch: string;
-  accounting: string;
+  arch: RunnerArch;
+  accounting: ComputeAccounting;
   site: string;
-  trust: string;
+  trust: RunnerTrust;
 }
 
 /** The registration was refused because a live registration already has the name. */
@@ -272,28 +297,42 @@ export class RunnerNameTaken extends Error {
   }
 }
 
+/** The registration was refused because its owner is no longer an approved, undeleted owner. */
+export class RunnerOwnerNotStanding extends Error {
+  constructor() {
+    super("the registering account is not an approved owner");
+    this.name = "RunnerOwnerNotStanding";
+  }
+}
+
 /**
  * Register a runner (the owner's act; the route checks the role) and its audit row, in ONE batch, and
- * return the id and the SECRET, which this call is the only time anything holds in the clear. Throws
+ * return the id and the SECRET, which this call is the only time anything holds in the clear. The row is
+ * written `FROM users` of an approved, undeleted owner: when the owner's cascade committed after the route
+ * authenticated the request, nothing is written and {@link RunnerOwnerNotStanding} is thrown. Throws
  * {@link RunnerNameTaken} when a live registration has the name (the partial unique index decides, so two
- * racing registrations cannot both win).
+ * racing registrations cannot both win). `keyId` is the id of the API key the request used, or null for a
+ * session: it is recorded in the audit row, for the stolen-key incident step in the header.
  */
 export async function registerRunner(
   db: D1Database,
   ownerId: number,
   body: RunnerRegisterRequest,
+  keyId: number | null = null,
 ): Promise<{ runnerId: string; secret: string }> {
   const runnerId = newRunnerId();
   const secret = newRunnerCredential(RUNNER_SECRET_PREFIX);
   const secretHash = await hashRunnerCredential(secret);
+  let results: Awaited<ReturnType<D1Database["batch"]>>;
   try {
-    await db.batch([
+    results = await db.batch([
       db
         .prepare(
           `INSERT INTO compute_runners
              (id, name, pool, cores, memory_mb, gpus, scratch_gb, backend, runtimes, arch, accounting,
               site, trust, secret_hash, registered_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, u.id
+             FROM users u WHERE u.id = ? AND ${OWNER_STANDING_SQL}`,
         )
         .bind(
           runnerId,
@@ -312,19 +351,25 @@ export async function registerRunner(
           secretHash,
           ownerId,
         ),
-      // The shape of the event only: never the secret, its hash, the name or the site.
-      auditLogStatement(db, {
-        userId: ownerId,
-        action: "compute.runner.registered",
-        resourceType: "compute_runner",
-        resourceId: runnerId,
-        details: JSON.stringify({
-          pool: body.pool,
-          backend: body.backend,
-          accounting: body.accounting,
-          trust: body.trust,
-        }),
-      }),
+      // The shape of the event and the key that made it: never the secret, its hash, the name or the site.
+      // Written only if the row was (`changes() > 0`).
+      db
+        .prepare(AUDIT_IF_PREVIOUS_CHANGED_SQL)
+        .bind(
+          ...auditLogParams({
+            userId: ownerId,
+            action: "compute.runner.registered",
+            resourceType: "compute_runner",
+            resourceId: runnerId,
+            details: JSON.stringify({
+              pool: body.pool,
+              backend: body.backend,
+              accounting: body.accounting,
+              trust: body.trust,
+              key_id: keyId,
+            }),
+          }),
+        ),
     ]);
   } catch (err) {
     if (
@@ -334,6 +379,7 @@ export async function registerRunner(
     }
     throw err;
   }
+  if ((results[0]?.meta?.changes ?? 0) === 0) throw new RunnerOwnerNotStanding();
   return { runnerId, secret };
 }
 
@@ -365,7 +411,10 @@ export async function findRunnerBySecret(
   secret: string,
 ): Promise<{ id: string } | null> {
   return db
-    .prepare("SELECT id FROM compute_runners WHERE secret_hash = ? AND revoked_at IS NULL")
+    .prepare(
+      `SELECT r.id FROM compute_runners r JOIN users u ON u.id = r.registered_by
+        WHERE r.secret_hash = ? AND r.revoked_at IS NULL AND ${OWNER_STANDING_SQL}`,
+    )
     .bind(await hashRunnerCredential(secret))
     .first<{ id: string }>();
 }
@@ -377,8 +426,8 @@ export const toProtocolTimestamp = (sqlite: string): string => `${sqlite.replace
  * Buy an access token with a runner's secret: ONE token row, valid for `RUNNER_ACCESS_TOKEN_SECONDS` on
  * D1's clock, then the runner's expired tokens are dropped and `last_seen_at` and `runner_version` are
  * written. All in one batch, and the token is inserted only `FROM` a registration that is still live, so a
- * revoke that lands between the lookup and this batch leaves no token (null: the same answer as an unknown
- * secret). The token is returned once and only its hash is stored.
+ * revoke, or an owner's cascade, that lands between the lookup and this batch leaves no token (null: the
+ * same answer as an unknown secret). The token is returned once and only its hash is stored.
  */
 export async function exchangeRunnerSecret(
   db: D1Database,
@@ -391,8 +440,9 @@ export async function exchangeRunnerSecret(
     db
       .prepare(
         `INSERT INTO compute_runner_tokens (token_hash, runner_id, expires_at)
-         SELECT ?, id, datetime('now', '+${RUNNER_ACCESS_TOKEN_SECONDS} seconds')
-           FROM compute_runners WHERE id = ? AND revoked_at IS NULL`,
+         SELECT ?, r.id, datetime('now', '+${RUNNER_ACCESS_TOKEN_SECONDS} seconds')
+           FROM compute_runners r JOIN users u ON u.id = r.registered_by
+          WHERE r.id = ? AND r.revoked_at IS NULL AND ${OWNER_STANDING_SQL}`,
       )
       .bind(hash, runnerId),
     db
@@ -419,10 +469,30 @@ export type RunnerAccess =
   | { kind: "unknown" }
   | { kind: "expired" };
 
+/** The columns {@link resolveRunnerAccess} selects, and no others. */
+type AccessRow = Pick<
+  RunnerRow,
+  | "id"
+  | "name"
+  | "pool"
+  | "cores"
+  | "memory_mb"
+  | "gpus"
+  | "scratch_gb"
+  | "backend"
+  | "runtimes"
+  | "arch"
+  | "accounting"
+  | "site"
+  | "trust"
+  | "revoked_at"
+> & { live: number };
+
 /**
- * What an access token is: the principal of an unexpired token of an unrevoked registration, `expired`
- * for a token past its end, and `unknown` for everything else (never issued, deleted by a revoke, or a
- * token whose registration is revoked). Judged on D1's clock, in the lookup's own statement.
+ * What an access token is: the principal of an unexpired token of an unrevoked registration whose owner
+ * still stands, `expired` for a token past its end, and `unknown` for everything else (never issued, deleted
+ * by a revoke, a token whose registration is revoked, or an owner who is no longer an approved, undeleted
+ * owner). Judged on D1's clock, in the lookup's own statement.
  */
 export async function resolveRunnerAccess(db: D1Database, token: string): Promise<RunnerAccess> {
   const row = await db
@@ -430,11 +500,13 @@ export async function resolveRunnerAccess(db: D1Database, token: string): Promis
       `SELECT r.id, r.name, r.pool, r.cores, r.memory_mb, r.gpus, r.scratch_gb, r.backend, r.runtimes,
               r.arch, r.accounting, r.site, r.trust, r.revoked_at,
               (t.expires_at > datetime('now')) AS live
-         FROM compute_runner_tokens t JOIN compute_runners r ON r.id = t.runner_id
-        WHERE t.token_hash = ?`,
+         FROM compute_runner_tokens t
+         JOIN compute_runners r ON r.id = t.runner_id
+         JOIN users u ON u.id = r.registered_by
+        WHERE t.token_hash = ? AND ${OWNER_STANDING_SQL}`,
     )
     .bind(await hashRunnerCredential(token))
-    .first<RunnerRow & { live: number }>();
+    .first<AccessRow>();
   if (!row || row.revoked_at !== null) return { kind: "unknown" };
   if (row.live !== 1) return { kind: "expired" };
   return {

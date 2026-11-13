@@ -35,6 +35,9 @@ A runner (portable compute, `nemar-runner` on a workstation or a cluster) holds 
 `runnerRevokeStatements` ends one registration and `runnerEndStatements` every live registration an owner made, in the batch of the path that ends the credential: delete its tokens, release its unstarted claims, make its started jobs `unreported` with the lease cleared, and revoke the registration last.
 `runnerEndStatements` has THREE callers, `finalizeRevocation`, `tombstoneUserCascade` and the role demotion (registering a runner is an owner's act), listed in `RUNNER_END_CALLERS` (`services/compute-runners.ts`) and held to the code by `backend/test/compute-runner-end-callers.test.ts`.
 A key revocation and a sign-out are deliberately not callers, and the one function that revokes every key without ending the account, the emailed key regeneration, is a named exception.
+A registration is written only for an approved, undeleted owner and honored (exchange, token use) only while its owner still stands, so a request already past authentication when the cascade committed leaves nothing usable behind.
+The residual of that deliberate key exception: a stolen owner key can register a runner that outlives the key's revocation.
+The `compute.runner.registered` audit row records the key id, so after revoking a leaked owner key run `nemar admin compute runners list` and revoke every registration you do not recognize.
 
 ## One secret signs every compute token: rotate it only with no job running
 
