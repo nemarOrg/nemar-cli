@@ -80,6 +80,28 @@ function otherAddress(): string | null {
   return null;
 }
 
+/**
+ * The addresses something in this process listens on at `port`, read from the operating system
+ * (`lsof`), as `127.0.0.1` or `*` (every interface); empty when `lsof` is not available.
+ */
+async function listeningOn(port: number): Promise<string[]> {
+  try {
+    const proc = spawn({
+      cmd: ["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fn"],
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return out
+      .split("\n")
+      .filter((l) => l.startsWith("n"))
+      .map((l) => l.slice(1).replace(new RegExp(`:${port}$`), ""));
+  } catch {
+    return [];
+  }
+}
+
 /** Whether something answers a TCP connection at `host:port` within a second. */
 async function reachable(host: string, port: number): Promise<boolean> {
   try {
@@ -196,6 +218,9 @@ describe("the S3 stand-in", () => {
       expect(standin.accessKeyId).toBe("given-access-key");
       expect(standin.secretAccessKey).toBe("given-secret-key");
       expect(await reachable("127.0.0.1", port)).toBe(true);
+      const bound = await listeningOn(port);
+      if (Bun.which("lsof")) expect(bound.length).toBeGreaterThan(0);
+      for (const address of bound) expect(address).toBe("127.0.0.1");
       const lan = otherAddress();
       if (lan !== null) expect(await reachable(lan, port)).toBe(false);
     } finally {
@@ -261,6 +286,11 @@ describe("one state directory, started, restarted", () => {
     expect(health.body.status).toBe("ok");
     expect(new URL(stack.url).hostname).toBe("127.0.0.1");
     expect(new URL(stack.s3Url).hostname).toBe("127.0.0.1");
+    for (const port of [stack.port, stack.s3Port]) {
+      const addresses = await listeningOn(port);
+      if (Bun.which("lsof")) expect(addresses.length).toBeGreaterThan(0);
+      for (const address of addresses) expect(address).toBe("127.0.0.1");
+    }
     const lan = otherAddress();
     if (lan !== null) {
       expect(await reachable(lan, stack.port)).toBe(false);
