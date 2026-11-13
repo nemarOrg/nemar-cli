@@ -19,7 +19,7 @@
  *    not this stack's is refused;
  *  - `outputs` downloads a finished job's results through the real links route (the second page by the
  *    `after` cursor), prints names and sizes only, and refuses a job that is not the pipelines account's;
- *  - the command line: `serve` prints the banner and answers `/health`, refuses `--host 0.0.0.0` and a
+ *  - the command line: `serve` prints the banner and answers `/health`, refuses `--host` other than loopback and a
  *    missing value.
  * MUTATIONS, each run alone: bind the API or the S3 stand-in without `hostname`; drop the `hostname` guard;
  * drop `umask` or the `chmod` of a secret; let `s3Credentials` fall back to the public defaults; apply a
@@ -75,7 +75,9 @@ afterAll(() => {
 /** An address of this machine that is not loopback, or null when it has none. */
 function otherAddress(): string | null {
   for (const list of Object.values(networkInterfaces())) {
-    for (const a of list ?? []) if (a.family === "IPv4" && !a.internal) return a.address;
+    for (const { family, internal, address } of list ?? []) {
+      if (family === "IPv4" && !internal) return address;
+    }
   }
   return null;
 }
@@ -168,7 +170,7 @@ describe("the persistent database", () => {
     const usersBefore = (first.db.query("SELECT COUNT(*) AS n FROM users").get() as { n: number })
       .n;
     first.db.run(
-      "INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, service_access, account_kind) VALUES ('kept', 'kept@example.org', 'x', 'approved', 'member', 'cli', 1, 0, 'person')",
+      "INSERT INTO users (username, email, password_hash, status, role, signup_source, email_verified, service_access, account_kind) VALUES ('kept', 'kept@example.test', 'x', 'approved', 'member', 'cli', 1, 0, 'person')",
     );
     first.db.close();
 
@@ -235,7 +237,7 @@ describe("refusals that come before anything is created", () => {
   test("another host, a tag, a live dataset and a reserved id", async () => {
     const state = join(fresh("refuse"), "state");
     const base = { state, image: IMAGE, port: 0, s3Port: 0 };
-    await expect(startLocalStack({ ...base, host: "0.0.0.0" })).rejects.toThrow(
+    await expect(startLocalStack({ ...base, host: "::" })).rejects.toThrow(
       /binds 127\.0\.0\.1 only/,
     );
     await expect(
@@ -835,7 +837,7 @@ describe("the command line", () => {
 
   test("another host, a missing image and an unknown argument are refused", async () => {
     const state = join(fresh("cli-refuse"), "state");
-    const host = await run(["serve", "--state", state, "--image", IMAGE, "--host", "0.0.0.0"]);
+    const host = await run(["serve", "--state", state, "--image", IMAGE, "--host", "localhost"]);
     expect(host.code).toBe(1);
     expect(host.err).toContain("binds 127.0.0.1 only");
     const noImage = await run(["serve", "--state", state]);

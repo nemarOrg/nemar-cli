@@ -84,8 +84,8 @@ const BUCKETS = { records: "nemar-compute-records", results: "nemar-compute-resu
 const KEY_NAMES = ["owner", "admin", "pipelines"] as const;
 type KeyName = (typeof KEY_NAMES)[number];
 
-const FIXTURE_OWNER = { username: "local-owner", email: "local-owner@example.org" } as const;
-const FIXTURE_ADMIN = { username: "local-admin", email: "local-admin@example.org" } as const;
+const FIXTURE_OWNER = { username: "local-owner", email: "local-owner@example.test" } as const;
+const FIXTURE_ADMIN = { username: "local-admin", email: "local-admin@example.test" } as const;
 
 export interface StackOptions {
   state: string;
