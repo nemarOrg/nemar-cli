@@ -33,6 +33,7 @@ import { authOrcidRoutes } from "./routes/auth-orcid";
 import { authPrivateRoutes } from "./routes/auth-private";
 import { authWebRoutes } from "./routes/auth-web";
 import { computeRoutes } from "./routes/compute";
+import { computeRunnerRoutes } from "./routes/compute-runners";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
@@ -288,6 +289,9 @@ api.route("/sandbox", sandboxRoutes);
 // person's own cancel and links (epic #2005 phase A5, #2010). Its routes are pinned by
 // test/compute-route-inventory.test.ts.
 api.route("/compute", computeRoutes);
+// A registered runner's own routes (portable compute, card DM-05): the secret buys an access token, and
+// the token opens `GET /compute/runners/me`. No session and no API key; pinned by the same inventory test.
+api.route("/compute/runners", computeRunnerRoutes);
 api.route("/webhooks", webhooks);
 // Public JSON Schema documents (issue #1059). Static, D1-free, cached: the
 // bytes are the repo's own shared/*.schema.json, the same files the Zarr
