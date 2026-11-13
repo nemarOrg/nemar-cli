@@ -777,6 +777,15 @@ describe("the command line", () => {
           banner,
         );
       expect(m).not.toBeNull();
+      // The spawned process is not under this suite's loopback preload for `Bun.serve`: what it listens on
+      // is what the stack itself asked for.
+      const s3Port = /S3 stand-in on http:\/\/127\.0\.0\.1:(\d+);/.exec(text)?.[1];
+      expect(s3Port).toBeDefined();
+      for (const port of [Number(m?.[1]), Number(s3Port)]) {
+        const bound = await listeningOn(port);
+        if (Bun.which("lsof")) expect(bound.length).toBeGreaterThan(0);
+        for (const address of bound) expect(address).toBe("127.0.0.1");
+      }
       const health = await call(`http://127.0.0.1:${m?.[1]}`, "GET", "/health");
       expect(health.status).toBe(200);
       expect(health.body.status).toBe("ok");
