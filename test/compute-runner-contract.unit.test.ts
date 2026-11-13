@@ -757,6 +757,7 @@ function generate(): Case[] {
   bound(reg, ["gpus"], 0, -1);
   bound(reg, ["scratch_gb"], 100_000, 100_001);
   bound(reg, ["name"], "a".repeat(64), "a".repeat(65));
+  bound(reg, ["name"], "workstation_1", "Workstation_1");
   bound(reg, ["site"], "a".repeat(32), "a".repeat(33));
   bound(reg, ["site"], "a_1", "A_1");
   bound(reg, ["runtimes"], [...RUNNER_RUNTIMES], ["docker", "docker"]);
