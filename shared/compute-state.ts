@@ -243,9 +243,82 @@ export const PLATFORM_FAILURE_CODES = [
   // 2026-11-06): the job ends `failed`, the hold is released with NO charge, and the row is flagged
   // `mismatch` so the observer and the tenant sweep can reconcile any real use against Expanse's figures.
   "tapis_record_lost",
+  // A job a runner claimed and then lost (portable compute, protocol `nemar.runner.v1`): the
+  // thirteenth word, with the details of {@link RUNNER_LOST_DETAILS}. It is not a launcher code and
+  // none of its details is in {@link LAUNCHER_DETAILS}, so the code alone decides and
+  // `isPlatformFailure("runner_lost", detail)` is true for every detail.
+  "runner_lost",
 ] as const;
 
 export type PlatformFailureCode = (typeof PLATFORM_FAILURE_CODES)[number];
+
+/**
+ * Why a runner job ended `runner_lost`, recorded as its failure detail: its lease ran out with no
+ * outputs (`lease_expired`), it was claimed the most times a job may be and never finished
+ * (`claims_exhausted`), it ran past its deadline (`deadline_exceeded`), or its runner's registration
+ * was revoked (`runner_revoked`). The numbers behind them are in `shared/contract/compute-runner.ts`.
+ */
+export const RUNNER_LOST_DETAILS = [
+  "lease_expired",
+  "claims_exhausted",
+  "deadline_exceeded",
+  "runner_revoked",
+] as const;
+
+export type RunnerLostDetail = (typeof RUNNER_LOST_DETAILS)[number];
+
+// --- Executors, accounting classes and runner backends (portable compute) -----------------------
+
+/** Who runs a job: Tapis on an allocation, or a runner that polls NEMAR. A job is `tapis` by default. */
+export const COMPUTE_EXECUTORS = ["tapis", "runner"] as const;
+
+export type ComputeExecutor = (typeof COMPUTE_EXECUTORS)[number];
+
+/**
+ * How a job is accounted: `su` is the ledger in service units, `none` writes no ledger entry and
+ * measures usage instead. A Tapis job is always `su`: accounting follows the resource, not the executor.
+ */
+export const COMPUTE_ACCOUNTING = ["su", "none"] as const;
+
+export type ComputeAccounting = (typeof COMPUTE_ACCOUNTING)[number];
+
+/** Where a runner job executes: a workstation, or a cluster through its scheduler directly. */
+export const RUNNER_BACKENDS = ["local", "slurm"] as const;
+
+export type RunnerBackend = (typeof RUNNER_BACKENDS)[number];
+
+/**
+ * The refusals of the runner routes, each answered as `{ error: <word> }` with the status of
+ * {@link RUNNER_REFUSAL_STATUS}. A runner reads the word, never a sentence.
+ */
+export const RUNNER_REFUSALS = [
+  "runner_credential_not_accepted",
+  "runner_unknown",
+  "runner_token_expired",
+  "runners_disabled",
+  "lease_lost",
+  "job_not_claimed",
+  "runner_outdated",
+  "protocol_unsupported",
+  "runner_accounting_unbuilt",
+  "invalid_body",
+] as const;
+
+export type RunnerRefusal = (typeof RUNNER_REFUSALS)[number];
+
+/** The one table of HTTP statuses for {@link RUNNER_REFUSALS}. */
+export const RUNNER_REFUSAL_STATUS = {
+  runner_credential_not_accepted: 401,
+  runner_unknown: 401,
+  runner_token_expired: 401,
+  runners_disabled: 503,
+  lease_lost: 409,
+  job_not_claimed: 404,
+  runner_outdated: 426,
+  protocol_unsupported: 426,
+  runner_accounting_unbuilt: 409,
+  invalid_body: 400,
+} as const satisfies Record<RunnerRefusal, number>;
 
 /**
  * Why NEMAR refused to take a job's results, recorded as the detail of `result_upload_failed`.
