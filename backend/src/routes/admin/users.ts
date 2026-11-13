@@ -34,6 +34,7 @@ import {
   sendBroadcast,
 } from "../../services/broadcast";
 import { computeReleaseStatements } from "../../services/compute-release";
+import { runnerEndStatements } from "../../services/compute-runners";
 import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-auth";
 import {
   parseEmailPreferences,
@@ -370,10 +371,13 @@ const REVOCABLE_USER_COLUMNS =
  *
  * The credential cascade is ONE batch: sessions, docs and private grants, the
  * support tickets (`mailReleaseStatements`) and the account's compute
- * (`computeReleaseStatements`, epic #2005 phase A8). Compute has TWO callers,
- * this function and `tombstoneUserCascade`; a role demotion and a key
- * revocation do not end it (`services/compute-release.ts` says why). The Tapis
- * cancels are not made in the batch: the retried sweep makes them.
+ * (`computeReleaseStatements`, epic #2005 phase A8) and the runners the
+ * account registered (`runnerEndStatements`, portable compute D5). Compute has
+ * TWO callers, this function and `tombstoneUserCascade`; a role demotion and a
+ * key revocation do not end it (`services/compute-release.ts` says why). The
+ * runner statements have THREE: these two and the role demotion (an owner's
+ * registrations end with their standing; `services/compute-runners.ts`). The
+ * Tapis cancels are not made in the batch: the retried sweep makes them.
  */
 async function finalizeRevocation(
   c: Context<{ Bindings: Bindings; Variables: Variables }>,
@@ -542,6 +546,13 @@ async function finalizeRevocation(
     // every pool is frozen. The Tapis cancels follow from the retried sweep, never from this
     // batch. A role demotion and a key revocation do NOT end compute; compute-release.ts says why.
     ...computeReleaseStatements(user.id).map((s) => db.prepare(s.sql).bind(...s.binds)),
+    // The runners the account registered end too (portable compute, D5): their access tokens are
+    // deleted, an unstarted claim is released and a started job becomes `unreported` with no lease, then
+    // each registration is revoked. One of THREE callers of `runnerEndStatements` (this function,
+    // `tombstoneUserCascade`, the role demotion); a key revocation is deliberately not one.
+    ...runnerEndStatements(user.id, "account_revoked").map((s) =>
+      db.prepare(s.sql).bind(...s.binds),
+    ),
     // What the account holds at every OpenID Connect client: its grants, tokens and unused codes end,
     // and each client with a back-channel logout address is queued to be told (ADR 0119 rule 12).
     // In this batch for the same reason as the rest: a revoked account that is approved again must
@@ -1202,6 +1213,11 @@ export function registerUsersRoutes(admin: AdminRouter): void {
           // kind of reason: a demoted person is still an account with a grant, pools and jobs
           // (`computeReleaseStatements` is for the two paths that end the whole account).
           //
+          // The runners this person registered DO end (`runnerEndStatements`, portable compute D5):
+          // registering one is an owner's act, so what only an owner holds goes with the standing, in
+          // this batch. The third caller of that set, after `finalizeRevocation` and
+          // `tombstoneUserCascade`; it goes LAST so the results read by position above do not shift.
+          //
           // OpenID Connect grants are not ended here (ADR 0119 rule 12): a token carries no role and
           // no OIDC scope confers admin authority, so a demotion leaves nothing of theirs to
           // downgrade. `oidc-cascade-nonmembership.test.ts` holds that the rows survive; a
@@ -1219,6 +1235,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
             // ones are released; any other demotion ends admin standing altogether.
             ...mailReleaseStatements(target.id, newRole === "admin" ? "restricted" : "all").map(
               (s) => db.prepare(s.sql).bind(...s.binds),
+            ),
+            ...runnerEndStatements(target.id, "role_demoted").map((s) =>
+              db.prepare(s.sql).bind(...s.binds),
             ),
           ]);
           tokensRevoked = result[0]?.meta?.changes ?? 0;
