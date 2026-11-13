@@ -104,7 +104,7 @@ Detail: [`.rules/release-and-repull.md`](.rules/release-and-repull.md).
 
 ### The compute switches are the owner's
 
-`COMPUTE_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED` are dark switches: they stay out of `backend/wrangler-sccn.toml` (`backend/test/compute-switches-flag.test.ts` fails a change that adds one),
+`COMPUTE_ENABLED`, `COMPUTE_PIPELINES_DISPATCH_ENABLED` and `COMPUTE_RUNNERS_ENABLED` (registered runners; it also needs `COMPUTE_ENABLED`) are dark switches: they stay out of `backend/wrangler-sccn.toml` (`backend/test/compute-switches-flag.test.ts` fails a change that adds one),
 and only the owner adds one, in a reviewed pull request that edits that test.
 Compute crons are production-only (ADR 0118).
 
