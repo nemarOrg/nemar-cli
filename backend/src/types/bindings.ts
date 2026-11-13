@@ -1,3 +1,4 @@
+import type { RunnerPrincipal } from "../services/compute-runners";
 import type { CloudflareSendEmail } from "../services/email";
 import type { ClaimAccount } from "../services/oidc-claims";
 import type { WebSessionUser } from "../services/web-session";
@@ -87,6 +88,10 @@ export interface Bindings {
   // so `GET /admin/compute/status` is what says what the Worker reads.
   COMPUTE_ENABLED?: string; // "1" lets compute run (production or development only)
   COMPUTE_PIPELINES_DISPATCH_ENABLED?: string; // "1" lets NEMAR's own pipelines dispatch (needs COMPUTE_ENABLED)
+  // The portable-compute switch (card DM-05, D7): "1" lets a registered runner exchange its secret and
+  // use its access token. Needs COMPUTE_ENABLED too, is absent from wrangler-sccn.toml like the other
+  // two, and is pinned by the same test.
+  COMPUTE_RUNNERS_ENABLED?: string;
 
   // The Tapis tenant the compute gateway submits to (epic #2005 phase A4, services/tapis/config.ts).
   // Worker secrets or owner-set variables, NEVER in wrangler-sccn.toml: a tenant name is not public.
@@ -529,6 +534,8 @@ export interface AuthUser {
  */
 export interface Variables {
   user: AuthUser;
+  /** Set by `runnerAccess` (routes/compute-runners.ts): the runner whose access token the request carried. */
+  runner?: RunnerPrincipal;
   // Set by optionalAuthMiddleware when an Authorization: Bearer header was
   // provided but did not resolve to a valid, approved user. Lets routes that
   // require auth on a flag (e.g., /datasets?mine=true) emit a token-specific
