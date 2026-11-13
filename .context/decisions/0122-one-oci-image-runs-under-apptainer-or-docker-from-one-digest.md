@@ -29,7 +29,7 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
    As ADR 0118 decision 14 says, the file's name is what ties it to the digest; neither the launcher nor this ADR claims the file's content was verified until a runner checks the signature.
 4. **Apptainer is primary where it is installed, and Docker or Podman is the second runtime.**
    Apptainer needs no daemon and no root, and the launcher's CI already runs it.
-   The workstations in hand have only Docker until Apptainer is installed, which is an owner decision, so the first runs use the second runtime.
+   Some lab machines have only Docker until Apptainer is installed, which is an owner decision, so the first runs use the second runtime.
    Under Docker or Podman the runtime pulls `image.uri` by digest and verifies it on pull, so `NEMAR_SIF_ROOT` is not required there; this changes decision 14's "required, the launcher has no fallback" for those two runtimes only.
 5. **The second runtime runs under pinned isolation flags and a limits rule.**
    The flags (dropped capabilities, no new privileges, a read-only root, the invoking user's ids, exactly the four binds) are in the launcher docs.
