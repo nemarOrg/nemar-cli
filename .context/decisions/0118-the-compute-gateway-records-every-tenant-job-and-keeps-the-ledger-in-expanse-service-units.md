@@ -760,3 +760,9 @@ It adds no queue and no migration.
      It is triggered more easily than it looks: with no stored row `policy show` now returns the default WITH the `tenant` key, so any show, edit and set round trip writes the key without the owner meaning to.
      Recovery: `putPolicy` never reads the current row, so a version without the key can be written first (by the older Worker's own `policy set`, from a file without `tenant`).
      While `COMPUTE_ENABLED` is absent in production there is nothing live to break.
+
+## Amendment 2026-11-13: pointer to ADR 0121
+
+[ADR 0121](0121-a-job-names-its-executor-and-its-accounting-class-and-a-workstation-runner-pulls-its-work.md) refines decision 3 and the A3 amendment's item 1 (the job INSERT gated on the hold) for jobs with `accounting = 'none'`, which run on a workstation runner, make no hold and write no ledger entry.
+It changes nothing for `su` jobs, and a Tapis job is always `su`.
+The verdict of this ADR stands.
