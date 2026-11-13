@@ -95,6 +95,8 @@ export interface StandinOptions {
   buckets: Record<string, R2Bucket>;
   accessKeyId?: string;
   secretAccessKey?: string;
+  /** The port to listen on (default 0, an ephemeral one). The server always listens on loopback only. */
+  port?: number;
 }
 
 const xml = (body: string, status: number, extra: Record<string, string> = {}) =>
@@ -413,7 +415,10 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
   }
 
   const server: Server = Bun.serve({
-    port: 0,
+    port: options.port ?? 0,
+    // Loopback only: without it Bun listens on every interface, and the long-running local stack's ssh
+    // tunnel (card DM-08) would expose a bucket to the whole network.
+    hostname: "127.0.0.1",
     async fetch(req) {
       const entry: StandinRequest = {
         op: "Unknown",
