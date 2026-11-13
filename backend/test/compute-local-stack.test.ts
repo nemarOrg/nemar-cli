@@ -650,11 +650,13 @@ describe("--seed-from-catalog", () => {
   });
   afterAll(() => api.stop(true));
 
+  const catalogState = join(fresh("catalog"), "state");
+
   test("copies the predicate's values and the version, nothing else, and says which", async () => {
     seen = [];
     const lines: string[] = [];
     const stack = await startLocalStack({
-      state: join(fresh("catalog"), "state"),
+      state: catalogState,
       image: IMAGE,
       port: 0,
       s3Port: 0,
@@ -692,6 +694,32 @@ describe("--seed-from-catalog", () => {
         "zarr_source_commit, latest_version, latest_version_at, latest_version_doi, total_files",
       );
       expect(said).toContain("nm000500: eligible for a pipeline run");
+    } finally {
+      await stack.stop();
+    }
+  }, 120_000);
+
+  test("a restart over the same state leaves the dataset it already holds alone", async () => {
+    seen = [];
+    const lines: string[] = [];
+    const stack = await startLocalStack({
+      state: catalogState,
+      image: IMAGE,
+      port: 0,
+      s3Port: 0,
+      seedFromCatalog: ["nm000500"],
+      catalogBase: `http://127.0.0.1:${api.port}`,
+      log: (l) => lines.push(l),
+    });
+    try {
+      expect(seen).toEqual([]);
+      expect(lines).toContain("nm000500: already in the state database, left as it is");
+      expect(count(stack, "SELECT COUNT(*) AS n FROM datasets WHERE dataset_id = 'nm000500'")).toBe(
+        1,
+      );
+      expect(
+        count(stack, "SELECT COUNT(*) AS n FROM dataset_versions WHERE dataset_id = 'nm000500'"),
+      ).toBe(1);
     } finally {
       await stack.stop();
     }
