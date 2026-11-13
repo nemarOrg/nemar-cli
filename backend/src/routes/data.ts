@@ -33,6 +33,7 @@ import {
   type PublicManifestEntry,
   type ResolvedVersion,
   type VersionPickerEntry,
+  bidsPathAfterMount,
   buildBytesUrl,
   buildCatalogIndexPayload,
   buildContentDisposition,
@@ -40,8 +41,8 @@ import {
   buildLandingPayload,
   buildRedirectUrl,
   contentTypeForBidsPath,
-  decodeBidsPath,
   diffRemovedSinceResolved,
+  encodeBidsPath,
   findLastSeenVersionBy,
   pickResponseFormat,
   renderCatalogIndexHtml,
@@ -1424,7 +1425,7 @@ async function fileOrIndexHandler(
     });
     const urlObj = new URL(request.url);
     const lastSeenHref = lastSeen
-      ? `${urlObj.protocol}//${urlObj.host}/${datasetId}/${lastSeen.version}/${rawPath.replace(/^\/+/, "")}`
+      ? `${urlObj.protocol}//${urlObj.host}/${datasetId}/${encodeURIComponent(lastSeen.version)}/${encodeBidsPath(rawPath.replace(/^\/+/, ""))}`
       : null;
     return fileNotFound({
       request,
@@ -2114,9 +2115,8 @@ dataRoutes.get("/:datasetId/qa/", (c) => {
 
 dataRoutes.get("/:datasetId/qa/*", (c) => {
   const datasetId = c.req.param("datasetId");
-  const prefix = `/${datasetId}/qa/`;
-  const idx = c.req.path.indexOf(prefix);
-  const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
+  const rawPath = bidsPathAfterMount(new URL(c.req.url).pathname, [datasetId, "qa"]);
+  if (rawPath === null) return notFound("Not found");
   return qaHandler(c.env, c.req.raw, datasetId, rawPath);
 });
 
@@ -2313,11 +2313,10 @@ dataRoutes.get("/:datasetId/:version/*", (c) => {
       headers: { Location: `/${datasetId}/${version}`, "Cache-Control": "public, max-age=300" },
     });
   }
-  const prefix = `/${datasetId}/${version}/`;
-  // The undecoded pathname, decoded exactly once by decodeBidsPath.
-  const pathname = new URL(c.req.url).pathname;
-  const idx = pathname.indexOf(prefix);
-  const rawPath = idx === -1 ? "" : decodeBidsPath(pathname.slice(idx + prefix.length));
+  // The pathname as the URL parser left it (escapes intact, dot segments
+  // collapsed), decoded once per segment.
+  const rawPath = bidsPathAfterMount(new URL(c.req.url).pathname, [datasetId, version]);
+  if (rawPath === null) return notFound("Not found");
   return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath, deferOf(c));
 });
 
