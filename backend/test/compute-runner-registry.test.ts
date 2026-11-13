@@ -870,6 +870,25 @@ describe("revoke", () => {
   });
 });
 
+describe("the key id of an audit row", () => {
+  test("a lowercase `bearer` scheme is refused by authentication, so no registration is made without a key id to record", async () => {
+    const res = await app.request(
+      "/admin/compute/runners",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `bearer ${COMPUTE_KEYS.owner}`,
+        },
+        body: JSON.stringify(REGISTRATION),
+      },
+      envOf(),
+    );
+    expect(res.status).toBe(401);
+    expect(count("SELECT COUNT(*) AS n FROM compute_runners")).toBe(0);
+  });
+});
+
 describe("a claim with a cancel on it", () => {
   test("is not released (it would be live forever); it goes unreported, keeping its runner and claim, with no lease", async () => {
     const mine = await runnerWithToken();
@@ -983,6 +1002,9 @@ describe("the services, directly", () => {
 });
 
 describe("the service-binding entrypoint and the rate limiter", () => {
+  // Not a guard on `case "runner_credential"` in principal.ts: deleting it falls through to the same
+  // `invalid_credential`. What this pins is the refusal by prefix in `resolveApiKeyUser`, which is what
+  // keeps a hash that `tokens` holds from resolving.
   test("resolvePrincipal resolves a runner secret or token to no one, even if `tokens` holds its hash", async () => {
     const { secret, token } = await runnerWithToken();
     for (const value of [secret, token]) {

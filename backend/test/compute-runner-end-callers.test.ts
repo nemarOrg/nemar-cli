@@ -36,6 +36,7 @@ import {
   RUNNER_END_EXCEPTIONS,
   RUNNER_REVOKE_REASONS,
   RunnerOwnerNotStanding,
+  findRunnerBySecret,
   hashRunnerCredential,
   registerRunner,
   runnerEndStatements,
@@ -279,6 +280,8 @@ app.route("/compute/runners", computeRunnerRoutes);
 let db: Database;
 let userIds: Record<Who, number>;
 let d1: D1Database;
+/** When set, the Worker's database for one request: `d1` with something injected after its first batch. */
+let dbOverride: D1Database | null = null;
 
 /**
  * The runner routes need the switches on, which needs `production` or `development`; the revoke, delete and
@@ -288,7 +291,7 @@ let d1: D1Database;
  */
 const env = (quiet: boolean): Bindings =>
   ({
-    DB: d1,
+    DB: dbOverride ?? d1,
     ENVIRONMENT: quiet ? "test" : "production",
     COMPUTE_ENABLED: "1",
     COMPUTE_RUNNERS_ENABLED: "1",
@@ -322,6 +325,7 @@ async function seedUsers(): Promise<void> {
 beforeEach(async () => {
   db = freshDb();
   d1 = realD1(db);
+  dbOverride = null;
   userIds = {} as Record<Who, number>;
   await seedUsers();
 });
@@ -736,4 +740,72 @@ describe("a registration that was past authentication when the owner's cascade c
       runnerId: expect.stringMatching(/^rnr_/),
     });
   });
+});
+
+describe("the cascade and the status are one atomic step, so a late registration cannot survive a re-approval", () => {
+  /**
+   * The Worker's database with ONE thing injected: `late` runs right after the first batch commits, which
+   * is where a request that was already past authentication lands its write. Everything else is the real
+   * database, statement for statement.
+   */
+  function injectAfterFirstBatch(late: () => Promise<void>): D1Database {
+    let fired = false;
+    return {
+      prepare: (sql: string) => d1.prepare(sql),
+      batch: async (statements: D1PreparedStatement[]) => {
+        const result = await d1.batch(statements);
+        if (!fired) {
+          fired = true;
+          await late();
+        }
+        return result;
+      },
+    } as unknown as D1Database;
+  }
+
+  const LATE = { ...REGISTRATION, name: "late_two" } as Parameters<typeof registerRunner>[2];
+
+  const PATHS: Array<[string, () => Promise<{ status: number }>]> = [
+    [
+      "finalizeRevocation (the admin revoke)",
+      () => api("POST", "/admin/revoke/rn-target", "actor"),
+    ],
+    [
+      "the role demotion",
+      () => api("POST", "/admin/users/rn-target/role", "actor", { role: "admin" }),
+    ],
+    [
+      "tombstoneUserCascade (the soft delete)",
+      () => api("DELETE", `/admin/users/by-id/${userIds.target}`, "actor"),
+    ],
+  ];
+
+  for (const [name, end] of PATHS) {
+    test(`${name}: end batch, then registerRunner, then status, then re-approval: the secret does not resolve`, async () => {
+      let secret: string | null = null;
+      let refused: unknown = null;
+      dbOverride = injectAfterFirstBatch(async () => {
+        try {
+          secret = (await registerRunner(d1, userIds.target, LATE)).secret;
+        } catch (err) {
+          refused = err;
+        }
+      });
+      expect((await end()).status).toBe(200);
+      dbOverride = null;
+      // The registration landed after the cascade committed and was refused: the owner's status (or role,
+      // or deletion) was already in the same batch.
+      expect(refused).toBeInstanceOf(RunnerOwnerNotStanding);
+      expect(secret).toBeNull();
+      // Re-approval, as an admin would do it (and a re-promotion, for the demotion): nothing comes back.
+      db.run(
+        "UPDATE users SET status = 'approved', role = 'owner', deleted_at = NULL WHERE id = ?",
+        [userIds.target],
+      );
+      expect(
+        db.query("SELECT COUNT(*) AS n FROM compute_runners WHERE name = 'late_two'").get(),
+      ).toEqual({ n: 0 });
+      if (secret !== null) expect(await findRunnerBySecret(d1, secret)).toBeNull();
+    });
+  }
 });

@@ -555,7 +555,7 @@ describe("the indexes and the file", () => {
       for (const s of statements) {
         const plan = await e.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${s.sql}`, ...s.binds);
         const detail = plan.map((r) => r.detail).join(" | ");
-        expect([detail.includes("compute_jobs_runner"), detail]).toEqual([true, detail]);
+        expect([/USING INDEX compute_jobs_runner\b/.test(detail), detail]).toEqual([true, detail]);
         expect(detail).not.toMatch(/SCAN compute_jobs(?! USING)/);
       }
     },

@@ -527,6 +527,50 @@ async function finalizeRevocation(
   // `iam_revocation_failures` row as the surviving signal. That is pre-existing
   // and orthogonal; what matters here is that the credential cascade is
   // reachable on the retry.)
+
+  // Update user status, IN THE SAME BATCH as the cascade (below), and last.
+  //
+  // It was a separate statement after the batch, and a request already past authentication could land a
+  // runner registration between the two: the owner was still `approved`, so the registration's standing
+  // guard passed, the row stayed live, and a later re-approval brought it back. Written in the batch, the
+  // status and the cascade commit together: a registration is either before it (and ended by it) or after
+  // it (and refused by the guard). The batch is atomic, so the retry property below is unchanged: if it
+  // throws, the account is still `approved` and the admin's retry re-enters.
+  // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
+  const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
+
+  // service_access (migration 0062) gates real (non-sandbox) uploads and
+  // compute independently of `status` -- clearing it here closes issue
+  // #1069 (a revoked user kept the grant and could still pass
+  // realDatasetServiceGate if `status` were ever restored without an
+  // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
+  // is the eraser of what approval wrote, so a later listing cannot show a
+  // revoked account still carrying "granted by X on Y".
+  //
+  // The upload-REQUEST stamps go too (ADR 0042). An open request is
+  // `upload_access_requested_at` set with no grant, so leaving the stamp on a
+  // revoked row would put a former grantee back into the admin review queue
+  // the moment their grant was taken away -- the one account an admin has
+  // just decided about. Clearing both means a re-instated account asks
+  // again, which is the right shape: the review is of a person at a moment,
+  // and revocation ends that moment.
+  const statusWrite = db
+    .prepare(
+      `
+    UPDATE users
+    SET status = ?,
+        service_access = 0,
+        service_access_granted_at = NULL,
+        service_access_granted_by = NULL,
+        upload_access_requested_at = NULL,
+        upload_access_notified_at = NULL,
+        revoked_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE id = ?
+  `,
+    )
+    .bind(finalStatus, user.id);
+
   await db.batch([
     db
       .prepare(
@@ -558,47 +602,12 @@ async function finalizeRevocation(
     // In this batch for the same reason as the rest: a revoked account that is approved again must
     // come back with nothing, and a cascade outside the batch could fail alone.
     ...oidcEndStatements(user.id, "account_revoked").map((s) => db.prepare(s.sql).bind(...s.binds)),
+    // The status and the service-access stamps, last (see above).
+    statusWrite,
   ]);
   // The logouts are queued; the first attempt is made after the response, so no partner can slow or
   // fail this revocation, and a partner that fails leaves the account revoked (the tick retries).
   deferLogoutDelivery(c.env, user.id, backgroundOf(c));
-
-  // Update user status
-  // If IAM revocation failed, mark as revoked_iam_pending for manual cleanup
-  const finalStatus = iamRevoked || !user.aws_iam_username ? "revoked" : "revoked_iam_pending";
-
-  // service_access (migration 0062) gates real (non-sandbox) uploads and
-  // compute independently of `status` -- clearing it here closes issue
-  // #1069 (a revoked user kept the grant and could still pass
-  // realDatasetServiceGate if `status` were ever restored without an
-  // explicit re-grant). The two grant stamps go with it (ADR 0040): revoke
-  // is the eraser of what approval wrote, so a later listing cannot show a
-  // revoked account still carrying "granted by X on Y".
-  //
-  // The upload-REQUEST stamps go too (ADR 0042). An open request is
-  // `upload_access_requested_at` set with no grant, so leaving the stamp on a
-  // revoked row would put a former grantee back into the admin review queue
-  // the moment their grant was taken away -- the one account an admin has
-  // just decided about. Clearing both means a re-instated account asks
-  // again, which is the right shape: the review is of a person at a moment,
-  // and revocation ends that moment.
-  await db
-    .prepare(
-      `
-    UPDATE users
-    SET status = ?,
-        service_access = 0,
-        service_access_granted_at = NULL,
-        service_access_granted_by = NULL,
-        upload_access_requested_at = NULL,
-        upload_access_notified_at = NULL,
-        revoked_at = datetime('now'),
-        updated_at = datetime('now')
-    WHERE id = ?
-  `,
-    )
-    .bind(finalStatus, user.id)
-    .run();
 
   // Remove from every dataset repo they touch: collaborator grants
   // (dataset_collaborators) UNION repos they own (datasets.owner_user_id).
