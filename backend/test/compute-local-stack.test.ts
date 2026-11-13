@@ -189,9 +189,9 @@ function hostCases(port: number) {
     refused: [
       `evil.example:${port}`,
       "evil.example",
-      `127.0.0.2:${port}`,
+      `2130706434:${port}`,
       `[::1]:${port}`,
-      `0.0.0.0:${port}`,
+      `[::]:${port}`,
       `127.0.0.1:${port + 1}`,
       `localhost:${port + 1}`,
       "127.0.0.1",
