@@ -760,3 +760,13 @@ It adds no queue and no migration.
      It is triggered more easily than it looks: with no stored row `policy show` now returns the default WITH the `tenant` key, so any show, edit and set round trip writes the key without the owner meaning to.
      Recovery: `putPolicy` never reads the current row, so a version without the key can be written first (by the older Worker's own `policy set`, from a file without `tenant`).
      While `COMPUTE_ENABLED` is absent in production there is nothing live to break.
+
+## Amendment 2026-11-13: pointer to ADR 0121 and ADR 0122
+
+[ADR 0121](0121-a-job-names-its-executor-and-its-accounting-class-and-a-workstation-runner-pulls-its-work.md) refines this ADR for jobs that are not Tapis tenant jobs: a job with `accounting = 'none'` runs on a runner, never on Tapis, makes no hold and writes no ledger entry.
+For those jobs it departs from decision 3 and the A3 amendment's item 1 (the hold), decision 4 (settles twice), decision 9 (the ACCESS report), the A2 amendment's item 7 (`settled_final_at` and the `job:<id>:final` entry) and the A5 amendment's item 6 (the terminal batch's ledger entry).
+A tenant or partner job has a Tapis job and is always `su`, so nothing changes for it.
+[ADR 0122](0122-one-oci-image-runs-under-apptainer-or-docker-from-one-digest.md) refines decision 14: `NEMAR_SIF_ROOT` is not required under Docker or Podman, and the SIF is built and signed once in CI.
+`shared/contract/compute-runner.ts` also extends decision 10's list of modules.
+`sweepRunnerLeases` also runs on claim calls outside production; the 30-minute tick itself stays production-only, so decision 8 and the dark-switch rule of `AGENTS.md` are intact.
+The verdict of this ADR stands.
