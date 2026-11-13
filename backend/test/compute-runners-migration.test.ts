@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { COMPUTE_ACCOUNTING, COMPUTE_EXECUTORS, RUNNER_BACKENDS } from "../../shared/compute-state";
 import { COMPUTE_POOLS } from "../../shared/contract/compute";
 import { RUNNER_ARCHES, RUNNER_RUNTIMES, RUNNER_TRUST } from "../../shared/contract/compute-runner";
+import { runnerEndStatements, runnerRevokeStatements } from "../src/services/compute-runners";
 import { type Engine, startEngines } from "./helpers/compute-engines";
 import { MIGRATIONS_DIR } from "./helpers/miniflare-d1";
 
@@ -112,6 +113,9 @@ function job(over: Row = {}): Row {
     ...over,
   };
 }
+
+/** A runner job: only NEMAR's own pipeline jobs are run by a runner. */
+const RUNNER_JOB = { executor: "runner", source: "pipeline" };
 
 const insertJob = (e: Engine, over: Row = {}) => insert(e, "compute_jobs", job(over));
 
@@ -398,8 +402,8 @@ describe("compute_jobs", () => {
     async (e) => {
       expect(await insertJob(e, { executor: "other" })).toMatch(NAMED("compute_jobs_executor"));
       expect(await insertJob(e, { accounting: "other" })).toMatch(NAMED("compute_jobs_accounting"));
-      expect(await insertJob(e, { executor: "runner", accounting: "none" })).toBeNull();
-      expect(await insertJob(e, { executor: "runner", accounting: "su" })).toBeNull();
+      expect(await insertJob(e, { ...RUNNER_JOB, accounting: "none" })).toBeNull();
+      expect(await insertJob(e, { ...RUNNER_JOB, accounting: "su" })).toBeNull();
       expect(await insertJob(e, { executor: "tapis", accounting: "su" })).toBeNull();
       expect(await insertJob(e, { executor: "tapis", accounting: "none" })).toMatch(
         NAMED("compute_jobs_accounting_executor"),
@@ -411,9 +415,26 @@ describe("compute_jobs", () => {
   );
 
   onEveryEngine(
+    "only a pipeline job may have a runner executor (a person's, a partner's and the others' are Tapis)",
+    async (e) => {
+      for (const source of ["cli", "web", "partner"]) {
+        expect([
+          source,
+          await insertJob(e, { source, executor: "runner", accounting: "none" }),
+        ]).toEqual([source, expect.stringMatching(NAMED("compute_jobs_executor_source"))]);
+        expect(await insertJob(e, { source, executor: "tapis" })).toBeNull();
+      }
+      expect(
+        await insertJob(e, { source: "pipeline", executor: "runner", accounting: "none" }),
+      ).toBeNull();
+      expect(await insertJob(e, { source: "pipeline", executor: "tapis" })).toBeNull();
+    },
+  );
+
+  onEveryEngine(
     "only a runner job names a runner or a backend, in the declared shapes",
     async (e) => {
-      const claimed = { executor: "runner", accounting: "none" };
+      const claimed = { ...RUNNER_JOB, accounting: "none" };
       expect(
         await insertJob(e, { ...claimed, runner_id: runnerId(), runner_backend: "local" }),
       ).toBeNull();
@@ -523,13 +544,30 @@ describe("the indexes and the file", () => {
     },
   );
 
+  onEveryEngine(
+    "the cascade's statements find a runner's jobs through the runner_id index, not a scan of the job table",
+    async (e) => {
+      const statements = [
+        ...runnerRevokeStatements(runnerId(), "owner_revoked"),
+        ...runnerEndStatements(7, "account_revoked"),
+      ].filter((s) => s.sql.includes("compute_jobs"));
+      expect(statements).toHaveLength(4);
+      for (const s of statements) {
+        const plan = await e.all<{ detail: string }>(`EXPLAIN QUERY PLAN ${s.sql}`, ...s.binds);
+        const detail = plan.map((r) => r.detail).join(" | ");
+        expect([detail.includes("compute_jobs_runner"), detail]).toEqual([true, detail]);
+        expect(detail).not.toMatch(/SCAN compute_jobs(?! USING)/);
+      }
+    },
+  );
+
   test("no GLOB pattern is longer than D1 takes (50 characters)", () => {
     const patterns = [...SQL.matchAll(/GLOB\s+'([^']*)'/g)].map((m) => m[1] as string);
     expect(patterns.length).toBeGreaterThanOrEqual(1);
     for (const p of patterns) expect([p, p.length <= 50]).toEqual([p, true]);
   });
 
-  test("the file creates two tables, four indexes and twelve columns, and touches nothing else", () => {
+  test("the file creates two tables, five indexes and twelve columns, and touches nothing else", () => {
     expect([...SQL.matchAll(/CREATE TABLE (\w+)/g)].map((m) => m[1])).toEqual([
       "compute_runners",
       "compute_runner_tokens",
@@ -538,6 +576,7 @@ describe("the indexes and the file", () => {
       "compute_runners_live_name",
       "compute_runners_owner",
       "compute_runner_tokens_runner",
+      "compute_jobs_runner",
       "compute_jobs_runner_waiting",
     ]);
     const code = SQL.split("\n")

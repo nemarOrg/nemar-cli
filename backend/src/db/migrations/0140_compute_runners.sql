@@ -40,7 +40,8 @@
 -- registration deletes its rows, so a token stops working at once and not at its expiry.
 --
 -- compute_jobs gains, in this order:
---   * `executor`: `tapis` (default) or `runner`. `accounting`: `su` (default) or `none`; a Tapis job is
+--   * `executor`: `tapis` (default) or `runner`; a runner runs NEMAR's own pipeline jobs only, so a job
+--     of any other `source` is `tapis` (the second CHECK). `accounting`: `su` (default) or `none`; a Tapis job is
 --     always `su` (the second CHECK). Mechanics select the executor, money and tenancy the accounting.
 --   * `runner_backend`: where a runner job executes; only a runner job names one.
 --   * `runner_id`, `runner_claimed_at`, `lease_id`, `lease_expires_at`: the claim. A waiting runner job is
@@ -111,7 +112,8 @@ CREATE TABLE compute_runner_tokens (
 CREATE INDEX compute_runner_tokens_runner ON compute_runner_tokens (runner_id);
 
 ALTER TABLE compute_jobs ADD COLUMN executor TEXT NOT NULL DEFAULT 'tapis'
-  CONSTRAINT compute_jobs_executor CHECK (executor IN ('tapis', 'runner'));
+  CONSTRAINT compute_jobs_executor CHECK (executor IN ('tapis', 'runner'))
+  CONSTRAINT compute_jobs_executor_source CHECK (executor = 'tapis' OR source = 'pipeline');
 
 ALTER TABLE compute_jobs ADD COLUMN accounting TEXT NOT NULL DEFAULT 'su'
   CONSTRAINT compute_jobs_accounting CHECK (accounting IN ('su', 'none'))
@@ -157,6 +159,10 @@ ALTER TABLE compute_jobs ADD COLUMN runner_max_rss_mb INTEGER
   CONSTRAINT compute_jobs_runner_rss CHECK (
     runner_max_rss_mb IS NULL OR (typeof(runner_max_rss_mb) = 'integer'
       AND runner_max_rss_mb BETWEEN 0 AND 9007199254740991));
+
+-- The cascade's statements select a runner's jobs by `runner_id` (a revoke, or an owner's end), so they
+-- must not scan the job table.
+CREATE INDEX compute_jobs_runner ON compute_jobs (runner_id) WHERE runner_id IS NOT NULL;
 
 -- The jobs a runner may claim: waiting (`created`), unclaimed, in a pool. A query uses the index only if
 -- it states the same terms.
