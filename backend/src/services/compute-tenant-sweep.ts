@@ -226,6 +226,7 @@ const UNRESERVED_GATE_SQL = `EXISTS (SELECT 1 FROM compute_jobs
 /** Rows of this sweep's own that have not ended: the rotation by last examination. */
 export const FOLLOW_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE flag_unreserved = 1 AND state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL
+    AND executor = 'tapis'
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /** The account a Tapis owner maps to, by the gateway pseudonym, if the account is active and not deleted. */
