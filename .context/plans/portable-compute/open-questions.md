@@ -11,6 +11,16 @@ Each pending row names a plan of record, so the pack runs whichever way the owne
 | Q10 | QC runs on the Zarr serving copy by default (EEG 250 Hz; EMG and iEEG 1 kHz) with the label "QC ran on the serving copy (EEG 250 Hz, 16-bit), not on the archive"; a named fidelity profile and a native-rate profile stay an option for ADR 0123, not a demo item. | plan D13, 3.1; DM-13; DM-16 |
 | Q1 (partly) | The two ssh aliases work from the manager's host; a read-only probe as the owner's own login is allowed after plan approval. | DM-01; runbook live facts |
 
+## Decided by the owner at plan approval (2026-11-13, later)
+
+| ID | Decision | Where it is applied |
+|---|---|---|
+| Plan | Approved as written, including both `AGENTS.md` overrides, the merge authority (epic branches only) and the routing. | plan section 0 |
+| Budget | `Agents today` raised to 100; `Advisor consults` stays 5. | runbook Setup step 5 |
+| Q12 | Option B: the operator may create `nemar-runner` on the demo workstation under the scratch path, pull or build the image there, run it and delete it all; no installs of system software and no `sudo`; a user-local Bun install is allowed. | DM-14, DM-15, DM-19 |
+| Q1 | No scratch path named: DM-01 uses `$HOME` for `$SCRATCH_A` and `$SCRATCH_B`, marked provisional. | DM-01 |
+| Q4 | The owner named two datasets: `nm000132` and `on003645`. DM-02 checks both against its criteria (public, non-anonymous, small, EEG, a Zarr copy that exists) and reports; if both pass, `nm000132` is the demo dataset; if only one passes, that one; if neither, the manager asks the owner. No default of DM-02's own applies. | DM-02, DM-13, DM-19 |
+
 ## Pending
 
 | ID | Question | Options | Plan of record until answered | Waits | Needed by |

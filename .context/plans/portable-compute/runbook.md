@@ -40,7 +40,7 @@ Aliases, paths and host facts are never written into the board, a commit, a PR o
 5. Hand-edit Parity, Slots and Budget to exactly these rows, then `mb check B`:
    Parity: `worker` Sonnet high; `worker-hard` Sonnet xhigh; `lead` Opus xhigh; `frontier` Fable; `reviewer` Sonnet high (Codex and Copilot columns as the template has them).
    Slots: `claude-sonnet` (Claude; worker, worker-hard; Max 3; Can network); `claude-opus` (Claude; lead; Max 1; Can network); `operator` (Claude; worker; Max 1; Can network, ssh:ws-a, ssh:ws-b); `codex` (Codex; Max 0).
-   Budget: `Agents today` limit 60, resets daily; `Advisor consults` limit 5, never resets (one is CP-F's frontier consult); no wave row (this plan uses slots, not waves).
+   Budget: `Agents today` limit 100 (owner, 2026-11-13, raised from 60 for the 48-hour sprint), resets daily; `Advisor consults` limit 5, never resets (one is CP-F's frontier consult); no wave row (this plan uses slots, not waves).
 6. Seed the Steps and Questions as `queue.md` says ("Board seeding").
 7. Open one epic issue per repository with `gh issue create` (nemar-cli: "Portable compute: workstation runners"; nemar-process: "Runner, launcher runtimes and the Zarr recipe"), each with the card IDs as a task list; `mb decide` the numbers.
 8. `mb card` on every file in `cards/` (README.md is skipped); every card must pass.
