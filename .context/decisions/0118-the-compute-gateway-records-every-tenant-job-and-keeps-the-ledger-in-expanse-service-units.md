@@ -767,4 +767,6 @@ It adds no queue and no migration.
 For those jobs it departs from decision 3 and the A3 amendment's item 1 (the hold), decision 4 (settles twice), decision 9 (the ACCESS report), the A2 amendment's item 7 (`settled_final_at` and the `job:<id>:final` entry) and the A5 amendment's item 6 (the terminal batch's ledger entry).
 A tenant or partner job has a Tapis job and is always `su`, so nothing changes for it.
 [ADR 0122](0122-one-oci-image-runs-under-apptainer-or-docker-from-one-digest.md) refines decision 14: `NEMAR_SIF_ROOT` is not required under Docker or Podman, and the SIF is built and signed once in CI.
+`shared/contract/compute-runner.ts` also extends decision 10's list of modules.
+`sweepRunnerLeases` also runs on claim calls outside production; the 30-minute tick itself stays production-only, so decision 8 and the dark-switch rule of `AGENTS.md` are intact.
 The verdict of this ADR stands.

@@ -12,7 +12,7 @@ It supersedes nothing.
 ## Context
 
 ADR 0118 runs a job from a Singularity Image Format (SIF) file named by its digest, and the launcher's continuous integration (CI) already exercises Apptainer.
-The lab workstations in hand run Docker, not Apptainer, and have no scheduler; host detail is in the gated systems inventory (`admin/operations/systems-inventory`).
+Some lab machines run Docker, not Apptainer, and have no scheduler; host detail is in the gated systems inventory (`admin/operations/systems-inventory`).
 Shared clusters generally run Apptainer and not Docker.
 NEMAR needs one artifact that both can run, whose identity a result can name, without a second build that could drift from the first.
 SIF builds are not byte-reproducible, so a SIF built separately on each host could never be verified against a signature.
@@ -48,14 +48,14 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
 - Apptainer is the target runtime, not the first one: the first runs are on the second runtime, with its root-equivalence and without a cgroup guarantee for Apptainer until delegation is proved.
 - A rootful daemon's group is the only guard on its host, so a new machine needs an owner decision and an inventory record, not a configuration change.
 - Signing only from `main` or a tag means a pre-merge image cannot verify; a demo before a merge uses the labeled operator-built path.
-- Two runtimes double the test matrix; the Docker backend is cut only if the demo machine's verdict is neither `docker` nor `podman`, and the Apptainer path stays.
+- Two runtimes double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is neither `docker` nor `podman`, and the Apptainer path stays.
 
 ## Alternatives considered
 
 - **One image per runtime:** two builds can drift, and a digest would no longer identify a result.
 - **A SIF built on each host:** not reproducible, so never verifiable.
 - **Docker only:** shared clusters generally do not run it, which defeats portability.
-- **Apptainer only:** the lab workstations in hand do not have it.
+- **Apptainer only:** some lab machines do not have it.
 - **Signing from any branch:** a signature would no longer mean "reviewed and merged".
 - **Rootful Docker on any host:** a root-equivalent group has no place on a shared machine.
 - **An unlabeled local build:** a result would claim provenance it does not have.

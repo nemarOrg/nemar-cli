@@ -32,7 +32,7 @@ Money must be counted only where an allocation exists, and every job, wherever i
    The runner's `started` heartbeat writes `created -> running`, its `uploading` heartbeat writes `running -> archiving`, and `finished` stands only after `verifyResults`.
    An unstarted lease that expires clears the claim, so no backward edge is needed; a started job whose lease expires becomes `unreported`.
    An `unreported` runner job whose outputs completed is verified like any other; otherwise it fails `runner_lost` `lease_expired` after a give-up wait (60 minutes at the time of writing).
-   `runner_lost` has four declared details: `lease_expired`, `claims_exhausted`, `deadline_exceeded` and `runner_revoked`; as specified, a revoke moves started jobs to `unreported` and no code yet writes `runner_revoked`, so the word is reserved.
+   `runner_lost` has four declared details: `lease_expired`, `claims_exhausted`, `deadline_exceeded` and `runner_revoked`; `runner_revoked` is written by `sweepRunnerLeases` for a revoked runner's started job whose outputs did not complete, and a job whose outputs completed is verified.
    `submitted` and `queued` are never used by `runner/local`; whether `runner/slurm` uses `queued` is decided when that backend is built.
    The column is deliberately not #2121 phase P3's `admitted_at`, so either migration can land first.
 3. **Workstations pull; NEMAR never pushes.**
@@ -43,7 +43,7 @@ Money must be counted only where an allocation exists, and every job, wherever i
    The claim writes `launch_spec_digest` for the specification it answers, and a re-claim overwrites it.
    A heartbeat renews the lease and carries a cancel back; a started job's lease is never replaced; an unstarted expired lease releases the claim a bounded number of times, then `runner_lost` `claims_exhausted`.
    The runner stops a job at its end time plus a grace, and the Worker fails a started job a grace past its minutes with `runner_lost` `deadline_exceeded` unless its outputs completed.
-   `sweepRunnerLeases` runs on every claim call, in every environment, and on the production 30-minute tick; ADR 0118 decision 8's "crons are production only" does not apply to it.
+   `sweepRunnerLeases` runs on every claim call, in every environment, and on the production 30-minute tick; the tick itself stays production-only, so ADR 0118 decision 8 stands.
    The bundle, outputs and outputs-complete calls of a runner job are accepted only under the current lease, and a retried complete answers the same state.
    Execution is at least once and acceptance is at most once; exactly once is not achievable across a partition.
    Every number, word and shape is declared once in `shared/contract/compute-runner.ts`; at the time of writing a lease is 10 minutes, a heartbeat 60 seconds and a job is claimed at most 3 times.
@@ -62,7 +62,7 @@ Money must be counted only where an allocation exists, and every job, wherever i
    Capacity is a runner guard inside the job's own INSERT: live `accounting = 'none'` runner jobs of the pool must be fewer than `policy.runners.maxLiveJobs[pool]` (defaults 64 for `cpu` and 8 for `gpu`).
    A runner job's sizing uses an existing partition name as a label only, `shared`, whose ceilings apply, and `estimateSuMilli` is never called for it.
    An `accounting = 'su'` runner job is refused (`runner_accounting_unbuilt`) until the phase that builds its hold, settlement and report.
-   Runners do not share the Zarr conversion host's capacity ledger (ADR 0101) until ADR 0123 decides how.
+   Runners do not share the Zarr conversion host's capacity ledger (ADR 0101) until a later ADR (planned as 0123) decides how.
 7. **`COMPUTE_RUNNERS_ENABLED` is a third dark switch.**
    It is needed together with `computeEnabled(env)` and stays out of `backend/wrangler-sccn.toml`; the change that builds it will pin it with a flag test and name it in the dark-switch rule of `AGENTS.md`.
 8. **A derivative has its own home.**
