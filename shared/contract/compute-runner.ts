@@ -18,6 +18,11 @@
  * `test/contract-schemas.test.ts`. Never parse a response with a strict schema, and never build a
  * response schema from a request one.
  *
+ * Two rules no schema here can state, so the reader enforces them: a claim answer cannot say that
+ * `jobs.length <= free_slots` (it is a rule between the request and the response, so the runner must
+ * check it; the schema only caps `jobs` at `RUNNER_MAX_FREE_SLOTS`), and a `launch_spec_env` is checked
+ * for its alphabet and length only (the runner decodes it with the rules of `decodeLaunchSpecEnv`).
+ *
  * Nothing here reads a clock, a database or a network.
  */
 
