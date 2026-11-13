@@ -10,7 +10,7 @@
  *
  *   bun backend/scripts/compute-local-stack.ts serve --state <dir> --image <ref@sha256:hex>
  *        [--port 8787] [--s3-port 8788] [--seed-fixture] [--seed-from-catalog <id>]...
- *   bun backend/scripts/compute-local-stack.ts outputs --state <dir> --job <id> --to <dir> [--port 8787]
+ *   bun backend/scripts/compute-local-stack.ts outputs --state <dir> --job <id> --to <dir> [--port 8787] [--s3-port 8788]
  *
  * WHO CAN REACH IT. A runner on another machine reaches the two loopback ports through `ssh -R`, which
  * makes them reachable by every local user of that machine. So: both servers bind 127.0.0.1 and refuse any
@@ -42,13 +42,15 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { DEFAULT_COMPUTE_POLICY, PIPELINES_TAPIS_OWNER } from "../../shared/contract/compute";
@@ -64,7 +66,13 @@ import { isReservedFixtureId } from "../src/services/datasetId";
 import { generateApiKey, hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { seedEegDataset, seedPipelinesAccount } from "../test/helpers/compute-pipeline-fixture";
-import { type ComputeS3Standin, startComputeS3Standin } from "../test/helpers/compute-s3-standin";
+import {
+  type ComputeS3Standin,
+  HOST_REFUSAL_BODY,
+  HOST_REFUSAL_STATUS,
+  loopbackHostAllowed,
+  startComputeS3Standin,
+} from "../test/helpers/compute-s3-standin";
 import { seedUser } from "../test/helpers/compute-seed";
 import { openMigratedDb, realD1 } from "../test/helpers/d1";
 import { retryInfrastructure } from "../test/helpers/neurobagel-harness";
@@ -74,7 +82,11 @@ export const DEFAULT_PORT = 8787;
 export const DEFAULT_S3_PORT = 8788;
 export const PUBLIC_API = "https://api.nemar.org";
 export const CATALOG_USER_AGENT = "nemar-local-stack/0";
-/** The fixture dataset `--seed-fixture` inserts: a real-shaped `nm` id below the reserved band, one version. */
+/**
+ * The fixture dataset `--seed-fixture` inserts: a real-shaped `nm` id below the reserved band, one version.
+ * The id lies in the live allocation range, so `--seed-from-catalog` refuses it (a real dataset may one day
+ * hold it); a standing fixture in the reserved band needs the owner (ADR 0068) and is not taken here.
+ */
 export const FIXTURE_DATASET_ID = "nm000900";
 /** The commit the fixture's version names; a fixture value, not a real commit. */
 export const FIXTURE_SOURCE_COMMIT = "f".repeat(40);
@@ -117,6 +129,12 @@ export interface LocalStack {
   /** The names of the dataset columns copied by `--seed-from-catalog`, per id. */
   copied: Record<string, string[]>;
   stop(): Promise<void>;
+  /**
+   * The synchronous part of a stop, for a signal handler that must exit in the same tick (Miniflare's
+   * own handler exits synchronously after ours): close both servers, close the database, and make the
+   * state private. Miniflare is disposed by the process's `exit` event.
+   */
+  stopNow(): void;
 }
 
 // --- Files -------------------------------------------------------------------------------------------
@@ -163,16 +181,31 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf-8")) as T;
 }
 
+/** The public defaults of the test S3 stand-in: never a credential of this stack. */
+const PUBLIC_STANDIN_VALUES = new Set(["STANDINKEYID", "standin-secret-access-key"]);
+
+/**
+ * Whether a stored secret is one this stack could have made: a string of at least 32 characters that is
+ * not a public default and is not a repeated or near-constant value (an all-zero or `abab...` file).
+ */
+export function usableSecret(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 32 &&
+    !PUBLIC_STANDIN_VALUES.has(value) &&
+    new Set(value).size >= 8
+  );
+}
+
 /** The S3 credentials of this state: 32 random bytes each, made once and reused. */
 function s3Credentials(state: string): { accessKeyId: string; secretAccessKey: string } {
   const path = join(state, "s3.json");
   if (existsSync(path)) {
     const found = readJson<{ accessKeyId?: unknown; secretAccessKey?: unknown }>(path);
     if (
-      typeof found.accessKeyId === "string" &&
-      typeof found.secretAccessKey === "string" &&
-      found.accessKeyId.length >= 32 &&
-      found.secretAccessKey.length >= 32
+      usableSecret(found.accessKeyId) &&
+      usableSecret(found.secretAccessKey) &&
+      found.accessKeyId !== found.secretAccessKey
     ) {
       return { accessKeyId: found.accessKeyId, secretAccessKey: found.secretAccessKey };
     }
@@ -189,7 +222,7 @@ function callbackSecret(state: string): string {
   const path = join(state, "secret");
   if (existsSync(path)) {
     const found = readFileSync(path, "utf-8").trim();
-    if (found.length >= 32) return found;
+    if (usableSecret(found)) return found;
     throw new Error(
       "secret in the state directory is not usable; remove the directory to start over",
     );
@@ -207,7 +240,7 @@ function apiKeys(state: string): Record<KeyName, { apiKey: string; apiKeyPrefix:
     const out = {} as Record<KeyName, { apiKey: string; apiKeyPrefix: string }>;
     for (const name of KEY_NAMES) {
       const key = found[name];
-      if (typeof key !== "string" || key.length < 32) {
+      if (!usableSecret(key)) {
         throw new Error(
           "keys.json in the state directory is not usable; remove the directory to start over",
         );
@@ -303,6 +336,9 @@ export function catalogRefusal(id: string): string | null {
   if (LIVE_DATASETS.has(id))
     return `${id}: a live dataset (public, DOIs minted) is never read or copied here`;
   if (isReservedFixtureId(id)) return `${id}: in the reserved fixture band`;
+  if (id === FIXTURE_DATASET_ID) {
+    return `${id}: the id of the local fixture dataset (--seed-fixture), not read from the catalog`;
+  }
   return null;
 }
 
@@ -404,8 +440,20 @@ async function datasetThere(db: D1Database, id: string): Promise<boolean> {
 // --- The stack ---------------------------------------------------------------------------------------
 
 /** The four routers as `backend/src/index.ts` mounts them, at the paths the CLI and the runner use. */
-function makeApp(): (req: Request, env: Bindings) => Response | Promise<Response> {
+function makeApp(
+  port: () => number,
+): (req: Request, env: Bindings) => Response | Promise<Response> {
   const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  // DNS rebinding: ENVIRONMENT is `development` here (no rate limit, dev-only sign-in branches), so a
+  // browser tricked into resolving a name to this address must not reach a single route. Only the two
+  // loopback spellings of the stack's own port are served; a missing Host, another name, another IP
+  // literal and another port get the same fixed refusal.
+  app.use("*", async (c, next) => {
+    if (!loopbackHostAllowed(c.req.header("host") ?? null, port())) {
+      return c.body(HOST_REFUSAL_BODY, HOST_REFUSAL_STATUS, { "Content-Type": "application/json" });
+    }
+    await next();
+  });
   app.get("/health", (c) =>
     c.json({ status: "ok", timestamp: new Date().toISOString(), stack: "local" }),
   );
@@ -472,6 +520,7 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
     accessKeyId: creds.accessKeyId,
     secretAccessKey: creds.secretAccessKey,
     port: opts.s3Port ?? DEFAULT_S3_PORT,
+    hostGuard: true,
   });
   const g = globalThis as { NEMAR_COMPUTE_S3_URL?: string };
   const previousS3Url = g.NEMAR_COMPUTE_S3_URL;
@@ -497,6 +546,12 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
   } as unknown as Bindings;
 
   let server: ReturnType<typeof Bun.serve> | undefined;
+  const closeNow = () => {
+    server?.stop(true);
+    standin.stop();
+    db.close();
+    hardenTree(state);
+  };
   const teardown = async () => {
     server?.stop(true);
     standin.stop();
@@ -507,7 +562,7 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
     process.umask(previousUmask);
   };
   try {
-    const handle = makeApp();
+    const handle = makeApp(() => server?.port as number);
     server = Bun.serve({
       port: opts.port ?? DEFAULT_PORT,
       hostname: LOOPBACK,
@@ -556,6 +611,7 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
       standin,
       copied,
       stop: teardown,
+      stopNow: closeNow,
     };
   } catch (err) {
     await teardown();
@@ -581,13 +637,17 @@ export async function downloadOutputs(opts: {
   job: string;
   to: string;
   port?: number;
+  /** The port of the stack's S3 stand-in: every download must come from this loopback origin. */
+  s3Port?: number;
 }): Promise<Downloaded[]> {
   const keysPath = join(resolve(opts.state), "keys.json");
   const pipelines = readJson<Record<string, string>>(keysPath).pipelines;
   if (typeof pipelines !== "string") throw new Error("keys.json holds no pipelines key");
   const base = `http://${LOOPBACK}:${opts.port ?? DEFAULT_PORT}`;
+  const s3Origin = `http://${LOOPBACK}:${opts.s3Port ?? DEFAULT_S3_PORT}`;
   const to = resolve(opts.to);
   mkdirSync(to, { recursive: true, mode: 0o700 });
+  const root = realpathSync(to);
   const out: Downloaded[] = [];
   let after: string | null = null;
   do {
@@ -610,22 +670,70 @@ export async function downloadOutputs(opts: {
       );
     }
     for (const link of page.links) {
-      const target = resolve(to, link.path);
-      if (!target.startsWith(`${to}${sep}`))
+      const target = resolve(root, link.path);
+      if (!isInside(root, target) || !isInside(root, deepestRealAncestor(target))) {
         throw new Error(`refusing a path outside --to: ${link.path}`);
-      const got = await fetch(link.url);
+      }
+      // The address is the route's, but the stack's own S3 stand-in is the only place it may point:
+      // nothing else is fetched, and no redirect is followed to anywhere.
+      let origin: string;
+      try {
+        origin = new URL(link.url).origin;
+      } catch {
+        throw new Error(`${link.path}: the link is not an address`);
+      }
+      if (origin !== s3Origin)
+        throw new Error(`${link.path}: the link is not on the stack's S3 origin`);
+      const got = await fetch(link.url, { redirect: "manual" });
+      if (got.status >= 300 && got.status < 400) {
+        throw new Error(`${link.path}: the download answered a redirect, which is not followed`);
+      }
       if (!got.ok) throw new Error(`${link.path}: the download answered ${got.status}`);
       const bytes = new Uint8Array(await got.arrayBuffer());
       if (bytes.length !== link.size) {
         throw new Error(`${link.path}: ${bytes.length} bytes arrived, ${link.size} were declared`);
       }
       mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+      // The directory now exists: what it really is must still be inside, and the file must not be a
+      // symbolic link that a write would follow out.
+      if (!isInside(root, realpathSync(dirname(target)))) {
+        throw new Error(`refusing a path outside --to: ${link.path}`);
+      }
+      if (isSymbolicLink(target)) {
+        throw new Error(`refusing to write through a symbolic link: ${link.path}`);
+      }
       writeFileSync(target, bytes, { mode: 0o600 });
       out.push({ path: link.path, size: bytes.length });
     }
     after = page.next_after ?? null;
   } while (after !== null);
   return out;
+}
+
+/** Whether `path` is `root` or below it, by relative path: never throws, and `/` as the root is fine. */
+export function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Whether `path` is itself a symbolic link, dangling or not (`existsSync` follows links, `lstat` does not). */
+function isSymbolicLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** The real path of the deepest ancestor of `path` that exists (the path itself if it does). */
+function deepestRealAncestor(path: string): string {
+  let at = path;
+  while (!existsSync(at)) {
+    const up = dirname(at);
+    if (up === at) break;
+    at = up;
+  }
+  return realpathSync(at);
 }
 
 // --- Command line ------------------------------------------------------------------------------------
@@ -701,7 +809,7 @@ function gitFacts(): string {
 const USAGE = `usage:
   compute-local-stack.ts serve --state <dir> --image <ref@sha256:hex> [--port 8787] [--s3-port 8788]
                                [--seed-fixture] [--seed-from-catalog <id>]...
-  compute-local-stack.ts outputs --state <dir> --job <id> --to <dir> [--port 8787]
+  compute-local-stack.ts outputs --state <dir> --job <id> --to <dir> [--port 8787] [--s3-port 8788]
 exit codes: 0 done, 1 refused or failed, 2 usage`;
 
 export async function main(argv: string[]): Promise<number> {
@@ -722,16 +830,23 @@ export async function main(argv: string[]): Promise<number> {
         job: one(parsed, "--job") as string,
         to: one(parsed, "--to") as string,
         port: portOf(parsed, "--port", DEFAULT_PORT),
+        s3Port: portOf(parsed, "--s3-port", DEFAULT_S3_PORT),
       });
       for (const f of files) console.log(`${f.path}\t${f.size}`);
       return 0;
     }
     // Registered BEFORE Miniflare starts: Miniflare's own signal handler calls `process.exit(128 + n)`
-    // synchronously, so a handler added after it never runs and a stop by signal would report 143. The
-    // state is durable at every request (SQLite commits, R2 writes finish before they answer), so a
-    // plain exit is a clean stop; the `exit` event disposes the Miniflare process.
-    for (const signal of ["SIGINT", "SIGTERM"] as const)
-      process.once(signal, () => process.exit(0));
+    // synchronously, so a handler added after it never runs and a stop by signal would report 143 (and a
+    // dropped ssh session, SIGHUP, 129). Ours closes both servers and the database in the same tick, then
+    // exits 0; the state is durable at every request (SQLite commits, R2 writes finish before they
+    // answer), and the `exit` event disposes the Miniflare process.
+    const running: { stack?: LocalStack } = {};
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+      process.once(signal, () => {
+        running.stack?.stopNow();
+        process.exit(0);
+      });
+    }
     const stack = await startLocalStack({
       state: one(parsed, "--state") as string,
       image: one(parsed, "--image") as string,
@@ -741,6 +856,7 @@ export async function main(argv: string[]): Promise<number> {
       seedFixture: parsed.bare.has("--seed-fixture"),
       seedFromCatalog: parsed.flags.get("--seed-from-catalog") ?? [],
     });
+    running.stack = stack;
     console.log(`NEMAR local compute stack (not a deployment) at ${stack.url}, ${gitFacts()}`);
     console.log(
       `S3 stand-in on ${stack.s3Url}; state in ${stack.state}; keys are in keys.json and never printed`,

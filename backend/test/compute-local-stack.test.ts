@@ -28,7 +28,17 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { connect } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -43,13 +53,15 @@ import {
   catalogRefusal,
   downloadOutputs,
   hardenTree,
+  isInside,
   startLocalStack,
   treeModes,
+  usableSecret,
 } from "../scripts/compute-local-stack";
 import { createJob } from "../src/services/compute-jobs";
 import { declaredKey, declaredText } from "../src/services/compute-verify";
 import { launchableSpec } from "./helpers/compute-lifecycle-fixture";
-import { startComputeS3Standin } from "./helpers/compute-s3-standin";
+import { loopbackHostAllowed, startComputeS3Standin } from "./helpers/compute-s3-standin";
 import { sha256Hex } from "./helpers/compute-seed";
 import { APPLIED_MIGRATIONS_TABLE, openMigratedDb } from "./helpers/d1";
 import { migrationFiles } from "./helpers/miniflare-d1";
@@ -139,6 +151,58 @@ async function call(
   return { status: res.status, body, text };
 }
 
+/**
+ * One HTTP request over a raw socket, so the `Host` header is exactly what the test says (or absent, which
+ * HTTP/1.0 allows and `fetch` cannot send). Returns the status code and the body.
+ */
+function rawGet(
+  port: number,
+  path: string,
+  host: string | null,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolveReply, reject) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    let data = "";
+    socket.setTimeout(5000, () => {
+      socket.destroy();
+      reject(new Error("no answer"));
+    });
+    socket.on("data", (chunk) => {
+      data += chunk.toString();
+    });
+    socket.on("error", reject);
+    socket.on("close", () => {
+      const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(data)?.[1] ?? 0);
+      resolveReply({ status, body: data.split("\r\n\r\n").slice(1).join("\r\n\r\n") });
+    });
+    const lines = [`GET ${path} ${host === null ? "HTTP/1.0" : "HTTP/1.1"}`];
+    if (host !== null) lines.push(`Host: ${host}`);
+    for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
+    socket.write(`${lines.join("\r\n")}\r\nConnection: close\r\n\r\n`);
+  });
+}
+
+/** The hosts a guarded loopback server must refuse, and the spellings it must serve, for `port`. */
+function hostCases(port: number) {
+  return {
+    refused: [
+      `evil.example:${port}`,
+      "evil.example",
+      `127.0.0.2:${port}`,
+      `[::1]:${port}`,
+      `0.0.0.0:${port}`,
+      `127.0.0.1:${port + 1}`,
+      `localhost:${port + 1}`,
+      "127.0.0.1",
+      "localhost",
+      `127.0.0.1.evil.example:${port}`,
+      "",
+    ],
+    served: [`127.0.0.1:${port}`, `localhost:${port}`, `LOCALHOST:${port}`],
+  };
+}
+
 const REGISTRATION = {
   name: "lab_a_cpu",
   pool: "cpu",
@@ -205,7 +269,10 @@ describe("the persistent database", () => {
 });
 
 describe("the S3 stand-in", () => {
-  test("takes the credentials and the port it is given and listens on loopback only", async () => {
+  // The address a server listens on is not asserted here: under `bun test` a preload makes loopback the
+  // default of every `Bun.serve`, so a missing `hostname` would pass in this process. The spawned `serve`
+  // case below asks the operating system instead.
+  test("takes the credentials and the port it is given", async () => {
     const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
     const port = probe.port as number;
     probe.stop(true);
@@ -220,13 +287,35 @@ describe("the S3 stand-in", () => {
       expect(standin.accessKeyId).toBe("given-access-key");
       expect(standin.secretAccessKey).toBe("given-secret-key");
       expect(await reachable("127.0.0.1", port)).toBe(true);
-      const bound = await listeningOn(port);
-      if (Bun.which("lsof")) expect(bound.length).toBeGreaterThan(0);
-      for (const address of bound) expect(address).toBe("127.0.0.1");
-      const lan = otherAddress();
-      if (lan !== null) expect(await reachable(lan, port)).toBe(false);
     } finally {
       standin.stop();
+    }
+  });
+
+  test("with hostGuard it serves only the two loopback spellings of its own port", async () => {
+    const standin = startComputeS3Standin({ buckets: {}, port: 0, hostGuard: true });
+    const port = Number(new URL(standin.url).port);
+    const open = startComputeS3Standin({ buckets: {}, port: 0 });
+    try {
+      const cases = hostCases(port);
+      for (const host of cases.refused) {
+        const got = await rawGet(port, "/anything", host === "" ? null : host);
+        expect({ host, status: got.status }).toEqual({ host, status: 421 });
+        expect(got.body).toBe('{"error":"host_not_allowed"}');
+      }
+      for (const host of cases.served) {
+        // Past the guard the stand-in answers its own way (an unsigned request is a 403), never the refusal.
+        const got = await rawGet(port, "/bucket/key", host);
+        expect({ host, status: got.status }).toEqual({ host, status: 403 });
+      }
+      expect(standin.log.length).toBe(cases.served.length);
+      // Off by default: another Host is answered like any other request.
+      const openPort = Number(new URL(open.url).port);
+      expect((await rawGet(openPort, "/bucket/key", "evil.example")).status).toBe(403);
+      expect(loopbackHostAllowed(null, port)).toBe(false);
+    } finally {
+      standin.stop();
+      open.stop();
     }
   });
 });
@@ -251,11 +340,82 @@ describe("refusals that come before anything is created", () => {
     await expect(startLocalStack({ ...base, seedFromCatalog: ["xx000001"] })).rejects.toThrow(
       /not a dataset id/,
     );
+    // The fixture's own id lies in the live allocation range: it is never read from the catalog.
+    await expect(
+      startLocalStack({ ...base, seedFromCatalog: [FIXTURE_DATASET_ID] }),
+    ).rejects.toThrow(/local fixture dataset/);
+    expect(catalogRefusal(FIXTURE_DATASET_ID)).toMatch(/--seed-fixture/);
     expect(() => statSync(state)).toThrow();
     expect(catalogRefusal("nm000274")).toBeNull();
     expect(catalogRefusal("nm000102")).toBeNull();
     expect(catalogRefusal("nm000108")).toBeNull();
   });
+});
+
+describe("stored secrets that this stack could not have made", () => {
+  const good = "0123456789abcdef".repeat(4);
+  const other = "fedcba9876543210".repeat(4);
+
+  test("usableSecret refuses the public defaults, short, constant and repeated values", () => {
+    expect(usableSecret(good)).toBe(true);
+    for (const bad of [
+      "STANDINKEYID",
+      "standin-secret-access-key",
+      "0".repeat(64),
+      "a".repeat(32),
+      "ab".repeat(32),
+      "abcd".repeat(16),
+      "short",
+      "",
+      null,
+      42,
+    ]) {
+      expect(usableSecret(bad)).toBe(false);
+    }
+  });
+
+  test("a start refuses an s3.json, secret or keys.json holding one, and writes nothing over it", async () => {
+    const cases: Array<[string, string, RegExp]> = [
+      [
+        "s3.json",
+        JSON.stringify({
+          accessKeyId: "STANDINKEYID",
+          secretAccessKey: "standin-secret-access-key",
+        }),
+        /s3\.json.*not usable/,
+      ],
+      [
+        "s3.json",
+        JSON.stringify({ accessKeyId: "0".repeat(64), secretAccessKey: other }),
+        /s3\.json.*not usable/,
+      ],
+      [
+        "s3.json",
+        JSON.stringify({ accessKeyId: "ab".repeat(32), secretAccessKey: other }),
+        /s3\.json.*not usable/,
+      ],
+      [
+        "s3.json",
+        JSON.stringify({ accessKeyId: good, secretAccessKey: good }),
+        /s3\.json.*not usable/,
+      ],
+      ["secret", `${"0".repeat(64)}\n`, /secret.*not usable/],
+      [
+        "keys.json",
+        JSON.stringify({ owner: good, admin: other, pipelines: "1".repeat(40) }),
+        /keys\.json.*not usable/,
+      ],
+    ];
+    for (const [file, text, message] of cases) {
+      const state = join(fresh("badsecret"), "state");
+      mkdirSync(state, { mode: 0o700 });
+      writeFileSync(join(state, file), text, { mode: 0o600 });
+      await expect(
+        startLocalStack({ state, image: IMAGE, port: 0, s3Port: 0, log: () => {} }),
+      ).rejects.toThrow(message);
+      expect(readFileSync(join(state, file), "utf-8")).toBe(text);
+    }
+  }, 120_000);
 });
 
 describe("one state directory, started, restarted", () => {
@@ -282,22 +442,44 @@ describe("one state directory, started, restarted", () => {
     await stack?.stop();
   }, 30_000);
 
-  test("answers /health on loopback and on no other address", async () => {
+  test("answers /health on loopback, and refuses every Host that is not its own", async () => {
     const health = await call(stack.url, "GET", "/health");
     expect(health.status).toBe(200);
     expect(health.body.status).toBe("ok");
     expect(new URL(stack.url).hostname).toBe("127.0.0.1");
     expect(new URL(stack.s3Url).hostname).toBe("127.0.0.1");
-    for (const port of [stack.port, stack.s3Port]) {
-      const addresses = await listeningOn(port);
-      if (Bun.which("lsof")) expect(addresses.length).toBeGreaterThan(0);
-      for (const address of addresses) expect(address).toBe("127.0.0.1");
+    // DNS rebinding: the same fixed refusal on a public route, an authenticated one and a runner one, for
+    // a name, an IP literal, a missing Host and a port that is not the stack's.
+    const cases = hostCases(stack.port);
+    for (const path of ["/health", "/admin/compute/runners", "/compute/runners/me"]) {
+      for (const host of cases.refused) {
+        const got = await rawGet(
+          stack.port,
+          path,
+          host === "" ? null : host,
+          path === "/admin/compute/runners" ? { Authorization: `Bearer ${stack.keys.owner}` } : {},
+        );
+        expect({ path, host, status: got.status, body: got.body }).toEqual({
+          path,
+          host,
+          status: 421,
+          body: '{"error":"host_not_allowed"}',
+        });
+      }
     }
-    const lan = otherAddress();
-    if (lan !== null) {
-      expect(await reachable(lan, stack.port)).toBe(false);
-      expect(await reachable(lan, stack.s3Port)).toBe(false);
+    for (const host of cases.served) {
+      expect((await rawGet(stack.port, "/health", host)).status).toBe(200);
     }
+    // The owner's key opens the admin route only with an accepted Host.
+    const owner = { Authorization: `Bearer ${stack.keys.owner}` };
+    expect(
+      (await rawGet(stack.port, "/admin/compute/runners", `localhost:${stack.port}`, owner)).status,
+    ).toBe(200);
+    // The S3 stand-in is guarded on its own port, and the stack's own signer still reaches it.
+    for (const host of hostCases(stack.s3Port).refused) {
+      expect((await rawGet(stack.s3Port, "/x", host === "" ? null : host)).status).toBe(421);
+    }
+    expect((await rawGet(stack.s3Port, "/x", `127.0.0.1:${stack.s3Port}`)).status).toBe(403);
   });
 
   test("the state directory is private and the S3 credentials are random, not the public defaults", async () => {
@@ -479,7 +661,13 @@ describe("one state directory, started, restarted", () => {
     );
 
     const to = fresh("outputs");
-    const got = await downloadOutputs({ state, job: jobId, to, port: stack.port });
+    const got = await downloadOutputs({
+      state,
+      job: jobId,
+      to,
+      port: stack.port,
+      s3Port: stack.s3Port,
+    });
     // Files the buckets made while the stack ran (no start or stop has hardened them since) are private
     // too: that is the process's umask, which Miniflare's own process inherits.
     expect(
@@ -512,6 +700,8 @@ describe("one state directory, started, restarted", () => {
         fresh("cli"),
         "--port",
         String(stack.port),
+        "--s3-port",
+        String(stack.s3Port),
       ],
       cwd: REPO_ROOT,
       stdout: "pipe",
@@ -530,6 +720,7 @@ describe("one state directory, started, restarted", () => {
         job: "job_000000000000000000000000",
         to: fresh("none"),
         port: stack.port,
+        s3Port: stack.s3Port,
       }),
     ).rejects.toThrow(/job_not_found|404/);
   });
@@ -564,48 +755,172 @@ describe("one state directory, started, restarted", () => {
       [jobId],
     );
     const to = fresh("pages");
-    const got = await downloadOutputs({ state, job: jobId, to, port: stack.port });
+    const got = await downloadOutputs({
+      state,
+      job: jobId,
+      to,
+      port: stack.port,
+      s3Port: stack.s3Port,
+    });
     expect(got).toHaveLength(1001);
     expect(new Set(got.map((g) => g.path)).size).toBe(1001);
     expect(readdirSync(join(to, "many"))).toHaveLength(1001);
   }, 120_000);
 
-  test("a path that would leave --to is refused", async () => {
-    const pipelinesId = (
-      stack.db.query("SELECT id FROM users WHERE username = 'nemar-pipelines'").get() as {
-        id: number;
-      }
-    ).id;
-    const made = await createJob(stack.env, {
-      source: "pipeline",
-      accountId: pipelinesId,
-      appId: "nemar-launch",
-      appVersion: "1.0.0",
-      spec: launchableSpec({ datasets: [{ id: FIXTURE_DATASET_ID, version: "1.0.0" }] }),
-    });
-    if (!made.ok) throw new Error(`could not make a job: ${made.code}`);
-    // A link whose path the route would never mint cannot be made through the route, so the guard is
-    // shown on the function the route's answer passes through: an answer from a stand-in stack.
-    const evil = Bun.serve({
+  /**
+   * A stand-in for the links route's ANSWER (a link whose path or address the real route would never
+   * mint cannot be made through it), and a stand-in for the S3 origin the link points at, so what
+   * `downloadOutputs` does with a hostile answer is shown. `links` is given the S3 origin's port.
+   */
+  async function hostile(
+    links: (s3Port: number) => Array<{ path: string; size: number; url: string }>,
+    s3: (req: Request) => Response,
+  ) {
+    const hits: string[] = [];
+    const s3Server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
-      fetch: (req) =>
-        new URL(req.url).pathname.endsWith("/links")
-          ? Response.json({
-              links: [
-                { path: "../escaped.txt", size: 1, url: `http://127.0.0.1:${stack.s3Port}/x` },
-              ],
-              next_after: null,
-            })
-          : new Response("x"),
+      fetch: (req) => {
+        hits.push(new URL(req.url).pathname);
+        return s3(req);
+      },
     });
-    const to = join(fresh("escape"), "to");
+    const route = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => Response.json({ links: links(s3Server.port as number), next_after: null }),
+    });
+    const run = (to: string) =>
+      downloadOutputs({
+        state,
+        job: "job_000000000000000000000001",
+        to,
+        port: route.port as number,
+        s3Port: s3Server.port as number,
+      });
+    return {
+      run,
+      hits,
+      stop() {
+        route.stop(true);
+        s3Server.stop(true);
+      },
+    };
+  }
+
+  test("a path that would leave --to is refused", async () => {
+    const h = await hostile(
+      (p) => [{ path: "../escaped.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () => new Response("x"),
+    );
     try {
-      await expect(
-        downloadOutputs({ state, job: made.job.id, to, port: evil.port as number }),
-      ).rejects.toThrow(/outside --to/);
+      const parent = fresh("escape");
+      await expect(h.run(join(parent, "to"))).rejects.toThrow(/outside --to/);
+      expect(() => statSync(join(parent, "escaped.txt"))).toThrow();
+      expect(h.hits).toEqual([]);
     } finally {
-      evil.stop(true);
+      h.stop();
+    }
+  });
+
+  test("a symbolic link inside --to, to a directory or to a file, is not written through", async () => {
+    const outside = fresh("outside");
+    const to = fresh("symlinks");
+    symlinkSync(outside, join(to, "dir"));
+    writeFileSync(join(outside, "victim.txt"), "original");
+    symlinkSync(join(outside, "victim.txt"), join(to, "file.txt"));
+    // A link to a file that does not exist yet: a write would create it outside.
+    symlinkSync(join(outside, "created.txt"), join(to, "dangling.txt"));
+    const h = await hostile(
+      (p) => [{ path: "dir/new.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () => new Response("x"),
+    );
+    const g = await hostile(
+      (p) => [{ path: "file.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () => new Response("x"),
+    );
+    const d = await hostile(
+      (p) => [{ path: "dangling.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () => new Response("x"),
+    );
+    try {
+      await expect(h.run(to)).rejects.toThrow(/outside --to/);
+      await expect(g.run(to)).rejects.toThrow(/outside --to/);
+      await expect(d.run(to)).rejects.toThrow(/symbolic link/);
+      expect(readdirSync(outside)).toEqual(["victim.txt"]);
+      expect(readFileSync(join(outside, "victim.txt"), "utf-8")).toBe("original");
+    } finally {
+      h.stop();
+      g.stop();
+      d.stop();
+    }
+  });
+
+  test("--to may itself be reached through a symbolic link, and the root is a legal target", async () => {
+    const real = fresh("real-to");
+    const parent = fresh("link-parent");
+    const via = join(parent, "via");
+    symlinkSync(real, via);
+    const h = await hostile(
+      (p) => [{ path: "a/b.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () => new Response("x"),
+    );
+    try {
+      expect(await h.run(via)).toEqual([{ path: "a/b.txt", size: 1 }]);
+      expect(readFileSync(join(real, "a", "b.txt"), "utf-8")).toBe("x");
+    } finally {
+      h.stop();
+    }
+    // The containment test never throws, at the root or at a name that merely starts with dots.
+    expect(isInside("/", "/etc/x")).toBe(true);
+    expect(isInside("/", "/")).toBe(true);
+    expect(isInside("/a", "/ab")).toBe(false);
+    expect(isInside("/a", "/a/b")).toBe(true);
+    expect(isInside("/a", "/a/..b")).toBe(true);
+    expect(isInside("/a", "/a/../b")).toBe(false);
+    expect(isInside("/a/b", "/a")).toBe(false);
+  });
+
+  test("a link must be on the stack's S3 origin, and a redirect is not followed", async () => {
+    const decoyHits = { n: 0 };
+    const counted = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        decoyHits.n++;
+        return new Response("x");
+      },
+    });
+    const other = await hostile(
+      () => [{ path: "a.txt", size: 1, url: `http://127.0.0.1:${counted.port}/x` }],
+      () => new Response("x"),
+    );
+    const named = await hostile(
+      (p) => [{ path: "a.txt", size: 1, url: `http://localhost:${p}/x` }],
+      () => new Response("x"),
+    );
+    const bad = await hostile(
+      () => [{ path: "a.txt", size: 1, url: "not an address" }],
+      () => new Response("x"),
+    );
+    const redirecting = await hostile(
+      (p) => [{ path: "a.txt", size: 1, url: `http://127.0.0.1:${p}/x` }],
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: `http://127.0.0.1:${counted.port}/x` },
+        }),
+    );
+    try {
+      await expect(other.run(fresh("o1"))).rejects.toThrow(/not on the stack's S3 origin/);
+      await expect(named.run(fresh("o2"))).rejects.toThrow(/not on the stack's S3 origin/);
+      await expect(bad.run(fresh("o3"))).rejects.toThrow(/not an address/);
+      await expect(redirecting.run(fresh("o4"))).rejects.toThrow(/redirect/);
+      expect(decoyHits.n).toBe(0);
+      expect(named.hits).toEqual([]);
+    } finally {
+      counted.stop(true);
+      for (const h of [other, named, bad, redirecting]) h.stop();
     }
   });
 });
@@ -756,22 +1071,29 @@ describe("--seed-from-catalog", () => {
 // --- The command line ---------------------------------------------------------------------------------
 
 describe("the command line", () => {
-  async function run(args: string[]) {
+  /** A process that never outlives its test: killed after `ms` (and the test then fails on its exit code). */
+  async function run(args: string[], ms = 30_000) {
     const proc = spawn({
       cmd: ["bun", SCRIPT, ...args],
       cwd: REPO_ROOT,
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [out, err] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    return { out, err, code: await proc.exited };
+    const timer = setTimeout(() => proc.kill("SIGKILL"), ms);
+    try {
+      const [out, err] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      return { out, err, code: await proc.exited };
+    } finally {
+      clearTimeout(timer);
+      proc.kill("SIGKILL");
+    }
   }
 
-  test("serve prints the banner, answers /health on the printed port, and stops on a signal", async () => {
-    const state = join(fresh("serve"), "state");
+  /** A spawned `serve` with its banner read; `finish` ends it (a signal) and is also called if a case throws. */
+  async function serve(state: string, extra: string[] = []) {
     const proc = spawn({
       cmd: [
         "bun",
@@ -785,7 +1107,7 @@ describe("the command line", () => {
         "0",
         "--s3-port",
         "0",
-        "--seed-fixture",
+        ...extra,
       ],
       cwd: REPO_ROOT,
       stdout: "pipe",
@@ -800,34 +1122,58 @@ describe("the command line", () => {
       if (done) break;
       text += decoder.decode(value);
     }
+    const banner = text.split("\n").find((l) => l.startsWith("NEMAR local")) ?? "";
+    const m =
+      /^NEMAR local compute stack \(not a deployment\) at http:\/\/127\.0\.0\.1:(\d+), (\S+)@([0-9a-f]{7,40}|unknown)$/.exec(
+        banner,
+      );
+    const s3Port = /S3 stand-in on http:\/\/127\.0\.0\.1:(\d+);/.exec(text)?.[1];
+    let ended = false;
+    return {
+      proc,
+      text,
+      banner: m,
+      port: Number(m?.[1]),
+      s3Port: Number(s3Port),
+      async finish(signal: "SIGTERM" | "SIGINT" | "SIGHUP" | "SIGKILL" = "SIGKILL") {
+        if (!ended) proc.kill(signal);
+        ended = true;
+        const timer = setTimeout(() => proc.kill("SIGKILL"), 20_000);
+        try {
+          return await proc.exited;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+    };
+  }
+
+  test("serve prints the banner, answers /health on the printed port, and binds loopback", async () => {
+    const state = join(fresh("serve"), "state");
+    const s = await serve(state, ["--seed-fixture"]);
     try {
-      const banner = text.split("\n").find((l) => l.startsWith("NEMAR local")) ?? "";
-      const m =
-        /^NEMAR local compute stack \(not a deployment\) at http:\/\/127\.0\.0\.1:(\d+), (\S+)@([0-9a-f]{7,40}|unknown)$/.exec(
-          banner,
-        );
-      expect(m).not.toBeNull();
+      expect(s.banner).not.toBeNull();
       // The spawned process is not under this suite's loopback preload for `Bun.serve`: what it listens on
-      // is what the stack itself asked for.
-      const s3Port = /S3 stand-in on http:\/\/127\.0\.0\.1:(\d+);/.exec(text)?.[1];
-      expect(s3Port).toBeDefined();
-      for (const port of [Number(m?.[1]), Number(s3Port)]) {
+      // is what the stack itself asked for, read from the operating system.
+      for (const port of [s.port, s.s3Port]) {
         const bound = await listeningOn(port);
         if (Bun.which("lsof")) expect(bound.length).toBeGreaterThan(0);
         for (const address of bound) expect(address).toBe("127.0.0.1");
+        const lan = otherAddress();
+        if (lan !== null) expect(await reachable(lan, port)).toBe(false);
       }
-      const health = await call(`http://127.0.0.1:${m?.[1]}`, "GET", "/health");
+      const health = await call(`http://127.0.0.1:${s.port}`, "GET", "/health");
       expect(health.status).toBe(200);
       expect(health.body.status).toBe("ok");
+      expect((await rawGet(s.port, "/health", "evil.example")).status).toBe(421);
       const keys = JSON.parse(readFileSync(join(state, "keys.json"), "utf-8")) as Record<
         string,
         string
       >;
-      for (const key of Object.values(keys)) expect(text).not.toContain(key);
+      for (const key of Object.values(keys)) expect(s.text).not.toContain(key);
     } finally {
-      proc.kill("SIGTERM");
+      await s.finish("SIGTERM");
     }
-    expect(await proc.exited).toBe(0);
     expect(
       treeModes(state).filter(([p, mode]) =>
         statSync(p).isDirectory() ? mode !== "700" : mode !== "600",
@@ -835,9 +1181,69 @@ describe("the command line", () => {
     ).toEqual([]);
   }, 120_000);
 
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    test(`${signal} stops it with exit 0`, async () => {
+      const s = await serve(join(fresh("signal"), "state"));
+      expect(s.banner).not.toBeNull();
+      expect(await s.finish(signal)).toBe(0);
+    }, 120_000);
+  }
+
+  test("SIGHUP (a dropped ssh session) closes the servers and exits 0, and a restart reuses the state", async () => {
+    const state = join(fresh("hup"), "state");
+    const first = await serve(state, ["--seed-fixture"]);
+    let runnerId = "";
+    let keysBefore = "";
+    try {
+      expect(first.banner).not.toBeNull();
+      keysBefore = readFileSync(join(state, "keys.json"), "utf-8");
+      const owner = (JSON.parse(keysBefore) as Record<string, string>).owner as string;
+      const reg = await call(`http://127.0.0.1:${first.port}`, "POST", "/admin/compute/runners", {
+        bearer: owner,
+        body: REGISTRATION,
+      });
+      expect(reg.status).toBe(201);
+      runnerId = reg.body.runner_id as string;
+    } finally {
+      expect(await first.finish("SIGHUP")).toBe(0);
+    }
+    // Closed: nothing answers on the old ports.
+    expect(await reachable("127.0.0.1", first.port)).toBe(false);
+    expect(await reachable("127.0.0.1", first.s3Port)).toBe(false);
+
+    const second = await serve(state);
+    try {
+      expect(second.banner).not.toBeNull();
+      expect(second.text).not.toContain("applied ");
+      expect(readFileSync(join(state, "keys.json"), "utf-8")).toBe(keysBefore);
+      const owner = (JSON.parse(keysBefore) as Record<string, string>).owner as string;
+      const listed = await call(
+        `http://127.0.0.1:${second.port}`,
+        "GET",
+        "/admin/compute/runners",
+        {
+          bearer: owner,
+        },
+      );
+      expect(listed.status).toBe(200);
+      expect(JSON.stringify(listed.body)).toContain(runnerId);
+    } finally {
+      expect(await second.finish("SIGTERM")).toBe(0);
+    }
+    expect(
+      treeModes(state).filter(([p, mode]) =>
+        statSync(p).isDirectory() ? mode !== "700" : mode !== "600",
+      ),
+    ).toEqual([]);
+  }, 180_000);
+
   test("another host, a missing image and an unknown argument are refused", async () => {
     const state = join(fresh("cli-refuse"), "state");
-    const host = await run(["serve", "--state", state, "--image", IMAGE, "--host", "localhost"]);
+    // `run` kills a process that does not exit, so a stack that wrongly started would fail this fast.
+    const host = await run(
+      ["serve", "--state", state, "--image", IMAGE, "--host", "localhost"],
+      15_000,
+    );
     expect(host.code).toBe(1);
     expect(host.err).toContain("binds 127.0.0.1 only");
     const noImage = await run(["serve", "--state", state]);
@@ -847,7 +1253,7 @@ describe("the command line", () => {
     expect(unknown.code).toBe(2);
     expect((await run([])).code).toBe(2);
     expect(() => statSync(state)).toThrow();
-  }, 60_000);
+  }, 90_000);
 });
 
 describe("hardenTree", () => {

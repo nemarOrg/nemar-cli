@@ -97,7 +97,28 @@ export interface StandinOptions {
   secretAccessKey?: string;
   /** The port to listen on (default 0, an ephemeral one). The server always listens on loopback only. */
   port?: number;
+  /**
+   * Answer 421 `host_not_allowed` to any request whose `Host` is not `127.0.0.1:<port>` or
+   * `localhost:<port>` (a browser rebound to this address by DNS sends its own name). Off by default:
+   * the signature already covers the host of a presigned URL, and the suites address `127.0.0.1`.
+   */
+  hostGuard?: boolean;
 }
+
+/**
+ * Whether a `Host` header names this loopback server: exactly `127.0.0.1:<port>` or `localhost:<port>`
+ * (case-insensitive name, no other name, no IP literal but the loopback one, no other port, no missing
+ * header). A client on another machine reaching the port through `ssh -R` sends the name and port it
+ * dialed; the stack's tunnel uses the same port number on both ends, so that is one of these two.
+ */
+export function loopbackHostAllowed(host: string | null, port: number): boolean {
+  if (host === null) return false;
+  const h = host.toLowerCase();
+  return h === `127.0.0.1:${port}` || h === `localhost:${port}`;
+}
+
+export const HOST_REFUSAL_STATUS = 421;
+export const HOST_REFUSAL_BODY = '{"error":"host_not_allowed"}';
 
 const xml = (body: string, status: number, extra: Record<string, string> = {}) =>
   new Response(body, { status, headers: { "Content-Type": "application/xml", ...extra } });
@@ -420,6 +441,15 @@ export function startComputeS3Standin(options: StandinOptions): ComputeS3Standin
     // tunnel (card DM-08) would expose a bucket to the whole network.
     hostname: "127.0.0.1",
     async fetch(req) {
+      if (
+        options.hostGuard === true &&
+        !loopbackHostAllowed(req.headers.get("host"), server.port as number)
+      ) {
+        return new Response(HOST_REFUSAL_BODY, {
+          status: HOST_REFUSAL_STATUS,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       const entry: StandinRequest = {
         op: "Unknown",
         method: req.method,
