@@ -277,6 +277,7 @@ import {
   identifierPreflightStep,
   recheckIdentifierPreflight,
 } from "../lib/upload/identifier-preflight.js";
+import { integrateRemoteBeforeValidationStep } from "../lib/upload/integrate-remote.js";
 import {
   computeFilesToUpload,
   prepareUploadProgress,
@@ -779,6 +780,13 @@ Examples:
       const absolutePath = resolve(datasetPath);
       if (!existsSync(absolutePath)) {
         console.log(chalk.red(`Error: Path does not exist: ${absolutePath}`));
+        process.exit(1);
+      }
+
+      // Local patch (#2140): a dataset that already exists has its remote main integrated
+      // first (git annex merge, clean stop on conflict), so the identifier preflight and the
+      // validation below read the tree that will be pushed. Every gate still runs after it.
+      if ((await integrateRemoteBeforeValidationStep(absolutePath, options)).status === "fail") {
         process.exit(1);
       }
 

@@ -1095,6 +1095,234 @@ export async function pushAnnexBranchToGitHub(
   }
 }
 
+/**
+ * What {@link integrateRemoteIntoAdjustedBranch} did. `no-remote-branch` and `up-to-date`
+ * changed nothing; `integrated` moved the adjusted branch so it contains the remote tip.
+ * A failure always leaves HEAD, the base and basis refs and the work tree as they were
+ * (no conflict markers, no MERGE_HEAD), or says that it could not.
+ */
+export type IntegrateRemoteResult =
+  | { success: true; outcome: "no-remote-branch" | "up-to-date" | "integrated" }
+  | {
+      success: false;
+      kind: "fetch" | "conflict" | "merge" | "state";
+      error: string;
+      conflicts: string[];
+    };
+
+/** git-annex names both sides of a conflicted annexed file `<name>.variant-<hex><.ext>`. */
+const ANNEX_VARIANT_NAME = /\.variant-[0-9a-f]{4,}(?:\.[^/]*)?$/i;
+
+async function readRefOid(path: string, ref: string): Promise<string | null | undefined> {
+  const res = await runCommand(["git", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
+    cwd: path,
+  });
+  if (res.exitCode === 0) return res.stdout.trim();
+  if (res.exitCode === 1) return null;
+  return undefined;
+}
+
+async function listTreePaths(path: string, rev: string): Promise<Set<string> | null> {
+  const res = await runCommand(["git", "ls-tree", "-r", "-z", "--name-only", rev], { cwd: path });
+  if (res.exitCode !== 0) return null;
+  return new Set(res.stdout.split("\0").filter((p) => p.length > 0));
+}
+
+function conflictPathsFromOutput(output: string): string[] {
+  const paths: string[] = [];
+  for (const line of output.split("\n")) {
+    const m = /^CONFLICT \([^)]*\): Merge conflict in (.+)$/.exec(line.trim());
+    if (m) paths.push(m[1]);
+  }
+  return paths;
+}
+
+/**
+ * Local patch for nemarOrg/nemar-cli#2140. Integrates `<remote>/<base>` into the git-annex
+ * adjusted branch `adjustedBranch` (e.g. `adjusted/main(unlocked)`) the git-annex way, so a
+ * push refused because NEMAR's pipeline (or anyone) committed to main can be retried.
+ *
+ *  1. `git fetch <remote>`.
+ *  2. Nothing to do when the remote tip is already in HEAD.
+ *  3. A conflict check in the representation that is pushed (`git merge-tree` of HEAD and the
+ *     remote tip; it writes objects only, never the work tree or a ref). Any conflicted path
+ *     stops here, before anything changes.
+ *  4. `git annex merge <remote>/<base>`, which merges into the basis branch and re-adjusts
+ *     (fast-forward or merge). A plain `git merge` on an adjusted branch is never used.
+ *  5. After it: the remote tip must be in HEAD, and no `.variant-` file may have appeared
+ *     (git-annex resolves an annexed-file conflict by keeping both sides under new names and
+ *     exits 0; that is a conflict here). Otherwise everything is put back.
+ *
+ * Never forces anything; nothing is pushed here.
+ */
+export async function integrateRemoteIntoAdjustedBranch(
+  path: string,
+  remoteName: string,
+  adjustedBranch: string,
+  baseBranch: string,
+): Promise<IntegrateRemoteResult> {
+  const fail = (
+    kind: "fetch" | "conflict" | "merge" | "state",
+    error: string,
+    conflicts: string[] = [],
+  ): IntegrateRemoteResult => ({
+    success: false,
+    kind,
+    error,
+    conflicts: [...new Set(conflicts)].sort(),
+  });
+
+  const symbolic = await runCommand(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], {
+    cwd: path,
+  });
+  if (symbolic.exitCode !== 0 || symbolic.stdout.trim() !== adjustedBranch) {
+    return fail("state", `HEAD is not on ${adjustedBranch}; nothing was merged`);
+  }
+  const fetchRes = await runCommand(["git", "fetch", remoteName], { cwd: path });
+  if (fetchRes.exitCode !== 0) {
+    return fail(
+      "fetch",
+      `git fetch ${remoteName} failed: ${fetchRes.stderr.trim() || `exit ${fetchRes.exitCode}`}`,
+    );
+  }
+  const remoteTip = await readRefOid(path, `refs/remotes/${remoteName}/${baseBranch}`);
+  if (remoteTip === undefined) {
+    return fail("state", `${remoteName}/${baseBranch} could not be read`);
+  }
+  if (remoteTip === null) return { success: true, outcome: "no-remote-branch" };
+  const head = await readRefOid(path, "HEAD");
+  if (!head) return fail("state", "HEAD could not be read");
+  const remoteInHead = await isAncestor(path, remoteTip, head);
+  if (remoteInHead === undefined) {
+    return fail("state", `${remoteName}/${baseBranch} could not be compared with HEAD`);
+  }
+  if (remoteInHead) return { success: true, outcome: "up-to-date" };
+
+  // 3. Conflict check without touching the work tree. Exit 1 is "conflicts"; anything else
+  // but 0 means this git cannot do it (merge-tree --write-tree needs git 2.38), and the
+  // checks after the merge still apply.
+  const pre = await runCommand(
+    ["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", head, remoteTip],
+    { cwd: path },
+  );
+  if (pre.exitCode === 1) {
+    const fields = pre.stdout.split("\0").filter((p) => p.length > 0);
+    const conflicts = fields.slice(1);
+    return fail(
+      "conflict",
+      `${remoteName}/${baseBranch} and the local branch both changed the same path(s); nothing was merged`,
+      conflicts,
+    );
+  }
+  if (pre.exitCode !== 0) {
+    vlog(`merge-tree conflict check unavailable (exit ${pre.exitCode}); relying on post-checks`);
+  }
+
+  const baseRef = `refs/heads/${baseBranch}`;
+  const basisRef = `refs/basis/${adjustedBranch}`;
+  const savedBase = await readRefOid(path, baseRef);
+  const savedBasis = await readRefOid(path, basisRef);
+  if (savedBase === undefined || savedBasis === undefined) {
+    return fail("state", "the base branch refs could not be read; nothing was merged");
+  }
+  const headPaths = await listTreePaths(path, head);
+  const remotePaths = await listTreePaths(path, remoteTip);
+  if (!headPaths || !remotePaths) return fail("state", "the trees to merge could not be read");
+
+  const merge = await runCommand(["git", "annex", "merge", `${remoteName}/${baseBranch}`], {
+    cwd: path,
+  });
+  const mergeOutput = `${merge.stdout}\n${merge.stderr}`;
+
+  let problem: { kind: "conflict" | "merge"; error: string; conflicts: string[] } | null = null;
+  if (merge.exitCode !== 0) {
+    const unmerged = await runCommand(["git", "diff", "--name-only", "--diff-filter=U", "-z"], {
+      cwd: path,
+    });
+    const unmergedPaths =
+      unmerged.exitCode === 0 ? unmerged.stdout.split("\0").filter((p) => p.length > 0) : [];
+    const conflicts = [...conflictPathsFromOutput(mergeOutput), ...unmergedPaths];
+    problem = {
+      kind: conflicts.length > 0 ? "conflict" : "merge",
+      error: `git annex merge ${remoteName}/${baseBranch} failed: ${
+        merge.stderr.trim().split("\n").slice(-3).join(" ") || `exit ${merge.exitCode}`
+      }`,
+      conflicts,
+    };
+  } else {
+    const after = await readRefOid(path, "HEAD");
+    const afterPaths = after ? await listTreePaths(path, after) : null;
+    if (!after || !afterPaths) {
+      problem = { kind: "merge", error: "the merged HEAD could not be read", conflicts: [] };
+    } else {
+      const variants = [...afterPaths].filter(
+        (p) => !headPaths.has(p) && !remotePaths.has(p) && ANNEX_VARIANT_NAME.test(p),
+      );
+      if (variants.length > 0) {
+        problem = {
+          kind: "conflict",
+          error: `git annex merge resolved a conflict by renaming both sides (${variants.length} .variant- file(s)); that is not accepted, the merge was undone`,
+          conflicts: [...conflictPathsFromOutput(mergeOutput), ...variants],
+        };
+      } else if ((await isAncestor(path, remoteTip, after)) !== true) {
+        problem = {
+          kind: "merge",
+          error: `after git annex merge, ${remoteName}/${baseBranch} is still not contained in HEAD`,
+          conflicts: [],
+        };
+      }
+    }
+  }
+  if (!problem) return { success: true, outcome: "integrated" };
+
+  // Put everything back: no MERGE_HEAD, no unmerged entries, HEAD and refs as they were.
+  const notes: string[] = [];
+  if ((await readRefOid(path, "MERGE_HEAD")) !== null) {
+    const abort = await runCommand(["git", "merge", "--abort"], { cwd: path });
+    if (abort.exitCode !== 0) notes.push("git merge --abort failed");
+  }
+  const stillUnmerged = await runCommand(["git", "ls-files", "-u"], { cwd: path });
+  if (stillUnmerged.stdout.trim().length > 0) {
+    const resetMerge = await runCommand(["git", "reset", "--merge"], { cwd: path });
+    if (resetMerge.exitCode !== 0) notes.push("git reset --merge failed");
+  }
+  if ((await readRefOid(path, "HEAD")) !== head) {
+    const keep = await runCommand(["git", "reset", "--keep", head], { cwd: path });
+    if (keep.exitCode !== 0) notes.push(`git reset --keep ${head} failed: ${keep.stderr.trim()}`);
+  }
+  for (const [ref, saved] of [
+    [baseRef, savedBase],
+    [basisRef, savedBasis],
+  ] as const) {
+    const now = await readRefOid(path, ref);
+    if (now === saved) continue;
+    const restore = saved
+      ? await runCommand(["git", "update-ref", ref, saved], { cwd: path })
+      : await runCommand(["git", "update-ref", "-d", ref], { cwd: path });
+    if (restore.exitCode !== 0) notes.push(`${ref} could not be restored to ${saved ?? "absent"}`);
+  }
+  const leftUnmerged = await runCommand(["git", "ls-files", "-u"], { cwd: path });
+  const clean =
+    (await readRefOid(path, "MERGE_HEAD")) === null &&
+    leftUnmerged.stdout.trim().length === 0 &&
+    (await readRefOid(path, "HEAD")) === head;
+  if (!clean) notes.push("the repository is NOT back in its previous state; inspect `git status`");
+  const suffix =
+    notes.length > 0 ? ` (${notes.join("; ")})` : "; the branch and work tree are unchanged";
+  return fail(problem.kind, `${problem.error}${suffix}`, problem.conflicts);
+}
+
+/** One line naming the conflicted paths (at most 10) for a failure message. */
+export function describeIntegrationFailure(result: {
+  error: string;
+  conflicts: string[];
+}): string {
+  if (result.conflicts.length === 0) return result.error;
+  const shown = result.conflicts.slice(0, 10).join(", ");
+  const more = result.conflicts.length > 10 ? ` and ${result.conflicts.length - 10} more` : "";
+  return `${result.error}. Conflicting path(s): ${shown}${more}. Resolve them on the remote or in this tree (commit), then re-run; nothing was force-pushed`;
+}
+
 export async function pushToGitHub(
   path: string,
   remoteName = "origin",
@@ -1149,7 +1377,12 @@ export async function pushToGitHub(
     // Detached HEAD (HEAD:main) has no local branch to rebase, and adjusted
     // (DataLad) branches must not be rebased -- both keep the plain push behavior.
     const canRebase = !branchToPush.startsWith("adjusted/") && branchToPush !== "HEAD:main";
-    const annexPreflight = await prepareAnnexBranchPush(path, remoteName);
+    // #2140 (local patch): an adjusted branch is integrated with `git annex merge` instead.
+    const adjustedLocal =
+      branchToPush.startsWith("adjusted/") && branchToPush.includes(":")
+        ? branchToPush.slice(0, branchToPush.indexOf(":"))
+        : null;
+    let annexPreflight = await prepareAnnexBranchPush(path, remoteName);
     if (!annexPreflight.success) {
       return {
         success: false,
@@ -1166,6 +1399,34 @@ export async function pushToGitHub(
         break;
       }
       mainStderr = res.stderr;
+      if (adjustedLocal && attempt < PUSH_REBASE_RETRIES && isNonFastForwardPush(res.stderr)) {
+        const integrated = await integrateRemoteIntoAdjustedBranch(
+          path,
+          remoteName,
+          adjustedLocal,
+          baseBranch,
+        );
+        if (!integrated.success) {
+          return {
+            success: false,
+            error: `Push rejected (${remoteName}/${baseBranch} moved) and it could not be integrated: ${describeIntegrationFailure(integrated)}`,
+          };
+        }
+        // A rejection that integrating cannot cure (the remote tip is already in HEAD) is
+        // reported as it is.
+        if (integrated.outcome !== "integrated") break;
+        // git annex merge also merged the remote git-annex branch: check that history again.
+        const refreshed = await prepareAnnexBranchPush(path, remoteName);
+        if (!refreshed.success) {
+          return {
+            success: false,
+            error: `Push stopped before the main branch was updated because ${refreshed.error}.`,
+          };
+        }
+        annexPreflight = refreshed;
+        rebaseCycles++;
+        continue;
+      }
       if (!canRebase || attempt === PUSH_REBASE_RETRIES || !isNonFastForwardPush(res.stderr)) {
         break;
       }
@@ -1195,7 +1456,7 @@ export async function pushToGitHub(
     if (!pushed) {
       const note =
         rebaseCycles > 0
-          ? ` (still rejected after ${rebaseCycles} fetch+rebase retry cycle(s))`
+          ? ` (still rejected after ${rebaseCycles} fetch+${adjustedLocal ? "git annex merge" : "rebase"} retry cycle(s))`
           : "";
       return { success: false, error: `${mainStderr.trim() || "Failed to push to GitHub"}${note}` };
     }
