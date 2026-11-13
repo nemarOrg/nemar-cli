@@ -41,11 +41,14 @@
 
 import {
   type ComputeRecipe,
+  type RecipeExecutor,
   findRecipe,
+  isSourceCommit,
   readRecipeRecord,
   recipeArguments,
   recipeCommand,
   recipeRequiredOutputs,
+  recipeZarrArguments,
 } from "../../../shared/compute-recipes.js";
 import { PLATFORM_FAILURE_CODES } from "../../../shared/compute-state.js";
 import {
@@ -62,6 +65,7 @@ import {
   type PartitionName,
   dataTagForVersion,
   estimateSuMilli,
+  runnersPolicyOf,
 } from "../../../shared/contract/compute.js";
 import type { Bindings } from "../types/bindings.js";
 import {
@@ -70,6 +74,7 @@ import {
   type CreateJobRefusal,
   JOB_BY_KEY_SQL,
   PIPELINE_LIVE_JOBS_SQL,
+  RUNNER_LIVE_JOBS_SQL,
   createJob,
 } from "./compute-jobs.js";
 import { type SubmitOutcome, submitComputeJob } from "./compute-lifecycle.js";
@@ -91,7 +96,7 @@ import {
 import { getPolicy } from "./compute-policy.js";
 import { sha256Hex } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
-import { computeEnabled } from "./compute-switches.js";
+import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
 
 // --- Words ------------------------------------------------------------------------------------------
@@ -184,6 +189,7 @@ export type PipelineRefusal =
   | "too_many_files"
   | "recipe_not_automatic"
   | "recipe_placeholder"
+  | "runners_disabled"
   | "registry_drift"
   | "daily_cap_reached"
   | "run_failed"
@@ -199,6 +205,12 @@ export interface DispatchInput {
   /** Any spelling the data plane takes (`1.0.2`, `v1.0.2`, `latest`); the newest version when absent. */
   version?: string;
   actor: PipelineActor;
+  /**
+   * Who runs the job (ADR 0121): `tapis` when absent. A recipe lists the executors it may be dispatched to
+   * (`invalid_spec` for one it does not), and `runner` needs the runners switch (`runners_disabled`). A runner
+   * job is made with no hold and no ledger entry, is never submitted, and waits for a runner to pull it.
+   */
+  executor?: RecipeExecutor;
 }
 
 export type DispatchResult =
@@ -210,8 +222,11 @@ export type DispatchResult =
       version: string;
       recipe: string;
       attempt: number;
-      /** What the immediate submit said; a job that waits is submitted by the 30-minute tick. */
-      submit: SubmitOutcome;
+      /**
+       * What the immediate submit said; a job that waits is submitted by the 30-minute tick. A runner job is
+       * never submitted: `waiting_for_runner` says it waits to be pulled.
+       */
+      submit: SubmitOutcome | "waiting_for_runner";
     }
   | {
       ok: false;
@@ -330,23 +345,41 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  * recipe's name beside an `image` runtime, the command and the arguments that carry the image digest.
  * Parsed with the strict schema, so a registry entry that is not a valid job is a programming error that
  * a test also catches.
+ *
+ * A `zarr` recipe stages no dataset (`datasets: []`): its arguments carry the commit its serving copy is
+ * said to describe (`sourceCommit`, 40 hex digits, which `resolveRun` supplies) and the one origin it may
+ * read. A `zarr` recipe with no valid commit is a programming error here, never a job.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
-  input: { datasetId: string; tag: string; image: { ref: string; digest: string } },
+  input: {
+    datasetId: string;
+    tag: string;
+    image: { ref: string; digest: string };
+    /** Required for a `zarr` recipe, never read for a `bids` one. */
+    sourceCommit?: string | null;
+  },
 ) {
+  const zarr = recipe.input === "zarr";
   return JobSpecSchema.parse({
     name: `${recipe.name} ${input.datasetId} ${input.tag}`.slice(0, 80),
     runtime: "image",
     image: input.image.ref,
     recipe: recipe.name,
     command: recipeCommand(recipe),
-    args: recipeArguments({
-      datasetId: input.datasetId,
-      tag: input.tag,
-      imageDigest: input.image.digest,
-    }),
-    datasets: [{ id: input.datasetId, version: input.tag }],
+    args: zarr
+      ? recipeZarrArguments({
+          datasetId: input.datasetId,
+          tag: input.tag,
+          sourceCommit: input.sourceCommit as string,
+          imageDigest: input.image.digest,
+        })
+      : recipeArguments({
+          datasetId: input.datasetId,
+          tag: input.tag,
+          imageDigest: input.image.digest,
+        }),
+    datasets: zarr ? [] : [{ id: input.datasetId, version: input.tag }],
     partition: recipe.partition,
     nodes: recipe.nodes,
     cores: recipe.cores,
@@ -371,22 +404,38 @@ export function recipeEstimateMilli(recipe: ComputeRecipe): number {
 // --- What a run needs of the dataset ------------------------------------------------------------------
 
 type ResolvedRun =
-  | { ok: true; tag: string }
+  | {
+      ok: true;
+      tag: string;
+      /**
+       * For a recipe that reads the Zarr serving copy: the commit of the dataset repository that copy was
+       * built from, as the dataset row records it (`zarr_source_commit`); null for a `bids` recipe.
+       * DM-06b replaces this with the verified commit pair of the tagged version.
+       */
+      sourceCommit: string | null;
+    }
   | {
       ok: false;
       code: "dataset_not_eligible" | "version_not_found" | "version_untagged" | "too_many_files";
       extra: { version?: string; blockedBy?: PipelineTermId[] };
     };
 
+/** The commit a dataset's Zarr serving copy was built from, as the row records it (`zarr-ready` writes it). */
+const ZARR_SOURCE_COMMIT_SQL = "SELECT zarr_source_commit FROM datasets WHERE dataset_id = ?1";
+
 /**
  * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
  * run cannot disagree: the eligibility predicate over the row (ADR 0065), the version row (the newest,
- * or the one named) with a data-plane tag, and the manifest bound.
+ * or the one named) with a data-plane tag, and the manifest bound. For a recipe whose input is `zarr` it also
+ * resolves the source commit of the serving copy, and a dataset with no recorded commit is
+ * `dataset_not_eligible` (it has no serving copy to read). It is the one place a Zarr recipe's identity is
+ * decided, so the dry run and the run cannot disagree.
  */
 async function resolveRun(
   db: D1Database,
   datasetId: string,
   wanted: string | undefined,
+  recipe?: ComputeRecipe,
 ): Promise<ResolvedRun> {
   const loaded = await loadPipelineRow(db, datasetId);
   if (!loaded.eligible) {
@@ -402,7 +451,20 @@ async function resolveRun(
   ) {
     return { ok: false, code: "too_many_files", extra: { version: picked.tag } };
   }
-  return { ok: true, tag: picked.tag };
+  if (recipe?.input !== "zarr") return { ok: true, tag: picked.tag, sourceCommit: null };
+  const copy = await db
+    .prepare(ZARR_SOURCE_COMMIT_SQL)
+    .bind(datasetId)
+    .first<{ zarr_source_commit: string | null }>();
+  const commit = copy?.zarr_source_commit ?? null;
+  if (!isSourceCommit(commit)) {
+    return {
+      ok: false,
+      code: "dataset_not_eligible",
+      extra: { version: picked.tag, blockedBy: [] },
+    };
+  }
+  return { ok: true, tag: picked.tag, sourceCommit: commit };
 }
 
 // --- A result that is not the tuple that was claimed ------------------------------------------------
@@ -476,11 +538,21 @@ export async function dispatchPipelineJob(
   }
   // A placeholder is on no path: not an administrator's run, not the queue, not the cron.
   if (recipe.placeholder === true) return fail("recipe_placeholder", datasetId);
+  // The executor, decided from the registry: a recipe is run only where it lists, and a runner needs its
+  // switch. The route has said so already in its own words; this is the boundary that holds if another caller
+  // reaches the service (the cron passes none, so it is always `tapis`).
+  const executor = input.executor ?? "tapis";
+  if (!recipe.executors.includes(executor)) {
+    return fail("invalid_spec", datasetId, { field: "executor" });
+  }
+  if (executor === "runner" && !computeRunnersEnabled(env)) {
+    return fail("runners_disabled", datasetId);
+  }
   // The registry names a tuple that a finished result has shown is not what runs: nothing is claimed.
   if (await tupleHeld(db, recipe)) return fail("registry_drift", datasetId);
 
   // The dataset and its version, decided from the rows (ADR 0065): nothing a caller said is read.
-  const resolved = await resolveRun(db, datasetId, input.version);
+  const resolved = await resolveRun(db, datasetId, input.version, recipe);
   if (!resolved.ok) return fail(resolved.code, datasetId, resolved.extra);
   const { tag } = resolved;
 
@@ -493,7 +565,7 @@ export async function dispatchPipelineJob(
   // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
   let spec: ReturnType<typeof recipeJobSpec>;
   try {
-    spec = recipeJobSpec(recipe, { datasetId, tag, image });
+    spec = recipeJobSpec(recipe, { datasetId, tag, image, sourceCommit: resolved.sourceCommit });
   } catch (err) {
     console.error(
       `[compute-pipeline] spec_unbuildable recipe=${recipe.name} error=${err instanceof Error ? err.name : "unknown"}`,
@@ -535,6 +607,7 @@ export async function dispatchPipelineJob(
       appId: recipe.appId,
       appVersion: recipe.appVersion,
       spec,
+      executor,
     });
     // A job whose records did not land is finished by a replay of its key; one try.
     if (created.ok && !created.recordsWritten) {
@@ -546,6 +619,7 @@ export async function dispatchPipelineJob(
         appId: recipe.appId,
         appVersion: recipe.appVersion,
         spec,
+        executor,
       });
     }
   } catch (err) {
@@ -585,7 +659,7 @@ export async function dispatchPipelineJob(
         version: tag,
         recipe: recipe.name,
         attempt: stamp.attempt,
-        submit: "unavailable",
+        submit: executor === "runner" ? "waiting_for_runner" : "unavailable",
       };
     }
     await finishStamp(db, stampId, "failed", "create_failed");
@@ -603,6 +677,19 @@ export async function dispatchPipelineJob(
 
   const job = created.job;
   await db.prepare(LINK_STAMP_SQL).bind(stampId, job.id).run();
+  // A runner job is never submitted: it waits for a runner to pull it (ADR 0121).
+  if (executor === "runner") {
+    return {
+      ok: true,
+      stampId,
+      jobId: job.id,
+      datasetId,
+      version: tag,
+      recipe: recipe.name,
+      attempt: stamp.attempt,
+      submit: "waiting_for_runner",
+    };
+  }
   // The submit is the lifecycle's: one attempt now; the 30-minute tick covers a job that waits.
   let submit: SubmitOutcome = "unavailable";
   try {
@@ -979,6 +1066,8 @@ export interface DryRunInput {
   version?: string;
   /** For the queue: how many datasets to list. */
   limit?: number;
+  /** Who the run would be for; `tapis` when absent. A runner run names one dataset. */
+  executor?: RecipeExecutor;
 }
 
 export interface DryRunConfig {
@@ -988,14 +1077,20 @@ export interface DryRunConfig {
   runtime_image: boolean;
   /** The service account exists, is approved and is a service. */
   pipelines_account: boolean;
+  /** `computeRunnersEnabled`: a runner run needs it. Present only in the dry run of a runner run. */
+  runners_enabled?: boolean;
 }
 
 export type DryRunResult =
-  | { ok: false; code: "recipe_unknown" | "recipe_placeholder" }
+  | { ok: false; code: "recipe_unknown" | "recipe_placeholder" | "invalid_spec" }
   | {
       ok: true;
       recipe: string;
-      /** What the hold of one job is, in milli-SU. */
+      /** Who the run would be for. */
+      executor: RecipeExecutor;
+      /** For a runner run: the room under the runners' live cap (a runner run has no `room`). */
+      runner_room?: RunnerRoom;
+      /** What the hold of one job is, in milli-SU; 0 for a runner job, which has none. */
       estimate_milli_per_job: number;
       /** The same for every dataset listed. */
       estimate_milli_total: number;
@@ -1022,6 +1117,59 @@ export type DryRunResult =
       blocked_by_term?: Record<string, number>;
     };
 
+/** A live or succeeded stamp for the tuple of a recipe over one dataset version: the claim would be refused. */
+const liveStamp = (db: D1Database, datasetId: string, tag: string, recipe: ComputeRecipe) =>
+  db
+    .prepare(
+      `SELECT 1 FROM compute_pipeline_stamps
+        WHERE dataset_id = ?1 AND version = ?2 AND recipe = ?3 AND recipe_version = ?4
+          AND engine = ?5 AND state IN ('dispatched', 'succeeded')`,
+    )
+    .bind(datasetId, tag, recipe.name, recipe.version, recipe.engine)
+    .first();
+
+/**
+ * The dry run of a runner run over ONE named dataset: the very verdict a run would give (`resolveRun`, a live
+ * stamp for the tuple, the runners' live cap), with no estimate (a runner job has no hold) and the runners'
+ * room in place of the daily cap and the tenant ceiling, which a runner job does not meet.
+ */
+async function runnerDryRun(
+  db: D1Database,
+  recipe: ComputeRecipe,
+  base: {
+    ok: true;
+    recipe: string;
+    executor: RecipeExecutor;
+    estimate_milli_per_job: number;
+    config: DryRunConfig;
+  },
+  input: DryRunInput,
+  room: RunnerRoom,
+): Promise<DryRunResult> {
+  const datasetId = input.datasetId as string;
+  const shown = { ...base, runner_room: room, estimate_milli_total: 0 };
+  const resolved = await resolveRun(db, datasetId, input.version, recipe);
+  if (!resolved.ok) {
+    return {
+      ...shown,
+      would_dispatch: [],
+      blocked: {
+        code: resolved.code,
+        blocked_by: resolved.extra.blockedBy ?? [],
+        ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+      },
+    };
+  }
+  const blocked = (code: string) => ({
+    ...shown,
+    would_dispatch: [],
+    blocked: { code, blocked_by: [] as PipelineTermId[], version: resolved.tag },
+  });
+  if (await liveStamp(db, datasetId, resolved.tag, recipe)) return blocked("live_attempt_exists");
+  if (room.live_left <= 0) return blocked("over_concurrency");
+  return { ...shown, would_dispatch: [{ dataset_id: datasetId, version: resolved.tag }] };
+}
+
 /** The most dataset rows the dry run reads to count what blocks each term. */
 const DRY_RUN_SCAN_ROWS = 5000;
 
@@ -1037,14 +1185,29 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
   const recipe = findRecipe(input.recipe);
   if (recipe === null) return { ok: false, code: "recipe_unknown" };
   if (recipe.placeholder === true) return { ok: false, code: "recipe_placeholder" };
+  const executor = input.executor ?? "tapis";
+  // The route refuses these in its own words; a direct caller meets the boundary here.
+  if (!recipe.executors.includes(executor)) return { ok: false, code: "invalid_spec" };
+  if (executor === "runner" && input.datasetId === undefined) {
+    return { ok: false, code: "invalid_spec" };
+  }
   const db = env.DB;
-  const perJob = recipeEstimateMilli(recipe);
+  // A runner job is never priced (`estimateSuMilli` is not called for it).
+  const perJob = executor === "runner" ? 0 : recipeEstimateMilli(recipe);
   const config: DryRunConfig = {
     compute_enabled: computeEnabled(env),
     runtime_image: readRuntimeImage(env).state === "ok",
     pipelines_account: (await pipelinesAccountId(db)) !== null,
+    // Only a runner run asks for the switch: a Tapis run's answer is what it was before ADR 0121.
+    ...(executor === "runner" ? { runners_enabled: computeRunnersEnabled(env) } : {}),
   };
-  const base = { ok: true as const, recipe: recipe.name, estimate_milli_per_job: perJob, config };
+  const base = {
+    ok: true as const,
+    recipe: recipe.name,
+    executor,
+    estimate_milli_per_job: perJob,
+    config,
+  };
   if (await tupleHeld(db, recipe)) {
     return {
       ...base,
@@ -1056,6 +1219,15 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
 
   // The caps, read as a live run reads them.
   const policy = (await getPolicy(db)).policy;
+  if (executor === "runner") {
+    return runnerDryRun(
+      db,
+      recipe,
+      base,
+      input,
+      await runnerRoom(db, policy, poolOfRecipe(recipe)),
+    );
+  }
   const caps = await pipelineRoom(db, policy, poolOfRecipe(recipe));
 
   if (input.datasetId !== undefined) {
@@ -1069,7 +1241,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
             ? ("tenant" as const)
             : ("limit" as const),
     };
-    const resolved = await resolveRun(db, input.datasetId, input.version);
+    const resolved = await resolveRun(db, input.datasetId, input.version, recipe);
     if (!resolved.ok) {
       return {
         ...base,
@@ -1083,14 +1255,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
         },
       };
     }
-    const live = await db
-      .prepare(
-        `SELECT 1 FROM compute_pipeline_stamps
-          WHERE dataset_id = ?1 AND version = ?2 AND recipe = ?3 AND recipe_version = ?4
-            AND engine = ?5 AND state IN ('dispatched', 'succeeded')`,
-      )
-      .bind(input.datasetId, resolved.tag, recipe.name, recipe.version, recipe.engine)
-      .first();
+    const live = await liveStamp(db, input.datasetId, resolved.tag, recipe);
     if (live) {
       return {
         ...base,
@@ -1163,9 +1328,13 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
 export const poolOfRecipe = (recipe: ComputeRecipe): ComputePool =>
   PARTITIONS[recipe.partition as PartitionName].pool;
 
-/** Pipeline jobs made today (UTC): `created_at` is `datetime('now')`, so a day starts at `date('now')`. */
+/**
+ * Pipeline jobs made today (UTC): `created_at` is `datetime('now')`, so a day starts at `date('now')`. The
+ * daily cap paces spending and Tapis use, so it counts `accounting = 'su'` jobs only: a runner job is the
+ * runners' cap's (ADR 0121).
+ */
 export const PIPELINE_JOBS_TODAY_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
-  WHERE source = 'pipeline' AND created_at >= date('now')`;
+  WHERE source = 'pipeline' AND accounting = 'su' AND created_at >= date('now')`;
 
 const countOf = async (db: D1Database, sql: string, ...binds: unknown[]): Promise<number> =>
   (
@@ -1218,6 +1387,29 @@ export async function pipelineRoom(
     live_left: Math.max(0, policy.pipelines.maxLiveJobs[pool] - live),
     tenant_left: tenantRoom(await tenantFacts(db, policy), "pipelines"),
   };
+}
+
+/** What is left of the runners' live cap in one pool (ADR 0121): the room a runner run is enforced against. */
+export interface RunnerRoom {
+  /** `runners.maxLiveJobs` of the pool minus the live runner jobs in it, never below 0. */
+  live_left: number;
+  /** The owner's cap for the pool (the policy's default when it names none). */
+  live_cap: number;
+}
+
+/**
+ * The room the runners have in a pool right now. The live count is the statement the runner job's own INSERT
+ * guards on (`RUNNER_LIVE_JOBS_SQL`), so the room that is read is the room that is enforced. Neither the
+ * daily cap nor the tenant ceiling is read: a runner job holds no Tapis slot and spends no allocation.
+ */
+export async function runnerRoom(
+  db: D1Database,
+  policy: ComputePolicy,
+  pool: ComputePool,
+): Promise<RunnerRoom> {
+  const cap = runnersPolicyOf(policy).maxLiveJobs[pool];
+  const live = await countOf(db, RUNNER_LIVE_JOBS_SQL, pool);
+  return { live_left: Math.max(0, cap - live), live_cap: cap };
 }
 
 /** How many datasets one run may try, and what bounded it. */

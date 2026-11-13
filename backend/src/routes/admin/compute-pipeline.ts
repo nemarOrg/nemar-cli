@@ -13,7 +13,10 @@
  * trims what it would dispatch to it.
  *
  * The request names a recipe, then ONE dataset (with an optional version) or `eligible` with a `limit`,
- * and `dry_run`. It names nothing else: the dataset row (and with it eligibility, ADR 0065), the version
+ * `dry_run`, and optionally the `executor` (`tapis`, the default, or `runner`, ADR 0121). A recipe lists the
+ * executors it may be dispatched to and one it does not list is `invalid_body` naming `executor`; so is a
+ * runner run over `eligible`; a live runner run is refused `runners_disabled` unless the runners switch is on.
+ * A runner run makes a job with no hold that waits for a runner and is never submitted. It names nothing else: the dataset row (and with it eligibility, ADR 0065), the version
  * row, the service account, the pool and the runtime image are the Worker's own. A request with any other
  * key is refused, so a field a caller believes it can set is never silently dropped.
  *
@@ -71,6 +74,7 @@ const SENTENCES = {
   recipe_unknown: "There is no such recipe.",
   recipe_not_automatic: "That recipe is not run automatically.",
   recipe_placeholder: "That recipe is a placeholder and cannot be run.",
+  runners_disabled: "Runners are not switched on.",
   registry_drift:
     "A finished run reported another recipe version or engine than the registry names, so the recipe is held.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
@@ -130,11 +134,16 @@ function invalid(c: Ctx, kind: "invalid_body" | "invalid_query", error: z.ZodErr
   );
 }
 
+/** A validation error that names the `executor` field, in the words `invalid` answers every bad body with. */
+const executorIssue = (message: string) =>
+  new z.ZodError([{ code: z.ZodIssueCode.custom, path: ["executor"], message }]);
+
 const RECIPE_NAME = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 
 const runBody = z
   .object({
     recipe: RECIPE_NAME,
+    executor: z.enum(["tapis", "runner"]).optional(),
     dataset: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE).optional(),
     eligible: z.boolean().optional(),
@@ -273,6 +282,20 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
     const recipe = findRecipe(body.recipe);
     if (recipe === null) return refuse(c, "recipe_unknown");
     if (recipe.placeholder === true) return refuse(c, "recipe_placeholder");
+    // The executor is part of the request's validity, decided from the registry before anything is read:
+    // a recipe is dispatched only to an executor it lists, and a runner run names ONE dataset (the queue's
+    // clamps are Tapis's: the daily cap and the tenant ceiling mean nothing to a runner job).
+    const executor = body.executor ?? "tapis";
+    if (!recipe.executors.includes(executor)) {
+      return invalid(
+        c,
+        "invalid_body",
+        executorIssue("that recipe is not dispatched to that executor"),
+      );
+    }
+    if (executor === "runner" && body.dataset === undefined) {
+      return invalid(c, "invalid_body", executorIssue("a runner run names one dataset"));
+    }
     try {
       if (body.dry_run === true) {
         const dry = await pipelineDryRun(c.env, {
@@ -280,6 +303,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           datasetId: body.dataset,
           version: body.version,
           limit: body.limit ?? COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
+          executor,
         });
         if (!dry.ok) return refuse(c, dry.code);
         return c.json({ ...dry, ok: true, dry_run: true });
@@ -294,6 +318,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           datasetId: body.dataset,
           version: body.version,
           actor,
+          executor,
         });
         const audited = await audit(
           c,
@@ -309,6 +334,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
             ok: true,
             dry_run: false,
             recipe: body.recipe,
+            executor,
             results: [resultView(result)],
             dispatched: 1,
             stopped_by: null,
@@ -335,6 +361,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           ok: true,
           dry_run: false,
           recipe: body.recipe,
+          executor,
           results: run.results.map(resultView),
           dispatched: run.dispatched,
           stopped_by: run.stoppedBy,

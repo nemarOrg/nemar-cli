@@ -2,7 +2,7 @@
  * `nemar admin compute pipeline`: an administrator runs NEMAR's own processing recipes through the compute
  * gateway and reads the stamps they leave (epic #2005 phase A6, #2011; ADR 0118; design section 10).
  *
- *   nemar admin compute pipeline run <recipe> --dataset <id>[@version] [--dry-run]
+ *   nemar admin compute pipeline run <recipe> --dataset <id>[@version] [--executor tapis|runner] [--dry-run]
  *   nemar admin compute pipeline run <recipe> --eligible [--limit <n>] [--dry-run]
  *   nemar admin compute pipeline status [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
  *
@@ -78,10 +78,18 @@ function roomLine(room: ComputePipelineRoom, when: string): string {
   }; bounded by ${by}`;
 }
 
+/** The runners' room: a runner job has no daily cap and no tenant slot, only the runners' live cap. */
+function runnerRoomLine(room: { live_left: number; live_cap: number }, when: string): string {
+  return `  runner room ${when}: ${room.live_left} left of the runners' live cap of ${room.live_cap}`;
+}
+
 function printRun(res: ComputePipelineRunResponse): void {
+  const runner = res.executor === "runner";
   if (res.dry_run) {
-    say(`dry run of ${word(res.recipe)}: nothing was written`);
-    if (res.estimate_milli_per_job !== undefined) {
+    say(`dry run of ${word(res.recipe)}${runner ? " on a runner" : ""}: nothing was written`);
+    if (runner) {
+      say("  executor: runner (no hold, no service units; a runner pulls the job)");
+    } else if (res.estimate_milli_per_job !== undefined) {
       say(
         `  estimated hold per job: ${formatSu(res.estimate_milli_per_job)} SU, ` +
           `in total ${formatSu(res.estimate_milli_total ?? 0)} SU`,
@@ -89,13 +97,16 @@ function printRun(res: ComputePipelineRunResponse): void {
     }
     if (res.config) {
       const c = res.config;
-      say(
-        `  a real run needs: compute ${c.compute_enabled ? "on" : "OFF"}, ` +
-          `runtime image ${c.runtime_image ? "set" : "NOT SET"}, ` +
-          `pipelines account ${c.pipelines_account ? "present" : "MISSING"}`,
-      );
+      const needs = [
+        `compute ${c.compute_enabled ? "on" : "OFF"}`,
+        `runtime image ${c.runtime_image ? "set" : "NOT SET"}`,
+        `pipelines account ${c.pipelines_account ? "present" : "MISSING"}`,
+      ];
+      if (runner) needs.push(`runners ${c.runners_enabled ? "on" : "OFF"}`);
+      say(`  a real run needs: ${needs.join(", ")}`);
     }
     if (res.room) say(roomLine(res.room, "now"));
+    if (res.runner_room) say(runnerRoomLine(res.runner_room, "now"));
     const would = res.would_dispatch ?? [];
     say(`  would dispatch ${would.length}:`);
     for (const d of would) say(`    ${word(d.dataset_id)} ${word(d.version)}`);
@@ -115,7 +126,9 @@ function printRun(res: ComputePipelineRunResponse): void {
     return;
   }
   const results = res.results ?? [];
-  say(`${word(res.recipe)}: dispatched ${res.dispatched ?? 0} of ${results.length} tried`);
+  say(
+    `${word(res.recipe)}${runner ? " (runner)" : ""}: dispatched ${res.dispatched ?? 0} of ${results.length} tried`,
+  );
   for (const r of results) say(resultLine(r));
   if (res.stopped_by) say(`  stopped by ${word(res.stopped_by)}`);
   if (res.room) say(roomLine(res.room, "before the run"));
@@ -174,8 +187,16 @@ Runs a processing recipe on NEMAR's own datasets through the compute gateway, or
                             ${COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT}, at most ${COMPUTE_PIPELINE_RUN_LIMIT_MAX}); a run is also
                             bounded by the live cap of the pool, the daily cap and at most
                             ${COMPUTE_PIPELINE_RUN_PER_INVOCATION} per invocation, and says which one bounded it
-  --dry-run                 read only: the datasets it would run, the estimated SU, what a real run
-                            lacks, and what blocks the rest; works against every Worker
+  --executor <who>          tapis (the default) or runner. A recipe lists the executors it may be run
+                            on (nemar-floor on tapis, nemar-floor-zarr on a runner) and the Worker refuses
+                            another with invalid_body naming executor. A runner run names one dataset
+                            (not --eligible), needs the runners switch (runners_disabled when it is off),
+                            makes a job with no hold and no service units that a registered runner pulls,
+                            and is bounded only by the owner's live cap for runners (over_concurrency),
+                            never by the daily cap or the tenant ceiling
+  --dry-run                 read only: the datasets it would run, the estimated SU (none for a runner),
+                            the room (for a runner, the runners' live cap), what a real run lacks, and what
+                            blocks the rest; works against every Worker
 
 The caps are the owner's, for every path: a run that finds the pool full or the day's cap used stops
 with over_concurrency or daily_cap_reached and dispatches nothing. One named dataset is refused as
@@ -215,6 +236,7 @@ pipelineCommand
   .command("run <recipe>")
   .description("Run a recipe over one dataset or the eligible ones, or dry-run it")
   .option("--dataset <id>", "One dataset, nm000104 or nm000104@1.0.2")
+  .option("--executor <who>", "Who runs the job: tapis (default) or runner")
   .option("--eligible", "The next eligible datasets the recipe has not been run over")
   .option("--limit <n>", "With --eligible: how many datasets at most")
   .option("--dry-run", "Say what would happen; write nothing")
@@ -223,7 +245,14 @@ pipelineCommand
   .action(
     async (
       recipe: string,
-      o: { dataset?: string; eligible?: boolean; limit?: string; dryRun?: boolean; json?: boolean },
+      o: {
+        dataset?: string;
+        executor?: string;
+        eligible?: boolean;
+        limit?: string;
+        dryRun?: boolean;
+        json?: boolean;
+      },
     ) => {
       const json = o.json === true;
       if (!requireSignedIn(json)) return;
@@ -242,6 +271,20 @@ pipelineCommand
         return;
       }
       const request: ComputePipelineRunRequest = { recipe };
+      if (o.executor !== undefined) {
+        if (o.executor !== "tapis" && o.executor !== "runner") {
+          failMessage("--executor is tapis or runner.", { json, answered: true });
+          return;
+        }
+        if (o.executor === "runner" && o.dataset === undefined) {
+          failMessage("A runner run names one dataset with --dataset, not --eligible.", {
+            json,
+            answered: true,
+          });
+          return;
+        }
+        request.executor = o.executor;
+      }
       if (o.dataset !== undefined) {
         if (o.limit !== undefined) {
           failMessage("--limit goes with --eligible.", { json, answered: true });
