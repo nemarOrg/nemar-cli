@@ -24,6 +24,13 @@
  * as the ARGUMENT `--image-digest`. The recipe cannot check that value against the image it runs in; it
  * is the caller's claim, and the Worker compares it with the launcher's `provenance.json` before it
  * accepts a result (`recipeImageDigestArg`).
+ *
+ * TWO INPUTS, TWO EXECUTORS (portable compute, ADR 0121, plan D12). A recipe's `input` is `bids` (the
+ * dataset staged at `/data/<id>`, the arguments above) or `zarr` (nothing staged: the recipe streams the
+ * dataset's Zarr serving copy from `--zarr-base`, the one origin it may open, and the Worker passes the commit
+ * that copy was built from as `--source-commit`; `recipeZarrArguments`). `executors` lists where a recipe may
+ * be dispatched: `tapis` (an allocation, a hold) or `runner` (a registered runner pulls it, no hold). A
+ * dispatch to an executor a recipe does not list is refused.
  */
 
 /** The states of a stamp, declared once; the migration's CHECK is held to this list by a test. */
@@ -53,6 +60,20 @@ const IMAGE_DIGEST_VALUE_RE = /^sha256:[0-9a-f]{64}$/;
 /** What a recipe's dispatch is eligible on: today only electroencephalography (EEG) datasets. */
 export type RecipeEligibility = "eeg";
 
+/**
+ * What a recipe reads: `bids`, the dataset's own files bound read-only at `/data/<id>` (the launcher
+ * stages them), or `zarr`, the dataset's Zarr serving copy streamed over HTTPS from `--zarr-base`, with
+ * no dataset staged (portable compute, plan D12).
+ */
+export type RecipeInput = "bids" | "zarr";
+
+/**
+ * Who may run a recipe: Tapis on an allocation, or a runner that polls NEMAR (ADR 0121). These are the
+ * words of `COMPUTE_EXECUTORS` in `./compute-state.ts`, repeated here because this module imports
+ * nothing; a test holds the two lists together.
+ */
+export type RecipeExecutor = "tapis" | "runner";
+
 export interface ComputeRecipe {
   /** The recipe's name, as `nemar-recipe run <name>` takes it. */
   name: string;
@@ -69,6 +90,10 @@ export interface ComputeRecipe {
   memoryMb?: number;
   gpus: number;
   minutes: number;
+  /** What the recipe reads; a `zarr` recipe is dispatched with no dataset staged and a source commit. */
+  input: RecipeInput;
+  /** The executors the recipe may be dispatched to; a dispatch to another is refused. */
+  executors: readonly RecipeExecutor[];
   /** The daily dispatcher dispatches a recipe only while this is true. */
   autoDispatch: boolean;
   /**
@@ -97,7 +122,29 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     memoryMb: 16384,
     gpus: 0,
     minutes: 360,
+    input: "bids",
+    executors: Object.freeze(["tapis"] as const),
     autoDispatch: true,
+    eligibility: "eeg",
+  }),
+  // A transition name (plan D12): nemar-floor's chain over the Zarr serving copy, on a runner. The
+  // partition is a SIZING LABEL only (ADR 0121, decision 6): `shared`'s ceilings apply, nothing is
+  // submitted to it and no service unit is estimated. Step Q0 folds it into `nemar-floor`.
+  Object.freeze({
+    name: "nemar-floor-zarr",
+    version: "1.0.0",
+    appId: "nemar-launch",
+    appVersion: "1.0.0",
+    engine: "eegprep@0.5.0",
+    partition: "shared",
+    nodes: 1,
+    cores: 4,
+    memoryMb: 16384,
+    gpus: 0,
+    minutes: 120,
+    input: "zarr",
+    executors: Object.freeze(["runner"] as const),
+    autoDispatch: false,
     eligibility: "eeg",
   }),
   Object.freeze({
@@ -111,6 +158,8 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     cores: 10,
     gpus: 1,
     minutes: 720,
+    input: "bids",
+    executors: Object.freeze(["tapis"] as const),
     autoDispatch: false,
     placeholder: true,
     eligibility: "eeg",
@@ -172,6 +221,53 @@ export function recipeArguments(input: {
     input.tag,
     RECIPE_IMAGE_DIGEST_FLAG,
     input.imageDigest,
+  ];
+}
+
+/** The origin a Zarr-input recipe reads, and the one network origin it may open (plan D12). */
+export const RECIPE_ZARR_BASE = "https://zarr.nemar.org";
+
+/** The flag that carries the commit of the dataset repository the Zarr serving copy was built from. */
+export const RECIPE_SOURCE_COMMIT_FLAG = "--source-commit";
+
+const SOURCE_COMMIT_RE = /^[0-9a-f]{40}$/;
+
+/** Is this a full commit id: 40 lowercase hex digits. */
+export const isSourceCommit = (value: unknown): value is string =>
+  typeof value === "string" && SOURCE_COMMIT_RE.test(value);
+
+/**
+ * The arguments of a Zarr-input recipe job over one dataset version: no dataset directory (nothing is
+ * staged), the product directory, the identity the recipe must not guess, the commit the serving copy is
+ * said to describe, the image digest, and the one origin the recipe may read. The order is part of the
+ * contract (the job's `spec.json` records it). A commit that is not 40 lowercase hex digits is a
+ * programming error, never passed on.
+ */
+export function recipeZarrArguments(input: {
+  datasetId: string;
+  /** The data-plane tag of the version (`v1.0.2` or `latest`). */
+  tag: string;
+  /** The commit passed as `--source-commit`: 40 lowercase hex digits. */
+  sourceCommit: string;
+  /** The image digest, `sha256:<64 hex>`. */
+  imageDigest: string;
+}): string[] {
+  if (!isSourceCommit(input.sourceCommit)) {
+    throw new RangeError("a source commit is 40 lowercase hex digits");
+  }
+  return [
+    "--out",
+    RECIPE_PRODUCT_DIR,
+    "--dataset-id",
+    input.datasetId,
+    "--dataset-version",
+    input.tag,
+    RECIPE_SOURCE_COMMIT_FLAG,
+    input.sourceCommit,
+    RECIPE_IMAGE_DIGEST_FLAG,
+    input.imageDigest,
+    "--zarr-base",
+    RECIPE_ZARR_BASE,
   ];
 }
 
