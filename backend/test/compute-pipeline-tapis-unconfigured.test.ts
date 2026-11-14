@@ -273,7 +273,7 @@ describe("(d) G4: the daily dispatcher", () => {
     expect(await snapshot(env)).toEqual(before);
   });
 
-  test("a second tick does the same: no job is made, so none waits for ever", async () => {
+  test("a second tick does the same: no job is made, so none waits forever", async () => {
     const env = fx.env({ ...NO_TAPIS, COMPUTE_PIPELINES_DISPATCH_ENABLED: "1" });
     await world(env, [FIRST]);
     const before = await snapshot(env);
