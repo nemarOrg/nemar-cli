@@ -27,17 +27,19 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
    The same workflow converts the image to a SIF, pushes it to the GitHub Container Registry as an OCI artifact tagged `sha256-<hex of the image digest>`, and signs it under the same identity.
    A machine that lacks `<hex>.sif` pulls that artifact and never builds one.
    As ADR 0118 decision 14 says, the file's name is what ties it to the digest; neither the launcher nor this ADR claims the file's content was verified until a runner checks the signature.
-4. **Apptainer is primary where it is installed, and Docker or Podman is the second runtime.**
+4. **Apptainer is primary where it is installed, and Docker is the supported second engine.**
    Apptainer needs no daemon and no root, and the launcher's CI already runs it.
-   Some lab machines have only Docker until Apptainer is installed, which is an owner decision, so the first runs use the second runtime.
-   Under Docker or Podman the runtime pulls `image.uri` by digest and verifies it on pull, so `NEMAR_SIF_ROOT` is not required there; this changes decision 14's "required, the launcher has no fallback" for those two runtimes only.
-5. **The second runtime runs under pinned isolation flags and a limits rule.**
+   Some lab machines have only Docker until Apptainer is installed, which is an owner decision, so the first runs use Docker.
+   Under Docker the engine pulls `image.uri` by digest and verifies it on pull, so `NEMAR_SIF_ROOT` is not required there; this changes decision 14's "required, the launcher has no fallback" for Docker only.
+5. **Docker runs under pinned isolation flags and a limits rule.**
    The flags (dropped capabilities, no new privileges, a read-only root, the invoking user's ids, exactly the four binds) are in the launcher docs.
    Docker gets `--cpus` and `--memory` on every run.
    Apptainer gets them only when the runner's `doctor` has proved cgroup delegation (`NEMAR_ENFORCE_LIMITS=1`); otherwise the runner's own watchdog enforces wall time and resident memory and reports that mode.
-6. **A rootful `docker` group is allowed only on a single-tenant lab machine recorded in the gated systems inventory.**
-   Membership of that group is root-equivalent on its host, whoever the user is.
-   On any shared or multi-user host the second runtime must be rootless, or the host is not a runner.
+6. **Docker is rootful only on a single-tenant lab machine recorded in the gated systems inventory, and Podman is unsupported.**
+   Membership of the `docker` group is root-equivalent on its host, whoever the user is.
+   Podman is unsupported until it is verified on a real host: its site-wide `containers.conf` volumes and devices and its `mounts.conf` entries reach every container, and the launcher can neither disable nor detect them.
+   The launcher refuses it.
+   On a shared host, where only rootless engines are allowed, Apptainer is therefore the only engine today.
 7. **An operator-built image is unsigned and must say so.**
    Its source commit and image id are written into a label, a result that used it is labeled "operator-built, unsigned", and it is never presented as built in CI.
    Verifying a signature before first use is a runner feature added later; until then a runner runs the digest the Worker names, unverified.
@@ -45,10 +47,12 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
 ## Consequences
 
 - A result can name one digest that either runtime ran, so a workstation run and a cluster run are comparable by construction.
-- Apptainer is the target runtime, not the first one: the first runs are on the second runtime, with its root-equivalence and without a cgroup guarantee for Apptainer until delegation is proved.
+- Apptainer is the target runtime, not the first one: the first runs are on Docker, with its root-equivalence and without a cgroup guarantee for Apptainer until delegation is proved.
 - A rootful daemon's group is the only guard on its host, so a new machine needs an owner decision and an inventory record, not a configuration change.
 - Signing only from `main` or a tag means a pre-merge image cannot verify; a demo before a merge uses the labeled operator-built path.
-- Two runtimes double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is neither `docker` nor `podman`, and the Apptainer path stays.
+- Two engines double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is not `docker`, and the Apptainer path stays.
+- Lifting the Podman refusal is a later step: inspect a container's mounts and devices against the declared binds on a real rootless Podman host.
+  A Docker-only demo machine is unaffected.
 
 ## Alternatives considered
 
