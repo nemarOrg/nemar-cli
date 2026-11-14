@@ -520,6 +520,9 @@ export interface ComputePipelineRunRequest {
  * is refused with is one of the ledger's (`COMPUTE_REFUSAL_CODES`) and keeps the status
  * `COMPUTE_REFUSAL_STATUS` gives it, so no status is declared twice.
  *  - `runners_disabled`: a runner run while the runners switch is off (503, the runner protocol's status).
+ *  - `tapis_unconfigured`: a Tapis-executor run while the Worker has no usable Tapis configuration (503).
+ *    It is refused before anything is written, so no hold waits for a submit that cannot happen; it is
+ *    the same for every dataset, recipe and pool, so it stops a run over the queue and ends the daily one.
  *  - `create_failed`: the job could not be written (502); `run_failed`: the run stopped on an
  *    unexpected error (500), a platform fault and not a refusal of the request.
  *  - `daily_cap_reached`: NEMAR's pipelines have made as many jobs today as the owner allows (409). It
@@ -551,6 +554,12 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   zarr_source_unverifiable: 503,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
+  /**
+   * A Tapis-executor run (`nemar-floor`, one dataset or `eligible`, from an administrator, the daily
+   * dispatcher or any other caller) while the Worker has no usable Tapis configuration: refused before any
+   * stamp, hold, ledger entry, job, record or audit row is written, and nothing reaches a tenant.
+   */
+  tapis_unconfigured: 503,
   daily_cap_reached: 409,
   create_failed: 502,
   run_failed: 500,

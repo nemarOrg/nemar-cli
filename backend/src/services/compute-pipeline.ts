@@ -78,7 +78,11 @@ import {
   RUNNER_LIVE_JOBS_SQL,
   createJob,
 } from "./compute-jobs.js";
-import { type SubmitOutcome, submitComputeJob } from "./compute-lifecycle.js";
+import {
+  type SubmitOutcome,
+  submitComputeJob,
+  tapisSubmitConfigured,
+} from "./compute-lifecycle.js";
 import {
   NEWEST_VERSION_SQL,
   PIPELINE_ELIGIBLE_SQL,
@@ -201,6 +205,7 @@ export type PipelineRefusal =
   | "recipe_not_automatic"
   | "recipe_placeholder"
   | "runners_disabled"
+  | "tapis_unconfigured"
   | "registry_drift"
   | "daily_cap_reached"
   | "run_failed"
@@ -627,6 +632,12 @@ export async function dispatchPipelineJob(
   }
   if (executor === "runner" && !computeRunnersEnabled(env)) {
     return fail("runners_disabled", datasetId);
+  }
+  // A Tapis job is made only where it can be submitted: with no usable Tapis configuration the hold, the
+  // stamp and the job would wait for a submit that cannot happen, and nothing but a cancel would end them.
+  // Before every read of the dataset and every write, for every caller (the route, the queue, the cron).
+  if (executor === "tapis" && !tapisSubmitConfigured(env)) {
+    return fail("tapis_unconfigured", datasetId);
   }
   // The registry names a tuple that a finished result has shown is not what runs: nothing is claimed.
   if (await tupleHeld(db, recipe)) return fail("registry_drift", datasetId);
@@ -1576,6 +1587,8 @@ const STOPS_A_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusal>([
   "compute_disabled",
   "runtime_unavailable",
   "pipelines_account_missing",
+  // The same for every dataset: no Tapis job can be submitted from this Worker.
+  "tapis_unconfigured",
   "recipe_placeholder",
   "invalid_spec",
   "insufficient_balance",

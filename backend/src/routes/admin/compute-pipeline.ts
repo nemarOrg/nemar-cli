@@ -21,9 +21,10 @@
  * key is refused, so a field a caller believes it can set is never silently dropped.
  *
  * A dry run reads only and works in every environment; it writes nothing, not even an audit row. A live
- * run refuses `compute_disabled` unless compute is on, and is audited as `compute.pipeline.run` with
- * counts and fixed words (never a path, a name or a value). The stamps are synced before every run and
- * every status read. Every refusal is `{ error: <sentence>, code: <word> }`; an invalid body names the
+ * run refuses `compute_disabled` unless compute is on, and a live Tapis run refuses `tapis_unconfigured` while
+ * the Worker has no usable Tapis configuration; both are answered before anything is written. A run that goes
+ * ahead is audited as `compute.pipeline.run` with counts and fixed words (never a path, a name or a value).
+ * The stamps are synced before every run and every status read. Every refusal is `{ error: <sentence>, code: <word> }`; an invalid body names the
  * fields and never echoes a value. The routes sit behind the admin router's middleware (authentication,
  * the admin role, the cookie-origin guard). Nothing here touches GitHub or sends mail.
  */
@@ -49,6 +50,7 @@ import {
   COMPUTE_DATASET_VERSION_RE,
 } from "../../../../shared/contract/compute.js";
 import { AUDIT_LOG_INSERT_SQL } from "../../db/audit-log.js";
+import { tapisSubmitConfigured } from "../../services/compute-lifecycle.js";
 import {
   type DispatchResult,
   type PipelineRefusal,
@@ -75,6 +77,8 @@ const SENTENCES = {
   recipe_not_automatic: "That recipe is not run automatically.",
   recipe_placeholder: "That recipe is a placeholder and cannot be run.",
   runners_disabled: "Runners are not switched on.",
+  tapis_unconfigured:
+    "Tapis is not configured on this Worker, so a Tapis job cannot be submitted; nothing was written.",
   registry_drift:
     "A finished run reported another recipe version or engine than the registry names, so the recipe is held.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
@@ -319,6 +323,12 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         return c.json({ ...dry, ok: true, dry_run: true });
       }
       if (!computeEnabled(c.env)) return refuse(c, "compute_disabled");
+      // A Tapis run on a Worker that cannot submit to Tapis is refused here, as `compute_disabled` is, before
+      // the stamp sync, the dispatch and the audit row; `dispatchPipelineJob` holds the same line for every
+      // other caller. A runner run never asks, and a dry run is answered above.
+      if (executor === "tapis" && !tapisSubmitConfigured(c.env)) {
+        return refuse(c, "tapis_unconfigured");
+      }
       const actor = { kind: "admin", userId: c.get("user").id } as const;
 
       if (body.dataset !== undefined) {
