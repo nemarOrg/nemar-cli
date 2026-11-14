@@ -324,7 +324,12 @@ interface Uploaded {
  */
 async function uploadAs(
   entry: Claimed,
-  o: { lease?: string | null; files?: Array<{ path: string; content: string }> } = {},
+  o: {
+    lease?: string | null;
+    files?: Array<{ path: string; content: string }>;
+    /** Declare and upload, but never call outputs-complete (a runner that went silent first). */
+    skipComplete?: boolean;
+  } = {},
 ): Promise<Uploaded> {
   const decoded = decodeLaunchSpecEnv(entry.launch_spec_env);
   if (!decoded.ok) throw new Error("the launcher would refuse the launch specification");
@@ -401,6 +406,7 @@ async function uploadAs(
   } else {
     await outputsRes.text();
   }
+  if (o.skipComplete) return result;
   const completeRes = await fetch(`${spec.api_base}/compute/jobs/${entry.id}/outputs/complete`, {
     method: "POST",
     headers,
@@ -1475,11 +1481,12 @@ function hookD1(d1: D1Database, match: string, fn: () => Promise<void>): D1Datab
 }
 
 /** The other request: the job's lease expires, the sweep releases it, and `thief` claims it under a NEW lease. */
-async function stealLease(jobId: string, thief: Runner): Promise<void> {
+async function stealLease(jobId: string, thief: Runner): Promise<Claimed> {
   await age(jobId, "lease_expires_at", "-1 minute");
   await sweepRunnerLeases(env);
   const taken = await claimRunnerJobs(env, thief.principal, 1);
   expect(taken.jobs.map((j) => j.id)).toEqual([jobId]);
+  return taken.jobs[0] as unknown as Claimed;
 }
 
 const completeBody = (jobId: string, leaseId: string, over: Record<string, unknown> = {}) => ({
@@ -1561,14 +1568,14 @@ describe("at most once acceptance, under a race", () => {
     });
   });
 
-  test("outputs-complete under a lease that was replaced between the route's check and the write changes nothing (MUTATION: drop the lease term of COMPLETE_OUTPUTS_SQL)", async () => {
+  test("outputs-complete under a lease a revoke cleared between the route's check and the write changes nothing (MUTATION: drop the lease term of COMPLETE_OUTPUTS_SQL)", async () => {
     const { r, jobId, entry } = await claimed();
     const saved = env;
     env = {
       ...saved,
       DB: hookD1(saved.DB, "SET outputs_completed_at", async () => {
         env = saved;
-        await stealLease(jobId, r);
+        expect((await revokeRunner(r.id)).status).toBe(200);
       }),
     };
     try {
@@ -1580,17 +1587,18 @@ describe("at most once acceptance, under a race", () => {
     }
     const job = await row(jobId);
     expect(job.outputs_completed_at).toBeNull();
-    expect(job.lease_id).not.toBe(entry.lease_id);
+    expect(job.lease_id).toBeNull();
   });
 
   test("the claim of the declared bytes under a replaced lease changes nothing (MUTATION: drop the lease term of CLAIM_RESULTS_BYTES_SQL)", async () => {
     const { r, jobId, entry } = await claimed();
     const saved = env;
+    let renewed: Claimed | null = null;
     env = {
       ...saved,
       DB: hookD1(saved.DB, "SET results_bytes", async () => {
         env = saved;
-        await stealLease(jobId, r);
+        renewed = await stealLease(jobId, r);
       }),
     };
     try {
@@ -1602,6 +1610,12 @@ describe("at most once acceptance, under a race", () => {
     const job = await row(jobId);
     expect(job.results_bytes).toBeNull();
     expect(job.lease_id).not.toBe(entry.lease_id);
+    // The stale request recorded NOTHING on the new holder's job (a refusal written under its lease would
+    // fail its own outputs call and end the job result_upload_failed): MUTATION: record under the row's lease.
+    expect(job.failure_detail).toBeNull();
+    const holder = renewed as unknown as Claimed;
+    expect((await uploadAs(holder)).outputs).toBe(200);
+    expect((await row(jobId)).state).toBe("created");
   });
 
   test("a launch digest written under a lease that was replaced is refused, and that claim is not answered (MUTATION: drop the lease term of LAUNCH_DIGEST_UNDER_LEASE_SQL)", async () => {
@@ -1652,8 +1666,23 @@ describe("a claim never burns a job's claims for a fault of NEMAR's", () => {
     } as unknown as Bindings;
     expect((await claimRunnerJobs(watching, r.principal, 3)).jobs).toEqual([]);
     expect(tried).toBe(false);
+    // Nor with no runtime image: a poll that claimed one job only to give it back would still be a write.
+    let triedNoImage = false;
+    const noImage = {
+      ...env,
+      COMPUTE_RUNTIME_IMAGE: undefined,
+      DB: hookD1(env.DB, "claim_attempts + 1", async () => {
+        triedNoImage = true;
+      }),
+    } as unknown as Bindings;
+    expect((await claimRunnerJobs(noImage, r.principal, 3)).jobs).toEqual([]);
+    expect(triedNoImage).toBe(false);
     // The same holds for the secret and the records bucket, through the service.
-    for (const gap of [{ PRESCREEN_CALLBACK_SECRET: undefined }, { COMPUTE_RECORDS: undefined }]) {
+    for (const gap of [
+      { PRESCREEN_CALLBACK_SECRET: undefined },
+      { COMPUTE_RECORDS: undefined },
+      { COMPUTE_RUNTIME_IMAGE: undefined },
+    ]) {
       expect((await claimRunnerJobs({ ...env, ...gap } as Bindings, r.principal, 3)).jobs).toEqual(
         [],
       );
@@ -1662,43 +1691,78 @@ describe("a claim never burns a job's claims for a fault of NEMAR's", () => {
     expect((await claimOne(r)).id).toBe(jobId);
   });
 
-  test("a records bucket that throws after the claim committed gives the claim back uncounted, and the jobs that did build are answered (MUTATION: drop the give-back, or its counter)", async () => {
+  test("a records bucket that throws for one job COUNTS its claim, goes on to the next job, and ends the poisoned row claims_exhausted after three (MUTATION: uncount the give-back, or stop at the first throw)", async () => {
     const r = await runner();
     const [one, two, three] = [await dispatch(), await dispatch(), await dispatch()] as [
       string,
       string,
       string,
     ];
-    for (const [i, id] of [one, two, three].entries())
+    for (const [i, id] of [one, two, three].entries()) {
       await age(id, "created_at", `-${3 - i} minutes`);
+    }
     const real = fx.harness.records;
     const down = {
       put: (k: string, v: unknown, o?: unknown) =>
         real.put(k, v as ArrayBuffer, o as Parameters<R2Bucket["put"]>[2]),
       get: async (key: string) => {
-        if (key === recordKey(two, "spec.json")) throw new Error("the store is down");
+        if (key === recordKey(two, "spec.json")) throw new Error("the store is down for this one");
         return real.get(key);
       },
       head: (k: string) => real.head(k),
       delete: (k: string) => real.delete(k),
       list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
     } as unknown as R2Bucket;
-    const answered = await claimRunnerJobs({ ...env, COMPUTE_RECORDS: down }, r.principal, 3);
+    const broken = { ...env, COMPUTE_RECORDS: down };
+    // Call 1: the first job is answered; the poisoned one is claimed twice more (counted) and given back each time.
+    const first = await claimRunnerJobs(broken, r.principal, 3);
+    expect(first.jobs.map((j) => j.id)).toEqual([one]);
+    expect(await row(two)).toMatchObject({ state: "created", runner_id: null, claim_attempts: 2 });
+    // Call 2: its third claim is counted too, and then the NEXT job is claimed (the pool is not stalled).
+    const second = await claimRunnerJobs(broken, r.principal, 3);
+    expect(second.jobs.map((j) => j.id)).toEqual([three]);
+    expect(await row(two)).toMatchObject({ claim_attempts: 3, runner_id: null });
+    // And the sweep ends it: three counted claims.
+    await sweepRunnerLeases(env);
+    expect(await row(two)).toMatchObject({
+      state: "failed",
+      failure_code: "runner_lost",
+      failure_detail: "claims_exhausted",
+    });
+  });
+
+  test("a database that fails the second claim statement still answers the job already built, and does not throw (MUTATION: drop the try around the claim statement)", async () => {
+    const r = await runner();
+    const [one, two] = [await dispatch(), await dispatch()] as [string, string];
+    await age(one, "created_at", "-2 minutes");
+    await age(two, "created_at", "-1 minutes");
+    let n = 0;
+    const real = env.DB;
+    const flaky = {
+      prepare(text: string) {
+        const st = real.prepare(text) as unknown as D1Statement;
+        const api = {
+          bind(...p: unknown[]) {
+            st.bind(...p);
+            return api;
+          },
+          async run() {
+            if (text.includes("claim_attempts + 1") && ++n === 2)
+              throw new Error("the database failed");
+            return st.run();
+          },
+          first: () => st.first(),
+          all: () => st.all(),
+          __execForBatch: () => st.__execForBatch(),
+        };
+        return api;
+      },
+      batch: (stmts: unknown[]) =>
+        (real as unknown as { batch(s: unknown[]): unknown }).batch(stmts),
+    } as unknown as D1Database;
+    const answered = await claimRunnerJobs({ ...env, DB: flaky }, r.principal, 3);
     expect(answered.jobs.map((j) => j.id)).toEqual([one]);
-    expect(await row(one)).toMatchObject({ runner_id: r.id, claim_attempts: 1 });
-    // Given back, and uncounted; the third was never asked for.
-    for (const id of [two, three]) {
-      expect(await row(id)).toMatchObject({
-        state: "created",
-        runner_id: null,
-        lease_id: null,
-        claim_attempts: 0,
-      });
-    }
-    // The store is back: both are claimed, once each.
-    const rest = await claimRunnerJobs(env, r.principal, 3);
-    expect(rest.jobs.map((j) => j.id)).toEqual([two, three]);
-    expect((await row(two)).claim_attempts).toBe(1);
+    expect((await row(two)).runner_id).toBeNull();
   });
 
   test("a specification that can never be built ends the job failed launch_failed (invalid_spec), settled with charge 0, and the next job is still answered", async () => {
@@ -1930,5 +1994,196 @@ describe("the runner sweep ignores what is not a runner's", () => {
     expect(swept.released).toBe(0);
     expect(swept.exhausted).toBe(1);
     expect(await row(jobId)).toMatchObject({ state: "failed", failure_detail: "claims_exhausted" });
+  });
+});
+
+// --- Review round 2 ---------------------------------------------------------------------------------------------
+
+describe("the replay of records is throttled, bounded and last", () => {
+  /** Waiting rows whose records never landed (the store was down), old enough to replay. */
+  async function unwritten(n: number, minutes = 6): Promise<Array<{ jobId: string; id: string }>> {
+    const bad = { ...env, COMPUTE_RECORDS: failing(1_000_000) };
+    const made: Array<{ jobId: string; id: string }> = [];
+    for (let i = 0; i < n; i++) {
+      const id = await dataset();
+      const r = await dispatchPipelineJob(bad, {
+        recipe: "nemar-floor-zarr",
+        datasetId: id,
+        actor: { kind: "admin", userId: ids.admin },
+        executor: "runner",
+      });
+      if (!r.ok) throw new Error(`could not dispatch: ${r.code}`);
+      await age(r.jobId, "created_at", `-${minutes} minutes`);
+      made.push({ jobId: r.jobId, id });
+    }
+    return made;
+  }
+
+  test("with ten unwritten rows and the store down, a second poll within five minutes asks GitHub for nothing; five minutes later it asks again (MUTATION: drop the examined_at throttle)", async () => {
+    const rows = await unwritten(10);
+    const down = { ...env, COMPUTE_RECORDS: failing(1_000_000) };
+    github.log.length = 0;
+    const first = await sweepRunnerLeases(down);
+    const asked = github.log.length;
+    expect(asked).toBeGreaterThan(0);
+    expect(first.replayed).toBe(0);
+    await sweepRunnerLeases(down);
+    await sweepRunnerLeases(down);
+    expect(github.log.length).toBe(asked);
+    for (const { jobId } of rows) await age(jobId, "examined_at", "-6 minutes");
+    await sweepRunnerLeases(down);
+    expect(github.log.length).toBeGreaterThan(asked);
+  });
+
+  test("verifications and copies run before the replays, so a slow GitHub keeps neither from running (MUTATION: run the replays first)", async () => {
+    const { r, jobId, entry } = await claimed();
+    await heartbeat(r, jobId, entry.lease_id, "started");
+    expect((await uploadAs(entry)).complete).toBe(200);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    await unwritten(1);
+    github.stall(2500, "github");
+    let settled = false;
+    let deferred: Promise<unknown> = Promise.resolve();
+    await sweepRunnerLeases(env, env.DB, {
+      defer: (p) => {
+        deferred = p.then(() => {
+          settled = true;
+        });
+      },
+      replayBoundMs: 5000,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    // The replay still waits on GitHub; the verification and the copy are done.
+    expect(settled).toBe(false);
+    const job = await row(jobId);
+    expect(job.state).toBe("finished");
+    expect(job.result_records_at).not.toBeNull();
+    await deferred;
+  });
+
+  test("one replay is bounded: a GitHub that stalls for seconds holds the slow phase for the bound only (MUTATION: drop the bound)", async () => {
+    await unwritten(1);
+    github.stall(2500, "github");
+    let deferred: Promise<unknown> = Promise.resolve();
+    await sweepRunnerLeases(env, env.DB, {
+      defer: (p) => {
+        deferred = p;
+      },
+      replayBoundMs: 200,
+    });
+    const started = Date.now();
+    await deferred;
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  test("no replay starts after the phase's allowance (MUTATION: drop the allowance)", async () => {
+    await unwritten(3);
+    github.stall(400, "github");
+    let deferred: Promise<unknown> = Promise.resolve();
+    github.log.length = 0;
+    await sweepRunnerLeases(env, env.DB, {
+      defer: (p) => {
+        deferred = p;
+      },
+      replayBoundMs: 5000,
+      replayPhaseMs: 100,
+    });
+    await deferred;
+    // The first replay runs (the allowance is checked before each one after the first has started the clock), the rest do not.
+    const rows = github.log.filter((l) => l.path.includes("/commits/")).length;
+    expect(rows).toBeLessThanOrEqual(1);
+  });
+
+  test("a row aged past the window whose replay now succeeds is replayed, not given up on, and no records are written onto a failed row (MUTATION: give up before the replay)", async () => {
+    const [stuck] = await unwritten(1, 61);
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.replayed).toBe(1);
+    expect(swept.records_lost).toBe(0);
+    const job = await row(stuck?.jobId as string);
+    expect(job.state).toBe("created");
+    expect(job.records_written_at).not.toBeNull();
+  });
+
+  test("a row aged past the window whose source cannot be reached is not given up on: an unreachable source is not a mismatch (MUTATION: treat unreachable as a mismatch)", async () => {
+    const [stuck] = await unwritten(1, 61);
+    github.tag(stuck?.id as string, "v1.0.0", { http: 500 });
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.records_lost).toBe(0);
+    expect(swept.replayed).toBe(0);
+    expect((await row(stuck?.jobId as string)).state).toBe("created");
+  });
+
+  test("a row aged past the window whose source no longer says what was recorded is given up on, in the same call as its replay", async () => {
+    const [stuck] = await unwritten(1, 61);
+    github.tag(stuck?.id as string, "v1.0.0", "f".repeat(40));
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.records_lost).toBe(1);
+    expect(swept.replayed).toBe(0);
+    expect(await row(stuck?.jobId as string)).toMatchObject({
+      state: "failed",
+      failure_code: "records_unavailable",
+    });
+  });
+});
+
+describe("a claim whose outputs were declared is never released", () => {
+  test("declared but not completed: not released, unreported keeping its lease, and given up on after the wait (MUTATION: drop results_bytes IS NULL from the release)", async () => {
+    const { jobId, entry } = await claimed();
+    expect((await uploadAs(entry, { skipComplete: true })).outputs).toBe(200);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.released).toBe(0);
+    expect(await row(jobId)).toMatchObject({
+      state: "unreported",
+      lease_id: entry.lease_id,
+      claim_attempts: 1,
+    });
+    await age(jobId, "lease_expires_at", "-61 minutes");
+    await sweepRunnerLeases(env);
+    expect(await row(jobId)).toMatchObject({ state: "failed", failure_detail: "lease_expired" });
+  });
+
+  test("declared on the last claim: unreported too, not failed claims_exhausted (MUTATION: drop the results_bytes term of the exhausted rows)", async () => {
+    const { jobId, entry } = await claimed();
+    expect((await uploadAs(entry, { skipComplete: true })).outputs).toBe(200);
+    await sql("UPDATE compute_jobs SET claim_attempts = 3 WHERE id = ?1", jobId);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.exhausted).toBe(0);
+    expect((await row(jobId)).state).toBe("unreported");
+  });
+});
+
+describe("a completion that lost its commit to a heartbeat", () => {
+  test("is committed again from the row read anew, and answers the end state (MUTATION: no second commit)", async () => {
+    const { r, jobId, entry } = await claimed();
+    await heartbeat(r, jobId, entry.lease_id, "started");
+    expect((await row(jobId)).state).toBe("running");
+    const hooked = {
+      ...env,
+      DB: hookD1(env.DB, "failure_detail = COALESCE(?5", async () => {
+        expect((await heartbeat(r, jobId, entry.lease_id, "uploading")).status).toBe(200);
+      }),
+    };
+    const res = await completeRunnerJob(
+      hooked,
+      r.principal,
+      completeBody(jobId, entry.lease_id) as never,
+    );
+    expect(res).toMatchObject({ ok: true, state: "failed" });
+    const job = await row(jobId);
+    expect(job).toMatchObject({
+      state: "failed",
+      failure_code: "runtime_error",
+      runner_wall_seconds: 77,
+    });
+    expect(job.settled_final_at).not.toBeNull();
+  });
+});
+
+describe("the lease statement is chosen fail-closed (a source search)", () => {
+  test("commitTerminal carries the lease for anything that is not a Tapis row (MUTATION: === runner)", () => {
+    const src = readFileSync(join(import.meta.dir, "../src/services/compute-lifecycle.ts"), "utf8");
+    expect(src).toContain('const runnerRow = job.executor !== "tapis";');
   });
 });
