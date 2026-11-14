@@ -335,6 +335,7 @@ describe("the daily dispatcher ends its whole run on platform_busy", () => {
       "compute_disabled",
       "runtime_unavailable",
       "pipelines_account_missing",
+      "tapis_unconfigured",
     ]) {
       expect(ENDS_THE_RUN.has(word as never), word).toBe(true);
     }

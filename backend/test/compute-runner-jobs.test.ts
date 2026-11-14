@@ -834,6 +834,27 @@ describe("a runner job through the admin route", () => {
     expect(fx.tapis.log).toEqual([]);
   });
 
+  test("needs no Tapis: with no Tapis credential the run is 201 waiting_for_runner, with a runner job row and no ledger row (S3c: the Tapis check is the Tapis executor's only)", async () => {
+    const env = runnerEnv({
+      TAPIS_USERNAME: undefined,
+      TAPIS_PASSWORD: undefined,
+      TAPIS_SERVICE_TOKEN: undefined,
+    });
+    await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000201");
+    const ledger = await n(env, "compute_ledger");
+    const r = await runRunner("nm000201", env);
+    expect(r.status).toBe(201);
+    expect(r.body.results[0]).toMatchObject({
+      dataset_id: "nm000201",
+      ok: true,
+      submit: "waiting_for_runner",
+    });
+    expect(await n(env, "compute_jobs", "executor = 'runner' AND state = 'created'")).toBe(1);
+    expect(await n(env, "compute_ledger")).toBe(ledger);
+    expect(fx.tapis.log).toEqual([]);
+  });
+
   test("records the specification: no dataset staged, the exact argument vector, the digest the row holds (MUTATION: stage the dataset)", async () => {
     const env = runnerEnv();
     await seedPipelinesAccount(env);
@@ -1017,10 +1038,12 @@ describe("a runner job through the admin route", () => {
       live_left: expect.any(Number),
       tenant_left: expect.any(Number),
     });
+    // S3c: the one key a Tapis dry run gained, and a runner's dry run has none of it.
     expect(Object.keys(r.body.config).sort()).toEqual([
       "compute_enabled",
       "pipelines_account",
       "runtime_image",
+      "tapis_configured",
     ]);
   });
 });

@@ -356,6 +356,7 @@ describe("compute-admin: every exported schema is open", () => {
     // `run_failed` is a word a run stops with, so it has a status, and not the 422 a missing one used to get.
     expect(table.run_failed).toBe(500);
     expect(table.registry_drift).toBe(409);
+    expect(table.tapis_unconfigured).toBe(503);
     expect(table.daily_cap_reached).toBe(409);
     expect(table.version_not_found).toBe(404);
     expect(Object.keys(table).length).toBe(
