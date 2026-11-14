@@ -76,6 +76,16 @@ const NOTE_MAX = 500;
 
 const su = (milli: number) => formatSu(milli);
 
+/** What an attention count means, for the words that need a sentence (fixed text: the Worker's value is never echoed). */
+const ATTENTION_HINTS: Readonly<Record<string, string>> = {
+  policy_unreadable:
+    " (the stored owner policy cannot be read: every hold, run and limit fails closed until a valid version is written)",
+  runner_cancel_pending_failed:
+    " (a runner job's recorded cancel is over an hour old and its runner has not taken it: revoke the runner, or the lease sweep ends it once the lease is not current)",
+  runner_copy_abandoned:
+    " (a terminal runner job's launcher files were never copied into the records and no longer will be)",
+};
+
 /** One pool on one line, in SU. Everything the Worker sent is made plain first. */
 function poolLine(p: ComputePoolView): string {
   const who = `${plain(p.holder_kind)} ${plain(p.holder_ref)}`;
@@ -654,13 +664,7 @@ function printStatus(res: ComputeStatusResponse): void {
   }
   for (const [word, n] of Object.entries(res.attention ?? {})) {
     if (typeof n === "number" && n > 0) {
-      say(
-        `Attention: ${plain(word)} ${n}${
-          word === "policy_unreadable"
-            ? " (the stored owner policy cannot be read: every hold, run and limit fails closed until a valid version is written)"
-            : ""
-        }`,
-      );
+      say(`Attention: ${plain(word)} ${n}${ATTENTION_HINTS[word] ?? ""}`);
     }
   }
   say("Runtime image");

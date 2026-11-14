@@ -93,8 +93,15 @@ describe("runner route inventory", () => {
   };
 
   test("the route table is exactly the pinned one", () => {
-    expect(tableOfRunners()).toEqual({ "POST /token": 1, "GET /me": 2 });
-    expect(computeRunnerRoutes.routes.length).toBe(3);
+    expect(tableOfRunners()).toEqual({
+      "POST /token": 1,
+      "GET /me": 2,
+      // DM-07: the queue's three calls, each behind `runnerAccess` and then its handler.
+      "POST /claim": 2,
+      "POST /heartbeat": 2,
+      "POST /complete": 2,
+    });
+    expect(computeRunnerRoutes.routes.length).toBe(9);
   });
 
   test("no router-level middleware exists, the exchange carries none, and /me carries runnerAccess only", () => {
@@ -106,6 +113,9 @@ describe("runner route inventory", () => {
     expect(handlersOf("/token")).toHaveLength(1);
     expect(handlersOf("/token")).not.toContain("runnerAccess");
     expect(handlersOf("/me")).toEqual(["runnerAccess", "handler"]);
+    for (const path of ["/claim", "/heartbeat", "/complete"]) {
+      expect(handlersOf(path)).toEqual(["runnerAccess", "handler"]);
+    }
   });
 
   test("neither a person's authentication nor a launcher's token guards a runner route", () => {
