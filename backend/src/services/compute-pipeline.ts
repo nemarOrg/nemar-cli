@@ -49,6 +49,7 @@ import {
   recipeCommand,
   recipeRequiredOutputs,
   recipeZarrArguments,
+  recipeZarrBase,
 } from "../../../shared/compute-recipes.js";
 import { PLATFORM_FAILURE_CODES } from "../../../shared/compute-state.js";
 import {
@@ -98,6 +99,7 @@ import { sha256Hex } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
+import { isNonProductionEnv } from "./environment.js";
 import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
@@ -353,6 +355,20 @@ export async function pipelinesAccountId(db: D1Database): Promise<number | null>
 
 // --- The job a recipe is ----------------------------------------------------------------------------
 
+/**
+ * The origin a Zarr recipe job reads in this environment (portable compute, plan S1 and D12): outside
+ * production the Worker's own `ZARR_HOSTNAME` (a staging fixture is read from the staging copy), and in
+ * production, for an unset or misspelled `ENVIRONMENT`, and for a host name that is not a bare lower-case
+ * one, the production host. The classification is `isNonProductionEnv`'s, the one the eligibility predicate
+ * uses.
+ */
+export function pipelineZarrBase(env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">): string {
+  return recipeZarrBase({
+    nonProduction: isNonProductionEnv(env),
+    zarrHostname: env.ZARR_HOSTNAME,
+  });
+}
+
 /** The partition of a recipe, as the type `JobSpecSchema` takes. */
 const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName;
 
@@ -364,8 +380,9 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  *
  * A `zarr` recipe stages no dataset (`datasets: []`): its arguments carry the commit attestation that
  * `resolveRun` verified (`zarrSource`: the serving index's commit, the tag's commit, how they are equivalent
- * and the paths between them) and the one origin it may read. A `zarr` recipe with no verified attestation is
- * a programming error here, never a job.
+ * and the paths between them) and the one origin it may read, which is the ENVIRONMENT's own Zarr host
+ * ({@link pipelineZarrBase}, from `env`, never from a request or a dataset row). A `zarr` recipe with no
+ * verified attestation is a programming error here, never a job.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -375,6 +392,8 @@ export function recipeJobSpec(
     image: { ref: string; digest: string };
     /** Required for a `zarr` recipe, never read for a `bids` one. */
     zarrSource?: ZarrCommitAttestation | null;
+    /** The Worker's bindings the Zarr origin is read from; only a `zarr` recipe reads them. */
+    env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">;
   },
 ) {
   const zarr = recipe.input === "zarr";
@@ -390,6 +409,7 @@ export function recipeJobSpec(
           tag: input.tag,
           attestation: input.zarrSource as ZarrCommitAttestation,
           imageDigest: input.image.digest,
+          zarrBase: pipelineZarrBase(input.env),
         })
       : recipeArguments({
           datasetId: input.datasetId,
@@ -624,7 +644,13 @@ export async function dispatchPipelineJob(
   // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
   let spec: ReturnType<typeof recipeJobSpec>;
   try {
-    spec = recipeJobSpec(recipe, { datasetId, tag, image, zarrSource: resolved.zarrSource });
+    spec = recipeJobSpec(recipe, {
+      datasetId,
+      tag,
+      image,
+      zarrSource: resolved.zarrSource,
+      env,
+    });
   } catch (err) {
     console.error(
       `[compute-pipeline] spec_unbuildable recipe=${recipe.name} error=${err instanceof Error ? err.name : "unknown"}`,

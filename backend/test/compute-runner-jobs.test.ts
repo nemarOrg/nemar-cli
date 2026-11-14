@@ -312,6 +312,7 @@ function zarrSpec(env: Bindings, datasetId = "nm000104") {
     tag: "v1.0.0",
     image: { ref: image.ref, digest: image.digest },
     zarrSource: EXACT,
+    env,
   });
 }
 
@@ -417,6 +418,7 @@ describe("the recipe registry", () => {
         tag: "v1.0.0",
         attestation: EXACT,
         imageDigest: digest,
+        zarrBase: RECIPE_ZARR_BASE,
       }),
     ).toEqual([
       "--out",
@@ -440,7 +442,12 @@ describe("the recipe registry", () => {
   });
 
   test("a commit that is not 40 lowercase hex digits is an error, never an argument (MUTATION: drop the check)", () => {
-    const base = { datasetId: "nm000104", tag: "v1.0.0", imageDigest: `sha256:${"b".repeat(64)}` };
+    const base = {
+      datasetId: "nm000104",
+      tag: "v1.0.0",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      zarrBase: RECIPE_ZARR_BASE,
+    };
     for (const bad of [
       "",
       "abc",
@@ -463,11 +470,13 @@ describe("the recipe registry", () => {
       ref: `ghcr.io/example/nemar-python@sha256:${"b".repeat(64)}`,
       digest: `sha256:${"b".repeat(64)}`,
     };
+    const production = { ENVIRONMENT: "production" as const };
     const zarr = recipeJobSpec(findRecipe("nemar-floor-zarr") as never, {
       datasetId: "nm000104",
       tag: "v1.0.0",
       image,
       zarrSource: EXACT,
+      env: production,
     });
     expect(zarr.datasets).toEqual([]);
     expect(zarr.args).toEqual(
@@ -476,6 +485,7 @@ describe("the recipe registry", () => {
         tag: "v1.0.0",
         attestation: EXACT,
         imageDigest: image.digest,
+        zarrBase: RECIPE_ZARR_BASE,
       }),
     );
     expect(zarr.command).toEqual(["nemar-recipe", "run", "nemar-floor-zarr"]);
@@ -486,6 +496,7 @@ describe("the recipe registry", () => {
         datasetId: "nm000104",
         tag: "v1.0.0",
         image,
+        env: production,
       }),
     ).toThrow();
     const bids = recipeJobSpec(findRecipe("nemar-floor") as never, {
@@ -494,6 +505,7 @@ describe("the recipe registry", () => {
       image,
       // Never read for a BIDS recipe.
       zarrSource: EXACT,
+      env: production,
     });
     expect(bids.datasets).toEqual([{ id: "nm000104", version: "v1.0.0" }]);
     expect(bids.args).toEqual(

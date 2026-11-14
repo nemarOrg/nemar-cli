@@ -939,6 +939,7 @@ async function rebuiltSpec(
         tag: stamp.version,
         image: { ref: image.ref, digest: image.digest },
         zarrSource,
+        env,
       }),
     };
   } catch {

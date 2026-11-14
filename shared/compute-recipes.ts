@@ -228,6 +228,40 @@ export function recipeArguments(input: {
 /** The origin a Zarr-input recipe reads, and the one network origin it may open (plan D12). */
 export const RECIPE_ZARR_BASE = "https://zarr.nemar.org";
 
+/**
+ * A bare, lower-case host name: letters, digits, dots and hyphens, starting and ending with a letter or a
+ * digit. No scheme, port, path, query, user, space or upper-case letter, so `https://` plus a value that
+ * matches is an origin and nothing else.
+ */
+export const RECIPE_ZARR_HOSTNAME_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+
+/**
+ * The origin a Zarr-input recipe job is told to read (portable compute, plan S1 and D12). Production, and any
+ * configured host that is not a bare lower-case host name (or none at all), is {@link RECIPE_ZARR_BASE};
+ * outside production it is the environment's OWN serving host, `https://` plus the Worker's `ZARR_HOSTNAME`,
+ * so a staging fixture is read from the staging copy. The host comes from the Worker's configuration only,
+ * never from a request, a dataset row or an index. `nonProduction` is the Worker's own decision
+ * (`isNonProductionEnv`: only `development`, `staging` and `test`; anything else, unset included, is
+ * production): this file is import-free, so the decision is handed in, never re-derived here.
+ */
+export function recipeZarrBase(input: {
+  nonProduction: boolean;
+  zarrHostname?: string | null;
+}): string {
+  const host = input.zarrHostname;
+  if (!input.nonProduction || typeof host !== "string" || !RECIPE_ZARR_HOSTNAME_RE.test(host)) {
+    return RECIPE_ZARR_BASE;
+  }
+  return `https://${host}`;
+}
+
+/** Is this an origin {@link recipeZarrBase} can give: the production origin, or `https://` and a bare host name. */
+export const isRecipeZarrBase = (value: unknown): value is string =>
+  value === RECIPE_ZARR_BASE ||
+  (typeof value === "string" &&
+    value.startsWith("https://") &&
+    RECIPE_ZARR_HOSTNAME_RE.test(value.slice("https://".length)));
+
 /** The flag that carries the commit of the dataset repository the Zarr serving copy was built from. */
 export const RECIPE_SOURCE_COMMIT_FLAG = "--source-commit";
 /** The flag that carries the commit of the version's tag. */
@@ -263,9 +297,10 @@ export interface ZarrCommitAttestation {
  * The arguments of a Zarr-input recipe job over one dataset version: no dataset directory (nothing is
  * staged), the product directory, the identity the recipe must not guess, the commit attestation (the source
  * commit, the tag commit, the equivalence and one `--commit-delta-path` per changed path), the image digest,
- * and the one origin the recipe may read. The order is part of the contract (the job's `spec.json` records
- * it). A commit that is not 40 lowercase hex digits, or an attestation that contradicts itself, is a
- * programming error, never passed on.
+ * and the one origin the recipe may read (`zarrBase`, from {@link recipeZarrBase}: the environment's own host,
+ * never a constant here). The order is part of the contract (the job's `spec.json` records
+ * it). A commit that is not 40 lowercase hex digits, an attestation that contradicts itself, or an origin
+ * that is not one `recipeZarrBase` can give is a programming error, never passed on.
  */
 export function recipeZarrArguments(input: {
   datasetId: string;
@@ -274,8 +309,13 @@ export function recipeZarrArguments(input: {
   attestation: ZarrCommitAttestation;
   /** The image digest, `sha256:<64 hex>`. */
   imageDigest: string;
+  /** The origin the recipe reads: {@link recipeZarrBase}'s answer. */
+  zarrBase: string;
 }): string[] {
   const { sourceCommit, tagCommit, equivalence, deltaPaths } = input.attestation;
+  if (!isRecipeZarrBase(input.zarrBase)) {
+    throw new RangeError("the Zarr base is the production origin or https:// and a bare host name");
+  }
   if (!isSourceCommit(sourceCommit) || !isSourceCommit(tagCommit)) {
     throw new RangeError("a source commit and a tag commit are 40 lowercase hex digits");
   }
@@ -305,7 +345,7 @@ export function recipeZarrArguments(input: {
     RECIPE_IMAGE_DIGEST_FLAG,
     input.imageDigest,
     "--zarr-base",
-    RECIPE_ZARR_BASE,
+    input.zarrBase,
   ];
 }
 
