@@ -770,3 +770,40 @@ A tenant or partner job has a Tapis job and is always `su`, so nothing changes f
 `shared/contract/compute-runner.ts` also extends decision 10's list of modules.
 `sweepRunnerLeases` also runs on claim calls outside production; the 30-minute tick itself stays production-only, so decision 8 and the dark-switch rule of `AGENTS.md` are intact.
 The verdict of this ADR stands.
+
+## Amendment 2026-11-14: the registration block and runner-only deployments
+
+The amendment of 2026-11-04 (#2043), item 8, was written when `COMPUTE_ENABLED` could only mean a Tapis submission.
+Read literally it binds every environment and every executor, because "anywhere" has no qualifier, yet both of its conditions (the launcher's decoder, and the owner items recorded on the launcher phase's pull request) guard the Tapis go-live: registration with a tenant, and a launch specification reaching a scheduler that writes it into a file a shell sources.
+[ADR 0121](0121-a-job-names-its-executor-and-its-accounting-class-and-a-workstation-runner-pulls-its-work.md) does not mention item 8, and an agent cannot read away a sentence of an accepted ADR, so the owner amends it here.
+The owner decided on 2026-11-14 to mark Tapis as parked and to apply this text.
+"Item N" means the numbered item of THIS amendment.
+It changes no code, no switch, no wrangler file and no version.
+
+1. **Item 8 of the amendment of 2026-11-04 (#2043) is read as the Tapis go-live block.**
+   It blocks three things, in every environment: registering an application definition with a tenant, setting a Tapis credential (`TAPIS_USERNAME`, `TAPIS_PASSWORD` or `TAPIS_SERVICE_TOKEN`) in a Worker where `COMPUTE_ENABLED` is `1`, and submitting a job to a tenant.
+   Its first condition, the launcher's decoder in `nemar-process`, is met (`nemarOrg/nemar-process#10`).
+   The owner items of `nemarOrg/nemar-process#9` still block all three.
+2. **`COMPUTE_ENABLED` may be `1`, with `COMPUTE_RUNNERS_ENABLED`, in a Worker that holds no Tapis credential, for runner jobs.**
+   Every path that would reach Tapis in such a Worker answers `unconfigured`, and no job, credential or launch value is sent to a tenant.
+   A Tapis-executor pipeline run is refused with `tapis_unconfigured` (503) before any write, for every caller (step S3c of the portable compute plan, #2168), so no stamp, no job row and no ledger hold can appear that only a cancel would end.
+   A runner run and a dry run are unaffected.
+3. **Setting a Tapis credential where `COMPUTE_ENABLED` is `1` is the Tapis go-live.**
+   It needs the items of `nemarOrg/nemar-process#9` settled and every Tapis mechanic selecting `executor = 'tapis'`, the tenant sweep's tag bind included.
+   The bind (`handleUnbound` with `BIND_TAPIS_JOB_SQL`) selects no executor at the time of writing, so once Tapis is configured a Tapis job tagged `nemar_job:<a runner job's id>` could move that runner row; with no credential it is unreachable.
+4. **The item on `--no-mount hostfs` is not Tapis-only.**
+   It is the launcher's Apptainer flag set, and a runner drives the same launcher, so it applies to every Apptainer run, a runner's included.
+   The owner decided that the production runner uses Apptainer, rootless, so the first production Apptainer runner waits for that item.
+   A runner that drives Docker is not affected by it.
+5. **The Tapis go-live is parked by the owner's decision of 2026-11-14.**
+   Nothing in this amendment settles the owner items of `nemarOrg/nemar-process#9`.
+6. **The switches stay the owner's.**
+   A production switch is set in a reviewed pull request that edits the dark-switch test (`backend/test/compute-switches-flag.test.ts`), and nothing else sets one.
+   Decision 8 and the dark-switch rule of `AGENTS.md` are unchanged.
+7. **Policy keys, and the first production cap.**
+   The policy reader is as strict as the writer (the A2 amendment's item 8), so a Worker that does not know a key reads a stored policy that holds it as unreadable and fails every compute path closed (the P2 amendment's item 7).
+   No policy version holding the `tenant` or the `runners` key is stored in production until the previous production deployment reads both, so that a one-step rollback cannot land on a Worker that cannot read the policy.
+   The shipped default carries `tenant`, so a `policy show`, edit and `policy set` round trip writes it even when nobody meant to.
+   The first production runner cap stays the code default (`RUNNERS_POLICY_DEFAULT`) until a second release that carries the epic is deployed, and only then is a cap stored as `policy.runners`; the owner chose that over lowering the code default.
+8. **Eligibility has a second, non-production text.**
+   Eligibility stays one predicate written once as a list of terms (item 5 of the amendment of 2026-11-05 (#2011, phase A6)), and step S1 of the portable compute plan (#2164) added a second, non-production text of it (`PIPELINE_ELIGIBLE_SQL_NONPROD`) that admits the compute fixture `nm099996` outside production only; production's text is unchanged, and an `ENVIRONMENT` that is unset or misspelled behaves as production.
