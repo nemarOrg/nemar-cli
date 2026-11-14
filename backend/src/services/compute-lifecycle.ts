@@ -205,6 +205,15 @@ export const TERMINAL_TRANSITION_SQL = `UPDATE compute_jobs SET
   WHERE id = ?1 AND state = ?2 AND (?16 = 0 OR tapis_uuid IS NULL)`;
 
 /**
+ * A RUNNER job's terminal transition: {@link TERMINAL_TRANSITION_SQL} plus the lease the writer READ (`?17`,
+ * compared with `IS`, so a row that had no lease must still have none). A writer that read a job under one
+ * lease must not end it after the lease was released and the job claimed again (state is still `created`
+ * across that), nor after a revoke cleared it: at most once acceptance (ADR 0121). Used by `commitTerminal`
+ * for `executor = 'runner'` rows only; the Tapis statement is unchanged.
+ */
+export const RUNNER_TERMINAL_TRANSITION_SQL = `${TERMINAL_TRANSITION_SQL} AND lease_id IS ?17`;
+
+/**
  * The gate of the settlement statement: this job row has taken the terminal state `?` and has not been
  * settled. The settlement runs after the transition in one batch, so for the writer that won the
  * transition this is true, and for any other it is false (and the ledger's own "the hold is open"
@@ -652,9 +661,10 @@ export async function commitTerminal(
             : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate)),
           db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
         ];
+  const runnerRow = job.executor === "runner";
   const results = await db.batch([
     db
-      .prepare(TERMINAL_TRANSITION_SQL)
+      .prepare(runnerRow ? RUNNER_TERMINAL_TRANSITION_SQL : TERMINAL_TRANSITION_SQL)
       .bind(
         job.id,
         job.state,
@@ -672,6 +682,7 @@ export async function commitTerminal(
         plan.slurmJobId,
         `+${recordsRetentionYears} years`,
         plan.unsubmittedOnly ? 1 : 0,
+        ...(runnerRow ? [job.lease_id ?? null] : []),
       ),
     ...settlement,
     // The report ACCESS is owed for a job whose record first shows its Slurm id at its END (phase A8,
@@ -1782,8 +1793,11 @@ async function adopt(
 
 export interface CancelResult {
   ok: boolean;
-  /** `cancel_requested` is recorded; `already_cancelled` for a replay; `bad_state` for a job that ended otherwise. */
-  outcome: "cancel_requested" | "already_cancelled" | "bad_state" | "job_not_found";
+  /**
+   * `cancel_requested` is recorded; `cancelled` for a waiting runner job that ended in SQL in the call;
+   * `already_cancelled` for a replay; `bad_state` for a job that ended otherwise.
+   */
+  outcome: "cancel_requested" | "cancelled" | "already_cancelled" | "bad_state" | "job_not_found";
   state: ComputeState | null;
 }
 
@@ -1809,9 +1823,13 @@ export async function requestComputeCancel(
   await env.DB.prepare(CANCEL_INTENT_SQL).bind(job.id, reason).run();
   if (job.executor === "runner") {
     // A waiting runner job ends here, in one batch; a claimed one keeps the intent for its heartbeat.
-    await endWaitingRunnerJob(env, job, reason);
+    const endedHere = await endWaitingRunnerJob(env, job, reason);
     const ended = await getJob(env.DB, job.id);
-    return { ok: true, outcome: "cancel_requested", state: ended?.state ?? job.state };
+    return {
+      ok: true,
+      outcome: endedHere ? "cancelled" : "cancel_requested",
+      state: ended?.state ?? job.state,
+    };
   }
   await driveCancel(env, job.id, REQUEST_READ);
   const after = await getJob(env.DB, job.id);

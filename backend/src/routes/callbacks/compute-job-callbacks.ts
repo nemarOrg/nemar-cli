@@ -82,7 +82,9 @@ async function authorize(c: Ctx): Promise<ComputeJobRow | null> {
     !!secret &&
     (await verifyComputeToken("job", token, { jobId: id, nonce: nonce ?? NO_NONCE }, secret));
   if (!valid || !job || nonce === null || isTerminalComputeState(job.state)) return null;
-  if (job.executor === "runner" && !holdsCurrentLease(c, job)) return null;
+  // FAIL CLOSED: anything that is not a Tapis job needs the lease, so a row read without its `executor`
+  // (a column list that lost it in a merge) is refused rather than let through.
+  if (job.executor !== "tapis" && !holdsCurrentLease(c, job)) return null;
   return job;
 }
 
