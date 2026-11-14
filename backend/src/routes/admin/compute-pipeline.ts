@@ -13,9 +13,12 @@
  * trims what it would dispatch to it.
  *
  * The request names a recipe, then ONE dataset (with an optional version) or `eligible` with a `limit`,
- * `dry_run`, and optionally the `executor` (`tapis`, the default, or `runner`, ADR 0121). A recipe lists the
- * executors it may be dispatched to and one it does not list is `invalid_body` naming `executor`; so is a
- * runner run over `eligible`; a live runner run is refused `runners_disabled` unless the runners switch is on.
+ * `dry_run`, and optionally the `executor` (`tapis`, the default, or `runner`, ADR 0121) and the `input`
+ * (`bids` or `zarr`, plan D12; the executor's own when absent: `bids` on Tapis, `zarr` on a runner). A recipe
+ * lists the executors it may be dispatched to and one it does not list is `invalid_body` naming `executor`;
+ * so is a runner run over `eligible`; a live runner run is refused `runners_disabled` unless the runners
+ * switch is on. An input the recipe does not list, or one the executor does not run (`bids` on a runner,
+ * `zarr` on Tapis), is `invalid_spec` naming `input`, before anything is read or written.
  * A runner run makes a job with no hold that waits for a runner and is never submitted. It names nothing else: the dataset row (and with it eligibility, ADR 0065), the version
  * row, the service account, the pool and the runtime image are the Worker's own. A request with any other
  * key is refused, so a field a caller believes it can set is never silently dropped.
@@ -32,7 +35,12 @@
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { z } from "zod";
-import { findRecipe } from "../../../../shared/compute-recipes.js";
+import {
+  RECIPE_INPUTS,
+  defaultInput,
+  findRecipe,
+  recipeRunsInput,
+} from "../../../../shared/compute-recipes.js";
 import { COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
 import {
   COMPUTE_ADMIN_ERROR_STATUS,
@@ -80,7 +88,7 @@ const SENTENCES = {
   tapis_unconfigured:
     "Tapis is not configured on this Worker, so a Tapis job cannot be submitted; nothing was written.",
   registry_drift:
-    "A finished run reported another recipe version or engine than the registry names, so the recipe is held.",
+    "A finished run reported another recipe version, engine or input than the registry names, so the recipe is held for that input.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
   version_not_found: "That dataset has no such version.",
   version_untagged: "That version has no name the data plane serves.",
@@ -131,6 +139,21 @@ const refuse = (c: Ctx, code: SentencedRefusal, extra: object = {}) =>
     COMPUTE_PIPELINE_REFUSAL_STATUS[code] as ContentfulStatusCode,
   );
 
+/**
+ * An input the recipe does not read, or one the executor does not run, in `invalid_spec`'s own status and
+ * word, naming the `input` field: the sentence says what is allowed, and nothing a caller sent is echoed.
+ */
+const refuseInput = (c: Ctx) =>
+  c.json(
+    {
+      error:
+        "That recipe does not run on that input with that executor: bids runs on Tapis and zarr runs on a runner.",
+      code: "invalid_spec",
+      field: "input",
+    },
+    COMPUTE_PIPELINE_REFUSAL_STATUS.invalid_spec as ContentfulStatusCode,
+  );
+
 /** A 400 that names the fields and what is wrong with each, never what was sent. */
 function invalid(c: Ctx, kind: "invalid_body" | "invalid_query", error: z.ZodError) {
   const named = error.issues
@@ -155,6 +178,7 @@ const runBody = z
   .object({
     recipe: RECIPE_NAME,
     executor: z.enum(["tapis", "runner"]).optional(),
+    input: z.enum(RECIPE_INPUTS).optional(),
     dataset: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE).optional(),
     eligible: z.boolean().optional(),
@@ -238,10 +262,14 @@ function stampView(row: StampRow): ComputePipelineStampView {
     recipe: row.recipe,
     recipe_version: row.recipe_version,
     engine: row.engine,
+    input: row.input,
     attempt: row.attempt,
     state: row.state,
     job_id: row.job_id,
     refusal_code: row.refusal_code,
+    reader: row.reader,
+    input_engine: row.input_engine,
+    input_digest: row.input_digest,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -310,6 +338,9 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
     if (executor === "runner" && body.dataset === undefined) {
       return invalid(c, "invalid_body", executorIssue("a runner run names one dataset"));
     }
+    // The input, named or the executor's own, is decided from the registry too, before anything is read.
+    const input = body.input ?? defaultInput(executor);
+    if (!recipeRunsInput(recipe, input, executor)) return refuseInput(c);
     try {
       if (body.dry_run === true) {
         const dry = await pipelineDryRun(c.env, {
@@ -318,6 +349,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           version: body.version,
           limit: body.limit ?? COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
           executor,
+          input,
         });
         if (!dry.ok) return refuse(c, dry.code);
         return c.json({ ...dry, ok: true, dry_run: true });
@@ -339,6 +371,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           version: body.version,
           actor,
           executor,
+          input,
         });
         const audited = await audit(
           c,
@@ -356,6 +389,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
             dry_run: false,
             recipe: body.recipe,
             executor,
+            input,
             results: [resultView(result)],
             dispatched: 1,
             stopped_by: null,
@@ -384,6 +418,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           dry_run: false,
           recipe: body.recipe,
           executor,
+          input,
           results: run.results.map(resultView),
           dispatched: run.dispatched,
           stopped_by: run.stoppedBy,
