@@ -683,6 +683,15 @@ describe("the bounds are literal", () => {
     });
     github.index(ID, { source_commit: T, pad: pad(2 * 1024 * 1024) });
     expect(await checkZarrSource(env, ID, "v1.0.0")).toMatchObject({ ok: true });
+    // The same with no declared length (chunked): the reader's own count stops it.
+    const doc = (bytes: number) => JSON.stringify({ source_commit: T, pad: pad(bytes) });
+    github.index(ID, { stream: doc(ZARR_SOURCE_INDEX_MAX_BYTES + 1024) });
+    expect(await checkZarrSource(env, ID, "v1.0.0")).toMatchObject({
+      ok: false,
+      code: "zarr_source_unverifiable",
+    });
+    github.index(ID, { stream: doc(2 * 1024 * 1024) });
+    expect(await checkZarrSource(env, ID, "v1.0.0")).toMatchObject({ ok: true });
 
     // The commit endpoint's body: a 1 MiB bound.
     github.tag(ID, "v1.0.0", { body: { sha: T, pad: pad(ZARR_SOURCE_COMMIT_MAX_BYTES + 1024) } });

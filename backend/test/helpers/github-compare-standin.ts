@@ -51,7 +51,10 @@ export interface GithubCompareStandin {
   /** The compare of `base...head`, 404 when unset. */
   compare(repo: string, base: string, head: string, answer: CompareAnswer): void;
   /** The index of a dataset: a document, or a status (404 when unset); a string is sent as it is. */
-  index(id: string, answer: Record<string, unknown> | string | { http: number }): void;
+  index(
+    id: string,
+    answer: Record<string, unknown> | string | { http: number } | { stream: string },
+  ): void;
   /** Answer the requests of `scope` (default: both services) only after `ms` (a stalled service). */
   stall(ms: number, scope?: "all" | "github" | "index"): void;
   /** Forget every answer and the log. */
@@ -68,7 +71,10 @@ const isStatusOnly = (v: unknown): v is { http: number } =>
 export function startGithubCompareStandin(): GithubCompareStandin {
   const tags = new Map<string, string | { http: number } | { body: unknown }>();
   const compares = new Map<string, CompareAnswer>();
-  const indexes = new Map<string, Record<string, unknown> | string | { http: number }>();
+  const indexes = new Map<
+    string,
+    Record<string, unknown> | string | { http: number } | { stream: string }
+  >();
   const log: StandinRequest[] = [];
   let stallMs = 0;
   let stallScope: "all" | "github" | "index" = "all";
@@ -112,6 +118,21 @@ export function startGithubCompareStandin(): GithubCompareStandin {
         if (hit === undefined) return new Response("not found", { status: 404 });
         if (isStatusOnly(hit)) return new Response("{}", { status: hit.http });
         if (typeof hit === "string") return new Response(hit, { status: 200 });
+        // A chunked body with no declared length: only the reader's own bound can stop it.
+        if ("stream" in hit) {
+          const text = hit.stream;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                const bytes = new TextEncoder().encode(text);
+                for (let at = 0; at < bytes.length; at += 1 << 20) {
+                  controller.enqueue(bytes.subarray(at, at + (1 << 20)));
+                }
+                controller.close();
+              },
+            }),
+          );
+        }
         return Response.json(hit);
       }
       return new Response("not found", { status: 404 });
