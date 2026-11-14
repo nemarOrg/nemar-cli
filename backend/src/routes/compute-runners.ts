@@ -161,10 +161,22 @@ computeRunnerRoutes.post("/claim", runnerAccess, async (c) => {
   if (!parsed.success) return refuse(c, "invalid_body");
   if (!runnerVersionAtLeast(parsed.data.runner_version)) return refuse(c, "runner_outdated");
   // The lease rules run whenever a runner polls, in every environment; a fault here never fails the claim.
+  // Only the cheap steps run before the answer: the verification of outputs, the replay of records and the
+  // copies of the launcher's files go to `waitUntil`, so a poll never waits on the results bucket.
+  let deferred = false;
+  const defer = (work: Promise<unknown>) => {
+    deferred = true;
+    try {
+      c.executionCtx.waitUntil(work);
+    } catch {
+      void work;
+    }
+  };
   try {
-    const swept = runnerLeaseLogLine(await sweepRunnerLeases(c.env, c.env.DB));
-    if (swept?.level === "error") console.error(swept.line);
-    else if (swept) console.log(swept.line);
+    const swept = await sweepRunnerLeases(c.env, c.env.DB, { defer });
+    const line = deferred ? null : runnerLeaseLogLine(swept);
+    if (line?.level === "error") console.error(line.line);
+    else if (line) console.log(line.line);
   } catch (err) {
     console.error(
       `[compute-runner-queue] sweep_failed class=${err instanceof Error ? err.name : typeof err}`,

@@ -84,6 +84,8 @@ const ATTENTION_HINTS: Readonly<Record<string, string>> = {
     " (a runner job's recorded cancel is over an hour old and its runner has not taken it: revoke the runner, or the lease sweep ends it once the lease is not current)",
   runner_copy_abandoned:
     " (a terminal runner job's launcher files were never copied into the records and no longer will be)",
+  runner_records_unwritten:
+    " (a waiting runner job's records never landed and the lease sweep has neither replayed nor ended it: the sweep is not running or is starved)",
 };
 
 /** One pool on one line, in SU. Everything the Worker sent is made plain first. */

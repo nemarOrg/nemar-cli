@@ -42,7 +42,7 @@
  * Logs carry fixed words and counts only: no job id, token, address, specification or name.
  */
 
-import { findRecipe, isSourceCommit } from "../../../shared/compute-recipes.js";
+import { type ZarrCommitAttestation, findRecipe } from "../../../shared/compute-recipes.js";
 import {
   type ComputeFailureCode,
   type ComputeFailureDetail,
@@ -97,6 +97,7 @@ import { readRuntimeImage } from "./compute-runtime-image.js";
 import { LIVE_STATES_SQL, TERMINAL_STATES_SQL } from "./compute-state-sql.js";
 import { readLauncherDocs, verifyResults } from "./compute-verify.js";
 import type { TapisJob } from "./tapis/client.js";
+import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Numbers -------------------------------------------------------------------------------------
 
@@ -106,21 +107,38 @@ export const RUNNER_MIN_VERSION = "0.1.0";
 /** A waiting runner row whose records have not landed is replayed once it is this old, in minutes. */
 export const RUNNER_RECORDS_REPLAY_MINUTES = 5;
 
+/** A waiting runner row whose records could not be replayed in this many minutes ends `failed`. */
+export const RUNNER_RECORDS_GIVE_UP_MINUTES = 60;
+
 // --- The claim -----------------------------------------------------------------------------------
 
 /**
+ * What a runner already holds, as the sum of one resource over its live claims (`?1` the runner id): the claim
+ * statement admits a job only while the runner's registered capacity (`?7` cores, `?8` memory, `?9` GPUs)
+ * still has room for it beside every job the runner already holds (a claimed job that is not over, an
+ * `unreported` one included, since its runner may still be running it). So a claim of many slots is bounded
+ * by the registration and a runner cannot be handed more than it said it can run, however many it asks for.
+ */
+const held = (column: string): string =>
+  `(SELECT COALESCE(SUM(${column}), 0) FROM compute_jobs l
+     WHERE l.runner_id = ?1 AND l.executor = 'runner' AND l.state IN (${LIVE_STATES_SQL}))`;
+
+/**
  * The terms that make a job claimable, over the alias `a` of `compute_jobs`: a waiting runner job
- * (`created`, unclaimed, records landed, no cancel recorded, claims left) of the runner's pool that fits
- * (`?6` pool, `?7` cores, `?8` memory, `?9` GPUs) and whose dataset, found through the job's own stamp, still
- * passes the pipeline eligibility predicate. Written for both the subselect that picks the oldest and the
- * outer row the UPDATE writes, so the statement is atomic by itself.
+ * (`created`, unclaimed, records landed, no cancel recorded, claims left) of the runner's pool that fits what
+ * the runner has left (`?6` pool, `?7` cores, `?8` memory, `?9` GPUs, each beside what it already holds) and
+ * whose dataset, found through the job's own stamp, still passes the pipeline eligibility predicate. Written
+ * for both the subselect that picks the oldest and the outer row the UPDATE writes, so the statement is
+ * atomic by itself.
  */
 const claimable = (a: string): string => `${a}.executor = 'runner' AND ${a}.accounting = 'none'
       AND ${a}.state = 'created' AND ${a}.runner_claimed_at IS NULL
       AND ${a}.records_written_at IS NOT NULL AND ${a}.cancel_requested_at IS NULL
       AND ${a}.claim_attempts < ?5
-      AND ${a}.pool = ?6 AND ${a}.cores_per_node <= ?7 AND COALESCE(${a}.memory_mb, 0) <= ?8
-      AND ${a}.gpus <= ?9
+      AND ${a}.pool = ?6
+      AND ${held("l.cores_per_node")} + ${a}.cores_per_node <= ?7
+      AND ${held("COALESCE(l.memory_mb, 0)")} + COALESCE(${a}.memory_mb, 0) <= ?8
+      AND ${held("l.gpus")} + ${a}.gpus <= ?9
       AND EXISTS (SELECT 1 FROM compute_pipeline_stamps s JOIN datasets d ON d.dataset_id = s.dataset_id
                    WHERE s.job_id = ${a}.id AND ${PIPELINE_ELIGIBLE_SQL})`;
 
@@ -165,10 +183,30 @@ export const LAUNCH_DIGEST_UNDER_LEASE_SQL = `UPDATE compute_jobs SET launch_spe
   WHERE id = ?1 AND executor = 'runner' AND lease_id = ?2 AND runner_id = ?3 AND state = 'created'
     AND cancel_requested_at IS NULL`;
 
-/** Give a claim back when the launch specification could not be built from configuration: `?1` the job, `?2` the lease. */
+/**
+ * Give a claim back: `?1` the job, `?2` the lease. The claim counted (`claim_attempts + 1`) and a give-back
+ * UNCOUNTS it, so a fault of NEMAR's (a configuration gap, a store that threw, a digest that could not be
+ * written) never uses up the job's three claims. It clears only the lease it names and only an unstarted job.
+ */
 export const RELEASE_CLAIM_SQL = `UPDATE compute_jobs SET
-    runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL
+    runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL,
+    claim_attempts = MAX(claim_attempts - 1, 0)
   WHERE id = ?1 AND executor = 'runner' AND lease_id = ?2 AND state = 'created' AND started_at IS NULL`;
+
+/**
+ * Whether the launch specification can be built at all: the callback secret, the API base address and the
+ * records bucket are set (what `buildLaunch` reads before the job). Asked BEFORE any claim, so a Worker that
+ * is not configured claims nothing and burns no job's claims.
+ */
+export function launchConfigured(
+  env: Pick<Bindings, "PRESCREEN_CALLBACK_SECRET" | "API_BASE_URL" | "COMPUTE_RECORDS">,
+): boolean {
+  return (
+    !!env.PRESCREEN_CALLBACK_SECRET &&
+    (env.API_BASE_URL ?? "").trim() !== "" &&
+    !!env.COMPUTE_RECORDS
+  );
+}
 
 /** The semantic version `v` as numbers and its pre-release text, or null when it is not one. */
 function semverParts(v: string): { core: [number, number, number]; pre: string | null } | null {
@@ -233,6 +271,10 @@ export async function claimRunnerJobs(
 ): Promise<ClaimResult> {
   const db = env.DB;
   const jobs: RunnerClaimedJob[] = [];
+  if (!launchConfigured(env)) {
+    console.error("[compute-runner-queue] launch_unconfigured");
+    return { jobs };
+  }
   for (let i = 0; i < freeSlots; i++) {
     const leaseId = randomHex(16);
     const won = await db
@@ -250,42 +292,59 @@ export async function claimRunnerJobs(
       )
       .run();
     if ((won.meta?.changes ?? 0) !== 1) break;
-    const named = await db
-      .prepare(CLAIMED_BY_LEASE_SQL)
-      .bind(leaseId, runner.id)
-      .first<{ id: string }>();
-    if (!named) continue; // a revoke cleared the claim between the two statements
-    const job = await getJob(db, named.id);
-    if (!job || job.lease_id !== leaseId) continue;
+    // From here the claim is won and counted: whatever goes wrong on NEMAR's side gives it back uncounted.
+    let jobId: string | null = null;
+    try {
+      const named = await db
+        .prepare(CLAIMED_BY_LEASE_SQL)
+        .bind(leaseId, runner.id)
+        .first<{ id: string }>();
+      if (!named) continue; // a revoke cleared the claim between the two statements
+      jobId = named.id;
+      const job = await getJob(db, named.id);
+      if (!job || job.lease_id !== leaseId) continue;
 
-    const built = await buildLaunch(env, job);
-    if (!built.ok) {
-      if (built.why === "unconfigured") {
-        await db.prepare(RELEASE_CLAIM_SQL).bind(job.id, leaseId).run();
-        console.error("[compute-runner-queue] launch_unconfigured");
-        break; // the same for every job: stop asking
+      const built = await buildLaunch(env, job);
+      if (!built.ok) {
+        if (built.why === "unconfigured") {
+          await db.prepare(RELEASE_CLAIM_SQL).bind(job.id, leaseId).run();
+          console.error("[compute-runner-queue] launch_unconfigured");
+          break; // the same for every job: stop asking
+        }
+        // The recorded specification can never launch: the job is over, as a Tapis job that cannot be submitted is.
+        console.error("[compute-runner-queue] launch_unbuildable");
+        await endRunnerJob(env, job, { kind: "launch_unbuildable" });
+        continue;
       }
-      // The recorded specification can never launch: the job is over, as a Tapis job that cannot be submitted is.
-      console.error("[compute-runner-queue] launch_unbuildable");
-      await endRunnerJob(env, job, { kind: "launch_unbuildable" });
-      continue;
+      const wrote = await db
+        .prepare(LAUNCH_DIGEST_UNDER_LEASE_SQL)
+        .bind(job.id, leaseId, runner.id, built.launch.digest)
+        .run();
+      if ((wrote.meta?.changes ?? 0) !== 1) continue;
+      jobs.push({
+        id: job.id,
+        lease_id: leaseId,
+        lease_expires_at: toProtocolTimestamp(job.lease_expires_at as string),
+        launch_spec_env: built.launch.launchSpecEnv,
+        image: built.launch.image,
+        cores: job.cores_per_node,
+        memory_mb: job.memory_mb,
+        gpus: job.gpus,
+        minutes: job.minutes,
+      });
+    } catch (err) {
+      // A store that threw (the records bucket) after the claim committed: the claim goes back uncounted, the
+      // jobs that did build are still answered, and the loop stops (the next job would meet the same fault).
+      console.error(`[compute-runner-queue] claim_step_failed class=${errorClassName(err)}`);
+      if (jobId !== null) {
+        await db
+          .prepare(RELEASE_CLAIM_SQL)
+          .bind(jobId, leaseId)
+          .run()
+          .catch(() => undefined);
+      }
+      break;
     }
-    const wrote = await db
-      .prepare(LAUNCH_DIGEST_UNDER_LEASE_SQL)
-      .bind(job.id, leaseId, runner.id, built.launch.digest)
-      .run();
-    if ((wrote.meta?.changes ?? 0) !== 1) continue;
-    jobs.push({
-      id: job.id,
-      lease_id: leaseId,
-      lease_expires_at: toProtocolTimestamp(job.lease_expires_at as string),
-      launch_spec_env: built.launch.launchSpecEnv,
-      image: built.launch.image,
-      cores: job.cores_per_node,
-      memory_mb: job.memory_mb,
-      gpus: job.gpus,
-      minutes: job.minutes,
-    });
   }
   return { jobs };
 }
@@ -301,10 +360,16 @@ export const HEARTBEAT_STARTED_SQL = `UPDATE compute_jobs SET
   WHERE id = ?1 AND executor = 'runner' AND runner_id = ?2 AND lease_id = ?3
     AND state = 'created' AND cancel_requested_at IS NULL`;
 
-/** `uploading`: `running -> archiving`. Only while no cancel is recorded. `?1` the job, `?2` the runner, `?3` the lease. */
-export const HEARTBEAT_UPLOADING_SQL = `UPDATE compute_jobs SET state = 'archiving'
+/**
+ * `uploading`: `running -> archiving`, and it also STARTS a `created` job (a runner that never sent `started`
+ * but is uploading is running: without a `started_at` the job would escape the deadline, and a lease that
+ * expired after its outputs completed could be released and the job run again). Only while no cancel is
+ * recorded. `?1` the job, `?2` the runner, `?3` the lease.
+ */
+export const HEARTBEAT_UPLOADING_SQL = `UPDATE compute_jobs SET
+    state = 'archiving', started_at = COALESCE(started_at, datetime('now'))
   WHERE id = ?1 AND executor = 'runner' AND runner_id = ?2 AND lease_id = ?3
-    AND state = 'running' AND cancel_requested_at IS NULL`;
+    AND state IN ('created', 'running') AND cancel_requested_at IS NULL`;
 
 /**
  * Renew the lease of a live job the runner holds: `?1` the job, `?2` the runner, `?3` the lease. A job that
@@ -359,7 +424,9 @@ export type RunnerEnd =
   | { kind: "verify" }
   | { kind: "lost"; detail: RunnerLostDetail }
   | { kind: "cancelled" }
-  | { kind: "launch_unbuildable" };
+  | { kind: "launch_unbuildable" }
+  /** A waiting job whose records never landed and could not be replayed in the give-up window. */
+  | { kind: "records_unavailable" };
 
 /** The record `verifyResults` reads an exit number from, for a runner job (the Tapis path reads Tapis's). */
 function runnerRecord(exit: number | null): TapisJob {
@@ -487,6 +554,8 @@ async function planOf(env: Bindings, job: ComputeJobRow, end: RunnerEnd): Promis
       return TERMINAL_FAILED("runner_lost", lost(end.detail));
     case "launch_unbuildable":
       return TERMINAL_FAILED("launch_failed", "invalid_spec");
+    case "records_unavailable":
+      return TERMINAL_FAILED("records_unavailable", "records_unreadable");
     case "cancelled":
       return cancelled();
     case "verify":
@@ -522,11 +591,16 @@ export async function endRunnerJob(
 
 // --- Complete ------------------------------------------------------------------------------------
 
-/** The usage a runner measured, written once under the lease: `?1` job, `?2` runner, `?3` lease, `?4`..`?6` the numbers. */
+/**
+ * The usage a runner measured, written once under the lease: `?1` job, `?2` runner, `?3` lease, `?4`..`?6`
+ * the numbers. It has NO state term, because a completed job keeps its lease and a repeat completion fills a
+ * usage a first one did not get to write; it has the lease and runner terms, so a completion that held a
+ * lease which was since released, replaced or revoked records nothing.
+ */
 export const RECORD_USAGE_SQL = `UPDATE compute_jobs SET
     runner_wall_seconds = ?4, runner_cpu_seconds = ?5, runner_max_rss_mb = ?6
   WHERE id = ?1 AND executor = 'runner' AND runner_id = ?2 AND lease_id = ?3
-    AND state IN (${LIVE_STATES_SQL}) AND runner_wall_seconds IS NULL`;
+    AND runner_wall_seconds IS NULL`;
 
 export type CompleteResult =
   | { ok: true; state: string; after: (() => Promise<void>) | null }
@@ -534,8 +608,11 @@ export type CompleteResult =
 
 /**
  * A runner's completion. The lease must be the job's (`lease_lost` otherwise, a job of another runner
- * included); a repeat for `(job, lease_id)` answers the stored state and writes nothing (the lease is kept
- * after completion). The usage is recorded once, then the job ends as {@link planOf} says.
+ * included); a repeat for `(job, lease_id)` answers the stored state. AT MOST ONCE ACCEPTANCE: the job is
+ * ended by `commitTerminal`, whose statement carries the lease this call READ (`RUNNER_TERMINAL_TRANSITION_SQL`),
+ * so a completion that passed the check above and then lost its lease (the claim was released and taken by
+ * another runner, or a revoke cleared it) writes nothing, answers `lease_lost`, and records no usage; the
+ * usage is written AFTER the end, under the lease, once.
  */
 export async function completeRunnerJob(
   env: Bindings,
@@ -553,29 +630,30 @@ export async function completeRunnerJob(
   ) {
     return { ok: false, refusal: "lease_lost" };
   }
-  if (TERMINAL_STATES.has(job.state)) return { ok: true, state: job.state, after: null };
+  const usage = [body.usage.wall_seconds, body.usage.cpu_seconds, body.usage.max_rss_mb] as const;
+  const recordUsage = () =>
+    env.DB.prepare(RECORD_USAGE_SQL)
+      .bind(job.id, runner.id, body.lease_id, ...usage)
+      .run();
+  if (TERMINAL_STATES.has(job.state)) {
+    await recordUsage();
+    return { ok: true, state: job.state, after: null };
+  }
 
-  await env.DB.prepare(RECORD_USAGE_SQL)
-    .bind(
-      job.id,
-      runner.id,
-      body.lease_id,
-      body.usage.wall_seconds,
-      body.usage.cpu_seconds,
-      body.usage.max_rss_mb,
-    )
-    .run();
-  const fresh = (await getJob(env.DB, job.id)) ?? job;
-  const plan = await endRunnerJob(env, fresh, {
+  const plan = await endRunnerJob(env, job, {
     kind: "complete",
     exit: body.exit_number,
     code: body.launcher_failure_code,
     detail: body.launcher_detail,
   });
+  await recordUsage();
   const after = await getJob(env.DB, job.id);
-  const state = after?.state ?? fresh.state;
-  if (plan === null || after === null) return { ok: true, state, after: null };
-  return { ok: true, state, after: () => afterTerminal(env, after, plan) };
+  // The row is no longer this runner's lease: another writer owns the job now, and nothing of this call stands.
+  if (after === null || after.runner_id !== runner.id || after.lease_id !== body.lease_id) {
+    return { ok: false, refusal: "lease_lost" };
+  }
+  if (plan === null) return { ok: true, state: after.state, after: null };
+  return { ok: true, state: after.state, after: () => afterTerminal(env, after, plan) };
 }
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set(["finished", "failed", "cancelled"]);
@@ -595,21 +673,24 @@ export const CANCELLED_ROWS_SQL = `SELECT j.id FROM compute_jobs j
   WHERE j.executor = 'runner' AND j.state IN (${LIVE_STATES_SQL}) AND j.cancel_requested_at IS NOT NULL
     AND (j.runner_claimed_at IS NULL OR j.lease_id IS NULL OR j.lease_expires_at IS NULL
          OR j.lease_expires_at <= datetime('now') OR ${REVOKED("j")})
-  ORDER BY j.cancel_requested_at ASC, j.id ASC LIMIT ?1`;
+  ORDER BY j.examined_at ASC, j.cancel_requested_at ASC, j.id ASC LIMIT ?1`;
 
 /**
  * Unstarted claims whose lease expired and that have claims left: the claim is cleared and the job waits again
- * (`claim_attempts` stays counted). `?1` the most claims, `?2` the limit.
+ * (`claim_attempts` stays counted). A claim whose OUTPUTS COMPLETED is never released (another runner would run
+ * the job again over the first one's files): it is verified instead, through `unreported` (see
+ * {@link UNREPORT_EXPIRED_SQL}). `?1` the most claims, `?2` the limit.
  */
 export const RELEASE_EXPIRED_CLAIMS_SQL = `UPDATE compute_jobs SET
     runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL
   WHERE id IN (SELECT id FROM compute_jobs
                 WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NOT NULL
                   AND started_at IS NULL AND cancel_requested_at IS NULL
+                  AND outputs_completed_at IS NULL
                   AND lease_expires_at <= datetime('now') AND claim_attempts < ?1
                 ORDER BY lease_expires_at ASC LIMIT ?2)
     AND executor = 'runner' AND state = 'created' AND runner_claimed_at IS NOT NULL
-    AND started_at IS NULL AND cancel_requested_at IS NULL
+    AND started_at IS NULL AND cancel_requested_at IS NULL AND outputs_completed_at IS NULL
     AND lease_expires_at <= datetime('now') AND claim_attempts < ?1`;
 
 /**
@@ -618,24 +699,28 @@ export const RELEASE_EXPIRED_CLAIMS_SQL = `UPDATE compute_jobs SET
  */
 export const EXHAUSTED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE executor = 'runner' AND state = 'created' AND cancel_requested_at IS NULL
-    AND claim_attempts >= ?1
+    AND claim_attempts >= ?1 AND outputs_completed_at IS NULL
     AND (runner_claimed_at IS NULL
          OR (started_at IS NULL AND lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')))
-  ORDER BY created_at ASC, id ASC LIMIT ?2`;
+  ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?2`;
 
 /**
  * A started job whose lease expired is `unreported` and KEEPS its lease id (a partitioned runner may still
- * land its outputs). Only a job with no recorded cancel. `?1` the limit.
+ * land its outputs); so is an unstarted claim whose outputs completed (it is verified, never released). Only a
+ * job with no recorded cancel. `?1` the limit.
  */
 export const UNREPORT_EXPIRED_SQL = `UPDATE compute_jobs SET state = 'unreported'
   WHERE id IN (SELECT id FROM compute_jobs
-                WHERE executor = 'runner' AND state IN ('running', 'archiving')
-                  AND started_at IS NOT NULL AND cancel_requested_at IS NULL
+                WHERE executor = 'runner' AND cancel_requested_at IS NULL
                   AND lease_expires_at <= datetime('now')
+                  AND ((state IN ('running', 'archiving') AND started_at IS NOT NULL)
+                       OR (state = 'created' AND runner_claimed_at IS NOT NULL
+                           AND outputs_completed_at IS NOT NULL))
                 ORDER BY lease_expires_at ASC LIMIT ?1)
-    AND executor = 'runner' AND state IN ('running', 'archiving')
-    AND started_at IS NOT NULL AND cancel_requested_at IS NULL
-    AND lease_expires_at <= datetime('now')`;
+    AND executor = 'runner' AND cancel_requested_at IS NULL
+    AND lease_expires_at <= datetime('now')
+    AND ((state IN ('running', 'archiving') AND started_at IS NOT NULL)
+         OR (state = 'created' AND runner_claimed_at IS NOT NULL AND outputs_completed_at IS NOT NULL))`;
 
 /**
  * `unreported` runner jobs with no recorded cancel that are due: their outputs completed (verify), their
@@ -648,28 +733,43 @@ export const UNREPORTED_ROWS_SQL = `SELECT j.id, ${REVOKED("j")} AS revoked FROM
     AND (j.outputs_completed_at IS NOT NULL OR ${REVOKED("j")}
          OR COALESCE(j.lease_expires_at, j.runner_claimed_at, j.created_at)
               <= datetime('now', '-${RUNNER_LOST_GIVE_UP_MINUTES} minutes'))
-  ORDER BY COALESCE(j.lease_expires_at, j.runner_claimed_at, j.created_at) ASC, j.id ASC LIMIT ?1`;
+  ORDER BY j.examined_at ASC, COALESCE(j.lease_expires_at, j.runner_claimed_at, j.created_at) ASC,
+    j.id ASC LIMIT ?1`;
 
 /**
- * Started jobs past `started_at` plus their minutes plus the grace, without completed outputs and with no
- * recorded cancel. `?1` the limit.
+ * Started jobs past `started_at` plus their minutes plus the grace, without completed outputs. A job with a
+ * recorded cancel is included: a runner that keeps renewing its lease and ignores the cancel is ended
+ * `cancelled` at the deadline (without a cancel it is `runner_lost` `deadline_exceeded`). `?1` the limit.
  */
 export const DEADLINE_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE executor = 'runner' AND state IN ('running', 'archiving', 'unreported')
-    AND started_at IS NOT NULL AND outputs_completed_at IS NULL AND cancel_requested_at IS NULL
+    AND started_at IS NOT NULL AND outputs_completed_at IS NULL
     AND datetime(started_at, '+' || (minutes + ${RUNNER_DEADLINE_GRACE_MINUTES}) || ' minutes')
           <= datetime('now')
-  ORDER BY started_at ASC, id ASC LIMIT ?1`;
+  ORDER BY examined_at ASC, started_at ASC, id ASC LIMIT ?1`;
 
 /**
  * Waiting runner rows whose records never landed (the dispatch answered `recordsWritten: false`), old enough
- * that the dispatch's own retry is over. `?1` the limit.
+ * that the dispatch's own retry is over, in ROTATION (`examined_at`, stamped on every row the sweep examines),
+ * so a row that can never be replayed does not hold the front of the line. `?1` the limit.
  */
 export const REPLAY_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NULL
     AND records_written_at IS NULL AND cancel_requested_at IS NULL
     AND created_at <= datetime('now', '-${RUNNER_RECORDS_REPLAY_MINUTES} minutes')
-  ORDER BY created_at ASC, id ASC LIMIT ?1`;
+  ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?1`;
+
+/**
+ * Waiting rows whose records never landed and could not be replayed for {@link RUNNER_RECORDS_GIVE_UP_MINUTES}:
+ * the specification can no longer be rebuilt as the recorded digest (the image or the commits changed), so the
+ * job can never be claimed. They end `failed` `records_unavailable` (`records_unreadable`), which frees the slot
+ * and the tuple. `?1` the limit.
+ */
+export const RECORDS_GIVE_UP_ROWS_SQL = `SELECT id FROM compute_jobs
+  WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NULL
+    AND records_written_at IS NULL AND cancel_requested_at IS NULL
+    AND created_at <= datetime('now', '-${RUNNER_RECORDS_GIVE_UP_MINUTES} minutes')
+  ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?1`;
 
 /** Terminal runner rows whose launcher files were never copied into the records, in rotation. `?1` the limit. */
 export const RUNNER_UNCOPIED_SQL = `SELECT id FROM compute_jobs
@@ -695,16 +795,28 @@ export const RUNNER_COPY_ABANDONED_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
     AND settled_provisional_at IS NOT NULL AND records_deleted_at IS NULL
     AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
 
-/** The two runner attention counts, by their contract words. */
+/**
+ * Waiting runner rows whose records never landed and are still not repaired well past the give-up window: the
+ * sweep replays them and then ends them, so a positive count says the sweep is not running or is starved. The
+ * count of `runner_records_unwritten`.
+ */
+export const RUNNER_RECORDS_UNWRITTEN_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
+  WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NULL
+    AND records_written_at IS NULL
+    AND created_at <= datetime('now', '-${RUNNER_RECORDS_GIVE_UP_MINUTES * 2} minutes')`;
+
+/** The runner attention counts, by their contract words. */
 export const RUNNER_ATTENTION_COUNTS: ReadonlyArray<
   readonly [word: (typeof COMPUTE_RUNNER_ATTENTION_WORDS)[number], sql: string]
 > = [
   ["runner_cancel_pending_failed", RUNNER_CANCEL_PENDING_FAILED_SQL],
   ["runner_copy_abandoned", RUNNER_COPY_ABANDONED_SQL],
+  ["runner_records_unwritten", RUNNER_RECORDS_UNWRITTEN_SQL],
 ];
 
 export interface RunnerSweepResult {
   replayed: number;
+  records_lost: number;
   cancelled: number;
   released: number;
   exhausted: number;
@@ -714,11 +826,14 @@ export interface RunnerSweepResult {
   lost_expired: number;
   lost_deadline: number;
   copied: number;
+  /** Steps whose batch was full: more rows were due than one call looks at (they rotate, none is starved). */
+  saturated: number;
   errors: number;
 }
 
 const emptySweep = (): RunnerSweepResult => ({
   replayed: 0,
+  records_lost: 0,
   cancelled: 0,
   released: 0,
   exhausted: 0,
@@ -728,14 +843,15 @@ const emptySweep = (): RunnerSweepResult => ({
   lost_expired: 0,
   lost_deadline: 0,
   copied: 0,
+  saturated: 0,
   errors: 0,
 });
 
 /**
  * A waiting job's specification, rebuilt the way the dispatch built it from the job's own stamp (the tuple the
  * dispatch claimed: dataset, version tag and recipe), the configured runtime image and, for a Zarr recipe, the
- * commit the dataset row records. Null when any of it is gone. Only a candidate: the caller accepts it only
- * when its digest is the one the row holds.
+ * commit attestation the source check gives NOW (a call to GitHub and the serving index). Null when any of it
+ * is gone. Only a candidate: the caller accepts it only when its digest is the one the row holds.
  */
 async function rebuiltSpec(env: Bindings, jobId: string) {
   const stamp = await env.DB.prepare(
@@ -746,22 +862,23 @@ async function rebuiltSpec(env: Bindings, jobId: string) {
   const recipe = stamp === null ? null : findRecipe(stamp.recipe);
   const image = readRuntimeImage(env);
   if (stamp === null || recipe === null || image.state !== "ok") return null;
-  let sourceCommit: string | null = null;
+  let zarrSource: ZarrCommitAttestation | null = null;
   if (recipe.input === "zarr") {
-    const row = await env.DB.prepare(
-      "SELECT zarr_source_commit FROM datasets WHERE dataset_id = ?1",
-    )
-      .bind(stamp.dataset_id)
-      .first<{ zarr_source_commit: string | null }>();
-    if (!isSourceCommit(row?.zarr_source_commit)) return null;
-    sourceCommit = row?.zarr_source_commit ?? null;
+    const checked = await checkZarrSource(env, stamp.dataset_id, stamp.version);
+    if (!checked.ok) return null;
+    zarrSource = {
+      sourceCommit: checked.sourceCommit,
+      tagCommit: checked.tagCommit,
+      equivalence: checked.equivalence,
+      deltaPaths: checked.deltaPaths,
+    };
   }
   try {
     return recipeJobSpec(recipe, {
       datasetId: stamp.dataset_id,
       tag: stamp.version,
       image: { ref: image.ref, digest: image.digest },
-      sourceCommit,
+      zarrSource,
     });
   } catch {
     return null;
@@ -777,39 +894,59 @@ async function replayRecords(env: Bindings, job: ComputeJobRow): Promise<boolean
   return writeRecords(env, job, text, false);
 }
 
+export interface SweepOptions {
+  /**
+   * Where the SLOW work goes (the verification of finished outputs, the replay of records and the copies of the
+   * launcher's files): handed to this function as one promise, which logs the sweep's line when it ends. With
+   * none, the slow work is done before `sweepRunnerLeases` returns and the CALLER logs. The claim route passes
+   * `waitUntil`, so a runner's poll is answered after the cheap steps and never waits on R2.
+   */
+  defer?: (work: Promise<unknown>) => void;
+}
+
 /**
- * One pass over the runner queue's leases, deadlines, cancels and copies, bounded by `RUNNER_SWEEP_BATCH`
- * rows shared by its steps, in this order (the order is load-bearing: a row an earlier step moves is picked up
- * by a later one in the same call):
- *   1. replay the records of waiting rows whose records never landed;
+ * One pass over the runner queue's leases, deadlines, cancels and copies, in this order (the order is
+ * load-bearing: a row an earlier step moves is picked up by a later one in the same call):
+ *   1. replay the records of waiting rows whose records never landed, and end the ones that cannot be;
  *   2. end every recorded cancel whose lease is not current (`cancelled`, or verified when outputs completed);
  *   3. release expired unstarted claims, and fail the ones with no claims left (`claims_exhausted`);
- *   4. move started jobs whose lease expired to `unreported`;
+ *   4. move started jobs (and unstarted ones with outputs) whose lease expired to `unreported`;
  *   5. settle `unreported` jobs: verify those with outputs, `runner_revoked` for a revoked runner, and
  *      `lease_expired` after the give-up wait;
- *   6. fail started jobs past their deadline;
+ *   6. fail started jobs past their deadline (`cancelled` when a cancel was recorded);
  *   7. copy the records of terminal runner rows that were not copied.
- * Reads no switch. Never throws: a row's failure is counted and the next row goes on. `db` is the database
- * the statements run on (the Worker's own, `env.DB`).
+ * EVERY STEP HAS ITS OWN BUDGET of `RUNNER_SWEEP_BATCH` rows, and every row a step examines is stamped
+ * (`examined_at`) and the steps order by it, so a row that cannot be settled goes to the back of the line and
+ * cannot starve another step or the rows behind it; a step whose batch was full is counted (`saturated`).
+ * Reads no switch. Never throws: a row's failure is counted and the next row goes on. `db` is the database the
+ * statements run on (the Worker's own, `env.DB`).
  */
 export async function sweepRunnerLeases(
   env: Bindings,
   db: D1Database = env.DB,
+  options: SweepOptions = {},
 ): Promise<RunnerSweepResult> {
   const r = emptySweep();
-  let left = RUNNER_SWEEP_BATCH;
-  const ids = async (sql: string, ...binds: unknown[]): Promise<string[]> =>
-    (
+  const slow: Array<() => Promise<void>> = [];
+  // Slow work is queued and run at the end (deferred, or before returning).
+  const later = (work: () => Promise<void>) => {
+    slow.push(work);
+  };
+  const ids = async (sql: string, ...binds: unknown[]): Promise<string[]> => {
+    const rows = (
       await db
         .prepare(sql)
-        .bind(...binds, left)
+        .bind(...binds, RUNNER_SWEEP_BATCH)
         .all<{ id: string }>()
     ).results.map((x) => x.id);
+    if (rows.length >= RUNNER_SWEEP_BATCH) r.saturated++;
+    return rows;
+  };
 
   const each = async (rows: string[], step: (job: ComputeJobRow) => Promise<void>) => {
     for (const id of rows) {
-      left--;
       try {
+        await db.prepare(STAMP_EXAMINED_SQL).bind(id).run();
         const job = await getJob(db, id);
         if (job) await step(job);
       } catch (err) {
@@ -819,94 +956,106 @@ export async function sweepRunnerLeases(
     }
   };
 
-  const finish = async (job: ComputeJobRow, end: RunnerEnd): Promise<boolean> => {
+  /** End a job now; the copy that follows is slow work. True when this call ended it. */
+  const finishNow = async (job: ComputeJobRow, end: RunnerEnd): Promise<boolean> => {
     const plan = await endRunnerJob(env, job, end);
     if (plan === null) return false;
-    const done = (await getJob(db, job.id)) ?? job;
-    await afterTerminal(env, done, plan);
+    later(async () => {
+      await afterTerminal(env, (await getJob(db, job.id)) ?? job, plan);
+    });
     return true;
+  };
+  /** A verification reads the bucket for every declared output: slow, so it is queued whole. */
+  const verify = (job: ComputeJobRow, count: () => void) => {
+    later(async () => {
+      const plan = await endRunnerJob(env, job, { kind: "verify" });
+      if (plan === null) return;
+      count();
+      await afterTerminal(env, (await getJob(db, job.id)) ?? job, plan);
+    });
   };
 
   try {
-    // 1. Records that never landed.
-    if (left > 0) {
-      await each(await ids(REPLAY_ROWS_SQL), async (job) => {
-        if (await replayRecords(env, job)) r.replayed++;
-      });
-    }
-
-    // 2. A recorded cancel with nobody left to carry it out.
-    if (left > 0) {
-      await each(await ids(CANCELLED_ROWS_SQL), async (job) => {
-        if (job.runner_claimed_at === null) {
-          if (
-            await endWaitingRunnerJob(env, job, job.cancel_reason === "user" ? "user" : "admin")
-          ) {
-            r.cancelled++;
-          }
-        } else if (job.outputs_completed_at !== null) {
-          if (await finish(job, { kind: "verify" })) r.verified++;
-        } else if (await finish(job, { kind: "cancelled" })) {
-          r.cancelled++;
+    // 1. Records that never landed: replayed (slow), then given up on.
+    await each(await ids(REPLAY_ROWS_SQL), async (job) => {
+      later(async () => {
+        try {
+          if (await replayRecords(env, job)) r.replayed++;
+        } catch (err) {
+          r.errors++;
+          console.error(`[compute-runner-queue] replay_failed class=${errorClassName(err)}`);
         }
       });
-    }
+    });
+    await each(await ids(RECORDS_GIVE_UP_ROWS_SQL), async (job) => {
+      // The replay above had its chance (it runs after this call returns when deferred, and a row that was
+      // replayed has records): only a row still without them after the window is ended.
+      if (await finishNow(job, { kind: "records_unavailable" })) r.records_lost++;
+    });
+
+    // 2. A recorded cancel with nobody left to carry it out.
+    await each(await ids(CANCELLED_ROWS_SQL), async (job) => {
+      if (job.runner_claimed_at === null) {
+        if (await endWaitingRunnerJob(env, job, job.cancel_reason === "user" ? "user" : "admin")) {
+          r.cancelled++;
+        }
+      } else if (job.outputs_completed_at !== null) {
+        verify(job, () => r.verified++);
+      } else if (await finishNow(job, { kind: "cancelled" })) {
+        r.cancelled++;
+      }
+    });
 
     // 3. Unstarted claims: released, or out of claims.
-    if (left > 0) {
-      const released = await db
-        .prepare(RELEASE_EXPIRED_CLAIMS_SQL)
-        .bind(RUNNER_MAX_CLAIMS, left)
-        .run();
-      const n = released.meta?.changes ?? 0;
-      r.released += n;
-      left -= n;
-    }
-    if (left > 0) {
-      await each(await ids(EXHAUSTED_ROWS_SQL, RUNNER_MAX_CLAIMS), async (job) => {
-        if (await finish(job, { kind: "lost", detail: "claims_exhausted" })) r.exhausted++;
-      });
-    }
+    const released = await db
+      .prepare(RELEASE_EXPIRED_CLAIMS_SQL)
+      .bind(RUNNER_MAX_CLAIMS, RUNNER_SWEEP_BATCH)
+      .run();
+    r.released += released.meta?.changes ?? 0;
+    if (r.released >= RUNNER_SWEEP_BATCH) r.saturated++;
+    await each(await ids(EXHAUSTED_ROWS_SQL, RUNNER_MAX_CLAIMS), async (job) => {
+      if (await finishNow(job, { kind: "lost", detail: "claims_exhausted" })) r.exhausted++;
+    });
 
-    // 4. Started jobs with an expired lease.
-    if (left > 0) {
-      const moved = await db.prepare(UNREPORT_EXPIRED_SQL).bind(left).run();
-      const n = moved.meta?.changes ?? 0;
-      r.unreported += n;
-      left -= n;
-    }
+    // 4. Jobs with an expired lease, started or holding completed outputs.
+    const moved = await db.prepare(UNREPORT_EXPIRED_SQL).bind(RUNNER_SWEEP_BATCH).run();
+    r.unreported += moved.meta?.changes ?? 0;
+    if (r.unreported >= RUNNER_SWEEP_BATCH) r.saturated++;
 
     // 5. `unreported` jobs that are due.
-    if (left > 0) {
-      const due = (
-        await db.prepare(UNREPORTED_ROWS_SQL).bind(left).all<{ id: string; revoked: number }>()
-      ).results;
-      const revoked = new Map(due.map((x) => [x.id, x.revoked === 1]));
-      await each(
-        due.map((x) => x.id),
-        async (job) => {
-          if (job.outputs_completed_at !== null) {
-            if (await finish(job, { kind: "verify" })) r.verified++;
-          } else if (revoked.get(job.id) === true) {
-            if (await finish(job, { kind: "lost", detail: "runner_revoked" })) r.lost_revoked++;
-          } else if (await finish(job, { kind: "lost", detail: "lease_expired" })) {
-            r.lost_expired++;
-          }
-        },
-      );
-    }
+    const due = (
+      await db
+        .prepare(UNREPORTED_ROWS_SQL)
+        .bind(RUNNER_SWEEP_BATCH)
+        .all<{ id: string; revoked: number }>()
+    ).results;
+    if (due.length >= RUNNER_SWEEP_BATCH) r.saturated++;
+    const revoked = new Map(due.map((x) => [x.id, x.revoked === 1]));
+    await each(
+      due.map((x) => x.id),
+      async (job) => {
+        if (job.outputs_completed_at !== null) {
+          verify(job, () => r.verified++);
+        } else if (revoked.get(job.id) === true) {
+          if (await finishNow(job, { kind: "lost", detail: "runner_revoked" })) r.lost_revoked++;
+        } else if (await finishNow(job, { kind: "lost", detail: "lease_expired" })) {
+          r.lost_expired++;
+        }
+      },
+    );
 
     // 6. Past the deadline.
-    if (left > 0) {
-      await each(await ids(DEADLINE_ROWS_SQL), async (job) => {
-        if (await finish(job, { kind: "lost", detail: "deadline_exceeded" })) r.lost_deadline++;
-      });
-    }
+    await each(await ids(DEADLINE_ROWS_SQL), async (job) => {
+      if (job.cancel_requested_at !== null) {
+        if (await finishNow(job, { kind: "cancelled" })) r.cancelled++;
+      } else if (await finishNow(job, { kind: "lost", detail: "deadline_exceeded" })) {
+        r.lost_deadline++;
+      }
+    });
 
     // 7. Records of terminal rows, in rotation.
-    if (left > 0) {
-      await each(await ids(RUNNER_UNCOPIED_SQL), async (job) => {
-        await db.prepare(STAMP_EXAMINED_SQL).bind(job.id).run();
+    await each(await ids(RUNNER_UNCOPIED_SQL), async (job) => {
+      later(async () => {
         try {
           await copyResultRecords(env, job);
           r.copied++;
@@ -915,10 +1064,32 @@ export async function sweepRunnerLeases(
           console.error(`[compute-runner-queue] records_copy_failed class=${errorClassName(err)}`);
         }
       });
-    }
+    });
   } catch (err) {
     r.errors++;
     console.error(`[compute-runner-queue] sweep_failed class=${errorClassName(err)}`);
+  }
+
+  const runSlow = async () => {
+    for (const work of slow) {
+      try {
+        await work();
+      } catch (err) {
+        r.errors++;
+        console.error(`[compute-runner-queue] slow_step_failed class=${errorClassName(err)}`);
+      }
+    }
+  };
+  if (options.defer && slow.length > 0) {
+    options.defer(
+      runSlow().then(() => {
+        const log = runnerLeaseLogLine(r);
+        if (log?.level === "error") console.error(log.line);
+        else if (log) console.log(log.line);
+      }),
+    );
+  } else {
+    await runSlow();
   }
   return r;
 }
