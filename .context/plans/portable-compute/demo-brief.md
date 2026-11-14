@@ -3,110 +3,145 @@
 This page is for the owner.
 It says what can be shown, what is live and what is recorded, what each part proves and does not prove, and what comes next.
 Times are Pacific.
-Every row rests on a gate that passed in the recorded evidence; anything without a passed gate is under "does not prove yet".
-Last updated 2026-11-14 00:08, before DM-15 (the live run through NEMAR's routes) has a result; this brief is updated if DM-15 passes before 2026-11-15T05:00.
+Every row rests on a gate that passed in recorded evidence; anything without a passed gate is under "does not prove yet".
+Last updated 2026-11-14, after DM-15 (the recorded run through a local NEMAR stack) passed.
+
+Key: DM-nn and PX-nn name cards of the plan.
+G1 the demo workstation runs the digest-pinned image with limits; G2 the control-plane tests; G3 the runner tests; G4 the image identity and signature; G5 the job record says `finished` on the runner; G6 provenance records are schema-valid; G7 the runner discarded its scratch; G8 the reader opens the recordings and matches the index.
+F1 is the recorded run through the local stack (DM-15); F2 is the manual run (F2-a container run, F2-b reader, F2-c tests; DM-19).
 
 ## 1. What you can say
 
 "NEMAR's quality control (QC) recipe, built on eegprep, ran in a container identified by its image digest on a lab workstation over a real public electroencephalography (EEG) dataset, streaming the recordings from NEMAR's Zarr serving copy with no dataset download and nothing kept on disk, and wrote QC tables with signalJourney provenance; the same recordings open in mne-python.
-QC ran on NEMAR's Zarr serving copy (EEG resampled to 250 Hz, 16-bit), not on the archived recordings.
+QC ran on NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit; the serving copy of this dataset is at 200 Hz), not on the archived recordings.
 The pull-based runner and its queue are built and tested against NEMAR's real control-plane code; they are not yet deployed."
 
-Add: the container image was built and signed in continuous integration (CI), and its digest was checked on the demo workstation before the run.
-Label every recording and every run "manual run, not dispatched by NEMAR".
-Do not say the F1 sentence (the runner claiming a job from NEMAR's control plane on the workstation): no live run has passed.
-The four stores in this demo measured 32 channels at 200 Hz, equal to the index, so do not quote 250 Hz as a measurement of this dataset.
+Add: the container image was built and signed in continuous integration (CI).
+Add (F1): "A recorded run shows the runner on the lab workstation claiming a job from a local NEMAR test stack on the presenter's laptop, not staging and not production, running it from the signed image, and completing it in about 23 seconds."
+Label the manual run "manual run, not dispatched by NEMAR" and the F1 run "recorded, run through the local stack".
+The 250 Hz figure is a rate cap (Architecture Decision Record (ADR) 0028), not a target.
+The archived recording's own rate was not checked: say "not shown" if asked.
 Never say or imply: runs on high-performance computing (HPC) unchanged, the runner verified a signature, private data, EEGLAB support, EEGDash integration, derivatives published or citable, catalog-scale throughput, or a consolidated NEMAR reader.
 
 ## 2. Live or recorded
 
-All runs used the public dataset `nm000274`, version `v1.0.5` (tag commit `91a8f5c9c83117b7e064cf7ae4eef1220b81cf57`, Zarr index source commit `64feed5210ebea128a8484acd3027f9551ff2d7e`).
-Only `.nemar/availability-report.json` and `.nemar/metadata.json` changed since the tag (verdict `metadata_only`, checked by the GitHub compare call).
-Abbreviations: nemar-cli epic head `27868ce1b2ea81424b42a3bc518f750821717de9` ("cli head"); nemar-process runner-epic head `13b3a899f2adf42b01120496cb902abf19feb1b2` ("process head"); eegprep-lean reader commit `14ba46e8da5340cd7ae6adb644cda24fb3f5e483` ("reader commit").
+Dataset: public `nm000274` `v1.0.5` (tag commit `91a8f5c9c83117b7e064cf7ae4eef1220b81cf57`, Zarr index source commit `64feed5210ebea128a8484acd3027f9551ff2d7e`; only `.nemar/availability-report.json` and `.nemar/metadata.json` changed since the tag, verdict `metadata_only`).
+Image: `ghcr.io/nemarorg/nemar-python@sha256:33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a` (tag `0.1.0-cpu`), built by the CI image run on nemar-process `main` at `9212eb5a919cfdd5d6b74fc77f8ea7aed807fc70`.
+"Cli head" is nemar-cli `27868ce1b2ea81424b42a3bc518f750821717de9`; "process head" is nemar-process `13b3a899f2adf42b01120496cb902abf19feb1b2`; "reader commit" is eegprep-lean `14ba46e8da5340cd7ae6adb644cda24fb3f5e483`, which is on the `develop` branch of eegprep.
 
-| Step | Mode | Recorded time and commit | Gate it rests on |
+| Step | Mode | Recorded time and commit | Gate |
 |---|---|---|---|
-| Image digest and signature | recorded | signature verified against the CI workflow identity 2026-11-13 18:37, pulled by digest on the demo workstation and equal 23:48; image `sha256:33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a` (tag `0.1.0-cpu`); published by the CI image run on nemar-process `main` at `9212eb5a919cfdd5d6b74fc77f8ea7aed807fc70`, 2026-11-13 18:18, per GitHub's run list (the image's own labels were not read; the digest is the identity) | G4 path A, passed |
-| Recipe run in the container | live, about 15 s | 2026-11-13 23:54, cli head and process head | F2-a, passed: exit 0 in 14 s, 4 of 4 stores, 0 failed |
-| Provenance check | live | 2026-11-13 23:55, process head | G6, passed: five signalJourney records, exit 0 each |
-| Discard | live | 2026-11-13 23:55, process head | F2-a discard, passed: `discarded` printed |
-| Reader in mne-python | live | 2026-11-13 23:55, reader commit | G8 and F2-b, passed: all 4 stores, 32 channels, 200 Hz, sample counts equal to the index |
-| Control-plane tests | live (about 19 s) | 2026-11-14 00:00, cli head | G2 and F2-c, passed: six test files, 254 pass, 0 fail, plus typecheck, lint and the D1 catalog check |
-| Runner and launcher tests | recorded only (about 4 minutes) | 2026-11-14 00:00, process head | G3 and F2-c, passed: 3781 passed, 57 skipped (the container tests that need Apptainer are skipped on that machine) |
-| Runner in CI with real Apptainer | recorded only | CI run on the process head `13b3a899f2adf42b01120496cb902abf19feb1b2`, 2026-11-13 19:30 | G3 CI job, passed: 2 tests, not skipped |
+| Signature and digest | recorded | signature check 2026-11-14 00:17 (the signature check record: anonymous, against the CI workflow identity and the OpenID Connect issuer, a wrong-identity control fails); CI's own signing step passed in public run 43545538455 on `main`; pulled by digest on the demo workstation and equal, 2026-11-13 23:48; `main` `9212eb5a` | G4 |
+| Limits | recorded | 2026-11-13 23:49, DM-14 smoke test of the image digest | G1 |
+| Recipe in a container | live, about 15 s | 2026-11-13 23:54, image digest, `main` `9212eb5a` | F2-a |
+| Provenance check | live | 2026-11-13 23:55, validator at the process head | G6 |
+| Discard of the manual run | live | 2026-11-13 23:55, image digest (shell commands only) | F2-a |
+| Reader in mne-python | live | 2026-11-13 23:55, reader commit | G8 |
+| Control-plane tests | live, about 20 s after install | 2026-11-14 00:00, cli head | G2 |
+| Runner and launcher tests | recorded only, about 4 minutes | 2026-11-14 00:00, process head | G3 |
+| Runner against a stand-in in CI | recorded only | 2026-11-13 19:30, CI run on the process head | G3 |
+| Job through the local stack | live, about 25 s, only if the laptop stack and tunnel are up; else recorded | 2026-11-14 00:09:36 to 00:09:59, cli head, process head, image digest | G5 |
+| F1 outputs, discard and reader | live as above; else recorded | 2026-11-14 00:10, process head (validator), reader commit | G6, G7, G8 |
 
-Every live row has its recording as the fallback; the recordings are the operator's typescript files.
-The discard row is the manual run's own `rm` and `test ! -e`, not the runner's G7 check.
-The full `bun test` suite was not run.
+Every live row has a recorded fallback; the recordings are the operator's transcripts and plain-text logs.
 
 ## 3. What it proves and does not prove
 
 What it proves, one line per passed gate:
 
-- G4: the image on the demo workstation is the CI-built, signed digest named above, and the container tooling inside it reports `nemar-floor-zarr` 1.0.0 and `eegprep` 0.5.0.
-- G1: the demo workstation runs that digest with memory and CPU limits applied (control groups version 2) as the owner's login.
-- F2-a: the QC recipe processed 4 of 4 EEG stores over the network in 14 s inside a read-only container with all capabilities dropped, 4 CPUs and 16 GiB, and wrote 5 records.
-- G6: all 5 signalJourney records are schema-valid, and the aggregate record names the image digest and both commits.
-- F2-a discard: the output directory was deleted afterwards, and the container root was read-only, so nothing of the run remains on the workstation.
-- G8: the same 4 recordings open in mne-python with 32 channels at 200 Hz and the index's sample counts.
-- G2: the control-plane tests of the runner registry, queue, callers and local stack pass on the cli head.
-- G3: the runner and launcher tests pass on the process head, and the runner stack ran in CI with real Apptainer.
+- G4: the image on the demo workstation is the CI-built digest named above, and CI signed it (the signature was checked by hand on the operator's machine).
+- G1: Docker on the demo workstation enforces memory and CPU limits and control groups version 2 on a small smoke container (python image, memory 268435456 bytes, cpu `100000 100000`); the demo run passed the same flags, but its own enforcement was not measured.
+- F2-a: the recipe processed 4 of 4 EEG stores over the network in 14 s (exit 0) in a read-only container with all capabilities dropped, 4 CPUs and 16 GiB, and wrote 5 records; the outputs were deleted afterwards (the image and its layers stay in Docker's cache on purpose).
+- G6: all 5 signalJourney records are schema-valid, in the manual run and in F1 (22 output files downloaded); the aggregate record names the image digest and both dataset commits.
+- G8: the same 4 EEG recordings open in mne-python with 32 channels at 200 Hz and the index's sample counts, in both runs.
+- G2: the control-plane tests (six files, 254 pass, 0 fail, plus typecheck, lint and the Cloudflare SQLite database (D1) catalog check) pass on the cli head.
+- G3: the runner and launcher tests pass on the process head (3781 passed, 57 skipped: 45 Apptainer container tests plus 12 others, Linux-only features and a drift check that needs a nemar-cli checkout and runs in CI); the CI job ran the runner against a local stack with real Apptainer (2 tests, a tiny stand-in image on a seeded fixture dataset, not the QC recipe).
+- G5: job `job_c574b14326174e8d1a307d1e` for `nm000274@1.0.5` was dispatched through the real routes of a local NEMAR stack, claimed and run by `nemar-runner` on the demo workstation over a reverse tunnel with Docker and no image pull, and ended `finished` (executor `runner`, backend `local`, provenance and manifest status ok, results verified).
+- G7: after the F1 job the workstation had 0 job directories and the runner log shows `scratch_discarded` once.
 
 What it does not prove yet:
 
-- A job dispatched through NEMAR's routes and run by the runner on the demo workstation (F1).
-  The real runner flow (register, claim, run, finish) is proven on the local stack through real routes in CI, but no run on the workstation has passed.
-- Staging or production: nothing here touched either; the dark switches stay untouched.
-- Private data: only a public dataset was read.
-- HPC or any scheduler: only a workstation with Docker.
-- The runner's own Docker backend on the demo workstation: Docker was run by hand.
-- The Zarr conversion migration: the conversion cron is untouched and unchanged.
-- The fidelity of the serving copy: QC ran on the resampled copy, so QC values describe that copy, not the archived recordings.
-- Where derivatives will live: the outputs of this run existed only in the local scratch and the operator's evidence directory, not in any NEMAR store, and were then discarded.
-- Reproducibility of the input: the recipe writes `index_sha256` and `bytes_read`, but the platform does not verify them, and G6 proves schema validity only.
-- A consolidated reader: the reader that ran is `eegprep-lean` at a commit now on the `develop` branch of eegprep, not a release; the image's pin moves to a release later (step PX-08).
-- Release provenance in the records: the published image `0.1.0` predates the release-provenance change (nemar-process pull request 28), so its records carry the image digest but not the nemar-process release version and commit; the first image with them needs a release tag and the owner's publish.
-- That the runner verifies image signatures: the signature was checked by hand on the operator's machine.
+- Staging or production: no staging or production NEMAR API, database, switch or deployment was touched; the recipe reads files from the public Zarr serving host, which is a production host, read only.
+- The F1 stack is a local test stack on the presenter's laptop, left running with the tunnel and the runner registration until Sunday, so the laptop must stay on; a job from a real account was not shown, nor a second workstation.
+- That the runner verifies image signatures, or enforces per-job limits (its F1 log shows `enforce_limits` false).
+- Private data, and HPC or any scheduler.
+- The Zarr conversion migration: the conversion cron is untouched.
+- The fidelity of the serving copy: QC values describe the serving copy, and the archived recording's own rate was not checked.
+- Where derivatives will live: outputs existed only on the workstation's scratch, the local stack and the operator's evidence directory, not in any NEMAR store.
+- Reproducibility of the input: the recipe writes `index_sha256` and `bytes_read`, but the platform does not verify them, G6 proves schema validity only, and in the aggregate record the commit check is `attested_by_caller`, so the `metadata_only` verdict is the operator's check, not the platform's.
+- A consolidated reader: `eegprep-lean` at a commit now on `develop`, not a release; the image's pin moves to a release later (step PX-08).
+- Release provenance in the records: image `0.1.0` predates the release-provenance change (nemar-process pull request 28), so its records carry the image digest but not the nemar-process release version and commit.
+- The full `bun test` suite was not run.
 
 ## 4. Run order for Sunday
 
-Placeholders: `<ws>` is the demo workstation login, `$RUNNER_ROOT` is its runner directory, `<out>` is a local evidence directory.
-No secret is needed for any step.
+Set the placeholders once; every path and login is expanded locally, and an unset runner root makes each command that uses `${R:?}` fail instead of running.
+No key is needed; ssh access to the workstation is.
+Setup facts: the runner is registered as `demo_1` (`demo-1` fails the name pattern), and the runner directories are not group- or other-writable (the workstation's umask is 002, so the doctor first refused them).
 
 ```bash
-# DM-19 step 2: the directory the run writes into (on the demo workstation)
-ssh <ws> 'mkdir -p -m 0700 "$RUNNER_ROOT/manual/out"'
+W="<workstation login>"; R="<runner root on the workstation>"; E="<absolute evidence directory>"
+N="<nemar-process checkout at the process head>"; C="<nemar-cli checkout at the cli head>"
+S="<local stack state directory>"; H=33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a
+IMG=ghcr.io/nemarorg/nemar-python@sha256:$H
+RUN="python3 -I -S -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(\"nemar_runner\", run_name=\"__main__\", alter_sys=True)' '${R:?}/src/runner'"
 
-# DM-19 step 3: the recipe in the container (on the demo workstation)
-H=33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a
-ssh <ws> "docker run --rm --user \"\$(id -u):\$(id -g)\" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp --cpus 4 --memory 16384m --mount type=bind,src=\$RUNNER_ROOT/manual/out,dst=/work/outputs ghcr.io/nemarorg/nemar-python@sha256:$H nemar-recipe run nemar-floor-zarr --out /work/outputs/product --dataset-id nm000274 --dataset-version v1.0.5 --source-commit 64feed5210ebea128a8484acd3027f9551ff2d7e --tag-commit 91a8f5c9c83117b7e064cf7ae4eef1220b81cf57 --commit-equivalence metadata_only --image-digest sha256:$H --zarr-base https://zarr.nemar.org --commit-delta-path .nemar/availability-report.json --commit-delta-path .nemar/metadata.json"
+# Preflight: stack answers, tunnel reaches it from the workstation, runner files and doctor (no secret printed)
+curl -fsS http://127.0.0.1:8787/health; echo
+ssh "$W" "curl -fsS http://127.0.0.1:8787/health"; echo
+ssh "$W" "test -s ~/.config/nemar-runner/config.json && test -s ~/.config/nemar-runner/secret && echo config-and-secret-present; $RUN doctor"
 
-# DM-19 step 4: copy back, validate each signalJourney file, discard (validate in the nemar-process checkout at the process head)
-scp -r "<ws>:$RUNNER_ROOT/manual/out/product" <out>/
-for f in $(find <out>/product -name '*signalJourney.json'); do uv run --group signaljourney python scripts/validate_signaljourney.py "$f"; echo "rc=$?"; done
-ssh <ws> 'rm -rf "$RUNNER_ROOT/manual" && test ! -e "$RUNNER_ROOT/manual" && echo discarded'
+# F2-a (DM-19 steps 2, 3): the recipe in the container, with exit code and wall time
+ssh "$W" "mkdir -p -m 0700 '${R:?}/manual/out'"
+ssh "$W" "start=\$(date +%s); docker run --rm --user \"\$(id -u):\$(id -g)\" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp --cpus 4 --memory 16384m --mount type=bind,src=${R:?}/manual/out,dst=/work/outputs $IMG nemar-recipe run nemar-floor-zarr --out /work/outputs/product --dataset-id nm000274 --dataset-version v1.0.5 --source-commit 64feed5210ebea128a8484acd3027f9551ff2d7e --tag-commit 91a8f5c9c83117b7e064cf7ae4eef1220b81cf57 --commit-equivalence metadata_only --image-digest sha256:$H --zarr-base https://zarr.nemar.org --commit-delta-path .nemar/availability-report.json --commit-delta-path .nemar/metadata.json; rc=\$?; echo EXIT=\$rc WALL=\$(( \$(date +%s)-start ))s"
 
-# DM-19 step 5: the reader, once per store (the store argument is the index path key, the .edf path)
-uv run --no-project --with "eegprep-lean[zarr,mne] @ git+https://github.com/sccn/eegprep@14ba46e8da5340cd7ae6adb644cda24fb3f5e483#subdirectory=packages/eegprep-lean" python -c "import eegprep_lean as L; w = L.load_recording('nm000274', '<store .edf path>'); r = L.to_mne_raw(w); print(r.info['nchan'], r.info['sfreq'])"
+# F2-a (DM-19 step 4): copy back, validate, discard
+scp -r "$W:${R:?}/manual/out/product" "$E/"
+cd "$N" && find "$E/product" -name '*signalJourney.json' | while read -r f; do uv run --group signaljourney python scripts/validate_signaljourney.py "$f"; echo "rc=$?"; done
+ssh "$W" "rm -rf '${R:?}/manual' && test ! -e '${R:?}/manual' && echo discarded"
+
+# F2-b (DM-19 step 5): the reader on each store (the store argument is the index path key, the .edf path)
+for s in sub-4/ses-0/eeg/sub-4_ses-0_task-imagery_acq-finaltest_run-1_eeg.edf sub-4/ses-0/eeg/sub-4_ses-0_task-imagery_acq-finaltrain_run-0_eeg.edf sub-5/ses-0/eeg/sub-5_ses-0_task-imagery_acq-finaltest_run-1_eeg.edf sub-5/ses-0/eeg/sub-5_ses-0_task-imagery_acq-finaltrain_run-0_eeg.edf; do
+  uv run --no-project --with "eegprep-lean[zarr,mne] @ git+https://github.com/sccn/eegprep@14ba46e8da5340cd7ae6adb644cda24fb3f5e483#subdirectory=packages/eegprep-lean" python -c "import sys, eegprep_lean as L; r = L.to_mne_raw(L.load_recording('nm000274', sys.argv[1])); print(r.info['nchan'], r.info['sfreq'], r.n_times)" "$s"
+done
+
+# F2-c (G2): the control-plane tests, live
+cd "$C" && bun install --frozen-lockfile && (cd backend && bun install --frozen-lockfile)
+cd "$C" && bun test backend/test/compute-runner-registry.test.ts backend/test/compute-runner-end-callers.test.ts backend/test/compute-runner-jobs.test.ts backend/test/compute-runner-queue.test.ts backend/test/compute-local-stack-runner.test.ts test/admin-compute-runners-cli.test.ts
+
+# F1 (DM-15 steps 7 to 9); the stack, tunnel and registration are already running, do not restart them
+export TEST_API_URL=http://127.0.0.1:8787 NEMAR_CONFIG_DIR="$E/cfg" NEMAR_NO_UPDATE_CHECK=1
+cd "$C" && bun run src/index.ts admin compute pipeline run nemar-floor-zarr --dataset nm000274@1.0.5 --executor runner --json
+J="<job id from the dispatch output>"
+ssh "$W" "$RUN once"
+cd "$C" && bun run src/index.ts admin compute jobs record "$J" --json
+cd "$C" && bun backend/scripts/compute-local-stack.ts outputs --state "$S" --job "$J" --to "$E/f1out"
+cd "$N" && find "$E/f1out" -name '*signalJourney.json' | while read -r f; do uv run --group signaljourney python scripts/validate_signaljourney.py "$f"; echo "rc=$?"; done
+ssh "$W" "find '${R:?}/jobs' -mindepth 1 | wc -l; grep -c scratch_discarded '${R:?}/runner.log'"
+# Only to rebuild F1 from nothing (DM-15 steps 2 and 3), each detached:
+#   cd "$C" && bun backend/scripts/compute-local-stack.ts serve --state "$S" --image "$IMG" --seed-from-catalog nm000274
+#   ssh -N -o ExitOnForwardFailure=yes -R 127.0.0.1:8787:127.0.0.1:8787 -R 127.0.0.1:8788:127.0.0.1:8788 "$W"
 ```
 
-The four store paths are `sub-4/ses-0/eeg/sub-4_ses-0_task-imagery_acq-finaltest_run-1_eeg.edf`, `sub-4/ses-0/eeg/sub-4_ses-0_task-imagery_acq-finaltrain_run-0_eeg.edf`, `sub-5/ses-0/eeg/sub-5_ses-0_task-imagery_acq-finaltest_run-1_eeg.edf` and `sub-5/ses-0/eeg/sub-5_ses-0_task-imagery_acq-finaltrain_run-0_eeg.edf`.
-Expected: exit 0, a summary of 4 discovered and 4 succeeded, `rc=0` five times, `discarded`, and `32 200.0` four times.
-If DM-15 passes, its steps 2, 3 and 7 to 9 are added here by an update.
+Expected: the recipe summary shows 4 discovered and 4 succeeded, then `EXIT=0` and a wall time near 14 s; `rc=0` five times; `discarded`; `32 200.0` with the sample counts 160000, 96000, 160000, 96000; 254 tests pass; for F1, `finished`, `runner`, `local`, 22 output files, `rc=0` five times, then `0` and `1`.
 
 ## 5. If something fails on stage
 
-Switch in this order, and say "recorded" aloud each time.
-1. Recipe run or network trouble: the recorded step 3 transcript (2026-11-13 23:54, exit 0 in 14 s).
-2. Validation: the recorded step 4 validation and discard output (23:55).
-3. Reader: the recorded step 5 transcript (23:55).
-4. Tests: the recorded step 6 transcripts (2026-11-14 00:00), including the runner and launcher run.
-5. Anything else: the architecture slide of the plan, then stop and answer from section 3.
+Switch in this order and say "recorded" aloud each time.
+1. Recipe run or network trouble: the recorded recipe transcript (2026-11-13 23:54, exit 0 in 14 s).
+2. Runner or stack trouble: the recorded F1 transcript and gate logs (2026-11-14 00:09 to 00:10).
+3. Validation or discard: the recorded logs (2026-11-13 23:55).
+4. Reader: the recorded reader transcript (23:55).
+5. Tests: the recorded test transcripts (2026-11-14 00:00).
+6. Anything else: stop and answer from section 3.
 
+On a 500 from the Zarr host, retry once after a pause, then switch to the recording.
 A question outside the evidence gets "not shown yet", with the matching line from "does not prove yet".
 
 ## 6. Next
 
 - Phase S (staging and production runner jobs): S1, a dev-owned compute fixture `nm099996` eligible outside production only; then S2, the epic reaching `dev` with a staging job finished.
-- Phase Z (Zarr conversion becomes a pipeline): Z0, ADR 0123 proposed after the CP-F review; then Z1, the formats contract file.
-- Phase R (readers): R0, the collaborator's reader epic arriving upstream with ADR 0120; then R1, the shared reader transport.
+- Phase Z (Zarr conversion becomes a pipeline): Z0, ADR 0123 proposed after the frontier review; then Z1, the formats contract file.
+- Phase R (readers): R0, the collaborator's reader epic arriving upstream with ADR 0120; then R1, the eegprep-lean engine transport plus one conformance suite for the three readers.
+
+Open items for the owner: the architecture slide named in plan section 3.4 does not exist yet; plan 3.1 and the DM-16 card still carry the old 250 Hz wording, and the owner's answer (Q18) governs this brief until the lead aligns them.
