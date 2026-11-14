@@ -61,8 +61,7 @@ function resultLine(r: ComputePipelineResult): string {
   }
   const blocked =
     r.blocked_by && r.blocked_by.length > 0 ? ` [${r.blocked_by.map(word).join(", ")}]` : "";
-  const reason = r.reason ? `, reason ${word(r.reason)}` : "";
-  return `  ${word(r.dataset_id)}${r.version ? ` ${word(r.version)}` : ""}: refused, ${word(r.code ?? "?")}${blocked}${reason}`;
+  return `  ${word(r.dataset_id)}${r.version ? ` ${word(r.version)}` : ""}: refused, ${word(r.code ?? "?")}${blocked}`;
 }
 
 /** What a run had room for, and what bounded it, in words a person reads (the fixed words are the Worker's). */
