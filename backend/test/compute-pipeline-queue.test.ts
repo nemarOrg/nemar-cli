@@ -393,10 +393,12 @@ describe("the dry run", () => {
     expect(dry.estimate_milli_total).toBe(2 * recipeEstimateMilli(floor));
     // 16 GB is 8 core-units over 6 hours: 48 SU.
     expect(dry.estimate_milli_per_job).toBe(48_000);
+    // S3c: a Tapis dry run also says whether Tapis is configured; the fixture environment configures it.
     expect(dry.config).toEqual({
       compute_enabled: true,
       runtime_image: true,
       pipelines_account: true,
+      tapis_configured: true,
     });
   });
 
@@ -420,10 +422,13 @@ describe("the dry run", () => {
     const dry = await pipelineDryRun(quiet, { recipe: "nemar-floor", limit: 1 });
     if (!dry.ok) throw new Error("not ok");
     expect(dry.would_dispatch).toHaveLength(1);
+    // The quiet environment turns off the compute switch and the image only; it keeps the fixture's Tapis
+    // configuration, so Tapis is still configured here.
     expect(dry.config).toEqual({
       compute_enabled: false,
       runtime_image: false,
       pipelines_account: true,
+      tapis_configured: true,
     });
     expect(await counts(env)).toEqual(before);
   });
