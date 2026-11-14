@@ -47,11 +47,14 @@ import { adminRoutes } from "../src/routes/admin";
 import { computeRoutes } from "../src/routes/compute";
 import { computeRunnerRoutes } from "../src/routes/compute-runners";
 import { getJob } from "../src/services/compute-jobs";
+import { UNCOPIED_TERMINAL_SQL } from "../src/services/compute-lifecycle";
+import { RUNNER_TERMINAL_TRANSITION_SQL } from "../src/services/compute-lifecycle";
 import { dispatchPipelineJob } from "../src/services/compute-pipeline";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
 import {
   CLAIM_RUNNER_JOB_SQL,
   claimRunnerJobs,
+  completeRunnerJob,
   runnerVersionAtLeast,
   sweepRunnerLeases,
 } from "../src/services/compute-runner-queue";
@@ -70,6 +73,10 @@ import {
 } from "./helpers/compute-lifecycle-fixture";
 import { seedEegDataset, seedPipelinesAccount } from "./helpers/compute-pipeline-fixture";
 import { roundTripD1, seedUser, setPolicy } from "./helpers/compute-seed";
+import {
+  type GithubCompareStandin,
+  startGithubCompareStandin,
+} from "./helpers/github-compare-standin";
 
 // --- The world ---------------------------------------------------------------------------------------
 
@@ -79,6 +86,15 @@ let env: Bindings;
 let base = "";
 let server: ReturnType<typeof Bun.serve>;
 const pending: Promise<unknown>[] = [];
+
+/**
+ * The two external services the Zarr source check reads (GitHub, and the serving copy's index), as one real
+ * loopback server: the happy world is the tag and the index naming one commit. A Zarr dispatch runs in
+ * `development` (the check honors its seams only outside production).
+ */
+let github: GithubCompareStandin;
+const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+const previousSeams = { github: seams.NEMAR_GITHUB_API_URL, index: seams.NEMAR_ZARR_INDEX_BASE };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 app.route("/admin", adminRoutes);
@@ -99,6 +115,9 @@ const flush = async () => {
 
 beforeAll(async () => {
   fx = await startLifecycleFixture({ withD1: true });
+  github = startGithubCompareStandin();
+  seams.NEMAR_GITHUB_API_URL = github.url;
+  seams.NEMAR_ZARR_INDEX_BASE = github.indexBase;
   server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -110,14 +129,18 @@ beforeAll(async () => {
 beforeEach(async () => {
   // What the last case handed to `waitUntil` runs against that case's database: let it end first.
   await flush();
+  github?.reset();
   await fx.reset();
   ids = await seedComputeUsers(fx.harness.db);
-  env = fx.env({ COMPUTE_RUNNERS_ENABLED: "1", API_BASE_URL: base });
+  env = fx.env({ ENVIRONMENT: "development", COMPUTE_RUNNERS_ENABLED: "1", API_BASE_URL: base });
   await seedPipelinesAccount(env);
 });
 
 afterAll(async () => {
   server?.stop(true);
+  github?.stop();
+  seams.NEMAR_GITHUB_API_URL = previousSeams.github;
+  seams.NEMAR_ZARR_INDEX_BASE = previousSeams.index;
   await fx?.dispose();
 }, 30_000);
 
@@ -149,6 +172,8 @@ let seq = 0;
 async function dataset(e: Bindings = env): Promise<string> {
   const id = `nm${String(1000 + ++seq).padStart(6, "0")}`;
   await seedEegDataset(e, id);
+  github.tag(id, "v1.0.0", COMMIT);
+  github.index(id, { source_commit: COMMIT, store_count: 3 });
   await e.DB.prepare(
     "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = 'ready', zarr_store_count = 3 WHERE dataset_id = ?2",
   )
@@ -557,25 +582,35 @@ describe("the claim", () => {
     expect(runnerVersionAtLeast("not a version")).toBe(false);
   });
 
-  test("the statement carries every predicate, literally (MUTATION: delete any one)", () => {
+  test("the statement carries every predicate, literally, for the picked row AND the row written (MUTATION: delete any one)", () => {
     const s = CLAIM_RUNNER_JOB_SQL;
+    // The terms of `claimable`: each is there twice, once over the subselect's `j` and once over the outer row.
+    for (const alias of ["j", "compute_jobs"]) {
+      for (const term of [
+        `${alias}.executor = 'runner'`,
+        `${alias}.accounting = 'none'`,
+        `${alias}.state = 'created'`,
+        `${alias}.runner_claimed_at IS NULL`,
+        `${alias}.records_written_at IS NOT NULL`,
+        `${alias}.cancel_requested_at IS NULL`,
+        `${alias}.claim_attempts < ?5`,
+        `${alias}.pool = ?6`,
+        `+ ${alias}.cores_per_node <= ?7`,
+        `+ COALESCE(${alias}.memory_mb, 0) <= ?8`,
+        `+ ${alias}.gpus <= ?9`,
+        `WHERE s.job_id = ${alias}.id AND d.status = 'active'`,
+      ]) {
+        expect([alias, term, s.includes(term)]).toEqual([alias, term, true]);
+      }
+    }
     for (const term of [
-      "executor = 'runner'",
-      "accounting = 'none'",
-      "state = 'created'",
-      "runner_claimed_at IS NULL",
-      "records_written_at IS NOT NULL",
-      "cancel_requested_at IS NULL",
-      "claim_attempts < ?5",
-      "cores_per_node <= ?7",
-      "COALESCE(j.memory_mb, 0) <= ?8",
-      "gpus <= ?9",
       "FROM compute_runners r JOIN users u ON u.id = r.registered_by",
       "r.revoked_at IS NULL",
       "u.role = 'owner' AND u.status = 'approved' AND u.deleted_at IS NULL",
       "d.visibility = 'public'",
       "d.anonymous = 0",
       "ORDER BY j.created_at ASC",
+      "l.runner_id = ?1",
     ]) {
       expect(s).toContain(term);
     }
@@ -596,13 +631,20 @@ describe("two runners racing for one job", () => {
   for (const which of [0, 1]) {
     test(`50 rounds never give a job to both [${which === 0 ? "bun:sqlite" : "Miniflare D1"}] (MUTATION: drop runner_claimed_at IS NULL from the claim)`, async () => {
       const w = worlds()[which] as ReturnType<typeof worlds>[number];
-      const e = fx.env({ DB: w.d1, COMPUTE_RUNNERS_ENABLED: "1", API_BASE_URL: base });
+      const e = fx.env({
+        ENVIRONMENT: "development",
+        DB: w.d1,
+        COMPUTE_RUNNERS_ENABLED: "1",
+        API_BASE_URL: base,
+      });
       if (which === 1) {
         await seedPipelinesAccount(e, { reuse: true });
       }
       const owner = which === 0 ? ids.owner : await seedUser(w.d1, { role: "owner" });
-      const a = await runner(e, {}, owner);
-      const b = await runner(e, {}, owner);
+      // Room for every round: a runner is handed only what its registered capacity still holds.
+      const big = { cores: 256, memory_mb: 16_777_216 };
+      const a = await runner(e, big, owner);
+      const b = await runner(e, big, owner);
       const racing = w.racing(e);
       let rounds = 0;
       for (let i = 0; i < 50; i++) {
@@ -1077,7 +1119,7 @@ describe("the launcher routes of a runner job need the current lease", () => {
       join(import.meta.dir, "../src/routes/callbacks/compute-job-callbacks.ts"),
       "utf8",
     );
-    expect(src).toContain('job.executor === "runner" && !holdsCurrentLease(c, job)');
+    expect(src).toContain('job.executor !== "tapis" && !holdsCurrentLease(c, job)');
   });
 });
 
@@ -1150,6 +1192,7 @@ describe("records that never landed", () => {
   test("a runner job created with recordsWritten false is not claimed; after the replay sweep the next claim admits it (MUTATION: skip the replay)", async () => {
     const r = await runner();
     const bad = fx.env({
+      ENVIRONMENT: "development",
       COMPUTE_RUNNERS_ENABLED: "1",
       API_BASE_URL: base,
       COMPUTE_RECORDS: failing(2),
@@ -1178,6 +1221,7 @@ describe("records that never landed", () => {
 
   test("a row whose specification cannot be rebuilt as the recorded digest is left alone, not written with another", async () => {
     const bad = fx.env({
+      ENVIRONMENT: "development",
       COMPUTE_RUNNERS_ENABLED: "1",
       API_BASE_URL: base,
       COMPUTE_RECORDS: failing(2),
@@ -1191,12 +1235,8 @@ describe("records that never landed", () => {
     });
     const jobId = (made as { jobId: string }).jobId;
     await age(jobId, "created_at", "-6 minutes");
-    // The dataset's recorded commit changed since: the rebuilt text is another text.
-    await sql(
-      "UPDATE datasets SET zarr_source_commit = ?1 WHERE dataset_id = ?2",
-      "f".repeat(40),
-      id,
-    );
+    // The tag moved since: the rebuilt text is another text (or the check cannot say).
+    github.tag(id, "v1.0.0", "f".repeat(40));
     const swept = await sweepRunnerLeases(env);
     expect(swept.replayed).toBe(0);
     expect((await row(jobId)).records_written_at).toBeNull();
@@ -1230,6 +1270,8 @@ describe("the cancel of a waiting runner job", () => {
     const res = await admin("POST", `/compute/jobs/${first}/cancel`);
     expect(res.status).toBe(200);
     expect(res.body.job).toMatchObject({ state: "cancelled", settled: true, charged_milli: 0 });
+    // The answer says it ended in this call, not that a cancel was merely recorded.
+    expect(res.body.outcome).toBe("cancelled");
     const job = await row(first);
     expect(job).toMatchObject({ state: "cancelled", cancel_reason: "admin", charged_milli: 0 });
     expect(job.settled_provisional_at).not.toBeNull();
@@ -1263,6 +1305,7 @@ describe("the cancel of a waiting runner job", () => {
     const { r, jobId, entry } = await claimed();
     const res = await admin("POST", `/compute/jobs/${jobId}/cancel`);
     expect(res.body.job.state).toBe("created");
+    expect(res.body.outcome).toBe("cancel_requested");
     expect((await row(jobId)).cancel_requested_at).not.toBeNull();
     expect(
       RunnerHeartbeatResponseSchema.parse(
@@ -1309,7 +1352,7 @@ describe("the records copy of a runner job", () => {
     expect((await uploadAs(entry)).complete).toBe(200);
     // The store is down for the completion's copy: the answer still says finished.
     const saved = env;
-    env = fx.env({ COMPUTE_RUNNERS_ENABLED: "1", API_BASE_URL: base });
+    env = fx.env({ ENVIRONMENT: "development", COMPUTE_RUNNERS_ENABLED: "1", API_BASE_URL: base });
     const down = failing(1000);
     env = { ...env, COMPUTE_RECORDS: down };
     const done = await complete(r, jobId, entry.lease_id);
@@ -1372,5 +1415,520 @@ describe("the two attention words", () => {
 describe("the recipe of a runner job is the recipe's", () => {
   test("the registry entry the queue relies on", () => {
     expect(findRecipe("nemar-floor-zarr")?.executors).toEqual(["runner"]);
+  });
+});
+
+// --- Review round 1 ---------------------------------------------------------------------------------------------
+
+type D1Statement = {
+  bind(...p: unknown[]): unknown;
+  run(): Promise<unknown>;
+  first(): Promise<unknown>;
+  all(): Promise<unknown>;
+  __execForBatch(): unknown;
+};
+
+/**
+ * A database that lets ONE other writer in before the first statement whose text holds `match` runs: the
+ * interleaving a real database has between two requests, made exact. Nothing is replaced: every statement
+ * still runs on the real database, in the real order, and `fn` is what the other request did meanwhile.
+ */
+function hookD1(d1: D1Database, match: string, fn: () => Promise<void>): D1Database {
+  let fired = false;
+  const fire = async (sqlText: string) => {
+    if (fired || !sqlText.includes(match)) return;
+    fired = true;
+    await fn();
+  };
+  return {
+    prepare(sqlText: string) {
+      const inner = d1.prepare(sqlText) as unknown as D1Statement;
+      const api = {
+        __sql: sqlText,
+        bind(...p: unknown[]) {
+          inner.bind(...p);
+          return api;
+        },
+        async run() {
+          await fire(sqlText);
+          return inner.run();
+        },
+        async first() {
+          await fire(sqlText);
+          return inner.first();
+        },
+        async all() {
+          await fire(sqlText);
+          return inner.all();
+        },
+        __execForBatch() {
+          return inner.__execForBatch();
+        },
+      };
+      return api;
+    },
+    async batch(stmts: Array<{ __sql?: string }>) {
+      for (const st of stmts) await fire(st.__sql ?? "");
+      return (d1 as unknown as { batch(s: unknown[]): Promise<unknown> }).batch(stmts);
+    },
+  } as unknown as D1Database;
+}
+
+/** The other request: the job's lease expires, the sweep releases it, and `thief` claims it under a NEW lease. */
+async function stealLease(jobId: string, thief: Runner): Promise<void> {
+  await age(jobId, "lease_expires_at", "-1 minute");
+  await sweepRunnerLeases(env);
+  const taken = await claimRunnerJobs(env, thief.principal, 1);
+  expect(taken.jobs.map((j) => j.id)).toEqual([jobId]);
+}
+
+const completeBody = (jobId: string, leaseId: string, over: Record<string, unknown> = {}) => ({
+  job_id: jobId,
+  lease_id: leaseId,
+  exit_number: 13,
+  launcher_failure_code: null,
+  launcher_detail: null,
+  usage: { wall_seconds: 77, cpu_seconds: 88, max_rss_mb: 99 },
+  usage_partial: false,
+  scratch_discarded: true,
+  ...over,
+});
+
+describe("at most once acceptance, under a race", () => {
+  const MARK = "failure_detail = COALESCE(?5";
+
+  test("a completion that lost its lease between the check and the write (the claim released and taken again) ends nothing, records no usage and is lease_lost (MUTATION: drop the lease from RUNNER_TERMINAL_TRANSITION_SQL, or from RECORD_USAGE_SQL)", async () => {
+    const { r, jobId, entry } = await claimed();
+    expect(RUNNER_TERMINAL_TRANSITION_SQL).toContain("AND lease_id IS ?17");
+    const hooked = { ...env, DB: hookD1(env.DB, MARK, () => stealLease(jobId, r)) };
+    const res = await completeRunnerJob(
+      hooked,
+      r.principal,
+      completeBody(jobId, entry.lease_id) as never,
+    );
+    expect(res).toEqual({ ok: false, refusal: "lease_lost" });
+    const job = await row(jobId);
+    expect(job).toMatchObject({
+      state: "created",
+      failure_code: null,
+      runner_wall_seconds: null,
+      runner_id: r.id,
+      claim_attempts: 2,
+    });
+    expect(job.lease_id).not.toBe(entry.lease_id);
+    expect(job.settled_provisional_at).toBeNull();
+    expect(await count("SELECT COUNT(*) AS n FROM compute_ledger WHERE job_id = ?1", jobId)).toBe(
+      0,
+    );
+  });
+
+  test("so does one whose runner another runner replaced", async () => {
+    const { r, jobId, entry } = await claimed();
+    const b = await runner();
+    const hooked = { ...env, DB: hookD1(env.DB, MARK, () => stealLease(jobId, b)) };
+    const res = await completeRunnerJob(
+      hooked,
+      r.principal,
+      completeBody(jobId, entry.lease_id) as never,
+    );
+    expect(res).toEqual({ ok: false, refusal: "lease_lost" });
+    expect(await row(jobId)).toMatchObject({
+      state: "created",
+      runner_id: b.id,
+      failure_code: null,
+    });
+  });
+
+  test("and a completion that passed the check before a revoke cleared the lease cannot decide the end after it", async () => {
+    const { r, jobId, entry } = await claimed();
+    const hooked = {
+      ...env,
+      DB: hookD1(env.DB, MARK, async () => {
+        expect((await revokeRunner(r.id)).status).toBe(200);
+      }),
+    };
+    const res = await completeRunnerJob(
+      hooked,
+      r.principal,
+      completeBody(jobId, entry.lease_id) as never,
+    );
+    expect(res).toEqual({ ok: false, refusal: "lease_lost" });
+    expect(await row(jobId)).toMatchObject({
+      state: "created",
+      lease_id: null,
+      failure_code: null,
+      runner_wall_seconds: null,
+    });
+  });
+
+  test("outputs-complete under a lease that was replaced between the route's check and the write changes nothing (MUTATION: drop the lease term of COMPLETE_OUTPUTS_SQL)", async () => {
+    const { r, jobId, entry } = await claimed();
+    const saved = env;
+    env = {
+      ...saved,
+      DB: hookD1(saved.DB, "SET outputs_completed_at", async () => {
+        env = saved;
+        await stealLease(jobId, r);
+      }),
+    };
+    try {
+      const up = await uploadAs(entry);
+      expect(up.outputs).toBe(200);
+      expect(up.complete).toBe(409);
+    } finally {
+      env = saved;
+    }
+    const job = await row(jobId);
+    expect(job.outputs_completed_at).toBeNull();
+    expect(job.lease_id).not.toBe(entry.lease_id);
+  });
+
+  test("the claim of the declared bytes under a replaced lease changes nothing (MUTATION: drop the lease term of CLAIM_RESULTS_BYTES_SQL)", async () => {
+    const { r, jobId, entry } = await claimed();
+    const saved = env;
+    env = {
+      ...saved,
+      DB: hookD1(saved.DB, "SET results_bytes", async () => {
+        env = saved;
+        await stealLease(jobId, r);
+      }),
+    };
+    try {
+      const up = await uploadAs(entry);
+      expect(up.outputs).not.toBe(200);
+    } finally {
+      env = saved;
+    }
+    const job = await row(jobId);
+    expect(job.results_bytes).toBeNull();
+    expect(job.lease_id).not.toBe(entry.lease_id);
+  });
+
+  test("a launch digest written under a lease that was replaced is refused, and that claim is not answered (MUTATION: drop the lease term of LAUNCH_DIGEST_UNDER_LEASE_SQL)", async () => {
+    const r = await runner();
+    const jobId = await dispatch();
+    const hooked = {
+      ...env,
+      DB: hookD1(env.DB, "SET launch_spec_digest", () => stealLease(jobId, r)),
+    };
+    const first = await claimRunnerJobs(hooked, r.principal, 1);
+    expect(first.jobs).toEqual([]);
+    const job = await row(jobId);
+    // The second claim (the thief's, the same runner under another lease) is the one that stands.
+    expect(job).toMatchObject({ runner_id: r.id, claim_attempts: 2 });
+    expect(job.launch_spec_digest).not.toBeNull();
+  });
+});
+
+describe("a claim never burns a job's claims for a fault of NEMAR's", () => {
+  test("a Worker with no API base address claims nothing, however often the runner polls (MUTATION: drop the configuration check)", async () => {
+    const r = await runner();
+    const jobId = await dispatch();
+    const saved = env;
+    env = { ...saved, API_BASE_URL: undefined } as unknown as Bindings;
+    try {
+      for (let i = 0; i < 5; i++) {
+        const res = await claim(r, 1);
+        expect(res.status).toBe(200);
+        expect(res.body.jobs).toEqual([]);
+      }
+    } finally {
+      env = saved;
+    }
+    await sweepRunnerLeases(env);
+    expect(await row(jobId)).toMatchObject({
+      state: "created",
+      runner_id: null,
+      claim_attempts: 0,
+    });
+    // Nothing was even tried: no claim statement ran (a claim given back is a write that should not happen).
+    let tried = false;
+    const watching = {
+      ...env,
+      API_BASE_URL: undefined,
+      DB: hookD1(env.DB, "claim_attempts + 1", async () => {
+        tried = true;
+      }),
+    } as unknown as Bindings;
+    expect((await claimRunnerJobs(watching, r.principal, 3)).jobs).toEqual([]);
+    expect(tried).toBe(false);
+    // The same holds for the secret and the records bucket, through the service.
+    for (const gap of [{ PRESCREEN_CALLBACK_SECRET: undefined }, { COMPUTE_RECORDS: undefined }]) {
+      expect((await claimRunnerJobs({ ...env, ...gap } as Bindings, r.principal, 3)).jobs).toEqual(
+        [],
+      );
+    }
+    expect((await row(jobId)).claim_attempts).toBe(0);
+    expect((await claimOne(r)).id).toBe(jobId);
+  });
+
+  test("a records bucket that throws after the claim committed gives the claim back uncounted, and the jobs that did build are answered (MUTATION: drop the give-back, or its counter)", async () => {
+    const r = await runner();
+    const [one, two, three] = [await dispatch(), await dispatch(), await dispatch()] as [
+      string,
+      string,
+      string,
+    ];
+    for (const [i, id] of [one, two, three].entries())
+      await age(id, "created_at", `-${3 - i} minutes`);
+    const real = fx.harness.records;
+    const down = {
+      put: (k: string, v: unknown, o?: unknown) =>
+        real.put(k, v as ArrayBuffer, o as Parameters<R2Bucket["put"]>[2]),
+      get: async (key: string) => {
+        if (key === recordKey(two, "spec.json")) throw new Error("the store is down");
+        return real.get(key);
+      },
+      head: (k: string) => real.head(k),
+      delete: (k: string) => real.delete(k),
+      list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
+    } as unknown as R2Bucket;
+    const answered = await claimRunnerJobs({ ...env, COMPUTE_RECORDS: down }, r.principal, 3);
+    expect(answered.jobs.map((j) => j.id)).toEqual([one]);
+    expect(await row(one)).toMatchObject({ runner_id: r.id, claim_attempts: 1 });
+    // Given back, and uncounted; the third was never asked for.
+    for (const id of [two, three]) {
+      expect(await row(id)).toMatchObject({
+        state: "created",
+        runner_id: null,
+        lease_id: null,
+        claim_attempts: 0,
+      });
+    }
+    // The store is back: both are claimed, once each.
+    const rest = await claimRunnerJobs(env, r.principal, 3);
+    expect(rest.jobs.map((j) => j.id)).toEqual([two, three]);
+    expect((await row(two)).claim_attempts).toBe(1);
+  });
+
+  test("a specification that can never be built ends the job failed launch_failed (invalid_spec), settled with charge 0, and the next job is still answered", async () => {
+    const r = await runner();
+    const bad = await dispatch();
+    const good = await dispatch();
+    await age(bad, "created_at", "-2 minutes");
+    await age(good, "created_at", "-1 minutes");
+    await fx.harness.records.delete(recordKey(bad, "spec.json"));
+    const answered = await claimRunnerJobs(env, r.principal, 2);
+    expect(answered.jobs.map((j) => j.id)).toEqual([good]);
+    const job = await row(bad);
+    expect(job).toMatchObject({
+      state: "failed",
+      failure_code: "launch_failed",
+      failure_detail: "invalid_spec",
+      charged_milli: 0,
+      platform_failure: 1,
+    });
+    expect(job.settled_final_at).not.toBeNull();
+    expect(await count("SELECT COUNT(*) AS n FROM compute_ledger WHERE job_id = ?1", bad)).toBe(0);
+  });
+});
+
+describe("the sweep cannot be starved", () => {
+  /** Waiting rows whose records never landed and whose specification can no longer be rebuilt. */
+  async function unreplayable(n: number): Promise<string[]> {
+    const bad = { ...env, COMPUTE_RECORDS: failing(1_000_000) };
+    const made: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = await dataset();
+      const r = await dispatchPipelineJob(bad, {
+        recipe: "nemar-floor-zarr",
+        datasetId: id,
+        actor: { kind: "admin", userId: ids.admin },
+        executor: "runner",
+      });
+      if (!r.ok) throw new Error(`could not dispatch: ${r.code}`);
+      await age(r.jobId, "created_at", "-6 minutes");
+      github.tag(id, "v1.0.0", "f".repeat(40));
+      made.push(r.jobId);
+    }
+    return made;
+  }
+
+  test("ten or more rows the replay can never rebuild do not stop the other steps, and rotate (MUTATION: one shared budget; or drop the examined_at order)", async () => {
+    // A claimed job with a recorded cancel and an expired lease: step 2 must still end it.
+    const { jobId } = await claimed();
+    const stuck = await unreplayable(11);
+    await admin("POST", `/compute/jobs/${jobId}/cancel`);
+    await age(jobId, "lease_expires_at", "-1 minute");
+
+    const first = await sweepRunnerLeases(env);
+    expect(first.cancelled).toBe(1);
+    expect((await row(jobId)).state).toBe("cancelled");
+    expect(first.saturated).toBeGreaterThanOrEqual(1);
+    const examined = async () =>
+      await count(
+        `SELECT COUNT(*) AS n FROM compute_jobs WHERE id IN (${stuck.map(() => "?").join(",")}) AND examined_at IS NOT NULL`,
+        ...stuck,
+      );
+    expect(await examined()).toBe(10);
+    // Rotation: the one the first call did not reach is the first of the second.
+    await sweepRunnerLeases(env);
+    expect(await examined()).toBe(11);
+    expect((await row(stuck[0] as string)).state).toBe("created");
+  });
+
+  test("a row whose records never landed and could not be replayed for an hour ends failed records_unavailable, which frees its slot (MUTATION: drop the give-up step)", async () => {
+    const stuck = await unreplayable(11);
+    for (const id of stuck) await age(id, "created_at", "-61 minutes");
+    const first = await sweepRunnerLeases(env);
+    expect(first.records_lost).toBe(10);
+    const second = await sweepRunnerLeases(env);
+    expect(second.records_lost).toBe(1);
+    for (const id of stuck) {
+      const job = await row(id);
+      expect(job).toMatchObject({
+        state: "failed",
+        failure_code: "records_unavailable",
+        failure_detail: "records_unreadable",
+        charged_milli: 0,
+      });
+      expect(job.settled_final_at).not.toBeNull();
+    }
+  });
+
+  test("a row left unwritten well past the window is an attention word (runner_records_unwritten)", async () => {
+    const [id] = await unreplayable(1);
+    await age(id as string, "created_at", "-130 minutes");
+    const res = await admin("GET", "/compute/status");
+    expect(res.body.attention).toMatchObject({ runner_records_unwritten: 1 });
+    expect(ComputeStatusResponseSchema.safeParse(res.body).success).toBe(true);
+  });
+});
+
+describe("outputs that completed are never run again", () => {
+  test("an uploading heartbeat starts a created job, so its deadline runs", async () => {
+    const { r, jobId, entry } = await claimed();
+    expect((await heartbeat(r, jobId, entry.lease_id, "uploading")).status).toBe(200);
+    const job = await row(jobId);
+    expect(job.state).toBe("archiving");
+    expect(job.started_at).not.toBeNull();
+  });
+
+  test("a claim whose outputs completed but never sent started is verified, not released and run again (MUTATION: drop the outputs term of the release)", async () => {
+    const { jobId, entry } = await claimed();
+    expect((await uploadAs(entry)).complete).toBe(200);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.released).toBe(0);
+    const job = await row(jobId);
+    expect(job).toMatchObject({ state: "finished", claim_attempts: 1, charged_milli: 0 });
+    expect(job.results_verified_at).not.toBeNull();
+  });
+});
+
+describe("outputs that completed are verified even when no claims are left", () => {
+  test("a claim on its last attempt whose outputs completed is verified, not failed claims_exhausted (MUTATION: drop the outputs term of the exhausted rows)", async () => {
+    const { jobId, entry } = await claimed();
+    expect((await uploadAs(entry)).complete).toBe(200);
+    await sql("UPDATE compute_jobs SET claim_attempts = 3 WHERE id = ?1", jobId);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.exhausted).toBe(0);
+    expect(await row(jobId)).toMatchObject({ state: "finished", failure_code: null });
+  });
+});
+
+describe("a runner that ignores a cancel", () => {
+  test("keeps renewing its lease and is ended cancelled at the deadline (MUTATION: exclude cancel-requested rows from the deadline)", async () => {
+    const { r, jobId, entry } = await claimed();
+    await heartbeat(r, jobId, entry.lease_id, "started");
+    await admin("POST", `/compute/jobs/${jobId}/cancel`);
+    await age(jobId, "started_at", "-136 minutes");
+    expect((await heartbeat(r, jobId, entry.lease_id, "uploading")).body.cancel).toBe(true);
+    await sweepRunnerLeases(env);
+    expect(await row(jobId)).toMatchObject({
+      state: "cancelled",
+      cancel_reason: "admin",
+      failure_code: null,
+    });
+  });
+});
+
+describe("a claim is bounded by what the runner registered", () => {
+  test("two jobs fit eight cores and 40 GB, the third waits for room, however many slots are asked for (MUTATION: drop the held terms)", async () => {
+    const r = await runner(env, { cores: 8, memory_mb: 40_000 });
+    const wanted = [await dispatch(), await dispatch(), await dispatch()];
+    for (const [i, id] of wanted.entries()) await age(id, "created_at", `-${3 - i} minutes`);
+    const jobs = RunnerClaimResponseSchema.parse((await claim(r, 32)).body)
+      .jobs as unknown as Claimed[];
+    expect(jobs.map((j) => j.id)).toEqual([wanted[0], wanted[1]]);
+    expect((await row(wanted[2] as string)).runner_id).toBeNull();
+    // A job that ends gives its room back.
+    const first = jobs[0] as Claimed;
+    expect((await complete(r, first.id, first.lease_id, { exit_number: 13 })).body.state).toBe(
+      "failed",
+    );
+    expect((await claimOne(r)).id).toBe(wanted[2]);
+  });
+});
+
+describe("a poll does not wait on the slow steps", () => {
+  test("a claim answers while a verification waits on the results bucket, and the verification finishes afterwards (MUTATION: run the slow steps inline)", async () => {
+    const { r: a, jobId: slowJob, entry } = await claimed();
+    await heartbeat(a, slowJob, entry.lease_id, "started");
+    expect((await uploadAs(entry)).complete).toBe(200);
+    await age(slowJob, "lease_expires_at", "-1 minute");
+    const waiting = await dispatch();
+    const b = await runner();
+
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const real = fx.harness.results;
+    const gated = {
+      put: (k: string, v: unknown, o?: unknown) =>
+        real.put(k, v as ArrayBuffer, o as Parameters<R2Bucket["put"]>[2]),
+      get: (k: string) => real.get(k),
+      head: (k: string) => real.head(k),
+      delete: (k: string) => real.delete(k),
+      list: async (o?: Parameters<R2Bucket["list"]>[0]) => {
+        await gate;
+        return real.list(o);
+      },
+    } as unknown as R2Bucket;
+    const saved = env;
+    env = { ...saved, COMPUTE_RESULTS: gated };
+    let answered: Reply;
+    try {
+      answered = await claim(b, 1);
+    } finally {
+      env = saved;
+    }
+    // Answered with the waiting job, while the verification still waits.
+    expect((answered.body.jobs as Array<{ id: string }>).map((j) => j.id)).toEqual([waiting]);
+    expect((await row(slowJob)).state).toBe("unreported");
+    open();
+    await flush();
+    expect(await row(slowJob)).toMatchObject({ state: "finished", charged_milli: 0 });
+  });
+});
+
+describe("the runner sweep ignores what is not a runner's", () => {
+  test("a Tapis row that is terminal and uncopied is not copied by the runner sweep (MUTATION: drop executor = 'runner' from RUNNER_UNCOPIED_SQL)", async () => {
+    await sql(
+      `INSERT INTO compute_jobs
+         (id, source, kind, state, app_id, app_version, spec_digest, partition, pool, nodes,
+          cores_per_node, minutes, ended_at, settled_provisional_at)
+       VALUES ('job_${"7".repeat(24)}', 'pipeline', 'batch', 'finished', 'a', '1', ?1, 'shared', 'cpu',
+               1, 1, 1, datetime('now'), datetime('now'))`,
+      "a".repeat(64),
+    );
+    // The Tapis list still holds it (the runner sweep must not be the one that takes it).
+    const tapisList = (await env.DB.prepare(UNCOPIED_TERMINAL_SQL).bind(10).all()).results;
+    expect(tapisList).toHaveLength(1);
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.copied).toBe(0);
+    expect((await row(`job_${"7".repeat(24)}`)).result_records_at).toBeNull();
+  });
+
+  test("a claim with no claims left is failed, not released (MUTATION: drop claim_attempts < from the release)", async () => {
+    const { jobId } = await claimed();
+    await sql("UPDATE compute_jobs SET claim_attempts = 3 WHERE id = ?1", jobId);
+    await age(jobId, "lease_expires_at", "-1 minute");
+    const swept = await sweepRunnerLeases(env);
+    expect(swept.released).toBe(0);
+    expect(swept.exhausted).toBe(1);
+    expect(await row(jobId)).toMatchObject({ state: "failed", failure_detail: "claims_exhausted" });
   });
 });

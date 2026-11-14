@@ -431,8 +431,16 @@ describe("status", () => {
       "state, ended_at, settled_provisional_at",
       "'finished', datetime('now', '-5 days'), datetime('now', '-5 days')",
     );
+    insert(
+      "job_0000000000000000000000e3",
+      "state, created_at",
+      "'created', datetime('now', '-130 minutes')",
+    );
     const r = await runCli("owner", ["status"]);
     expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "Attention: runner_records_unwritten 1 (a waiting runner job's records never landed",
+    );
     expect(r.stdout).toContain(
       "Attention: runner_cancel_pending_failed 1 (a runner job's recorded cancel",
     );

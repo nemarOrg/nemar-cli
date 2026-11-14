@@ -169,6 +169,7 @@ describe("an unconfigured Worker", () => {
         copy_abandoned: 0,
         runner_cancel_pending_failed: 0,
         runner_copy_abandoned: 0,
+        runner_records_unwritten: 0,
         tenant_over_ceiling: 0,
         policy_unreadable: 0,
       },
@@ -217,6 +218,7 @@ describe("an unconfigured Worker", () => {
           copy_abandoned: 0,
           runner_cancel_pending_failed: 0,
           runner_copy_abandoned: 0,
+          runner_records_unwritten: 0,
           tenant_over_ceiling: 0,
           policy_unreadable: 0,
         },
@@ -308,6 +310,7 @@ describe("what every launch needs besides the credential", () => {
       copy_abandoned: 0,
       runner_cancel_pending_failed: 0,
       runner_copy_abandoned: 0,
+      runner_records_unwritten: 0,
       tenant_over_ceiling: 0,
       policy_unreadable: 0,
     });
@@ -322,6 +325,7 @@ describe("what every launch needs besides the credential", () => {
       copy_abandoned: 0,
       runner_cancel_pending_failed: 0,
       runner_copy_abandoned: 0,
+      runner_records_unwritten: 0,
       tenant_over_ceiling: 0,
       policy_unreadable: 0,
     });
@@ -402,6 +406,7 @@ describe("attention: what waits on a person", () => {
       copy_abandoned: 1,
       runner_cancel_pending_failed: 0,
       runner_copy_abandoned: 0,
+      runner_records_unwritten: 0,
       tenant_over_ceiling: 0,
       policy_unreadable: 0,
     });
