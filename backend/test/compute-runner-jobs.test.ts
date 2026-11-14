@@ -1446,6 +1446,12 @@ describe("no Tapis path touches a runner row", () => {
   test("the cancel sweep selects no runner row, even one with a cancel recorded and old (MUTATION: drop executor from CANCEL_ROWS_SQL)", async () => {
     const env = runnerEnv();
     const { id } = await made(env);
+    // A CLAIMED runner job (DM-07: a waiting one now ends in SQL, so only a claimed one keeps the intent).
+    await env.DB.prepare(
+      `UPDATE compute_jobs SET runner_id = ?2, runner_claimed_at = datetime('now') WHERE id = ?1`,
+    )
+      .bind(id, `rnr_${"d".repeat(24)}`)
+      .run();
     const cancelled = await call("POST", `/compute/jobs/${id}/cancel`, "admin", undefined, env);
     expect(cancelled.status).toBe(200);
     // The intent is recorded (the runner's heartbeat carries it back); the job is NOT ended here.

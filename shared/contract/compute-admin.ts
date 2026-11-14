@@ -436,6 +436,20 @@ export type ComputeJobAdminResponse = z.infer<typeof ComputeJobAdminResponseSche
 // --- NEMAR's own pipelines (epic #2005 phase A6, #2011) ---------------------------------------------------
 
 /**
+ * The attention words of the runner queue (portable compute, ADR 0121), counted in `GET /admin/compute/status`'s
+ * `attention` block and printed by `nemar admin compute status` as `Attention: <word> <n>` when positive:
+ * `runner_cancel_pending_failed` (a live runner job whose recorded cancel is more than 60 minutes old: its
+ * runner never took it) and `runner_copy_abandoned` (a terminal runner job whose records copy never happened
+ * and no longer will) and `runner_records_unwritten` (a waiting runner job whose records never landed and were
+ * neither replayed nor given up on well past the window: the lease sweep is not running or is starved).
+ */
+export const COMPUTE_RUNNER_ATTENTION_WORDS = [
+  "runner_cancel_pending_failed",
+  "runner_copy_abandoned",
+  "runner_records_unwritten",
+] as const;
+
+/**
  * The most datasets one `--eligible` request may ASK for. It is not what a run dispatches: a run is also
  * bounded by the policy's live cap, the policy's daily cap and {@link COMPUTE_PIPELINE_RUN_PER_INVOCATION},
  * whichever is smallest, and the answer's `room` says which one it was.

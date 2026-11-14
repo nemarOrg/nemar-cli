@@ -644,7 +644,7 @@ const refusal = (code: CreateJobRefusal, field?: string): CreateJobResult =>
  * nothing, mark them written. Never throws: a failure is one log line (the job id and the error's
  * class, nothing a person chose) and `false`, and the job is left as it is for a replay to finish.
  */
-async function writeRecords(
+export async function writeRecords(
   env: ComputeJobsEnv,
   job: ComputeJobRow,
   specText: string,

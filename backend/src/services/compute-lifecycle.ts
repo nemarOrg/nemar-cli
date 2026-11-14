@@ -205,6 +205,15 @@ export const TERMINAL_TRANSITION_SQL = `UPDATE compute_jobs SET
   WHERE id = ?1 AND state = ?2 AND (?16 = 0 OR tapis_uuid IS NULL)`;
 
 /**
+ * A RUNNER job's terminal transition: {@link TERMINAL_TRANSITION_SQL} plus the lease the writer READ (`?17`,
+ * compared with `IS`, so a row that had no lease must still have none). A writer that read a job under one
+ * lease must not end it after the lease was released and the job claimed again (state is still `created`
+ * across that), nor after a revoke cleared it: at most once acceptance (ADR 0121). Used by `commitTerminal`
+ * for `executor = 'runner'` rows only; the Tapis statement is unchanged.
+ */
+export const RUNNER_TERMINAL_TRANSITION_SQL = `${TERMINAL_TRANSITION_SQL} AND lease_id IS ?17`;
+
+/**
  * The gate of the settlement statement: this job row has taken the terminal state `?` and has not been
  * settled. The settlement runs after the transition in one batch, so for the writer that won the
  * transition this is true, and for any other it is false (and the ledger's own "the hold is open"
@@ -229,6 +238,21 @@ export const SETTLED_STAMP_SQL = `UPDATE compute_jobs SET
   WHERE id = ?1 AND state = ?2 AND settled_provisional_at IS NULL
     AND EXISTS (SELECT 1 FROM compute_ledger c
                  WHERE c.job_id = ?1 AND c.kind IN ('charge', 'release'))`;
+
+/**
+ * The stamp of a terminal `accounting = 'none'` runner job (ADR 0121, decision 6): there is no ledger entry
+ * to close, so both settled timestamps are written together with `charged_milli = 0`, and the records copy
+ * and the reports treat the job as settled like any other. `?1` the job, `?2` the state. Run in the same
+ * batch as the state change, in place of the ledger statements and {@link SETTLED_STAMP_SQL}; it writes only
+ * while the row has just taken `?2` and is not settled, and only for a runner job that is `none`, so a
+ * Tapis row can never be stamped settled without its ledger entry.
+ */
+export const NONE_SETTLED_STAMP_SQL = `UPDATE compute_jobs SET
+    settled_provisional_at = datetime('now'),
+    settled_final_at = datetime('now'),
+    charged_milli = 0
+  WHERE id = ?1 AND state = ?2 AND settled_provisional_at IS NULL
+    AND executor = 'runner' AND accounting = 'none'`;
 
 /** The job's tag search and its result are bound to the job with this: `?1` the job, `?2` the uuid, `?3` the status, `?4` the submit time. */
 export const BIND_TAPIS_JOB_SQL = `UPDATE compute_jobs SET
@@ -297,6 +321,30 @@ export const LAUNCH_DIGEST_SQL = `UPDATE compute_jobs SET
     launch_spec_digest = ?2, image_digest = ?3
   WHERE id = ?1 AND state IN ('created', 'uploading') AND tapis_uuid IS NULL
     AND cancel_requested_at IS NULL`;
+
+/**
+ * A WAITING runner job ends cancelled in SQL (ADR 0121): `?1` the job, `?2` the reason, `?3` the records
+ * retention as a SQLite modifier (`+7 years`). It writes only a job nobody has claimed (`runner_claimed_at
+ * IS NULL`, state `created`), so a claim that won first is never ended from under its runner: that job keeps
+ * its recorded intent for the heartbeat. Run in one batch with {@link NONE_SETTLED_STAMP_SQL} and
+ * {@link END_CANCELLED_STAMP_SQL}.
+ */
+export const CANCEL_WAITING_RUNNER_SQL = `UPDATE compute_jobs SET
+    state = 'cancelled', cancel_reason = COALESCE(cancel_reason, ?2),
+    ended_at = datetime('now'), retention_until = datetime('now', ?3)
+  WHERE id = ?1 AND executor = 'runner' AND accounting = 'none' AND state = 'created'
+    AND runner_claimed_at IS NULL`;
+
+/**
+ * The pipeline stamp of a job that just ended cancelled, ended the way the stamp sync ends a cancelled
+ * job's stamp (`syncPipelineStamps`: state `failed`, the word `job_cancelled`), `?1` the job. In the same
+ * batch as the cancel, so the tuple is free (no `live_attempt_exists`) the moment the job is over; the sync
+ * finds nothing left to do for it. It writes only while the job is cancelled and the stamp is open.
+ */
+export const END_CANCELLED_STAMP_SQL = `UPDATE compute_pipeline_stamps
+   SET state = 'failed', refusal_code = 'job_cancelled', updated_at = datetime('now')
+ WHERE job_id = ?1 AND state = 'dispatched'
+   AND EXISTS (SELECT 1 FROM compute_jobs j WHERE j.id = ?1 AND j.state = 'cancelled')`;
 
 /** The intent to cancel, recorded in D1 before anything is asked of Tapis: `?1` the job, `?2` the reason. */
 export const CANCEL_INTENT_SQL = `UPDATE compute_jobs SET
@@ -594,7 +642,7 @@ export interface TerminalPlan {
  * settled. Returns true when THIS writer won the transition: a job some other writer already moved
  * changes nothing here and answers false, and it is that writer's batch that settled it.
  */
-async function commitTerminal(
+export async function commitTerminal(
   env: Bindings,
   job: ComputeJobRow,
   plan: TerminalPlan,
@@ -602,13 +650,22 @@ async function commitTerminal(
 ): Promise<boolean> {
   const db = env.DB;
   const gate = { sql: SETTLEMENT_GATE_SQL, binds: [job.id, plan.to] };
-  const settle =
-    plan.settlement.kind === "release"
-      ? releaseStatements(db, { jobId: job.id }, gate)
-      : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate);
+  // An `accounting = 'none'` job has no hold: no ledger statement is built, and its own stamp settles it
+  // (ADR 0121). Everything else is the Tapis job's batch, byte for byte.
+  const settlement =
+    job.accounting === "none"
+      ? [db.prepare(NONE_SETTLED_STAMP_SQL).bind(job.id, plan.to)]
+      : [
+          ...(plan.settlement.kind === "release"
+            ? releaseStatements(db, { jobId: job.id }, gate)
+            : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate)),
+          db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
+        ];
+  // Fails closed, like the launcher routes: anything that is not a Tapis row carries the lease it read.
+  const runnerRow = job.executor !== "tapis";
   const results = await db.batch([
     db
-      .prepare(TERMINAL_TRANSITION_SQL)
+      .prepare(runnerRow ? RUNNER_TERMINAL_TRANSITION_SQL : TERMINAL_TRANSITION_SQL)
       .bind(
         job.id,
         job.state,
@@ -626,9 +683,9 @@ async function commitTerminal(
         plan.slurmJobId,
         `+${recordsRetentionYears} years`,
         plan.unsubmittedOnly ? 1 : 0,
+        ...(runnerRow ? [job.lease_id ?? null] : []),
       ),
-    ...settle,
-    db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
+    ...settlement,
     // The report ACCESS is owed for a job whose record first shows its Slurm id at its END (phase A8,
     // #2013): the same batch as the write that gave the row the id, `OR IGNORE`, and no network call.
     ...(plan.slurmJobId === null ? [] : [db.prepare(ACCESS_REPORT_PENDING_SQL).bind(job.id)]),
@@ -653,12 +710,12 @@ async function commitSettlementOnly(
 
 // --- Reading what ended --------------------------------------------------------------------------
 
-async function recordsRetentionYears(env: Bindings): Promise<number> {
+export async function recordsRetentionYears(env: Bindings): Promise<number> {
   return (await getPolicy(env.DB)).policy.retention.recordsYears;
 }
 
 /** The byte bound for one launcher document: the outputs body's bound for the owner's `maxFiles`. */
-async function launcherDocumentLimit(env: Bindings): Promise<number> {
+export async function launcherDocumentLimit(env: Bindings): Promise<number> {
   try {
     return outputsBodyLimitBytes((await getPolicy(env.DB)).policy.resultLimits.maxFiles);
   } catch {
@@ -936,7 +993,11 @@ async function applyOnce(
  * into the records (a failure leaves `result_records_at` NULL for the tick to retry), and a finished
  * job's person is told. Neither may fail the transition.
  */
-async function afterTerminal(env: Bindings, job: ComputeJobRow, plan: TerminalPlan): Promise<void> {
+export async function afterTerminal(
+  env: Bindings,
+  job: ComputeJobRow,
+  plan: TerminalPlan,
+): Promise<void> {
   try {
     await copyResultRecords(env, job);
   } catch (err) {
@@ -1102,13 +1163,15 @@ const refused = (outcome: Exclude<SubmitOutcome, "submitted" | "bound" | "alread
  * `launchSpecEnv` is the `NEMAR_LAUNCH_SPEC` value (the specification's text in base64url, A1c);
  * `digest` is the SHA-256 of the TEXT the launcher decodes it to, never of the value.
  */
-interface BuiltLaunch {
+export interface BuiltLaunch {
   launchSpecEnv: LaunchSpecEnvValue;
   digest: string;
   imageDigest: string;
+  /** The image the specification names, as a runner is told it (ADR 0121): reference, digest and SIF file name. */
+  image: { uri: string; digest: string; sif: string };
 }
 
-type BuildResult =
+export type BuildResult =
   | { ok: true; launch: BuiltLaunch }
   | { ok: false; why: "unconfigured" | "unbuildable" };
 
@@ -1128,7 +1191,7 @@ type BuildResult =
  * results limit is `resultLimits.maxJobBytes` and the outputs route enforces it; the two numbers are
  * never one.
  */
-async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResult> {
+export async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResult> {
   const secret = env.PRESCREEN_CALLBACK_SECRET;
   const apiBase = (env.API_BASE_URL ?? "").trim().replace(/\/+$/, "");
   if (!secret || apiBase === "" || job.webhook_nonce === null || !env.COMPUTE_RECORDS) {
@@ -1182,6 +1245,7 @@ async function buildLaunch(env: Bindings, job: ComputeJobRow): Promise<BuildResu
         launchSpecEnv: encodeLaunchSpecEnv(text),
         digest: await sha256Hex(new TextEncoder().encode(text)),
         imageDigest: digest,
+        image: { uri: imageRef, digest, sif },
       },
     };
   } catch {
@@ -1730,8 +1794,11 @@ async function adopt(
 
 export interface CancelResult {
   ok: boolean;
-  /** `cancel_requested` is recorded; `already_cancelled` for a replay; `bad_state` for a job that ended otherwise. */
-  outcome: "cancel_requested" | "already_cancelled" | "bad_state" | "job_not_found";
+  /**
+   * `cancel_requested` is recorded; `cancelled` for a waiting runner job that ended in SQL in the call;
+   * `already_cancelled` for a replay; `bad_state` for a job that ended otherwise.
+   */
+  outcome: "cancel_requested" | "cancelled" | "already_cancelled" | "bad_state" | "job_not_found";
   state: ComputeState | null;
 }
 
@@ -1755,9 +1822,50 @@ export async function requestComputeCancel(
   if (isTerminalComputeState(job.state))
     return { ok: false, outcome: "bad_state", state: job.state };
   await env.DB.prepare(CANCEL_INTENT_SQL).bind(job.id, reason).run();
+  if (job.executor === "runner") {
+    // A waiting runner job ends here, in one batch; a claimed one keeps the intent for its heartbeat.
+    const endedHere = await endWaitingRunnerJob(env, job, reason);
+    const ended = await getJob(env.DB, job.id);
+    return {
+      ok: true,
+      outcome: endedHere ? "cancelled" : "cancel_requested",
+      state: ended?.state ?? job.state,
+    };
+  }
   await driveCancel(env, job.id, REQUEST_READ);
   const after = await getJob(env.DB, job.id);
   return { ok: true, outcome: "cancel_requested", state: after?.state ?? job.state };
+}
+
+/**
+ * End a runner job nobody has claimed: cancelled, settled with charge 0 and its pipeline stamp ended, in ONE
+ * batch (see {@link CANCEL_WAITING_RUNNER_SQL}). The intent is recorded first, so a claim (which needs
+ * `cancel_requested_at IS NULL`) can no longer take the row; a claim that won before the intent leaves the
+ * job claimed, the batch changes nothing, and the heartbeat carries the cancel. The records copy follows and
+ * may not fail the cancel. True when this call ended the job.
+ */
+export async function endWaitingRunnerJob(
+  env: Bindings,
+  job: ComputeJobRow,
+  reason: "user" | "admin",
+): Promise<boolean> {
+  const db = env.DB;
+  const years = await recordsRetentionYears(env);
+  const results = await db.batch([
+    db.prepare(CANCEL_WAITING_RUNNER_SQL).bind(job.id, reason, `+${years} years`),
+    db.prepare(NONE_SETTLED_STAMP_SQL).bind(job.id, "cancelled"),
+    db.prepare(END_CANCELLED_STAMP_SQL).bind(job.id),
+  ]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) return false;
+  const done = (await getJob(db, job.id)) ?? job;
+  try {
+    await copyResultRecords(env, done);
+  } catch (err) {
+    console.error(
+      `[compute-lifecycle] records_copy_failed job=${job.id} class=${errorClassName(err)}`,
+    );
+  }
+  return true;
 }
 
 /**

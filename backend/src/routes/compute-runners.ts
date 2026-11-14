@@ -5,6 +5,13 @@
  *   POST /compute/runners/token   the runner's SECRET (`Authorization: Bearer nmr_...`) buys one access
  *                                 token for 900 seconds; the body is `RunnerTokenRequestSchema`
  *   GET  /compute/runners/me      the runner's id, name and capacity, with an ACCESS token (`nmra_...`)
+ *   POST /compute/runners/claim      up to `free_slots` waiting jobs, each with its own lease (DM-07)
+ *   POST /compute/runners/heartbeat  renew one job's lease, report its phase, learn whether to stop it
+ *   POST /compute/runners/complete   the end of one job, idempotent for `(job, lease_id)`
+ *
+ * The last three take an ACCESS token (`runnerAccess`) and strict bodies of at most 4 KiB (a claim) or 8 KiB.
+ * The claim runs `sweepRunnerLeases` first, so a runner that polls drives the lease rules in every
+ * environment. `lease_lost` (409) is the one answer for a job that is not this runner's current lease.
  *
  * No session and no API key: a runner holds neither. The two credentials are refused by every other path
  * (`middleware/auth.ts`, `runner_credential_not_accepted`), and `runnerAccess` below is the ONLY door an
@@ -30,8 +37,20 @@ import {
   RUNNER_ACCESS_TOKEN_RE,
   RUNNER_PROTOCOL,
   RUNNER_SECRET_RE,
+  RunnerClaimRequestSchema,
+  RunnerCompleteRequestSchema,
+  RunnerHeartbeatRequestSchema,
   RunnerTokenRequestSchema,
 } from "../../../shared/contract/compute-runner.js";
+import {
+  RUNNER_MIN_VERSION,
+  claimRunnerJobs,
+  completeRunnerJob,
+  heartbeatRunnerJob,
+  runnerLeaseLogLine,
+  runnerVersionAtLeast,
+  sweepRunnerLeases,
+} from "../services/compute-runner-queue.js";
 import {
   exchangeRunnerSecret,
   findRunnerBySecret,
@@ -46,6 +65,12 @@ type Ctx = Context<Env>;
 
 /** The most bytes the token request reads: its two fields are at most a few dozen characters. */
 export const RUNNER_TOKEN_BODY_MAX_BYTES = 1024;
+
+/** The most bytes a claim reads: a protocol word, a count, up to three runtimes, an architecture and a version. */
+export const RUNNER_CLAIM_BODY_MAX_BYTES = 4096;
+
+/** The most bytes a heartbeat or a completion reads: a few ids, words and numbers. */
+export const RUNNER_REPORT_BODY_MAX_BYTES = 8192;
 
 export const computeRunnerRoutes = new Hono<Env>();
 
@@ -114,4 +139,90 @@ computeRunnerRoutes.get("/me", runnerAccess, (c) => {
     site: runner.site,
     trust: runner.trust,
   });
+});
+
+/** The body of an authenticated runner request, bounded, with another protocol answered as its own refusal. */
+async function readRunnerBody(c: Ctx, max: number) {
+  const read = await readBoundedJsonObject(c, max);
+  if (!read.ok) return { ok: false as const, response: refuse(c, "invalid_body") };
+  if (typeof read.body.protocol === "string" && read.body.protocol !== RUNNER_PROTOCOL) {
+    return { ok: false as const, response: refuse(c, "protocol_unsupported") };
+  }
+  return { ok: true as const, body: read.body };
+}
+
+computeRunnerRoutes.post("/claim", runnerAccess, async (c) => {
+  const runner = c.get("runner");
+  if (!runner) return refuse(c, "runner_unknown");
+  c.header("Cache-Control", "no-store");
+  const read = await readRunnerBody(c, RUNNER_CLAIM_BODY_MAX_BYTES);
+  if (!read.ok) return read.response;
+  const parsed = RunnerClaimRequestSchema.safeParse(read.body);
+  if (!parsed.success) return refuse(c, "invalid_body");
+  if (!runnerVersionAtLeast(parsed.data.runner_version)) return refuse(c, "runner_outdated");
+  // The lease rules run whenever a runner polls, in every environment; a fault here never fails the claim.
+  // Only the cheap steps run before the answer: the verification of outputs, the replay of records and the
+  // copies of the launcher's files go to `waitUntil`, so a poll never waits on the results bucket.
+  let deferred = false;
+  const defer = (work: Promise<unknown>) => {
+    deferred = true;
+    try {
+      c.executionCtx.waitUntil(work);
+    } catch {
+      void work;
+    }
+  };
+  try {
+    const swept = await sweepRunnerLeases(c.env, c.env.DB, { defer });
+    const line = deferred ? null : runnerLeaseLogLine(swept);
+    if (line?.level === "error") console.error(line.line);
+    else if (line) console.log(line.line);
+  } catch (err) {
+    console.error(
+      `[compute-runner-queue] sweep_failed class=${err instanceof Error ? err.name : typeof err}`,
+    );
+  }
+  const claimed = await claimRunnerJobs(c.env, runner, parsed.data.free_slots);
+  return c.json({ jobs: claimed.jobs, min_runner_version: RUNNER_MIN_VERSION });
+});
+
+computeRunnerRoutes.post("/heartbeat", runnerAccess, async (c) => {
+  const runner = c.get("runner");
+  if (!runner) return refuse(c, "runner_unknown");
+  c.header("Cache-Control", "no-store");
+  const read = await readRunnerBody(c, RUNNER_REPORT_BODY_MAX_BYTES);
+  if (!read.ok) return read.response;
+  const parsed = RunnerHeartbeatRequestSchema.safeParse(read.body);
+  if (!parsed.success) return refuse(c, "invalid_body");
+  const beat = await heartbeatRunnerJob(c.env, runner, parsed.data);
+  if (!beat.ok) return refuse(c, beat.refusal);
+  return c.json({ lease_expires_at: beat.lease_expires_at, cancel: beat.cancel });
+});
+
+computeRunnerRoutes.post("/complete", runnerAccess, async (c) => {
+  const runner = c.get("runner");
+  if (!runner) return refuse(c, "runner_unknown");
+  c.header("Cache-Control", "no-store");
+  const read = await readRunnerBody(c, RUNNER_REPORT_BODY_MAX_BYTES);
+  if (!read.ok) return read.response;
+  const parsed = RunnerCompleteRequestSchema.safeParse(read.body);
+  if (!parsed.success) return refuse(c, "invalid_body");
+  const done = await completeRunnerJob(c.env, runner, parsed.data);
+  if (!done.ok) return refuse(c, done.refusal);
+  // The copy of the launcher's files into the records follows the terminal batch and may not fail the answer;
+  // a copy that does not finish is repaired by the lease sweep.
+  const after = done.after;
+  if (after !== null) {
+    const run = after().catch((err) =>
+      console.error(
+        `[compute-runner-queue] after_terminal_failed class=${err instanceof Error ? err.name : typeof err}`,
+      ),
+    );
+    try {
+      c.executionCtx.waitUntil(run);
+    } catch {
+      await run;
+    }
+  }
+  return c.json({ state: done.state });
 });
