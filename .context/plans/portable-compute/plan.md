@@ -123,9 +123,10 @@ Inputs land only in the job's own directory under the runner root (mode 0700), d
 The demo recipe streams whole recordings into memory with no dataset download and nothing kept on disk; launcher-staged Zarr inputs (launch specification v2, R3) make the platform, not the recipe, record what was read.
 
 **D13. The Zarr serving copy is lossy, and every derived product names the fidelity it describes.**
-The serving copy is int16 and resampled to modality caps (EEG and MEG 250 Hz, iEEG and electromyography 1000 Hz; ADR 0028 and the converter).
+The serving copy is int16, and its sampling rate is capped per modality (EEG and MEG at 250 Hz, iEEG and electromyography at 1000 Hz; ADR 0028 and the converter).
 QC on it describes the serving copy, not the archived recordings, and the demo says so.
 Owner decision (2026-11-13): everything runs on the Zarr serving copy by default (EEG 250 Hz; EMG and iEEG 1 kHz), and the demo carries the plain label above.
+Owner refinement (2026-11-14, Q18): 250 Hz is the EEG rate cap of ADR 0028, not a rate every EEG store is resampled to; general statements say "capped at 250 Hz", and only the demo statement in 3.1 names its dataset's serving rate.
 A named fidelity profile carried by the index (`serving` now, a native-rate lossless `native` later) stays an option for ADR 0123, not a demo item; every derived product already states `profile: serving`.
 
 **D14. Derived outputs have their own home.**
@@ -180,10 +181,10 @@ Migrations: `dev` is at 0130, #2116 holds 0131, 0132 and 0134, #2121 P3 plans 01
 
 ### 3.1 What can be said
 
-Plan of record (F2): "NEMAR's QC recipe, built on eegprep, ran in a container identified by its image digest on a lab workstation over a real public EEG dataset, streaming the recordings from NEMAR's Zarr serving copy with no dataset download and nothing kept on disk, and wrote QC tables with signalJourney provenance; the same recordings open in mne-python. QC ran on NEMAR's Zarr serving copy (EEG resampled to 250 Hz, 16-bit), not on the archived recordings. The pull-based runner and its queue are built and tested against NEMAR's real control-plane code; they are not yet deployed."
+Plan of record (F2): "NEMAR's QC recipe, built on eegprep, ran in a container identified by its image digest on a lab workstation over a real public EEG dataset, streaming the recordings from NEMAR's Zarr serving copy with no dataset download and nothing kept on disk, and wrote QC tables with signalJourney provenance; the same recordings open in mne-python. QC ran on NEMAR's Zarr serving copy (EEG capped at 250 Hz, 16-bit; the serving copy of this dataset is at 200 Hz), not on the archived recordings. The pull-based runner and its queue are built and tested against NEMAR's real control-plane code; they are not yet deployed."
 If DM-14 took path A, add "built and signed in CI"; under path B say "operator-built from source commit <sha>, unsigned".
 If F1 exists, add: "A recorded run shows the runner on the lab workstation claiming the job from NEMAR's control plane, running locally and not deployed, and completing it."
-Never say or imply: runs on HPC unchanged, the runner verified a signature, private data, EEGLAB support, EEGDash integration, derivatives published or citable, catalog-scale throughput, built in CI (unless path A happened), or a consolidated NEMAR reader.
+Never say or imply: runs on HPC unchanged, the runner verified a signature, private data, EEGLAB support, EEGDash integration, derivatives published or citable, catalog-scale throughput, built in CI (unless path A happened), a consolidated NEMAR reader, that the EEG was resampled to 250 Hz, or that the archived recordings are at 200 Hz or at any other stated rate (their own rate was not checked).
 Input provenance (`index_sha256`, `bytes_read`) is written by the recipe and not verified by the platform; G6 proves schema validity only.
 
 ### 3.2 Gates (pre-registered)
