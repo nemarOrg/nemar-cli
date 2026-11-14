@@ -131,17 +131,34 @@ import {
   seedPipelinesAccount,
 } from "./helpers/compute-pipeline-fixture";
 import { fundPlatform, roundTripD1, seedUser, setPolicy } from "./helpers/compute-seed";
+import {
+  type GithubCompareStandin,
+  startGithubCompareStandin,
+} from "./helpers/github-compare-standin";
 
 // --- The fixture and the two engines ---------------------------------------------------------------
 
 let fx: LifecycleFixture;
 const handle = makeComputeApp();
 
+/**
+ * The two external services the Zarr source check reads (GitHub, and the serving copy's index), as one real
+ * loopback server; `zarrDataset` makes the happy world (the tag and the index name the same commit), and
+ * `zarr-source-check.test.ts` owns the cases about the verdict itself.
+ */
+let github: GithubCompareStandin;
+const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+const previousSeams = { github: seams.NEMAR_GITHUB_API_URL, index: seams.NEMAR_ZARR_INDEX_BASE };
+
 beforeAll(async () => {
   fx = await startLifecycleFixture({ withD1: true });
+  github = startGithubCompareStandin();
+  seams.NEMAR_GITHUB_API_URL = github.url;
+  seams.NEMAR_ZARR_INDEX_BASE = github.indexBase;
 }, 120_000);
 
 beforeEach(async () => {
+  github?.reset();
   await fx.reset();
   await seedComputeUsers(fx.harness.db);
   // Miniflare's D1 is never reset; this file empties the jobs table so every case reads absolute numbers.
@@ -149,6 +166,9 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  github?.stop();
+  seams.NEMAR_GITHUB_API_URL = previousSeams.github;
+  seams.NEMAR_ZARR_INDEX_BASE = previousSeams.index;
   await fx?.dispose();
 }, 30_000);
 
@@ -188,8 +208,16 @@ const racing = (w: World): Bindings =>
 
 // --- Seeds and calls -----------------------------------------------------------------------------------
 
-/** A commit of the dataset repository, as the dataset row records the one its serving copy was built from. */
+/** A commit of the dataset repository: the tag's, and the one the serving index was built from. */
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+/** The attestation of the happy world: the tag and the index name the same commit. */
+const EXACT = {
+  sourceCommit: COMMIT,
+  tagCommit: COMMIT,
+  equivalence: "exact",
+  deltaPaths: [],
+} as const;
 
 async function zarrDataset(
   env: Bindings,
@@ -199,6 +227,11 @@ async function zarrDataset(
   versions?: Parameters<typeof seedEegDataset>[2],
 ) {
   await seedEegDataset(env, id, versions);
+  // The happy world of the source check: every version's tag and the copy's own index name COMMIT.
+  for (const [version] of versions?.versions ?? [["1.0.0"]]) {
+    github.tag(id, `v${version}`, COMMIT);
+  }
+  github.index(id, { source_commit: COMMIT, store_count: 3 });
   await env.DB.prepare(
     "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = ?2, zarr_store_count = ?3 WHERE dataset_id = ?4",
   )
@@ -243,13 +276,20 @@ async function call(
   return { status: res.status, body: parsed };
 }
 
+/**
+ * A Zarr dispatch runs in `development`: compute runs only there and in production, and the source check
+ * honors its index seam and reads GitHub without the App only outside production
+ * (`zarr-source-check.test.ts` runs the production cases).
+ */
+const zarrEnv = (env: Bindings = runnerEnv()): Bindings => ({ ...env, ENVIRONMENT: "development" });
+
 const runRunner = (id: string, env?: Bindings, extra: Record<string, unknown> = {}) =>
   call(
     "POST",
     "/compute/pipeline/run",
     "admin",
     { recipe: "nemar-floor-zarr", dataset: id, executor: "runner", ...extra },
-    env,
+    zarrEnv(env),
   );
 
 const n = async (env: Bindings, table: string, where = "1 = 1") =>
@@ -271,7 +311,7 @@ function zarrSpec(env: Bindings, datasetId = "nm000104") {
     datasetId,
     tag: "v1.0.0",
     image: { ref: image.ref, digest: image.digest },
-    sourceCommit: COMMIT,
+    zarrSource: EXACT,
   });
 }
 
@@ -375,7 +415,7 @@ describe("the recipe registry", () => {
       recipeZarrArguments({
         datasetId: "nm000104",
         tag: "v1.0.0",
-        sourceCommit: COMMIT,
+        attestation: EXACT,
         imageDigest: digest,
       }),
     ).toEqual([
@@ -387,6 +427,10 @@ describe("the recipe registry", () => {
       "v1.0.0",
       "--source-commit",
       COMMIT,
+      "--tag-commit",
+      COMMIT,
+      "--commit-equivalence",
+      "exact",
       "--image-digest",
       digest,
       "--zarr-base",
@@ -405,7 +449,12 @@ describe("the recipe registry", () => {
       COMMIT.toUpperCase(),
       `${COMMIT.slice(1)}g`,
     ]) {
-      expect(() => recipeZarrArguments({ ...base, sourceCommit: bad })).toThrow(RangeError);
+      expect(() =>
+        recipeZarrArguments({ ...base, attestation: { ...EXACT, sourceCommit: bad } }),
+      ).toThrow(RangeError);
+      expect(() =>
+        recipeZarrArguments({ ...base, attestation: { ...EXACT, tagCommit: bad } }),
+      ).toThrow(RangeError);
     }
   });
 
@@ -418,20 +467,20 @@ describe("the recipe registry", () => {
       datasetId: "nm000104",
       tag: "v1.0.0",
       image,
-      sourceCommit: COMMIT,
+      zarrSource: EXACT,
     });
     expect(zarr.datasets).toEqual([]);
     expect(zarr.args).toEqual(
       recipeZarrArguments({
         datasetId: "nm000104",
         tag: "v1.0.0",
-        sourceCommit: COMMIT,
+        attestation: EXACT,
         imageDigest: image.digest,
       }),
     );
     expect(zarr.command).toEqual(["nemar-recipe", "run", "nemar-floor-zarr"]);
     expect(launchSpecFits(zarr)).toBe(true);
-    // A Zarr recipe with no commit is a programming error.
+    // A Zarr recipe with no verified attestation is a programming error.
     expect(() =>
       recipeJobSpec(findRecipe("nemar-floor-zarr") as never, {
         datasetId: "nm000104",
@@ -444,7 +493,7 @@ describe("the recipe registry", () => {
       tag: "v1.0.0",
       image,
       // Never read for a BIDS recipe.
-      sourceCommit: COMMIT,
+      zarrSource: EXACT,
     });
     expect(bids.datasets).toEqual([{ id: "nm000104", version: "v1.0.0" }]);
     expect(bids.args).toEqual(
@@ -795,6 +844,10 @@ describe("a runner job through the admin route", () => {
       "v1.0.0",
       "--source-commit",
       COMMIT,
+      "--tag-commit",
+      COMMIT,
+      "--commit-equivalence",
+      "exact",
       "--image-digest",
       RUNTIME_IMAGE_DIGEST,
       "--zarr-base",
@@ -802,11 +855,11 @@ describe("a runner job through the admin route", () => {
     ]);
     expect(launchSpecFits(spec)).toBe(true);
     expect(spec.partition).toBe("shared");
-    // The request never supplied identity: the commit came from the dataset row.
+    // The request never supplied identity: the commits came from the serving index and the tag.
     expect(text).toContain(COMMIT);
   });
 
-  test("the commit is the dataset row's, whatever the request says (a key the Worker supplies is refused)", async () => {
+  test("the commits are the index's and the tag's, whatever the request says (a key the Worker supplies is refused)", async () => {
     const env = runnerEnv();
     await seedPipelinesAccount(env);
     await zarrDataset(env, "nm000104");
@@ -1264,18 +1317,21 @@ describe("refusals through the route", () => {
     expect(await n(env, "compute_jobs")).toBe(0);
   });
 
-  test("a dataset with no serving copy, or a malformed recorded commit, is not eligible for a Zarr recipe (MUTATION: pass a null commit)", async () => {
+  test("the commit recorded on the dataset row is never read: a null, a malformed or another commit changes nothing (MUTATION: read the row)", async () => {
     const env = runnerEnv();
     await seedPipelinesAccount(env);
     await zarrDataset(env, "nm000104", null);
     await zarrDataset(env, "nm000105", "NOT-A-COMMIT");
-    await zarrDataset(env, "nm000106", COMMIT.toUpperCase());
+    await zarrDataset(env, "nm000106", "f".repeat(40));
     for (const id of ["nm000104", "nm000105", "nm000106"]) {
       const r = await runRunner(id, env);
-      expect([id, r.status, r.body.code]).toEqual([id, 422, "dataset_not_eligible"]);
+      expect([id, r.status]).toEqual([id, 201]);
+      const stored = await fx.harness.records.get(recordKey(r.body.results[0].job_id, "spec.json"));
+      const args = JSON.parse(await (stored as R2ObjectBody).text()).args as string[];
+      // The vector carries the commit the INDEX and the tag name, not the row's.
+      expect(args[args.indexOf("--source-commit") + 1]).toBe(COMMIT);
+      expect(args[args.indexOf("--tag-commit") + 1]).toBe(COMMIT);
     }
-    expect(await n(env, "compute_jobs")).toBe(0);
-    expect(await n(env, "compute_pipeline_stamps")).toBe(0);
   });
 
   test("an ineligible dataset is refused for a runner as for Tapis (eligibility is the dataset row's)", async () => {

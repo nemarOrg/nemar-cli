@@ -42,8 +42,8 @@
 import {
   type ComputeRecipe,
   type RecipeExecutor,
+  type ZarrCommitAttestation,
   findRecipe,
-  isSourceCommit,
   readRecipeRecord,
   recipeArguments,
   recipeCommand,
@@ -98,6 +98,7 @@ import { sha256Hex } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
+import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
 
@@ -159,6 +160,9 @@ export const NON_DATASET_FAILURE_WORDS: readonly string[] = [
   "tuple_mismatch",
   "tuple_already_stamped",
   "tuple_attempt_taken",
+  // GitHub or the serving index could not be read: nothing was learned of the dataset (it is a pre-claim
+  // refusal and writes no stamp today; the word is listed so that a path that did would not count it).
+  "zarr_source_unverifiable",
 ];
 
 /** The list as SQL: fixed words of this tree, never a caller's. */
@@ -189,6 +193,8 @@ export type PipelineRefusal =
   | "too_many_files"
   | "zarr_version_not_newest"
   | "zarr_copy_not_ready"
+  | "zarr_source_mismatch"
+  | "zarr_source_unverifiable"
   | "recipe_not_automatic"
   | "recipe_placeholder"
   | "runners_disabled"
@@ -247,6 +253,8 @@ export type DispatchResult =
       stampId?: number;
       /** The field of the specification that was invalid, for `invalid_spec`. */
       field?: string;
+      /** For a Zarr source refusal: one of `ZARR_SOURCE_REASONS`, a fixed word that says what was not shown. */
+      reason?: string;
     };
 
 // --- Rows -------------------------------------------------------------------------------------------
@@ -354,9 +362,10 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  * Parsed with the strict schema, so a registry entry that is not a valid job is a programming error that
  * a test also catches.
  *
- * A `zarr` recipe stages no dataset (`datasets: []`): its arguments carry the commit its serving copy is
- * said to describe (`sourceCommit`, 40 hex digits, which `resolveRun` supplies) and the one origin it may
- * read. A `zarr` recipe with no valid commit is a programming error here, never a job.
+ * A `zarr` recipe stages no dataset (`datasets: []`): its arguments carry the commit attestation that
+ * `resolveRun` verified (`zarrSource`: the serving index's commit, the tag's commit, how they are equivalent
+ * and the paths between them) and the one origin it may read. A `zarr` recipe with no verified attestation is
+ * a programming error here, never a job.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -365,7 +374,7 @@ export function recipeJobSpec(
     tag: string;
     image: { ref: string; digest: string };
     /** Required for a `zarr` recipe, never read for a `bids` one. */
-    sourceCommit?: string | null;
+    zarrSource?: ZarrCommitAttestation | null;
   },
 ) {
   const zarr = recipe.input === "zarr";
@@ -379,7 +388,7 @@ export function recipeJobSpec(
       ? recipeZarrArguments({
           datasetId: input.datasetId,
           tag: input.tag,
-          sourceCommit: input.sourceCommit as string,
+          attestation: input.zarrSource as ZarrCommitAttestation,
           imageDigest: input.image.digest,
         })
       : recipeArguments({
@@ -416,11 +425,11 @@ type ResolvedRun =
       ok: true;
       tag: string;
       /**
-       * For a recipe that reads the Zarr serving copy: the commit of the dataset repository that copy was
-       * built from, as the dataset row records it (`zarr_source_commit`); null for a `bids` recipe.
-       * DM-06b replaces this with the verified commit pair of the tagged version.
+       * For a recipe that reads the Zarr serving copy: the verified commit attestation of the tagged version
+       * (`checkZarrSource`: the serving index's commit S, the tag's commit T, `exact` or `metadata_only`, the
+       * paths between them); null for a `bids` recipe.
        */
-      sourceCommit: string | null;
+      zarrSource: ZarrCommitAttestation | null;
     }
   | {
       ok: false;
@@ -430,38 +439,41 @@ type ResolvedRun =
         | "version_untagged"
         | "too_many_files"
         | "zarr_version_not_newest"
-        | "zarr_copy_not_ready";
-      extra: { version?: string; blockedBy?: PipelineTermId[] };
+        | "zarr_copy_not_ready"
+        | "zarr_source_mismatch"
+        | "zarr_source_unverifiable";
+      extra: { version?: string; blockedBy?: PipelineTermId[]; reason?: string };
     };
 
 /**
- * What the dataset row says of its Zarr serving copy (`zarr-ready` writes it): the conversion's state, its
- * store count and the commit of the dataset repository the LATEST copy was built from. Every consumer of the
- * copy reads it only while `zarr_status = 'ready'` and there is a store (as `zarr-catalog.ts` does).
+ * What the dataset row says of its Zarr serving copy (`zarr-ready` writes it): the conversion's state and its
+ * store count. Every consumer of the copy reads it only while `zarr_status = 'ready'` and there is a store (as
+ * `zarr-catalog.ts` does). The commit the copy was built from is NOT read from the row (it can be left over
+ * from a conversion that has since failed): it is the serving index's own, read by `checkZarrSource`.
  */
-const ZARR_COPY_SQL = `SELECT zarr_status, zarr_store_count, zarr_source_commit FROM datasets
-  WHERE dataset_id = ?1`;
+const ZARR_COPY_SQL = "SELECT zarr_status, zarr_store_count FROM datasets WHERE dataset_id = ?1";
 
 /**
  * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
  * run cannot disagree: the eligibility predicate over the row (ADR 0065), the version row (the newest,
- * or the one named) with a data-plane tag, and the manifest bound. For a recipe whose input is `zarr` it also
- * resolves the source commit of the serving copy, and a dataset with no recorded commit is
- * `dataset_not_eligible`. It is the one place a Zarr recipe's identity is decided, so the dry run and the run
- * cannot disagree.
+ * or the one named) with a data-plane tag, and the manifest bound. It is the one place a Zarr recipe's identity
+ * is decided, so the dry run and the run cannot disagree.
  *
- * A Zarr recipe reads the dataset's ONE serving copy, which the row ties to the LATEST version only, so until
- * the tag commit of a version is verified against the copy's own (DM-06b) it is run only for the NEWEST version
- * (`zarr_version_not_newest`) and only while the copy is `ready` with at least one store
- * (`zarr_copy_not_ready`: a `pending` or `failed` conversion leaves the previous copy's commit on the row).
- * The commit recorded on the row is passed as it is and is NOT a statement that the copy describes the tagged
- * data. The manifest bound (`too_many_files`) is a BIDS staging limit: a Zarr recipe stages no files.
+ * A Zarr recipe reads the dataset's ONE serving copy, which describes the NEWEST version, so it is run only for
+ * the newest (`zarr_version_not_newest`) and only while the copy is `ready` with at least one store
+ * (`zarr_copy_not_ready`: a `pending` or `failed` conversion leaves the previous copy's row values in place);
+ * both refusals come before any index read or GitHub request. Then `checkZarrSource` proves the copy's own
+ * commit S is the tag's commit T, or differs from it by metadata only (`zarr_source_mismatch` when it is
+ * not, `zarr_source_unverifiable` when GitHub or the index could not be read), and the verified attestation is
+ * what the recipe is given. Nothing is written by a refusal, so no stamp, hold or job comes of one. The manifest
+ * bound (`too_many_files`) is a BIDS staging limit: a Zarr recipe stages no files.
  */
 async function resolveRun(
   db: D1Database,
   datasetId: string,
   wanted: string | undefined,
-  recipe?: ComputeRecipe,
+  recipe: ComputeRecipe | undefined,
+  env: Bindings,
 ): Promise<ResolvedRun> {
   const loaded = await loadPipelineRow(db, datasetId);
   if (!loaded.eligible) {
@@ -479,27 +491,39 @@ async function resolveRun(
   ) {
     return { ok: false, code: "too_many_files", extra: { version: picked.tag } };
   }
-  if (!zarr) return { ok: true, tag: picked.tag, sourceCommit: null };
+  if (!zarr) return { ok: true, tag: picked.tag, zarrSource: null };
   if (picked.version.version !== versions[0]?.version) {
     return { ok: false, code: "zarr_version_not_newest", extra: { version: picked.tag } };
   }
   const copy = await db.prepare(ZARR_COPY_SQL).bind(datasetId).first<{
     zarr_status: string | null;
     zarr_store_count: number | null;
-    zarr_source_commit: string | null;
   }>();
   if (copy?.zarr_status !== "ready" || (copy.zarr_store_count ?? 0) <= 0) {
     return { ok: false, code: "zarr_copy_not_ready", extra: { version: picked.tag } };
   }
-  const commit = copy.zarr_source_commit;
-  if (!isSourceCommit(commit)) {
+  const checked = await checkZarrSource(env, datasetId, picked.tag);
+  if (!checked.ok) {
+    // The reason is one of this tree's fixed words (no path, address or token), for the operator's log.
+    console.error(
+      `[compute-pipeline] zarr_source dataset=${datasetId} code=${checked.code} reason=${checked.reason}`,
+    );
     return {
       ok: false,
-      code: "dataset_not_eligible",
-      extra: { version: picked.tag, blockedBy: [] },
+      code: checked.code,
+      extra: { version: picked.tag, reason: checked.reason },
     };
   }
-  return { ok: true, tag: picked.tag, sourceCommit: commit };
+  return {
+    ok: true,
+    tag: picked.tag,
+    zarrSource: {
+      sourceCommit: checked.sourceCommit,
+      tagCommit: checked.tagCommit,
+      equivalence: checked.equivalence,
+      deltaPaths: checked.deltaPaths,
+    },
+  };
 }
 
 // --- A result that is not the tuple that was claimed ------------------------------------------------
@@ -587,7 +611,7 @@ export async function dispatchPipelineJob(
   if (await tupleHeld(db, recipe)) return fail("registry_drift", datasetId);
 
   // The dataset and its version, decided from the rows (ADR 0065): nothing a caller said is read.
-  const resolved = await resolveRun(db, datasetId, input.version, recipe);
+  const resolved = await resolveRun(db, datasetId, input.version, recipe, env);
   if (!resolved.ok) return fail(resolved.code, datasetId, resolved.extra);
   const { tag } = resolved;
 
@@ -600,7 +624,7 @@ export async function dispatchPipelineJob(
   // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
   let spec: ReturnType<typeof recipeJobSpec>;
   try {
-    spec = recipeJobSpec(recipe, { datasetId, tag, image, sourceCommit: resolved.sourceCommit });
+    spec = recipeJobSpec(recipe, { datasetId, tag, image, zarrSource: resolved.zarrSource });
   } catch (err) {
     console.error(
       `[compute-pipeline] spec_unbuildable recipe=${recipe.name} error=${err instanceof Error ? err.name : "unknown"}`,
@@ -1171,7 +1195,7 @@ const liveStamp = (db: D1Database, datasetId: string, tag: string, recipe: Compu
  * room in place of the daily cap and the tenant ceiling, which a runner job does not meet.
  */
 async function runnerDryRun(
-  db: D1Database,
+  env: Bindings,
   recipe: ComputeRecipe,
   base: {
     ok: true;
@@ -1183,9 +1207,10 @@ async function runnerDryRun(
   input: DryRunInput,
   room: RunnerRoom,
 ): Promise<DryRunResult> {
+  const db = env.DB;
   const datasetId = input.datasetId as string;
   const shown = { ...base, runner_room: room, estimate_milli_total: 0 };
-  const resolved = await resolveRun(db, datasetId, input.version, recipe);
+  const resolved = await resolveRun(db, datasetId, input.version, recipe, env);
   if (!resolved.ok) {
     return {
       ...shown,
@@ -1194,6 +1219,7 @@ async function runnerDryRun(
         code: resolved.code,
         blocked_by: resolved.extra.blockedBy ?? [],
         ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+        ...(resolved.extra.reason === undefined ? {} : { reason: resolved.extra.reason }),
       },
     };
   }
@@ -1258,7 +1284,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
   const policy = (await getPolicy(db)).policy;
   if (executor === "runner") {
     return runnerDryRun(
-      db,
+      env,
       recipe,
       base,
       input,
@@ -1278,7 +1304,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
             ? ("tenant" as const)
             : ("limit" as const),
     };
-    const resolved = await resolveRun(db, input.datasetId, input.version, recipe);
+    const resolved = await resolveRun(db, input.datasetId, input.version, recipe, env);
     if (!resolved.ok) {
       return {
         ...base,
@@ -1289,6 +1315,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
           code: resolved.code,
           blocked_by: resolved.extra.blockedBy ?? [],
           ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+          ...(resolved.extra.reason === undefined ? {} : { reason: resolved.extra.reason }),
         },
       };
     }

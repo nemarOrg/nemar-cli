@@ -84,6 +84,10 @@ const SENTENCES = {
   zarr_version_not_newest:
     "That recipe reads the dataset's one Zarr copy, which describes only the newest version.",
   zarr_copy_not_ready: "That dataset has no ready Zarr copy to read.",
+  zarr_source_mismatch:
+    "That dataset's Zarr copy could not be shown to be the tagged version's data; the reason says what was not shown.",
+  zarr_source_unverifiable:
+    "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -216,6 +220,7 @@ function resultView(r: DispatchResult): ComputePipelineResult {
     code: r.code,
     ...(r.version === undefined ? {} : { version: r.version }),
     ...(r.blockedBy === undefined ? {} : { blocked_by: r.blockedBy }),
+    ...(r.reason === undefined ? {} : { reason: r.reason }),
     ...(r.stampId === undefined ? {} : { stamp_id: r.stampId }),
   };
 }

@@ -117,7 +117,8 @@ function printRun(res: ComputePipelineRunResponse): void {
         res.blocked.blocked_by.length > 0
           ? ` [${res.blocked.blocked_by.map(word).join(", ")}]`
           : "";
-      say(`  blocked: ${word(res.blocked.code)}${terms}`);
+      const reason = res.blocked.reason ? `, reason ${word(res.blocked.reason)}` : "";
+      say(`  blocked: ${word(res.blocked.code)}${terms}${reason}`);
     }
     if (res.blocked_by_term) {
       const rows = Object.entries(res.blocked_by_term).filter(([, n]) => Number(n) > 0);
@@ -316,7 +317,11 @@ pipelineCommand
             refusal.blockedBy.length > 0
               ? `, blocked by ${refusal.blockedBy.map(word).join(", ")}`
               : "";
-          failMessage(`${err.message} (${word(refusal.code)}${terms})`, { json, answered: true });
+          const reason = refusal.reason ? `, reason ${word(refusal.reason)}` : "";
+          failMessage(`${err.message} (${word(refusal.code)}${terms}${reason})`, {
+            json,
+            answered: true,
+          });
           return;
         }
         failWith(err, null, "Could not run the pipeline.", undefined, { json });
