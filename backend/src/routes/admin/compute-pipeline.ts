@@ -13,14 +13,18 @@
  * trims what it would dispatch to it.
  *
  * The request names a recipe, then ONE dataset (with an optional version) or `eligible` with a `limit`,
- * and `dry_run`. It names nothing else: the dataset row (and with it eligibility, ADR 0065), the version
+ * `dry_run`, and optionally the `executor` (`tapis`, the default, or `runner`, ADR 0121). A recipe lists the
+ * executors it may be dispatched to and one it does not list is `invalid_body` naming `executor`; so is a
+ * runner run over `eligible`; a live runner run is refused `runners_disabled` unless the runners switch is on.
+ * A runner run makes a job with no hold that waits for a runner and is never submitted. It names nothing else: the dataset row (and with it eligibility, ADR 0065), the version
  * row, the service account, the pool and the runtime image are the Worker's own. A request with any other
  * key is refused, so a field a caller believes it can set is never silently dropped.
  *
  * A dry run reads only and works in every environment; it writes nothing, not even an audit row. A live
- * run refuses `compute_disabled` unless compute is on, and is audited as `compute.pipeline.run` with
- * counts and fixed words (never a path, a name or a value). The stamps are synced before every run and
- * every status read. Every refusal is `{ error: <sentence>, code: <word> }`; an invalid body names the
+ * run refuses `compute_disabled` unless compute is on, and a live Tapis run refuses `tapis_unconfigured` while
+ * the Worker has no usable Tapis configuration; both are answered before anything is written. A run that goes
+ * ahead is audited as `compute.pipeline.run` with counts and fixed words (never a path, a name or a value).
+ * The stamps are synced before every run and every status read. Every refusal is `{ error: <sentence>, code: <word> }`; an invalid body names the
  * fields and never echoes a value. The routes sit behind the admin router's middleware (authentication,
  * the admin role, the cookie-origin guard). Nothing here touches GitHub or sends mail.
  */
@@ -46,6 +50,7 @@ import {
   COMPUTE_DATASET_VERSION_RE,
 } from "../../../../shared/contract/compute.js";
 import { AUDIT_LOG_INSERT_SQL } from "../../db/audit-log.js";
+import { tapisSubmitConfigured } from "../../services/compute-lifecycle.js";
 import {
   type DispatchResult,
   type PipelineRefusal,
@@ -71,12 +76,22 @@ const SENTENCES = {
   recipe_unknown: "There is no such recipe.",
   recipe_not_automatic: "That recipe is not run automatically.",
   recipe_placeholder: "That recipe is a placeholder and cannot be run.",
+  runners_disabled: "Runners are not switched on.",
+  tapis_unconfigured:
+    "Tapis is not configured on this Worker, so a Tapis job cannot be submitted; nothing was written.",
   registry_drift:
     "A finished run reported another recipe version or engine than the registry names, so the recipe is held.",
   dataset_not_eligible: "That dataset is not eligible for processing.",
   version_not_found: "That dataset has no such version.",
   version_untagged: "That version has no name the data plane serves.",
   too_many_files: "That version has more files than a job can stage.",
+  zarr_version_not_newest:
+    "That recipe reads the dataset's one Zarr copy, which describes only the newest version.",
+  zarr_copy_not_ready: "That dataset has no ready Zarr copy to read.",
+  zarr_source_mismatch:
+    "That dataset's Zarr copy could not be shown to be the tagged version's data; the reason says what was not shown.",
+  zarr_source_unverifiable:
+    "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -130,11 +145,16 @@ function invalid(c: Ctx, kind: "invalid_body" | "invalid_query", error: z.ZodErr
   );
 }
 
+/** A validation error that names the `executor` field, in the words `invalid` answers every bad body with. */
+const executorIssue = (message: string) =>
+  new z.ZodError([{ code: z.ZodIssueCode.custom, path: ["executor"], message }]);
+
 const RECIPE_NAME = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 
 const runBody = z
   .object({
     recipe: RECIPE_NAME,
+    executor: z.enum(["tapis", "runner"]).optional(),
     dataset: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
     version: z.string().regex(COMPUTE_DATASET_VERSION_RE).optional(),
     eligible: z.boolean().optional(),
@@ -195,6 +215,7 @@ function resultView(r: DispatchResult): ComputePipelineResult {
       stamp_id: r.stampId,
       attempt: r.attempt,
       submit: r.submit,
+      ...(r.recordsWritten === undefined ? {} : { records_written: r.recordsWritten }),
     };
   }
   return {
@@ -203,6 +224,7 @@ function resultView(r: DispatchResult): ComputePipelineResult {
     code: r.code,
     ...(r.version === undefined ? {} : { version: r.version }),
     ...(r.blockedBy === undefined ? {} : { blocked_by: r.blockedBy }),
+    ...(r.reason === undefined ? {} : { reason: r.reason }),
     ...(r.stampId === undefined ? {} : { stamp_id: r.stampId }),
   };
 }
@@ -232,6 +254,7 @@ async function audit(
   mode: "dataset" | "eligible",
   counts: { dispatched: number; refused: number },
   stoppedBy: string | null,
+  executor: "tapis" | "runner",
 ): Promise<boolean> {
   // The run has happened by now: jobs are made and holds taken. A failed audit write must not turn that
   // into a 500 that hides the job ids, so it is logged and the answer says the audit row is pending.
@@ -242,7 +265,7 @@ async function audit(
         PIPELINE_RUN_AUDIT_ACTION,
         "compute_pipeline",
         recipe,
-        JSON.stringify({ mode, ...counts, stopped_by: stoppedBy }),
+        JSON.stringify({ mode, executor, ...counts, stopped_by: stoppedBy }),
       )
       .run();
     return true;
@@ -273,6 +296,20 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
     const recipe = findRecipe(body.recipe);
     if (recipe === null) return refuse(c, "recipe_unknown");
     if (recipe.placeholder === true) return refuse(c, "recipe_placeholder");
+    // The executor is part of the request's validity, decided from the registry before anything is read:
+    // a recipe is dispatched only to an executor it lists, and a runner run names ONE dataset (the queue's
+    // clamps are Tapis's: the daily cap and the tenant ceiling mean nothing to a runner job).
+    const executor = body.executor ?? "tapis";
+    if (!recipe.executors.includes(executor)) {
+      return invalid(
+        c,
+        "invalid_body",
+        executorIssue("that recipe is not dispatched to that executor"),
+      );
+    }
+    if (executor === "runner" && body.dataset === undefined) {
+      return invalid(c, "invalid_body", executorIssue("a runner run names one dataset"));
+    }
     try {
       if (body.dry_run === true) {
         const dry = await pipelineDryRun(c.env, {
@@ -280,11 +317,18 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           datasetId: body.dataset,
           version: body.version,
           limit: body.limit ?? COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
+          executor,
         });
         if (!dry.ok) return refuse(c, dry.code);
         return c.json({ ...dry, ok: true, dry_run: true });
       }
       if (!computeEnabled(c.env)) return refuse(c, "compute_disabled");
+      // A Tapis run on a Worker that cannot submit to Tapis is refused here, as `compute_disabled` is, before
+      // the stamp sync, the dispatch and the audit row; `dispatchPipelineJob` holds the same line for every
+      // other caller. A runner run never asks, and a dry run is answered above.
+      if (executor === "tapis" && !tapisSubmitConfigured(c.env)) {
+        return refuse(c, "tapis_unconfigured");
+      }
       const actor = { kind: "admin", userId: c.get("user").id } as const;
 
       if (body.dataset !== undefined) {
@@ -294,6 +338,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           datasetId: body.dataset,
           version: body.version,
           actor,
+          executor,
         });
         const audited = await audit(
           c,
@@ -301,6 +346,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           "dataset",
           { dispatched: result.ok ? 1 : 0, refused: result.ok ? 0 : 1 },
           result.ok ? null : result.code,
+          executor,
         );
         const pending = audited ? {} : { audit_pending: true };
         if (!result.ok) return refuse(c, result.code, { ...resultView(result), ...pending });
@@ -309,6 +355,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
             ok: true,
             dry_run: false,
             recipe: body.recipe,
+            executor,
             results: [resultView(result)],
             dispatched: 1,
             stopped_by: null,
@@ -329,12 +376,14 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         "eligible",
         { dispatched: run.dispatched, refused: run.results.length - run.dispatched },
         run.stoppedBy,
+        executor,
       );
       return c.json(
         {
           ok: true,
           dry_run: false,
           recipe: body.recipe,
+          executor,
           results: run.results.map(resultView),
           dispatched: run.dispatched,
           stopped_by: run.stoppedBy,

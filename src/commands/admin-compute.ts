@@ -13,6 +13,7 @@
  *                                                         reporting, legal holds and ACCESS reports (phase A7, #2012; the same file)
  *   nemar admin compute observer mint [--json]            mint the observer's one-hour token (admin)
  *   nemar admin compute pipeline run|status ...           run NEMAR's own recipes, or read their stamps (admin; src/commands/admin-compute-pipeline.ts)
+ *   nemar admin compute runners register|list|revoke ...  the machines that run jobs for NEMAR (owner; src/commands/admin-compute-runners.ts)
  *
  * Amounts are service units (SU) as plain decimals with at most three places (`12.5`), and are sent
  * as whole thousandths. Every write sends one fresh `Idempotency-Key`, so within one invocation the
@@ -63,6 +64,7 @@ import {
 import { plain } from "../lib/terminal-text.js";
 import { jobsCommand, observerCommand } from "./admin-compute-jobs.js";
 import { pipelineCommand } from "./admin-compute-pipeline.js";
+import { runnersCommand } from "./admin-compute-runners.js";
 
 const ACCOUNT_RE = /^[1-9][0-9]{0,14}$/;
 const POLICY_FILE_MAX_BYTES = 256 * 1024;
@@ -73,6 +75,18 @@ const NOTE_MAX = 500;
 // ---------------------------------------------------------------------------------------------
 
 const su = (milli: number) => formatSu(milli);
+
+/** What an attention count means, for the words that need a sentence (fixed text: the Worker's value is never echoed). */
+const ATTENTION_HINTS: Readonly<Record<string, string>> = {
+  policy_unreadable:
+    " (the stored owner policy cannot be read: every hold, run and limit fails closed until a valid version is written)",
+  runner_cancel_pending_failed:
+    " (a runner job's recorded cancel is over an hour old and its runner has not taken it: revoke the runner, or the lease sweep ends it once the lease is not current)",
+  runner_copy_abandoned:
+    " (a terminal runner job's launcher files were never copied into the records and no longer will be)",
+  runner_records_unwritten:
+    " (a waiting runner job's records never landed and the lease sweep has neither replayed nor ended it: the sweep is not running or is starved)",
+};
 
 /** One pool on one line, in SU. Everything the Worker sent is made plain first. */
 function poolLine(p: ComputePoolView): string {
@@ -652,13 +666,7 @@ function printStatus(res: ComputeStatusResponse): void {
   }
   for (const [word, n] of Object.entries(res.attention ?? {})) {
     if (typeof n === "number" && n > 0) {
-      say(
-        `Attention: ${plain(word)} ${n}${
-          word === "policy_unreadable"
-            ? " (the stored owner policy cannot be read: every hold, run and limit fails closed until a valid version is written)"
-            : ""
-        }`,
-      );
+      say(`Attention: ${plain(word)} ${n}${ATTENTION_HINTS[word] ?? ""}`);
     }
   }
   say("Runtime image");
@@ -693,7 +701,7 @@ const statusCommand = new Command("status")
   });
 
 export const computeCommand = new Command("compute").description(
-  "The compute gateway: the owner policy, the SU allocation pools, status, jobs and their reports, legal holds, the pipeline and the observer's token (ADR 0118)",
+  "The compute gateway: the owner policy, the SU allocation pools, status, jobs and their reports, legal holds, the pipeline, the observer's token (ADR 0118) and the runner registry",
 );
 
 computeCommand.addCommand(policyCommand);
@@ -702,3 +710,4 @@ computeCommand.addCommand(statusCommand);
 computeCommand.addCommand(observerCommand);
 computeCommand.addCommand(jobsCommand);
 computeCommand.addCommand(pipelineCommand);
+computeCommand.addCommand(runnersCommand);

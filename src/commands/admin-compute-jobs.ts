@@ -81,9 +81,25 @@ function printJob(res: ComputeJobAdminResponse): void {
     );
   }
   say(`  partition: ${plain(job.partition)} (${plain(job.pool)})`);
-  say(
-    `  held ${formatSu(job.held_milli)} SU, charged ${formatSu(job.charged_milli)} SU, ${job.settled ? "settled" : "not settled"}`,
-  );
+  if (job.executor === "runner") {
+    // A runner job has no hold and no ledger entry: its usage is the runner's own figure, never SU.
+    say(
+      `  executor: runner, accounting: ${plain(job.accounting ?? "none")} (no hold, no service units)`,
+    );
+    say(
+      `  runner: ${job.runner_id ? plain(job.runner_id) : "none yet"}` +
+        `${job.runner_backend ? ` (${plain(job.runner_backend)})` : ""}` +
+        `${job.runner_claimed_at ? `, claimed ${plain(job.runner_claimed_at)}` : ""}`,
+    );
+    say(
+      `  runner-reported: wall ${job.runner_wall_seconds ?? "?"} s, cpu ${job.runner_cpu_seconds ?? "?"} s, ` +
+        `max resident ${job.runner_max_rss_mb ?? "?"} MB`,
+    );
+  } else {
+    say(
+      `  held ${formatSu(job.held_milli)} SU, charged ${formatSu(job.charged_milli)} SU, ${job.settled ? "settled" : "not settled"}`,
+    );
+  }
   say(`  flags: ${job.flags.length > 0 ? job.flags.map(plain).join(", ") : "none"}`);
   say(
     `  results: upload ${job.outputs_completed ? "complete" : "not complete"}, ` +
@@ -294,7 +310,7 @@ jobsCommand
         for (const j of res.jobs) {
           say(
             `${plain(j.id)}  ${plain(j.state).padEnd(10)} ${plain(j.source).padEnd(8)} ${plain(j.partition)}/${plain(j.pool)}  ` +
-              `${formatSu(j.charged_milli)} SU${j.settled ? "" : " (not settled)"}  ` +
+              `${j.executor === "runner" ? "runner, no SU" : `${formatSu(j.charged_milli)} SU${j.settled ? "" : " (not settled)"}`}  ` +
               `${j.flags.length > 0 ? `[${j.flags.map(plain).join(",")}]  ` : ""}${plain(j.created_at)}`,
           );
         }

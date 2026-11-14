@@ -26,7 +26,8 @@
  *              (`flag_unreserved = 1`), and an orphan (below). No floor and no way to be admitted: NEMAR
  *              did not admit them, it only counts them.
  *
- * WHAT OCCUPIES A SLOT. Every row in a live state (`created` included: it is about to hold one), and
+ * WHAT OCCUPIES A SLOT. Every `accounting = 'su'` row in a live state (`created` included: it is about to hold
+ * one; a runner job is `accounting = 'none'`, holds no Tapis slot and is not counted, ADR 0121), and
  * one slot more for EVERY row that records an orphaned platform job (`orphan_tapis_uuid`), live or not: a
  * Tapis job NEMAR made that no row owns is still running until the cancel is known to have worked. A live
  * row can carry one in two ways, and holds two slots then, its own and the orphan's: a duplicate of the job
@@ -96,7 +97,7 @@ export const TENANT_COUNTS_SQL = `SELECT
              WHEN source = 'partner' THEN 'partner'
              ELSE 'other'
            END AS c
-      FROM compute_jobs WHERE state IN (${LIVE_STATES_SQL})
+      FROM compute_jobs WHERE state IN (${LIVE_STATES_SQL}) AND accounting = 'su'
     UNION ALL
     SELECT 'other' FROM compute_jobs
      WHERE orphan_tapis_uuid IS NOT NULL

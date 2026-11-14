@@ -164,6 +164,12 @@ const SWEEP_WIRING: Record<
   // switch, so turning compute off never strands a live job.
   runComputeAdvanceCron: "tick-prod-only",
   sweepComputeCancellations: "tick-prod-only",
+  // Portable compute (card DM-07, ADR 0121): the runner queue's lease rules. It rides the 30-minute tick's
+  // production guard and is absent from DEV_CRON_ALLOWLIST; it ALSO runs on every runner claim (the claim
+  // route calls it, in every environment, so the local stack and staging get it whenever a runner polls),
+  // which is why it carries no environment guard of its own. It reads no switch, so turning runners off never
+  // strands a claimed job.
+  sweepRunnerLeases: "tick-prod-only",
   // Epic #2005 phase A8 (#2013, ADR 0118 decision 9): the ACCESS gateway-attributes reporter. It sends
   // each Slurm job's pseudonymous gateway user to a third party with an owner-set key, so it rides the
   // 30-minute tick's production guard and is absent from DEV_CRON_ALLOWLIST; it also refuses outside

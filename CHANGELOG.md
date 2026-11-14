@@ -15,8 +15,10 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
-A tenant-wide ceiling on live compute jobs (#2126, phase P2 of issue #2121).
-It carries no migration and sets no Worker variable or secret, and it changes nothing in production while the compute switches are absent, because no job can exist then.
+Two blocks of compute work are unreleased: a tenant-wide ceiling on live compute jobs (#2126, phase P2 of issue #2121), and portable compute with workstation runners (epic #2145).
+The ceiling carries no migration and sets no Worker variable or secret, and it changes nothing in production while the compute switches are absent, because no job can exist then.
+The runners block ships migration 0140 (the runner registry tables and the executor, accounting and lease columns of `compute_jobs`) and sets no Worker variable or secret; creating a runner job and every runner claim stay behind the dark switch `COMPUTE_RUNNERS_ENABLED`, and an owner can register a runner while it is off (the registration is useless until the switch is on).
+Three of its changes run in production with no switch: the runner lease sweep (`sweepRunnerLeases`) on the 30-minute scheduled tick, which reads no switch; the refusal in `resolveApiKeyUser` of any key that starts with `nmr_` or `nmra_`, as a runner credential and never as an API key; and `runnerEndStatements`, which ends a person's runners in the account deletion, account revocation and role demotion paths.
 
 ### Added
 
@@ -29,10 +31,13 @@ It carries no migration and sets no Worker variable or secret, and it changes no
   `platform_busy` stops a pipeline run and ends the daily dispatcher's run; `pipeline run` and its dry run are clamped to the tenant room.
   `nemar admin compute status` prints the occupied slots by class and the attention count `tenant_over_ceiling`, and the live tenant sweep logs `tenant_live` and `occupied` and warns when the live count passes the ceiling.
   The ceiling is checked on both database engines in tests (bun:sqlite and Miniflare D1), with racing requests for the last slots.
+- Registered workstation runners pull pipeline jobs over HTTPS behind the dark switch `COMPUTE_RUNNERS_ENABLED`.
+- A job records its executor and accounting class, and runner jobs write no ledger entry.
 
 ### Known limits
 
 - Rolling a Worker back to a build from before this change makes a stored policy that has the `tenant` key unreadable (the reader is strict and fails closed); write a policy without the key first.
+- Rolling a Worker back to a build from before the runners block makes a stored policy that has the `runners` key unreadable (the reader is strict and fails closed): before any rollback across it, turn runners off and drain them, and write a policy without the key first.
 - Counting the orphaned platform jobs scans `compute_jobs` once per hold, because an index for it would need a migration.
 - The pipelines' daily cap is still read before a run and not checked in the hold's statement (see 0.10.33).
 

@@ -24,6 +24,14 @@
  * as the ARGUMENT `--image-digest`. The recipe cannot check that value against the image it runs in; it
  * is the caller's claim, and the Worker compares it with the launcher's `provenance.json` before it
  * accepts a result (`recipeImageDigestArg`).
+ *
+ * TWO INPUTS, TWO EXECUTORS (portable compute, ADR 0121, plan D12). A recipe's `input` is `bids` (the
+ * dataset staged at `/data/<id>`, the arguments above) or `zarr` (nothing staged: the recipe streams the
+ * dataset's Zarr serving copy from `--zarr-base`, the one origin it may open, and the Worker passes the commit
+ * that copy was built from, the version's tag commit and how they are equivalent as `--source-commit`,
+ * `--tag-commit`, `--commit-equivalence` and `--commit-delta-path`; `recipeZarrArguments`). `executors` lists where a recipe may
+ * be dispatched: `tapis` (an allocation, a hold) or `runner` (a registered runner pulls it, no hold). A
+ * dispatch to an executor a recipe does not list is refused.
  */
 
 /** The states of a stamp, declared once; the migration's CHECK is held to this list by a test. */
@@ -53,6 +61,20 @@ const IMAGE_DIGEST_VALUE_RE = /^sha256:[0-9a-f]{64}$/;
 /** What a recipe's dispatch is eligible on: today only electroencephalography (EEG) datasets. */
 export type RecipeEligibility = "eeg";
 
+/**
+ * What a recipe reads: `bids`, the dataset's own files bound read-only at `/data/<id>` (the launcher
+ * stages them), or `zarr`, the dataset's Zarr serving copy streamed over HTTPS from `--zarr-base`, with
+ * no dataset staged (portable compute, plan D12).
+ */
+export type RecipeInput = "bids" | "zarr";
+
+/**
+ * Who may run a recipe: Tapis on an allocation, or a runner that polls NEMAR (ADR 0121). These are the
+ * words of `COMPUTE_EXECUTORS` in `./compute-state.ts`, repeated here because this module imports
+ * nothing; a test holds the two lists together.
+ */
+export type RecipeExecutor = "tapis" | "runner";
+
 export interface ComputeRecipe {
   /** The recipe's name, as `nemar-recipe run <name>` takes it. */
   name: string;
@@ -69,6 +91,10 @@ export interface ComputeRecipe {
   memoryMb?: number;
   gpus: number;
   minutes: number;
+  /** What the recipe reads; a `zarr` recipe is dispatched with no dataset staged and a source commit. */
+  input: RecipeInput;
+  /** The executors the recipe may be dispatched to; a dispatch to another is refused. */
+  executors: readonly RecipeExecutor[];
   /** The daily dispatcher dispatches a recipe only while this is true. */
   autoDispatch: boolean;
   /**
@@ -97,7 +123,29 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     memoryMb: 16384,
     gpus: 0,
     minutes: 360,
+    input: "bids",
+    executors: Object.freeze(["tapis"] as const),
     autoDispatch: true,
+    eligibility: "eeg",
+  }),
+  // A transition name (plan D12): nemar-floor's chain over the Zarr serving copy, on a runner. The
+  // partition is a SIZING LABEL only (ADR 0121, decision 6): `shared`'s ceilings apply, nothing is
+  // submitted to it and no service unit is estimated. Step Q0 folds it into `nemar-floor`.
+  Object.freeze({
+    name: "nemar-floor-zarr",
+    version: "1.0.0",
+    appId: "nemar-launch",
+    appVersion: "1.0.0",
+    engine: "eegprep@0.5.0",
+    partition: "shared",
+    nodes: 1,
+    cores: 4,
+    memoryMb: 16384,
+    gpus: 0,
+    minutes: 120,
+    input: "zarr",
+    executors: Object.freeze(["runner"] as const),
+    autoDispatch: false,
     eligibility: "eeg",
   }),
   Object.freeze({
@@ -111,6 +159,8 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     cores: 10,
     gpus: 1,
     minutes: 720,
+    input: "bids",
+    executors: Object.freeze(["tapis"] as const),
     autoDispatch: false,
     placeholder: true,
     eligibility: "eeg",
@@ -172,6 +222,130 @@ export function recipeArguments(input: {
     input.tag,
     RECIPE_IMAGE_DIGEST_FLAG,
     input.imageDigest,
+  ];
+}
+
+/** The origin a Zarr-input recipe reads, and the one network origin it may open (plan D12). */
+export const RECIPE_ZARR_BASE = "https://zarr.nemar.org";
+
+/**
+ * A bare, lower-case host name: letters, digits, dots and hyphens, starting and ending with a letter or a
+ * digit. No scheme, port, path, query, user, space or upper-case letter, so `https://` plus a value that
+ * matches is an origin and nothing else.
+ */
+export const RECIPE_ZARR_HOSTNAME_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/;
+
+/**
+ * The origin a Zarr-input recipe job is told to read (portable compute, plan S1 and D12). Production, and any
+ * configured host that is not a bare lower-case host name (or none at all), is {@link RECIPE_ZARR_BASE};
+ * outside production it is the environment's OWN serving host, `https://` plus the Worker's `ZARR_HOSTNAME`,
+ * so a staging fixture is read from the staging copy. The host comes from the Worker's configuration only,
+ * never from a request, a dataset row or an index. `nonProduction` is the Worker's own decision
+ * (`isNonProductionEnv`: only `development`, `staging` and `test`; anything else, unset included, is
+ * production): this file is import-free, so the decision is handed in, never re-derived here.
+ */
+export function recipeZarrBase(input: {
+  nonProduction: boolean;
+  zarrHostname?: string | null;
+}): string {
+  const host = input.zarrHostname;
+  if (!input.nonProduction || typeof host !== "string" || !RECIPE_ZARR_HOSTNAME_RE.test(host)) {
+    return RECIPE_ZARR_BASE;
+  }
+  return `https://${host}`;
+}
+
+/** Is this an origin {@link recipeZarrBase} can give: the production origin, or `https://` and a bare host name. */
+export const isRecipeZarrBase = (value: unknown): value is string =>
+  value === RECIPE_ZARR_BASE ||
+  (typeof value === "string" &&
+    value.startsWith("https://") &&
+    RECIPE_ZARR_HOSTNAME_RE.test(value.slice("https://".length)));
+
+/** The flag that carries the commit of the dataset repository the Zarr serving copy was built from. */
+export const RECIPE_SOURCE_COMMIT_FLAG = "--source-commit";
+/** The flag that carries the commit of the version's tag. */
+export const RECIPE_TAG_COMMIT_FLAG = "--tag-commit";
+/** The flag that carries how the two commits are equivalent: `exact` or `metadata_only`. */
+export const RECIPE_COMMIT_EQUIVALENCE_FLAG = "--commit-equivalence";
+/** The repeatable flag that carries one path changed between the tag commit and the source commit. */
+export const RECIPE_COMMIT_DELTA_PATH_FLAG = "--commit-delta-path";
+
+const SOURCE_COMMIT_RE = /^[0-9a-f]{40}$/;
+
+/** Is this a full commit id: 40 lowercase hex digits. */
+export const isSourceCommit = (value: unknown): value is string =>
+  typeof value === "string" && SOURCE_COMMIT_RE.test(value);
+
+/**
+ * What the Worker attests of the commit a Zarr serving copy was built from (`checkZarrSource` decides it):
+ * `exact` (the source commit is the tag commit, no path) or `metadata_only` (they differ, and every path
+ * between them is named and lies under `.nemar/` or `.github/`). The recipe validates the same agreement and
+ * exits 2 on a contradiction, so a vector that disagrees with itself is a programming error here.
+ */
+export interface ZarrCommitAttestation {
+  /** The commit the serving index was built from: 40 lowercase hex digits. */
+  sourceCommit: string;
+  /** The commit of the version's tag: 40 lowercase hex digits. */
+  tagCommit: string;
+  equivalence: "exact" | "metadata_only";
+  /** The changed paths in the compare's order; empty for `exact`, at least one for `metadata_only`. */
+  deltaPaths: readonly string[];
+}
+
+/**
+ * The arguments of a Zarr-input recipe job over one dataset version: no dataset directory (nothing is
+ * staged), the product directory, the identity the recipe must not guess, the commit attestation (the source
+ * commit, the tag commit, the equivalence and one `--commit-delta-path` per changed path), the image digest,
+ * and the one origin the recipe may read (`zarrBase`, from {@link recipeZarrBase}: the environment's own host,
+ * never a constant here). The order is part of the contract (the job's `spec.json` records
+ * it). A commit that is not 40 lowercase hex digits, an attestation that contradicts itself, or an origin
+ * that is not one `recipeZarrBase` can give is a programming error, never passed on.
+ */
+export function recipeZarrArguments(input: {
+  datasetId: string;
+  /** The data-plane tag of the version (`v1.0.2` or `latest`). */
+  tag: string;
+  attestation: ZarrCommitAttestation;
+  /** The image digest, `sha256:<64 hex>`. */
+  imageDigest: string;
+  /** The origin the recipe reads: {@link recipeZarrBase}'s answer. */
+  zarrBase: string;
+}): string[] {
+  const { sourceCommit, tagCommit, equivalence, deltaPaths } = input.attestation;
+  if (!isRecipeZarrBase(input.zarrBase)) {
+    throw new RangeError("the Zarr base is the production origin or https:// and a bare host name");
+  }
+  if (!isSourceCommit(sourceCommit) || !isSourceCommit(tagCommit)) {
+    throw new RangeError("a source commit and a tag commit are 40 lowercase hex digits");
+  }
+  if (equivalence === "exact" && (tagCommit !== sourceCommit || deltaPaths.length > 0)) {
+    throw new RangeError("an exact attestation has one commit and no delta path");
+  }
+  if (equivalence === "metadata_only" && (tagCommit === sourceCommit || deltaPaths.length === 0)) {
+    throw new RangeError("a metadata_only attestation has two commits and names the changed paths");
+  }
+  if (equivalence !== "exact" && equivalence !== "metadata_only") {
+    throw new RangeError("the commit equivalence is exact or metadata_only");
+  }
+  return [
+    "--out",
+    RECIPE_PRODUCT_DIR,
+    "--dataset-id",
+    input.datasetId,
+    "--dataset-version",
+    input.tag,
+    RECIPE_SOURCE_COMMIT_FLAG,
+    sourceCommit,
+    RECIPE_TAG_COMMIT_FLAG,
+    tagCommit,
+    RECIPE_COMMIT_EQUIVALENCE_FLAG,
+    equivalence,
+    ...deltaPaths.flatMap((path) => [RECIPE_COMMIT_DELTA_PATH_FLAG, path]),
+    RECIPE_IMAGE_DIGEST_FLAG,
+    input.imageDigest,
+    "--zarr-base",
+    input.zarrBase,
   ];
 }
 
