@@ -752,6 +752,37 @@ describe("one job's whole run through the routes", () => {
     }
   });
 
+  test("a lease that is not the job's, a job of another runner and a job nobody made are all lease_lost, on heartbeat and complete (MUTATION: drop the lease compare of complete)", async () => {
+    const { r, jobId, entry } = await claimed();
+    const other = await runner();
+    const wrong = "ab".repeat(16);
+    for (const phase of ["started", "uploading"] as const) {
+      const beat = await heartbeat(r, jobId, wrong, phase);
+      expect([beat.status, beat.body.error]).toEqual([409, "lease_lost"]);
+      expect((await heartbeat(other, jobId, entry.lease_id, phase)).body.error).toBe("lease_lost");
+      expect((await heartbeat(r, `job_${"0".repeat(24)}`, wrong, phase)).body.error).toBe(
+        "lease_lost",
+      );
+    }
+    for (const [who, lease] of [
+      [r, wrong],
+      [other, entry.lease_id],
+    ] as const) {
+      const res = await complete(who, jobId, lease);
+      expect([res.status, res.body.error]).toEqual([409, "lease_lost"]);
+    }
+    expect(await row(jobId)).toMatchObject({ state: "created", runner_wall_seconds: null });
+  });
+
+  test("the usage is written once per job (MUTATION: drop the IS NULL term)", async () => {
+    const { r, jobId, entry } = await claimed();
+    await sql("UPDATE compute_jobs SET runner_wall_seconds = 5 WHERE id = ?1", jobId);
+    expect((await complete(r, jobId, entry.lease_id, { exit_number: 13 })).body.state).toBe(
+      "failed",
+    );
+    expect((await row(jobId)).runner_wall_seconds).toBe(5);
+  });
+
   test("an exit of 0 with no outputs completed fails verification (result_upload_failed, not_completed)", async () => {
     const { r, jobId, entry } = await claimed();
     const res = await complete(r, jobId, entry.lease_id);
