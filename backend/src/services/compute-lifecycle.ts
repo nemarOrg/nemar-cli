@@ -525,6 +525,17 @@ export function tapisAccess(
   return { env, owner, ...mode };
 }
 
+/**
+ * Whether this Worker can submit a job to Tapis at all: the gate's and the submitter's one definition.
+ * `submitComputeJob` answers `unconfigured` exactly when it is false (after the checks that precede
+ * it), and a pipeline run's refusal `tapis_unconfigured` (the route and `dispatchPipelineJob`) is
+ * decided here, so a run is never made that the submitter would leave waiting for ever. It reads
+ * configuration only and makes no request.
+ */
+export function tapisSubmitConfigured(env: Bindings): boolean {
+  return tapisAccess(env, TICK_READ) !== null;
+}
+
 // --- Settlement: what a job used -----------------------------------------------------------------
 
 export type Provisional =
