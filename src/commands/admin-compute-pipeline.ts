@@ -52,10 +52,12 @@ const word = (value: string): string => plain(value);
 /** One dataset's outcome on a line. */
 function resultLine(r: ComputePipelineResult): string {
   if (r.ok) {
-    return (
+    const line =
       `  ${word(r.dataset_id)} ${word(r.version ?? "")}: dispatched` +
-      ` (attempt ${r.attempt ?? "?"}, job ${word(r.job_id ?? "?")}, submit ${word(r.submit ?? "?")})`
-    );
+      ` (attempt ${r.attempt ?? "?"}, job ${word(r.job_id ?? "?")}, submit ${word(r.submit ?? "?")})`;
+    return r.records_written === false
+      ? `${line}; its records were NOT written: the job waits until they are (records_not_written)`
+      : line;
   }
   const blocked =
     r.blocked_by && r.blocked_by.length > 0 ? ` [${r.blocked_by.map(word).join(", ")}]` : "";
