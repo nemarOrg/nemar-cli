@@ -93,6 +93,12 @@ export function startGithubCompareStandin(): GithubCompareStandin {
   const server = Bun.serve({
     port: 0,
     hostname: LOOPBACK,
+    // A stalled answer must end at the CLIENT's deadline, never at the server's. Bun.serve closes a request
+    // that has been idle for `idleTimeout` seconds (10 by default, the same as the index deadline), and when
+    // it wins that race on a pooled connection the client sends the request a second time, so the log counts
+    // two index requests where the check made one. Measured: with a pooled connection and a server idle
+    // timeout shorter than the client's deadline the stalled path was seen twice; with it longer, once.
+    idleTimeout: 60,
     async fetch(req) {
       const url = new URL(req.url);
       const auth = req.headers.get("authorization");
