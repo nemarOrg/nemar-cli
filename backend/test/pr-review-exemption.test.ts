@@ -1,10 +1,10 @@
 /**
- * Who is exempt from the dataset pull-request review (ADR 0107).
+ * Who may invoke the explicit administrative naming-rule override (ADR 0107).
  *
  * `isReviewExempt` is asked about a GitHub login. The accounts answer first, so the tests seed real
  * accounts into the real schema (bun:sqlite behind realD1, every migration applied) and ask; GitHub
- * answers second, as a `Bun.serve()` stand-in for api.github.com. The callers that act on the
- * answer (the review gate, the admin queue) are exercised through their own entry points in
+ * answers second, as a `Bun.serve()` stand-in for api.github.com. The automatic review gate and queue
+ * no longer use this eligibility result; their role-neutral behavior is covered by
  * `pr-review-flow.test.ts` and `pr-review-queue.test.ts`.
  */
 
@@ -106,7 +106,7 @@ function seedAccount(o: {
 
 const exempt = (login: string) => isReviewExempt(env(), { login, repo: REPO });
 
-describe("who is exempt from the review", () => {
+describe("who may use the explicit naming-rule override", () => {
   test("an approved owner's login is exempt", async () => {
     seedAccount({ github: "owner-gh", role: "owner" });
     expect(await exempt("owner-gh")).toBe(true);
@@ -285,9 +285,9 @@ describe("GitHub has to agree", () => {
     try {
       for (const [, answer] of levels) {
         permissions = { "admin-gh": answer };
-        const before = lines.filter((l) => l.text.startsWith("[pr-review-exempt]")).length;
+        const before = lines.filter((l) => l.text.startsWith("[pr-review-naming-override]")).length;
         await exempt("Admin-GH");
-        const ours = lines.filter((l) => l.text.startsWith("[pr-review-exempt]"));
+        const ours = lines.filter((l) => l.text.startsWith("[pr-review-naming-override]"));
         // Exactly one of our lines per failure (the transport's retry notices are not ours).
         expect(ours.length - before).toBe(1);
         seen.push(ours.at(-1)?.level ?? "warn");
@@ -296,7 +296,7 @@ describe("GitHub has to agree", () => {
       Object.assign(console, originals);
     }
     expect(seen).toEqual(levels.map(([, , level]) => level));
-    for (const l of lines.filter((x) => x.text.startsWith("[pr-review-exempt]"))) {
+    for (const l of lines.filter((x) => x.text.startsWith("[pr-review-naming-override]"))) {
       expect(l.text).not.toContain(TOKEN);
       expect(l.text.toLowerCase()).not.toContain("admin-gh");
     }

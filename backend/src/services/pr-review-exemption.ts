@@ -1,33 +1,16 @@
 /**
- * Who the dataset pull-request review does not apply to (ADR 0107).
+ * Eligibility for the explicit administrative naming-rule override (ADR 0107).
  *
- * A pull request opened by a NEMAR owner or administrator is not reviewed: the review stands in for
- * an administrator's judgment of someone else's change, and an administrator needs no stand-in for
- * their own. This module is the ONE place a NEMAR role is read for that purpose. Every caller (the
- * review gate, the admin queue) asks {@link isReviewExempt}; none of them knows a role, an account
- * kind or a login.
+ * This module does not decide whether an automatic pull-request review runs: every otherwise
+ * reviewable pull request is reviewed regardless of author role (ADR 0120). The separate
+ * `pr-reviews allow` operation remains limited to an owner or administrator author and uses this
+ * module to verify the linked NEMAR account and GitHub's repository role. No webhook gate or queue
+ * calls `isReviewExempt`.
  *
- * **The rule is an identity match.** A GitHub login is exempt only when it is the `github_username`
- * of a live NEMAR account that is approved, holds the `owner` or `admin` role, and is a person or a
- * service account. The match ignores case, as GitHub does. An account of kind `test` is never
- * exempt (ADR 0048): a persona is not a real identity, whatever role it holds. No login is written
- * into this code, so adding or removing an owner or administrator changes who is exempt and nothing
- * else has to.
- *
- * **GitHub has to agree.** A NEMAR account can name a GitHub login nobody holds, or one its person
- * has since renamed, and the role match alone would then exempt whoever registers that name. So a
- * login that matches an account is also asked about at GitHub: it must hold the repository `admin`
- * role on THIS repository (an organization owner, or a member of a team with admin). The question is
- * asked only after a role match, and every way it can fail (no token, an error, a timeout, an answer
- * that is not the one expected) means not exempt, so the review runs, which is the safe side.
- *
- * **Nothing stores the answer.** No column holds it, and every call reads `users` again, so a
- * demotion, a revocation or a deleted account ends the exemption on the very next pull request.
- *
- * A database failure throws, like every read in the review's intake: the webhook answers 500 and
- * the delivery can be redelivered. A GitHub failure never throws here; it answers not exempt, and says so in the log.
- * A caller that must tell "not exempt" from "GitHub did not say" (an administrator's override, which
- * would otherwise be refused for a reason that is not true) asks {@link reviewExemption}.
+ * Eligibility requires a live, approved NEMAR owner/admin account of kind `person` or `service`
+ * (never `test`; ADR 0048), matched case-insensitively to the GitHub login, plus GitHub reporting
+ * the repository `admin` role on this repository. The result is never cached. Database failures
+ * throw; GitHub failures return `unknown`, and the explicit override fails closed.
  */
 
 import type { AccountKind } from "../../../shared/contract/user.js";
@@ -36,13 +19,12 @@ import { getDatasetsTokenWithRefresher } from "./github-auth.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 
-/** The NEMAR roles whose pull requests are not reviewed. */
+/** NEMAR roles eligible to use the explicit naming-rule override. */
 export const REVIEW_EXEMPT_ROLES = ["owner", "admin"] as const satisfies readonly UserRole[];
 
 /**
- * The account kinds that can be exempt. `test` is not one of them (ADR 0048): a test persona is a
- * person's secondary account and not a real identity, so no role it is given makes its pull
- * requests skip the review.
+ * The account kinds eligible for the explicit naming-rule override. `test` is not one of them
+ * (ADR 0048): a test persona is not a real identity.
  */
 export const REVIEW_EXEMPT_KINDS = ["person", "service"] as const satisfies readonly AccountKind[];
 
@@ -57,7 +39,7 @@ const sqlList = (words: readonly string[]): string => `(${words.map((w) => `'${w
  * as `idx_users_github` (unique, `github_username COLLATE NOCASE`) and the lookup is an index
  * search; a test reads the query plan. `deleted_at IS NULL` is there for the same reason it is
  * everywhere an account is looked up: a tombstoned row keeps no usable handle, and one that did must
- * not exempt anyone.
+ * not authorize the override.
  */
 export const REVIEW_EXEMPT_SQL = `SELECT 1 AS exempt FROM users
   WHERE github_username = ? COLLATE NOCASE
@@ -77,8 +59,8 @@ export interface ReviewExemptSubject {
 }
 
 /**
- * The longest the question to GitHub may take, in all, before it is abandoned and the answer is
- * "not exempt". It runs inside the webhook's own request, which GitHub gives ten seconds, and a
+ * The longest the question to GitHub may take before override eligibility becomes `unknown`. It
+ * runs inside the webhook's own request, which GitHub gives ten seconds, and a
  * pusher other than the author is a second question.
  */
 let permissionTimeoutMs = 4_000;
@@ -114,9 +96,8 @@ async function repositoryRole(
     );
     if (!res.ok) {
       // A login GitHub does not know is an answer (an account that names a login nobody holds).
-      // Anything else is GitHub or the credential failing, which every exempt account feels at
-      // once, so it is logged as the fault it is.
-      const line = `[pr-review-exempt] ${who.repo}: GitHub answered HTTP ${res.status} to the permission check; not exempt`;
+      // Other failures mean the explicit override cannot be authorized.
+      const line = `[pr-review-naming-override] ${who.repo}: GitHub answered HTTP ${res.status} to the permission check; override not authorized`;
       if (res.status === 404) {
         console.warn(line);
         return "not_admin";
@@ -130,10 +111,9 @@ async function repositoryRole(
         ? (body as Record<string, unknown>).role_name
         : undefined;
     if (typeof role !== "string") {
-      // The answer is not the shape this reads. If GitHub changed it, every exempt account is
-      // reviewed from now on, and this line is the only sign of it.
+      // The answer is not the shape this reads. Fail closed and surface the fixed category.
       console.error(
-        `[pr-review-exempt] ${who.repo}: the permission check answered with no usable role_name; not exempt`,
+        `[pr-review-naming-override] ${who.repo}: the permission check answered with no usable role_name; override not authorized`,
       );
       return "unknown";
     }
@@ -141,27 +121,27 @@ async function repositoryRole(
   } catch (err) {
     // Fixed words and the error's own message (a status or a timeout), never a token or a login.
     console.error(
-      `[pr-review-exempt] ${who.repo}: the permission check failed (${err instanceof Error ? err.message.slice(0, 120) : "unknown"}); not exempt`,
+      `[pr-review-naming-override] ${who.repo}: the permission check failed (${err instanceof Error ? err.message.slice(0, 120) : "unknown"}); override not authorized`,
     );
     return "unknown";
   }
 }
 
 /**
- * Whether this GitHub login is exempt from the review on this dataset: a live, approved owner or
- * administrator account holds it (the query), and GitHub agrees that it holds `admin` on the
- * repository. A login that is not shaped like one is never exempt and is not looked up, and
- * GitHub is asked only after the accounts have said yes. Nothing is remembered between calls.
+ * Whether this GitHub login is eligible for the explicit naming-rule override on this dataset: a
+ * live, approved owner or administrator account holds it (the query), and GitHub agrees that it
+ * holds `admin` on the repository. This result does not affect automatic review intake. A login
+ * that is not shaped like one is not looked up, and GitHub is asked only after the account query
+ * matches. Nothing is remembered between calls.
  */
 export async function isReviewExempt(env: Bindings, who: ReviewExemptSubject): Promise<boolean> {
   return (await reviewExemption(env, who)) === "exempt";
 }
 
 /**
- * {@link isReviewExempt}, with GitHub's silence kept apart: `unknown` when the accounts said yes
- * and GitHub did not answer the question. The review's own gate treats that as not exempt, which
- * is the safe side there; an administrator's override must not, because "the author is not an
- * owner or administrator" would be false.
+ * {@link isReviewExempt}, with GitHub's silence kept apart: `unknown` when the account matches and
+ * GitHub did not answer. The explicit override must not mistake that for a confirmed ineligible
+ * author.
  */
 export async function reviewExemption(
   env: Bindings,

@@ -699,127 +699,40 @@ describe("what an administrator's start is held to", () => {
   });
 });
 
-describe("an owner's or administrator's pull request is not started (ADR 0107)", () => {
-  /** The check-run writes GitHub recorded. */
+describe("an owner or administrator can start the same review (ADR 0120)", () => {
   const checkWrites = () => calls.filter((c) => /\/check-runs(\/\d+)?$/.test(c.path));
 
-  test("it is answered exempt_author, gets the skipped check, and writes no row and no audit row", async () => {
-    // The seeded administrator's GitHub login, as seedUser stores it.
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({
-      environment: "production",
-      dispatched: false,
-      reason: "exempt_author",
-      review_id: null,
-      author_login: "startadmin-gh",
-    });
-    expect(rows()).toHaveLength(0);
-    expect(dispatches()).toHaveLength(0);
-    expect(checkWrites()).toHaveLength(1);
-    expect(checkWrites()[0].body).toMatchObject({
-      name: "NEMAR PR Review",
-      head_sha: SHA_A,
-      status: "completed",
-      conclusion: "skipped",
-    });
-    // Only a start that was handed to GitHub is an audited fact.
-    expect(db.query("SELECT * FROM audit_log WHERE action = 'pr_review_started'").all()).toEqual(
-      [],
-    );
-  });
-
-  test("a commit a review has touched is handled like anyone's, whoever its author is: an administrator asked for a review of it", async () => {
-    // An earlier review of this commit errored. A start restarts such a commit, and the author
-    // being exempt now does not turn that undecided review into `skipped`, which a required check
-    // counts as passing: the review is started again.
-    seedReview(db, {
-      ds: DATASET,
-      n: 7,
-      sha: SHA_A,
-      authorId: 4001,
-      login: "startadmin-gh",
-      state: "errored",
-      detail: "workflow_failed",
-    });
-    db.run("UPDATE pr_reviews SET check_run_id = 4242 WHERE pr_number = 7");
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.body).toMatchObject({ dispatched: true, reason: "redispatched" });
-    expect(dispatches()).toHaveLength(1);
-    expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null });
-    expect(checkWrites().length).toBeGreaterThan(0);
-    expect(JSON.stringify(checkWrites().map((c) => c.body))).not.toContain("skipped");
-  });
-
-  test("a commit with a decided review is left alone by a start of an exempt author's pull request", async () => {
-    seedReview(db, {
-      ds: DATASET,
-      n: 7,
-      sha: SHA_A,
-      authorId: 4001,
-      login: "startadmin-gh",
-      state: "reported",
-      verdict: "fail",
-    });
-    db.run("UPDATE pr_reviews SET check_run_id = 4242 WHERE pr_number = 7");
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.body).toMatchObject({ dispatched: false, reason: "duplicate" });
-    expect(dispatches()).toHaveLength(0);
-    // The failed review's check is not written over, by `skipped` or by anything.
-    expect(checkWrites()).toEqual([]);
-    expect(JSON.stringify(calls.map((c) => c.body))).not.toContain("skipped");
-    // The row still says what the review said (a start re-states a stored result on the pull
-    // request's comment, as a redelivery does, and that is all it does).
-    expect(rows()).toHaveLength(1);
-    expect(rows()[0]).toMatchObject({ state: "reported", verdict: "fail", check_run_id: 4242 });
-  });
-
-  test("a check GitHub will not take is a sentence to try again, and nothing is stored", async () => {
-    checkStatus = 500;
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.status).toBe(502);
-    expect(r.body).toMatchObject({ code: "github_unavailable" });
-    expect(String(r.body.error)).toContain("whose author is exempt from the review");
-    expect(String(r.body.error)).toContain("Try again");
-    expect(rows()).toHaveLength(0);
-    expect(dispatches()).toHaveLength(0);
-  });
-
-  test("an administrator that GitHub does not report as admin on the repository is started like anyone", async () => {
-    permissions = { "startadmin-gh": "write" };
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
-    expect(rows()).toHaveLength(1);
-    // The review's own check was posted (in progress), and none of the checks is `skipped`.
-    expect(checkWrites().length).toBeGreaterThan(0);
-    expect(JSON.stringify(checkWrites().map((c) => c.body))).not.toContain("skipped");
-  });
-
-  test("a pull request by an account that is not exempt is started as before", async () => {
-    // The control: the seeded member differs from the seeded administrator in the role alone.
-    pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4002, login: "startmember-gh" });
-
-    const r = await start(DATASET, 7);
-
-    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched" });
-    expect(rows()).toHaveLength(1);
-    expect(dispatches()).toHaveLength(1);
-  });
+  test.each([
+    ["admin", "startadmin-gh"],
+    ["owner", "startowner-gh"],
+  ] as const)(
+    "a %s pull request is dispatched and gets an in-progress check",
+    async (role, login) => {
+      const userId =
+        role === "admin"
+          ? adminId
+          : await seedUser(
+              "startowner",
+              "owner",
+              "approved",
+              "start-owner-key-0123456789abcdef0123456789ab",
+            );
+      pulls[`${DATASET}#7`] = restPull({ number: 7, userId, login });
+      const r = await start(DATASET, 7);
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched", author_login: login });
+      expect(rows()).toHaveLength(1);
+      expect(dispatches()).toHaveLength(1);
+      expect(checkWrites()).toHaveLength(1);
+      expect(checkWrites()[0].body).toMatchObject({
+        name: "NEMAR PR Review",
+        head_sha: SHA_A,
+        status: "in_progress",
+      });
+      expect(JSON.stringify(checkWrites().map((c) => c.body))).not.toContain("skipped");
+      expect(calls.some((c) => /\/collaborators\/[^/]+\/permission$/.test(c.path))).toBe(false);
+    },
+  );
 });
 
 describe("a restart adds a run to the row only when the earlier attempt reached the model", () => {
@@ -1270,172 +1183,6 @@ describe("the restart's bookkeeping and who can trigger it", () => {
   });
 });
 
-// ---------------------------------------------------------------------------------------------
-// The naming rule on an owner's or administrator's pull request, and its one override (ADR 0107)
-// ---------------------------------------------------------------------------------------------
-
-describe("owners and administrators meet the naming rule before their exemption", () => {
-  // `startadmin-gh` is the GitHub login of the seeded administrator, and GitHub says admin.
-  const ADMIN_LOGIN = "startadmin-gh";
-
-  test("an administrator's pull request whose title starts with an author and a year fails, and nothing is started", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
-    expect(rows()).toHaveLength(0);
-    expect(dispatches()).toHaveLength(0);
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({
-      conclusion: "failure",
-      output: { title: "Needs changes: the naming rule" },
-    });
-  });
-
-  test.each([
-    ["an author-year key in the middle", "Rename the dataset to Lee-2019-EEG"],
-    ["a DOI", "Add the recordings described in 10.1038/s41597-020-0532-5"],
-  ])("an administrator's title with %s fails, and nothing is started", async (_what, title) => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title });
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
-    expect(rows()).toHaveLength(0);
-    expect(dispatches()).toHaveLength(0);
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({
-      conclusion: "failure",
-      output: { title: "Needs changes: the naming rule" },
-    });
-    expect(JSON.stringify(check?.body)).toContain(
-      "has a citation (an author and a year, or a DOI)",
-    );
-  });
-
-  test("the same pull request with a title that says what changed is skipped: the control", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Add three EEG recordings" });
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author" });
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({ conclusion: "skipped" });
-  });
-
-  test("a change of the dataset name to an author-and-year name fails an owner's pull request", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Rename the dataset" });
-    naming[DATASET] = {
-      files: ["dataset_description.json"],
-      names: { [SHA_A]: "Lee2019 Motor Imagery", [BASE_SHA]: "Motor imagery EEG" },
-    };
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ reason: "naming_rule" });
-  });
-
-  test("an author-and-year name the pull request did not change is not its problem", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-    naming[DATASET] = {
-      files: ["dataset_description.json"],
-      names: { [SHA_A]: "Lee2019 Motor Imagery", [BASE_SHA]: "Lee2019 Motor Imagery" },
-    };
-    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "exempt_author" });
-  });
-
-  test("a name GitHub will not show needs a person: never a skip", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-    naming[DATASET] = { compareStatus: 500 };
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ reason: "naming_unchecked" });
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({ conclusion: "action_required" });
-  });
-
-  test.each([
-    ["is not JSON", NOT_JSON],
-    ["has no Name", NO_NAME],
-    ["has a Name that is not text", NAME_NOT_TEXT],
-  ])(
-    "a dataset_description.json at the head that %s is a name nobody could read: it needs a person, never a skip",
-    async (_what, content) => {
-      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-      naming[DATASET] = {
-        files: ["dataset_description.json"],
-        names: { [SHA_A]: content, [BASE_SHA]: "Resting EEG of volunteers" },
-      };
-      const r = await start(DATASET, 7);
-      expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
-      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-      expect(check?.body).toMatchObject({ conclusion: "action_required" });
-      expect(rows()).toHaveLength(0);
-    },
-  );
-
-  test("a refused title beside a name GitHub will not show is naming_unchecked, a check that needs a person, never naming_rule", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
-    naming[DATASET] = { compareStatus: 500 };
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({ conclusion: "action_required" });
-    expect(rows()).toHaveLength(0);
-  });
-
-  test.each([
-    ["empty", ""],
-    ["only blanks", "   "],
-    ["only zero-width spaces", "\u200b\u200b"],
-    ["only the braille blank", "\u2800"],
-  ])(
-    "a changed Name that is %s shows a reader nothing: it is unchecked, never a skip",
-    async (_what, shown) => {
-      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-      naming[DATASET] = {
-        files: ["dataset_description.json"],
-        names: { [SHA_A]: shown, [BASE_SHA]: "Resting EEG of volunteers" },
-      };
-      const r = await start(DATASET, 7);
-      expect(r.body).toMatchObject({ dispatched: false, reason: "naming_unchecked" });
-      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-      expect(check?.body).toMatchObject({ conclusion: "action_required" });
-    },
-  );
-
-  test("a head file GitHub cannot find, with no list or a list that may have been cut, is unchecked", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-    for (const files of [null, CUT_LIST]) {
-      calls = [];
-      naming[DATASET] = { files, names: { [BASE_SHA]: "Resting EEG of volunteers" } };
-      const r = await start(DATASET, 7);
-      expect(r.body).toMatchObject({ reason: "naming_unchecked" });
-      const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-      expect(check?.body).toMatchObject({ conclusion: "action_required" });
-    }
-  });
-
-  test("a page that holds only some of the comparison's commits does not speak for its files: the names are read", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-    // One commit of two, and a file list that does not name the description. Believed, it would
-    // skip a name the pull request changed; the refused name below must be found.
-    naming[DATASET] = {
-      commits: { total: 2, onPage: 1 },
-      files: [],
-      names: { [SHA_A]: "Lee2019 Motor Imagery", [BASE_SHA]: "Motor imagery EEG" },
-    };
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ dispatched: false, reason: "naming_rule" });
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({ conclusion: "failure" });
-  });
-
-  test("a file the comparison lists as removed is a removal, not a naming failure: it is skipped", async () => {
-    pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Fix a sidecar" });
-    naming[DATASET] = {
-      files: [{ filename: "dataset_description.json", status: "removed" }],
-      names: { [BASE_SHA]: "Lee2019 Motor Imagery" },
-    };
-    const r = await start(DATASET, 7);
-    expect(r.body).toMatchObject({ reason: "exempt_author" });
-    const check = calls.find((c) => c.method === "POST" && c.path.endsWith("/check-runs"));
-    expect(check?.body).toMatchObject({ conclusion: "skipped" });
-  });
-});
-
 describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", () => {
   const ADMIN_LOGIN = "startadmin-gh";
 
@@ -1511,16 +1258,22 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     await allow(DATASET, 7);
     calls = [];
     // A later delivery of the same commit (here an administrator's start) keeps the waiver.
-    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "exempt_naming_waived" });
-    expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
+    expect((await start(DATASET, 7)).body).toMatchObject({
+      dispatched: true,
+      reason: "dispatched",
+    });
+    expect(lastCheck()).toMatchObject({ status: "in_progress" });
     // A new commit is a new question.
     pulls[`${DATASET}#7`] = restPull({
       login: ADMIN_LOGIN,
       title: "Lee2019 EEG rename",
       sha: SHA_B,
     });
-    expect((await start(DATASET, 7)).body).toMatchObject({ reason: "naming_rule" });
-    expect(lastCheck()).toMatchObject({ conclusion: "failure", head_sha: SHA_B });
+    expect((await start(DATASET, 7)).body).toMatchObject({
+      dispatched: true,
+      reason: "dispatched",
+    });
+    expect(lastCheck()).toMatchObject({ status: "in_progress", head_sha: SHA_B });
   });
 
   describe("the reason", () => {
@@ -2056,17 +1809,17 @@ describe("redo: an administrator starts a finished review again", () => {
     expect(rows()[0]).toMatchObject({ state: "dispatched", detail: null, edit_restarts: 0 });
   });
 
-  test("an owner's or administrator's pull request with no review on record is still not reviewed", async () => {
+  test("an owner's or administrator's pull request with no review on record is dispatched", async () => {
     pulls[`${DATASET}#7`] = restPull({ number: 7, userId: 4001, login: "startadmin-gh" });
 
     const r = await redo();
 
-    expect(r.body).toMatchObject({ dispatched: false, reason: "exempt_author", redo: true });
-    expect(rows()).toHaveLength(0);
-    expect(dispatches()).toHaveLength(0);
+    expect(r.body).toMatchObject({ dispatched: true, reason: "dispatched", redo: true });
+    expect(rows()).toHaveLength(1);
+    expect(dispatches()).toHaveLength(1);
   });
 
-  test("an exempt author's commit that a review has touched is restarted like anyone's, never written over by skipped", async () => {
+  test("an owner's commit that a review has touched is restarted like anyone's", async () => {
     // A stranger's push to the administrator's branch put the commit through review (ADR 0107).
     seedReview(db, {
       ds: DATASET,

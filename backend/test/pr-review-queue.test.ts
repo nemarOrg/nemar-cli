@@ -34,9 +34,7 @@ import {
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
 import { handlePullRequestEvent } from "../src/services/pr-review";
-import { REVIEW_EXEMPT_SQL } from "../src/services/pr-review-exemption";
 import {
-  __setExemptLookupBudgetForTests,
   __setGraphqlTimeoutForTests,
   checkStateOf,
   classify,
@@ -48,11 +46,6 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1, wrapD1 } from "./helpers/d1";
-import {
-  type PermissionAnswer,
-  isPermissionPath,
-  permissionResponse,
-} from "./helpers/github-permission";
 import { projectOnto } from "./helpers/graphql-select";
 import {
   type CheckSpec,
@@ -95,11 +88,6 @@ let graphqlResponder: ((attempt: number) => Response | null | Promise<Response |
 let graphqlAttempts = 0;
 let usersById: Record<string, { id: number; login: string; type: string } | number> = {};
 let pulls: Record<string, Record<string, unknown> | number> = {};
-/** What GitHub says each login holds on a repository (see helpers/github-permission.ts). */
-let permissions: Record<string, PermissionAnswer> = {};
-/** How many permission questions were being answered at once, now and at most. */
-let permissionInFlight = 0;
-let permissionMaxInFlight = 0;
 
 /** A failing answer that tells the retry transport not to wait, so a test of a failure is not slow. */
 function failing(status: number): Response {
@@ -155,17 +143,6 @@ beforeAll(() => {
         const hit = pulls[`${pull[1]}#${pull[2]}`];
         if (typeof hit === "number") return failing(hit);
         return hit ? Response.json(hit) : new Response("{}", { status: 404 });
-      }
-      if (req.method === "GET" && isPermissionPath(url.pathname)) {
-        permissionInFlight++;
-        permissionMaxInFlight = Math.max(permissionMaxInFlight, permissionInFlight);
-        try {
-          return (
-            (await permissionResponse(url, permissions)) ?? new Response("{}", { status: 404 })
-          );
-        } finally {
-          permissionInFlight--;
-        }
       }
       return new Response("not found", { status: 404 });
     },
@@ -232,10 +209,6 @@ afterEach(() => {
   graphqlAttempts = 0;
   usersById = {};
   pulls = {};
-  permissions = {};
-  permissionInFlight = 0;
-  permissionMaxInFlight = 0;
-  __setExemptLookupBudgetForTests(null);
   envOverrides = {};
   __resetRateLimitStateForTests();
 });
@@ -2183,537 +2156,35 @@ describe("the volume of reviews in the list: information, never a gate", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Owners and administrators (ADR 0107)
+// Owners and administrators receive the same review queue treatment (ADR 0120)
 // ---------------------------------------------------------------------------------------------
 
-describe("an owner's or administrator's pull request is exempt (ADR 0107)", () => {
-  /** The seeded administrator's GitHub login, as `seedUser` stores it. */
-  const ADMIN_GH = "queueadmin-gh";
-  /** An approved member, as `seedUser` stores it: the same account in everything but the role. */
-  const MEMBER_GH = "queuemember-gh";
-
-  test("it reads exempt, is not yours to act on, and sorts after everything else", async () => {
-    seedReview({ ds: "nm000203", n: 3, state: "reported", verdict: "fail", authorId: 700 });
-    nodes(
-      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001, created: "2026-09-01T00:00:00Z" },
-      { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
-      { ds: "nm000203", n: 3, author: "stranger", authorId: 700 },
-    );
-    const { body } = await queue();
-    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
-    expect(by.nm000201).toMatchObject({
-      verdict: "exempt",
-      detail: null,
-      needs_you: false,
-      reviewed_sha: null,
-      review_current: null,
-      stale_verdict: null,
-    });
-    // The control: a stranger's pull request with no review is still asking for a person.
-    expect(by.nm000202).toMatchObject({ verdict: "not_reviewed", needs_you: true });
-    // Not reviewed, then a failure, then the exempt one, though it was opened first.
-    expect(body.entries.map((e) => e.dataset_id)).toEqual(["nm000202", "nm000203", "nm000201"]);
-  });
-
-  describe("when the naming rule holds it", () => {
-    /** The review's own check on a commit, as the exempt path posts it. */
-    const reviewCheck = (conclusion: string, over: Partial<CheckSpec> = {}): CheckSpec => ({
-      type: "run",
-      name: "NEMAR PR Review",
-      status: "COMPLETED",
-      conclusion,
-      ...over,
-    });
-    const withChecks = (ds: string, ...extra: CheckSpec[]) => [bidsOk(ds), versionOk, ...extra];
-    const detailOf = async () => {
-      const { body } = await queue();
-      return Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
-    };
-
-    test("a check that failed reads naming_rule, one that asks for a person reads naming_unchecked, and neither is yours to act on", async () => {
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000201", reviewCheck("FAILURE")),
-        },
-        {
-          ds: "nm000202",
-          n: 2,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000202", reviewCheck("ACTION_REQUIRED")),
-        },
-      );
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({
-        verdict: "exempt",
-        detail: "naming_rule",
-        needs_you: false,
-      });
-      expect(by.nm000202).toMatchObject({
-        verdict: "exempt",
-        detail: "naming_unchecked",
-        needs_you: false,
-      });
-    });
-
-    test("a refused title beside a name that could not be read reads naming_unchecked, as the check the Worker posts for it: no waiver is offered", async () => {
-      // The conclusion the exempt path posts for the facts, in GitHub's words. A failure would be
-      // listed as "needs allow --admin", and the waiver is refused while the name is unread.
-      const posted = (title: NamingProblem | null, name: NameFinding | null) =>
-        conclusionOf({ kind: "naming", facts: { title, name } }).toUpperCase();
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000201", reviewCheck(posted("author_year", "unchecked"))),
-        },
-        {
-          ds: "nm000202",
-          n: 2,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000202", reviewCheck(posted("author_year", null))),
-        },
-        {
-          ds: "nm000203",
-          n: 3,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000203", reviewCheck(posted(null, "unchecked"))),
-        },
-      );
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: "naming_unchecked" });
-      // The controls: a refusal alone is waivable, and an unread name alone is as it was.
-      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
-      expect(by.nm000203).toMatchObject({ verdict: "exempt", detail: "naming_unchecked" });
-    });
-
-    test("a title or a name the rule refuses reads naming_rule whatever the problem is, a DOI among them", async () => {
-      // Each closed word of the rule, as a refused title and as a refused new name, posted as the
-      // exempt path posts it: the list's label does not say which problem it was, so a word the
-      // rule gains cannot be listed as anything but a failure an administrator may waive.
-      const posted = (title: NamingProblem | null, name: NameFinding | null) =>
-        conclusionOf({ kind: "naming", facts: { title, name } }).toUpperCase();
-      const specs = NAMING_PROBLEMS.flatMap((problem, i) =>
-        [posted(problem, null), posted(null, problem)].map((conclusion, j) => {
-          const ds = `nm0002${i}${j + 1}`;
-          return {
-            ds,
-            n: i * 2 + j + 1,
-            author: ADMIN_GH,
-            authorId: 4001,
-            checks: withChecks(ds, reviewCheck(conclusion)),
-          };
-        }),
-      );
-      expect(specs).toHaveLength(NAMING_PROBLEMS.length * 2);
-      nodes(...specs);
-      const by = await detailOf();
-      for (const spec of specs) {
-        expect(by[spec.ds], spec.ds).toMatchObject({
-          verdict: "exempt",
-          detail: "naming_rule",
-          needs_you: false,
-        });
-      }
-      // The words are the ones the closed list holds, the DOI among them.
-      expect([...NAMING_PROBLEMS]).toContain("doi");
-    });
-
-    test("a check that was skipped, is running, or is not there is the plain exemption", async () => {
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000201", reviewCheck("SKIPPED")),
-        },
-        {
-          ds: "nm000202",
-          n: 2,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks(
-            "nm000202",
-            reviewCheck("", { status: "IN_PROGRESS", conclusion: null }),
-          ),
-        },
-        { ds: "nm000203", n: 3, author: ADMIN_GH, authorId: 4001 },
-        { ds: "nm000204", n: 4, author: ADMIN_GH, authorId: 4001, checks: null },
-      );
-      const by = await detailOf();
-      for (const ds of ["nm000201", "nm000202", "nm000203", "nm000204"]) {
-        expect(by[ds], ds).toMatchObject({ verdict: "exempt", detail: null });
-      }
-    });
-
-    test("the newest run of the check wins: a waiver's skipped check after the failure releases it, a later failure holds it", async () => {
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks(
-            "nm000201",
-            reviewCheck("FAILURE", { at: "2026-10-01T10:00:00Z" }),
-            reviewCheck("SKIPPED", { at: "2026-10-01T11:00:00Z" }),
-          ),
-        },
-        {
-          ds: "nm000202",
-          n: 2,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks(
-            "nm000202",
-            reviewCheck("SKIPPED", { at: "2026-10-01T10:00:00Z" }),
-            reviewCheck("FAILURE", { at: "2026-10-01T11:00:00Z" }),
-          ),
-        },
-      );
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
-      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
-    });
-
-    test("a list of checks cut short is not read for it", async () => {
-      nodes({
-        ds: "nm000201",
-        n: 1,
-        author: ADMIN_GH,
-        authorId: 4001,
-        checks: withChecks("nm000201", reviewCheck("FAILURE")),
-        moreChecks: true,
-      });
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
-    });
-
-    test("a commit status of the same name is not a check run: it neither holds a pull request nor releases one", async () => {
-      const status = (state: string, at: string): CheckSpec => ({
-        type: "status",
-        name: "NEMAR PR Review",
-        state,
-        at,
-      });
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000201", status("FAILURE", "2026-10-01T11:00:00Z")),
-        },
-        {
-          ds: "nm000202",
-          n: 2,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks(
-            "nm000202",
-            reviewCheck("FAILURE", { at: "2026-10-01T10:00:00Z" }),
-            status("SUCCESS", "2026-10-01T11:00:00Z"),
-          ),
-        },
-      );
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({ verdict: "exempt", detail: null });
-      expect(by.nm000202).toMatchObject({ verdict: "exempt", detail: "naming_rule" });
-    });
-
-    test("only an exempt row carries it: another author's failed check is not labeled, and a review of the commit wins", async () => {
-      seedReview({
-        ds: "nm000203",
-        n: 3,
-        sha: SHA_A,
-        state: "reported",
-        verdict: "fail",
-        authorId: 4001,
-        login: ADMIN_GH,
-      });
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: "stranger",
-          authorId: 700,
-          checks: withChecks("nm000201", reviewCheck("FAILURE")),
-        },
-        {
-          ds: "nm000203",
-          n: 3,
-          sha: SHA_A,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000203", reviewCheck("FAILURE")),
-        },
-      );
-      const by = await detailOf();
-      expect(by.nm000201).toMatchObject({ verdict: "not_reviewed", detail: null });
-      expect(by.nm000203).toMatchObject({ verdict: "fail", detail: null, review_current: true });
-    });
-
-    test("the word can be filtered for with exempt, and sorts with the exempt rows", async () => {
-      nodes(
-        {
-          ds: "nm000201",
-          n: 1,
-          author: ADMIN_GH,
-          authorId: 4001,
-          checks: withChecks("nm000201", reviewCheck("FAILURE")),
-        },
-        { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
-      );
-      const only = await queue("?verdict=exempt");
-      expect(only.body.entries.map((e) => [e.dataset_id, e.detail])).toEqual([
-        ["nm000201", "naming_rule"],
-      ]);
-      const all = await queue();
-      expect(all.body.entries.map((e) => e.dataset_id)).toEqual(["nm000202", "nm000201"]);
-    });
-  });
-
-  test("an owner and an administrator are both exempt, a member and a test persona are not", async () => {
-    await seedUser(
+describe("owner and administrator pull requests are offered for review (ADR 0120)", () => {
+  test("both appear as not_reviewed and need action, without repository-role lookups", async () => {
+    const ownerId = await seedUser(
       "queueowner",
       "owner",
       "approved",
       "queue-owner-key-0123456789abcdef0123456789ab",
     );
-    db.run(
-      `INSERT INTO users (username, email, github_username, status, role, email_verified, account_kind)
-       VALUES ('persona', 'persona@example.org', 'persona-gh', 'approved', 'admin', 1, 'test')`,
-    );
     nodes(
-      { ds: "nm000201", n: 1, author: "queueowner-gh", authorId: 4002 },
-      { ds: "nm000202", n: 2, author: ADMIN_GH, authorId: 4001 },
-      { ds: "nm000203", n: 3, author: MEMBER_GH, authorId: 4003 },
-      { ds: "nm000204", n: 4, author: "persona-gh", authorId: 4004 },
+      { ds: "nm000201", n: 1, author: "queueadmin-gh", authorId: adminId },
+      { ds: "nm000202", n: 2, author: "queueowner-gh", authorId: ownerId },
     );
-    const { body } = await queue();
-    const verdicts = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e.verdict]));
-    expect(verdicts).toEqual({
-      nm000201: "exempt",
-      nm000202: "exempt",
-      nm000203: "not_reviewed",
-      nm000204: "not_reviewed",
-    });
-  });
-
-  test("a review of the current commit stands: a push by someone who is not exempt was reviewed", async () => {
-    seedReview({
-      ds: "nm000201",
-      n: 1,
-      sha: SHA_A,
-      state: "reported",
-      verdict: "fail",
-      authorId: 4001,
-      login: ADMIN_GH,
-    });
-    nodes({ ds: "nm000201", n: 1, sha: SHA_A, author: ADMIN_GH, authorId: 4001 });
-    const { body } = await queue();
-    expect(body.entries[0]).toMatchObject({ verdict: "fail", review_current: true });
-  });
-
-  test("a review of another commit is not carried over, and does not stop it being exempt", async () => {
-    seedReview({
-      ds: "nm000201",
-      n: 1,
-      sha: SHA_B,
-      state: "reported",
-      verdict: "pass",
-      authorId: 4001,
-      login: ADMIN_GH,
-    });
-    nodes({ ds: "nm000201", n: 1, sha: SHA_A, author: ADMIN_GH, authorId: 4001 });
-    const { body } = await queue();
-    expect(body.entries[0]).toMatchObject({
-      verdict: "exempt",
-      review_current: false,
-      reviewed_sha: SHA_B,
-      stale_verdict: "pass",
-      needs_you: false,
-    });
-  });
-
-  test("a bot, or an author GitHub has no user for, is never exempt, whatever its name", async () => {
-    nodes(
-      { ds: "nm000201", n: 1, author: ADMIN_GH, authorType: "Bot" },
-      { ds: "nm000202", n: 2, author: null },
-    );
-    const { body } = await queue();
+    const { status, body } = await queue();
+    expect(status).toBe(200);
+    expect(body.entries).toHaveLength(2);
     expect(body.entries.map((e) => e.verdict)).toEqual(["not_reviewed", "not_reviewed"]);
+    expect(body.entries.every((e) => e.needs_you)).toBe(true);
+    expect(calls.some((c) => /\/collaborators\/[^/]+\/permission$/.test(c.path))).toBe(false);
   });
 
-  test("an account whose GitHub role is not admin on the dataset is not exempt, in the list or the detail", async () => {
-    permissions = { "nm000201#queueadmin-gh": "write" };
-    nodes(
-      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 },
-      { ds: "nm000202", n: 2, author: ADMIN_GH, authorId: 4001 },
-    );
-    const { body } = await queue();
-    const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e.verdict]));
-    expect(by).toEqual({ nm000201: "not_reviewed", nm000202: "exempt" });
-
-    pulls["nm000201#7"] = livePull({ user: { login: ADMIN_GH, id: 4001, type: "User" } });
-    expect((await detail("nm000201", 7)).body.verdict).toBe("not_reviewed");
-  });
-
-  /** Twenty pull requests opened by one administrator, in twenty datasets. */
-  const twentyDatasets = () =>
-    Array.from({ length: 20 }, (_, i) => ({
-      ds: `nm0002${String(i).padStart(2, "0")}`,
-      n: i + 1,
-      author: ADMIN_GH,
-      authorId: 4001,
-    }));
-
-  test("the lookups run a few at a time: not one after another, and not all at once", async () => {
-    permissions = { [ADMIN_GH]: { delayMs: 60 } };
-    nodes(...twentyDatasets());
-    const { body } = await queue();
-    expect(body.entries).toHaveLength(20);
-    expect(body.entries.every((e) => e.verdict === "exempt")).toBe(true);
-    expect(calls.filter((c) => isPermissionPath(c.path))).toHaveLength(20);
-    expect(permissionMaxInFlight).toBeGreaterThanOrEqual(4);
-    expect(permissionMaxInFlight).toBeLessThanOrEqual(6);
-  });
-
-  test("a list never waits longer than its budget for lookups: the rest read as not exempt", async () => {
-    // Each answer takes 150 ms and the whole list may wait 100: the first few lookups start, then
-    // no more do, and the list is still answered.
-    __setExemptLookupBudgetForTests(100);
-    permissions = { [ADMIN_GH]: { delayMs: 150 } };
-    nodes(...twentyDatasets());
-    const started = Date.now();
-    const { status, body } = await queue();
+  test("a detail read does not infer a skipped review from the author's role", async () => {
+    pulls["nm000201#7"] = livePull({ user: { login: "queueadmin-gh", id: adminId, type: "User" } });
+    const { status, body } = await detail("nm000201", 7);
     expect(status).toBe(200);
-    expect(body.entries).toHaveLength(20);
-    const exempt = body.entries.filter((e) => e.verdict === "exempt").length;
-    const unasked = body.entries.filter((e) => e.verdict === "not_reviewed").length;
-    expect(exempt).toBeGreaterThan(0);
-    expect(unasked).toBeGreaterThan(0);
-    expect(exempt + unasked).toBe(20);
-    // Far fewer than twenty questions were asked, and the list did not take their sum.
-    expect(calls.filter((c) => isPermissionPath(c.path)).length).toBeLessThan(20);
-    expect(Date.now() - started).toBeLessThan(1500);
-  });
-
-  test("a database failure on a lookup fails the list and stops the lookups that were still to start", async () => {
-    nodes(...twentyDatasets());
-    let lookups = 0;
-    const failing = wrapD1(realD1(db), (sql) => {
-      if (sql !== REVIEW_EXEMPT_SQL) return;
-      lookups++;
-      if (lookups === 1) throw new Error("D1 unavailable");
-    });
-    const res = await app.request(
-      "/admin/pr-reviews",
-      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
-      { ...env(), DB: failing } as Bindings,
-    );
-    expect(res.status).toBe(500);
-    expect(((await res.json()) as { code?: string }).code).toBe("internal");
-    // The workers that were already running may still finish; none starts another lookup for a
-    // list that has already failed. Give a worker that would keep going time to show it.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(lookups).toBeLessThanOrEqual(6);
-  });
-
-  test("a GitHub that cannot say is not exempt, and the list is still answered", async () => {
-    permissions = { [ADMIN_GH]: 500 };
-    nodes({ ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 });
-    const { status, body } = await queue();
-    expect(status).toBe(200);
-    expect(body.entries[0]).toMatchObject({ verdict: "not_reviewed", needs_you: true });
-  });
-
-  test("the verdict can be asked for, and --needs-me leaves it out", async () => {
-    nodes(
-      { ds: "nm000201", n: 1, author: ADMIN_GH, authorId: 4001 },
-      { ds: "nm000202", n: 2, author: "stranger", authorId: 700 },
-    );
-    const only = await queue("?verdict=exempt");
-    expect(only.status).toBe(200);
-    expect(only.body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
-    const mine = await queue("?needs_me=1");
-    expect(mine.body.entries.map((e) => e.dataset_id)).toEqual(["nm000202"]);
-    const both = await queue("?verdict=exempt,not-reviewed");
-    expect(both.body.entries).toHaveLength(2);
-  });
-
-  test("the role is read once per dataset and author for a request, and again for the next", async () => {
-    // A second administrator, so demoting one does not take away the caller's own access.
-    await seedUser(
-      "queueother",
-      "admin",
-      "approved",
-      "queue-other-key-0123456789abcdef0123456789ab",
-    );
-    const other = "queueother-gh";
-    nodes(
-      { ds: "nm000201", n: 1, author: other, authorId: 4005 },
-      { ds: "nm000201", n: 2, author: other.toUpperCase(), authorId: 4005 },
-      { ds: "nm000201", n: 3, author: other, authorId: 4005 },
-      { ds: "nm000202", n: 4, author: other, authorId: 4005 },
-    );
-    let lookups = 0;
-    const counting = wrapD1(realD1(db), (sql) => {
-      if (sql === REVIEW_EXEMPT_SQL) lookups++;
-    });
-    const res = await app.request(
-      "/admin/pr-reviews",
-      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
-      { ...env(), DB: counting } as Bindings,
-    );
-    const body = (await res.json()) as unknown as QueueResponse;
-    expect(body.entries.every((e) => e.verdict === "exempt")).toBe(true);
-    // Two datasets, one author: two lookups for four pull requests, not four.
-    expect(lookups).toBe(2);
-
-    // Nothing is kept: a demotion is seen by the very next request.
-    db.run("UPDATE users SET role = 'member' WHERE github_username = ?", [other]);
-    const demoted = await queue();
-    expect(demoted.body.entries).toHaveLength(4);
-    expect(demoted.body.entries.every((e) => e.verdict === "not_reviewed")).toBe(true);
-  });
-
-  test("the detail of one pull request says exempt on the same terms, and not for a member", async () => {
-    pulls["nm000201#7"] = livePull({ user: { login: ADMIN_GH, id: 4001, type: "User" } });
-    const exempt = await detail("nm000201", 7);
-    expect(exempt.status).toBe(200);
-    expect(exempt.body).toMatchObject({
-      verdict: "exempt",
-      detail: null,
-      review: null,
-      review_current: null,
-    });
-
-    pulls["nm000201#8"] = livePull({
-      number: 8,
-      user: { login: MEMBER_GH, id: 4003, type: "User" },
-    });
-    expect((await detail("nm000201", 8)).body.verdict).toBe("not_reviewed");
-
-    // A review of the current commit is still the verdict.
-    seedReview({ ds: "nm000201", n: 9, state: "reported", verdict: "uncertain", authorId: 4001 });
-    pulls["nm000201#9"] = livePull({
-      number: 9,
-      user: { login: ADMIN_GH, id: 4001, type: "User" },
-    });
-    expect((await detail("nm000201", 9)).body).toMatchObject({
-      verdict: "uncertain",
-      review_current: true,
-    });
+    expect(body).toMatchObject({ verdict: "not_reviewed", review_current: null, review: null });
+    expect(calls.some((c) => /\/collaborators\/[^/]+\/permission$/.test(c.path))).toBe(false);
   });
 });
 
@@ -2765,7 +2236,7 @@ describe("an upstream re-pull's own pull request at the recorded head is waived 
     expect(only.body.entries.map((e) => e.dataset_id)).toEqual(["nm000201"]);
   });
 
-  test("the record's number and head from another branch is not waived, and an exempt author's waived one reads waived", async () => {
+  test("the record's number and head from another branch is not waived, and an administrator's recorded re-pull is waived", async () => {
     seedRecord("nm000201", 1, SHA_A);
     seedRecord("nm000202", 2, SHA_A);
     nodes(
@@ -2775,7 +2246,7 @@ describe("an upstream re-pull's own pull request at the recorded head is waived 
     const { body } = await queue();
     const by = Object.fromEntries(body.entries.map((e) => [e.dataset_id, e]));
     expect(by.nm000201?.verdict).toBe("not_reviewed");
-    // The waiver wins over the exemption of an owner or administrator.
+    // The record-bound mirror waiver is independent of the author's role.
     expect(by.nm000202?.verdict).toBe("waived");
   });
 

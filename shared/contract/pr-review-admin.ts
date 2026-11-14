@@ -44,18 +44,15 @@ export type { OverrideMode, ReviewState };
  *  - `in_progress`: the review was handed to GitHub and has not reported.
  *  - `could_not_decide`: the review ran and ended without a verdict (an error, or it never
  *    reported). `detail` says why.
- *  - `exempt`: the pull request's author is a NEMAR owner or administrator, who are not reviewed
- *    (ADR 0107), so no review of the current commit is on record and none is wanted. Its review
- *    check is posted when the commit arrives, as `skipped` unless the naming rule fails it or
- *    cannot check it; this list does not verify that. A review of the current commit still wins
- *    over this word, because a push by someone who is not exempt IS reviewed, and a review of
- *    another commit is never carried over to this one.
+ *  - `exempt`: legacy wire value retained for older clients and historical responses. Current
+ *    Workers do not infer this verdict from an author's owner/admin role; an unreviewed head is
+ *    `not_reviewed` and is offered for review (ADR 0120).
  *  - `waived`: the pull request is an open upstream re-pull's, at the head NEMAR's tools recorded
  *    for it (ADR 0117), so the review does not apply and its check is posted as `skipped` with a
  *    title that says it was waived. Decided from NEMAR's record of the re-pull and the pull request
  *    as GitHub names it, read again for every list and detail and never stored. It wins over a
- *    review of the current commit, whose findings are then recommendations only, and over `exempt`.
- *    A merge gate takes it as allowing, without `--force`.
+ *    review of the current commit, whose findings are then recommendations only. A merge gate takes
+ *    it as allowing, without `--force`.
  */
 export const QUEUE_VERDICTS = [
   "pass",
@@ -73,9 +70,8 @@ export type QueueVerdict = (typeof QUEUE_VERDICTS)[number];
 const UNSTORED_VERDICTS: readonly QueueVerdict[] = ["exempt", "waived"];
 
 /**
- * A verdict a STORED review can have: every word but `exempt` and `waived`, which are about a pull
- * request that is not reviewed and are never what a row says. The queue and the detail view may say
- * them; a review record and a history item may not.
+ * A verdict a STORED review can have: every word but `exempt` and `waived`, which are unstored
+ * compatibility or record-derived queue values, never what a row says.
  */
 export type StoredVerdict = Exclude<QueueVerdict, "exempt" | "waived">;
 
@@ -95,12 +91,12 @@ export type QueueEnvironment = "production" | "non-production";
 
 /**
  * The closed reason behind a `not_reviewed` (a decline) or `could_not_decide` (a run error), or, for
- * an `exempt` row in the list, why the naming rule holds it: `naming_rule` (the review's check on
+ * a historical `exempt` row in the list, why the naming rule holds it: `naming_rule` (the review's check on
  * the current commit failed, so the author fixes the title or the dataset name, or an administrator
  * waives the rule for the commit with `allow --admin`) and `naming_unchecked` (that check asks for a
  * person, because the dataset's name could not be read, whatever the title says: there is nothing
  * to waive until a start reads it, or, when the file has no readable `Name`, until the file is fixed
- * and pushed). An exempt row the rule does not hold has no detail.
+ * and pushed). A historical exempt row the rule does not hold has no detail.
  */
 export type VerdictDetail =
   | DeclineReason
@@ -251,12 +247,8 @@ export interface QueueResponse {
  * ADR 0107; only a delivery says it, an administrator's start never edits anything) or
  * `dispatch_claimed` (GitHub's answer was lost but the workflow had already claimed it) when it was
  * handed to GitHub,
- * otherwise why not (`duplicate`, `contributor_paused`, `exempt_author` (its author is an owner or
- * administrator, so it is not reviewed and its check was posted as skipped), `naming_rule` (its
- * author is exempt, and the naming rule refused its title or its new dataset name, so its check was
- * posted as failed), `naming_unchecked` (exempt, and the dataset name could not be read, whatever
- * the title says, so the check needs a person), `exempt_naming_waived` (exempt, and an administrator waived the naming rule
- * for this commit), `repull_waived` (it is an open upstream re-pull's pull request at the head
+ * otherwise why not (`duplicate`, `contributor_paused`, legacy `exempt_author`/`exempt_naming_waived`
+ * values (not emitted by current Workers), `naming_rule`, `naming_unchecked`, `repull_waived` (it is an open upstream re-pull's pull request at the head
  * NEMAR recorded, so the review is waived and its check was posted as skipped, ADR 0117; nothing is
  * started, a `redo` included), `draft`, `not_open`, `not_main`, `bot_author`, `dataset_not_reviewable`,
  * `review_running` (a redo found the review still running and left it alone),
@@ -281,13 +273,13 @@ export interface StartReviewResponse {
  *  - `waived`: the rule refused the commit, the waiver is recorded, and its check is now skipped;
  *  - `already_waived`: a waiver for this commit covers what the rule finds; its check was posted
  *    again;
- *  - `nothing_to_waive`: the rule finds nothing on the commit; its check was posted as skipped;
+ *  - `nothing_to_waive`: the rule finds nothing on the commit; the naming-override check was posted;
  *  - `naming_unchecked`: the dataset's name could not be read, so there is nothing definite to
  *    waive and nothing was recorded or posted. GitHub may not have answered, which asking again
  *    settles, or the file at the head has no readable `Name` (not JSON, no text `Name`, or one that
  *    shows nothing), which asking again finds again: that file has to be fixed and pushed;
- *  - `not_exempt`: the author is not a NEMAR owner or administrator, whose review it would bypass;
- *  - `reviewed`: the commit was reviewed (someone who is not exempt pushed it), and its review stands;
+ *  - `not_exempt`: the author is not eligible to use the explicit administrative naming override;
+ *  - `reviewed`: the commit already has a review, and that review stands;
  *  - or why the pull request was not looked at, in the start's words (`pr_review_disabled`,
  *    `unknown_dataset`, `dataset_not_reviewable`, `not_open`, `not_main`, `draft`, `bot_author`,
  *    `malformed`, ...).

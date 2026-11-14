@@ -7,15 +7,12 @@
  * as the `pull_request` delivery it would have been, and hands it to the one gate every delivery
  * goes through (`handlePullRequestEvent`). So the flag, the "public, named, first-published"
  * test, the per-commit dedupe and the contributor pause all apply exactly as they would to a
- * delivery, and so does the exemption: a pull request opened by an owner or administrator is not
- * reviewed and nothing is started for it (ADR 0107), unless a review has already touched its
- * current commit, which is then handled like anyone's. It gets one check, which the naming rule
- * decides, and the answer names which: `exempt_author` with a `skipped` check when the rule finds
- * nothing, `exempt_naming_waived` with a `skipped` check that says so when an administrator waived
- * the rule for this commit, `naming_rule` with a failed check when the title or the new dataset
- * name breaks it, and `naming_unchecked` with a check that needs a person when the dataset's name
- * could not be read (whatever the title says). One thing differs, and it is the administrator's choice made by name: a
- * commit whose review ended without a verdict (declined, errored, never reported) is started again,
+ * delivery. Author role does not exempt an otherwise reviewable pull request (ADR 0120). It gets
+ * an ordinary review subject to the same privacy, bot, base-branch, contributor-block and exact
+ * re-pull waiver gates as a delivery. The administrator's explicit naming-rule override remains a
+ * separate operation and is not inferred from account identity. One thing differs, and it is the
+ * administrator's choice made by name: a commit whose review ended without a verdict (declined,
+ * errored, never reported) is started again,
  * and with `redo` so is one whose review has a result (a second run, which costs model calls). A
  * review that is running is never started again, a redo included: the answer is `review_running`.
  *
@@ -39,7 +36,6 @@ import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
 import { QueueError, environmentName, ownedHere } from "./pr-review-queue.js";
 import {
-  ExemptCheckNotPublished,
   type WaiverCheckFailure,
   WaiverCheckNotPublished,
   handlePullRequestEvent,
@@ -142,9 +138,8 @@ export async function readPullRequest(
 /**
  * Review `datasetId#prNumber` now. The answer is the gate's own: `dispatched`, or the fixed word for
  * why not. A pull request that cannot be reviewed (a draft, closed, not aimed at `main`, a bot's) is
- * an answer, not an error, and so is one whose author is an owner or administrator (`exempt_author`,
- * `exempt_naming_waived`, `naming_rule` or `naming_unchecked`, see the module comment); a dataset
- * this Worker does not own, a pull request GitHub does not have and a GitHub that does not answer
+ * an answer, not an error; a dataset this Worker does not own, a pull request GitHub does not have
+ * and a GitHub that does not answer
  * are errors.
  */
 export async function startPullRequestReview(
@@ -203,16 +198,6 @@ export async function startPullRequestReview(
       { adminStart: true, redo, adminUserId },
     );
   } catch (err) {
-    // The author is exempt and GitHub would not take the check the naming rule decided on (skipped,
-    // failed or needing a person): a sentence, not the generic failure, because retrying is exactly
-    // what the administrator should do.
-    if (err instanceof ExemptCheckNotPublished) {
-      throw new QueueError(
-        502,
-        "github_unavailable",
-        "GitHub would not take the check for this pull request, whose author is exempt from the review, so nothing was posted. Try again in a moment.",
-      );
-    }
     if (err instanceof WaiverCheckNotPublished) {
       throw new QueueError(502, "github_unavailable", waiverNotPublishedWords(err.failure));
     }

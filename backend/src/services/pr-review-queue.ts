@@ -17,21 +17,14 @@
  * - **Nothing here trusts a pull request's words.** Titles go through `sanitizeNote`, branch names
  *   are reduced to a conservative character set, links are built from the dataset id and number, and
  *   no body is read.
- * - **An owner's or administrator's pull request is `exempt`** (ADR 0107). It is not reviewed and
- *   stores no row, so without a word of its own it would read `not_reviewed` for ever and be offered
- *   to an administrator to review by hand. The word is given only while the current commit has no
- *   review of its own: a push by someone who is not exempt IS reviewed, and that review's verdict
- *   stands. It is inferred from who opened the pull request, not read from GitHub: nothing here
- *   checks that the review check was posted as `skipped`. The one thing read of that check is
- *   whether the naming rule holds the pull request (the check failed, or asks for a person), which
- *   the row says in `detail`, so the list shows it waits for a fix or for `allow --admin`. Which
- *   authors are exempt is `isReviewExempt`'s to say, asked once per dataset and login for the
- *   length of one request, a few at a time and within a time budget, and never kept.
+ * - **Every unreviewed pull request is `not_reviewed` and offered for review**, regardless of
+ *   whether its author is a NEMAR owner or administrator (ADR 0120). The exact record-bound
+ *   upstream re-pull waiver remains `waived` (ADR 0117).
  * - **An upstream re-pull's own pull request at the head NEMAR recorded is `waived`** (ADR 0117),
  *   decided from the open `upstream_repulls` records read for the request and GitHub's facts about
  *   the pull request, by the one rule the review itself asks (`shared/repull-review-waiver.ts`). It
- *   wins over a review of that head (whose findings are then recommendations) and over `exempt`,
- *   and, like `exempt`, it is not stored and not verified against the check GitHub shows.
+ *   wins over a review of that head (whose findings are then recommendations). It is derived from
+ *   the record, not stored or verified against the check GitHub shows.
  * - **Overrides are keyed by GitHub's numeric id**, because a login can be renamed and reused.
  */
 
@@ -86,7 +79,6 @@ import {
 } from "./github/branch-protection.js";
 import { GITHUB_API, ORG_NAME, ghHeaders } from "./github/shared.js";
 import { githubFetchWithRetry } from "./github/transport.js";
-import { isReviewExempt } from "./pr-review-exemption.js";
 import { readRepullWaiver, readWaiverRecords } from "./pr-review-repull-waiver.js";
 import {
   PR_REVIEW_DEADLINE_MINUTES,
@@ -257,7 +249,7 @@ export function readCheckContext(node: unknown): CheckContext | null {
     }
     // NEUTRAL and SKIPPED count as passing for a required check on GitHub. Neither of the two
     // checks read here (BIDS and version) emits them, so seeing one means something else is posting
-    // under the name. (The review's own check does emit SKIPPED, for an exempt pull request, but it
+    // under the name. (The review's own check can emit SKIPPED for an explicit naming override, but it
     // is not one of the names this queue reads.)
     return { name: n.name, kind: "run", state: "unknown", at: started, appId };
   }
@@ -312,13 +304,11 @@ export function checkStateOf(
 }
 
 /**
- * Why an exempt pull request is held by the naming rule, if it is, read from GitHub's record of the
- * review's own check on the current commit: `naming_rule` when that check failed (the rule refused
- * the title or the new dataset name, which an administrator can waive for the commit), and
- * `naming_unchecked` when it asks for a person (the dataset's name could not be read, whatever the
- * title says, so there is nothing to waive until a start reads it). The queue infers who is exempt
- * from who opened the pull request and posts nothing itself, so this is the only place it learns the
- * rule's answer. A review check that passed, was skipped, is still running or is absent is no hold,
+ * Whether the review check reports a naming hold on the current commit, read from GitHub's record:
+ * `naming_rule` when that check failed (the rule refused the title or the new dataset name, which
+ * an administrator can waive for the commit), and `naming_unchecked` when it asks for a person (the
+ * dataset's name could not be read, whatever the title says). The queue does not infer this from
+ * author role or post a check itself. A review check that passed, was skipped, is still running or is absent is no hold,
  * and neither is one on a list that was cut short, where the check might be on the next page. Only
  * informs: a workflow job named like the check could make the label wrong, and nothing is decided
  * by it.
@@ -853,9 +843,9 @@ async function loadReviews(db: D1Database, datasetIds: readonly string[]): Promi
  * Verdicts an administrator can act on: approve a pass, merge an upstream re-pull's waived pull
  * request through the re-pull's gate (ADR 0117; the gate says when it waits for `resume`), or review
  * by hand what the automation could not or did not decide. A fail is the author's to fix and an
- * in-progress review is waiting on the machine, so neither is yours yet, and an exempt pull request
- * is not reviewed at all, so there is no review for a person to read (when the naming rule holds
- * one, its row says so in `detail`, and the author's fix or an `allow --admin` is what releases it).
+ * in-progress review is waiting on the machine, so neither is yours yet. An unreviewed pull request
+ * is offered for review regardless of author role; a naming hold is shown from the check and detail,
+ * and the author's fix or an `allow --admin` is what releases that hold.
  */
 const NEEDS_YOU: ReadonlySet<QueueVerdict> = new Set([
   "pass",
@@ -949,83 +939,6 @@ export function environmentName(env: Bindings): QueueEnvironment {
  */
 export function ownedHere(env: Bindings, datasetId: string): boolean {
   return isNonProductionEnv(env) ? isDevOwnedDatasetId(datasetId) : !isDevOwnedDatasetId(datasetId);
-}
-
-/**
- * How many exemption lookups run at once while a list is built. Each may ask GitHub whether a login
- * holds admin on a repository, and an administrator who has pull requests open in dozens of
- * datasets would otherwise cost that many questions one after another.
- */
-const EXEMPT_LOOKUP_CONCURRENCY = 6;
-
-/**
- * The longest a list waits for its exemption lookups, in all. A lookup not started by then is
- * skipped and its pull request reads as not exempt (what the list said before there was an
- * exemption), so a GitHub that is slow or refusing makes the list less informative and never
- * slower than this plus one lookup.
- */
-let exemptLookupBudgetMs = 20_000;
-
-export function __setExemptLookupBudgetForTests(ms: number | null): void {
-  exemptLookupBudgetMs = ms ?? 20_000;
-}
-
-/**
- * `isReviewExempt`, asked once per (dataset, login) for the length of ONE request and never kept
- * beyond it: an author with several open pull requests costs one lookup, and a role that changes
- * is seen by the next request. The dataset is part of the key because the answer is about a
- * repository, not only a person. `warm` runs a known set of lookups a few at a time within the
- * budget, so that the list can then read what finished from memory with `known` (a lookup that
- * never ran reads as not exempt); `ask` is for the one lookup of a detail view.
- */
-function exemptionLookup(env: Bindings) {
-  const answers = new Map<string, Promise<boolean>>();
-  const finished = new Map<string, boolean>();
-  const keyOf = (datasetId: string, login: string) => `${datasetId}#${login.toLowerCase()}`;
-  const ask = (datasetId: string, login: string): Promise<boolean> => {
-    const key = keyOf(datasetId, login);
-    let answer = answers.get(key);
-    if (answer === undefined) {
-      answer = isReviewExempt(env, { login, repo: datasetId }).then((exempt) => {
-        finished.set(key, exempt);
-        return exempt;
-      });
-      answers.set(key, answer);
-    }
-    return answer;
-  };
-  const warm = async (
-    wanted: ReadonlyArray<{ datasetId: string; login: string }>,
-  ): Promise<void> => {
-    const pending = [...wanted];
-    const deadline = Date.now() + exemptLookupBudgetMs;
-    let outOfTime = false;
-    const worker = async (): Promise<void> => {
-      try {
-        for (let next = pending.shift(); next !== undefined; next = pending.shift()) {
-          if (Date.now() >= deadline) {
-            if (!outOfTime) {
-              outOfTime = true;
-              console.warn(
-                "[pr-queue] exemption lookups ran out of time; the rest are listed as not exempt",
-              );
-            }
-            return;
-          }
-          await ask(next.datasetId, next.login);
-        }
-      } catch (err) {
-        // A lookup failed (the database), which fails the whole list: no more are started for it.
-        pending.length = 0;
-        throw err;
-      }
-    };
-    const workers = Math.min(EXEMPT_LOOKUP_CONCURRENCY, pending.length);
-    await Promise.all(Array.from({ length: workers }, worker));
-  };
-  const known = (datasetId: string, login: string): boolean =>
-    finished.get(keyOf(datasetId, login)) ?? false;
-  return { ask, warm, known };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1174,8 +1087,6 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
   const reviews = await loadReviews(env.DB, datasetIds);
   // The open upstream re-pull records that could waive one of these pull requests (ADR 0117).
   const waivers = await readWaiverRecords(env.DB, datasetIds);
-  const exempt = exemptionLookup(env);
-
   const staged = mine.map((pr) => {
     // The review of the current commit if there is one; else the newest, which `classify` will
     // show as another commit's.
@@ -1184,8 +1095,7 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
       reviews.newest.get(`${pr.datasetId}#${pr.prNumber}`) ??
       null;
     const base = classify(row, pr.headSha);
-    // An upstream re-pull's own pull request at the head NEMAR recorded, whatever a review of it
-    // said: the search reads only pull requests into `main`.
+    // An exact upstream re-pull record can waive only the recorded head and branch.
     const waived = repullReviewWaiverOf(waivers.get(pr.datasetId) ?? [], {
       datasetId: pr.datasetId,
       prNumber: pr.prNumber,
@@ -1194,26 +1104,13 @@ export async function buildQueue(env: Bindings, filters: QueueFilters): Promise<
       headRef: pr.headRef,
       baseRef: "main",
     }).waived;
-    // An exempt pull request has no review of its current commit, by design. A bot or a ghost
-    // (no GitHub user id) is never an owner or administrator, and a waived one is not asked about.
-    const mayBeExempt = !waived && base.review_current !== true && pr.authorId !== null;
-    return { pr, base, mayBeExempt, waived };
+    return { pr, base, waived };
   });
-  await exempt.warm(
-    staged
-      .filter((s) => s.mayBeExempt)
-      .map((s) => ({ datasetId: s.pr.datasetId, login: s.pr.authorLogin })),
-  );
 
   const all: QueueEntry[] = [];
-  for (const { pr, base, mayBeExempt, waived } of staged) {
-    // An exempt row says when the naming rule holds it (its check failed, or asks for a person), so
-    // the list shows it waits on a fix or an `allow --admin`; otherwise it carries no detail.
-    const classified: Classified = waived
-      ? { ...base, verdict: "waived", detail: null }
-      : mayBeExempt && exempt.known(pr.datasetId, pr.authorLogin)
-        ? { ...base, verdict: "exempt", detail: pr.namingHold }
-        : base;
+  for (const { pr, base, waived } of staged) {
+    // Every unreviewed head is offered for review regardless of author role.
+    const classified: Classified = waived ? { ...base, verdict: "waived", detail: null } : base;
     const verdictAndDraft = { verdict: classified.verdict, draft: pr.draft };
     all.push({
       dataset_id: pr.datasetId,
@@ -1452,11 +1349,9 @@ export async function readPrReviewDetail(
         }
       : null;
   let effective = classify(row && derived ? { ...row, ...derived } : null, head);
-  // The same words as the list gives, on the same terms (see `buildQueue`). First an upstream
-  // re-pull's own pull request at the head NEMAR recorded (ADR 0117), which wins over the review of
-  // that head and over the exemption; it needs GitHub's record of the pull request, so a pull
-  // request GitHub could not show is not waived here (unknown is never a waiver). Then an owner's or
-  // administrator's pull request with no review of its current commit.
+  // The same words as the list gives, on the same terms (see `buildQueue`): an exact recorded
+  // upstream re-pull head is waived; otherwise the stored review determines the verdict. Account
+  // identity never changes the queue label.
   const waived =
     head !== null &&
     live.kind === "found" &&
@@ -1470,16 +1365,7 @@ export async function readPrReviewDetail(
         baseRef: live.pr.base_ref,
       })
     ).waived;
-  if (waived) {
-    effective = { ...effective, verdict: "waived", detail: null };
-  } else if (
-    effective.review_current !== true &&
-    livePr !== null &&
-    livePr.author_id !== null &&
-    (await exemptionLookup(env).ask(datasetId, livePr.author_login))
-  ) {
-    effective = { ...effective, verdict: "exempt", detail: null };
-  }
+  if (waived) effective = { ...effective, verdict: "waived", detail: null };
 
   const history: ReviewHistoryItem[] = results.slice(0, HISTORY_LIMIT).map((r) => {
     const state: ReviewState = REVIEW_STATE_SET.has(r.state) ? (r.state as ReviewState) : "errored";

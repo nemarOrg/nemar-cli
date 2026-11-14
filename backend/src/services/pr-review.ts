@@ -15,28 +15,20 @@
  * delivery GitHub signs; no workflow in a dataset repository takes part, so no collaborator can
  * edit the review or reach the credentials it uses by editing a branch. It is also the only place
  * that knows who opened a pull request and whether an administrator has blocked them.
- * {@link gateDecision} is that decision, made once per delivery: exempt, then blocked, then
- * reviewed. **No count decides it** (ADR 0107): not how many reviews a contributor or the platform
- * started this hour or day, and not how many of a contributor's pull requests were rejected. Only
+ * {@link gateDecision} is that decision, made once per delivery: blocked, then reviewed. **No count
+ * decides it** (ADR 0107): not how many reviews a contributor or the platform started this hour or
+ * day, and not how many of a contributor's pull requests were rejected. Only
  * an administrator's block holds a contributor back. What bounds the cost is decided in that ADR
  * (a content screen first, and the workspace's spend limit), and the claim step is what makes a
  * forged `repository_dispatch` buy nothing, since anyone holding a dataset repository's workflow
  * credentials can send one.
  *
- * **Owners and administrators are not reviewed** (ADR 0107). A pull request opened by a NEMAR
- * owner or administrator, when an owner or administrator also caused the delivery (the push, the
- * reopening) and no review has yet touched that commit, is answered with a `skipped` check and
- * nothing else: no row, no model call. {@link isReviewExempt} decides from the accounts, never from
- * anything the pull request says, and before any row is written. A commit that already has a row
- * keeps what its review said, whoever acts on it next, when the delivery changes no text (a
- * force-push back to it, an administrator's start of a review that has a result): `skipped` is never
- * written over a review. The deliveries that do change the text are the exceptions, and they restart
- * the review of a commit that has a row, an exempt author's included: an edit, a reopening and a
- * marking as ready (below).
- * They are not exempt from the naming rule, which runs first: a title or a new dataset name it
- * refuses fails their check, and only an administrator's recorded waiver for that commit
- * (`nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`) turns it back into
- * `skipped`.
+ * **Every reviewable pull request is reviewed, including owners and administrators** (ADR 0120).
+ * The only automatic review waiver is the exact, record-bound upstream re-pull waiver described
+ * below (ADR 0117). A commit that already has a row keeps what its review said, whoever acts on it
+ * next, when the delivery changes no text; edits, reopenings and marking ready restart review as
+ * described below. The explicit administrator naming-rule override remains a separate, audited
+ * operation; this delivery gate no longer infers a review waiver from account identity.
  *
  * **An edit of the title, the body or the base re-runs the review** (ADR 0107). The job reads the
  * pull request from the API when it starts, so a review describes the text as it was then, and an
@@ -46,8 +38,8 @@
  * ({@link restartReview} rotates the nonce, so the superseded job's claim and report are refused).
  * A job that had already claimed is not stopped: it still spends its model call before its report is
  * refused, so superseding a claimed review costs that run in full, while one that never claimed
- * spends nothing. Only a commit with no row is a new delivery (an owner's or administrator's takes
- * the exempt path above); a commit with a row is restarted, an edit that moves the base onto `main`
+ * spends nothing. Only a commit with no row is a new delivery; a commit with a row is restarted,
+ * an edit that moves the base onto `main`
  * included. A base moved off `main` is not a pull request this review applies to and is ignored
  * like any other. An edit that names nothing else is ignored.
  *
@@ -78,7 +70,7 @@
  * from the record's release branch, at the head the record holds, is answered with one `skipped`
  * check titled "Waived: upstream re-pull" and nothing else: no row, no dispatch, no model call
  * ({@link publishWaived}). It is decided from NEMAR's record and GitHub's facts about the pull
- * request (`shared/repull-review-waiver.ts`), before the exemption and before any row is read for
+ * request (`shared/repull-review-waiver.ts`), before a block or any row is read for
  * restarting, so no delivery, edit, reopening or administrator's start (a redo included) of such a
  * head runs the review. A head the record does not hold yet (enrichment moved it and no NEMAR tool
  * has recorded the move) is reviewed as any other, because the Worker cannot tell enrichment from a
@@ -102,10 +94,10 @@
  *
  * Database failures inside {@link handlePullRequestEvent} throw: the webhook route answers 500 so
  * the delivery shows as failed in the App's delivery log, where it can be redelivered. So does an
- * exempt pull request's check, or a re-pull's waived one, that could not be published, which has
+ * naming-override check, or a re-pull's waived one, that could not be published, which has
  * no row for the watchdog to retry from. Redelivery of a reviewed commit is safe because (dataset,
- * pull request, commit) is unique; redelivery of an exempt or waived commit is safe because a
- * second `skipped` check is harmless. A redelivered edit starts the review again, which
+ * pull request, commit) is unique; redelivery of a naming-override or waived outcome is safe because
+ * a second `skipped` check is harmless. A redelivered edit starts the review again, which
  * supersedes the first, costs one more run and counts toward the cap.
  */
 
@@ -154,7 +146,6 @@ import {
   upsertReviewComment,
 } from "./github/pr-review-api.js";
 import { ORG_NAME } from "./github/shared.js";
-import { isReviewExempt } from "./pr-review-exemption.js";
 import {
   type NamingSubject,
   isNamingWaived,
@@ -274,7 +265,7 @@ export interface PrIntake {
   /**
    * GitHub's relationship label for the author, stored with the review for people to read. Nothing
    * in the gate reads it: it says CONTRIBUTOR for a private organization member, so it is no reason
-   * to exempt or to reject anyone (ADR 0107).
+   * to bypass review or reject anyone (ADR 0107).
    */
   authorAssociation: string | null;
   fromFork: boolean;
@@ -289,13 +280,13 @@ export interface PrIntake {
    * Who caused the delivery (GitHub's `sender`): whoever pushed, reopened or marked the pull
    * request ready. Null when the delivery names no one or a shape a login does not have, and for an
    * administrator's start, which is built from GitHub's record of the pull request and has no
-   * sender. It is read only to decide the exemption, never shown or stored.
+   * sender. It is retained as intake metadata but does not decide whether the pull request is
+   * reviewed.
    */
   senderLogin: string | null;
   /**
-   * The pull request's title, read for one purpose: the naming rule on an exempt pull request
-   * (`pr-review-naming.ts`), which the review job applies to everyone else's from its own read of
-   * the pull request. It is never shown, stored, logged or sent anywhere.
+   * The pull request's title, read for one purpose: the separate naming-rule override
+   * (`pr-review-naming.ts`). It is never shown, stored, logged or sent anywhere.
    */
   title: string;
   /** The base branch's commit GitHub named with the pull request, for the naming rule; or null. */
@@ -441,8 +432,8 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
   }
   if (!LOGIN.test(user.login)) return { ok: false, reason: "malformed" };
 
-  // The sender of a bot (`name[bot]`) is not a login, so it reads as no sender at all, and an
-  // exemption never rests on one.
+  // The sender of a bot (`name[bot]`) is not a login, so it reads as no sender at all. Author role
+  // and event sender do not create an automatic review exemption.
   const sender = rec(p.sender);
 
   return {
@@ -468,7 +459,7 @@ export function readPullRequestEvent(payload: unknown): IntakeResult {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The gate: who is reviewed
+// The gate: blocked contributors and universal review
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -976,14 +967,15 @@ export interface PrReviewOptions {
    * An administrator asked for this review by name (`startPullRequestReview`). The payload was built
    * from GitHub's own record of the pull request. It lets a commit whose review ended without a
    * verdict be started again, which a new delivery of the commit does only for a dispatch GitHub did
-   * not run. It names no sender, so whether the pull request is exempt is judged on its author alone.
+   * not run. It names no sender; the review gate applies the same role-independent policy as an
+   * event delivery.
    */
   adminStart?: boolean;
   /**
    * The administrator also asked for a commit whose review has a result (`reported`) to be run
    * again (`start --redo`). Meaningful only with `adminStart`: nothing else asks for it. It reaches
-   * no further than that: a review that is running is not superseded, and the gate, the block and
-   * the exemption apply as to any start.
+   * no further than that: a review that is running is not superseded, and the gate and contributor
+   * block apply as to any start.
    */
   redo?: boolean;
   /**
@@ -994,68 +986,26 @@ export interface PrReviewOptions {
 }
 
 /**
- * Whether this delivery is one the review does not apply to (ADR 0107): the pull request's author
- * is an owner or administrator AND so is whoever caused the delivery.
- *
- * The second half is what keeps the exemption from reaching a stranger's work. Anyone with write
- * access can push to an owner's branch, reopen the pull request or mark it ready, and what they put
- * in front of the review must not be skipped because the pull request carries another name. A
- * sender who is the author (compared as GitHub does, without regard to case) needs no second look.
- * Anyone else must be exempt in their own right. A delivery that names no usable sender cannot be
- * attributed, and an unattributed delivery is reviewed.
- *
- * An administrator's start is the one delivery with no sender: its payload is GitHub's own record
- * of the pull request, built by the Worker, and nobody pushed. It is judged on the author alone.
+ * Whether this delivery may be reviewed. Account identity never exempts a pull request; only an
+ * administrator's standing block can stop a new or restarted review. The exact upstream re-pull
+ * waiver is decided separately, from its recorded record, before this gate.
  */
-async function isExemptDelivery(
-  env: Bindings,
-  pr: PrIntake,
-  options: PrReviewOptions,
-): Promise<boolean> {
-  const repo = pr.datasetId;
-  if (!(await isReviewExempt(env, { login: pr.authorLogin, repo }))) return false;
-  if (options.adminStart === true) return true;
-  const sender = pr.senderLogin;
-  if (sender === null) return false;
-  if (sender.toLowerCase() === pr.authorLogin.toLowerCase()) return true;
-  return await isReviewExempt(env, { login: sender, repo });
-}
-
-/** What the gate decides for a delivery. */
-type Gate = "exempt" | "blocked" | "review";
+type Gate = "blocked" | "review";
 
 /**
- * Whether a review is spent on this delivery, the one decision (ADR 0107), in this order:
- *
- *  1. **exempt**: an owner or administrator is behind the delivery ({@link isExemptDelivery}, the
- *     author AND whoever caused it, never the author alone). Asked only for a commit with no row
- *     (`commit` is `"new"`): a commit a review has touched keeps what that review said, so there
- *     `skipped` can never be the answer.
- *  2. **blocked**: an administrator has blocked the author. It holds back a restart of a commit
- *     already on record (`"on_record"`) as it does a new commit, and it never reaches an exempt
- *     delivery, because exempt is asked first.
- *  3. **review**: everything else. No count decides it: not how many reviews the author or the
- *     platform started lately, and not how many of the author's pull requests were rejected.
- *     That is what the earlier hourly, daily and platform caps and the automatic pause did, and
- *     ADR 0107 removed them.
+ * Whether a review is spent on this delivery: an administrator's block declines it; otherwise it
+ * is reviewed, regardless of author or sender role. No count decides it (ADR 0107).
  *
  * A database error throws, like every read of the intake.
  */
-async function gateDecision(
-  env: Bindings,
-  pr: PrIntake,
-  options: PrReviewOptions,
-  commit: "new" | "on_record",
-): Promise<Gate> {
-  if (commit === "new" && (await isExemptDelivery(env, pr, options))) return "exempt";
+async function gateDecision(env: Bindings, pr: PrIntake): Promise<Gate> {
   const standing = standingOf(await readAuthorOverride(env.DB, pr.authorId));
   return standing.paused ? "blocked" : "review";
 }
 
 /**
- * The exempt pull request's check could not be published. Thrown, so the webhook answers 500 and
- * the delivery shows as failed where it can be redelivered; an administrator's start turns it into
- * a sentence.
+ * An explicit naming-override check could not be published. The admin route turns it into a retry
+ * sentence; ordinary review deliveries no longer publish identity-based skipped checks.
  */
 export class ExemptCheckNotPublished extends Error {
   constructor() {
@@ -1065,10 +1015,9 @@ export class ExemptCheckNotPublished extends Error {
 }
 
 /**
- * What an exempt pull request's commit comes to under the naming rule (ADR 0107), which runs
- * before the exemption takes effect: `exempt` when the rule finds nothing, `exempt` and `waived`
- * when it finds something an administrator waived for this commit, and `naming` otherwise (a
- * failure, or a check that needs a person when the dataset's name could not be read).
+ * The separate naming-rule override's result (ADR 0107): `exempt` when the rule finds nothing,
+ * `exempt` and `waived` when an administrator recorded a waiver for this commit, and `naming`
+ * otherwise. This helper is not the automatic delivery review gate.
  */
 export async function exemptOutcomeFor(
   env: Bindings,
@@ -1081,20 +1030,7 @@ export async function exemptOutcomeFor(
 }
 
 /**
- * The fixed word an exempt outcome is answered with, for the webhook and an administrator's start.
- * A name that could not be read is `naming_unchecked` whatever the title says, because that is what
- * the check says (it needs a person) and what a waiver answers: nothing can be waived until the
- * name is read.
- */
-export function exemptReason(
-  outcome: Extract<ReviewOutcome, { kind: "exempt" | "naming" }>,
-): string {
-  if (outcome.kind === "exempt") return outcome.waived ? "exempt_naming_waived" : "exempt_author";
-  return outcome.facts.name === "unchecked" ? "naming_unchecked" : "naming_rule";
-}
-
-/**
- * Post an exempt pull request's one check: a NEW check run on the commit. Throws
+ * Post the explicit naming-override check: a NEW check run on the commit. Throws
  * {@link ExemptCheckNotPublished} when GitHub will not take it.
  */
 export async function postExemptCheck(
@@ -1120,36 +1056,6 @@ export async function postExemptCheck(
     );
     throw new ExemptCheckNotPublished();
   }
-}
-
-/**
- * Answer a pull request nobody reviews (ADR 0107) with the one check that says so, and nothing
- * else: no row, no dispatch, no model call, no "in progress" check, no comment. The naming rule
- * runs first (see {@link exemptOutcomeFor}): a title or a new dataset name it refuses fails the
- * check, because owners and administrators are exempt from the review and not from the rule.
- *
- * It is only reached for a commit that has no row (see `handlePullRequestEvent`): a commit a review
- * has touched keeps what the review said, so `skipped` is never written over a verdict, a decline
- * or an error. For the same reason a NEW check run is created and an old one is never updated (a
- * review that starts for the same commit between the row read and this publish therefore leaves
- * the commit with two checks; the ADR says so). The pull request's review comment, when an earlier
- * commit's review left one, is not touched: it names the commit it is about.
- *
- * It writes nothing, so there is nothing for the watchdog to publish again. A check that cannot
- * be published is therefore thrown ({@link ExemptCheckNotPublished}) and the webhook answers 500:
- * the delivery shows as failed in the App's delivery log, where it can be redelivered, instead of
- * leaving a pull request with no check and no trace (see the module comment).
- */
-async function publishExempt(env: Bindings, pr: PrIntake): Promise<PrReviewResponse> {
-  const where = `${pr.datasetId}#${pr.prNumber}`;
-  const outcome = await exemptOutcomeFor(env, pr);
-  await postExemptCheck(env, pr, outcome);
-  const reason = exemptReason(outcome);
-  // The only record that a commit was exempted: it has no row and no comment. No login, no title.
-  console.info(
-    `[pr-review] ${where}: exempt, ${conclusionOf(outcome)} check posted for ${pr.headSha.slice(0, 7)} (${reason})`,
-  );
-  return no(reason);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1219,7 +1125,7 @@ async function waiverOfRow(env: Bindings, row: ReviewRow): Promise<Waived | null
 
 /**
  * The waived check could not be published. Thrown, so the webhook answers 500 and the delivery
- * shows as failed where it can be redelivered, as for an exempt pull request; an administrator's
+ * shows as failed where it can be redelivered; an administrator's
  * start turns it into a sentence.
  */
 export class WaiverCheckNotPublished extends Error {
@@ -1251,7 +1157,7 @@ export type WaiverTrigger = "delivery" | "admin_start" | "recorded";
  * A head a review has touched (it ran before NEMAR recorded the head) has its own check run, which
  * is updated in place to the waiver, and its comment, which then says the same with the review's
  * findings as recommendations; the row keeps what the review said. A head with no row gets a NEW
- * check run and no comment, as an exempt pull request does. A check that does not reach GitHub is
+ * check run and no comment. A check that does not reach GitHub is
  * thrown ({@link WaiverCheckNotPublished}). One audit row says what was waived, for which record
  * and why; it is best effort, because the check is what a merge reads.
  */
@@ -1466,7 +1372,7 @@ export async function handlePullRequestEvent(
   if (reviewable === "not_reviewable") return no("dataset_not_reviewable");
 
   // An upstream re-pull's own pull request at the head NEMAR recorded is waived (ADR 0117), before
-  // anything else is asked: the exemption, a block, a row to restart. Nothing a delivery or an
+  // a block or any row is read. Nothing a delivery or an
   // administrator's start (a redo included) can do runs the review of such a head; its check is
   // published as waived, over whatever an earlier review of it said.
   const waiver = await readRepullWaiver(db, waiverSubjectOf(pr));
@@ -1477,8 +1383,7 @@ export async function handlePullRequestEvent(
   }
 
   // A commit a review has touched keeps what that review said, whoever acts on it next: a row means
-  // someone put this commit through review (a stranger's push to an owner's branch, or an author
-  // who was not exempt yet), and an exempt author's push back to it, or an administrator's start,
+  // someone put this commit through review, and a later delivery or administrator's start
   // must not turn another person's failed or undecided review into `skipped`, which a required
   // check counts as passing. `handleRepeat` re-states the row instead, or, for an edit, a reopening
   // and a marking as ready, which change the text the review judged, starts the review again (and
@@ -1486,10 +1391,8 @@ export async function handlePullRequestEvent(
   const existing = await readRowByKey(db, pr.datasetId, pr.prNumber, pr.headSha);
   if (existing) return await handleRepeat(env, existing, secret, pr, options);
 
-  // Every other delivery meets the gate once, before any row is written: an exempt pull request
-  // stores no row, so no redelivery or restart can carry it into the review.
-  const gate = await gateDecision(env, pr, options, "new");
-  if (gate === "exempt") return await publishExempt(env, pr);
+  // Every reviewable delivery meets the block gate once before a new row is written.
+  const gate = await gateDecision(env, pr);
   const paused = gate === "blocked";
   const nonce = crypto.randomUUID();
   const inserted = await db
@@ -1634,7 +1537,7 @@ async function handleRepeat(
     if (
       textChange &&
       current.editRestarts >= PR_REVIEW_EDIT_CAP &&
-      (await gateDecision(env, pr, options, "on_record")) !== "blocked"
+      (await gateDecision(env, pr)) !== "blocked"
     ) {
       if (current.detail === "edit_limit") break;
       const refused = await refuseEdit(env, current, pr);
@@ -1648,7 +1551,7 @@ async function handleRepeat(
     if (
       options.redo === true &&
       current.state === "reported" &&
-      (await gateDecision(env, pr, options, "on_record")) === "blocked"
+      (await gateDecision(env, pr)) === "blocked"
     ) {
       return no("contributor_paused", existing.id);
     }
@@ -1832,8 +1735,8 @@ const KEEP_RECENT_DECLINE_STAMP = `CASE WHEN state = 'declined' AND detail = 'co
     AND published_at >= datetime('now', '-1 hour') THEN published_at END`;
 
 /**
- * Give a commit a fresh attempt, held to the same gate as a new one except for the exemption (see
- * {@link gateDecision}; the commit has a row, so `skipped` is never an answer): a contributor an
+ * Give a commit a fresh attempt, held to the same gate as a new one (see {@link gateDecision};
+ * the commit has a row, so `skipped` is never an answer): a contributor an
  * administrator has blocked is declined. Null when another delivery moved the row first.
  *
  * The nonce is replaced, and that is what retires the attempt this one supersedes. The superseded
@@ -1852,7 +1755,7 @@ async function restartReview(
   options: PrReviewOptions,
 ): Promise<PrReviewResponse | null> {
   const db = env.DB;
-  const paused = (await gateDecision(env, pr, options, "on_record")) === "blocked";
+  const paused = (await gateDecision(env, pr)) === "blocked";
   const nonce = crypto.randomUUID();
   // The cap's count: an administrator's start begins it again when it starts the review (a start
   // that a block declines is a restart too, and a decline is no run to count), except a redo of a
