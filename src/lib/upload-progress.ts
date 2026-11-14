@@ -324,6 +324,32 @@ export function clearUploadProgress(datasetPath: string): boolean {
   }
 }
 
+/**
+ * Local patch for nemarOrg/nemar-cli#2141 (i): what a SUCCESSFUL upload leaves behind,
+ * instead of deleting the progress file. The per-file records (path, size, mtime, status)
+ * and the "tracking" stamp are kept; every other step stamp and the remote-check stamp
+ * are dropped. A re-run with an unchanged data-file list then has nothing to add
+ * (computeFilesToUpload is empty), skips `git annex add`, and goes straight to the
+ * location-log reconcile and the check of the remote, then saves, pushes and deploys CI
+ * as a fresh run does. A file that is new or changed since (size or mtime) is tracked
+ * again exactly as before (hasFileListChanged / getFilesNeedingUpload); `--restart`
+ * still clears everything. Validation, the identifier preflight, attestation,
+ * publication and the CLI version check are not touched by this.
+ *
+ * No progress file (nothing to keep) means nothing is written. Returns whether the
+ * file on disk is now in the retained state (or absent).
+ */
+export function retainTrackingAfterSuccess(datasetPath: string): boolean {
+  const progress = readUploadProgress(datasetPath);
+  if (!progress) return clearUploadProgress(datasetPath);
+  progress.completed_steps = progress.completed_steps.includes("tracking") ? ["tracking"] : [];
+  // The remote is asked again on the next run: a success is not a fresh check.
+  progress.remote_checked_at = undefined;
+  progress.remote_checked_count = undefined;
+  progress.remote_checked_fingerprint = undefined;
+  return writeUploadProgress(datasetPath, progress);
+}
+
 export function getProgressSummary(progress: UploadProgress): {
   total: number;
   uploaded: number;

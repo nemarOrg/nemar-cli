@@ -277,6 +277,7 @@ import {
   identifierPreflightStep,
   recheckIdentifierPreflight,
 } from "../lib/upload/identifier-preflight.js";
+import { integrateRemoteBeforeValidationStep } from "../lib/upload/integrate-remote.js";
 import {
   computeFilesToUpload,
   prepareUploadProgress,
@@ -289,10 +290,12 @@ import {
   validateBidsStep,
   verifyGhCli,
 } from "../lib/upload/preflight.js";
+import { leaseFromResponse } from "../lib/upload/s3-copy-session.js";
 import {
   DEFAULT_UPLOAD_ANNEX_JOBS,
   acceptRepoInvitation,
   configureRemotes,
+  copyAnnexedForPush,
   createOrResumeDataset,
   initializeAnnexDataset,
 } from "../lib/upload/transfer.js";
@@ -779,6 +782,13 @@ Examples:
       const absolutePath = resolve(datasetPath);
       if (!existsSync(absolutePath)) {
         console.log(chalk.red(`Error: Path does not exist: ${absolutePath}`));
+        process.exit(1);
+      }
+
+      // Local patch (#2140): a dataset that already exists has its remote main integrated
+      // first (git annex merge, clean stop on conflict), so the identifier preflight and the
+      // validation below read the tree that will be pushed. Every gate still runs after it.
+      if ((await integrateRemoteBeforeValidationStep(absolutePath, options)).status === "fail") {
         process.exit(1);
       }
 
@@ -5684,36 +5694,10 @@ Examples:
       }
     }
 
-    // Push git to GitHub
-    let spinner = ora("Pushing to GitHub...").start();
-    const gitResult = await pushToGitHub(cwd);
-
-    if (!gitResult.success) {
-      const err = gitResult.error || "";
-      if (err.includes("protected branch") || err.includes("GH006")) {
-        spinner.fail("Push rejected: branch protection is enabled");
-        console.log();
-        console.log("  Public datasets require changes via pull request.");
-        printBranchProtectionSuggestions();
-      } else if (err.includes("terminal prompts disabled")) {
-        spinner.fail("Git push failed: authentication required");
-        console.log();
-        console.log("  Run 'nemar auth setup-ssh' to configure SSH authentication.");
-      } else {
-        spinner.fail("Git push failed");
-        console.log(chalk.red(`  ${err}`));
-      }
-      process.exit(1);
-    }
-
-    if (gitResult.warning) {
-      spinner.warn("Git pushed with warning");
-      console.log(chalk.yellow(`  ${gitResult.warning}`));
-    } else {
-      spinner.succeed("Pushed to GitHub");
-    }
-
-    // Push annex content to S3 (if enabled and remote exists)
+    // Local patch (#2141 ii): copy annex content to S3 FIRST (if enabled and a remote exists),
+    // with the upload's renewing, location-log-driven copy; git is pushed only after it
+    // succeeds, so the pushed git-annex branch already records the copies.
+    let spinner: ReturnType<typeof ora>;
     let s3PushFailed = false;
     if (options.s3 !== false) {
       const s3Remotes = await getAnnexS3Remotes(cwd);
@@ -5803,51 +5787,99 @@ Examples:
           }
 
           spinner = ora(`Copying data to S3 (${remoteName})...`).start();
-          let s3Result: Awaited<ReturnType<typeof copyToAnnexRemote>>;
-          try {
-            s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
-          } finally {
-            // Always clear STS creds from .git/annex/creds/ once the copy
-            // subprocess exits, regardless of outcome. Otherwise an interrupted
-            // upload leaves expired credentials on disk that fail later reads.
-            if (pushCreds) await clearAnnexCredentials(cwd);
-          }
-          if (!s3Result.success) {
-            spinner.fail("S3 push failed");
-            console.log(chalk.red(`  ${s3Result.error}`));
-            console.log(
-              chalk.yellow(
-                "  Git changes were pushed successfully; data upload can be retried later with 'nemar dataset push --no-pr'.",
+          if (pushCreds && pushDatasetId) {
+            const datasetIdForRenewal = pushDatasetId;
+            const copied = await copyAnnexedForPush({
+              absolutePath: cwd,
+              remote: remoteName,
+              jobs,
+              lease: leaseFromResponse(
+                toS3Credentials(pushCreds.credentials),
+                pushCreds.credentials.expiration,
               ),
-            );
-            s3PushFailed = true;
-          } else {
-            spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
-
-            // git annex copy writes new location records to the local git-annex
-            // branch. The pushToGitHub at the start of this action pushed the
-            // branch as it stood then; those new commits have to be pushed
-            // separately or fresh clones won't know the S3 copies exist.
-            const annexPushSpinner = ora("Pushing git-annex branch...").start();
-            const annexPush = await pushAnnexBranchToGitHub(cwd, "origin");
-            if (!annexPush.success) {
-              annexPushSpinner.warn(
-                `Could not push git-annex branch: ${annexPush.error || "unknown error"}`,
-              );
-              console.log(
-                chalk.yellow(
-                  "  The checked annex push was refused. Resolve the reported issue before retrying; do not push the branch manually.",
-                ),
-              );
+              renewLease: async () => {
+                const fresh = await requestUploadCredentials(datasetIdForRenewal);
+                return leaseFromResponse(
+                  toS3Credentials(fresh.credentials),
+                  fresh.credentials.expiration,
+                );
+              },
+              onCredentialsRenewed: (count, reason) => {
+                spinner.info(`Renewed upload credentials (${reason}; renewal ${count})`);
+                spinner = ora(`Copying data to S3 (${remoteName})...`).start();
+              },
+              onPlan: (plan) => {
+                spinner.text = `Copying ${plan.pending} pending of ${plan.total} annexed file(s) to S3 (${remoteName}) in ${plan.copyBatchCount} batch(es)${plan.recorded > 0 ? `, then checking ${plan.recorded} already recorded` : ""}...`;
+              },
+            });
+            if (!copied.success) {
+              spinner.fail("S3 push failed");
+              console.log(chalk.red(`  ${copied.error}`));
+              if (copied.hint) console.log(chalk.yellow(`  ${copied.hint}`));
               s3PushFailed = true;
             } else {
-              annexPushSpinner.succeed("Pushed git-annex branch");
+              spinner.succeed(
+                `Copied ${copied.filesCopied} file(s) to S3; all ${copied.total} annexed file(s) recorded at ${remoteName}${copied.renewals > 0 ? ` (${copied.renewals} credential renewal(s))` : ""}`,
+              );
+            }
+          } else {
+            // No NEMAR credentials (environment AWS credentials): the original one-shot copy.
+            let s3Result: Awaited<ReturnType<typeof copyToAnnexRemote>>;
+            try {
+              s3Result = await copyToAnnexRemote(cwd, remoteName, jobs, s3Creds);
+            } finally {
+              if (pushCreds) await clearAnnexCredentials(cwd);
+            }
+            if (!s3Result.success) {
+              spinner.fail("S3 push failed");
+              console.log(chalk.red(`  ${s3Result.error}`));
+              s3PushFailed = true;
+            } else {
+              spinner.succeed(`Copied ${s3Result.filesCopied} file(s) to S3`);
             }
           }
         }
       } else {
         console.log(chalk.dim("  No usable S3 remote configured; skipping data push."));
       }
+    }
+
+    if (s3PushFailed) {
+      console.log(
+        chalk.yellow(
+          "  Nothing was pushed to GitHub. Re-run 'nemar dataset push' (it copies only what the remote lacks), or push git alone with 'nemar dataset push --no-s3'.",
+        ),
+      );
+      process.exit(1);
+    }
+
+    // Push git to GitHub (main + git-annex, which now records the S3 copies)
+    spinner = ora("Pushing to GitHub...").start();
+    const gitResult = await pushToGitHub(cwd);
+
+    if (!gitResult.success) {
+      const err = gitResult.error || "";
+      if (err.includes("protected branch") || err.includes("GH006")) {
+        spinner.fail("Push rejected: branch protection is enabled");
+        console.log();
+        console.log("  Public datasets require changes via pull request.");
+        printBranchProtectionSuggestions();
+      } else if (err.includes("terminal prompts disabled")) {
+        spinner.fail("Git push failed: authentication required");
+        console.log();
+        console.log("  Run 'nemar auth setup-ssh' to configure SSH authentication.");
+      } else {
+        spinner.fail("Git push failed");
+        console.log(chalk.red(`  ${err}`));
+      }
+      process.exit(1);
+    }
+
+    if (gitResult.warning) {
+      spinner.warn("Git pushed with warning");
+      console.log(chalk.yellow(`  ${gitResult.warning}`));
+    } else {
+      spinner.succeed("Pushed to GitHub");
     }
 
     // Create PR if --pr flag is set
