@@ -13,7 +13,9 @@
  * THE CLAIM IS ONE CONDITIONAL UPDATE per job ({@link CLAIM_RUNNER_JOB_SQL}), the shape of
  * `claimOpenDispatch`: it admits the oldest waiting job of the runner's pool that fits, whose dataset still
  * passes the pipeline eligibility predicate inside the same statement (`PIPELINE_ELIGIBLE_SQL`, joined through
- * the job's stamp: a job with no linked stamp is simply not claimed yet), and only while the runner's
+ * the job's stamp: a job with no linked stamp is simply not claimed yet; outside production
+ * `PIPELINE_ELIGIBLE_SQL_NONPROD`, which also lets the compute fixture through, and `claimRunnerJobSql` picks
+ * the text by the environment), and only while the runner's
  * registration is unrevoked and its registering owner still stands (`OWNER_STANDING_SQL`). A claim that passed
  * `runnerAccess` before a revoke and commits after it therefore wins nothing. `meta.changes = 1` is the
  * winner test, and each winner has its own lease id.
@@ -84,7 +86,10 @@ import {
   launcherDocumentLimit,
   recordsRetentionYears,
 } from "./compute-lifecycle.js";
-import { PIPELINE_ELIGIBLE_SQL } from "./compute-pipeline-eligibility.js";
+import {
+  PIPELINE_ELIGIBLE_SQL,
+  PIPELINE_ELIGIBLE_SQL_NONPROD,
+} from "./compute-pipeline-eligibility.js";
 import { recipeJobSpec } from "./compute-pipeline.js";
 import { sha256Hex } from "./compute-records.js";
 import {
@@ -96,6 +101,7 @@ import {
 import { readRuntimeImage } from "./compute-runtime-image.js";
 import { LIVE_STATES_SQL, TERMINAL_STATES_SQL } from "./compute-state-sql.js";
 import { readLauncherDocs, verifyResults } from "./compute-verify.js";
+import { isNonProductionEnv } from "./environment.js";
 import type { TapisJob } from "./tapis/client.js";
 import { checkZarrSource } from "./zarr-source-check.js";
 
@@ -127,11 +133,15 @@ const held = (column: string): string =>
  * The terms that make a job claimable, over the alias `a` of `compute_jobs`: a waiting runner job
  * (`created`, unclaimed, records landed, no cancel recorded, claims left) of the runner's pool that fits what
  * the runner has left (`?6` pool, `?7` cores, `?8` memory, `?9` GPUs, each beside what it already holds) and
- * whose dataset, found through the job's own stamp, still passes the pipeline eligibility predicate. Written
- * for both the subselect that picks the oldest and the outer row the UPDATE writes, so the statement is
- * atomic by itself.
+ * whose dataset, found through the job's own stamp, still passes the pipeline eligibility predicate
+ * (`eligible`: the production predicate, or the one a recognized non-production environment uses, which lets
+ * the compute fixture through, plan S1). Written for both the subselect that picks the oldest and the outer
+ * row the UPDATE writes, so the statement is atomic by itself.
  */
-const claimable = (a: string): string => `${a}.executor = 'runner' AND ${a}.accounting = 'none'
+const claimable = (
+  a: string,
+  eligible: string,
+): string => `${a}.executor = 'runner' AND ${a}.accounting = 'none'
       AND ${a}.state = 'created' AND ${a}.runner_claimed_at IS NULL
       AND ${a}.records_written_at IS NOT NULL AND ${a}.cancel_requested_at IS NULL
       AND ${a}.claim_attempts < ?5
@@ -140,7 +150,7 @@ const claimable = (a: string): string => `${a}.executor = 'runner' AND ${a}.acco
       AND ${held("COALESCE(l.memory_mb, 0)")} + COALESCE(${a}.memory_mb, 0) <= ?8
       AND ${held("l.gpus")} + ${a}.gpus <= ?9
       AND EXISTS (SELECT 1 FROM compute_pipeline_stamps s JOIN datasets d ON d.dataset_id = s.dataset_id
-                   WHERE s.job_id = ${a}.id AND ${PIPELINE_ELIGIBLE_SQL})`;
+                   WHERE s.job_id = ${a}.id AND ${eligible})`;
 
 /**
  * One job's claim. `?1` the runner id, `?2` the runner's backend, `?3` the new lease id, `?4` a fresh
@@ -154,7 +164,7 @@ const claimable = (a: string): string => `${a}.executor = 'runner' AND ${a}.acco
  * deleted, and commits after, changes no row. `meta.changes = 1` is the winner test: D1 serialises two
  * statements, and the second finds the row claimed. A lease lasts `RUNNER_LEASE_SECONDS` on D1's clock.
  */
-export const CLAIM_RUNNER_JOB_SQL = `UPDATE compute_jobs SET
+const claimSql = (eligible: string): string => `UPDATE compute_jobs SET
     runner_claimed_at = datetime('now'),
     runner_id = ?1,
     runner_backend = ?2,
@@ -163,11 +173,29 @@ export const CLAIM_RUNNER_JOB_SQL = `UPDATE compute_jobs SET
     claim_attempts = claim_attempts + 1,
     webhook_nonce = COALESCE(webhook_nonce, ?4)
   WHERE id = (SELECT j.id FROM compute_jobs j
-               WHERE ${claimable("j")}
+               WHERE ${claimable("j", eligible)}
                ORDER BY j.created_at ASC, j.id ASC LIMIT 1)
-    AND ${claimable("compute_jobs")}
+    AND ${claimable("compute_jobs", eligible)}
     AND EXISTS (SELECT 1 FROM compute_runners r JOIN users u ON u.id = r.registered_by
                  WHERE r.id = ?1 AND r.revoked_at IS NULL AND ${OWNER_STANDING_SQL})`;
+
+/** The claim of production: over the production predicate, the text it had before portable compute's S1. */
+export const CLAIM_RUNNER_JOB_SQL = claimSql(PIPELINE_ELIGIBLE_SQL);
+
+/**
+ * The claim of a recognized non-production environment: the same statement over the widened predicate, which
+ * lets the compute fixture through (plan S1). Built once at module load, like the production text.
+ */
+export const CLAIM_RUNNER_JOB_SQL_NONPROD = claimSql(PIPELINE_ELIGIBLE_SQL_NONPROD);
+
+/**
+ * The claim an environment runs: the widened text only when `ENVIRONMENT` is recognized as not production
+ * (`isNonProductionEnv`); an unset, empty or misspelled value is production, so a production claim can never
+ * admit the fixture.
+ */
+export function claimRunnerJobSql(env: Pick<Bindings, "ENVIRONMENT">): string {
+  return isNonProductionEnv(env) ? CLAIM_RUNNER_JOB_SQL_NONPROD : CLAIM_RUNNER_JOB_SQL;
+}
 
 /** The job a claim just won, found by its own lease id (random, so it names one row). `?1` the lease, `?2` the runner. */
 export const CLAIMED_BY_LEASE_SQL =
@@ -290,12 +318,14 @@ export async function claimRunnerJobs(
     console.error("[compute-runner-queue] launch_unconfigured");
     return { jobs };
   }
+  // The environment's own text: the production predicate unless ENVIRONMENT is recognized as not production.
+  const claimStatement = claimRunnerJobSql(env);
   for (let i = 0; i < freeSlots; i++) {
     const leaseId = randomHex(16);
     let won: Awaited<ReturnType<D1PreparedStatement["run"]>>;
     try {
       won = await db
-        .prepare(CLAIM_RUNNER_JOB_SQL)
+        .prepare(claimStatement)
         .bind(
           runner.id,
           runner.backend,

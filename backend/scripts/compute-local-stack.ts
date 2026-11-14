@@ -696,7 +696,7 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
         opts.catalogBase ?? PUBLIC_API,
         opts.zarrIndexBase ?? PUBLIC_ZARR_BASE,
       );
-      const checked = await loadPipelineRow(env.DB, id);
+      const checked = await loadPipelineRow(env.DB, id, env);
       log(`${id}: copied ${copied[id].join(", ")}`);
       log(
         checked.eligible
