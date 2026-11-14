@@ -962,7 +962,12 @@ describe("the words", () => {
   });
 
   test("the recipe's own rule for an attestation is held by the vector builder (MUTATION: drop a rule)", () => {
-    const base = { datasetId: ID, tag: "v1.0.0", imageDigest: `sha256:${"b".repeat(64)}` };
+    const base = {
+      datasetId: ID,
+      tag: "v1.0.0",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      zarrBase: "https://zarr.nemar.org",
+    };
     const ok = { sourceCommit: T, tagCommit: T, equivalence: "exact" as const, deltaPaths: [] };
     expect(() => recipeZarrArguments({ ...base, attestation: ok })).not.toThrow();
     for (const bad of [

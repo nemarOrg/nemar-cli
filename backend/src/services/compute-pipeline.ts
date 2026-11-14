@@ -49,6 +49,7 @@ import {
   recipeCommand,
   recipeRequiredOutputs,
   recipeZarrArguments,
+  recipeZarrBase,
 } from "../../../shared/compute-recipes.js";
 import { PLATFORM_FAILURE_CODES } from "../../../shared/compute-state.js";
 import {
@@ -81,8 +82,8 @@ import { type SubmitOutcome, submitComputeJob } from "./compute-lifecycle.js";
 import {
   NEWEST_VERSION_SQL,
   PIPELINE_ELIGIBLE_SQL,
+  PIPELINE_ELIGIBLE_SQL_NONPROD,
   PIPELINE_ROW_COLUMNS,
-  PIPELINE_TERMS,
   type PipelineRow,
   type PipelineTermId,
   type PipelineVersion,
@@ -92,12 +93,14 @@ import {
   isPipelineEligible,
   loadPipelineRow,
   pickVersion,
+  pipelineTermsFor,
 } from "./compute-pipeline-eligibility.js";
 import { getPolicy } from "./compute-policy.js";
 import { sha256Hex } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
 import { computeEnabled, computeRunnersEnabled } from "./compute-switches.js";
 import { tenantFacts, tenantRoom } from "./compute-tenant.js";
+import { isNonProductionEnv } from "./environment.js";
 import { checkZarrSource } from "./zarr-source-check.js";
 
 // --- Words ------------------------------------------------------------------------------------------
@@ -353,6 +356,20 @@ export async function pipelinesAccountId(db: D1Database): Promise<number | null>
 
 // --- The job a recipe is ----------------------------------------------------------------------------
 
+/**
+ * The origin a Zarr recipe job reads in this environment (portable compute, plan S1 and D12): outside
+ * production the Worker's own `ZARR_HOSTNAME` (a staging fixture is read from the staging copy), and in
+ * production, for an unset or misspelled `ENVIRONMENT`, and for a host name that is not a bare lower-case
+ * one, the production host. The classification is `isNonProductionEnv`'s, the one the eligibility predicate
+ * uses.
+ */
+export function pipelineZarrBase(env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">): string {
+  return recipeZarrBase({
+    nonProduction: isNonProductionEnv(env),
+    zarrHostname: env.ZARR_HOSTNAME,
+  });
+}
+
 /** The partition of a recipe, as the type `JobSpecSchema` takes. */
 const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName;
 
@@ -364,8 +381,9 @@ const partitionOf = (recipe: ComputeRecipe) => recipe.partition as PartitionName
  *
  * A `zarr` recipe stages no dataset (`datasets: []`): its arguments carry the commit attestation that
  * `resolveRun` verified (`zarrSource`: the serving index's commit, the tag's commit, how they are equivalent
- * and the paths between them) and the one origin it may read. A `zarr` recipe with no verified attestation is
- * a programming error here, never a job.
+ * and the paths between them) and the one origin it may read, which is the ENVIRONMENT's own Zarr host
+ * ({@link pipelineZarrBase}, from `env`, never from a request or a dataset row). A `zarr` recipe with no
+ * verified attestation is a programming error here, never a job.
  */
 export function recipeJobSpec(
   recipe: ComputeRecipe,
@@ -375,6 +393,8 @@ export function recipeJobSpec(
     image: { ref: string; digest: string };
     /** Required for a `zarr` recipe, never read for a `bids` one. */
     zarrSource?: ZarrCommitAttestation | null;
+    /** The Worker's bindings the Zarr origin is read from; only a `zarr` recipe reads them. */
+    env: Pick<Bindings, "ENVIRONMENT" | "ZARR_HOSTNAME">;
   },
 ) {
   const zarr = recipe.input === "zarr";
@@ -390,6 +410,7 @@ export function recipeJobSpec(
           tag: input.tag,
           attestation: input.zarrSource as ZarrCommitAttestation,
           imageDigest: input.image.digest,
+          zarrBase: pipelineZarrBase(input.env),
         })
       : recipeArguments({
           datasetId: input.datasetId,
@@ -475,7 +496,7 @@ async function resolveRun(
   recipe: ComputeRecipe | undefined,
   env: Bindings,
 ): Promise<ResolvedRun> {
-  const loaded = await loadPipelineRow(db, datasetId);
+  const loaded = await loadPipelineRow(db, datasetId, env);
   if (!loaded.eligible) {
     return { ok: false, code: "dataset_not_eligible", extra: { blockedBy: loaded.blockedBy } };
   }
@@ -624,7 +645,13 @@ export async function dispatchPipelineJob(
   // (`invalid_spec`) with nothing written, never a throw that leaves a claimed stamp and aborts a run.
   let spec: ReturnType<typeof recipeJobSpec>;
   try {
-    spec = recipeJobSpec(recipe, { datasetId, tag, image, zarrSource: resolved.zarrSource });
+    spec = recipeJobSpec(recipe, {
+      datasetId,
+      tag,
+      image,
+      zarrSource: resolved.zarrSource,
+      env,
+    });
   } catch (err) {
     console.error(
       `[compute-pipeline] spec_unbuildable recipe=${recipe.name} error=${err instanceof Error ? err.name : "unknown"}`,
@@ -1038,33 +1065,17 @@ export interface Candidate {
 }
 
 /**
- * The eligible datasets a recipe has not been run over at the newest version, by id, at most `limit`.
- * The SQL selects (the predicate and the absence of a live or succeeded stamp); the TypeScript re-checks
- * every row it returns, and a version with no data-plane tag is skipped. A dataset the sync has not
- * caught up with is not a candidate: its open stamp holds the tuple. A tuple whose stamp FAILED is not a
- * candidate for {@link RETRY_COOLDOWN_DAYS} days after the failure, nor once it has failed
- * {@link MAX_FAILED_ATTEMPTS} times (a refusal is not a failure: the pool's word is not the dataset's),
- * decided in the SQL so that failing datasets at the head of the order do not fill the page.
+ * The candidate statement, over a predicate (`eligible`): the eligible datasets whose newest version has no live
+ * or succeeded stamp for the tuple and whose failures are inside the cooldown and the cap. `?1` the cursor,
+ * `?2` recipe, `?3` recipe version, `?4` engine, `?5` page size, `?6` the cooldown, `?7` the cap. Built twice at
+ * module load, once per predicate, and never at call time: a call picks one with {@link pipelineCandidatesSql}.
  */
-export async function pipelineCandidates(
-  db: D1Database,
-  recipe: ComputeRecipe,
-  limit: number,
-  after = "",
-): Promise<Candidate[]> {
-  const out: Candidate[] = [];
-  let cursor = after;
-  // A page may hold rows skipped for want of a tag; read on until the limit or the end.
-  for (let page = 0; page < 20 && out.length < limit; page++) {
-    const rows = (
-      await db
-        .prepare(
-          `SELECT ${PIPELINE_ROW_COLUMNS},
+const candidatesSql = (eligible: string): string => `SELECT ${PIPELINE_ROW_COLUMNS},
                   (${NEWEST_VERSION_SQL("d")}) AS newest_version,
                   (${NEWEST_VERSION_SQL("d", "total_files")}) AS newest_total_files
              FROM datasets d
             WHERE d.dataset_id > ?1
-              AND ${PIPELINE_ELIGIBLE_SQL}
+              AND ${eligible}
               AND NOT EXISTS (
                 SELECT 1 FROM compute_pipeline_stamps s
                  WHERE s.dataset_id = d.dataset_id AND s.recipe = ?2 AND s.recipe_version = ?3
@@ -1083,8 +1094,45 @@ export async function pipelineCandidates(
                    AND c.engine = ?4 AND c.state = 'failed'
                    AND ${COUNTS_AS_FAILURE_SQL("c")}
                    AND c.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("c")})`)}) < ?7
-            ORDER BY d.dataset_id LIMIT ?5`,
-        )
+            ORDER BY d.dataset_id LIMIT ?5`;
+
+/** The candidate statement of production: the production predicate, byte for byte what it was before portable compute's S1. */
+export const PIPELINE_CANDIDATES_SQL = candidatesSql(PIPELINE_ELIGIBLE_SQL);
+
+/** The candidate statement of a recognized non-production environment: the widened predicate (the compute fixture). */
+export const PIPELINE_CANDIDATES_SQL_NONPROD = candidatesSql(PIPELINE_ELIGIBLE_SQL_NONPROD);
+
+/** The candidate statement an environment runs: the widened one only when `ENVIRONMENT` is recognized as not production. */
+export function pipelineCandidatesSql(env: Pick<Bindings, "ENVIRONMENT">): string {
+  return isNonProductionEnv(env) ? PIPELINE_CANDIDATES_SQL_NONPROD : PIPELINE_CANDIDATES_SQL;
+}
+
+/**
+ * The eligible datasets a recipe has not been run over at the newest version, by id, at most `limit`.
+ * The SQL selects (the predicate and the absence of a live or succeeded stamp); the TypeScript re-checks
+ * every row it returns, and a version with no data-plane tag is skipped. A dataset the sync has not
+ * caught up with is not a candidate: its open stamp holds the tuple. A tuple whose stamp FAILED is not a
+ * candidate for {@link RETRY_COOLDOWN_DAYS} days after the failure, nor once it has failed
+ * {@link MAX_FAILED_ATTEMPTS} times (a refusal is not a failure: the pool's word is not the dataset's),
+ * decided in the SQL so that failing datasets at the head of the order do not fill the page.
+ *
+ * Which predicate is the environment's: the production one unless `env.ENVIRONMENT` is recognized as not
+ * production, where the compute fixture is let through as well (plan S1); the statement and the re-check
+ * take the same decision.
+ */
+export async function pipelineCandidates(
+  env: Pick<Bindings, "DB" | "ENVIRONMENT">,
+  recipe: ComputeRecipe,
+  limit: number,
+  after = "",
+): Promise<Candidate[]> {
+  const out: Candidate[] = [];
+  let cursor = after;
+  const statement = pipelineCandidatesSql(env);
+  // A page may hold rows skipped for want of a tag; read on until the limit or the end.
+  for (let page = 0; page < 20 && out.length < limit; page++) {
+    const rows = (
+      await env.DB.prepare(statement)
         .bind(
           cursor,
           recipe.name,
@@ -1100,7 +1148,7 @@ export async function pipelineCandidates(
     for (const row of rows) {
       cursor = row.dataset_id;
       if (out.length >= limit) break;
-      if (!isPipelineEligible(row) || row.newest_version === null) continue;
+      if (!isPipelineEligible(row, env) || row.newest_version === null) continue;
       // A version no launcher can stage (no data-plane tag, or a manifest over the bound) is never a
       // candidate: it would be refused again on every run and hold a place in the queue for good.
       const tag = dataTagForVersion(row.newest_version);
@@ -1357,7 +1405,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
   }
 
   const room = clampRun(input.limit ?? 20, caps);
-  const candidates = room.attempts > 0 ? await pipelineCandidates(db, recipe, room.attempts) : [];
+  const candidates = room.attempts > 0 ? await pipelineCandidates(env, recipe, room.attempts) : [];
   // Everything else: what the datasets that are not eligible fail, counted per term.
   const rows = (
     await db
@@ -1366,10 +1414,10 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
       .all<PipelineRow>()
   ).results;
   const blockedByTerm: Record<string, number> = Object.fromEntries(
-    PIPELINE_TERMS.map((t) => [t.id, 0]),
+    pipelineTermsFor(env).map((t) => [t.id, 0]),
   );
   for (const row of rows) {
-    for (const term of failedPipelineTerms(row))
+    for (const term of failedPipelineTerms(row, env))
       blockedByTerm[term] = (blockedByTerm[term] ?? 0) + 1;
   }
   return {
@@ -1613,7 +1661,7 @@ export async function dispatchEligible(
     return run;
   }
   try {
-    for (const candidate of await pipelineCandidates(env.DB, recipe, room.attempts, input.after)) {
+    for (const candidate of await pipelineCandidates(env, recipe, room.attempts, input.after)) {
       if (run.dispatched >= room.attempts) break;
       const result = await dispatchPipelineJob(env, {
         recipe: recipe.name,
