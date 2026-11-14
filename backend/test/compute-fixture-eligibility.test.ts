@@ -12,7 +12,7 @@
  *  (a) the declaration: the id list is the reserved band, never the absent id, never the never-dev-owned one;
  *  (b) the predicate under every environment, against the real migrated schema: eligible under
  *      `development`, `staging` and `test`; refused under `production`, the empty string, an unset binding and
- *      every misspelling; an exemplar, a neighbour in the band and a sandbox that is not the fixture refused
+ *      every misspelling; an exemplar, a neighbor in the band and a sandbox that is not the fixture refused
  *      everywhere; every other term still holds for the fixture;
  *  (c) the SQL form and the TypeScript form agree, in both environments, over generated rows;
  *  (d) the statements: production's three texts are the base commit's texts, character for character; the
@@ -104,7 +104,7 @@ const NON_PRODUCTION: Array<string | undefined> = ["development", "staging", "te
 
 /**
  * Everything that is production: the word itself, an empty value, an unset binding and the ways a value
- * can go wrong (a trailing space, another case, an abbreviation, a typo). An unrecognised value is
+ * can go wrong (a trailing space, another case, an abbreviation, a typo). An unrecognized value is
  * production.
  */
 const PRODUCTION_LIKE: Array<string | undefined> = [
@@ -243,7 +243,7 @@ describe("the fixture under each environment", () => {
     }
   });
 
-  test("a neighbour in the band, another prefix and a sandbox that is not the fixture are refused everywhere", async () => {
+  test("a neighbor in the band, another prefix and a sandbox that is not the fixture are refused everywhere", async () => {
     for (const id of [
       "nm099900", // the absent id, the floor of the band
       "nm099995",
@@ -427,7 +427,7 @@ describe("the statements", () => {
     }
   });
 
-  test("each call picks its text by the environment it is handed: production for anything unrecognised (MUTATION: always the widened text)", () => {
+  test("each call picks its text by the environment it is handed: production for anything unrecognized (MUTATION: always the widened text)", () => {
     for (const environment of PRODUCTION_LIKE) {
       const env = envOf(environment);
       expect([label(environment), pipelineEligibleSql(env)]).toEqual([
@@ -625,7 +625,7 @@ describe("a real dispatch, listing and claim", () => {
   });
 
   test("a job's recipe arguments name the environment's Zarr host, and the claim answers them (MUTATION: read the constant)", async () => {
-    const e = { ...env, ZARR_HOSTNAME: "test.nemar.org" };
+    const e = { ...env, ZARR_HOSTNAME: "zarr.staging.example" };
     await dataset(FIXTURE, { sandbox: true });
     const principal = await runner();
     const made = await dispatch(e, FIXTURE);
@@ -637,12 +637,12 @@ describe("a real dispatch, listing and claim", () => {
     );
     if (!decoded.ok) throw new Error("the launcher would refuse the launch specification");
     const spec = LaunchSpecSchema.parse(JSON.parse(decoded.text));
-    expect(spec.args.slice(-2)).toEqual(["--zarr-base", "https://test.nemar.org"]);
+    expect(spec.args.slice(-2)).toEqual(["--zarr-base", "https://zarr.staging.example"]);
     expect(spec.image.digest).toBe(RUNTIME_IMAGE_DIGEST);
   });
 
   test("a replay of the records rebuilds the same specification under the same environment, and another one under another (MUTATION: read the base from anywhere but the environment)", async () => {
-    const e = { ...env, ZARR_HOSTNAME: "test.nemar.org" };
+    const e = { ...env, ZARR_HOSTNAME: "zarr.staging.example" };
     await dataset(FIXTURE, { sandbox: true });
     // A store that is down for the dispatch's two writes: the job has a digest and no records.
     const real = fx.harness.records;
@@ -711,8 +711,8 @@ describe("the Zarr base of a recipe job", () => {
       "evil.example#x",
       "evil.example\n",
       "evil.example\\x",
-      "test.nemar.org".replace("t", "T"), // upper case is not a bare lower-case host name
-      "TEST.NEMAR.ORG",
+      "zarr.staging.example".replace("z", "Z"), // upper case is not a bare lower-case host name
+      "ZARR.STAGING.EXAMPLE",
       "-evil.example",
       "evil.example-",
       ".evil.example",
@@ -729,20 +729,20 @@ describe("the Zarr base of a recipe job", () => {
     expect(recipeZarrBase({ nonProduction: true, zarrHostname: undefined })).toBe(RECIPE_ZARR_BASE);
     expect(recipeZarrBase({ nonProduction: true, zarrHostname: null })).toBe(RECIPE_ZARR_BASE);
     // Production reads no ZARR_HOSTNAME at all.
-    for (const name of ["test.nemar.org", "zarr.nemar.org", "evil.example", undefined]) {
+    for (const name of ["zarr.staging.example", "zarr.nemar.org", "evil.example", undefined]) {
       expect(recipeZarrBase({ nonProduction: false, zarrHostname: name })).toBe(RECIPE_ZARR_BASE);
     }
   });
 
   test("outside production a bare lower-case host name gives https:// and the name", () => {
-    for (const name of ["test.nemar.org", "zarr.nemar.org", "localhost", "a", "a1-b.c2"]) {
+    for (const name of ["zarr.staging.example", "zarr.nemar.org", "localhost", "a", "a1-b.c2"]) {
       expect(RECIPE_ZARR_HOSTNAME_RE.test(name)).toBe(true);
       expect(recipeZarrBase({ nonProduction: true, zarrHostname: name })).toBe(`https://${name}`);
     }
   });
 
   test("the Worker's base is decided from ENVIRONMENT by the same classifier as the predicate: unset and misspelled are production", () => {
-    const zarrHostname = "test.nemar.org";
+    const zarrHostname = "zarr.staging.example";
     for (const environment of PRODUCTION_LIKE) {
       expect([
         label(environment),
@@ -752,7 +752,7 @@ describe("the Zarr base of a recipe job", () => {
     for (const environment of NON_PRODUCTION) {
       expect(
         pipelineZarrBase({ ENVIRONMENT: environment as EnvName, ZARR_HOSTNAME: zarrHostname }),
-      ).toBe("https://test.nemar.org");
+      ).toBe("https://zarr.staging.example");
       // No host configured: the production host.
       expect(pipelineZarrBase({ ENVIRONMENT: environment as EnvName })).toBe(RECIPE_ZARR_BASE);
       expect(pipelineZarrBase({ ENVIRONMENT: environment as EnvName, ZARR_HOSTNAME: "" })).toBe(
@@ -764,12 +764,12 @@ describe("the Zarr base of a recipe job", () => {
   test("the recipe job's vector carries the base the environment names, last (MUTATION: read RECIPE_ZARR_BASE in recipeJobSpec)", () => {
     const recipe = findRecipe("nemar-floor-zarr");
     if (recipe === null) throw new Error("no recipe");
-    const zarrHostname = "test.nemar.org";
+    const zarrHostname = "zarr.staging.example";
     const staging = recipeJobSpec(recipe, {
       ...SPEC_INPUT,
       env: { ENVIRONMENT: "staging", ZARR_HOSTNAME: zarrHostname },
     });
-    expect(staging.args.slice(-2)).toEqual(["--zarr-base", "https://test.nemar.org"]);
+    expect(staging.args.slice(-2)).toEqual(["--zarr-base", "https://zarr.staging.example"]);
     for (const environment of PRODUCTION_LIKE) {
       const spec = recipeJobSpec(recipe, {
         ...SPEC_INPUT,
@@ -792,7 +792,7 @@ describe("the Zarr base of a recipe job", () => {
       imageDigest: RUNTIME_IMAGE_DIGEST,
       attestation: SPEC_INPUT.zarrSource,
     };
-    for (const ok of [RECIPE_ZARR_BASE, "https://test.nemar.org"]) {
+    for (const ok of [RECIPE_ZARR_BASE, "https://zarr.staging.example"]) {
       expect(recipeZarrArguments({ ...base, zarrBase: ok }).slice(-2)).toEqual(["--zarr-base", ok]);
     }
     for (const bad of [
