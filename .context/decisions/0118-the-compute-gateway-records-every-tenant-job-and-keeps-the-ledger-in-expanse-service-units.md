@@ -414,6 +414,7 @@ The repository owner approved the fix on 2026-11-04: base64url without padding.
    The last clause of the A5 amendment's not-verified paragraph (whether Tapis passes a JSON launch specification, quotes and braces included, through an environment variable unaltered) is no longer the question: the value holds no quote or brace.
    Nothing is removed from this record; the earlier sentences stay as they were written.
 8. **Registration stays blocked.**
+   **[Read as the Tapis go-live block from 2026-11-14, so a runner-only deployment is not blocked by it: see the amendment of 2026-11-14, items 1 and 2.]**
    No application definition is registered with any tenant, and `COMPUTE_ENABLED` is not turned on anywhere, until the launcher's decoder lands in `nemar-process` (it implements the same format, with the golden vectors and the alphabet pinned on both sides) AND the owner items recorded on the launcher phase's pull request (`nemarOrg/nemar-process#9`) are settled.
    The order is: this change merges into the compute epic branch, then `nemar-process` re-pins the schema file to this merge commit and merges.
    The schema file `shared/contract/compute-launch.schema.json` changes in its descriptions and not its structure: it describes the document, says the document travels as base64url and claims nothing about the scheduler; `nemar-process` copies it byte for byte.
@@ -455,6 +456,7 @@ Not verified against a real tenant, and listed so nobody reads it as fact: how t
    `--image-digest` is the caller's claim and the recipe cannot check it.
    `verifyResults` compares the one value the recorded specification passes with the digest `provenance.json` says the launcher ran, and fails the job `result_verification_failed` with `image_digest_mismatch` (flagged for an administrator) on a difference, a missing flag, a malformed value or a second flag.
 5. **Eligibility is one predicate, decided from the D1 row on every dispatch** (ADR 0065): active, public, `anonymous = 0` (NULL is unknown, and unknown is not false), first published, not withdrawn, DOI not tombstoned, a version, `eeg` as a whole modality token, and a real `nm` or `on` id outside the reserved fixture band.
+   **[Outside production a second text of this predicate also admits the compute fixture `nm099996`: see the amendment of 2026-11-14, item 8.]**
    The request names a recipe, a dataset and optionally a version, and nothing else; a body with any other key is refused.
    A version with no data-plane tag, or one whose manifest holds more than 38,000 entries, is refused (`version_untagged`, `too_many_files`) and is never a candidate of the queue.
 6. **The daily dispatcher is dark three times over.**
