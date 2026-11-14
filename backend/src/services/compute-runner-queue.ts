@@ -194,17 +194,31 @@ export const RELEASE_CLAIM_SQL = `UPDATE compute_jobs SET
   WHERE id = ?1 AND executor = 'runner' AND lease_id = ?2 AND state = 'created' AND started_at IS NULL`;
 
 /**
- * Whether the launch specification can be built at all: the callback secret, the API base address and the
- * records bucket are set (what `buildLaunch` reads before the job). Asked BEFORE any claim, so a Worker that
- * is not configured claims nothing and burns no job's claims.
+ * Give a claim back and KEEP it counted: `?1` the job, `?2` the lease. For a fault that belongs to the job
+ * (its records cannot be read), so that three such claims end it `claims_exhausted` and it cannot stall the
+ * pool; only a Worker-wide gap is {@link RELEASE_CLAIM_SQL}'s uncounted give-back.
+ */
+export const RELEASE_CLAIM_COUNTED_SQL = `UPDATE compute_jobs SET
+    runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL
+  WHERE id = ?1 AND executor = 'runner' AND lease_id = ?2 AND state = 'created' AND started_at IS NULL`;
+
+/**
+ * Whether the launch specification can be built at all: the callback secret, the API base address, the records
+ * bucket and the runtime image are set (everything `buildLaunch` reads for a job from the Worker's own
+ * configuration). Asked BEFORE any claim, so a Worker that is not configured claims nothing and burns no
+ * job's claims, and no poll claims a job only to give it back.
  */
 export function launchConfigured(
-  env: Pick<Bindings, "PRESCREEN_CALLBACK_SECRET" | "API_BASE_URL" | "COMPUTE_RECORDS">,
+  env: Pick<
+    Bindings,
+    "PRESCREEN_CALLBACK_SECRET" | "API_BASE_URL" | "COMPUTE_RECORDS" | "COMPUTE_RUNTIME_IMAGE"
+  >,
 ): boolean {
   return (
     !!env.PRESCREEN_CALLBACK_SECRET &&
     (env.API_BASE_URL ?? "").trim() !== "" &&
-    !!env.COMPUTE_RECORDS
+    !!env.COMPUTE_RECORDS &&
+    readRuntimeImage(env).state === "ok"
   );
 }
 
@@ -261,8 +275,9 @@ const TERMINAL_FAILED = (
 /**
  * Claim up to `freeSlots` waiting jobs for a runner: one conditional UPDATE each ({@link CLAIM_RUNNER_JOB_SQL}),
  * the launch specification built for each winner and its digest written under the lease. A winner whose
- * specification cannot be built from configuration is given back; one that can never be built ends failed.
- * Never throws for a lost race: a claim that changes no row ends the loop.
+ * specification cannot be built for want of configuration is given back uncounted; one whose build THROWS is
+ * given back counted and the next job is tried; one that can never be built ends failed. Never throws: a
+ * claim that changes no row, or whose statement fails, ends the loop and the jobs already built are answered.
  */
 export async function claimRunnerJobs(
   env: Bindings,
@@ -277,22 +292,33 @@ export async function claimRunnerJobs(
   }
   for (let i = 0; i < freeSlots; i++) {
     const leaseId = randomHex(16);
-    const won = await db
-      .prepare(CLAIM_RUNNER_JOB_SQL)
-      .bind(
-        runner.id,
-        runner.backend,
-        leaseId,
-        crypto.randomUUID(),
-        RUNNER_MAX_CLAIMS,
-        runner.pool,
-        runner.cores,
-        runner.memory_mb,
-        runner.gpus,
-      )
-      .run();
+    let won: Awaited<ReturnType<D1PreparedStatement["run"]>>;
+    try {
+      won = await db
+        .prepare(CLAIM_RUNNER_JOB_SQL)
+        .bind(
+          runner.id,
+          runner.backend,
+          leaseId,
+          crypto.randomUUID(),
+          RUNNER_MAX_CLAIMS,
+          runner.pool,
+          runner.cores,
+          runner.memory_mb,
+          runner.gpus,
+        )
+        .run();
+    } catch (err) {
+      // The database failed on this statement: nothing is known to be claimed by it, and the jobs this call
+      // already built and wrote are still answered (a 500 would leave them leased for nothing).
+      console.error(`[compute-runner-queue] claim_failed class=${errorClassName(err)}`);
+      break;
+    }
     if ((won.meta?.changes ?? 0) !== 1) break;
-    // From here the claim is won and counted: whatever goes wrong on NEMAR's side gives it back uncounted.
+    // From here the claim is won and COUNTED. A Worker-wide gap (`unconfigured`) gives it back uncounted; a
+    // fault with THIS job (a store that throws for its records, again and again) is counted, so a poisoned
+    // row ends `claims_exhausted` after three claims instead of stalling the pool for ever, and the loop goes
+    // on to the next job.
     let jobId: string | null = null;
     try {
       const named = await db
@@ -333,17 +359,17 @@ export async function claimRunnerJobs(
         minutes: job.minutes,
       });
     } catch (err) {
-      // A store that threw (the records bucket) after the claim committed: the claim goes back uncounted, the
-      // jobs that did build are still answered, and the loop stops (the next job would meet the same fault).
+      // A store that threw (the records bucket) after the claim committed: the claim goes back, COUNTED, so
+      // the job can be claimed again (up to its limit) and the jobs that did build are still answered; the
+      // loop goes on to the next job.
       console.error(`[compute-runner-queue] claim_step_failed class=${errorClassName(err)}`);
       if (jobId !== null) {
         await db
-          .prepare(RELEASE_CLAIM_SQL)
+          .prepare(RELEASE_CLAIM_COUNTED_SQL)
           .bind(jobId, leaseId)
           .run()
           .catch(() => undefined);
       }
-      break;
     }
   }
   return { jobs };
@@ -584,9 +610,17 @@ export async function endRunnerJob(
   end: RunnerEnd,
 ): Promise<TerminalPlan | null> {
   const plan = await planOf(env, job, end);
-  if (!canTransitionCompute(job.state, plan.to)) return null;
-  const won = await commitTerminal(env, job, plan, await recordsRetentionYears(env));
-  return won ? plan : null;
+  return (await commitRunnerPlan(env, job, plan)) ? plan : null;
+}
+
+/** Commit a decided plan for the row as it was read (the state and the lease it carries are compared). */
+async function commitRunnerPlan(
+  env: Bindings,
+  job: ComputeJobRow,
+  plan: TerminalPlan,
+): Promise<boolean> {
+  if (!canTransitionCompute(job.state, plan.to)) return false;
+  return commitTerminal(env, job, plan, await recordsRetentionYears(env));
 }
 
 // --- Complete ------------------------------------------------------------------------------------
@@ -640,12 +674,29 @@ export async function completeRunnerJob(
     return { ok: true, state: job.state, after: null };
   }
 
-  const plan = await endRunnerJob(env, job, {
+  // The plan (and its verification, which is slow) is decided once. The commit compares the state it read, so
+  // a heartbeat that moved the row meanwhile (`running` to `archiving`) makes it lose; it is then tried once
+  // more with the row read again, while the lease is still this call's, so a runner that reported its end is
+  // not answered with a live state.
+  const decided = await planOf(env, job, {
     kind: "complete",
     exit: body.exit_number,
     code: body.launcher_failure_code,
     detail: body.launcher_detail,
   });
+  let won = await commitRunnerPlan(env, job, decided);
+  if (!won) {
+    const fresh = await getJob(env.DB, job.id);
+    if (
+      fresh !== null &&
+      fresh.runner_id === runner.id &&
+      fresh.lease_id === body.lease_id &&
+      !TERMINAL_STATES.has(fresh.state)
+    ) {
+      won = await commitRunnerPlan(env, fresh, decided);
+    }
+  }
+  const plan = won ? decided : null;
   await recordUsage();
   const after = await getJob(env.DB, job.id);
   // The row is no longer this runner's lease: another writer owns the job now, and nothing of this call stands.
@@ -677,20 +728,22 @@ export const CANCELLED_ROWS_SQL = `SELECT j.id FROM compute_jobs j
 
 /**
  * Unstarted claims whose lease expired and that have claims left: the claim is cleared and the job waits again
- * (`claim_attempts` stays counted). A claim whose OUTPUTS COMPLETED is never released (another runner would run
- * the job again over the first one's files): it is verified instead, through `unreported` (see
- * {@link UNREPORT_EXPIRED_SQL}). `?1` the most claims, `?2` the limit.
+ * (`claim_attempts` stays counted). A claim whose OUTPUTS WERE DECLARED (`results_bytes`) is never released,
+ * completed or not (another runner would run the job again over the first one's files, and its own declaration
+ * would be refused): it goes through `unreported` (see {@link UNREPORT_EXPIRED_SQL}). `?1` the most claims,
+ * `?2` the limit.
  */
 export const RELEASE_EXPIRED_CLAIMS_SQL = `UPDATE compute_jobs SET
     runner_claimed_at = NULL, runner_id = NULL, lease_id = NULL, lease_expires_at = NULL
   WHERE id IN (SELECT id FROM compute_jobs
                 WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NOT NULL
                   AND started_at IS NULL AND cancel_requested_at IS NULL
-                  AND outputs_completed_at IS NULL
+                  AND outputs_completed_at IS NULL AND results_bytes IS NULL
                   AND lease_expires_at <= datetime('now') AND claim_attempts < ?1
                 ORDER BY lease_expires_at ASC LIMIT ?2)
     AND executor = 'runner' AND state = 'created' AND runner_claimed_at IS NOT NULL
     AND started_at IS NULL AND cancel_requested_at IS NULL AND outputs_completed_at IS NULL
+    AND results_bytes IS NULL
     AND lease_expires_at <= datetime('now') AND claim_attempts < ?1`;
 
 /**
@@ -699,15 +752,16 @@ export const RELEASE_EXPIRED_CLAIMS_SQL = `UPDATE compute_jobs SET
  */
 export const EXHAUSTED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE executor = 'runner' AND state = 'created' AND cancel_requested_at IS NULL
-    AND claim_attempts >= ?1 AND outputs_completed_at IS NULL
+    AND claim_attempts >= ?1
     AND (runner_claimed_at IS NULL
-         OR (started_at IS NULL AND lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')))
+         OR (started_at IS NULL AND lease_expires_at IS NOT NULL AND lease_expires_at <= datetime('now')
+             AND outputs_completed_at IS NULL AND results_bytes IS NULL))
   ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?2`;
 
 /**
  * A started job whose lease expired is `unreported` and KEEPS its lease id (a partitioned runner may still
- * land its outputs); so is an unstarted claim whose outputs completed (it is verified, never released). Only a
- * job with no recorded cancel. `?1` the limit.
+ * land its outputs); so is an unstarted claim whose outputs were declared (verified if they completed, given up
+ * on like any silent job if not; never released). Only a job with no recorded cancel. `?1` the limit.
  */
 export const UNREPORT_EXPIRED_SQL = `UPDATE compute_jobs SET state = 'unreported'
   WHERE id IN (SELECT id FROM compute_jobs
@@ -715,12 +769,13 @@ export const UNREPORT_EXPIRED_SQL = `UPDATE compute_jobs SET state = 'unreported
                   AND lease_expires_at <= datetime('now')
                   AND ((state IN ('running', 'archiving') AND started_at IS NOT NULL)
                        OR (state = 'created' AND runner_claimed_at IS NOT NULL
-                           AND outputs_completed_at IS NOT NULL))
+                           AND (outputs_completed_at IS NOT NULL OR results_bytes IS NOT NULL)))
                 ORDER BY lease_expires_at ASC LIMIT ?1)
     AND executor = 'runner' AND cancel_requested_at IS NULL
     AND lease_expires_at <= datetime('now')
     AND ((state IN ('running', 'archiving') AND started_at IS NOT NULL)
-         OR (state = 'created' AND runner_claimed_at IS NOT NULL AND outputs_completed_at IS NOT NULL))`;
+         OR (state = 'created' AND runner_claimed_at IS NOT NULL
+             AND (outputs_completed_at IS NOT NULL OR results_bytes IS NOT NULL)))`;
 
 /**
  * `unreported` runner jobs with no recorded cancel that are due: their outputs completed (verify), their
@@ -750,25 +805,18 @@ export const DEADLINE_ROWS_SQL = `SELECT id FROM compute_jobs
 
 /**
  * Waiting runner rows whose records never landed (the dispatch answered `recordsWritten: false`), old enough
- * that the dispatch's own retry is over, in ROTATION (`examined_at`, stamped on every row the sweep examines),
- * so a row that can never be replayed does not hold the front of the line. `?1` the limit.
+ * that the dispatch's own retry is over, and not examined in the last {@link RUNNER_RECORDS_REPLAY_MINUTES}
+ * minutes: a replay of a Zarr row asks GitHub, so each row is tried once in that time (the throttle holds
+ * across calls, however often a runner polls), and the rows rotate (`examined_at`). `stale` is 1 for a row
+ * old enough to be given up on ({@link RUNNER_RECORDS_GIVE_UP_MINUTES}). `?1` the limit.
  */
-export const REPLAY_ROWS_SQL = `SELECT id FROM compute_jobs
+export const REPLAY_ROWS_SQL = `SELECT id,
+         (created_at <= datetime('now', '-${RUNNER_RECORDS_GIVE_UP_MINUTES} minutes')) AS stale
+  FROM compute_jobs
   WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NULL
     AND records_written_at IS NULL AND cancel_requested_at IS NULL
     AND created_at <= datetime('now', '-${RUNNER_RECORDS_REPLAY_MINUTES} minutes')
-  ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?1`;
-
-/**
- * Waiting rows whose records never landed and could not be replayed for {@link RUNNER_RECORDS_GIVE_UP_MINUTES}:
- * the specification can no longer be rebuilt as the recorded digest (the image or the commits changed), so the
- * job can never be claimed. They end `failed` `records_unavailable` (`records_unreadable`), which frees the slot
- * and the tuple. `?1` the limit.
- */
-export const RECORDS_GIVE_UP_ROWS_SQL = `SELECT id FROM compute_jobs
-  WHERE executor = 'runner' AND state = 'created' AND runner_claimed_at IS NULL
-    AND records_written_at IS NULL AND cancel_requested_at IS NULL
-    AND created_at <= datetime('now', '-${RUNNER_RECORDS_GIVE_UP_MINUTES} minutes')
+    AND (examined_at IS NULL OR examined_at <= datetime('now', '-${RUNNER_RECORDS_REPLAY_MINUTES} minutes'))
   ORDER BY examined_at ASC, created_at ASC, id ASC LIMIT ?1`;
 
 /** Terminal runner rows whose launcher files were never copied into the records, in rotation. `?1` the limit. */
@@ -853,19 +901,29 @@ const emptySweep = (): RunnerSweepResult => ({
  * commit attestation the source check gives NOW (a call to GitHub and the serving index). Null when any of it
  * is gone. Only a candidate: the caller accepts it only when its digest is the one the row holds.
  */
-async function rebuiltSpec(env: Bindings, jobId: string) {
+async function rebuiltSpec(
+  env: Bindings,
+  jobId: string,
+): Promise<
+  { kind: "spec"; spec: ReturnType<typeof recipeJobSpec> } | { kind: "mismatch" | "unreachable" }
+> {
   const stamp = await env.DB.prepare(
     "SELECT dataset_id, version, recipe FROM compute_pipeline_stamps WHERE job_id = ?1",
   )
     .bind(jobId)
     .first<{ dataset_id: string; version: string; recipe: string }>();
   const recipe = stamp === null ? null : findRecipe(stamp.recipe);
+  // A job no stamp names, or a recipe the registry lost, can never be rebuilt: a real mismatch.
+  if (stamp === null || recipe === null) return { kind: "mismatch" };
   const image = readRuntimeImage(env);
-  if (stamp === null || recipe === null || image.state !== "ok") return null;
+  if (image.state !== "ok") return { kind: "unreachable" };
   let zarrSource: ZarrCommitAttestation | null = null;
   if (recipe.input === "zarr") {
     const checked = await checkZarrSource(env, stamp.dataset_id, stamp.version);
-    if (!checked.ok) return null;
+    if (!checked.ok) {
+      // A source that could not be reached or read is not a mismatch: nothing is decided from it.
+      return { kind: checked.code === "zarr_source_mismatch" ? "mismatch" : "unreachable" };
+    }
     zarrSource = {
       sourceCommit: checked.sourceCommit,
       tagCommit: checked.tagCommit,
@@ -874,25 +932,53 @@ async function rebuiltSpec(env: Bindings, jobId: string) {
     };
   }
   try {
-    return recipeJobSpec(recipe, {
-      datasetId: stamp.dataset_id,
-      tag: stamp.version,
-      image: { ref: image.ref, digest: image.digest },
-      zarrSource,
-    });
+    return {
+      kind: "spec",
+      spec: recipeJobSpec(recipe, {
+        datasetId: stamp.dataset_id,
+        tag: stamp.version,
+        image: { ref: image.ref, digest: image.digest },
+        zarrSource,
+      }),
+    };
   } catch {
-    return null;
+    return { kind: "mismatch" };
   }
 }
 
+/** What a replay came to: the records are written, the rebuilt specification is not the recorded one, or nothing could be decided. */
+type ReplayOutcome = "written" | "mismatch" | "unreachable";
+
 /** Rebuild a waiting job's specification from its stamp, and finish its records if it is the one recorded. */
-async function replayRecords(env: Bindings, job: ComputeJobRow): Promise<boolean> {
-  const spec = await rebuiltSpec(env, job.id);
-  if (spec === null) return false;
-  const text = JSON.stringify(spec);
-  if ((await sha256Hex(new TextEncoder().encode(text))) !== job.spec_digest) return false;
-  return writeRecords(env, job, text, false);
+async function replayRecords(env: Bindings, job: ComputeJobRow): Promise<ReplayOutcome> {
+  const built = await rebuiltSpec(env, job.id);
+  if (built.kind !== "spec") return built.kind;
+  const text = JSON.stringify(built.spec);
+  if ((await sha256Hex(new TextEncoder().encode(text))) !== job.spec_digest) return "mismatch";
+  return (await writeRecords(env, job, text, false)) ? "written" : "unreachable";
 }
+
+/** `work`, or `"timeout"` once `ms` have passed (the work is not cancelled: its answer is ignored). */
+function bounded<T>(work: Promise<T>, ms: number): Promise<T | "timeout"> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve("timeout"), ms);
+    work.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** The longest one replay of records may take before it is given up for this call, in milliseconds. */
+export const RUNNER_REPLAY_BOUND_MS = 8_000;
+/** No replay is started once the slow phase has run this long, in milliseconds (a `waitUntil` has 30 seconds). */
+export const RUNNER_REPLAY_PHASE_MS = 20_000;
 
 export interface SweepOptions {
   /**
@@ -902,6 +988,9 @@ export interface SweepOptions {
    * `waitUntil`, so a runner's poll is answered after the cheap steps and never waits on R2.
    */
   defer?: (work: Promise<unknown>) => void;
+  /** Bounds of the replays of records, which ask GitHub and so run LAST in the slow phase (defaults above). */
+  replayBoundMs?: number;
+  replayPhaseMs?: number;
 }
 
 /**
@@ -928,6 +1017,9 @@ export async function sweepRunnerLeases(
 ): Promise<RunnerSweepResult> {
   const r = emptySweep();
   const slow: Array<() => Promise<void>> = [];
+  const replays: Array<() => Promise<void>> = [];
+  const replayBoundMs = options.replayBoundMs ?? RUNNER_REPLAY_BOUND_MS;
+  const replayPhaseMs = options.replayPhaseMs ?? RUNNER_REPLAY_PHASE_MS;
   // Slow work is queued and run at the end (deferred, or before returning).
   const later = (work: () => Promise<void>) => {
     slow.push(work);
@@ -976,22 +1068,33 @@ export async function sweepRunnerLeases(
   };
 
   try {
-    // 1. Records that never landed: replayed (slow), then given up on.
-    await each(await ids(REPLAY_ROWS_SQL), async (job) => {
-      later(async () => {
-        try {
-          if (await replayRecords(env, job)) r.replayed++;
-        } catch (err) {
-          r.errors++;
-          console.error(`[compute-runner-queue] replay_failed class=${errorClassName(err)}`);
-        }
-      });
-    });
-    await each(await ids(RECORDS_GIVE_UP_ROWS_SQL), async (job) => {
-      // The replay above had its chance (it runs after this call returns when deferred, and a row that was
-      // replayed has records): only a row still without them after the window is ended.
-      if (await finishNow(job, { kind: "records_unavailable" })) r.records_lost++;
-    });
+    // 1. Records that never landed: replayed (slow, and LAST in the slow phase: it asks GitHub), and given up
+    // on only when a replay in THIS call finds the specification can no longer be rebuilt.
+    const replayRows = (
+      await db
+        .prepare(REPLAY_ROWS_SQL)
+        .bind(RUNNER_SWEEP_BATCH)
+        .all<{ id: string; stale: number }>()
+    ).results;
+    if (replayRows.length >= RUNNER_SWEEP_BATCH) r.saturated++;
+    const stale = new Map(replayRows.map((x) => [x.id, x.stale === 1]));
+    await each(
+      replayRows.map((x) => x.id),
+      async (job) => {
+        replays.push(async () => {
+          const outcome = await bounded(replayRecords(env, job), replayBoundMs);
+          if (outcome === "written") {
+            r.replayed++;
+          } else if (outcome === "mismatch" && stale.get(job.id) === true) {
+            const plan = await endRunnerJob(env, job, { kind: "records_unavailable" });
+            if (plan !== null) {
+              r.records_lost++;
+              await afterTerminal(env, (await getJob(db, job.id)) ?? job, plan);
+            }
+          }
+        });
+      },
+    );
 
     // 2. A recorded cancel with nobody left to carry it out.
     await each(await ids(CANCELLED_ROWS_SQL), async (job) => {
@@ -1071,16 +1174,24 @@ export async function sweepRunnerLeases(
   }
 
   const runSlow = async () => {
-    for (const work of slow) {
+    const run = async (work: () => Promise<void>) => {
       try {
         await work();
       } catch (err) {
         r.errors++;
         console.error(`[compute-runner-queue] slow_step_failed class=${errorClassName(err)}`);
       }
+    };
+    for (const work of slow) await run(work);
+    // The replays come LAST, each under its own bound, and none starts after the phase's allowance: a slow
+    // GitHub never keeps a verification or a copy from running.
+    const phaseStart = Date.now();
+    for (const work of replays) {
+      if (Date.now() - phaseStart >= replayPhaseMs) break;
+      await run(work);
     }
   };
-  if (options.defer && slow.length > 0) {
+  if (options.defer && slow.length + replays.length > 0) {
     options.defer(
       runSlow().then(() => {
         const log = runnerLeaseLogLine(r);
