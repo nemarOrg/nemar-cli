@@ -4,7 +4,7 @@ This page is for the owner.
 It says what can be shown, what is live and what is recorded, what each part proves and does not prove, and what comes next.
 Times are Pacific.
 Every row rests on a gate that passed in recorded evidence; anything without a passed gate is under "does not prove yet".
-Last updated 2026-11-14, after DM-15 (the recorded run through a local NEMAR stack) passed.
+Last updated 2026-11-14, after DM-15 (the recorded run through a local NEMAR stack) passed and section 4 was rehearsed once.
 
 Key: DM-nn and PX-nn name cards of the plan.
 G1 the demo workstation runs the digest-pinned image with limits; G2 the control-plane tests; G3 the runner tests; G4 the image identity and signature; G5 the job record says `finished` on the runner; G6 provenance records are schema-valid; G7 the runner discarded its scratch; G8 the reader opens the recordings and matches the index.
@@ -40,10 +40,11 @@ Image: `ghcr.io/nemarorg/nemar-python@sha256:33922cad47b58098079905edb9a06e688e5
 | Control-plane tests | live, about 20 s after install | 2026-11-14 00:00, cli head | G2 |
 | Runner and launcher tests | recorded only, about 4 minutes | 2026-11-14 00:00, process head | G3 |
 | Runner against a stand-in in CI | recorded only | 2026-11-13 19:30, CI run on the process head | G3 |
-| Job through the local stack | live, about 25 s, only if the laptop stack and tunnel are up; else recorded | 2026-11-14 00:09:36 to 00:09:59, cli head, process head, image digest | G5 |
-| F1 outputs, discard and reader | live as above; else recorded | 2026-11-14 00:10, process head (validator), reader commit | G6, G7, G8 |
+| Job through the local stack | recorded only | 2026-11-14 00:09:36 to 00:09:59, cli head, process head, image digest | G5 |
+| F1 outputs, discard and reader | recorded only | 2026-11-14 00:10, process head (validator), reader commit | G6, G7, G8 |
 
 Every live row has a recorded fallback; the recordings are the operator's transcripts and plain-text logs.
+The commands of section 4 were run once as written in a rehearsal on 2026-11-14 (F2 and the tests passed; F1 was not run live).
 
 ## 3. What it proves and does not prove
 
@@ -62,7 +63,7 @@ What it proves, one line per passed gate:
 What it does not prove yet:
 
 - Staging or production: no staging or production NEMAR API, database, switch or deployment was touched; the recipe reads files from the public Zarr serving host, which is a production host, read only.
-- The F1 stack is a local test stack on the presenter's laptop, left running with the tunnel and the runner registration until Sunday, so the laptop must stay on; a job from a real account was not shown, nor a second workstation.
+- The F1 stack is a local test stack on the presenter's laptop, shown only from the recording, since a live rerun needs a fresh stack; a job from a real account was not shown, nor a second workstation.
 - That the runner verifies image signatures, or enforces per-job limits (its F1 log shows `enforce_limits` false).
 - Private data, and HPC or any scheduler.
 - The Zarr conversion migration: the conversion cron is untouched.
@@ -76,26 +77,25 @@ What it does not prove yet:
 ## 4. Run order for Sunday
 
 Set the placeholders once; every path and login is expanded locally, and an unset runner root makes each command that uses `${R:?}` fail instead of running.
-No key is needed; ssh access to the workstation is.
-Setup facts: the runner is registered as `demo_1` (`demo-1` fails the name pattern), and the runner directories are not group- or other-writable (the workstation's umask is 002, so the doctor first refused them).
+No key is needed for F2, which reads only public data; ssh access to the workstation is.
+F2 live takes about one minute with warm caches (a cold laptop needs GitHub and PyPI access for the reader and the validator, and a longer first run).
 
 ```bash
 W="<workstation login>"; R="<runner root on the workstation>"; E="<absolute evidence directory>"
 N="<nemar-process checkout at the process head>"; C="<nemar-cli checkout at the cli head>"
-S="<local stack state directory>"; H=33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a
+H=33922cad47b58098079905edb9a06e688e533c30e0a24e364c0306f0f14c431a
 IMG=ghcr.io/nemarorg/nemar-python@sha256:$H
-RUN="python3 -I -S -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module(\"nemar_runner\", run_name=\"__main__\", alter_sys=True)' '${R:?}/src/runner'"
 
-# Preflight: stack answers, tunnel reaches it from the workstation, runner files and doctor (no secret printed)
-curl -fsS http://127.0.0.1:8787/health; echo
-ssh "$W" "curl -fsS http://127.0.0.1:8787/health"; echo
-ssh "$W" "test -s ~/.config/nemar-runner/config.json && test -s ~/.config/nemar-runner/secret && echo config-and-secret-present; $RUN doctor"
+# F2 preflight: the workstation answers, Docker answers, the image digest is present (the output must show the digest above)
+ssh "$W" "docker info --format '{{.ServerVersion}}'"
+ssh "$W" "docker image inspect --format '{{json .RepoDigests}}' $IMG"
 
 # F2-a (DM-19 steps 2, 3): the recipe in the container, with exit code and wall time
 ssh "$W" "mkdir -p -m 0700 '${R:?}/manual/out'"
 ssh "$W" "start=\$(date +%s); docker run --rm --user \"\$(id -u):\$(id -g)\" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp --cpus 4 --memory 16384m --mount type=bind,src=${R:?}/manual/out,dst=/work/outputs $IMG nemar-recipe run nemar-floor-zarr --out /work/outputs/product --dataset-id nm000274 --dataset-version v1.0.5 --source-commit 64feed5210ebea128a8484acd3027f9551ff2d7e --tag-commit 91a8f5c9c83117b7e064cf7ae4eef1220b81cf57 --commit-equivalence metadata_only --image-digest sha256:$H --zarr-base https://zarr.nemar.org --commit-delta-path .nemar/availability-report.json --commit-delta-path .nemar/metadata.json; rc=\$?; echo EXIT=\$rc WALL=\$(( \$(date +%s)-start ))s"
 
 # F2-a (DM-19 step 4): copy back, validate, discard
+rm -rf "${E:?}/product"; mkdir -p "$E"
 scp -r "$W:${R:?}/manual/out/product" "$E/"
 cd "$N" && find "$E/product" -name '*signalJourney.json' | while read -r f; do uv run --group signaljourney python scripts/validate_signaljourney.py "$f"; echo "rc=$?"; done
 ssh "$W" "rm -rf '${R:?}/manual' && test ! -e '${R:?}/manual' && echo discarded"
@@ -107,29 +107,20 @@ done
 
 # F2-c (G2): the control-plane tests, live
 cd "$C" && bun install --frozen-lockfile && (cd backend && bun install --frozen-lockfile)
-cd "$C" && bun test backend/test/compute-runner-registry.test.ts backend/test/compute-runner-end-callers.test.ts backend/test/compute-runner-jobs.test.ts backend/test/compute-runner-queue.test.ts backend/test/compute-local-stack-runner.test.ts test/admin-compute-runners-cli.test.ts
-
-# F1 (DM-15 steps 7 to 9); the stack, tunnel and registration are already running, do not restart them
-export TEST_API_URL=http://127.0.0.1:8787 NEMAR_CONFIG_DIR="$E/cfg" NEMAR_NO_UPDATE_CHECK=1
-cd "$C" && bun run src/index.ts admin compute pipeline run nemar-floor-zarr --dataset nm000274@1.0.5 --executor runner --json
-J="<job id from the dispatch output>"
-ssh "$W" "$RUN once"
-cd "$C" && bun run src/index.ts admin compute jobs record "$J" --json
-cd "$C" && bun backend/scripts/compute-local-stack.ts outputs --state "$S" --job "$J" --to "$E/f1out"
-cd "$N" && find "$E/f1out" -name '*signalJourney.json' | while read -r f; do uv run --group signaljourney python scripts/validate_signaljourney.py "$f"; echo "rc=$?"; done
-ssh "$W" "find '${R:?}/jobs' -mindepth 1 | wc -l; grep -c scratch_discarded '${R:?}/runner.log'"
-# Only to rebuild F1 from nothing (DM-15 steps 2 and 3), each detached:
-#   cd "$C" && bun backend/scripts/compute-local-stack.ts serve --state "$S" --image "$IMG" --seed-from-catalog nm000274
-#   ssh -N -o ExitOnForwardFailure=yes -R 127.0.0.1:8787:127.0.0.1:8787 -R 127.0.0.1:8788:127.0.0.1:8788 "$W"
+cd "$C" && bun test backend/test/compute-runner-registry.test.ts backend/test/compute-runner-end-callers.test.ts backend/test/compute-runner-jobs.test.ts backend/test/compute-runner-queue.test.ts backend/test/compute-local-stack-runner.test.ts test/admin-compute-runners-cli.test.ts 2>&1 | tail -15
 ```
 
-Expected: the recipe summary shows 4 discovered and 4 succeeded, then `EXIT=0` and a wall time near 14 s; `rc=0` five times; `discarded`; `32 200.0` with the sample counts 160000, 96000, 160000, 96000; 254 tests pass; for F1, `finished`, `runner`, `local`, 22 output files, `rc=0` five times, then `0` and `1`.
+Expected: the recipe summary shows 4 discovered and 4 succeeded, then `EXIT=0` and a wall time near 14 s; `rc=0` five times; `discarded`; `32 200.0` with the sample counts 160000, 96000, 160000, 96000; the last test lines show 254 pass, 0 fail across 6 files.
+
+F1 is shown from the recording: the job record, the gate logs (G6 to G8) and the runner log, all from 2026-11-14 00:09 to 00:10.
+A live F1 needs a fresh stack, because a stack runs one live job per dataset version and the finished job still exists.
+It is not part of Sunday's live run.
 
 ## 5. If something fails on stage
 
 Switch in this order and say "recorded" aloud each time.
 1. Recipe run or network trouble: the recorded recipe transcript (2026-11-13 23:54, exit 0 in 14 s).
-2. Runner or stack trouble: the recorded F1 transcript and gate logs (2026-11-14 00:09 to 00:10).
+2. F1 itself: it is only ever shown as the recorded transcript and gate logs (2026-11-14 00:09 to 00:10).
 3. Validation or discard: the recorded logs (2026-11-13 23:55).
 4. Reader: the recorded reader transcript (23:55).
 5. Tests: the recorded test transcripts (2026-11-14 00:00).
@@ -144,4 +135,4 @@ A question outside the evidence gets "not shown yet", with the matching line fro
 - Phase Z (Zarr conversion becomes a pipeline): Z0, ADR 0123 proposed after the frontier review; then Z1, the formats contract file.
 - Phase R (readers): R0, the collaborator's reader epic arriving upstream with ADR 0120; then R1, the eegprep-lean engine transport plus one conformance suite for the three readers.
 
-Open items for the owner: the architecture slide named in plan section 3.4 does not exist yet; plan 3.1 and the DM-16 card still carry the old 250 Hz wording, and the owner's answer (Q18) governs this brief until the lead aligns them.
+Open items for the owner: the architecture slide named in plan section 3.4 does not exist yet.
