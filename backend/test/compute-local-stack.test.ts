@@ -49,6 +49,7 @@ import {
 } from "../../shared/contract/compute-runner";
 import {
   FIXTURE_DATASET_ID,
+  FIXTURE_SOURCE_COMMIT,
   type LocalStack,
   catalogRefusal,
   downloadOutputs,
@@ -59,6 +60,7 @@ import {
   usableSecret,
 } from "../scripts/compute-local-stack";
 import { createJob } from "../src/services/compute-jobs";
+import { recordKey } from "../src/services/compute-records";
 import { declaredKey, declaredText } from "../src/services/compute-verify";
 import { launchableSpec } from "./helpers/compute-lifecycle-fixture";
 import { loopbackHostAllowed, startComputeS3Standin } from "./helpers/compute-s3-standin";
@@ -958,6 +960,15 @@ describe("--seed-from-catalog", () => {
       const url = new URL(req.url);
       seen.push({ path: url.pathname, agent: req.headers.get("user-agent") });
       if (url.pathname === "/datasets/nm000500") return Response.json({ dataset: record });
+      // The serving host's index of the one dataset that has a serving copy (the Zarr source check's `S`).
+      if (url.pathname === "/zarr-index/nm000500/zarr/index.json") {
+        return Response.json({ source_commit: record.zarr_source_commit, store_count: 4 });
+      }
+      if (url.pathname === "/datasets/nm000503") {
+        return Response.json({
+          dataset: { ...record, dataset_id: "nm000503", zarr_source_commit: null },
+        });
+      }
       if (url.pathname === "/datasets/nm000501") {
         const { modalities, ...without } = record;
         return Response.json({ dataset: { ...without, dataset_id: "nm000501" } });
@@ -979,10 +990,15 @@ describe("--seed-from-catalog", () => {
       s3Port: 0,
       seedFromCatalog: ["nm000500"],
       catalogBase: `http://127.0.0.1:${api.port}`,
+      zarrIndexBase: `http://127.0.0.1:${api.port}/zarr-index`,
       log: (l) => lines.push(l),
     });
     try {
-      expect(seen).toEqual([{ path: "/datasets/nm000500", agent: "nemar-local-stack/0" }]);
+      // The public record, then the serving host's index (the copy's store count for the Zarr source check).
+      expect(seen).toEqual([
+        { path: "/datasets/nm000500", agent: "nemar-local-stack/0" },
+        { path: "/zarr-index/nm000500/zarr/index.json", agent: "nemar-local-stack/0" },
+      ]);
       const row = stack.db
         .query("SELECT * FROM datasets WHERE dataset_id = 'nm000500'")
         .get() as Loose;
@@ -993,6 +1009,9 @@ describe("--seed-from-catalog", () => {
         anonymous: 0,
         modalities: "eeg",
         zarr_source_commit: record.zarr_source_commit,
+        // The public record carries neither value; the index says the copy is there and how many stores it has.
+        zarr_status: "ready",
+        zarr_store_count: 4,
       });
       expect(row.description).toBeNull();
       expect(JSON.stringify(row)).not.toContain("NOT-COPIED");
@@ -1010,10 +1029,54 @@ describe("--seed-from-catalog", () => {
       expect(said).toContain(
         "zarr_source_commit, latest_version, latest_version_at, latest_version_doi, total_files",
       );
+      expect(said).toContain("zarr_status, zarr_store_count");
       expect(said).toContain("nm000500: eligible for a pipeline run");
     } finally {
       await stack.stop();
     }
+  }, 120_000);
+
+  test("the Zarr source check reads the public serving host and leaves GitHub at its public API (MUTATION: set the GitHub override; drop the index base)", async () => {
+    seen = [];
+    const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+    expect(seams.NEMAR_ZARR_INDEX_BASE).toBeUndefined();
+    // nm000503's record has no serving copy, so no index is read and no case needs the network.
+    const stack = await startLocalStack({
+      state: join(fresh("catalog-default-base"), "state"),
+      image: IMAGE,
+      port: 0,
+      s3Port: 0,
+      seedFromCatalog: ["nm000503"],
+      catalogBase: `http://127.0.0.1:${api.port}`,
+      log: () => {},
+    });
+    try {
+      expect(seams.NEMAR_ZARR_INDEX_BASE).toBe("https://zarr.nemar.org");
+      expect(seams.NEMAR_GITHUB_API_URL).toBeUndefined();
+      expect(seen.map((r) => r.path)).toEqual(["/datasets/nm000503"]);
+      const row = stack.db
+        .query("SELECT zarr_status, zarr_store_count FROM datasets WHERE dataset_id = 'nm000503'")
+        .get() as Loose;
+      expect(row).toEqual({ zarr_status: null, zarr_store_count: null });
+    } finally {
+      await stack.stop();
+    }
+    expect(seams.NEMAR_ZARR_INDEX_BASE).toBeUndefined();
+  }, 120_000);
+
+  test("--seed-fixture and --seed-from-catalog are not combined", async () => {
+    await expect(
+      startLocalStack({
+        state: join(fresh("catalog-and-fixture"), "state"),
+        image: IMAGE,
+        port: 0,
+        s3Port: 0,
+        seedFixture: true,
+        seedFromCatalog: ["nm000500"],
+        catalogBase: `http://127.0.0.1:${api.port}`,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/not combined/);
   }, 120_000);
 
   test("a restart over the same state leaves the dataset it already holds alone", async () => {
@@ -1026,6 +1089,7 @@ describe("--seed-from-catalog", () => {
       s3Port: 0,
       seedFromCatalog: ["nm000500"],
       catalogBase: `http://127.0.0.1:${api.port}`,
+      zarrIndexBase: `http://127.0.0.1:${api.port}/zarr-index`,
       log: (l) => lines.push(l),
     });
     try {
@@ -1042,6 +1106,36 @@ describe("--seed-from-catalog", () => {
     }
   }, 120_000);
 
+  test("a plain restart over a state holding a catalog dataset points the index read at the serving host, and a fixture start over it is refused (MUTATION: follow the flags)", async () => {
+    const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+    const stack = await startLocalStack({
+      state: catalogState,
+      image: IMAGE,
+      port: 0,
+      s3Port: 0,
+      zarrIndexBase: `http://127.0.0.1:${api.port}/zarr-index`,
+      log: () => {},
+    });
+    try {
+      // No seed flag at all: the state holds nm000500, so the seam is there.
+      expect(seams.NEMAR_ZARR_INDEX_BASE).toBe(`http://127.0.0.1:${api.port}/zarr-index`);
+      expect(seams.NEMAR_GITHUB_API_URL).toBeUndefined();
+    } finally {
+      await stack.stop();
+    }
+    await expect(
+      startLocalStack({
+        state: catalogState,
+        image: IMAGE,
+        port: 0,
+        s3Port: 0,
+        seedFixture: true,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/both the fixture and a catalog dataset/);
+    expect(seams.NEMAR_ZARR_INDEX_BASE).toBeUndefined();
+  }, 120_000);
+
   test("a field the public record does not serve stops the seed and names it", async () => {
     await expect(
       startLocalStack({
@@ -1051,6 +1145,7 @@ describe("--seed-from-catalog", () => {
         s3Port: 0,
         seedFromCatalog: ["nm000501"],
         catalogBase: `http://127.0.0.1:${api.port}`,
+        zarrIndexBase: `http://127.0.0.1:${api.port}/zarr-index`,
         log: () => {},
       }),
     ).rejects.toThrow(/does not serve modalities/);
@@ -1062,9 +1157,119 @@ describe("--seed-from-catalog", () => {
         s3Port: 0,
         seedFromCatalog: ["nm000502"],
         catalogBase: `http://127.0.0.1:${api.port}`,
+        zarrIndexBase: `http://127.0.0.1:${api.port}/zarr-index`,
         log: () => {},
       }),
     ).rejects.toThrow(/answered 404/);
+  }, 120_000);
+});
+
+// --- The Zarr source check on the fixture -----------------------------------------------------------------
+
+describe("--seed-fixture: a Zarr recipe is dispatched with the exact verdict", () => {
+  test("the stand-in names the fixture version's commit as the tag's and the index's, through the real route (MUTATION: another commit for the index)", async () => {
+    const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+    expect([seams.NEMAR_GITHUB_API_URL, seams.NEMAR_ZARR_INDEX_BASE]).toEqual([
+      undefined,
+      undefined,
+    ]);
+    const stack = await startLocalStack({
+      state: join(fresh("fixture-zarr"), "state"),
+      image: IMAGE,
+      port: 0,
+      s3Port: 0,
+      seedFixture: true,
+      log: () => {},
+    });
+    try {
+      // Loopback only: the stack never reaches GitHub or the serving host for its fixture.
+      expect(new URL(seams.NEMAR_GITHUB_API_URL as string).hostname).toBe("127.0.0.1");
+      expect(new URL(seams.NEMAR_ZARR_INDEX_BASE as string).hostname).toBe("127.0.0.1");
+      const row = stack.db
+        .query(
+          "SELECT zarr_source_commit, zarr_status, zarr_store_count FROM datasets WHERE dataset_id = ?1",
+        )
+        .get(FIXTURE_DATASET_ID) as Loose;
+      expect(row).toEqual({
+        zarr_source_commit: FIXTURE_SOURCE_COMMIT,
+        zarr_status: "ready",
+        zarr_store_count: 1,
+      });
+      const made = await call(stack.url, "POST", "/admin/compute/pipeline/run", {
+        bearer: stack.keys.admin,
+        body: { recipe: "nemar-floor-zarr", dataset: FIXTURE_DATASET_ID, executor: "runner" },
+      });
+      expect(made.status).toBe(201);
+      const jobId = made.body.results[0].job_id as string;
+      const spec = await (
+        (await stack.env.COMPUTE_RECORDS.get(recordKey(jobId, "spec.json"))) as R2ObjectBody
+      ).text();
+      const args = JSON.parse(spec).args as string[];
+      expect(args.slice(args.indexOf("--source-commit"), args.indexOf("--image-digest"))).toEqual([
+        "--source-commit",
+        FIXTURE_SOURCE_COMMIT,
+        "--tag-commit",
+        FIXTURE_SOURCE_COMMIT,
+        "--commit-equivalence",
+        "exact",
+      ]);
+    } finally {
+      await stack.stop();
+    }
+    expect([seams.NEMAR_GITHUB_API_URL, seams.NEMAR_ZARR_INDEX_BASE]).toEqual([
+      undefined,
+      undefined,
+    ]);
+  }, 120_000);
+});
+
+describe("the Zarr source check's seams follow the state database", () => {
+  const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+  const base = (state: string) => ({ state, image: IMAGE, port: 0, s3Port: 0, log: () => {} });
+
+  test("a plain restart over a state holding the fixture starts the stand-in again; a catalog seed over it is refused (MUTATION: follow the flags)", async () => {
+    const state = join(fresh("seams-fixture"), "state");
+    const first = await startLocalStack({ ...base(state), seedFixture: true });
+    await first.stop();
+    const again = await startLocalStack(base(state));
+    try {
+      expect(new URL(seams.NEMAR_GITHUB_API_URL as string).hostname).toBe("127.0.0.1");
+      expect(new URL(seams.NEMAR_ZARR_INDEX_BASE as string).hostname).toBe("127.0.0.1");
+      const made = await call(again.url, "POST", "/admin/compute/pipeline/run", {
+        bearer: again.keys.admin,
+        body: { recipe: "nemar-floor-zarr", dataset: FIXTURE_DATASET_ID, executor: "runner" },
+      });
+      expect(made.status).toBe(201);
+    } finally {
+      await again.stop();
+    }
+    await expect(
+      startLocalStack({
+        ...base(state),
+        seedFromCatalog: ["nm000500"],
+        catalogBase: "http://127.0.0.1:1",
+      }),
+    ).rejects.toThrow(/both the fixture and a catalog dataset/);
+    expect([seams.NEMAR_GITHUB_API_URL, seams.NEMAR_ZARR_INDEX_BASE]).toEqual([
+      undefined,
+      undefined,
+    ]);
+  }, 180_000);
+
+  test("a state holding another dataset of the live range is refused, never read from the network (MUTATION: drop the check)", async () => {
+    const state = join(fresh("seams-live"), "state");
+    const first = await startLocalStack(base(state));
+    first.db.run(
+      "INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility) VALUES ('nm000104', 'x', 1, 'active', 'public')",
+    );
+    await first.stop();
+    await expect(startLocalStack(base(state))).rejects.toThrow(
+      /state holds nm000104: a live dataset/,
+    );
+    expect([seams.NEMAR_GITHUB_API_URL, seams.NEMAR_ZARR_INDEX_BASE]).toEqual([
+      undefined,
+      undefined,
+    ]);
   }, 120_000);
 });
 

@@ -431,14 +431,14 @@ export async function mintComputeObserverRun(): Promise<ComputeObserverRunRespon
  */
 export function computeRefusalCode(
   err: unknown,
-): { code: string; blockedBy: string[] } | undefined {
+): { code: string; blockedBy: string[]; reason?: string } | undefined {
   if (!(err instanceof ApiError)) return undefined;
   const body = err.rawBody;
   if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
-  const { code, blocked_by: blocked } = body as Record<string, unknown>;
+  const { code, blocked_by: blocked, reason } = body as Record<string, unknown>;
   if (typeof code !== "string") return undefined;
   const blockedBy = Array.isArray(blocked)
     ? blocked.filter((t): t is string => typeof t === "string")
     : [];
-  return { code, blockedBy };
+  return { code, blockedBy, ...(typeof reason === "string" ? { reason } : {}) };
 }

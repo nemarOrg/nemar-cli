@@ -41,6 +41,10 @@ import {
   seedPipelinesAccount,
 } from "../backend/test/helpers/compute-pipeline-fixture";
 import { setPolicy } from "../backend/test/helpers/compute-seed";
+import {
+  type GithubCompareStandin,
+  startGithubCompareStandin,
+} from "../backend/test/helpers/github-compare-standin";
 import { DEFAULT_COMPUTE_POLICY } from "../shared/contract/compute";
 import {
   ComputePipelineRunResponseSchema,
@@ -550,11 +554,30 @@ describe("what is printed", () => {
 
 describe("run --executor runner (portable compute, ADR 0121)", () => {
   const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+  // The Zarr source check reads GitHub and the serving index (external services, a real loopback server) and
+  // honors its index seam only outside production: the Worker runs as `development` for these cases.
+  const ZARR_WORKER: Partial<Bindings> = { ENVIRONMENT: "development" };
+  const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+  let github: GithubCompareStandin;
+  const previousSeams = { github: seams.NEMAR_GITHUB_API_URL, index: seams.NEMAR_ZARR_INDEX_BASE };
+  beforeAll(() => {
+    github = startGithubCompareStandin();
+    seams.NEMAR_GITHUB_API_URL = github.url;
+    seams.NEMAR_ZARR_INDEX_BASE = github.indexBase;
+  });
+  afterAll(() => {
+    github.stop();
+    seams.NEMAR_GITHUB_API_URL = previousSeams.github;
+    seams.NEMAR_ZARR_INDEX_BASE = previousSeams.index;
+  });
 
   async function zarrWorld() {
     const env = fx.env();
     await seedPipelinesAccount(env);
     await seedEegDataset(env, "nm000104");
+    github.reset();
+    github.tag("nm000104", "v1.0.0", COMMIT);
+    github.index("nm000104", { source_commit: COMMIT, store_count: 3 });
     await env.DB.prepare(
       "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = 'ready', zarr_store_count = 3 WHERE dataset_id = 'nm000104'",
     )
@@ -578,7 +601,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
   });
 
   test("a dry run says runner, no SU, the runners' room and whether the switch is on; nothing is written (MUTATION: drop the runner room line)", async () => {
-    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1" };
     const env = await zarrWorld();
     const r = await runCli("admin", [
       "run",
@@ -617,7 +640,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
   });
 
   test("a live run makes a runner job that waits: no hold, no ledger entry, and says so (MUTATION: drop the (runner) label)", async () => {
-    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1" };
     const env = await zarrWorld();
     const ledger = await count(env, "compute_ledger");
     const r = await runCli("admin", [
@@ -652,7 +675,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
       delete: (key: string) => real.delete(key),
       list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
     } as unknown as R2Bucket;
-    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1", COMPUTE_RECORDS: failing };
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1", COMPUTE_RECORDS: failing };
     await zarrWorld();
     const r = await runCli("admin", [
       "run",
@@ -668,7 +691,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
   });
 
   test("a copy that is not ready is refused with its word and nothing is made", async () => {
-    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1" };
     const env = await zarrWorld();
     await env.DB.prepare(
       "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = 'nm000104'",
@@ -683,6 +706,36 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
     ]);
     expect(r.exitCode).toBe(1);
     expect(r.stderr + r.stdout).toContain("zarr_copy_not_ready");
+    expect(await count(env, "compute_jobs")).toBe(0);
+  });
+
+  test("a copy that could not be shown to be the tagged version's says why, live, in a dry run and as dry-run JSON (MUTATION: drop the reason from the CLI)", async () => {
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1" };
+    const env = await zarrWorld();
+    // The index was built from another commit and GitHub's compare says the copy is behind the tag.
+    const other = "89abcdef0123456789abcdef0123456789abcdef";
+    github.index("nm000104", { source_commit: other, store_count: 3 });
+    github.compare("nm000104", COMMIT, other, { status: "behind", behind_by: 1, files: [] });
+    const args = ["run", "nemar-floor-zarr", "--dataset", "nm000104", "--executor", "runner"];
+    const live = await runCli("admin", args);
+    expect(live.exitCode).toBe(1);
+    expect(live.stderr + live.stdout).toContain("zarr_source_mismatch, reason compare_behind");
+    const dry = await runCli("admin", [...args, "--dry-run"]);
+    expect(dry.exitCode).toBe(0);
+    expect(dry.stdout).toContain("blocked: zarr_source_mismatch, reason compare_behind");
+    // Unverifiable: the same two, with its own reasons.
+    github.index("nm000104", { http: 502 });
+    const unread = await runCli("admin", args);
+    expect(unread.exitCode).toBe(1);
+    expect(unread.stderr + unread.stdout).toContain(
+      "zarr_source_unverifiable, reason index_unreadable",
+    );
+    const asJson = await runCli("admin", [...args, "--dry-run", "--json"]);
+    expect(asJson.exitCode).toBe(0);
+    expect(JSON.parse(asJson.stdout).blocked).toMatchObject({
+      code: "zarr_source_unverifiable",
+      reason: "index_unreadable",
+    });
     expect(await count(env, "compute_jobs")).toBe(0);
   });
 
@@ -702,7 +755,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
   });
 
   test("a recipe on an executor it does not list exits 1 as invalid_body naming executor", async () => {
-    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    workerEnv = { ...ZARR_WORKER, COMPUTE_RUNNERS_ENABLED: "1" };
     await zarrWorld();
     const r = await runCli("admin", ["run", "nemar-floor-zarr", "--dataset", "nm000104"]);
     expect(r.exitCode).toBe(1);

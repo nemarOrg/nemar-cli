@@ -28,7 +28,8 @@
  * TWO INPUTS, TWO EXECUTORS (portable compute, ADR 0121, plan D12). A recipe's `input` is `bids` (the
  * dataset staged at `/data/<id>`, the arguments above) or `zarr` (nothing staged: the recipe streams the
  * dataset's Zarr serving copy from `--zarr-base`, the one origin it may open, and the Worker passes the commit
- * that copy was built from as `--source-commit`; `recipeZarrArguments`). `executors` lists where a recipe may
+ * that copy was built from, the version's tag commit and how they are equivalent as `--source-commit`,
+ * `--tag-commit`, `--commit-equivalence` and `--commit-delta-path`; `recipeZarrArguments`). `executors` lists where a recipe may
  * be dispatched: `tapis` (an allocation, a hold) or `runner` (a registered runner pulls it, no hold). A
  * dispatch to an executor a recipe does not list is refused.
  */
@@ -229,6 +230,12 @@ export const RECIPE_ZARR_BASE = "https://zarr.nemar.org";
 
 /** The flag that carries the commit of the dataset repository the Zarr serving copy was built from. */
 export const RECIPE_SOURCE_COMMIT_FLAG = "--source-commit";
+/** The flag that carries the commit of the version's tag. */
+export const RECIPE_TAG_COMMIT_FLAG = "--tag-commit";
+/** The flag that carries how the two commits are equivalent: `exact` or `metadata_only`. */
+export const RECIPE_COMMIT_EQUIVALENCE_FLAG = "--commit-equivalence";
+/** The repeatable flag that carries one path changed between the tag commit and the source commit. */
+export const RECIPE_COMMIT_DELTA_PATH_FLAG = "--commit-delta-path";
 
 const SOURCE_COMMIT_RE = /^[0-9a-f]{40}$/;
 
@@ -237,23 +244,49 @@ export const isSourceCommit = (value: unknown): value is string =>
   typeof value === "string" && SOURCE_COMMIT_RE.test(value);
 
 /**
+ * What the Worker attests of the commit a Zarr serving copy was built from (`checkZarrSource` decides it):
+ * `exact` (the source commit is the tag commit, no path) or `metadata_only` (they differ, and every path
+ * between them is named and lies under `.nemar/` or `.github/`). The recipe validates the same agreement and
+ * exits 2 on a contradiction, so a vector that disagrees with itself is a programming error here.
+ */
+export interface ZarrCommitAttestation {
+  /** The commit the serving index was built from: 40 lowercase hex digits. */
+  sourceCommit: string;
+  /** The commit of the version's tag: 40 lowercase hex digits. */
+  tagCommit: string;
+  equivalence: "exact" | "metadata_only";
+  /** The changed paths in the compare's order; empty for `exact`, at least one for `metadata_only`. */
+  deltaPaths: readonly string[];
+}
+
+/**
  * The arguments of a Zarr-input recipe job over one dataset version: no dataset directory (nothing is
- * staged), the product directory, the identity the recipe must not guess, the commit the serving copy is
- * said to describe, the image digest, and the one origin the recipe may read. The order is part of the
- * contract (the job's `spec.json` records it). A commit that is not 40 lowercase hex digits is a
+ * staged), the product directory, the identity the recipe must not guess, the commit attestation (the source
+ * commit, the tag commit, the equivalence and one `--commit-delta-path` per changed path), the image digest,
+ * and the one origin the recipe may read. The order is part of the contract (the job's `spec.json` records
+ * it). A commit that is not 40 lowercase hex digits, or an attestation that contradicts itself, is a
  * programming error, never passed on.
  */
 export function recipeZarrArguments(input: {
   datasetId: string;
   /** The data-plane tag of the version (`v1.0.2` or `latest`). */
   tag: string;
-  /** The commit passed as `--source-commit`: 40 lowercase hex digits. */
-  sourceCommit: string;
+  attestation: ZarrCommitAttestation;
   /** The image digest, `sha256:<64 hex>`. */
   imageDigest: string;
 }): string[] {
-  if (!isSourceCommit(input.sourceCommit)) {
-    throw new RangeError("a source commit is 40 lowercase hex digits");
+  const { sourceCommit, tagCommit, equivalence, deltaPaths } = input.attestation;
+  if (!isSourceCommit(sourceCommit) || !isSourceCommit(tagCommit)) {
+    throw new RangeError("a source commit and a tag commit are 40 lowercase hex digits");
+  }
+  if (equivalence === "exact" && (tagCommit !== sourceCommit || deltaPaths.length > 0)) {
+    throw new RangeError("an exact attestation has one commit and no delta path");
+  }
+  if (equivalence === "metadata_only" && (tagCommit === sourceCommit || deltaPaths.length === 0)) {
+    throw new RangeError("a metadata_only attestation has two commits and names the changed paths");
+  }
+  if (equivalence !== "exact" && equivalence !== "metadata_only") {
+    throw new RangeError("the commit equivalence is exact or metadata_only");
   }
   return [
     "--out",
@@ -263,7 +296,12 @@ export function recipeZarrArguments(input: {
     "--dataset-version",
     input.tag,
     RECIPE_SOURCE_COMMIT_FLAG,
-    input.sourceCommit,
+    sourceCommit,
+    RECIPE_TAG_COMMIT_FLAG,
+    tagCommit,
+    RECIPE_COMMIT_EQUIVALENCE_FLAG,
+    equivalence,
+    ...deltaPaths.flatMap((path) => [RECIPE_COMMIT_DELTA_PATH_FLAG, path]),
     RECIPE_IMAGE_DIGEST_FLAG,
     input.imageDigest,
     "--zarr-base",
