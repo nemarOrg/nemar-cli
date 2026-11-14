@@ -670,8 +670,10 @@ async function replay(
   specDigest: string,
   specText: string,
   uploads: boolean,
+  executor: ComputeExecutor = "tapis",
 ): Promise<CreateJobResult> {
-  if (existing.spec_digest !== specDigest) {
+  // The same key for a request of another executor is another request, whatever its specification says.
+  if (existing.spec_digest !== specDigest || existing.executor !== executor) {
     throw new ComputeJobError(
       "idempotency_conflict",
       "that idempotency key was used for a different request",
@@ -744,7 +746,7 @@ async function createRunnerJob(env: ComputeJobsEnv, plan: RunnerJobPlan): Promis
       .prepare(JOB_BY_KEY_SQL)
       .bind(args.accountId, args.key)
       .first<ComputeJobRow>();
-    return existing ? replay(env, existing, specDigest, specText, uploads) : null;
+    return existing ? replay(env, existing, specDigest, specText, uploads, "runner") : null;
   };
 
   const jobId = newJobId();
@@ -865,7 +867,7 @@ export async function createJob(
       .prepare(JOB_BY_KEY_SQL)
       .bind(args.accountId, args.key)
       .first<ComputeJobRow>();
-    if (existing) return replay(env, existing, specDigest, specText, uploads);
+    if (existing) return replay(env, existing, specDigest, specText, uploads, args.executor);
   }
 
   // Before any hold exists: what the owner's policy and the launch itself allow.
