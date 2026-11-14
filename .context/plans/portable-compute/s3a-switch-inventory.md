@@ -1,5 +1,10 @@
 # S3a: everything the compute switches open, read from the code (input to Q6)
 
+> Status, 2026-11-14 (S2 fix round 3, read at `23edcfa8`): rows G1, G2 and G4 in configuration B, the U1 clause for B, section 8's "not safe" verdict and condition C1 describe the behavior before card S3c (#2168), which has landed in this epic.
+> A Tapis-executor run is now refused `tapis_unconfigured` (503) before any write, at the route (`backend/src/routes/admin/compute-pipeline.ts:329-330`), at the service (`backend/src/services/compute-pipeline.ts:639-640`) and as a word that ends a dispatcher run (`ENDS_THE_RUN`, `backend/src/services/compute-pipeline-dispatch.ts:83`), so G1, G2 and G4 fail closed in B as in A and C1 is met wherever the epic is deployed.
+> Every line number below is anchored at `02113b16` (section 1) and has moved since; re-read a line at the head you rely on.
+> One omission is corrected in section 9: the Zarr source check makes outbound reads of its own, so the status health call is not the only outbound request.
+
 Card S3a of the portable compute plan, read-only.
 It lists every path that `COMPUTE_ENABLED`, `COMPUTE_RUNNERS_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED` open, every compute path that runs in production whatever they say, and what each does with no Tapis credential, no ACCESS key and no runtime image.
 Abbreviations: Architecture Decision Record (ADR); pull request (PR); Structured Query Language (SQL); Cloudflare's SQLite database (D1); Cloudflare's object store (R2); Open Container Initiative (OCI); the NSF program Advanced Cyberinfrastructure Coordination Ecosystem: Services & Support (ACCESS); service unit (SU).
@@ -227,7 +232,7 @@ No probe names a production host or key; only P1 and P2 can dispatch, and only o
 **Stop condition met under one precondition (the manager was notified on 2026-11-14).**
 In configuration B, G1 and G2 (and G4, if its switch were set) write a ledger hold outside the job row when the `pipelines` pool holds a grant, and the hold never times out while Tapis is unconfigured.
 Under that precondition this is **not safe**, on staging as in production.
-Every other gated path fails closed (G1 and G2 in A, G4 to G7) or is the runner path S3 is for (G3, G8 to G12), and without a Tapis credential no path sends a job, a credential or a launch value to a tenant (the status route's unauthenticated health call goes out only when `TAPIS_BASE_URL` is set).
+Every other gated path fails closed (G1 and G2 in A, G4 to G7) or is the runner path S3 is for (G3, G8 to G12), and without a Tapis credential no path sends a job, a credential or a launch value to a tenant (the status route's unauthenticated health call goes out only when `TAPIS_BASE_URL` is set; it is not the only outbound request, because the Zarr source check also reads GitHub and the serving index, section 9).
 
 **Verdict: safe with these extra conditions**, on top of the bar of card S3a:
 
@@ -246,3 +251,13 @@ This reading agrees with the advisor's, with the conditions above added.
 Notes for other owners: `GET /admin/compute/status` should report the runners switch (S6 or a follow-up; today only a runner dry run shows it); `BIND_TAPIS_JOB_SQL` and `handleUnbound` should select `executor = 'tapis'` (C4); a `created` Tapis job with no Tapis configuration should time out (the order at `backend/src/services/compute-lifecycle.ts:1624-1628`, also on #2116's head).
 
 Not verified: anything in production or staging (no switch, secret, policy or grant was read; the owner commands are in sections 5 and 6); production's cron behavior is read from `main`'s code, not from its logs; the rollback Worker's handling of runner rows was read, not run.
+
+## 9. Omission: the Zarr source check's outbound reads
+
+Added at S2 fix round 3, from the integration review.
+Section 8 names the status route's health call as the outbound request a Worker with no Tapis credential makes; it is not the only one.
+`checkZarrSource` (`backend/src/services/zarr-source-check.ts:489`) reads GitHub and the Zarr serving index for a recipe whose input is `zarr` (today `nemar-floor-zarr`, runner only, `shared/compute-recipes.ts:135`): up to three GitHub requests (5 seconds each, no retry) and one index read (10 seconds) per call, 20 seconds at most.
+It runs at three points: a live runner dispatch (`resolveRun`, `backend/src/services/compute-pipeline.ts:531`, behind `COMPUTE_ENABLED` and `COMPUTE_RUNNERS_ENABLED`); a runner dry run over a named dataset (the same `resolveRun`, reached from `pipelineDryRun`, which the route answers before it reads `COMPUTE_ENABLED`, so it needs no switch); and the claim of a Zarr runner job (`backend/src/services/compute-runner-queue.ts:952`, behind `COMPUTE_RUNNERS_ENABLED`).
+Each call goes to GitHub and to the serving index in the object store, never to a Tapis tenant.
+The requests carry the datasets organization's installation token where the GitHub App is configured, are unauthenticated outside production without it, and in production without it nothing is requested (`zarr_source_unverifiable`); a refusal writes nothing.
+So section 8's statement holds for tenants, and a reading that counts only the status health call as outbound does not: count these reads, and count the dry run as one that needs no switch.
