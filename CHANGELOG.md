@@ -28,6 +28,8 @@ It carries no migration and sets no Worker variable or secret, and it changes no
   `platform_busy` stops a pipeline run and ends the daily dispatcher's run; `pipeline run` and its dry run are clamped to the tenant room.
   `nemar admin compute status` prints the occupied slots by class and the attention count `tenant_over_ceiling`, and the live tenant sweep logs `tenant_live` and `occupied` and warns when the live count passes the ceiling.
   The ceiling is checked on both database engines in tests (bun:sqlite and Miniflare D1), with racing requests for the last slots.
+- Registered workstation runners pull pipeline jobs over HTTPS behind the dark switch `COMPUTE_RUNNERS_ENABLED`.
+- A job records its executor and accounting class, and runner jobs write no ledger entry.
 
 ### Known limits
 
