@@ -19,7 +19,12 @@
 
 import { z } from "zod";
 import { PIPELINE_STAMP_STATES } from "../compute-recipes.js";
-import { COMPUTE_REFUSAL_STATUS, type ComputeRefusalCode } from "../compute-state.js";
+import {
+  COMPUTE_REFUSAL_STATUS,
+  type ComputeExecutor,
+  type ComputeRefusalCode,
+  RUNNER_REFUSAL_STATUS,
+} from "../compute-state.js";
 import type { ComputePool } from "./compute.js";
 
 // --- Words -----------------------------------------------------------------------------------
@@ -398,6 +403,19 @@ export const ComputeJobViewSchema = z
     results_verified: z.boolean(),
     results_bytes: z.number().int().nullable(),
     records_copied: z.boolean(),
+    /**
+     * Portable compute (ADR 0121): who runs the job and how it is accounted, and, for a runner job, the
+     * runner's claim and the usage it measured (a runner's own figures, never SU). Optional so a CLI that
+     * reads an older Worker still parses its answer; a Tapis job shows `tapis` and `su` and nulls.
+     */
+    executor: z.string().optional(),
+    accounting: z.string().optional(),
+    runner_backend: nullableString.optional(),
+    runner_id: nullableString.optional(),
+    runner_claimed_at: nullableString.optional(),
+    runner_wall_seconds: z.number().int().nullable().optional(),
+    runner_cpu_seconds: z.number().int().nullable().optional(),
+    runner_max_rss_mb: z.number().int().nullable().optional(),
   })
   .passthrough();
 
@@ -471,6 +489,11 @@ export const COMPUTE_PIPELINE_STATUS_PAGE_MAX = 200;
  */
 export interface ComputePipelineRunRequest {
   recipe: string;
+  /**
+   * Who runs the job: `tapis` (the default) or `runner` (ADR 0121). A recipe lists the executors it may
+   * be dispatched to, and a runner run names one dataset, not the queue.
+   */
+  executor?: ComputeExecutor;
   dataset?: string;
   version?: string;
   eligible?: boolean;
@@ -482,6 +505,7 @@ export interface ComputePipelineRunRequest {
  * The refusal words only a pipeline run has. Their statuses are declared here; every other word a run
  * is refused with is one of the ledger's (`COMPUTE_REFUSAL_CODES`) and keeps the status
  * `COMPUTE_REFUSAL_STATUS` gives it, so no status is declared twice.
+ *  - `runners_disabled`: a runner run while the runners switch is off (503, the runner protocol's status).
  *  - `create_failed`: the job could not be written (502); `run_failed`: the run stopped on an
  *    unexpected error (500), a platform fault and not a refusal of the request.
  *  - `daily_cap_reached`: NEMAR's pipelines have made as many jobs today as the owner allows (409). It
@@ -496,6 +520,12 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   version_not_found: 404,
   version_untagged: 422,
   too_many_files: 422,
+  /** A Zarr recipe over a version older than the newest, whose copy the row does not describe (DM-06). */
+  zarr_version_not_newest: 422,
+  /** A Zarr recipe over a dataset whose copy is not `ready` with a store. */
+  zarr_copy_not_ready: 409,
+  /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
+  runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   daily_cap_reached: 409,
   create_failed: 502,
   run_failed: 500,
@@ -526,6 +556,8 @@ export const ComputePipelineResultSchema = z
     stamp_id: z.number().int().optional(),
     attempt: z.number().int().optional(),
     submit: z.string().optional(),
+    /** A runner job only: false when its records did not land (`submit` is then `records_not_written`). */
+    records_written: z.boolean().optional(),
     code: z.string().optional(),
     blocked_by: z.array(z.string()).optional(),
   })
@@ -552,6 +584,16 @@ export const ComputePipelineRoomSchema = z
 export type ComputePipelineRoom = z.infer<typeof ComputePipelineRoomSchema>;
 
 /**
+ * What a runner run has room for: the live `accounting = 'none'` runner jobs of the recipe's pool against the
+ * owner's `runners.maxLiveJobs` for it. Neither the daily cap nor the tenant ceiling applies to a runner job.
+ */
+const ComputePipelineRunnerRoomSchema = z
+  .object({ live_left: z.number().int(), live_cap: z.number().int() })
+  .passthrough();
+
+export type ComputePipelineRunnerRoom = z.infer<typeof ComputePipelineRunnerRoomSchema>;
+
+/**
  * The answer of a pipeline run, live or dry. A live run has `results`, `dispatched` and `stopped_by`;
  * a dry run has the estimate, the config a real run needs, what would be dispatched and what blocks the
  * rest. Every field of the other kind is optional, so one schema reads both, and the response is open.
@@ -566,6 +608,10 @@ export const ComputePipelineRunResponseSchema = z
     stopped_by: z.string().nullable().optional(),
     /** For a run over the eligible datasets, live or dry: the room it had and what bounded it. */
     room: ComputePipelineRoomSchema.optional(),
+    /** Who the run was for (`tapis` or `runner`); absent from an older Worker, which has only Tapis. */
+    executor: z.string().optional(),
+    /** For a runner run, live or dry: the room under the runners' live cap (there is no `room`). */
+    runner_room: ComputePipelineRunnerRoomSchema.optional(),
     /** True when the run was made and the Worker could not write its audit row: nothing is lost but the row. */
     audit_pending: z.boolean().optional(),
     estimate_milli_per_job: milli.optional(),
@@ -575,6 +621,8 @@ export const ComputePipelineRunResponseSchema = z
         compute_enabled: z.boolean(),
         runtime_image: z.boolean(),
         pipelines_account: z.boolean(),
+        /** Portable compute: `computeRunnersEnabled`; optional for an older Worker. */
+        runners_enabled: z.boolean().optional(),
       })
       .passthrough()
       .optional(),

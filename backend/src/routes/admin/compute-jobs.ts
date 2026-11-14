@@ -3,7 +3,8 @@
  *
  *   POST /admin/compute/jobs/:id/cancel    cancel a job (at Tapis, and release its hold if it never started)
  *   POST /admin/compute/jobs/:id/advance   one step: submit a `created` job, or read the job back from
- *                                          Tapis and apply it, and repair what a finished job is owed
+ *                                          Tapis and apply it, and repair what a finished job is owed; a
+ *                                          runner job is refused `invalid_body` naming `executor`
  *
  * `advance` is the way a job advances in development, where no compute cron runs. Both are the same
  * code the webhook, the 30-minute tick and a person's own cancel run (`advanceComputeJob`,
@@ -20,6 +21,7 @@ import {
   COMPUTE_REFUSAL_STATUS,
   COMPUTE_ROUTE_SENTENCES,
 } from "../../../../shared/compute-state.js";
+import { COMPUTE_ADMIN_ERROR_STATUS } from "../../../../shared/contract/compute-admin.js";
 import { COMPUTE_JOB_ID_RE } from "../../../../shared/contract/compute.js";
 import { getJob } from "../../services/compute-jobs.js";
 import {
@@ -62,6 +64,17 @@ export function registerComputeJobAdminRoutes(admin: AdminRouter): void {
       return c.json(
         { error: COMPUTE_ROUTE_SENTENCES.job_not_found, code: "job_not_found" },
         COMPUTE_REFUSAL_STATUS.job_not_found,
+      );
+    }
+    // A runner job is pulled by its runner, never advanced from here (ADR 0121): refused, naming the field.
+    const existing = await getJob(c.env.DB, id);
+    if (existing !== null && existing.executor !== "tapis") {
+      return c.json(
+        {
+          error: "The request is not valid: executor: a runner job is not advanced from here.",
+          code: "invalid_body",
+        },
+        COMPUTE_ADMIN_ERROR_STATUS.invalid_body,
       );
     }
     const result = await advanceComputeJob(c.env, id);

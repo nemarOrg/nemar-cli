@@ -547,3 +547,178 @@ describe("what is printed", () => {
     }
   });
 });
+
+describe("run --executor runner (portable compute, ADR 0121)", () => {
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+  async function zarrWorld() {
+    const env = fx.env();
+    await seedPipelinesAccount(env);
+    await seedEegDataset(env, "nm000104");
+    await env.DB.prepare(
+      "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = 'ready', zarr_store_count = 3 WHERE dataset_id = 'nm000104'",
+    )
+      .bind(COMMIT)
+      .run();
+    return env;
+  }
+
+  test("its help names --executor, the runner's cap, and what a runner run is not bounded by", async () => {
+    const r = await runCli("admin", ["run", "--help-all"]);
+    expect(r.exitCode).toBe(0);
+    const text = r.stdout.replace(/\s+/g, " ");
+    for (const phrase of [
+      "--executor <who>",
+      "nemar-floor-zarr on a runner",
+      "runners_disabled",
+      "never by the daily cap or the tenant ceiling",
+    ]) {
+      expect(text).toContain(phrase);
+    }
+  });
+
+  test("a dry run says runner, no SU, the runners' room and whether the switch is on; nothing is written (MUTATION: drop the runner room line)", async () => {
+    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    const env = await zarrWorld();
+    const r = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+      "--dry-run",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("dry run of nemar-floor-zarr on a runner: nothing was written");
+    expect(r.stdout).toContain(
+      "executor: runner (no hold, no service units; a runner pulls the job)",
+    );
+    expect(r.stdout).toContain("runners on");
+    expect(r.stdout).toContain("runner room now: 64 left of the runners' live cap of 64");
+    expect(r.stdout).toContain("nm000104 v1.0.0");
+    expect(r.stdout).not.toContain("estimated hold per job");
+    expect(await count(env, "compute_jobs")).toBe(0);
+    const json = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+      "--dry-run",
+      "--json",
+    ]);
+    expect(ComputePipelineRunResponseSchema.safeParse(JSON.parse(json.stdout)).success).toBe(true);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      executor: "runner",
+      runner_room: { live_left: 64 },
+    });
+  });
+
+  test("a live run makes a runner job that waits: no hold, no ledger entry, and says so (MUTATION: drop the (runner) label)", async () => {
+    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    const env = await zarrWorld();
+    const ledger = await count(env, "compute_ledger");
+    const r = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("nemar-floor-zarr (runner): dispatched 1 of 1 tried");
+    expect(r.stdout).toContain("submit waiting_for_runner");
+    expect(await count(env, "compute_jobs")).toBe(1);
+    expect(await count(env, "compute_ledger")).toBe(ledger);
+    const job = fx.harness.db
+      .query("SELECT executor, accounting, state FROM compute_jobs")
+      .get() as Record<string, string>;
+    expect(job).toEqual({ executor: "runner", accounting: "none", state: "created" });
+  });
+
+  test("a run whose records did not land says so and still exits 0 (MUTATION: drop the records note)", async () => {
+    let left = 2;
+    const real = fx.harness.records;
+    const failing = {
+      put: async (key: string, value: unknown, options?: unknown) => {
+        if (left-- > 0) throw new Error("the store is down");
+        return real.put(key, value as ArrayBuffer, options as Parameters<R2Bucket["put"]>[2]);
+      },
+      get: (key: string) => real.get(key),
+      head: (key: string) => real.head(key),
+      delete: (key: string) => real.delete(key),
+      list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
+    } as unknown as R2Bucket;
+    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1", COMPUTE_RECORDS: failing };
+    await zarrWorld();
+    const r = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("submit records_not_written");
+    expect(r.stdout).toContain("its records were NOT written");
+  });
+
+  test("a copy that is not ready is refused with its word and nothing is made", async () => {
+    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    const env = await zarrWorld();
+    await env.DB.prepare(
+      "UPDATE datasets SET zarr_status = 'failed' WHERE dataset_id = 'nm000104'",
+    ).run();
+    const r = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+    ]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr + r.stdout).toContain("zarr_copy_not_ready");
+    expect(await count(env, "compute_jobs")).toBe(0);
+  });
+
+  test("with the switch off a live run exits 1 with runners_disabled", async () => {
+    const env = await zarrWorld();
+    const r = await runCli("admin", [
+      "run",
+      "nemar-floor-zarr",
+      "--dataset",
+      "nm000104",
+      "--executor",
+      "runner",
+    ]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr + r.stdout).toContain("runners_disabled");
+    expect(await count(env, "compute_jobs")).toBe(0);
+  });
+
+  test("a recipe on an executor it does not list exits 1 as invalid_body naming executor", async () => {
+    workerEnv = { COMPUTE_RUNNERS_ENABLED: "1" };
+    await zarrWorld();
+    const r = await runCli("admin", ["run", "nemar-floor-zarr", "--dataset", "nm000104"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr + r.stdout).toContain("executor");
+    expect(r.stderr + r.stdout).toContain("invalid_body");
+  });
+
+  test("a runner run over --eligible, and an executor that is not a word, are refused before anything is sent (MUTATION: drop the local check)", async () => {
+    for (const args of [
+      ["run", "nemar-floor-zarr", "--eligible", "--executor", "runner"],
+      ["run", "nemar-floor-zarr", "--dataset", "nm000104", "--executor", "ssh"],
+    ]) {
+      const r = await runCli("admin", args);
+      expect([args, r.exitCode]).toEqual([args, 1]);
+      expect(r.stderr + r.stdout).toMatch(/--executor|runner run names one dataset/);
+    }
+    expect(seen).toEqual([]);
+  });
+});
