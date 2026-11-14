@@ -47,12 +47,15 @@ import {
   JobSpecSchema,
   PARTITIONS,
   RUNNERS_POLICY_DEFAULT,
+  TENANT_POLICY_DEFAULT,
   runnersPolicyOf,
 } from "../../shared/contract/compute";
 import { ComputePipelineRunResponseSchema } from "../../shared/contract/compute-admin";
 import { launchSpecFits } from "../../shared/contract/compute-launch";
+import { ACCESS_REPORT_PENDING_SQL } from "../src/services/access-attributes";
 import {
   ADVANCE_ROWS_PER_TICK,
+  CANCEL_ROWS_SQL,
   CREATED_ROWS_SQL,
   runComputeAdvanceCron,
   sweepComputeCancellations,
@@ -61,6 +64,7 @@ import {
   type ComputeJobRow,
   GATEWAY_USER_INSERT_SQL,
   JOB_INSERT_SQL,
+  PIPELINE_LIVE_JOBS_GUARD_SQL,
   PIPELINE_LIVE_JOBS_SQL,
   RUNNER_JOB_INSERT_SQL,
   RUNNER_LIVE_JOBS_GUARD_SQL,
@@ -68,11 +72,12 @@ import {
   createJob,
   getJob,
 } from "../src/services/compute-jobs";
-import { HOLD_INSERT_SQL } from "../src/services/compute-ledger";
+import { HOLD_INSERT_SQL, holdStatements } from "../src/services/compute-ledger";
 import {
   CANCEL_PENDING_FAILED_SQL,
   CLAIM_SUBMIT_SQL,
   COPY_ABANDONED_COUNT_SQL,
+  COPY_ABANDONED_RECENT_SQL,
   MARK_COPY_ABANDONED_SQL,
   UNCOPIED_TERMINAL_SQL,
   advanceComputeJob,
@@ -92,8 +97,18 @@ import {
 import { getPolicy } from "../src/services/compute-policy";
 import { QUEUE_MAX_MEMORY_MB } from "../src/services/compute-queues";
 import { recordKey, sha256Hex } from "../src/services/compute-records";
+import {
+  COMPUTE_RELEASE_CANCEL_SQL,
+  computeReleaseStatements,
+} from "../src/services/compute-release";
+import { accessReport } from "../src/services/compute-reporting";
 import { readRuntimeImage } from "../src/services/compute-runtime-image";
-import { TENANT_COUNTS_SQL, tenantFacts, tenantRoom } from "../src/services/compute-tenant";
+import {
+  TENANT_COUNTS_SQL,
+  tenantFacts,
+  tenantGuard,
+  tenantRoom,
+} from "../src/services/compute-tenant";
 import { FOLLOW_ROWS_SQL } from "../src/services/compute-tenant-sweep";
 import type { Bindings } from "../src/types/bindings";
 import {
@@ -176,13 +191,24 @@ const racing = (w: World): Bindings =>
 /** A commit of the dataset repository, as the dataset row records the one its serving copy was built from. */
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 
-async function zarrDataset(env: Bindings, id: string, commit: string | null = COMMIT) {
-  await seedEegDataset(env, id);
-  if (commit !== null) {
-    await env.DB.prepare("UPDATE datasets SET zarr_source_commit = ?1 WHERE dataset_id = ?2")
-      .bind(commit, id)
-      .run();
-  }
+async function zarrDataset(
+  env: Bindings,
+  id: string,
+  commit: string | null = COMMIT,
+  copy: { status?: string | null; stores?: number | null } = {},
+  versions?: Parameters<typeof seedEegDataset>[2],
+) {
+  await seedEegDataset(env, id, versions);
+  await env.DB.prepare(
+    "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = ?2, zarr_store_count = ?3 WHERE dataset_id = ?4",
+  )
+    .bind(
+      commit,
+      copy.status === undefined ? "ready" : copy.status,
+      copy.stores === undefined ? 3 : copy.stores,
+      id,
+    )
+    .run();
 }
 
 interface Reply {
@@ -483,6 +509,133 @@ describe("what did not change", () => {
     );
   });
 
+  /** The one predicate each Tapis statement gained, removed: what is left is what the statement was. */
+  const stripped = (sql: string) =>
+    sql
+      .replace(/\n {4}AND executor = 'tapis'(?=\n)/g, "")
+      .replace(/ AND executor = 'tapis'/g, "")
+      .replace(/ accounting = 'su' AND/g, "")
+      .replace(/ AND j\.accounting = 'su'/g, "")
+      .replace(/ AND accounting = 'su'/g, "");
+
+  test("each Tapis statement the change touched is its old text plus the one predicate (hashes of the base text, MUTATION: edit any other word of one)", async () => {
+    // The hashes are of the text at the epic base before this card (bc0ba1cf), taken by importing it.
+    const base: Array<[string, string, string]> = [
+      [
+        "PIPELINE_LIVE_JOBS_SQL",
+        PIPELINE_LIVE_JOBS_SQL,
+        "4ca7e3639dfb87a216eca2bedaa47f250e9cdf44e887fae0b177d95a345ba283",
+      ],
+      [
+        "PIPELINE_LIVE_JOBS_GUARD_SQL",
+        PIPELINE_LIVE_JOBS_GUARD_SQL,
+        "e0f4acd29c1fca146660396525309e076120bc781af820d0a8c938300078cfc5",
+      ],
+      [
+        "PIPELINE_JOBS_TODAY_SQL",
+        PIPELINE_JOBS_TODAY_SQL,
+        "a93a257a82c6e1335eff365f13427e69bd6b48a09b8fcf84fb341c86f8c78afa",
+      ],
+      [
+        "TENANT_COUNTS_SQL",
+        TENANT_COUNTS_SQL,
+        "8a4e709814ea642a8f39ab0d6a53c8d5590256e8021d4232596c92554d2b0d4e",
+      ],
+      [
+        "CANDIDATE_ROWS_SQL",
+        CANDIDATE_ROWS_SQL,
+        "d58a2e31a5d3b33c1715763da1709b8504562c80a110e33e97eeea89dda1db25",
+      ],
+      [
+        "CREATED_ROWS_SQL",
+        CREATED_ROWS_SQL,
+        "6e23001935fab6191005933005f3a6f089184b39787fa3037804f6911f07f807",
+      ],
+      [
+        "CANCEL_ROWS_SQL",
+        CANCEL_ROWS_SQL,
+        "82282a66449c8d262096c75b08584c90e8b97bb2195208368138ed00ea8b0743",
+      ],
+      [
+        "CLAIM_SUBMIT_SQL",
+        CLAIM_SUBMIT_SQL,
+        "a6536ca5fd33152882ded6ed04a04a1fcf7263ef9f00765883a098aaee5765be",
+      ],
+      [
+        "UNCOPIED_TERMINAL_SQL",
+        UNCOPIED_TERMINAL_SQL,
+        "0e11f44a84e811e25bd6e1840490b1b40e988ef1c49e846d152f4104f1f4a38e",
+      ],
+      [
+        "CANCEL_PENDING_FAILED_SQL",
+        CANCEL_PENDING_FAILED_SQL,
+        "f61155a920c3d64c99df5454c5232485d921509a4ff5710f66eb1060ecf7fac3",
+      ],
+      [
+        "MARK_COPY_ABANDONED_SQL",
+        MARK_COPY_ABANDONED_SQL,
+        "e8b4a4e172cb9373f0517e929706309c8c4ca49ba43f4e258935112abf6ba67e",
+      ],
+      [
+        "COPY_ABANDONED_RECENT_SQL",
+        COPY_ABANDONED_RECENT_SQL,
+        "ca864c424b3a8e141d7c586a154e580824f91544a905959e326230cb2b42258d",
+      ],
+      [
+        "COPY_ABANDONED_COUNT_SQL",
+        COPY_ABANDONED_COUNT_SQL,
+        "9158784e42fe0695794161072109d7cda58327e5584b26a582dd006a970acb2b",
+      ],
+      [
+        "FOLLOW_ROWS_SQL",
+        FOLLOW_ROWS_SQL,
+        "9ede95c5a7a42040aaa6984af26e3ba64b8a7c3fcf322640980cdd090a7abbff",
+      ],
+      [
+        "ACCESS_REPORT_PENDING_SQL",
+        ACCESS_REPORT_PENDING_SQL,
+        "8aafb3a4626fff59e237eb209ed77b3fa1f30752d4414b019be1968eb13b1a7d",
+      ],
+      [
+        "COMPUTE_RELEASE_CANCEL_SQL",
+        COMPUTE_RELEASE_CANCEL_SQL,
+        "0abd0e125ccb90b5564cae38a4e8c5420b00aa9c53b86b27d68fb92aeac1e87f",
+      ],
+    ];
+    for (const [name, sql, hash] of base) {
+      expect([name, await sha(stripped(sql))]).toEqual([name, hash]);
+      // And the predicate is really there: the statement is not its base text.
+      expect([name, stripped(sql) === sql]).toEqual([name, false]);
+    }
+  });
+
+  test("the composed pipeline hold (the hold, the pipelines' live cap, the tenant guard) is its base text plus the two predicates (MUTATION: touch the hold)", async () => {
+    const seen: string[] = [];
+    const real = fx.env().DB;
+    const spy = {
+      prepare: (sql: string) => {
+        seen.push(sql);
+        return real.prepare(sql);
+      },
+    } as unknown as D1Database;
+    holdStatements(spy, {
+      poolId: 1,
+      budgetPoolId: null,
+      amountMilli: 1000,
+      jobId: `job_${"0".repeat(24)}`,
+      extraGuards: [
+        { sql: PIPELINE_LIVE_JOBS_GUARD_SQL, binds: ["cpu", 8] },
+        tenantGuard("pipelines", TENANT_POLICY_DEFAULT),
+      ],
+    });
+    expect(seen).toHaveLength(1);
+    const composed = seen[0] as string;
+    expect(composed).toContain("accounting = 'su'");
+    expect(await sha(stripped(composed))).toBe(
+      "b6e4ad4156a0088d512f9ed086038328ed84839b13ad691e6181e1455d4bd514",
+    );
+  });
+
   test("the runner statement is its own: literals for the class, a guard of its own, no hold", () => {
     expect(RUNNER_JOB_INSERT_SQL).toContain("'runner', 'none'");
     expect(RUNNER_JOB_INSERT_SQL).toContain(RUNNER_LIVE_JOBS_GUARD_SQL);
@@ -499,6 +652,7 @@ describe("what did not change", () => {
       ["PIPELINE_JOBS_TODAY_SQL", PIPELINE_JOBS_TODAY_SQL],
       ["TENANT_COUNTS_SQL", TENANT_COUNTS_SQL],
       ["CANDIDATE_ROWS_SQL", CANDIDATE_ROWS_SQL],
+      ["ACCESS_REPORT_PENDING_SQL", ACCESS_REPORT_PENDING_SQL],
     ] as const) {
       expect([name, /accounting = 'su'/.test(sql)]).toEqual([name, true]);
     }
@@ -507,12 +661,15 @@ describe("what did not change", () => {
   test("mechanics select executor = 'tapis', written literally", () => {
     for (const [name, sql] of [
       ["CREATED_ROWS_SQL", CREATED_ROWS_SQL],
+      ["CANCEL_ROWS_SQL", CANCEL_ROWS_SQL],
       ["CLAIM_SUBMIT_SQL", CLAIM_SUBMIT_SQL],
       ["UNCOPIED_TERMINAL_SQL", UNCOPIED_TERMINAL_SQL],
       ["CANCEL_PENDING_FAILED_SQL", CANCEL_PENDING_FAILED_SQL],
       ["MARK_COPY_ABANDONED_SQL", MARK_COPY_ABANDONED_SQL],
+      ["COPY_ABANDONED_RECENT_SQL", COPY_ABANDONED_RECENT_SQL],
       ["COPY_ABANDONED_COUNT_SQL", COPY_ABANDONED_COUNT_SQL],
       ["FOLLOW_ROWS_SQL", FOLLOW_ROWS_SQL],
+      ["COMPUTE_RELEASE_CANCEL_SQL", COMPUTE_RELEASE_CANCEL_SQL],
     ] as const) {
       expect([name, /executor = 'tapis'/.test(sql)]).toEqual([name, true]);
     }
@@ -1403,5 +1560,268 @@ describe("no Tapis path touches a runner row", () => {
       .bind(ended.job.id)
       .run();
     expect(await candidates()).toEqual([]);
+  });
+});
+
+// --- The Zarr copy a runner run reads ------------------------------------------------------------------------------
+
+describe("a Zarr recipe reads only the newest version of a ready copy", () => {
+  const TWO_VERSIONS = {
+    versions: [
+      ["1.0.0", "2026-01-01 00:00:00", null],
+      ["1.1.0", "2026-02-01 00:00:00", null],
+    ] as Array<[string, string, number | null]>,
+  };
+
+  test("an older version is zarr_version_not_newest (422), the newest and the unnamed version are made (MUTATION: drop the newest check)", async () => {
+    const env = runnerEnv();
+    await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000104", COMMIT, {}, TWO_VERSIONS);
+    const older = await runRunner("nm000104", env, { version: "1.0.0" });
+    expect([older.status, older.body.code]).toEqual([422, "zarr_version_not_newest"]);
+    expect(await n(env, "compute_jobs")).toBe(0);
+    expect(await n(env, "compute_pipeline_stamps")).toBe(0);
+    const dry = await runRunner("nm000104", env, { version: "1.0.0", dry_run: true });
+    expect(dry.body.blocked).toMatchObject({ code: "zarr_version_not_newest", version: "v1.0.0" });
+    expect(dry.body.would_dispatch).toEqual([]);
+    const named = await runRunner("nm000104", env, { version: "1.1.0" });
+    expect([named.status, named.body.results[0].version]).toEqual([201, "v1.1.0"]);
+    expect((await row(env, named.body.results[0].job_id)).state).toBe("created");
+    const unnamed = await runRunner("nm000104", runnerEnv(), { version: "latest" });
+    expect(unnamed.body.code).toBe("live_attempt_exists");
+  });
+
+  for (const [name, copy] of [
+    ["pending", { status: "pending" }],
+    ["failed", { status: "failed" }],
+    ["never converted", { status: null }],
+    ["ready with no store", { status: "ready", stores: 0 }],
+    ["ready with no count", { status: "ready", stores: null }],
+  ] as const) {
+    test(`a copy that is ${name} is zarr_copy_not_ready (409), though the row still holds a commit (MUTATION: drop the status check)`, async () => {
+      const env = runnerEnv();
+      await seedPipelinesAccount(env);
+      await zarrDataset(env, "nm000104", COMMIT, copy);
+      const r = await runRunner("nm000104", env);
+      expect([r.status, r.body.code]).toEqual([409, "zarr_copy_not_ready"]);
+      const dry = await runRunner("nm000104", env, { dry_run: true });
+      expect(dry.body.blocked).toMatchObject({ code: "zarr_copy_not_ready" });
+      expect(await n(env, "compute_jobs")).toBe(0);
+      expect(await n(env, "compute_pipeline_stamps")).toBe(0);
+    });
+  }
+
+  test("the manifest bound is a BIDS staging limit: a Zarr run over a huge manifest is made, a BIDS run is refused (MUTATION: apply the bound to Zarr)", async () => {
+    const env = runnerEnv();
+    await seedPipelinesAccount(env);
+    await fundPipelines(env);
+    const huge = {
+      versions: [["1.0.0", "2026-01-01 00:00:00", 5_000_000]] as Array<
+        [string, string, number | null]
+      >,
+    };
+    await zarrDataset(env, "nm000104", COMMIT, {}, huge);
+    await seedEegDataset(env, "nm000105", huge);
+    expect((await runRunner("nm000104", env)).status).toBe(201);
+    const bids = await call(
+      "POST",
+      "/compute/pipeline/run",
+      "admin",
+      { recipe: "nemar-floor", dataset: "nm000105" },
+      env,
+    );
+    expect([bids.status, bids.body.code]).toEqual([422, "too_many_files"]);
+  });
+
+  test("the run is audited with its executor (MUTATION: drop executor from the audit row)", async () => {
+    const env = runnerEnv();
+    await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000104");
+    await runRunner("nm000104", env);
+    const rows = (
+      await env.DB.prepare(
+        "SELECT details FROM audit_log WHERE action = 'compute.pipeline.run'",
+      ).all<{ details: string }>()
+    ).results;
+    expect(JSON.parse(rows[0]?.details as string)).toEqual({
+      mode: "dataset",
+      executor: "runner",
+      dispatched: 1,
+      refused: 0,
+      stopped_by: null,
+    });
+  });
+});
+
+// --- A records write that failed -----------------------------------------------------------------------------------
+
+describe("a runner job whose records did not land", () => {
+  /** A real bucket that fails its next `n` writes, as an outage of the store would. */
+  const failing = (n: number): R2Bucket => {
+    let left = n;
+    const real = fx.harness.records;
+    return {
+      put: async (key: string, value: unknown, options?: unknown) => {
+        if (left-- > 0) throw new Error("the store is down");
+        return real.put(key, value as ArrayBuffer, options as Parameters<R2Bucket["put"]>[2]);
+      },
+      get: (key: string) => real.get(key),
+      head: (key: string) => real.head(key),
+      delete: (key: string) => real.delete(key),
+      list: (o?: Parameters<R2Bucket["list"]>[0]) => real.list(o),
+    } as unknown as R2Bucket;
+  };
+
+  test("is answered as records_not_written, not as waiting; the job exists with no records stamp (MUTATION: always say waiting_for_runner)", async () => {
+    const env = runnerEnv({ COMPUTE_RECORDS: failing(2) });
+    await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000104");
+    const r = await runRunner("nm000104", env);
+    expect(r.status).toBe(201);
+    expect(r.body.results[0]).toMatchObject({
+      ok: true,
+      submit: "records_not_written",
+      records_written: false,
+    });
+    expect(ComputePipelineRunResponseSchema.safeParse(r.body).success).toBe(true);
+    const job = await reread(env, r.body.results[0].job_id);
+    expect(job).toMatchObject({ state: "created", executor: "runner", records_written_at: null });
+    // The tick does not drive it (a runner row is not the Tapis path's), so nothing here repairs it.
+    await runComputeAdvanceCron(env);
+    expect((await reread(env, job.id)).records_written_at).toBeNull();
+  });
+
+  test("one failed write that the second try mends is answered as waiting", async () => {
+    const env = runnerEnv({ COMPUTE_RECORDS: failing(1) });
+    await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000104");
+    const r = await runRunner("nm000104", env);
+    expect(r.body.results[0]).toMatchObject({
+      submit: "waiting_for_runner",
+      records_written: true,
+    });
+    expect((await reread(env, r.body.results[0].job_id)).records_written_at).not.toBeNull();
+  });
+});
+
+// --- Idempotency across executors -------------------------------------------------------------------------------------
+
+describe("a key is one executor's", () => {
+  const KEY = `pl:${"cd".repeat(20)}`;
+  const make = (env: Bindings, account: number, executor: "tapis" | "runner") =>
+    createJob(env, {
+      source: "pipeline",
+      accountId: account,
+      idempotencyKey: KEY,
+      appId: "nemar-launch",
+      appVersion: "1.0.0",
+      spec: zarrSpec(env),
+      ...(executor === "runner" ? { executor } : {}),
+    });
+
+  test("the same key and the same specification for the other executor is idempotency_conflict, both ways round (MUTATION: compare the digest only)", async () => {
+    const env = runnerEnv();
+    const account = await seedPipelinesAccount(env);
+    await fundPipelines(env);
+    expect(await make(env, account, "runner")).toMatchObject({ ok: true, replayed: false });
+    await expect(make(env, account, "tapis")).rejects.toMatchObject({
+      code: "idempotency_conflict",
+    });
+    expect(await n(env, "compute_jobs")).toBe(1);
+    await env.DB.prepare("DELETE FROM compute_jobs").run();
+    expect(await make(env, account, "tapis")).toMatchObject({ ok: true, replayed: false });
+    await expect(make(env, account, "runner")).rejects.toMatchObject({
+      code: "idempotency_conflict",
+    });
+    expect(await n(env, "compute_jobs")).toBe(1);
+    // A replay of the same executor is still an answer.
+    expect(await make(env, account, "tapis")).toMatchObject({ ok: true, replayed: true });
+  });
+});
+
+// --- ACCESS and the abandoned-copy count -----------------------------------------------------------------------------------
+
+describe("a runner row owes no ACCESS report and is no ACCESS job", () => {
+  test("a Slurm id on a runner row makes no pending report; on a Tapis row it does (MUTATION: drop accounting from the statement)", async () => {
+    const env = runnerEnv();
+    const runnerId = await seedRunnerRow(env.DB);
+    const tapis = await seedRunnerRow(env.DB, { executor: "tapis", accounting: "su" });
+    for (const id of [runnerId, tapis]) {
+      await env.DB.prepare("UPDATE compute_jobs SET slurm_job_id = ?2 WHERE id = ?1")
+        .bind(id, `77${id.slice(-4)}`)
+        .run();
+      await env.DB.prepare(ACCESS_REPORT_PENDING_SQL).bind(id).run();
+    }
+    const reports = (
+      await env.DB.prepare("SELECT job_id FROM compute_access_reports").all<{ job_id: string }>()
+    ).results.map((r) => r.job_id);
+    expect(reports).toEqual([tapis]);
+  });
+
+  test("the quarter's ACCESS report counts a Tapis job and never a runner job (MUTATION: drop accounting from accessReport)", async () => {
+    const env = runnerEnv();
+    const runnerId = await seedRunnerRow(env.DB);
+    const tapis = await seedRunnerRow(env.DB, { executor: "tapis", accounting: "su" });
+    for (const id of [runnerId, tapis]) {
+      await env.DB.prepare(
+        `UPDATE compute_jobs SET slurm_job_id = ?2, remote_submitted_at = '2026-11-05 10:00:00',
+           gateway_user = ?3 WHERE id = ?1`,
+      )
+        .bind(id, `88${id.slice(-4)}`, id === tapis ? "gw_aaaaaaaaaaaaaaaaaaaa" : "nemar-pipelines")
+        .run();
+    }
+    const report = await accessReport(env.DB, "2026Q4");
+    expect(report?.totals).toEqual({ distinct_users: 1, jobs: 1 });
+  });
+
+  test("the abandoned-copy count within the window skips a runner row (MUTATION: drop executor from COPY_ABANDONED_RECENT_SQL)", async () => {
+    const env = runnerEnv();
+    for (const [executor, accounting] of [
+      ["runner", "none"],
+      ["tapis", "su"],
+    ] as const) {
+      const id = await seedRunnerRow(env.DB, { state: "finished", executor, accounting });
+      await env.DB.prepare(
+        `UPDATE compute_jobs SET ended_at = datetime('now', '-4 days'), settled_provisional_at = datetime('now', '-4 days') WHERE id = ?1`,
+      )
+        .bind(id)
+        .run();
+    }
+    expect((await env.DB.prepare(COPY_ABANDONED_RECENT_SQL).first<{ n: number }>())?.n).toBe(1);
+  });
+});
+
+// --- Releasing the pipelines account -------------------------------------------------------------------------------------
+
+describe("ending the pipelines service account", () => {
+  test("never ends an unclaimed runner row, and ends a Tapis row that never reached Tapis as before (MUTATION: drop executor from NEVER_REACHED_TAPIS)", async () => {
+    const env = runnerEnv();
+    const account = await seedPipelinesAccount(env);
+    await zarrDataset(env, "nm000104");
+    const made = await runRunner("nm000104", env);
+    const runnerId = made.body.results[0].job_id as string;
+    await fundPipelines(env);
+    const { job } = await makeJob(fx, {
+      source: "pipeline",
+      account: { username: "nemar-pipelines-b" },
+    });
+    // A Tapis job of the same account that never reached Tapis (re-owned to the account under release).
+    await env.DB.prepare("UPDATE compute_jobs SET account_id = ?2 WHERE id = ?1")
+      .bind(job.id, account)
+      .run();
+    await env.DB.batch(
+      computeReleaseStatements(account).map((s) => env.DB.prepare(s.sql).bind(...s.binds)),
+    );
+    const runnerRow = await row(env, runnerId);
+    expect(runnerRow).toMatchObject({
+      state: "created",
+      executor: "runner",
+      settled_provisional_at: null,
+    });
+    expect(runnerRow.cancel_requested_at).not.toBeNull();
+    expect(runnerRow.ended_at).toBeNull();
+    const tapisRow = await row(env, job.id);
+    expect(tapisRow).toMatchObject({ state: "cancelled" });
+    expect(tapisRow.settled_provisional_at).not.toBeNull();
   });
 });

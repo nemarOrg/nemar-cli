@@ -759,3 +759,41 @@ describe("observer mint", () => {
     expect((await runCli("member", ["mint"], ["observer"])).exitCode).toBe(1);
   });
 });
+
+describe("a runner job", () => {
+  async function runnerRow(): Promise<string> {
+    const env = fx.env();
+    const id = `job_${"1".repeat(24)}`;
+    await env.DB.prepare(
+      `INSERT INTO compute_jobs
+         (id, source, kind, app_id, app_version, spec_digest, partition, pool, nodes, cores_per_node, gpus,
+          minutes, executor, accounting, runner_backend, runner_id, runner_claimed_at, runner_wall_seconds,
+          runner_cpu_seconds, runner_max_rss_mb)
+       VALUES (?1, 'pipeline', 'batch', 'nemar-launch', '1.0.0', ?2, 'shared', 'cpu', 1, 4, 0, 60,
+               'runner', 'none', 'local', ?3, datetime('now'), 61, 240, 4096)`,
+    )
+      .bind(id, "a".repeat(64), `rnr_${"c".repeat(24)}`)
+      .run();
+    return id;
+  }
+
+  test("is shown with its executor, accounting and runner-reported usage, not as held SU (MUTATION: drop the runner branch)", async () => {
+    const id = await runnerRow();
+    const r = await runCli("owner", ["cancel", id]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("executor: runner, accounting: none (no hold, no service units)");
+    expect(r.stdout).toContain(`runner: rnr_${"c".repeat(24)} (local), claimed `);
+    expect(r.stdout).toContain("runner-reported: wall 61 s, cpu 240 s, max resident 4096 MB");
+    expect(r.stdout).not.toContain("held 0 SU");
+    expect(r.stdout).not.toContain("not settled");
+  });
+
+  test("is listed as runner, no SU", async () => {
+    const id = await runnerRow();
+    const r = await runCli("admin", ["list"]);
+    expect(r.exitCode).toBe(0);
+    const line = r.stdout.split("\n").find((l) => l.includes(id)) ?? "";
+    expect(line).toContain("runner, no SU");
+    expect(line).not.toContain("not settled");
+  });
+});
