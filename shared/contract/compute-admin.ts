@@ -524,6 +524,17 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   zarr_version_not_newest: 422,
   /** A Zarr recipe over a dataset whose copy is not `ready` with a store. */
   zarr_copy_not_ready: 409,
+  /**
+   * A Zarr recipe over a dataset whose serving copy was built from a commit that is neither the version's tag
+   * commit nor a metadata-only step after it (DM-06b): a definite refusal.
+   */
+  zarr_source_mismatch: 409,
+  /**
+   * The serving copy's commit or the tag's commit could not be read (a timeout, a refusal, no index, no
+   * credentials in production): nothing is known, so nothing is dispatched, and the same dispatch may succeed
+   * later (DM-06b).
+   */
+  zarr_source_unverifiable: 503,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   daily_cap_reached: 409,

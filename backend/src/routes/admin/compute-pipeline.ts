@@ -84,6 +84,10 @@ const SENTENCES = {
   zarr_version_not_newest:
     "That recipe reads the dataset's one Zarr copy, which describes only the newest version.",
   zarr_copy_not_ready: "That dataset has no ready Zarr copy to read.",
+  zarr_source_mismatch:
+    "That dataset's Zarr copy was built from data that is not the tagged version's.",
+  zarr_source_unverifiable:
+    "The Zarr copy or the tagged version could not be read, so nothing was checked; try again shortly.",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
