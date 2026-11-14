@@ -520,6 +520,10 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   version_not_found: 404,
   version_untagged: 422,
   too_many_files: 422,
+  /** A Zarr recipe over a version older than the newest, whose copy the row does not describe (DM-06). */
+  zarr_version_not_newest: 422,
+  /** A Zarr recipe over a dataset whose copy is not `ready` with a store. */
+  zarr_copy_not_ready: 409,
   /** The runners switch is off (portable compute): the status is the runner protocol's, declared once. */
   runners_disabled: RUNNER_REFUSAL_STATUS.runners_disabled,
   daily_cap_reached: 409,
@@ -552,6 +556,8 @@ export const ComputePipelineResultSchema = z
     stamp_id: z.number().int().optional(),
     attempt: z.number().int().optional(),
     submit: z.string().optional(),
+    /** A runner job only: false when its records did not land (`submit` is then `records_not_written`). */
+    records_written: z.boolean().optional(),
     code: z.string().optional(),
     blocked_by: z.array(z.string()).optional(),
   })

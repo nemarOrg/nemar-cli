@@ -81,6 +81,9 @@ const SENTENCES = {
   version_not_found: "That dataset has no such version.",
   version_untagged: "That version has no name the data plane serves.",
   too_many_files: "That version has more files than a job can stage.",
+  zarr_version_not_newest:
+    "That recipe reads the dataset's one Zarr copy, which describes only the newest version.",
+  zarr_copy_not_ready: "That dataset has no ready Zarr copy to read.",
   runtime_unavailable: "NEMAR's runtime image is not configured.",
   pipelines_account_missing: "The pipelines account is not set up.",
   compute_disabled: COMPUTE_ROUTE_SENTENCES.compute_disabled,
@@ -204,6 +207,7 @@ function resultView(r: DispatchResult): ComputePipelineResult {
       stamp_id: r.stampId,
       attempt: r.attempt,
       submit: r.submit,
+      ...(r.recordsWritten === undefined ? {} : { records_written: r.recordsWritten }),
     };
   }
   return {
@@ -241,6 +245,7 @@ async function audit(
   mode: "dataset" | "eligible",
   counts: { dispatched: number; refused: number },
   stoppedBy: string | null,
+  executor: "tapis" | "runner",
 ): Promise<boolean> {
   // The run has happened by now: jobs are made and holds taken. A failed audit write must not turn that
   // into a 500 that hides the job ids, so it is logged and the answer says the audit row is pending.
@@ -251,7 +256,7 @@ async function audit(
         PIPELINE_RUN_AUDIT_ACTION,
         "compute_pipeline",
         recipe,
-        JSON.stringify({ mode, ...counts, stopped_by: stoppedBy }),
+        JSON.stringify({ mode, executor, ...counts, stopped_by: stoppedBy }),
       )
       .run();
     return true;
@@ -326,6 +331,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
           "dataset",
           { dispatched: result.ok ? 1 : 0, refused: result.ok ? 0 : 1 },
           result.ok ? null : result.code,
+          executor,
         );
         const pending = audited ? {} : { audit_pending: true };
         if (!result.ok) return refuse(c, result.code, { ...resultView(result), ...pending });
@@ -355,6 +361,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         "eligible",
         { dispatched: run.dispatched, refused: run.results.length - run.dispatched },
         run.stoppedBy,
+        executor,
       );
       return c.json(
         {

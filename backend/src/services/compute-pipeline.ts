@@ -187,6 +187,8 @@ export type PipelineRefusal =
   | "version_not_found"
   | "version_untagged"
   | "too_many_files"
+  | "zarr_version_not_newest"
+  | "zarr_copy_not_ready"
   | "recipe_not_automatic"
   | "recipe_placeholder"
   | "runners_disabled"
@@ -226,7 +228,13 @@ export type DispatchResult =
        * What the immediate submit said; a job that waits is submitted by the 30-minute tick. A runner job is
        * never submitted: `waiting_for_runner` says it waits to be pulled.
        */
-      submit: SubmitOutcome | "waiting_for_runner";
+      submit: SubmitOutcome | "waiting_for_runner" | "records_not_written";
+      /**
+       * A runner job only: whether its records (`spec.json`, `identity.json`) landed. False after a store
+       * failure that a second try did not mend, and then `submit` says `records_not_written`: nothing here
+       * repairs the records (a runner job is not submitted by the tick), so the claim must (DM-07).
+       */
+      recordsWritten?: boolean;
     }
   | {
       ok: false;
@@ -416,20 +424,38 @@ type ResolvedRun =
     }
   | {
       ok: false;
-      code: "dataset_not_eligible" | "version_not_found" | "version_untagged" | "too_many_files";
+      code:
+        | "dataset_not_eligible"
+        | "version_not_found"
+        | "version_untagged"
+        | "too_many_files"
+        | "zarr_version_not_newest"
+        | "zarr_copy_not_ready";
       extra: { version?: string; blockedBy?: PipelineTermId[] };
     };
 
-/** The commit a dataset's Zarr serving copy was built from, as the row records it (`zarr-ready` writes it). */
-const ZARR_SOURCE_COMMIT_SQL = "SELECT zarr_source_commit FROM datasets WHERE dataset_id = ?1";
+/**
+ * What the dataset row says of its Zarr serving copy (`zarr-ready` writes it): the conversion's state, its
+ * store count and the commit of the dataset repository the LATEST copy was built from. Every consumer of the
+ * copy reads it only while `zarr_status = 'ready'` and there is a store (as `zarr-catalog.ts` does).
+ */
+const ZARR_COPY_SQL = `SELECT zarr_status, zarr_store_count, zarr_source_commit FROM datasets
+  WHERE dataset_id = ?1`;
 
 /**
  * The part of a run that is decided from the dataset's own rows, in one place so the dry run and the
  * run cannot disagree: the eligibility predicate over the row (ADR 0065), the version row (the newest,
  * or the one named) with a data-plane tag, and the manifest bound. For a recipe whose input is `zarr` it also
  * resolves the source commit of the serving copy, and a dataset with no recorded commit is
- * `dataset_not_eligible` (it has no serving copy to read). It is the one place a Zarr recipe's identity is
- * decided, so the dry run and the run cannot disagree.
+ * `dataset_not_eligible`. It is the one place a Zarr recipe's identity is decided, so the dry run and the run
+ * cannot disagree.
+ *
+ * A Zarr recipe reads the dataset's ONE serving copy, which the row ties to the LATEST version only, so until
+ * the tag commit of a version is verified against the copy's own (DM-06b) it is run only for the NEWEST version
+ * (`zarr_version_not_newest`) and only while the copy is `ready` with at least one store
+ * (`zarr_copy_not_ready`: a `pending` or `failed` conversion leaves the previous copy's commit on the row).
+ * The commit recorded on the row is passed as it is and is NOT a statement that the copy describes the tagged
+ * data. The manifest bound (`too_many_files`) is a BIDS staging limit: a Zarr recipe stages no files.
  */
 async function resolveRun(
   db: D1Database,
@@ -445,18 +471,27 @@ async function resolveRun(
     .results;
   const picked = pickVersion(versions, wanted);
   if (!picked.ok) return { ok: false, code: picked.code, extra: {} };
+  const zarr = recipe?.input === "zarr";
   if (
+    !zarr &&
     picked.version.total_files !== null &&
     picked.version.total_files > PIPELINE_MANIFEST_MAX_ENTRIES
   ) {
     return { ok: false, code: "too_many_files", extra: { version: picked.tag } };
   }
-  if (recipe?.input !== "zarr") return { ok: true, tag: picked.tag, sourceCommit: null };
-  const copy = await db
-    .prepare(ZARR_SOURCE_COMMIT_SQL)
-    .bind(datasetId)
-    .first<{ zarr_source_commit: string | null }>();
-  const commit = copy?.zarr_source_commit ?? null;
+  if (!zarr) return { ok: true, tag: picked.tag, sourceCommit: null };
+  if (picked.version.version !== versions[0]?.version) {
+    return { ok: false, code: "zarr_version_not_newest", extra: { version: picked.tag } };
+  }
+  const copy = await db.prepare(ZARR_COPY_SQL).bind(datasetId).first<{
+    zarr_status: string | null;
+    zarr_store_count: number | null;
+    zarr_source_commit: string | null;
+  }>();
+  if (copy?.zarr_status !== "ready" || (copy.zarr_store_count ?? 0) <= 0) {
+    return { ok: false, code: "zarr_copy_not_ready", extra: { version: picked.tag } };
+  }
+  const commit = copy.zarr_source_commit;
   if (!isSourceCommit(commit)) {
     return {
       ok: false,
@@ -677,7 +712,8 @@ export async function dispatchPipelineJob(
 
   const job = created.job;
   await db.prepare(LINK_STAMP_SQL).bind(stampId, job.id).run();
-  // A runner job is never submitted: it waits for a runner to pull it (ADR 0121).
+  // A runner job is never submitted: it waits for a runner to pull it (ADR 0121). Its records may not have
+  // landed (the store was down for both tries): the answer says so, as a fixed word.
   if (executor === "runner") {
     return {
       ok: true,
@@ -687,7 +723,8 @@ export async function dispatchPipelineJob(
       version: tag,
       recipe: recipe.name,
       attempt: stamp.attempt,
-      submit: "waiting_for_runner",
+      submit: created.recordsWritten ? "waiting_for_runner" : "records_not_written",
+      recordsWritten: created.recordsWritten,
     };
   }
   // The submit is the lifecycle's: one attempt now; the 30-minute tick covers a job that waits.
