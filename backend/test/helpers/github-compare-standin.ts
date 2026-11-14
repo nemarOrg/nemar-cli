@@ -14,6 +14,8 @@
  */
 
 const LOOPBACK = "127.0.0.1";
+/** The most files GitHub lists for one comparison. */
+const GITHUB_COMPARE_FILES_MAX = 300;
 
 /** One request the stand-in saw. `authorization` is the scheme only (`Bearer`) or null: no token is kept. */
 export interface StandinRequest {
@@ -22,6 +24,7 @@ export interface StandinRequest {
   /** The query string, without the `?`. */
   query: string;
   authorization: "Bearer" | "other" | null;
+  userAgent: string | null;
 }
 
 /** A file of a compare, as GitHub lists it. */
@@ -44,10 +47,17 @@ export interface GithubCompareStandin {
   /** Every request, in order. */
   log: StandinRequest[];
   /**
-   * The commit a tag resolves to in a repository, or the status to answer instead, or a whole body (404 when
-   * unset).
+   * A TAG of a repository: the commit it resolves to (a lightweight and an annotated tag both resolve to the
+   * commit the endpoint answers, so one call serves both), or the status to answer instead, or a whole body.
+   * It resolves through `commits/refs/tags/<name>` and, as on GitHub, through the bare `commits/<name>`; the
+   * short `commits/tags/<name>` is a 422. Unset: 404.
    */
-  tag(repo: string, ref: string, answer: string | { http: number } | { body: unknown }): void;
+  tag(repo: string, name: string, answer: string | { http: number } | { body: unknown }): void;
+  /**
+   * A BRANCH of a repository. GitHub's `commits/<ref>` resolves a branch by its bare name (and `refs/heads/`),
+   * and a branch does NOT resolve through `refs/tags/`: a caller that wants a tag must say so.
+   */
+  branch(repo: string, name: string, commit: string): void;
   /** The compare of `base...head`, 404 when unset. */
   compare(repo: string, base: string, head: string, answer: CompareAnswer): void;
   /** The index of a dataset: a document, or a status (404 when unset); a string is sent as it is. */
@@ -70,6 +80,7 @@ const isStatusOnly = (v: unknown): v is { http: number } =>
 
 export function startGithubCompareStandin(): GithubCompareStandin {
   const tags = new Map<string, string | { http: number } | { body: unknown }>();
+  const branches = new Map<string, string>();
   const compares = new Map<string, CompareAnswer>();
   const indexes = new Map<
     string,
@@ -90,6 +101,7 @@ export function startGithubCompareStandin(): GithubCompareStandin {
         path: url.pathname,
         query: url.search.replace(/^\?/, ""),
         authorization: auth === null ? null : auth.startsWith("Bearer ") ? "Bearer" : "other",
+        userAgent: req.headers.get("user-agent"),
       });
       const isIndex = url.pathname.startsWith("/zarr-index/");
       const stalled = stallScope === "all" || (stallScope === "index" ? isIndex : !isIndex);
@@ -97,7 +109,20 @@ export function startGithubCompareStandin(): GithubCompareStandin {
 
       let m = /^\/repos\/nemarDatasets\/([^/]+)\/commits\/(.+)$/.exec(url.pathname);
       if (m) {
-        const hit = tags.get(`${m[1]}/${decodeURIComponent(m[2] as string)}`);
+        const repo = m[1] as string;
+        const ref = decodeURIComponent(m[2] as string);
+        // How GitHub resolves `commits/<ref>`: a fully qualified ref by its kind, the short `tags/` form is
+        // refused, and a bare name is any ref (a branch first, then a tag).
+        let hit: string | { http: number } | { body: unknown } | undefined;
+        if (ref.startsWith("refs/tags/")) {
+          hit = tags.get(`${repo}/${ref.slice("refs/tags/".length)}`);
+        } else if (ref.startsWith("refs/heads/")) {
+          hit = branches.get(`${repo}/${ref.slice("refs/heads/".length)}`);
+        } else if (ref.startsWith("tags/")) {
+          return Response.json({ message: "No commit found for the ref" }, { status: 422 });
+        } else {
+          hit = branches.get(`${repo}/${ref}`) ?? tags.get(`${repo}/${ref}`);
+        }
         if (hit === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
         if (typeof hit !== "string") {
           if ("body" in hit) return Response.json(hit.body);
@@ -110,7 +135,11 @@ export function startGithubCompareStandin(): GithubCompareStandin {
         const hit = compares.get(`${m[1]}/${decodeURIComponent(m[2] as string)}`);
         if (hit === undefined) return Response.json({ message: "Not Found" }, { status: 404 });
         if (isStatusOnly(hit)) return new Response("{}", { status: hit.http });
-        return Response.json(hit);
+        // GitHub lists at most 300 files of a comparison, however many changed.
+        const files = (hit as { files?: unknown }).files;
+        return Response.json(
+          Array.isArray(files) ? { ...hit, files: files.slice(0, GITHUB_COMPARE_FILES_MAX) } : hit,
+        );
       }
       m = /^\/zarr-index\/([^/]+)\/zarr\/index\.json$/.exec(url.pathname);
       if (m) {
@@ -143,7 +172,8 @@ export function startGithubCompareStandin(): GithubCompareStandin {
     url,
     indexBase: `${url}/zarr-index`,
     log,
-    tag: (repo, ref, answer) => void tags.set(`${repo}/${ref}`, answer),
+    tag: (repo, name, answer) => void tags.set(`${repo}/${name}`, answer),
+    branch: (repo, name, commit) => void branches.set(`${repo}/${name}`, commit),
     compare: (repo, base, head, answer) => void compares.set(`${repo}/${base}...${head}`, answer),
     index: (id, answer) => void indexes.set(id, answer),
     stall: (ms, scope = "all") => {
@@ -152,6 +182,7 @@ export function startGithubCompareStandin(): GithubCompareStandin {
     },
     reset() {
       tags.clear();
+      branches.clear();
       compares.clear();
       indexes.clear();
       log.length = 0;

@@ -525,8 +525,8 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   /** A Zarr recipe over a dataset whose copy is not `ready` with a store. */
   zarr_copy_not_ready: 409,
   /**
-   * A Zarr recipe over a dataset whose serving copy was built from a commit that is neither the version's tag
-   * commit nor a metadata-only step after it (DM-06b): a definite refusal.
+   * A Zarr recipe over a dataset whose serving copy could not be shown to be the version's data (DM-06b): not the
+   * tag's commit and not a metadata-only step after it, or a check out of its limits; the `reason` says which.
    */
   zarr_source_mismatch: 409,
   /**
@@ -571,6 +571,8 @@ export const ComputePipelineResultSchema = z
     records_written: z.boolean().optional(),
     code: z.string().optional(),
     blocked_by: z.array(z.string()).optional(),
+    /** A Zarr source refusal's reason: a fixed word (`zarr_source_mismatch`, `zarr_source_unverifiable`). */
+    reason: z.string().optional(),
   })
   .passthrough();
 
@@ -641,7 +643,12 @@ export const ComputePipelineRunResponseSchema = z
       .array(z.object({ dataset_id: z.string(), version: z.string() }).passthrough())
       .optional(),
     blocked: z
-      .object({ code: z.string(), blocked_by: z.array(z.string()), version: z.string().optional() })
+      .object({
+        code: z.string(),
+        blocked_by: z.array(z.string()),
+        version: z.string().optional(),
+        reason: z.string().optional(),
+      })
       .passthrough()
       .optional(),
     blocked_by_term: z.record(z.unknown()).optional(),

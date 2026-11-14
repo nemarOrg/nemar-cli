@@ -148,6 +148,7 @@ const handle = makeComputeApp();
  */
 let github: GithubCompareStandin;
 const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+const previousSeams = { github: seams.NEMAR_GITHUB_API_URL, index: seams.NEMAR_ZARR_INDEX_BASE };
 
 beforeAll(async () => {
   fx = await startLifecycleFixture({ withD1: true });
@@ -166,8 +167,8 @@ beforeEach(async () => {
 
 afterAll(async () => {
   github?.stop();
-  seams.NEMAR_GITHUB_API_URL = undefined;
-  seams.NEMAR_ZARR_INDEX_BASE = undefined;
+  seams.NEMAR_GITHUB_API_URL = previousSeams.github;
+  seams.NEMAR_ZARR_INDEX_BASE = previousSeams.index;
   await fx?.dispose();
 }, 30_000);
 

@@ -42,7 +42,11 @@
  *    index is there is recorded as `ready` with the index's store count, so the Zarr recipe can be dispatched.
  *  - `--seed-fixture` starts a stand-in for the two (a real loopback server, nothing of GitHub's or the host's)
  *    that names the fixture version's commit as both the tag's and the index's: the verdict is `exact`.
- * The two seeds are not combined: the check reads one GitHub API and one index base for the whole stack.
+ * The seams follow what the STATE DATABASE holds, not the flags of this start: a plain restart over a state
+ * that holds the fixture starts the stand-in again, and one over a state that holds a catalog dataset points
+ * the index read at the public serving host. A state (or a start) that would hold both is refused before
+ * anything is started: the check reads one GitHub API and one index base for the whole stack, and the fixture's
+ * id lies in the live allocation range, which must never be read from the real GitHub or serving host.
  */
 
 import type { Database } from "bun:sqlite";
@@ -451,7 +455,7 @@ async function seedFromCatalog(
   // store count: the Zarr recipe is dispatched only while the copy is ready with a store (DM-06), and the
   // public record does not carry either value.
   if (typeof record.zarr_source_commit === "string") {
-    const index = await readZarrIndexOverHttp(zarrIndexBase, id);
+    const index = await readZarrIndexOverHttp(zarrIndexBase, id, CATALOG_USER_AGENT);
     if (index.ok && index.storeCount !== null && index.storeCount > 0) {
       await env.DB.prepare(
         "UPDATE datasets SET zarr_status = 'ready', zarr_store_count = ?1 WHERE dataset_id = ?2",
@@ -536,6 +540,31 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
   const { db, applied } = openMigratedDb(join(state, "stack.sqlite"));
   if (applied.length > 0) log(`applied ${applied.length} migration(s) to the state database`);
 
+  // What the state already holds decides the Zarr source check's seams, together with this start's seeds.
+  const held = (
+    db.query("SELECT dataset_id FROM datasets").all() as Array<{ dataset_id: string }>
+  ).map((r) => r.dataset_id);
+  const holdsFixture = opts.seedFixture === true || held.includes(FIXTURE_DATASET_ID);
+  const catalogIds = [
+    ...held.filter((id) => id !== FIXTURE_DATASET_ID),
+    ...(opts.seedFromCatalog ?? []),
+  ];
+  const refuseState = (message: string): never => {
+    db.close();
+    process.umask(previousUmask);
+    throw new Error(message);
+  };
+  for (const id of held) {
+    // A dataset in the live or reserved range, other than the local fixture, is never read from the network.
+    const refusal = id === FIXTURE_DATASET_ID ? null : catalogRefusal(id);
+    if (refusal) refuseState(`the state holds ${refusal}`);
+  }
+  if (holdsFixture && catalogIds.length > 0) {
+    refuseState(
+      "the state holds (or this start seeds) both the fixture and a catalog dataset: the Zarr source check reads one GitHub API and one index base, so use separate states",
+    );
+  }
+
   const infra = await retryInfrastructure("miniflare", async () => {
     const mf = new Miniflare({
       modules: true,
@@ -591,11 +620,11 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
   const previousGithub = zarrSeams.NEMAR_GITHUB_API_URL;
   const previousIndexBase = zarrSeams.NEMAR_ZARR_INDEX_BASE;
   let zarrStandin: GithubCompareStandin | undefined;
-  if (opts.seedFixture) {
+  if (holdsFixture) {
     zarrStandin = startGithubCompareStandin();
     zarrSeams.NEMAR_GITHUB_API_URL = zarrStandin.url;
     zarrSeams.NEMAR_ZARR_INDEX_BASE = zarrStandin.indexBase;
-  } else if ((opts.seedFromCatalog ?? []).length > 0) {
+  } else if (catalogIds.length > 0) {
     zarrSeams.NEMAR_ZARR_INDEX_BASE = opts.zarrIndexBase ?? PUBLIC_ZARR_BASE;
   }
   const restoreZarrSeams = () => {
@@ -634,7 +663,7 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
 
     await seed(env, keys);
     const ownerId = (await userIdOf(env.DB, FIXTURE_OWNER.username)) as number;
-    if (opts.seedFixture) {
+    if (holdsFixture) {
       if (!(await datasetThere(env.DB, FIXTURE_DATASET_ID))) {
         await seedEegDataset(env, FIXTURE_DATASET_ID, { owner: ownerId });
       }

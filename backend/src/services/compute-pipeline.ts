@@ -253,6 +253,8 @@ export type DispatchResult =
       stampId?: number;
       /** The field of the specification that was invalid, for `invalid_spec`. */
       field?: string;
+      /** For a Zarr source refusal: one of `ZARR_SOURCE_REASONS`, a fixed word that says what was not shown. */
+      reason?: string;
     };
 
 // --- Rows -------------------------------------------------------------------------------------------
@@ -440,7 +442,7 @@ type ResolvedRun =
         | "zarr_copy_not_ready"
         | "zarr_source_mismatch"
         | "zarr_source_unverifiable";
-      extra: { version?: string; blockedBy?: PipelineTermId[] };
+      extra: { version?: string; blockedBy?: PipelineTermId[]; reason?: string };
     };
 
 /**
@@ -506,7 +508,11 @@ async function resolveRun(
     console.error(
       `[compute-pipeline] zarr_source dataset=${datasetId} code=${checked.code} reason=${checked.reason}`,
     );
-    return { ok: false, code: checked.code, extra: { version: picked.tag } };
+    return {
+      ok: false,
+      code: checked.code,
+      extra: { version: picked.tag, reason: checked.reason },
+    };
   }
   return {
     ok: true,
@@ -1213,6 +1219,7 @@ async function runnerDryRun(
         code: resolved.code,
         blocked_by: resolved.extra.blockedBy ?? [],
         ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+        ...(resolved.extra.reason === undefined ? {} : { reason: resolved.extra.reason }),
       },
     };
   }
@@ -1308,6 +1315,7 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
           code: resolved.code,
           blocked_by: resolved.extra.blockedBy ?? [],
           ...(resolved.extra.version === undefined ? {} : { version: resolved.extra.version }),
+          ...(resolved.extra.reason === undefined ? {} : { reason: resolved.extra.reason }),
         },
       };
     }

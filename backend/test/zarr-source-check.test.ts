@@ -49,6 +49,7 @@ import {
   ZARR_SOURCE_INDEX_TIMEOUT_MS,
   ZARR_SOURCE_MAX_DELTA_PATHS,
   ZARR_SOURCE_MAX_GITHUB_REQUESTS,
+  ZARR_SOURCE_REASONS,
   checkZarrSource,
 } from "../src/services/zarr-source-check";
 import type { Bindings } from "../src/types/bindings";
@@ -71,6 +72,8 @@ let github: GithubCompareStandin;
 const handle = makeComputeApp();
 const seams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
 
+const previousSeams = { github: seams.NEMAR_GITHUB_API_URL, index: seams.NEMAR_ZARR_INDEX_BASE };
+
 beforeAll(async () => {
   fx = await startLifecycleFixture();
   github = startGithubCompareStandin();
@@ -87,8 +90,8 @@ beforeEach(async () => {
 
 afterAll(async () => {
   github?.stop();
-  seams.NEMAR_GITHUB_API_URL = undefined;
-  seams.NEMAR_ZARR_INDEX_BASE = undefined;
+  seams.NEMAR_GITHUB_API_URL = previousSeams.github;
+  seams.NEMAR_ZARR_INDEX_BASE = previousSeams.index;
   await fx?.dispose();
 }, 30_000);
 
@@ -243,7 +246,7 @@ describe("the verdict", () => {
       "https://zarr.nemar.org",
     ]);
     expect(githubRequests().map((q) => q.path)).toEqual([
-      `/repos/nemarDatasets/${ID}/commits/v1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`,
     ]);
     expect(indexRequests()).toHaveLength(1);
   });
@@ -278,7 +281,7 @@ describe("the verdict", () => {
     ]);
     // The compare is T...S (the tag commit first), one page of at most a hundred files.
     expect(githubRequests().map((q) => [q.path, q.query])).toEqual([
-      [`/repos/nemarDatasets/${ID}/commits/v1.0.0`, ""],
+      [`/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`, ""],
       [`/repos/nemarDatasets/${ID}/compare/${T}...${S}`, `per_page=${ZARR_SOURCE_COMPARE_PAGE}`],
     ]);
     // The recorded specification is a valid job that fits the launcher.
@@ -327,8 +330,8 @@ describe("the verdict", () => {
     const r = await run(env);
     expect(r.status).toBe(201);
     expect(githubRequests().map((q) => q.path)).toEqual([
-      `/repos/nemarDatasets/${ID}/commits/v1.0.0`,
-      `/repos/nemarDatasets/${ID}/commits/1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/1.0.0`,
       `/repos/nemarDatasets/${ID}/compare/${T}...${S}`,
     ]);
     expect(githubRequests().length).toBeLessThanOrEqual(ZARR_SOURCE_MAX_GITHUB_REQUESTS);
@@ -359,20 +362,44 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
     Array.from({ length: count }, () => ({ filename: path }));
   const many = (count: number) =>
     Array.from({ length: count }, (_, i) => ({ filename: `.nemar/f${i}.json` }));
-  const cases: Array<[string, unknown, string?]> = [
-    ["the copy is behind the tag", { status: "behind", behind_by: 2, files: [] }],
-    ["the histories diverged", { status: "diverged", behind_by: 1, files: [] }],
+  // [what happened, the compare GitHub answers, the reason the refusal carries]
+  const cases: Array<[string, unknown, string]> = [
+    ["the copy is behind the tag", { status: "behind", behind_by: 2, files: [] }, "compare_behind"],
+    ["the histories diverged", { status: "diverged", behind_by: 1, files: [] }, "compare_diverged"],
     [
       "the compare says identical for two different commits",
       { status: "identical", behind_by: 0, files: [] },
+      "compare_identical",
     ],
-    ["ahead, but the tag has commits the copy lacks", { ...ahead(".nemar/a.json"), behind_by: 1 }],
-    ["a data path changed", ahead(".nemar/a.json", "sub-01/eeg/sub-01_task-x_eeg.edf")],
-    ["a path under a look-alike root changed", ahead(".nemarx/a.json")],
-    ["a path climbs out of its root", ahead(".nemar/../sub-01/a.edf")],
-    ["a path has an empty segment", ahead(".nemar//a.json")],
-    ["a path holds a control character", ahead(".nemar/a\nb.json")],
-    ["a path is over 512 characters", ahead(`.nemar/${"a".repeat(510)}`)],
+    [
+      "ahead, but the tag has commits the copy lacks",
+      { ...ahead(".nemar/a.json"), behind_by: 1 },
+      "compare_behind",
+    ],
+    [
+      "a data path changed",
+      ahead(".nemar/a.json", "sub-01/eeg/sub-01_task-x_eeg.edf"),
+      "data_path",
+    ],
+    ["a path under a look-alike root changed", ahead(".nemarx/a.json"), "data_path"],
+    ["a root with no slash is a file, not the directory", ahead(".nemar"), "data_path"],
+    ["the other root with no slash", ahead(".github"), "data_path"],
+    ["a root in capitals is another path", ahead(".NEMAR/x"), "data_path"],
+    ["a root in mixed case is another path", ahead(".Github/x"), "data_path"],
+    ["a path climbs out of its root", ahead(".nemar/../sub-01/a.edf"), "data_path"],
+    ["a path has an empty segment", ahead(".nemar//a.json"), "data_path"],
+    ["a path holds a control character", ahead(".nemar/a\nb.json"), "data_path"],
+    ["a path is over 512 characters", ahead(`.nemar/${"a".repeat(510)}`), "data_path"],
+    [
+      "a path holds a lone surrogate (a JSON \\ud800 escape), which no process argument can carry",
+      ahead(".nemar/\ud800.json"),
+      "delta_path_unsupported",
+    ],
+    [
+      "paths whose launch bytes exceed the bound (11 paths of 500 non-ASCII characters, six bytes each)",
+      ahead(...Array.from({ length: 11 }, (_, i) => `.nemar/${i}${"\u00e9".repeat(500)}`)),
+      "delta_path_unsupported",
+    ],
     [
       "300 files changed (one path repeated, so only the count refuses it)",
       {
@@ -380,19 +407,27 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
         behind_by: 0,
         files: dup(".nemar/a.json", ZARR_SOURCE_COMPARE_FILES_LIMIT),
       },
+      "too_many_files",
     ],
-    ["33 delta paths", { status: "ahead", behind_by: 0, files: many(33) }],
+    [
+      "1000 files changed, of which GitHub lists 300",
+      { status: "ahead", behind_by: 0, files: many(1000) },
+      "too_many_files",
+    ],
+    ["33 delta paths", { status: "ahead", behind_by: 0, files: many(33) }, "too_many_delta_paths"],
     [
       `${ZARR_SOURCE_MAX_DELTA_PATHS + 1} delta paths, the most a job's argument vector carries plus one`,
       { status: "ahead", behind_by: 0, files: many(ZARR_SOURCE_MAX_DELTA_PATHS + 1) },
+      "too_many_delta_paths",
     ],
     [
       "the commits differ and no file does (the recipe cannot take metadata_only with no path)",
       ahead(),
+      "no_delta_path",
     ],
   ];
-  for (const [name, compare] of cases) {
-    test(`${name}`, async () => {
+  for (const [name, compare, reason] of cases) {
+    test(`${name} (reason ${reason})`, async () => {
       const env = devEnv();
       await seedPipelinesAccount(env);
       await fundPipelines(env);
@@ -401,7 +436,7 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
       const before = await writes(env);
       const auditsBefore = await audits(env);
       const r = await run(env);
-      expect([r.status, r.body.code]).toEqual([409, "zarr_source_mismatch"]);
+      expect([r.status, r.body.code, r.body.reason]).toEqual([409, "zarr_source_mismatch", reason]);
       expect(r.body.results?.[0]?.ok ?? false).toBe(false);
       // The route's one audit row of a refused run, as for version_untagged and zarr_copy_not_ready.
       expect(await audits(env)).toBe(auditsBefore + 1);
@@ -409,7 +444,11 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
       expect(await writes(env)).toEqual(before);
       // And the same verdict from the dry run, with nothing written either.
       const dry = await run(env, { dry_run: true });
-      expect(dry.body.blocked).toMatchObject({ code: "zarr_source_mismatch", version: "v1.0.0" });
+      expect(dry.body.blocked).toMatchObject({
+        code: "zarr_source_mismatch",
+        version: "v1.0.0",
+        reason,
+      });
       expect(dry.body.would_dispatch).toEqual([]);
       expect(await writes(env)).toEqual(before);
     });
@@ -442,8 +481,8 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
     const r = await run(env);
     expect([r.status, r.body.code]).toEqual([409, "zarr_source_mismatch"]);
     expect(githubRequests().map((q) => q.path)).toEqual([
-      `/repos/nemarDatasets/${ID}/commits/v1.0.0`,
-      `/repos/nemarDatasets/${ID}/commits/1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/1.0.0`,
     ]);
     expect(await writes(env)).toEqual(before);
   });
@@ -462,7 +501,7 @@ describe("a definite mismatch is zarr_source_mismatch and writes nothing", () =>
 });
 
 describe("what cannot be read is zarr_source_unverifiable and writes nothing", () => {
-  const cases: Array<[string, (env: Bindings) => Promise<void> | void, string?]> = [
+  const cases: Array<[string, (env: Bindings) => Promise<void> | void]> = [
     [
       "the tag lookup answers 502",
       async (env) => void (await dataset(env, { tag: { http: 502 } })),
@@ -563,8 +602,34 @@ describe("what cannot be read is zarr_source_unverifiable and writes nothing", (
       },
     ],
   ];
+  // The fixed word each refusal carries with its code.
+  const reasons: Record<string, string> = {
+    "the tag lookup answers 502": "github_unreadable",
+    "the tag lookup answers 503": "github_unreadable",
+    "the tag lookup is refused (403)": "github_unreadable",
+    "the tag lookup is throttled (429)": "github_unreadable",
+    "the tag lookup is unauthorized (401)": "github_unreadable",
+    "the tag lookup is a redirect (301)": "github_unreadable",
+    "the tag's commit is not a commit id": "github_unreadable",
+    "there is no index": "no_index",
+    "the index answers 502": "index_unreadable",
+    "the index is not JSON": "index_unreadable",
+    "the index has no source_commit": "index_commit_unusable",
+    "the index's source_commit is not a commit id": "index_commit_unusable",
+    "the index is an array": "index_unreadable",
+    "the compare answers 502": "github_unreadable",
+    "the compare is refused (403)": "github_unreadable",
+    "the compare has a status no rule names": "compare_unreadable",
+    "the compare has no behind_by": "compare_unreadable",
+    "the compare has no files list": "compare_unreadable",
+    "a compare file has no name": "compare_unreadable",
+    "a compare file's previous name is not a string": "compare_unreadable",
+  };
+  test("every case names its reason", () => {
+    expect(cases.map(([name]) => name).sort()).toEqual(Object.keys(reasons).sort());
+  });
   for (const [name, arrange] of cases) {
-    test(`${name}`, async () => {
+    test(`${name} (reason ${reasons[name]})`, async () => {
       const env = devEnv();
       await seedPipelinesAccount(env);
       await fundPipelines(env);
@@ -572,11 +637,18 @@ describe("what cannot be read is zarr_source_unverifiable and writes nothing", (
       const before = await writes(env);
       const auditsBefore = await audits(env);
       const r = await run(env);
-      expect([r.status, r.body.code]).toEqual([503, "zarr_source_unverifiable"]);
+      expect([r.status, r.body.code, r.body.reason]).toEqual([
+        503,
+        "zarr_source_unverifiable",
+        reasons[name],
+      ]);
       expect(await audits(env)).toBe(auditsBefore + 1);
       expect(await writes(env)).toEqual(before);
       const dry = await run(env, { dry_run: true });
-      expect(dry.body.blocked).toMatchObject({ code: "zarr_source_unverifiable" });
+      expect(dry.body.blocked).toMatchObject({
+        code: "zarr_source_unverifiable",
+        reason: reasons[name],
+      });
       expect(await writes(env)).toEqual(before);
       // Never more than three requests to GitHub, however it went.
       expect(githubRequests().length).toBeLessThanOrEqual(2 * ZARR_SOURCE_MAX_GITHUB_REQUESTS);
@@ -902,5 +974,162 @@ describe("the words", () => {
     ]) {
       expect(() => recipeZarrArguments({ ...base, attestation: bad })).toThrow(RangeError);
     }
+  });
+});
+
+// --- (g) The tag is a tag ----------------------------------------------------------------------------------------------------
+
+describe("the commit is read from the TAG, never from another ref", () => {
+  test("a branch named like the tag does not resolve: tag_absent, after the two tag requests and no compare (MUTATION: read commits/<name>)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    // No tag at all; a branch with each of the two names the lookup tries, pointing at the index's commit.
+    await dataset(env, { tag: null, index: { source_commit: T } });
+    github.branch(ID, "v1.0.0", T);
+    github.branch(ID, "1.0.0", T);
+    const before = await writes(env);
+    const r = await run(env);
+    expect([r.status, r.body.code, r.body.reason]).toEqual([
+      409,
+      "zarr_source_mismatch",
+      "tag_absent",
+    ]);
+    expect(githubRequests().map((q) => q.path)).toEqual([
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/v1.0.0`,
+      `/repos/nemarDatasets/${ID}/commits/refs/tags/1.0.0`,
+    ]);
+    expect(await writes(env)).toEqual(before);
+  });
+
+  test("a lightweight tag moved to the copy's parent on the v-less name is still a tag, and a branch cannot take its place (MUTATION: bare name)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    // The real tag is T; a branch of the same name points at S. The tag decides: T is S's parent here, and the
+    // index is built from S, so the verdict is metadata_only over T, never exact over S.
+    await dataset(env, { tag: T, index: { source_commit: S } });
+    github.branch(ID, "v1.0.0", S);
+    github.compare(ID, T, S, ahead(".nemar/a.json"));
+    const r = await run(env);
+    expect(r.status).toBe(201);
+    const args = await argsOf(r.body.results[0].job_id);
+    expect(
+      args.slice(args.indexOf("--source-commit"), args.indexOf("--commit-delta-path")),
+    ).toEqual(["--source-commit", S, "--tag-commit", T, "--commit-equivalence", "metadata_only"]);
+  });
+
+  test("a lightweight tag and an annotated tag both resolve to the commit (the endpoint peels the tag object)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    await dataset(env, { id: "nm000104" });
+    await dataset(env, { id: "nm000105" });
+    for (const id of ["nm000104", "nm000105"]) {
+      const checked = await checkZarrSource(env, id, "v1.0.0");
+      expect(checked).toMatchObject({ ok: true, tagCommit: T, equivalence: "exact" });
+    }
+  });
+});
+
+// --- (h) What a job can carry ----------------------------------------------------------------------------------------------
+
+describe("the delta paths always make a job that builds", () => {
+  test("24 paths of 512 ASCII characters dispatch and the job fits the launcher (MUTATION: lower the byte cap)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    await dataset(env, { index: { source_commit: S } });
+    const files = Array.from({ length: ZARR_SOURCE_MAX_DELTA_PATHS }, (_, i) => ({
+      filename: `.nemar/${String(i).padStart(2, "0")}${"a".repeat(512 - 9)}`,
+    }));
+    github.compare(ID, T, S, { status: "ahead", behind_by: 0, files });
+    const r = await run(env);
+    expect(r.status).toBe(201);
+    const spec = await specOf(r.body.results[0].job_id);
+    expect(launchSpecFits(spec)).toBe(true);
+    expect(spec.args.filter((a) => a === RECIPE_COMMIT_DELTA_PATH_FLAG)).toHaveLength(24);
+  });
+
+  test("10 paths of 500 non-ASCII characters (six launch bytes each) are just inside the cap and the job builds; 11 are refused (MUTATION: drop the byte cap)", async () => {
+    const env = devEnv();
+    await seedPipelinesAccount(env);
+    await dataset(env, { index: { source_commit: S } });
+    const path = (i: number) => `.nemar/${i}${"é".repeat(500)}`;
+    github.compare(ID, T, S, ahead(...Array.from({ length: 10 }, (_, i) => path(i))));
+    const ok = await run(env);
+    expect(ok.status).toBe(201);
+    expect(launchSpecFits(await specOf(ok.body.results[0].job_id))).toBe(true);
+    // The 24-path case of the same paths would be `invalid_spec` if the cap were not here.
+    await dataset(env, { id: "nm000105", index: { source_commit: S } });
+    github.compare("nm000105", T, S, ahead(...Array.from({ length: 24 }, (_, i) => path(i))));
+    const refused = await run(env, {}, "nm000105");
+    expect([refused.status, refused.body.code, refused.body.reason]).toEqual([
+      409,
+      "zarr_source_mismatch",
+      "delta_path_unsupported",
+    ]);
+  });
+});
+
+// --- (i) Credentials, reasons and the user agent -------------------------------------------------------------------------------
+
+describe("credentials, reasons and the user agent", () => {
+  const APP = {
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "4242",
+  } as const;
+
+  test("a token GitHub answers 401 to is dropped from the cache, this dispatch is unverifiable and not re-sent, the next one mints (MUTATION: keep the token)", async () => {
+    __seedInstallationTokenCacheForTests(4242, "stale-token-for-the-test", Date.now() + 3_600_000);
+    const env = devEnv({ ...APP, GITHUB_APP_PRIVATE_KEY: "not-a-key" });
+    await dataset(env, { tag: { http: 401 } });
+    expect(await checkZarrSource(env, ID, "v1.0.0")).toMatchObject({
+      ok: false,
+      code: "zarr_source_unverifiable",
+      reason: "github_unreadable",
+    });
+    // One request, the 401: it was not sent again.
+    expect(githubRequests()).toHaveLength(1);
+    // The next call has no cached token, so it mints, and this key cannot: a different reason.
+    github.log.length = 0;
+    expect(await checkZarrSource(env, ID, "v1.0.0")).toMatchObject({
+      ok: false,
+      code: "zarr_source_unverifiable",
+      reason: "token_mint_failed",
+    });
+    expect(github.log).toEqual([]);
+  });
+
+  test("no App in production and an App that cannot mint are told apart (MUTATION: one word for both)", async () => {
+    const none = prodEnv();
+    await dataset(none);
+    expect(await checkZarrSource(none, ID, "v1.0.0")).toMatchObject({
+      reason: "no_github_credentials",
+    });
+    const broken = prodEnv({ ...APP, GITHUB_APP_PRIVATE_KEY: "not-a-key" });
+    expect(await checkZarrSource(broken, ID, "v1.0.0")).toMatchObject({
+      reason: "token_mint_failed",
+    });
+    expect(github.log).toEqual([]);
+  });
+
+  test("outside production a request says it is the local stack; in production it says it is the Worker (MUTATION: one agent for both)", async () => {
+    await dataset(devEnv());
+    expect(await checkZarrSource(devEnv(), ID, "v1.0.0")).toMatchObject({ ok: true });
+    expect(github.log.map((q) => q.userAgent)).toEqual([
+      "nemar-local-stack/0",
+      "nemar-local-stack/0",
+    ]);
+    github.log.length = 0;
+    __seedInstallationTokenCacheForTests(
+      4242,
+      "installation-token-for-the-test",
+      Date.now() + 3_600_000,
+    );
+    const prod = prodEnv({ ...APP, GITHUB_APP_PRIVATE_KEY: "unused-key-the-cache-answers-first" });
+    await checkZarrSource(prod, ID, "v1.0.0");
+    expect(githubRequests().map((q) => q.userAgent)).toEqual(["NEMAR-API"]);
+  });
+
+  test("every reason is a fixed word of this file", () => {
+    for (const word of ZARR_SOURCE_REASONS) expect(word).toMatch(/^[a-z_]+$/);
+    expect(new Set(ZARR_SOURCE_REASONS).size).toBe(ZARR_SOURCE_REASONS.length);
   });
 });
