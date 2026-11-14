@@ -65,6 +65,7 @@ import {
   runComputePipelineDispatchCron,
 } from "./services/compute-pipeline-dispatch";
 import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
+import { runnerLeaseLogLine, sweepRunnerLeases } from "./services/compute-runner-queue";
 import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
@@ -1242,6 +1243,28 @@ export default {
             .catch((err) =>
               console.error(
                 "[compute-cancel] sweep failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // Portable compute (card DM-07, ADR 0121 decision 4): the runner queue's lease rules. It releases an
+        // expired unstarted claim, moves a started job whose lease expired to `unreported`, settles the
+        // `unreported` ones (verified, `runner_revoked`, `lease_expired`), fails a job past its deadline, ends
+        // every recorded cancel nobody is left to carry out and copies the records of a terminal runner job.
+        // It also runs on every runner claim, in every environment, so the local stack and staging get it
+        // whenever a runner polls; this tick is the production backstop for a queue nobody polls.
+        // PRODUCTION-ONLY here, and deliberately NOT in DEV_CRON_ALLOWLIST. It reads no switch, so turning
+        // runners off never strands a claimed job. One log line, only when it changed or failed something.
+        ctx.waitUntil(
+          sweepRunnerLeases(env, env.DB)
+            .then((r) => {
+              const log = runnerLeaseLogLine(r);
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-runner-queue] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),
