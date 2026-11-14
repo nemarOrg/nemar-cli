@@ -376,8 +376,7 @@ export async function countCancelPendingFailed(db: D1Database): Promise<number> 
  */
 export const MARK_COPY_ABANDONED_SQL = `UPDATE compute_jobs SET flag_mismatch = 1
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
-    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND executor = 'tapis'
-    AND records_deleted_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL AND executor = 'tapis'
     AND flag_mismatch = 0
     AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
 
@@ -391,16 +390,14 @@ export const COPY_ABANDONED_REPORT_DAYS = 30;
  */
 export const COPY_ABANDONED_RECENT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
-    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND executor = 'tapis'
-    AND records_deleted_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL AND executor = 'tapis'
     AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')
     AND ended_at >= datetime('now', '-${RECORDS_COPY_RETRY_DAYS + COPY_ABANDONED_REPORT_DAYS} days')`;
 
 /** The rows {@link MARK_COPY_ABANDONED_SQL} describes, flagged or not and however old: the number an administrator is shown. */
 export const COPY_ABANDONED_COUNT_SQL = `SELECT COUNT(*) AS n FROM compute_jobs
   WHERE state IN (${TERMINAL_STATES_SQL}) AND result_records_at IS NULL
-    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND executor = 'tapis'
-    AND records_deleted_at IS NULL
+    AND settled_provisional_at IS NOT NULL AND flag_unreserved = 0 AND records_deleted_at IS NULL AND executor = 'tapis'
     AND ended_at < datetime('now', '-${RECORDS_COPY_RETRY_DAYS} days')`;
 
 /** {@link COPY_ABANDONED_COUNT_SQL} as a number. */

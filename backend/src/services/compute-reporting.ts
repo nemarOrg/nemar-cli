@@ -404,13 +404,15 @@ export interface AccessReport {
  * job Tapis accepted that never reached the scheduler is not counted, and one bound late on the last
  * day of a quarter and scheduled in the next belongs to the next. A job that skipped the reservation or
  * whose owner NEMAR could not attribute is excluded: it has no gateway user to report, and ACCESS is
- * not told of use NEMAR did not authorise as the person's. A person is counted once however many jobs.
+ * not told of use NEMAR did not authorise as the person's. A runner job (`accounting = 'none'`) is never counted:
+ * it did not run on the allocation. A person is counted once however many jobs.
  */
 export async function accessReport(db: D1Database, quarter: string): Promise<AccessReport | null> {
   const bounds = quarterBounds(quarter);
   if (bounds === null) return null;
   const where = `slurm_job_id IS NOT NULL AND remote_submitted_at >= ?1 AND remote_submitted_at < ?2
-      AND flag_unattributed = 0 AND flag_unreserved = 0 AND gateway_user IS NOT NULL`;
+      AND flag_unattributed = 0 AND flag_unreserved = 0 AND gateway_user IS NOT NULL
+      AND accounting = 'su'`;
   const rows = (
     await db
       .prepare(
