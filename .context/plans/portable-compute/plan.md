@@ -271,7 +271,7 @@ Tiers: `w` worker, `wh` worker-hard, `lead`.
 | R5 | docs | EEGDash and braindecode can read the stores; fixtures published | docs CI; eegdash/EEGDash#401 linked | R1 | docs | mgr | w | CP-4 |
 | H1 | nemar-process | Runner backend `slurm`; `runner_remote_id`; accounting `su` with hold, settlement and ACCESS | `uv run pytest tests/runner/test_slurm_backend.py -q` against a real `slurmctld` in CI | DM-18 | `runner/nemar_runner/slurm.py` | ci | wh, Opus review | CP-3 |
 | H2 | both | The same digest gives equivalent outputs on a workstation and a SLURM host | pre-registered tolerance per output with pinned thread counts | H1 | none | ws-a, HPC | w | CP-4 |
-| W1 | docs | Public page docs.nemar.org/compute/portable-processing | docs CI; the `.md` mirror serves | S2 | nemarOrg/docs | mgr | w | CP-2 |
+| W1 | docs | Public page `compute/portable-processing` on the docs site (not published yet, so not spelled as a URL: `test/docs-links.unit.test.ts` resolves every URL against the published pages) | docs CI; the `.md` mirror serves | S2 | nemarOrg/docs | mgr | w | CP-2 |
 | W2 | docs | Gated runbook `admin/operations/workstation-runners` | docs CI; `nemar admin docs admin/operations/workstation-runners` reads it | DM-19 | nemarOrg/docs | mgr | w | CP-2 |
 
 ## 5. What I could not verify
