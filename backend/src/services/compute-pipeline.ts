@@ -1199,6 +1199,11 @@ export interface DryRunConfig {
   pipelines_account: boolean;
   /** `computeRunnersEnabled`: a runner run needs it. Present only in the dry run of a runner run. */
   runners_enabled?: boolean;
+  /**
+   * `tapisSubmitConfigured`: a Tapis run needs it (`tapis_unconfigured`). Present only in the dry run of a
+   * Tapis run, as `runners_enabled` is only in a runner's.
+   */
+  tapis_configured?: boolean;
 }
 
 export type DryRunResult =
@@ -1321,7 +1326,9 @@ export async function pipelineDryRun(env: Bindings, input: DryRunInput): Promise
     runtime_image: readRuntimeImage(env).state === "ok",
     pipelines_account: (await pipelinesAccountId(db)) !== null,
     // Only a runner run asks for the switch: a Tapis run's answer is what it was before ADR 0121.
-    ...(executor === "runner" ? { runners_enabled: computeRunnersEnabled(env) } : {}),
+    ...(executor === "runner"
+      ? { runners_enabled: computeRunnersEnabled(env) }
+      : { tapis_configured: tapisSubmitConfigured(env) }),
   };
   const base = {
     ok: true as const,

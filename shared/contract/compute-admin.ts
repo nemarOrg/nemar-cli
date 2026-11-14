@@ -659,6 +659,8 @@ export const ComputePipelineRunResponseSchema = z
         pipelines_account: z.boolean(),
         /** Portable compute: `computeRunnersEnabled`; optional for an older Worker. */
         runners_enabled: z.boolean().optional(),
+        /** Whether a Tapis job could be submitted; only in the dry run of a Tapis run, optional for an older Worker. */
+        tapis_configured: z.boolean().optional(),
       })
       .passthrough()
       .optional(),

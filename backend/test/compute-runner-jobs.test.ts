@@ -1017,10 +1017,12 @@ describe("a runner job through the admin route", () => {
       live_left: expect.any(Number),
       tenant_left: expect.any(Number),
     });
+    // S3c: the one key a Tapis dry run gained, and a runner's dry run has none of it.
     expect(Object.keys(r.body.config).sort()).toEqual([
       "compute_enabled",
       "pipelines_account",
       "runtime_image",
+      "tapis_configured",
     ]);
   });
 });

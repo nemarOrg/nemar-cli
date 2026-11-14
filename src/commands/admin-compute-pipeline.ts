@@ -105,6 +105,9 @@ function printRun(res: ComputePipelineRunResponse): void {
         `pipelines account ${c.pipelines_account ? "present" : "MISSING"}`,
       ];
       if (runner) needs.push(`runners ${c.runners_enabled ? "on" : "OFF"}`);
+      else if (c.tapis_configured !== undefined) {
+        needs.push(c.tapis_configured ? "Tapis configured" : "Tapis NOT CONFIGURED");
+      }
       say(`  a real run needs: ${needs.join(", ")}`);
     }
     if (res.room) say(roomLine(res.room, "now"));
