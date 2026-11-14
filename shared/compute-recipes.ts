@@ -26,20 +26,21 @@
  * accepts a result (`recipeImageDigestArg`).
  *
  * TWO INPUTS, TWO EXECUTORS (portable compute, ADR 0121, plan D12). A recipe lists the `inputs` it reads:
- * `bids` (the dataset staged at `/data/<id>`, the arguments above) or `zarr` (nothing staged: the recipe
- * streams the dataset's Zarr serving copy from `--zarr-base`, the one origin it may open, and the Worker
- * passes the commit that copy was built from, the version's tag commit and how they are equivalent as
- * `--source-commit`, `--tag-commit`, `--commit-equivalence` and `--commit-delta-path`; `recipeZarrArguments`).
- * The input is chosen in the COMMAND (`nemar-recipe run nemar-floor --input zarr`, `recipeCommand`), not in the
- * arguments: a Zarr job's arguments are the fixed ones and the delta paths, which fill the 64 a job may carry
- * (`ZARR_SOURCE_MAX_DELTA_PATHS`), so a BIDS run, whose command and arguments are what they always were, and a
- * Zarr run differ only in the two words after the recipe's name. `executors` lists where a recipe may be dispatched: `tapis` (an allocation, a
- * hold) or `runner` (a registered runner pulls it, no hold). A dispatch to an executor a recipe does not
- * list is refused. ONE recipe, ONE registry entry, both inputs: `nemar-floor` is `bids` on Tapis and `zarr`
- * on a runner, and {@link RECIPE_INPUT_EXECUTOR} says which input runs where. A dispatch names its input or
- * takes the executor's ({@link defaultInput}); an input the recipe does not list, or one the executor does
- * not run, is refused before anything is claimed ({@link recipeRunsInput}). The input is part of the
- * stamp's claimed tuple, so a `bids` and a `zarr` run of one dataset version coexist.
+ * `bids` (the dataset the launcher stages and binds read-only, the arguments above) or `zarr` (nothing
+ * staged: the recipe streams the dataset's Zarr serving copy from `--zarr-base`, the one origin it may open,
+ * and the Worker passes the commit that copy was built from, the version's tag commit and how they are
+ * equivalent as `--source-commit`, `--tag-commit`, `--commit-equivalence` and `--commit-delta-path`;
+ * `recipeZarrArguments`). The input is chosen in the COMMAND (`nemar-recipe run nemar-floor --input zarr`,
+ * `recipeCommand`), not in the arguments: a Zarr job's arguments are the fixed ones and the delta paths,
+ * which fill the 64 a job may carry (`ZARR_SOURCE_MAX_DELTA_PATHS`), so a BIDS run, whose command and
+ * arguments are what they always were, and a Zarr run differ only in the two words after the recipe's name.
+ * `executors` lists where a recipe may be dispatched: `tapis` (an allocation, a hold) or `runner` (a
+ * registered runner pulls it, no hold). A dispatch to an executor a recipe does not list is refused. ONE
+ * recipe, ONE registry entry, both inputs: `nemar-floor` is `bids` on Tapis and `zarr` on a runner, and
+ * {@link RECIPE_INPUT_EXECUTOR} says which input runs where. A dispatch names its input or takes the
+ * executor's ({@link defaultInput}); an input the recipe does not list, or one the executor does not run, is
+ * refused before anything is claimed ({@link recipeRunsInput}). The input is part of the stamp's claimed
+ * tuple, so a `bids` and a `zarr` run of one dataset version coexist.
  */
 
 /** The states of a stamp, declared once; the migration's CHECK is held to this list by a test. */
