@@ -661,7 +661,8 @@ export async function commitTerminal(
             : settleStatements(db, { jobId: job.id, chargeMilli: plan.settlement.milli }, gate)),
           db.prepare(SETTLED_STAMP_SQL).bind(job.id, plan.to),
         ];
-  const runnerRow = job.executor === "runner";
+  // Fails closed, like the launcher routes: anything that is not a Tapis row carries the lease it read.
+  const runnerRow = job.executor !== "tapis";
   const results = await db.batch([
     db
       .prepare(runnerRow ? RUNNER_TERMINAL_TRANSITION_SQL : TERMINAL_TRANSITION_SQL)

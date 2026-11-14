@@ -272,6 +272,10 @@ export async function handleOutputs(
   if ((claimed.meta?.changes ?? 0) !== 1) {
     const now = await getJob(env.DB, job.id);
     if (!now || TERMINAL_COMPUTE_STATES.includes(now.state as never)) return refuse("bad_state");
+    // A runner job whose lease is no longer the one this request proved belongs to another holder: this
+    // request is stale. It records nothing (a refusal written here would land under the NEW lease and count
+    // against the new holder's job) and presigns nothing.
+    if (job.executor !== "tapis" && now.lease_id !== job.lease_id) return refuse("bad_state");
     if (now.results_bytes === null) return refuseAndRecord(env, now, "results_quota_exceeded");
     // Claimed already: a replay is the same declaration, and only that.
     const same = now.results_bytes === total && (await declaredMatches(bucket, job.id, text));
