@@ -20,6 +20,7 @@ It carries no migration and sets no Worker variable or secret, and it changes no
 
 ### Added
 
+- The fixture id `nm099996` is declared dev-owned, so production stops claiming pushes to a repository by that name before anyone creates it.
 - **A ceiling on the live jobs of the whole tenant, checked in the statement that takes each job's hold, whoever submits it.**
   The owner's `tenant` policy key sets the ceiling and a floor of slots kept for people, for the pipelines and for partners; the schema refuses floors that add up to more than the ceiling, and a stored policy without the key falls back to the defaults, never to unlimited.
   A job that would take a slot owed to another class, or pass the ceiling, is refused with the new word `platform_busy` (409).
