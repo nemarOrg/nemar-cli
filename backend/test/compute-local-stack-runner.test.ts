@@ -91,7 +91,24 @@ function useStack(image: string): () => LocalStack {
     });
   }, 120_000);
   afterAll(async () => {
-    await stack?.stop();
+    // The stack hands the records copy of an ended job to `waitUntil` and nothing awaits it. A stop that comes
+    // while that copy is still in flight (a case that failed early, with its job `failed`) never returns:
+    // `mf.dispose` blocks the process. So the copy is waited for (at most 10 s) before the stop, and the stop
+    // itself is raced against a timeout, so a regression fails its case instead of hanging the run.
+    const open = () =>
+      (
+        stack?.db
+          .query(
+            "SELECT COUNT(*) AS n FROM compute_jobs WHERE ended_at IS NOT NULL AND result_records_at IS NULL",
+          )
+          .get() as { n: number } | undefined
+      )?.n ?? 0;
+    for (let waited = 0; open() > 0 && waited < 10_000; waited += 100) await Bun.sleep(100);
+    const stopped = await Promise.race([
+      stack?.stop().then(() => "stopped"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("stack_stop_timeout"), 10_000)),
+    ]);
+    if (stopped === "stack_stop_timeout") console.error("stack_stop_timeout");
   }, 30_000);
   return () => stack as LocalStack;
 }
@@ -427,10 +444,13 @@ describe.each([
   "one runner job, dispatch to settled finished, with %s as the stack's image",
   (_label, image) => {
     const running = useStack(image);
+    // The first case's job, for the outputs case below (so a name filter cannot break the second).
+    let finishedJob: string | null = null;
 
     test("finished, runner, accounting none, digest of the decoded text, settled with charge 0 and no ledger row (MUTATION: drop settled_final_at from NONE_SETTLED_STAMP_SQL, or write another launch digest)", async () => {
       const stack = running();
       const { jobId, entry } = await runWholeJob(stack);
+      finishedJob = jobId;
 
       // The GET routes: the administrator's record summary of the job.
       const record = await call(stack, "GET", `/admin/compute/records/${jobId}`, stack.keys.admin);
@@ -458,6 +478,8 @@ describe.each([
       expect(record.body.identifiers.launch_spec_digest).toBe(await sha(text));
       expect(record.body.identifiers.image_digest).toBe(spec.image.digest);
       expect(spec.image.uri).toBe(image);
+      // A Zarr runner job stages no bundle, so the launcher has none to ask the bundle route for.
+      expect(spec.bundle).toBeUndefined();
       expect(spec.image.digest).toBe(image.slice(image.indexOf("@") + 1));
 
       // The job record: settled final, charge 0, nothing in the ledger.
@@ -488,11 +510,8 @@ describe.each([
 
     test("the stack's outputs command downloads every declared file with its size (MUTATION: list no file, or write no file, in downloadOutputs)", async () => {
       const stack = running();
-      const jobId = (
-        stack.db.query("SELECT id FROM compute_jobs WHERE state = 'finished'").get() as {
-          id: string;
-        }
-      ).id;
+      const jobId = finishedJob;
+      if (jobId === null) throw new Error("the whole-run case did not leave a finished job");
       const to = fresh("outputs");
       const ran = await runOutputsCommand(stack, jobId, to);
       expect(ran.err).toBe("");
@@ -546,6 +565,8 @@ describe("a request that lost the lease after the route's check", () => {
     const entryA = await claimOne(own, a);
     expect(entryA.id).toBe(jobId);
 
+    // The hand-written lease expiry and the direct `sweepRunnerLeases` call are the only non-route steps in this
+    // file: expiry is clock-driven, and the sweep is the cron step the stack lacks.
     // The other request, made exact: between the route's lease check and the declared-bytes claim, the
     // lease expires, the sweep (the cron's step, which the stack lacks) releases the claim, and runner B
     // claims the job under a new lease through the real claim route.
