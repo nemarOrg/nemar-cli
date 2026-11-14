@@ -158,6 +158,13 @@ async function world(ids = ["nm000104", "nm000105", "nm000106"]) {
 const count = async (env: Bindings, table: string) =>
   (await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first<{ n: number }>())?.n ?? 0;
 
+/** No credential of any strategy: the Worker cannot submit to Tapis. */
+const NO_TAPIS: Partial<Bindings> = {
+  TAPIS_USERNAME: undefined,
+  TAPIS_PASSWORD: undefined,
+  TAPIS_SERVICE_TOKEN: undefined,
+};
+
 describe("run --eligible", () => {
   test("its help says what is eligible, the dry run, and that a live run needs compute", async () => {
     const r = await runCli("admin", ["run", "--help-all"]);
@@ -284,6 +291,17 @@ describe("run --dataset", () => {
     expect(r.stdout + r.stderr).toContain("compute_disabled");
     expect(await count(env, "compute_pipeline_stamps")).toBe(0);
   });
+
+  test("a live run against a Worker with no Tapis credential exits 1 with tapis_unconfigured and writes nothing", async () => {
+    const env = await world(["nm000104"]);
+    workerEnv = NO_TAPIS;
+    const r = await runCli("admin", ["run", "nemar-floor", "--dataset", "nm000104"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("tapis_unconfigured");
+    expect(await count(env, "compute_pipeline_stamps")).toBe(0);
+    expect(await count(env, "compute_jobs")).toBe(0);
+    expect(await count(env, "audit_log")).toBe(0);
+  });
 });
 
 describe("--dry-run", () => {
@@ -325,6 +343,22 @@ describe("--dry-run", () => {
       await count(env, "audit_log"),
       fx.tapis.log.length,
     ]).toEqual(before);
+  });
+
+  test("a Tapis dry run says whether Tapis is configured (MUTATION: drop the Tapis part of the needs line)", async () => {
+    await world(["nm000104"]);
+    const args = ["run", "nemar-floor", "--dataset", "nm000104", "--dry-run"];
+    const on = await runCli("admin", args);
+    expect(on.exitCode).toBe(0);
+    expect(on.stdout).toContain("pipelines account present, Tapis configured");
+    workerEnv = NO_TAPIS;
+    const off = await runCli("admin", args);
+    expect(off.exitCode).toBe(0);
+    expect(off.stdout).toContain("pipelines account present, Tapis NOT CONFIGURED");
+    const json = await runCli("admin", [...args, "--json"]);
+    const answer = JSON.parse(json.stdout);
+    expect(ComputePipelineRunResponseSchema.safeParse(answer).success).toBe(true);
+    expect(answer.config.tapis_configured).toBe(false);
   });
 
   test("the queue's dry run is trimmed to 10 per invocation, and says so", async () => {
@@ -618,6 +652,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
       "executor: runner (no hold, no service units; a runner pulls the job)",
     );
     expect(r.stdout).toContain("runners on");
+    expect(r.stdout).not.toContain("Tapis");
     expect(r.stdout).toContain("runner room now: 64 left of the runners' live cap of 64");
     expect(r.stdout).toContain("nm000104 v1.0.0");
     expect(r.stdout).not.toContain("estimated hold per job");
