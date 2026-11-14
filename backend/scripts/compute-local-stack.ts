@@ -34,6 +34,15 @@
  * band. The public API does not serve a dataset's version list (that route is authenticated), so the one
  * version row is built from the record's `latest_version*` fields, and the record's `zarr_source_commit`
  * (the commit the serving copy was built from) is kept as the version's commit.
+ *
+ * THE ZARR SOURCE CHECK (card DM-06b). A Zarr recipe is dispatched only when the serving copy's own commit S is
+ * the tag's commit T or a metadata-only step after it, read from the serving index and from GitHub. So:
+ *  - `--seed-from-catalog` points the check's index read at the public serving host (`NEMAR_ZARR_INDEX_BASE`)
+ *    and leaves GitHub at its public API, unauthenticated (the stack has no GitHub App); a dataset whose public
+ *    index is there is recorded as `ready` with the index's store count, so the Zarr recipe can be dispatched.
+ *  - `--seed-fixture` starts a stand-in for the two (a real loopback server, nothing of GitHub's or the host's)
+ *    that names the fixture version's commit as both the tag's and the index's: the verdict is `exact`.
+ * The two seeds are not combined: the check reads one GitHub API and one index base for the whole stack.
  */
 
 import type { Database } from "bun:sqlite";
@@ -64,6 +73,7 @@ import { getPolicy, putPolicy } from "../src/services/compute-policy";
 import { imageFacts } from "../src/services/compute-runtime-image";
 import { isReservedFixtureId } from "../src/services/datasetId";
 import { generateApiKey, hashApiKey } from "../src/services/token";
+import { readZarrIndexOverHttp } from "../src/services/zarr-source-check";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { seedEegDataset, seedPipelinesAccount } from "../test/helpers/compute-pipeline-fixture";
 import {
@@ -75,6 +85,10 @@ import {
 } from "../test/helpers/compute-s3-standin";
 import { seedUser } from "../test/helpers/compute-seed";
 import { openMigratedDb, realD1 } from "../test/helpers/d1";
+import {
+  type GithubCompareStandin,
+  startGithubCompareStandin,
+} from "../test/helpers/github-compare-standin";
 import { retryInfrastructure } from "../test/helpers/neurobagel-harness";
 
 export const LOOPBACK = "127.0.0.1";
@@ -82,6 +96,8 @@ export const DEFAULT_PORT = 8787;
 export const DEFAULT_S3_PORT = 8788;
 export const PUBLIC_API = "https://api.nemar.org";
 export const CATALOG_USER_AGENT = "nemar-local-stack/0";
+/** The public serving host's origin: where `--seed-from-catalog` reads each dataset's serving index. */
+export const PUBLIC_ZARR_BASE = "https://zarr.nemar.org";
 /**
  * The fixture dataset `--seed-fixture` inserts: a real-shaped `nm` id below the reserved band, one version.
  * The id lies in the live allocation range, so `--seed-from-catalog` refuses it (a real dataset may one day
@@ -90,6 +106,8 @@ export const CATALOG_USER_AGENT = "nemar-local-stack/0";
 export const FIXTURE_DATASET_ID = "nm000900";
 /** The commit the fixture's version names; a fixture value, not a real commit. */
 export const FIXTURE_SOURCE_COMMIT = "f".repeat(40);
+/** The data-plane tag of the fixture's one version (`1.0.0`, as `seedEegDataset` writes it). */
+export const FIXTURE_VERSION_TAG = "v1.0.0";
 /** The live datasets (public, DOIs minted): never read into this stack either. */
 const LIVE_DATASETS = new Set(["nm000103", "nm000104", "nm000105", "nm000106", "nm000107"]);
 const BUCKETS = { records: "nemar-compute-records", results: "nemar-compute-results" } as const;
@@ -112,6 +130,8 @@ export interface StackOptions {
   seedFromCatalog?: string[];
   /** Where the public record is read from (a test points it at a local stand-in). */
   catalogBase?: string;
+  /** Where the serving copy's index is read from by the Zarr source check; the public serving host by default. */
+  zarrIndexBase?: string;
   /** Called with each line the stack would print. */
   log?: (line: string) => void;
 }
@@ -370,6 +390,7 @@ async function seedFromCatalog(
   id: string,
   ownerId: number,
   base: string,
+  zarrIndexBase: string,
 ): Promise<string[]> {
   const refusal = catalogRefusal(id);
   if (refusal) throw new Error(refusal);
@@ -425,7 +446,22 @@ async function seedFromCatalog(
       typeof record.total_files === "number" ? record.total_files : null,
     )
     .run();
-  return [...CATALOG_DATASET_FIELDS, ...CATALOG_VERSION_FIELDS];
+  const seeded: string[] = [...CATALOG_DATASET_FIELDS, ...CATALOG_VERSION_FIELDS];
+  // A dataset with a serving copy is recorded `ready` only when its public index says so, with the index's own
+  // store count: the Zarr recipe is dispatched only while the copy is ready with a store (DM-06), and the
+  // public record does not carry either value.
+  if (typeof record.zarr_source_commit === "string") {
+    const index = await readZarrIndexOverHttp(zarrIndexBase, id);
+    if (index.ok && index.storeCount !== null && index.storeCount > 0) {
+      await env.DB.prepare(
+        "UPDATE datasets SET zarr_status = 'ready', zarr_store_count = ?1 WHERE dataset_id = ?2",
+      )
+        .bind(index.storeCount, id)
+        .run();
+      seeded.push("zarr_status", "zarr_store_count");
+    }
+  }
+  return seeded;
 }
 
 async function datasetThere(db: D1Database, id: string): Promise<boolean> {
@@ -481,6 +517,11 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
   for (const id of opts.seedFromCatalog ?? []) {
     const refusal = catalogRefusal(id);
     if (refusal) throw new Error(refusal);
+  }
+  if (opts.seedFixture && (opts.seedFromCatalog ?? []).length > 0) {
+    throw new Error(
+      "--seed-fixture and --seed-from-catalog are not combined: the Zarr source check reads one GitHub API and one index base",
+    );
   }
   const log = opts.log ?? ((line: string) => console.log(line));
   const state = resolve(opts.state);
@@ -545,15 +586,35 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
     COMPUTE_R2_S3_ENDPOINT: "http://127.0.0.1:1",
   } as unknown as Bindings;
 
+  // The Zarr source check's two external services (see the header). Read at call time, restored at teardown.
+  const zarrSeams = globalThis as { NEMAR_GITHUB_API_URL?: string; NEMAR_ZARR_INDEX_BASE?: string };
+  const previousGithub = zarrSeams.NEMAR_GITHUB_API_URL;
+  const previousIndexBase = zarrSeams.NEMAR_ZARR_INDEX_BASE;
+  let zarrStandin: GithubCompareStandin | undefined;
+  if (opts.seedFixture) {
+    zarrStandin = startGithubCompareStandin();
+    zarrSeams.NEMAR_GITHUB_API_URL = zarrStandin.url;
+    zarrSeams.NEMAR_ZARR_INDEX_BASE = zarrStandin.indexBase;
+  } else if ((opts.seedFromCatalog ?? []).length > 0) {
+    zarrSeams.NEMAR_ZARR_INDEX_BASE = opts.zarrIndexBase ?? PUBLIC_ZARR_BASE;
+  }
+  const restoreZarrSeams = () => {
+    zarrStandin?.stop();
+    zarrSeams.NEMAR_GITHUB_API_URL = previousGithub;
+    zarrSeams.NEMAR_ZARR_INDEX_BASE = previousIndexBase;
+  };
+
   let server: ReturnType<typeof Bun.serve> | undefined;
   const closeNow = () => {
     server?.stop(true);
+    restoreZarrSeams();
     standin.stop();
     db.close();
     hardenTree(state);
   };
   const teardown = async () => {
     server?.stop(true);
+    restoreZarrSeams();
     standin.stop();
     g.NEMAR_COMPUTE_S3_URL = previousS3Url;
     await infra.mf.dispose().catch(() => {});
@@ -573,11 +634,25 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
 
     await seed(env, keys);
     const ownerId = (await userIdOf(env.DB, FIXTURE_OWNER.username)) as number;
-    if (opts.seedFixture && !(await datasetThere(env.DB, FIXTURE_DATASET_ID))) {
-      await seedEegDataset(env, FIXTURE_DATASET_ID, { owner: ownerId });
-      await env.DB.prepare("UPDATE datasets SET zarr_source_commit = ?1 WHERE dataset_id = ?2")
+    if (opts.seedFixture) {
+      if (!(await datasetThere(env.DB, FIXTURE_DATASET_ID))) {
+        await seedEegDataset(env, FIXTURE_DATASET_ID, { owner: ownerId });
+      }
+      // A ready serving copy built from the fixture version's commit, which the stand-in names as the tag's
+      // commit too: the Zarr source check's verdict is `exact`. Every start, so a state made before the check
+      // existed is brought up to date; the stand-in's answers live only as long as this process.
+      await env.DB.prepare(
+        "UPDATE datasets SET zarr_source_commit = ?1, zarr_status = 'ready', zarr_store_count = 1 WHERE dataset_id = ?2",
+      )
         .bind(FIXTURE_SOURCE_COMMIT, FIXTURE_DATASET_ID)
         .run();
+    }
+    if (zarrStandin) {
+      zarrStandin.tag(FIXTURE_DATASET_ID, FIXTURE_VERSION_TAG, FIXTURE_SOURCE_COMMIT);
+      zarrStandin.index(FIXTURE_DATASET_ID, {
+        source_commit: FIXTURE_SOURCE_COMMIT,
+        store_count: 1,
+      });
     }
     const copied: Record<string, string[]> = {};
     for (const id of opts.seedFromCatalog ?? []) {
@@ -585,7 +660,13 @@ export async function startLocalStack(opts: StackOptions): Promise<LocalStack> {
         log(`${id}: already in the state database, left as it is`);
         continue;
       }
-      copied[id] = await seedFromCatalog(env, id, ownerId, opts.catalogBase ?? PUBLIC_API);
+      copied[id] = await seedFromCatalog(
+        env,
+        id,
+        ownerId,
+        opts.catalogBase ?? PUBLIC_API,
+        opts.zarrIndexBase ?? PUBLIC_ZARR_BASE,
+      );
       const checked = await loadPipelineRow(env.DB, id);
       log(`${id}: copied ${copied[id].join(", ")}`);
       log(
