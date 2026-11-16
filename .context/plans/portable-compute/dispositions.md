@@ -48,7 +48,7 @@ Three reviews (executability EX, design DE, long-horizon advisor AD) and the own
 
 | ID | Disposition |
 |---|---|
-| C1 lossy serving copy | Accepted, then decided by the owner: plain label in the demo; the fidelity profile and native profile stay an ADR 0123 option (plan D13, Q10). |
+| C1 lossy serving copy | Accepted, then decided by the owner: plain label in the demo; the fidelity profile and native profile stay an option for Z0's ADR (plan D13, Q10; ADR 0123 went to V1). |
 | C2 accounting class | Accepted: `accounting` on jobs and runners; money keys on it; `su` runner jobs refused until H1 (plan D1, D6; DM-04 to DM-07). |
 | C3 derivatives home | Accepted as plan D14, ADR 0121's rule, step V1 and Q11; the demo keeps outputs local and says so. |
 | C4 one recipe | Accepted: `nemar-floor-zarr` is a transition name; step Q0 converges. |
@@ -60,7 +60,7 @@ Three reviews (executability EX, design DE, long-horizon advisor AD) and the own
 | C10 private data | Decided by the owner: public only (Q9); R4 carries the advisor's conditions. |
 | C11 access patterns | Accepted: counted refusals in DM-13's outputs; masks in Q2; raw input through presigned data-plane reads and the largest datasets in Z5 (plan D10). |
 | C12 credit and equivalence | Accepted: citation fields in V1; H2 uses pre-registered tolerances with pinned threads; host facts per job; reproducibility statement in ADR 0121. |
-| C13 phase Z scale | Accepted: CP-F chooses the promote mechanism against the stated scale; the drift test covers every pin mirror and the privacy floor; ADR 0123 supersedes 0029, 0033 and 0101. |
+| C13 phase Z scale | Accepted: CP-F chooses the promote mechanism against the stated scale; the drift test covers every pin mirror and the privacy floor; Z0's ADR supersedes 0029, 0033 and 0101. |
 | C14 demo wording | Accepted: plan 3.1 and DM-16. |
 
 ## D. Smaller

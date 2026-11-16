@@ -1,0 +1,60 @@
+# Card V1b: The derivative store: a finished pipeline job's product becomes a keyed, retained derivative
+
+Status: ready
+Tier: worker-hard
+Timebox: L, 6 hours; escalate at 12 hours or two failed approaches
+Needs: none
+Depends: V1, Q0b
+Branch: feature/pc-v1b-derivative-store
+Worktree: $WT/nemar-cli-pc-v1b (base origin/feature/portable-compute-epic, containing V1 and Q0b)
+Plan: .context/plans/portable-compute/plan.md, D14, section 4 (V1); the ADR card V1 wrote; owner decision Q11
+Review: Sonnet panel plus one Opus review (retention and deletion: nothing published is ever deleted by code, a superseded or expired derivative's objects go and its row stays; access: only admins list and promote, only the owner sets `published`; isolation: no person's key reads the bucket, no public route; no path mints a DOI)
+
+## Goal
+
+When a pipeline job has finished and its stamp succeeded, its product is copied server-side into a private derivatives bucket under the key card V1 defines, described with `GeneratedBy`, `SourceDatasets` and a citation, retained by class (canary 30 days, catalog until superseded, published), and administrators can list and promote derivatives, all dark until the owner adds the bucket binding.
+
+## Context
+
+- Read the ADR and `shared/contract/derivatives.ts` from card V1, `backend/src/services/compute-s3.ts` (`copyObject`, `ComputeBucket`, the bucket names), `backend/src/services/compute-outputs.ts` (how a job's outputs and manifest are found in `COMPUTE_RESULTS`), `backend/src/services/compute-pipeline.ts` (the stamp sync and the fields Q0b added: `input`, `reader`, `input_engine`, `input_digest`), `backend/src/services/deletion.ts` (what deleting a dataset deletes), `backend/src/types/bindings.ts` (`COMPUTE_RESULTS?: R2Bucket` is the optional-binding pattern), the admin compute routes and their role checks, and the dataset version rows that hold a version DOI.
+- Subrequests: the Worker may make 1,000 per invocation and the daily tick shares them, so copying and expiring are paged with a cursor in D1.
+- A new daily cron job is production-only by default (`AGENTS.md`); the local stack and staging advance the store through the admin route below.
+- Workers never set a secret, create a bucket or edit a production switch: the owner creates the bucket `nemar-compute-derivatives`, gives the compute R2 token access to it, and adds the binding in a reviewed PR; this card writes that PR's text into its report.
+
+## Scope
+
+- New migration `backend/src/db/migrations/014N_compute_derivatives.sql` (the lowest free number from 0141), new `backend/src/services/compute-derivatives.ts`, new `backend/src/routes/admin/compute-derivatives.ts` and its registration, `backend/src/services/compute-s3.ts` (a `derivatives` bucket in `ComputeBucket`, named by `COMPUTE_DERIVATIVES_BUCKET_NAME`), `backend/src/types/bindings.ts` (`COMPUTE_DERIVATIVES?: R2Bucket`, `COMPUTE_DERIVATIVES_BUCKET_NAME?: string`), `backend/src/services/deletion.ts` (the derivative rule of item 7), the production daily block of `scheduled()` (one call), the route inventory test, new `backend/test/compute-derivatives.test.ts`, and `src/commands/` for `nemar admin compute derivatives list|show|promote|sync`.
+- Not `backend/wrangler-sccn.toml`, `shared/contract/derivatives.ts` (V1's; a change there is a patch note), any DOI or EZID code, or any public route.
+
+## Decided design
+
+Settled:
+1. **Table `compute_derivatives`**: `key` (64 lowercase hexadecimal, primary key), the eight key fields of V1 item 3, `image_digest`, `job_id`, `stamp_id`, `state` (`copying`, `stored`, `failed`, `expired`), `retention` (`canary`, `catalog`, `published`), `failure` (a fixed word or NULL), `copied` and `object_count` and `bytes` (integers), `created_at`, `stored_at`, `superseded_at`, `expires_at`, `doi` (NULL; no code writes it). Named CHECKs in 0117's style; `doi IS NULL OR retention = 'published'`; `state = 'stored'` requires `stored_at`.
+2. **Making one.** `syncDerivatives(env, { maxObjects: 100 })` takes succeeded stamps that have a finished job and no derivative row, oldest first, builds the key with `derivativeKey` from the stamp's columns (a stamp with a NULL `input_digest`, or one that fails a check of item 9, is skipped and counted as `derivative_unkeyable`), and inserts a `copying` row with `INSERT ... ON CONFLICT(key) DO NOTHING` (a second job with the same key adds nothing: the first derivative stands). It then copies that job's product files (the manifest's paths under `product/`) with `copyObject` from `results` to `derivatives` at `d/<key>/<relative path>`, at most `maxObjects` copies per call across all rows, advancing `copied`; each copy is checked by the destination's size and `etag` equal to the source's (binding `head`); a mismatch deletes what was copied and ends the row `failed` with `copy_mismatch`. When all are copied it writes `d/<key>/derivative.json` and sets `stored`, `stored_at`, `expires_at = stored_at + 30 days`.
+3. **`derivative.json`**: the key text and key, `GeneratedBy` (recipe, recipe version, image digest, job id, the record's `extensions.nemar.process` block), `SourceDatasets` (dataset id, version, the version DOI from D1 or null), `Profile` (`serving` or `archive`), for `serving` the `SERVING_PROFILE_SENTENCE` of V1, a citation string `Derived from <dataset id> version <version> (DOI <doi>) by NEMAR's <recipe> <recipe version>.` (the DOI clause left out when there is none), and the file list with size and SHA-256 from the job's manifest. It never states an archived recording's rate.
+4. **Retention.** The same sync expires rows whose `expires_at` has passed and whose retention is not `published`: it lists `d/<key>/` and deletes in batches of at most 1,000 keys, within the same `maxObjects` budget, then sets `expired`; the row stays. A `published` row is never expired, superseded or deleted by code.
+5. **Promotion.** `POST /admin/compute/derivatives/:key/retention` with `{"class": "catalog"}` (role admin or owner; only from `canary`, only for a `stored` row) sets `catalog`, clears `expires_at`, and in the same batch marks every other `catalog` row of the same dataset, recipe, input and profile `superseded_at = now`, `expires_at = now + 30 days`. `{"class": "published"}` is accepted only from the owner role, only from `catalog`, and clears `expires_at`. No route lowers a class.
+6. **Reading.** `GET /admin/compute/derivatives?dataset=<id>` and `GET /admin/compute/derivatives/:key` (admin or owner) return rows and the description; `POST /admin/compute/derivatives/sync` (admin or owner) runs one sync and returns its counts. The production daily block calls the sync once with `maxObjects: 100`.
+7. **Deleting a dataset** sets `expires_at = now` on its `canary` and `catalog` rows in the deletion's batch; its `published` rows are kept and the deletion's result reports `published_derivatives_held` with their count for the owner.
+8. **Dark until bound.** With `COMPUTE_DERIVATIVES` or `COMPUTE_DERIVATIVES_BUCKET_NAME` absent every entry point returns `derivatives_unavailable` and writes no row.
+9. **Keying checks** (the ADR's, card V1 item 7), every one, before the row is inserted, read from the job's dataset record, its `spec.json` and its recordings table, in this order, the first that fails deciding the word: for either input, the spec's arguments name no `--recording` (a subset run would take its full run's key, and the record cannot say it was one), and no row of the recordings table (the product's `*_recordings.tsv`, every row; the record's `records` list is capped) has the code `out_of_memory`, `internal_error`, `disk_error` or `time_budget` (a rerun under the same key could differ; a deterministic failure such as `load_failed` is keyed); for a `zarr` input also, the record's `extensions.nemar.input.stores_unread` is an empty list (Q0 writes a list of the store paths not read in full, never a count), its `stores_content` is a non-empty list, every row of it is an object whose `path` is text and those paths are its `stores`, each once (a row that is not fails this check), and only then V1's `inputDigest` of those rows is computed and equals the record's `input_digest` and the stamp's; last, for either input, `validateDerivativeKeyFields` accepts the eight fields. Card Q0b (nemar-cli PR 2177) stores a Zarr `input_digest` only when the first three Zarr checks hold and leaves the recomputation here, so V1's function is the one copy of the definition. A failed check writes no row and counts `derivative_unkeyable` under its word (`recording_subset`, `transient_failure`, `stores_unread`, `no_stores_content`, `stores_differ`, `undigestable` when `inputDigest` throws `DerivativeContractError`, `digest_mismatch`, `key_invalid` when the validator answers `ok: false` or `derivativeKey` throws), and logs the error's or the validator's `field` beside the word, never in it. The two checks before the recomputation come first so that its throw never masks `no_stores_content` or `stores_differ` (Python's digest of zero rows, which the TypeScript refuses, never reaches it). A throw from a V1 function ends that one stamp as unkeyable and never ends the sync, the route's call or the daily cron; V1b calls no store content function, whose refusals carry no `field` (the recipe computed those digests). A stamp found unkeyable does not hold back the stamps after it.
+The implementer may choose: helper names, the command's output format.
+
+## Acceptance
+
+- `bun test backend/test/compute-derivatives.test.ts` passes, through the real routes and services with the existing R2 S3-interface stand-in and the pipeline fixture helper: a finished Zarr job becomes a `stored` derivative whose key equals `derivativeKey` of its stamp and whose objects match the manifest; a run with `maxObjects: 2` over five files needs three syncs; a second job with the same key adds no row and copies nothing; a size mismatch ends `failed` with nothing left under the key; a `canary` row past 30 days is expired with its row kept; promoting B to `catalog` supersedes A; an admin's `published` request is refused and the owner's accepted; a `published` row past any date is untouched; deleting the dataset expires its `canary` rows and reports a held `published` one; without the binding the sync answers `derivatives_unavailable` and writes nothing; each keying check of item 9 failed alone (a spec with `--recording`, an `out_of_memory` row, a non-empty `stores_unread`, an empty `stores_content`, a row path not in `stores`, a stated digest one hexadecimal digit off, a `bids` stamp whose input digest is a `sha256:` one) adds no row and counts its word, while a `load_failed` row is keyed; a row whose `content_sha256` has 63 digits, its paths equal to `stores`, counts `undigestable` (not `stores_differ` or `digest_mismatch`), and a keyable stamp after it in the same sync is still stored.
+- Mutations, each failing a test: the `published` guard in the expiry removed; the owner-only check on `published` removed; the conflict clause on `key` removed; the recomputation of the input digest removed; the catch that turns an `inputDigest` throw into `undigestable` removed.
+
+## Gates
+
+- `bun run typecheck`, `bun run lint`, `bun run migrations:d1-check`, `bunx biome check` on the changed files, `bun test backend/test/compute-derivatives.test.ts backend/test/compute-route-inventory.test.ts backend/test/compute-pipeline.test.ts test/contract-derivatives.unit.test.ts`.
+- Full `bun test`: not run, would check: the epic gate.
+
+## Stop conditions
+
+- The design needs a DOI or EZID call, a public route, a person's key reading the bucket, or a binding in `backend/wrangler-sccn.toml`: stop.
+- `copyObject` cannot reach a third bucket without a change to how the compute S3 credentials are configured: stop and report what the owner must configure.
+
+## Report
+
+At most 25 lines: PR, head, the migration number, gates, mutations, deviations, and the owner's handoff in three lines (create `nemar-compute-derivatives`, give the compute R2 token access to it, add the binding and `COMPUTE_DERIVATIVES_BUCKET_NAME` in a reviewed PR).
