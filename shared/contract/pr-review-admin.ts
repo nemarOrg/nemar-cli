@@ -46,7 +46,7 @@ export type { OverrideMode, ReviewState };
  *    reported). `detail` says why.
  *  - `exempt`: legacy wire value retained for older clients and historical responses. Current
  *    Workers do not infer this verdict from an author's owner/admin role; an unreviewed head is
- *    `not_reviewed` and is offered for review (ADR 0120).
+ *    `not_reviewed` and is offered for review (ADR 0127).
  *  - `waived`: the pull request is an open upstream re-pull's, at the head NEMAR's tools recorded
  *    for it (ADR 0117), so the review does not apply and its check is posted as `skipped` with a
  *    title that says it was waived. Decided from NEMAR's record of the re-pull and the pull request

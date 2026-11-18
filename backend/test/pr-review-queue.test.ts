@@ -2156,10 +2156,10 @@ describe("the volume of reviews in the list: information, never a gate", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Owners and administrators receive the same review queue treatment (ADR 0120)
+// Owners and administrators receive the same review queue treatment (ADR 0127)
 // ---------------------------------------------------------------------------------------------
 
-describe("owner and administrator pull requests are offered for review (ADR 0120)", () => {
+describe("owner and administrator pull requests are offered for review (ADR 0127)", () => {
   test("both appear as not_reviewed and need action, without repository-role lookups", async () => {
     const ownerId = await seedUser(
       "queueowner",

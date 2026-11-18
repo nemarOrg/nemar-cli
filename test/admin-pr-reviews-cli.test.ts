@@ -349,7 +349,7 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(none.stdout).toContain("No pull requests match (3 open in all).");
   });
 
-  test("an owner's or administrator's pull request reads exempt (owner or admin) and is not marked as yours", async () => {
+  test("an owner's or administrator's unreviewed pull request needs review like any other", async () => {
     // The seeded administrator opened one, and so did a stranger.
     nodes(
       { ds: "nm000201", n: 5, author: "queueadmin-gh", authorId: 4001 },
@@ -360,20 +360,20 @@ describe("nemar admin pr-reviews (list)", () => {
     const lines = r.stdout.split("\n");
     const row = (ds: string) => lines.find((l) => l.includes(ds)) ?? "";
     expect(row("nm000201")).toMatch(
-      /^ {2}nm000201\s+#5\s+queueadmin-gh\s+branch update-metadata\s+exempt \(owner or admin\)\s+ok\s+ok/,
+      /^\* nm000201\s+#5\s+queueadmin-gh\s+branch update-metadata\s+not reviewed\s+ok\s+ok/,
     );
     expect(row("nm000203")).toMatch(/^\* nm000203\s+#4\s+carol\s+.*not reviewed/);
-    expect(r.stdout).toContain("2 open pull requests, 1 you can act on.");
+    expect(r.stdout).toContain("2 open pull requests, 2 you can act on.");
 
     // The word can be asked for, with the dash spelling the other words have.
     const only = await cli([...PR, "--verdict", "exempt"]);
     expect(only.exitCode).toBe(0);
-    expect(only.stdout).toContain("nm000201");
+    expect(only.stdout).not.toContain("nm000201");
     expect(only.stdout).not.toContain("nm000203");
-    expect((await cli([...PR, "--needs-me"])).stdout).not.toContain("nm000201");
+    expect((await cli([...PR, "--needs-me"])).stdout).toContain("nm000201");
   });
 
-  test("an exempt pull request the naming rule holds says it waits for allow --admin, and the plain one does not", async () => {
+  test("GitHub checks do not imply a role exemption or a stored review", async () => {
     const reviewCheck = (conclusion: string) => ({
       type: "run" as const,
       name: "NEMAR PR Review",
@@ -407,17 +407,15 @@ describe("nemar admin pr-reviews (list)", () => {
     expect(r.exitCode).toBe(0);
     const lines = r.stdout.split("\n");
     const row = (ds: string) => lines.find((l) => l.includes(ds)) ?? "";
-    expect(row("nm000201")).toMatch(/exempt, naming rule failed: needs allow --admin\s+ok\s+ok/);
-    expect(row("nm000202")).toMatch(
-      /exempt, naming rule not checked: start once, else fix the file\s+ok\s+ok/,
-    );
-    expect(row("nm000203")).toMatch(/exempt \(owner or admin\)\s+ok\s+ok/);
+    expect(row("nm000201")).toMatch(/not reviewed\s+ok\s+ok/);
+    expect(row("nm000202")).toMatch(/not reviewed\s+ok\s+ok/);
+    expect(row("nm000203")).toMatch(/not reviewed\s+ok\s+ok/);
     // The word reaches the JSON as a closed word, not a sentence.
     const json = JSON.parse((await cli([...PR, "--json"])).stdout) as QueueResponse;
     expect(json.entries.map((e) => [e.dataset_id, e.verdict, e.detail])).toEqual([
-      ["nm000201", "exempt", "naming_rule"],
-      ["nm000202", "exempt", "naming_unchecked"],
-      ["nm000203", "exempt", null],
+      ["nm000201", "not_reviewed", null],
+      ["nm000202", "not_reviewed", null],
+      ["nm000203", "not_reviewed", null],
     ]);
   });
 
@@ -672,22 +670,19 @@ describe("the REVIEW column legend", () => {
   test("says what the words on an exempt row mean, and how to release one", async () => {
     const r = await cli([...PR, "--help-all"]);
     const help = r.stdout.replace(/\s+/g, " ");
-    expect(help).toContain('"naming rule failed: needs allow --admin"');
-    expect(help).toContain('"naming rule not checked: start once, else fix the file"');
-    // And why the label does not say to wait: a file with no readable Name is found unreadable again.
-    expect(help).toContain("a file with no readable Name has to be fixed and pushed");
-    expect(help).toContain("allow <dataset> <pr> --admin --reason <why>");
+    expect(help).toContain("a legacy API reported an exemption, not a review pass");
+    expect(help).toContain("Current policy reviews owners and administrators too");
   });
 });
 
-describe("nemar admin pr-reviews allow and block say an owner or administrator is exempt", () => {
-  test("in their detailed help, so a block is not read as holding one back", async () => {
+describe("nemar admin pr-reviews allow and block apply to owner and admin roles", () => {
+  test("their detailed help does not promise a role bypass", async () => {
     for (const verb of ["allow", "block"]) {
       // The detailed help: `--help` itself keeps to the options and points at `--help-all`.
       const r = await cli([...PR, verb, "--help-all"]);
       expect(r.exitCode, verb).toBe(0);
-      expect(r.stdout.replace(/\s+/g, " "), verb).toContain(
-        "A NEMAR owner or administrator is exempt from the review whatever is decided here",
+      expect(r.stdout.replace(/\s+/g, " ").toLowerCase(), verb).toContain(
+        "author role does not skip review",
       );
     }
   });
@@ -953,11 +948,13 @@ describe("nemar admin pr-reviews allow <dataset> <pr> --admin: the naming rule's
     expect(help).toContain("allow <dataset> <pr> --admin");
     // The one-line description names the whole command, reason included.
     expect(help).toContain("(allow <dataset> <pr> --admin --reason <why>)");
-    expect(help).toContain("waives the rule for the pull request's CURRENT commit");
+    expect(help).toContain(
+      "explicit naming-rule override for an owner/admin author's CURRENT commit",
+    );
     expect(help).toContain("records the waiver");
     // The reason it records is required, and the help says so where the option and the override are.
     expect(help).toContain("Required with --admin");
-    expect(help).toContain("and your --reason, which is required");
+    expect(help).toContain("and your required --reason");
   });
 
   describe("--reason", () => {
@@ -1023,16 +1020,11 @@ describe("nemar admin pr-reviews show", () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
     const r = await cli([...PR, "show", "nm000201", "7"]);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Review:    exempt (owner or admin)");
-    expect(r.stdout).toContain("no automated review is required");
-    expect(r.stdout).toContain("is posted as skipped, which is not a pass");
-    expect(r.stdout).toContain("this view does not verify that it was");
-    expect(r.stdout).not.toContain("not reviewed");
-    expect(r.stdout).not.toContain("No automated review has been recorded");
-    // The author's record is not shown beside it: an exempt pull request is not held to it, and
-    // "not paused: reviewed automatically" would be the opposite of what happens.
-    expect(r.stdout).not.toContain("Standing:");
-    expect(r.stdout).not.toContain("decided pull request");
+    expect(r.stdout).toContain("Review:    not reviewed");
+    expect(r.stdout).toContain("No automated review has been recorded");
+    expect(r.stdout).toContain("Standing:");
+    expect(r.stdout).toContain("owners and administrators receive review too");
+    expect(r.stdout).not.toContain("no automated review is required");
   });
 
   test("an earlier commit's review is named as that commit's, not shown as this one's report", async () => {
@@ -1047,12 +1039,11 @@ describe("nemar admin pr-reviews show", () => {
       verdict: "fail",
     });
     const r = await cli([...PR, "show", "nm000201", "7"]);
-    expect(r.stdout).toContain("Review:    exempt (owner or admin)");
-    expect(r.stdout).toContain("An earlier commit (aaaaaaa) was reviewed and read fail");
-    expect(r.stdout).toContain("this commit was not reviewed");
-    // The old report is not printed as if it were about this commit.
-    expect(r.stdout).not.toContain("Needs changes");
-    expect(r.stdout).not.toContain("a DIFFERENT commit");
+    expect(r.stdout).toContain("Review:    not reviewed (other commit)");
+    expect(r.stdout).toContain("a DIFFERENT commit");
+    expect(r.stdout).toContain(
+      "That review said fail, and it does not apply to the current commit.",
+    );
   });
 
   test("says plainly when the review read an earlier commit", async () => {
@@ -1349,8 +1340,8 @@ describe("nemar admin pr-reviews approve", () => {
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
     const r = await cli([...PR, "approve", "nm000201", "7", "--dry-run"]);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("Review:   exempt (owner or admin)");
-    expect(r.stdout).toContain("The automated review did not run");
+    expect(r.stdout).toContain("Review:   not reviewed");
+    expect(r.stdout).toContain("The automated review has not read this commit.");
     expect(r.stdout).toContain("Dry run: nothing was approved or merged.");
     expect(reviewPosts()).toHaveLength(0);
   });
@@ -2143,17 +2134,15 @@ describe("nemar admin pr-reviews next", () => {
     expect(r.stdout).toContain("This commit has not been reviewed.");
   });
 
-  test("d on an exempt pull request says it is not reviewed, and not that a report could not be read", async () => {
-    // The queue's own administrator opened it, so it is exempt; --all shows what needs nobody.
+  test("d on an administrator pull request says it has not been reviewed", async () => {
+    // The queue's own administrator is subject to the same review policy.
     gh.pulls["nm000201#7"] = { sha: SHA_A, author: "queueadmin-gh", authorId: 4001 };
     nodes({ ds: "nm000201", n: 7, author: "queueadmin-gh", authorId: 4001 });
     const r = await next("d\nq\n", ["--all"]);
-    expect(r.stdout).toContain("exempt (owner or admin)");
-    expect(r.stdout).toContain(
-      "A NEMAR owner or administrator opened this pull request, so it is not reviewed.",
-    );
+    expect(r.stdout).toContain("not reviewed");
+    expect(r.stdout).toContain("has not been reviewed");
     expect(r.stdout).not.toContain("could not be read");
-    expect(r.stdout).not.toContain("has not been reviewed");
+    expect(r.stdout).not.toContain("owner or administrator opened");
     expect(writes()).toHaveLength(0);
   });
 

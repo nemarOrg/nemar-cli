@@ -410,6 +410,48 @@ describe("status", () => {
     expect(r.stdout).not.toContain("Attention: access_reports_failed");
   });
 
+  test("the two runner attention words are printed with what they mean when positive, and not otherwise (MUTATION: drop either hint, or the executor term of the Worker's count)", async () => {
+    configuredWorker({});
+    const quiet = await runCli("owner", ["status"]);
+    expect(quiet.stdout).not.toContain("runner_cancel_pending_failed");
+    expect(quiet.stdout).not.toContain("runner_copy_abandoned");
+    const insert = (id: string, cols: string, vals: string) =>
+      db.run(
+        `INSERT INTO compute_jobs (id, source, kind, app_id, app_version, spec_digest, partition, pool, nodes, cores_per_node, minutes, executor, accounting, ${cols})
+         VALUES (?, 'pipeline', 'batch', 'a', '1', ?, 'shared', 'cpu', 1, 1, 1, 'runner', 'none', ${vals})`,
+        [id, "a".repeat(64)],
+      );
+    insert(
+      "job_0000000000000000000000e1",
+      "state, cancel_requested_at",
+      "'running', datetime('now', '-61 minutes')",
+    );
+    insert(
+      "job_0000000000000000000000e2",
+      "state, ended_at, settled_provisional_at",
+      "'finished', datetime('now', '-5 days'), datetime('now', '-5 days')",
+    );
+    insert(
+      "job_0000000000000000000000e3",
+      "state, created_at",
+      "'created', datetime('now', '-130 minutes')",
+    );
+    const r = await runCli("owner", ["status"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain(
+      "Attention: runner_records_unwritten 1 (a waiting runner job's records never landed",
+    );
+    expect(r.stdout).toContain(
+      "Attention: runner_cancel_pending_failed 1 (a runner job's recorded cancel",
+    );
+    expect(r.stdout).toContain(
+      "Attention: runner_copy_abandoned 1 (a terminal runner job's launcher files",
+    );
+    // The Tapis words are about Tapis rows only.
+    expect(r.stdout).not.toContain("Attention: cancel_pending_failed");
+    expect(r.stdout).not.toContain("Attention: copy_abandoned");
+  });
+
   test("the runtime image: its digest when valid, a plain word when set to something that is not a pinned reference, and never the reference", async () => {
     const hex = "5".repeat(64);
     configuredWorker({

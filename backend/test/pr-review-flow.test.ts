@@ -664,7 +664,7 @@ describe("taking up a pull request", () => {
   });
 });
 
-describe("owner and administrator pull requests receive review (ADR 0120)", () => {
+describe("owner and administrator pull requests receive review (ADR 0127)", () => {
   test.each([
     ["owner", "owner-gh"],
     ["admin", "admin-gh"],

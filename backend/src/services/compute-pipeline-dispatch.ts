@@ -79,6 +79,8 @@ export const ENDS_THE_RUN: ReadonlySet<PipelineRefusal> = new Set<PipelineRefusa
   "compute_disabled",
   "runtime_unavailable",
   "pipelines_account_missing",
+  // No Tapis job can be submitted from this Worker, whatever the recipe or the pool.
+  "tapis_unconfigured",
   // The tenant ceiling does not depend on the pool or the recipe: no other recipe would be admitted.
   "platform_busy",
 ]);

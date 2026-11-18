@@ -732,11 +732,13 @@ describe("conclusions: only a clear pass is green, nothing unknown ever satisfie
     }
   });
 
-  test("a pull request opened by an owner or administrator says the review is not required, and that skipped is not a pass", () => {
+  test("an explicit naming override is not a review pass or a blanket role exemption", () => {
     const r = renderCheck({ kind: "exempt" });
-    expect(r.title).toBe("Not required: opened by a NEMAR owner or administrator");
+    expect(r.title).toBe("Explicit override: no naming violation");
     expect(r.summary).toContain("did not run");
-    expect(r.summary).toContain("may merge without it");
+    expect(r.summary).not.toContain("may merge without it");
+    expect(r.text).toContain("regardless of author role");
+    expect(r.summary).not.toContain("administrators are not reviewed");
     expect(r.text).toContain("Skipped is not a pass");
     // It must not borrow the words of a review that ran.
     for (const words of ["Passes", "Needs changes", "Could not decide", "does not pass"]) {
@@ -855,7 +857,7 @@ describe("the pull-request comment", () => {
     const body = renderComment({ kind: "exempt" }, sha);
     expect(body.startsWith(PR_REVIEW_COMMENT_MARKER)).toBe(true);
     expect(body).toContain("## NEMAR PR review: NOT REQUIRED");
-    expect(body).toContain("Not required: opened by a NEMAR owner or administrator");
+    expect(body).toContain("Explicit override: no naming violation");
     expect(body).toContain("0123456");
     for (const other of ["PASS", "NEEDS CHANGES", "NEEDS A PERSON"]) {
       expect(body).not.toContain(other);
@@ -2546,7 +2548,9 @@ describe("the naming rule on an owner's or administrator's pull request", () => 
   test("a waiver is skipped and says it was waived, for this commit only", () => {
     const r = renderCheck({ kind: "exempt", waived: true });
     expect(r.title).toContain("naming rule waived");
-    expect(r.text).toContain("does not carry over");
+    expect(r.text).toContain("applies only to this commit");
+    expect(r.text).toContain("does not suppress ordinary review");
+    expect(r.summary).not.toContain("administrators are not reviewed");
     expect(renderComment({ kind: "exempt", waived: true }, "a".repeat(40))).toContain(
       "NOT REQUIRED",
     );

@@ -23,7 +23,7 @@
  * forged `repository_dispatch` buy nothing, since anyone holding a dataset repository's workflow
  * credentials can send one.
  *
- * **Every reviewable pull request is reviewed, including owners and administrators** (ADR 0120).
+ * **Every reviewable pull request is reviewed, including owners and administrators** (ADR 0127).
  * The only automatic review waiver is the exact, record-bound upstream re-pull waiver described
  * below (ADR 0117). A commit that already has a row keeps what its review said, whoever acts on it
  * next, when the delivery changes no text; edits, reopenings and marking ready restart review as

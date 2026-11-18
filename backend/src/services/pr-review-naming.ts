@@ -1,16 +1,11 @@
 /**
- * The naming rule on a pull request the review does not run for (ADR 0107).
+ * The naming rule for the explicit administrative naming override (ADR 0107).
  *
- * A pull request opened by a NEMAR owner or administrator is not reviewed, but the naming rule
- * applies to it all the same, and it runs first: a title that has an author and a year, or a DOI,
- * anywhere in it or holds a naming-template token, or a change of the dataset's name to such a name,
- * fails its check. The rule is the one in `shared/naming-rule.ts`, which the CLI and the review job
- * use too, so the three refuse the same text. The review job applies it to everyone else's pull
- * requests before it asks any model; this module applies it here, because an exempt pull request
- * never reaches the job.
+ * Ordinary pull requests receive review regardless of author role (ADR 0127). This module checks
+ * the naming facts for the separate override operation, using the same shared rule as the CLI
+ * and review job. An override does not constitute an automated review.
  *
- * **What is read.** The title comes from the delivery (or, for an administrator's start, GitHub's
- * own record of the pull request); it is read for this rule only, and never shown, stored or logged.
+ * **What is read.** The title comes from GitHub's own record of the pull request; it is read for this rule only, and never shown, stored or logged.
  * The dataset's name is the `Name` of `dataset_description.json`, read from GitHub at the head and
  * at the merge base: the rule applies when the pull request CHANGES the name, so a name that was
  * already there is not this pull request's to fix. The merge base comes from GitHub's comparison of
@@ -22,8 +17,7 @@
  * something this cannot read: a file at the head that is not JSON or has no `Name` that is text and
  * shows something, or one that is missing where nothing says it was removed) is `unchecked`, which
  * publishes a check that does not pass. A file the comparison lists as removed is a removal, which
- * is not a naming failure. Each read runs inside the webhook's own request, which GitHub gives ten
- * seconds, so each is bounded.
+ * is not a naming failure. Each read is bounded so an override request cannot wait indefinitely.
  */
 
 import {
@@ -39,8 +33,8 @@ import { githubFetchWithRetry } from "./github/transport.js";
 
 /**
  * The longest one read may take before the name is `unchecked`. The comparison and then the two
- * reads of the file (made together) run inside the webhook's ten seconds, after the exemption's own
- * GitHub question and before the check is posted, so each is kept short.
+ * reads of the file (made together) run after the override eligibility check and before the check
+ * is posted, so each is kept short.
  */
 let readTimeoutMs = 3_000;
 

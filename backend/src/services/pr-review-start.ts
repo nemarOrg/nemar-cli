@@ -7,7 +7,7 @@
  * as the `pull_request` delivery it would have been, and hands it to the one gate every delivery
  * goes through (`handlePullRequestEvent`). So the flag, the "public, named, first-published"
  * test, the per-commit dedupe and the contributor pause all apply exactly as they would to a
- * delivery. Author role does not exempt an otherwise reviewable pull request (ADR 0120). It gets
+ * delivery. Author role does not exempt an otherwise reviewable pull request (ADR 0127). It gets
  * an ordinary review subject to the same privacy, bot, base-branch, contributor-block and exact
  * re-pull waiver gates as a delivery. The administrator's explicit naming-rule override remains a
  * separate operation and is not inferred from account identity. One thing differs, and it is the

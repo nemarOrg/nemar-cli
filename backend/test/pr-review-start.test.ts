@@ -699,7 +699,7 @@ describe("what an administrator's start is held to", () => {
   });
 });
 
-describe("an owner or administrator can start the same review (ADR 0120)", () => {
+describe("an owner or administrator can start the same review (ADR 0127)", () => {
   const checkWrites = () => calls.filter((c) => /\/check-runs(\/\d+)?$/.test(c.path));
 
   test.each([
@@ -1253,11 +1253,11 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(dispatches()).toHaveLength(0);
   });
 
-  test("the waiver holds for that commit on a later delivery, and a new commit is checked again", async () => {
+  test("an explicit naming waiver does not suppress ordinary review of this or a new commit", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
     await allow(DATASET, 7);
     calls = [];
-    // A later delivery of the same commit (here an administrator's start) keeps the waiver.
+    // A later start runs ordinary review; the naming waiver is not an author exemption.
     expect((await start(DATASET, 7)).body).toMatchObject({
       dispatched: true,
       reason: "dispatched",
@@ -1560,6 +1560,24 @@ describe("the override: nemar admin pr-reviews allow <dataset> <pr> --admin", ()
     expect(waivers()).toHaveLength(1);
     expect(lastCheck()).toMatchObject({ conclusion: "skipped" });
   });
+
+  test.each([
+    ["a capped file list", { files: CUT_LIST }],
+    ["an absent file list", { files: null }],
+    ["an incomplete comparison", { files: ["README.md"], commits: { total: 101, onPage: 100 } }],
+    ["a missing Name", { files: ["dataset_description.json"], names: { [SHA_A]: NO_NAME } }],
+    ["a non-text Name", { files: ["dataset_description.json"], names: { [SHA_A]: NAME_NOT_TEXT } }],
+  ] satisfies Array<[string, NamingRepo]>)(
+    "%s cannot authorize a naming waiver",
+    async (_label, fixture) => {
+      pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });
+      naming[DATASET] = fixture;
+      const r = await allow(DATASET, 7);
+      expect(r.body).toMatchObject({ waived: false, reason: "naming_unchecked" });
+      expect(waivers()).toHaveLength(0);
+      expect(calls.some((c) => c.path.endsWith("/check-runs"))).toBe(false);
+    },
+  );
 
   test("a name GitHub would not show is not waived: there is nothing definite to waive", async () => {
     pulls[`${DATASET}#7`] = restPull({ login: ADMIN_LOGIN, title: "Lee2019 EEG rename" });

@@ -30,6 +30,7 @@ import type { Bindings } from "../types/bindings";
 import { CANCEL_PENDING_FAILED_SQL, COPY_ABANDONED_COUNT_SQL } from "./compute-lifecycle";
 import { pipelinesAccountId } from "./compute-pipeline";
 import { ComputePolicyUnreadable, getPolicy } from "./compute-policy";
+import { RUNNER_ATTENTION_COUNTS } from "./compute-runner-queue";
 import { readRuntimeImage } from "./compute-runtime-image";
 import { computeS3 } from "./compute-s3";
 import { computeEnabled, computePipelinesDispatchEnabled } from "./compute-switches";
@@ -96,6 +97,8 @@ const ATTENTION_COUNTS: ReadonlyArray<readonly [key: string, sql: string]> = [
   ["cancel_pending_failed", CANCEL_PENDING_FAILED_SQL],
   // A terminal row whose copy of the launcher files was never made and no longer will be (flagged `mismatch`).
   ["copy_abandoned", COPY_ABANDONED_COUNT_SQL],
+  // The same two for runner jobs (portable compute, ADR 0121): the Tapis counts above select Tapis rows only.
+  ...RUNNER_ATTENTION_COUNTS,
 ];
 
 async function attentionCounts(

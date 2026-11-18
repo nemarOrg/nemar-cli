@@ -360,7 +360,7 @@ describe("standingLines", () => {
     expect(text).not.toContain("administrator's block");
   });
 
-  test("says an owner or administrator is exempt whatever is decided, so a block or an allow is not misread", () => {
+  test("says owner and admin roles receive review and do not bypass a block", () => {
     for (const s of [
       standing(),
       standing({
@@ -372,7 +372,7 @@ describe("standingLines", () => {
         .map((l) => l.replace(ANSI, ""))
         .join("\n");
       expect(text).toContain(
-        "a NEMAR owner or administrator is not reviewed whatever is decided here",
+        "owners and administrators receive review too; a block or an allow applies regardless of author role.",
       );
     }
   });

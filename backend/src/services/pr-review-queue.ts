@@ -18,7 +18,7 @@
  *   are reduced to a conservative character set, links are built from the dataset id and number, and
  *   no body is read.
  * - **Every unreviewed pull request is `not_reviewed` and offered for review**, regardless of
- *   whether its author is a NEMAR owner or administrator (ADR 0120). The exact record-bound
+ *   whether its author is a NEMAR owner or administrator (ADR 0127). The exact record-bound
  *   upstream re-pull waiver remains `waived` (ADR 0117).
  * - **An upstream re-pull's own pull request at the head NEMAR recorded is `waived`** (ADR 0117),
  *   decided from the open `upstream_repulls` records read for the request and GitHub's facts about

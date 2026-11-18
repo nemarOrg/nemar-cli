@@ -580,7 +580,7 @@ export function standingLines(s: ContributorStanding): string[] {
   }
   out.push(
     chalk.dim(
-      "  Exempt:    a NEMAR owner or administrator is not reviewed whatever is decided here, unless a review of the commit is already on record.",
+      "  Roles:     owners and administrators receive review too; a block or an allow applies regardless of author role.",
     ),
   );
   return out;
@@ -688,16 +688,8 @@ REVIEW column (the automated review of the pull request's CURRENT commit):
   in progress       the review is running
   could not decide  the review ended without a verdict (an error, or it never reported)
   exempt (owner or admin)
-                    a NEMAR owner or administrator opened it, so it is not reviewed (its review
-                    check is posted as skipped, which this list does not verify); nothing waits
-                    for you, and a push by anyone else IS reviewed. The naming rule still applies:
-                    a title or a new dataset name it refuses fails the check instead, until the
-                    title or the name is fixed or the rule is waived for that commit with
-                    'nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>'. The row
-                    says so when the check failed ("naming rule failed: needs allow --admin") or
-                    when the name could not be read ("naming rule not checked: start once, else fix
-                    the file": a start asks GitHub again, and a file with no readable Name has to be
-                    fixed and pushed; nothing is waivable until the name is read)
+                    a legacy API reported an exemption, not a review pass. This list does not
+                    verify its check. Current policy reviews owners and administrators too.
   waived (upstream re-pull)
                     an upstream re-pull's own pull request, at the commit NEMAR's record holds for
                     it, so the review does not apply: a mirror's content is upstream's (its check
@@ -923,7 +915,7 @@ prReviewsCommand
       );
       console.log(
         chalk.dim(
-          "             A NEMAR owner or administrator opened this pull request, so no automated review is required.",
+          "             A legacy API reported an exemption for this pull request. Current policy does not exempt author roles.",
         ),
       );
       console.log(
@@ -1202,13 +1194,14 @@ const NOT_STARTED: Record<string, string> = {
   review_running:
     "a review of this commit is running, and a redo waits until it reports or its time (about an hour) is up",
   contributor_paused: "the contributor is blocked by an administrator",
-  exempt_author: "its author is a NEMAR owner or administrator, so it is not reviewed",
+  exempt_author:
+    "its author is a NEMAR owner or administrator, and a legacy API reported a review exemption",
   exempt_naming_waived:
-    "its author is a NEMAR owner or administrator, and the naming rule was waived for this commit",
+    "a legacy API reported an owner/admin exemption, and the naming rule was waived for this commit",
   naming_rule:
-    "its author is a NEMAR owner or administrator, and the naming rule refused its title or its new dataset name, so its check failed",
+    "a legacy API reported an owner/admin exemption, and the naming rule refused its title or its new dataset name, so its check failed",
   naming_unchecked:
-    "its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
+    "a legacy API reported an owner/admin exemption, and its dataset name could not be read to check the naming rule, so its check needs a person",
   repull_waived:
     "it is an upstream re-pull's own pull request at the commit NEMAR recorded, so the review is waived and its check was posted as skipped, titled Waived: upstream re-pull",
   draft: "it is a draft",
@@ -1274,7 +1267,7 @@ prReviewsCommand
   )
   .option(
     "--all",
-    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict (an owner's or administrator's is exempt and left out, unless a review of its current commit is on record; one refused for too many edits is left out too, and started by name)",
+    "Every open pull request whose current commit has no review, or one that was declined or ended without a verdict (regardless of author role; a legacy API exemption or recorded re-pull waiver is left out, as is one refused for too many edits, which is started by name)",
   )
   .option(
     "--redo",
@@ -1295,11 +1288,8 @@ reopened or marked ready for review, or that its title, description or target br
 pull request that was already open when the review was switched on produced no such event, so it has
 no review until one of those happens to it. This asks for one by name. The API reads the pull request
 from GitHub itself and runs it through the same gate as any other: an administrator's block on the
-contributor still applies, and a pull request opened by a NEMAR owner or administrator is not
-reviewed and nothing is started. Its check is posted all the same, as the naming rule decides:
-skipped when the rule finds nothing (or an administrator waived it for this commit), failed when it
-refuses the title or the new dataset name, and one that needs a person when the name could not be
-read. No count of reviews, and no record of rejected pull requests, holds a start back. A commit
+contributor still applies, including to owners and administrators. Author role does not skip review.
+No count of reviews, and no record of rejected pull requests, holds a start back. A commit
 whose review was declined, ended in an error or never reported is started again, and so is one
 handed to GitHub more than 60 minutes ago that never came back and that no job claimed in the last
 50 minutes; one that is running or has a
@@ -1312,8 +1302,7 @@ A finished review is not run again by anything but --redo, or by an edit of the 
 description or target branch, a reopening or a marking as ready (five of those at most for one commit).
 --redo starts it again on the same review: its old result leaves the pull request's check while the new
 run is going. A blocked contributor's pull request is not redone: the block is the answer and the
-finished review stands. An owner's or administrator's pull request is still not reviewed unless a
-review of its current commit is on record. A review that is running, or whose job has not had its
+finished review stands. Owners and administrators receive the same review as other contributors. A review that is running, or whose job has not had its
 time yet, is never started again, so a redo waits for it. A redo leaves the count of edits as it is
 (it is no edit), and costs a second run of up to two model calls. A bulk redo cannot be resumed:
 running it again redoes the reviews that finished in between.
@@ -2287,7 +2276,7 @@ function noReportWhy(a: {
   }
   if (a.verdict === "in_progress") return "The review is still running.";
   if (a.verdict === "exempt") {
-    return "A NEMAR owner or administrator opened this pull request, so it is not reviewed.";
+    return "A legacy API reported an exemption for this pull request; this is not a review pass.";
   }
   if (a.verdict === "waived") {
     return "This commit is an upstream re-pull's own head, so the review is waived; what a review of it found is shown as recommendations.";
@@ -2884,15 +2873,11 @@ export function waiverLines(r: WaiveNamingResponse, dataset: string, pr: number)
       return [
         chalk.yellow(`Not waived: the author of ${label} is not a NEMAR owner or administrator.`),
         chalk.dim(
-          "  The override replaces only the exemption of owners and administrators. Anyone else's pull request is reviewed, and the naming rule is part of that review: its author fixes the title or the name, or an owner or administrator merges it in the GitHub UI.",
+          "  This explicit naming override is limited to owner/admin authors. Ordinary reviews apply to every author role; fix the title or name, or use the separate authorized GitHub merge-override workflow.",
         ),
       ];
     case "reviewed":
-      return [
-        chalk.yellow(
-          `Not waived: ${label} was reviewed (someone who is not exempt pushed it), and that review stands.`,
-        ),
-      ];
+      return [chalk.yellow(`Not waived: ${label} has a review on record, and that review stands.`)];
     case "naming_unchecked":
       return [
         chalk.yellow(
@@ -2988,20 +2973,15 @@ prReviewsCommand
     "after",
     `
 allow <login>
-  Lift a block: review this contributor's pull requests again (nothing else pauses anyone). A NEMAR
-  owner or administrator is exempt from the review whatever is decided here: their pull requests are
-  not reviewed, so a block does not hold them back and an allow changes nothing. (A commit a review
-  is already on record for is handled as before, a block included.)
+  Lift a block: review this contributor's pull requests again. Blocks and allows apply to owners
+  and administrators too; author role does not skip review.
 
 allow <dataset> <pr> --admin
-  Owners and administrators are exempt from the review, not from the naming rule: a pull request
-  title that has a citation (an author and a year, as in Lee2019 EEG dataset, or a DOI) anywhere in
-  it or holds an unfilled template field, and a change of the dataset's name to such a name, fail
-  their check like anyone's. This is the one way past it without a change: it waives the rule for
-  the pull request's CURRENT commit, records the waiver (who, the commit, what the rule found, and
-  your --reason, which is required), and posts the check as skipped with a line saying the rule was
-  waived. A new commit is checked again. It is refused for a pull request whose author is not an
-  owner or administrator (their review includes the rule) and for a commit that was reviewed.
+  Request an explicit naming-rule override for an owner/admin author's CURRENT commit. This
+  separate operation records the waiver (who, the commit, what the rule found, and your required
+  --reason), and posts a skipped check saying the naming rule was waived. Skipped is not a review
+  pass. It is refused for other authors and for a commit that already has a review on record.
+  The waiver does not carry to a new commit or suppress ordinary review deliveries and starts.
 
   Name the commit you looked at with --commit <sha> (its first 7 to 40 characters, as git log
   --oneline shows them). If the pull request has been pushed to since, nothing is waived or posted
@@ -3070,9 +3050,7 @@ prReviewsCommand
   .addHelpText(
     "after",
     `
-A NEMAR owner or administrator is exempt from the review whatever is decided here: their pull
-requests are not reviewed, so a block does not hold them back and an allow changes nothing. (A
-commit a review is already on record for is handled as before, a block included.)
+Blocks and allows apply to owners and administrators too. Author role does not skip review.
 `,
   )
   .action(async (loginArg: string, options: { reason?: string; json?: boolean }) => {

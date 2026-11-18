@@ -2,7 +2,7 @@
  * Eligibility for the explicit administrative naming-rule override (ADR 0107).
  *
  * This module does not decide whether an automatic pull-request review runs: every otherwise
- * reviewable pull request is reviewed regardless of author role (ADR 0120). The separate
+ * reviewable pull request is reviewed regardless of author role (ADR 0127). The separate
  * `pr-reviews allow` operation remains limited to an owner or administrator author and uses this
  * module to verify the linked NEMAR account and GitHub's repository role. No webhook gate or queue
  * calls `isReviewExempt`.

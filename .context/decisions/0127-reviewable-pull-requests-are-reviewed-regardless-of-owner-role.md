@@ -1,4 +1,4 @@
-# ADR 0120: Reviewable pull requests are reviewed regardless of owner role
+# ADR 0127: Reviewable pull requests are reviewed regardless of owner role
 
 **Status:** accepted
 **Date:** 2026-11-14
