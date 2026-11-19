@@ -24,3 +24,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not network'"
+markers = ["network: downloads full public surfaces into a cache outside the repository; CI skips it"]
