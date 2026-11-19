@@ -259,25 +259,23 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     expect(dispatches()).toHaveLength(0);
   });
 
-  test("an owner's or administrator's pull request is not started, and the sentence says why", async () => {
+  test("an owner's or administrator's pull request starts ordinary review", async () => {
     openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
 
     const r = await cli([...START, "nm000201", "12"]);
 
-    // An answer about a pull request, not a fault in the command.
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain(
-      "not started: its author is a NEMAR owner or administrator, so it is not reviewed",
-    );
-    expect(dispatches()).toHaveLength(0);
-    expect(rows()).toHaveLength(0);
-    // Its check was posted, as skipped, by the Worker.
+    expect(r.stdout).toContain("started. The pull request's check shows the review as running.");
+    expect(dispatches()).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", author_login: "startadmin-gh" });
     const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
     expect(checks).toHaveLength(1);
-    expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "skipped" });
+    expect(checks[0]?.body).toMatchObject({ status: "in_progress" });
+    expect(checks[0]?.body).not.toHaveProperty("conclusion", "skipped");
   });
 
-  test("an administrator's pull request whose title breaks the naming rule is not started, and its check fails", async () => {
+  test("an administrator's title does not trigger the old exemption gate", async () => {
     openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
     const pull = gh.pulls["nm000201#12"];
     if (!pull) throw new Error("no pull request");
@@ -286,16 +284,17 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     const r = await cli([...START, "nm000201", "12"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain(
-      "not started: its author is a NEMAR owner or administrator, and the naming rule refused its title or its new dataset name, so its check failed",
-    );
-    expect(dispatches()).toHaveLength(0);
+    expect(r.stdout).toContain("started. The pull request's check shows the review as running.");
+    expect(dispatches()).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", author_login: "startadmin-gh" });
     const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
     expect(checks).toHaveLength(1);
-    expect(checks[0].body).toMatchObject({ status: "completed", conclusion: "failure" });
+    expect(checks[0]?.body).toMatchObject({ status: "in_progress" });
+    expect(checks[0]?.body).not.toHaveProperty("conclusion", "skipped");
   });
 
-  test("an administrator's pull request whose dataset name GitHub would not show is a fault: exit 1, and how to retry", async () => {
+  test("an unreadable name does not suppress ordinary review of an administrator's pull request", async () => {
     openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
     gh.naming.nm000201 = {
       files: ["dataset_description.json"],
@@ -304,24 +303,18 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
 
     const r = await cli([...START, "nm000201", "12"]);
 
-    expect(r.exitCode).toBe(1);
-    expect(r.stdout).toContain(
-      "not started: its author is a NEMAR owner or administrator, and its dataset name could not be read to check the naming rule, so its check needs a person",
-    );
-    // Either GitHub did not answer or the file is unreadable: one more try, then the file, and
-    // never a bare "again in a moment", which a file that cannot be read answers the same way.
-    expect(r.stdout).toContain(
-      "GitHub may not have answered, or dataset_description.json has no readable Name",
-    );
-    expect(r.stdout).toContain("run the same command once more");
-    expect(r.stdout).toContain("fix dataset_description.json and push");
-    expect(r.stdout).not.toContain("in a moment");
-    expect(r.stdout).not.toContain("naming_unchecked");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("started. The pull request's check shows the review as running.");
+    expect(dispatches()).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", author_login: "startadmin-gh" });
     const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
-    expect(checks[0]?.body).toMatchObject({ conclusion: "action_required" });
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.body).toMatchObject({ status: "in_progress" });
+    expect(checks[0]?.body).not.toHaveProperty("conclusion", "skipped");
   });
 
-  test("an administrator's pull request whose naming problem was waived for this commit says so, exit 0", async () => {
+  test("a recorded naming waiver does not skip ordinary review of an administrator's pull request", async () => {
     openPr({ ds: "nm000201", n: 12, author: "startadmin-gh", authorId: 4001 });
     const pull = gh.pulls["nm000201#12"];
     if (!pull) throw new Error("no pull request");
@@ -335,10 +328,14 @@ describe("nemar admin pr-reviews start <dataset> <pr>", () => {
     const r = await cli([...START, "nm000201", "12"]);
 
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain(
-      "not started: its author is a NEMAR owner or administrator, and the naming rule was waived for this commit",
-    );
-    expect(dispatches()).toHaveLength(0);
+    expect(r.stdout).toContain("started. The pull request's check shows the review as running.");
+    expect(dispatches()).toHaveLength(1);
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]).toMatchObject({ state: "dispatched", author_login: "startadmin-gh" });
+    const checks = gh.seen.filter((s) => s.method === "POST" && s.path.endsWith("/check-runs"));
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.body).toMatchObject({ status: "in_progress" });
+    expect(checks[0]?.body).not.toHaveProperty("conclusion", "skipped");
   });
 
   test("the help says when a review that never came back may be started again, in the Worker's minutes", async () => {
