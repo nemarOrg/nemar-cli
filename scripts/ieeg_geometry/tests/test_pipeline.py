@@ -7,6 +7,7 @@ a local git repository and data tree, so the real fetch code runs without a netw
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +20,7 @@ from ieeg_geometry.__main__ import main
 from ieeg_geometry.ownership import OwnedPath, read_ownership, write_ownership
 from ieeg_geometry.version import pipeline_version
 
-from .remote import DATASET_ID, VERSION, Remote, build_remote
+from .remote import DATASET_ID, VERSION, Remote, _git, build_remote
 from .test_spm import _add_native_surface, _inside_points, _native, _write_field
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -374,35 +375,37 @@ def test_live_and_standing_datasets_are_refused_outright(dataset_id, tmp_path, c
     assert not work.exists()  # not even cloned
 
 
-def test_a_malformed_id_is_refused(tmp_path, capsys):
-    assert main(["run", "../etc", "--workdir", str(tmp_path / "w")]) == 1
+@pytest.mark.parametrize(
+    "dataset_id",
+    ["../etc", "nm000103\n", "nm000103 ", "nm\u0660\u0660\u0660\u0661\u0660\u0663", "NM000103"],
+)
+def test_a_malformed_id_is_refused(dataset_id, tmp_path, capsys):
+    assert main(["run", dataset_id, "--workdir", str(tmp_path / "w")]) == 1
     assert "not a dataset id" in capsys.readouterr().err
+    assert not (tmp_path / "w").exists()
 
 
 def test_a_tree_failure_fails_the_run_with_a_clear_message(remote, tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("IEEG_GEOMETRY_REPO_URL", f"file://{tmp_path}/nowhere/{{id}}")
-    monkeypatch.setenv("IEEG_GEOMETRY_DATA_URL", remote.data_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_API_URL", remote.api_url)
-    rc = main(["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--version", VERSION])
+    rc = main(
+        ["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--version", VERSION],
+        urls=dict(remote.urls(), repo_url=f"file://{tmp_path}/nowhere/{{id}}"),
+    )
     assert rc == 1 and "git clone failed" in capsys.readouterr().err
 
 
 def test_a_version_failure_fails_the_run_with_a_clear_message(
     remote, tmp_path, capsys, monkeypatch
 ):
-    monkeypatch.setenv("IEEG_GEOMETRY_REPO_URL", remote.repo_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_DATA_URL", remote.data_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_API_URL", f"file://{tmp_path}/missing/{{id}}.json")
-    rc = main(["run", DATASET_ID, "--workdir", str(tmp_path / "w")])
+    rc = main(
+        ["run", DATASET_ID, "--workdir", str(tmp_path / "w")],
+        urls=dict(remote.urls(), api_url=f"file://{tmp_path}/missing/{{id}}.json"),
+    )
     err = capsys.readouterr().err
     assert rc == 1 and "cannot read the version" in err
 
 
 def test_the_cli_prints_one_json_report(remote, tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("IEEG_GEOMETRY_REPO_URL", remote.repo_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_DATA_URL", remote.data_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_API_URL", remote.api_url)
-    assert main(["run", DATASET_ID, "--workdir", str(tmp_path / "w")]) == 0
+    assert main(["run", DATASET_ID, "--workdir", str(tmp_path / "w")], urls=remote.urls()) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["dataset_version"] == VERSION and report["mode"] == "dry-run"
     assert not list(Draft202012Validator(SCHEMA).iter_errors(report))
@@ -411,10 +414,10 @@ def test_the_cli_prints_one_json_report(remote, tmp_path, capsys, monkeypatch):
 def test_apply_without_surfaces_out_says_the_surfaces_were_not_written(
     remote, tmp_path, capsys, monkeypatch
 ):
-    monkeypatch.setenv("IEEG_GEOMETRY_REPO_URL", remote.repo_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_DATA_URL", remote.data_url)
-    monkeypatch.setenv("IEEG_GEOMETRY_API_URL", remote.api_url)
-    assert main(["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--apply"]) == 0
+    assert (
+        main(["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--apply"], urls=remote.urls())
+        == 0
+    )
     report = json.loads(capsys.readouterr().out)
     assert "surfaces not written: no --surfaces-out" in report["warnings"]
 
@@ -485,8 +488,10 @@ def test_a_missing_package_fails_the_run_instead_of_naming_unknown(
         raise metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(metadata, "version", absent)
-    monkeypatch.setenv("IEEG_GEOMETRY_REPO_URL", remote.repo_url)
-    rc = main(["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--version", VERSION])
+    rc = main(
+        ["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--version", VERSION],
+        urls=remote.urls(),
+    )
     assert rc == 1 and "not installed" in capsys.readouterr().err
     assert not (tmp_path / "w").exists()  # failed before any network use
     with pytest.raises(metadata.PackageNotFoundError):
@@ -525,3 +530,175 @@ def test_a_file_the_pipeline_wrote_that_no_longer_verifies_is_listed_for_removal
     assert ownership is not None
     assert not any("sub-9" in e.path for e in ownership.entries)
     assert third.report["changes"]["remove"] == second.report["changes"]["remove"]
+
+
+# ---- review round 1 ----------------------------------------------------------------------------
+
+
+def _fetch(remote, tmp_path, **kw):
+    return fetch.fetch_files(
+        DATASET_ID,
+        tmp_path / "w",
+        version=VERSION,
+        repo_url=remote.repo_url,
+        data_url=remote.data_url,
+        api_url=remote.api_url,
+        **kw,
+    )
+
+
+def _plant_link(source, tmp_path, link_target: str) -> tuple[Remote, str]:
+    """A repository whose `lh.pial` link has an attacker-chosen target."""
+    remote = build_remote(source, tmp_path / "remote")
+    rel = "derivatives/freesurfer/sub-p02/surf/lh.pial"
+    repo = tmp_path / "remote" / "repos" / DATASET_ID
+    key = Path(os.readlink(repo / rel)).name
+    (repo / rel).unlink()
+    (repo / rel).symlink_to(link_target.replace("KEY", key))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "evil link")
+    return remote, rel
+
+
+def test_a_relative_link_that_leaves_the_clone_is_not_followed(source, tmp_path):
+    outside = tmp_path / "escape"
+    remote, rel = _plant_link(
+        source, tmp_path, "../../../../../../escape/.git/annex/objects/ab/cd/KEY/KEY"
+    )
+    got = _fetch(remote, tmp_path)
+    assert "outside the clone" in got.failed[rel]
+    assert not outside.exists()
+
+
+def test_an_absolute_link_target_is_refused(source, tmp_path):
+    outside = tmp_path / "abs"
+    remote, rel = _plant_link(source, tmp_path, f"{outside}/.git/annex/objects/ab/cd/KEY/KEY")
+    got = _fetch(remote, tmp_path)
+    assert "not a relative git-annex key" in got.failed[rel]
+    assert not outside.exists()
+
+
+def test_an_existing_object_outside_the_clone_is_not_reported_as_fetched(source, tmp_path):
+    remote, rel = _plant_link(
+        source, tmp_path, "../../../../../../escape/.git/annex/objects/ab/cd/KEY/KEY"
+    )
+    repo = tmp_path / "remote" / "repos" / DATASET_ID
+    key = Path(os.readlink(repo / rel)).name
+    planted = tmp_path / "escape" / ".git" / "annex" / "objects" / "ab" / "cd" / key / key
+    planted.parent.mkdir(parents=True)
+    planted.write_bytes(b"outside")
+    got = _fetch(remote, tmp_path)
+    assert "outside the clone" in got.failed[rel] and rel not in got.fetched
+    assert planted.read_bytes() == b"outside"
+
+
+def test_a_body_larger_than_its_key_is_rejected_without_buffering_it(source, tmp_path):
+    bad = "derivatives/freesurfer/sub-p02/surf/lh.pial"
+    remote = build_remote(source, tmp_path / "remote")
+    served = remote.data_root / DATASET_ID / VERSION / bad
+    served.write_bytes(served.read_bytes() + b"X" * 5000)
+    got = _fetch(remote, tmp_path)
+    assert "larger than" in got.failed[bad]
+
+
+def test_a_truncated_body_is_rejected(source, tmp_path):
+    bad = "derivatives/freesurfer/sub-p02/surf/lh.pial"
+    remote = build_remote(source, tmp_path / "remote")
+    served = remote.data_root / DATASET_ID / VERSION / bad
+    served.write_bytes(served.read_bytes()[:-10])
+    got = _fetch(remote, tmp_path)
+    assert "do not match the annex key" in got.failed[bad]
+
+
+def test_a_path_with_a_space_or_a_hash_is_quoted_in_the_url(source, tmp_path):
+    odd = "derivatives/freesurfer/sub-p02/surf/lh.pial"
+    renamed = "derivatives/freesurfer/sub-p02 x#y/surf/lh.pial"
+    src = tmp_path / "src2"
+    shutil.copytree(source, src)
+    (src / renamed).parent.mkdir(parents=True)
+    shutil.copy(src / odd, src / renamed)
+    remote = build_remote(src, tmp_path / "remote")
+    served = remote.data_root / DATASET_ID / VERSION / renamed
+    assert served.exists()
+    got = _fetch(remote, tmp_path)
+    assert renamed not in got.failed and renamed in got.fetched
+
+
+def test_the_backoff_doubles_between_attempts(monkeypatch):
+    naps: list[float] = []
+    monkeypatch.setattr(fetch.time, "sleep", naps.append)
+    with pytest.raises(OSError):
+        fetch._get("http://127.0.0.1:9/x", 10)  # refused connection, retried
+    assert naps == [fetch._BACKOFF_S, fetch._BACKOFF_S * 2]
+
+
+def test_apply_fails_closed_when_a_track_errored(remote, tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(spm, "plan_dataset", boom)
+    work, surfaces = tmp_path / "w", tmp_path / "surf"
+    fetch.fetch_files(DATASET_ID, work, version=VERSION, **remote.urls())
+    before = _snapshot(work / DATASET_ID)
+    analysis, written = _run(remote, work, apply=True, surfaces_out=surfaces)
+    assert written == [] and "spm" in analysis.errors
+    assert _snapshot(work / DATASET_ID) == before and not surfaces.exists()
+    assert "apply skipped: a track failed" in analysis.report["warnings"]
+
+
+def test_the_cli_exits_2_and_prints_the_report_when_a_track_errored(
+    remote, tmp_path, capsys, monkeypatch
+):
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(freesurfer, "plan_dataset", boom)
+    rc = main(["run", DATASET_ID, "--workdir", str(tmp_path / "w"), "--apply"], urls=remote.urls())
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 2 and any("freesurfer track failed" in w for w in report["warnings"])
+
+
+def test_a_failed_label_plan_still_guards_the_later_tracks(remote, tmp_path, monkeypatch):
+    work = tmp_path / "w"
+    clone = fetch.fetch_files(DATASET_ID, work, version=VERSION, **remote.urls()).clone
+    path = P02.replace("_electrodes.tsv", "_space-fsaverage_electrodes.tsv")
+    write_ownership(
+        clone, pipeline_version(), [OwnedPath(path, "electrodes", (), "label-inference:sidecar")]
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(labels, "plan_dataset", boom)
+    analysis, _ = _run(remote, work)
+    fs = next(r for r in analysis.report["files"] if r["electrodes"] == P02)["decisions"]
+    assert "labels" in analysis.errors
+    assert pipeline.EARLIER_TRACK in fs["freesurfer"]["reason"]
+
+
+def test_surfaces_out_mirrors_exactly_the_new_index(remote, tmp_path):
+    work, surfaces = tmp_path / "w", tmp_path / "surf"
+    _run(remote, work, apply=True, surfaces_out=surfaces)
+    meshes = surfaces / "geometry" / "meshes"
+    stale = meshes / ("0" * 64 + ".mesh.bin")
+    stale.write_bytes(b"old")
+    (surfaces / "keep.txt").write_text("outside geometry/")
+    _run(remote, work, apply=True, surfaces_out=surfaces)
+    index = json.loads((surfaces / "geometry" / "index.json").read_text())
+    named = {m["path"] for e in index["entries"] for m in e["meshes"].values()}
+    on_disk = {p.relative_to(surfaces / "geometry").as_posix() for p in meshes.iterdir()}
+    assert named == on_disk and not stale.exists()
+    assert (surfaces / "keep.txt").exists()
+
+
+def test_a_nested_failed_sidecar_excludes_its_subjects_electrodes(source, tmp_path):
+    nested = "sourcedata/sub-01/ieeg/sub-01_ses-01_coordsystem.json"
+    src = tmp_path / "src3"
+    shutil.copytree(source, src)
+    (src / nested).parent.mkdir(parents=True)
+    (src / nested).write_text("{}")
+    remote = build_remote(src, tmp_path / "remote", extra_annexed=(nested,), missing_data=(nested,))
+    got = _fetch(remote, tmp_path)
+    assert nested in got.failed
+    assert SUB01 in got.excluded and not (got.clone / SUB01).exists()
+    assert P02 not in got.excluded

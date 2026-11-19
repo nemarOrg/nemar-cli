@@ -11,11 +11,14 @@ Recordings are never fetched. One file that cannot be downloaded is reported in
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,15 +29,15 @@ API_URL = "https://api.nemar.org/datasets/{id}"
 MAX_BYTES = 2 * 1024**3  # the card's stop condition: one dataset's fetch stays under 2 GB
 _TIMEOUT_S = 120
 _ATTEMPTS = 3
+_BACKOFF_S = 1.0  # doubled after each failed attempt
+_API_MAX_BYTES = 1024**2
 _GIT_TIMEOUT_S = 900
 
 # paths whose absence changes what a track decides: the run fails when one cannot be fetched
 DATASET_LEVEL = re.compile(
     r"^(README(\.\w+)?|dataset_description\.json|\.nemar/ieeg-geometry\.json)$"
 )
-_SUBJECT_FILE = re.compile(
-    r"(^|/)sub-[^/]+/.*(_electrodes\.tsv|_coordsystem\.json|_channels\.tsv)$"
-)
+_SUBJECT_FILE = re.compile(r"(_electrodes\.tsv|_coordsystem\.json|_channels\.tsv)$")
 _ANY_COORDSYSTEM = re.compile(r"_coordsystem\.json$")
 _SURFACE_FILE = re.compile(
     r"(^|/)(?:[lr]h\.pial(?:\.T1)?|[lr]h\.sphere\.reg|y_[^/]*\.nii(?:\.gz)?|[^/]*\.gii|[^/]*\.mat)$",
@@ -63,6 +66,12 @@ class FetchResult:
     bytes_downloaded: int = 0
     electrodes_in_tree: list[str] = field(default_factory=list)
     excluded: dict[str, str] = field(default_factory=dict)  # electrodes path -> reason
+
+
+def _entity(path: str, key: str) -> str | None:
+    """The `<key>-<value>` entity anywhere in a path (a directory or a file name)."""
+    m = re.search(rf"(?:^|[/_]){key}-([A-Za-z0-9]+)", path)
+    return m.group(1) if m else None
 
 
 # ---- selection (pure) -------------------------------------------------------------------------
@@ -102,18 +111,37 @@ def select_paths(entries: list[TreeEntry]) -> list[str]:
 # ---- network ----------------------------------------------------------------------------------
 
 
-def _get(url: str) -> bytes:
+def _get(url: str, max_bytes: int) -> bytes:
+    """The body at `url`, never more than `max_bytes` (an overshoot is an error, not a buffer).
+
+    Transient failures are retried with exponential backoff; a missing file is not.
+    """
     last: Exception | None = None
-    for _ in range(_ATTEMPTS):
+    for attempt in range(_ATTEMPTS):
+        if attempt:
+            time.sleep(_BACKOFF_S * 2 ** (attempt - 1))
         try:
             with urllib.request.urlopen(url, timeout=_TIMEOUT_S) as resp:  # noqa: S310
-                return resp.read()
+                data = resp.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise OSError(f"the body is larger than the {max_bytes} bytes expected")
+            return data
         except urllib.error.HTTPError as exc:
             if exc.code in (400, 401, 403, 404, 410):
                 raise
             last = exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, FileNotFoundError):
+                raise
             last = exc
+        except (http.client.HTTPException, TimeoutError, ConnectionError) as exc:
+            last = exc  # includes IncompleteRead (a truncated body)
+        except OSError as exc:
+            if "larger than" in str(exc):
+                raise
+            last = exc
+        except ValueError as exc:  # a malformed URL never gets better
+            raise OSError(f"bad URL {url!r}: {exc}") from exc
     assert last is not None
     raise last
 
@@ -122,9 +150,9 @@ def fetch_version(dataset_id: str, api_url: str = API_URL) -> str:
     """The latest released version of a dataset, from the NEMAR API."""
     url = api_url.format(id=dataset_id)
     try:
-        doc = json.loads(_get(url))
+        doc = json.loads(_get(url, _API_MAX_BYTES))
         version = doc["dataset"]["latest_version"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError) as exc:
         raise FetchError(f"cannot read the version of {dataset_id} from {url}: {exc}") from exc
     if not isinstance(version, str) or not version:
         raise FetchError(f"{dataset_id} has no released version; pass --version")
@@ -204,16 +232,19 @@ def _annex_object(clone: Path, rel: str) -> tuple[Path, int, str, str] | None:
     target = os.readlink(link)
     key = Path(target).name
     m = _KEY.match(key)
-    if ".git/annex/objects/" not in target or m is None:
-        raise OSError(f"symbolic link {target!r} is not a git-annex key with a size")
+    if os.path.isabs(target) or ".git/annex/objects/" not in target or m is None:
+        raise OSError(f"symbolic link {target!r} is not a relative git-annex key with a size")
+    objects = (clone / ".git" / "annex" / "objects").resolve()
+    obj = Path(os.path.normpath(link.parent / target))
+    if not obj.resolve().is_relative_to(objects):
+        raise OSError(f"symbolic link {target!r} points outside the clone's annex objects")
     backend = m.group(1).removesuffix("E")
     algo = backend.lower() if backend.lower() in hashlib.algorithms_available else ""
-    obj = Path(os.path.normpath(link.parent / target))
     return obj, int(m.group(2)), algo, m.group(3) if algo else ""
 
 
 def _download(url: str, dest: Path, size: int, algo: str, digest: str) -> None:
-    data = _get(url)
+    data = _get(url, size)
     if len(data) != size or (algo and hashlib.new(algo, data).hexdigest() != digest):
         raise OSError(f"downloaded {len(data)} bytes that do not match the annex key")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -275,9 +306,13 @@ def fetch_files(
             result.fetched.append(path)
             continue
         try:
-            url = data_url.format(id=dataset_id, version=version, path=path)
+            url = data_url.format(
+                id=dataset_id,
+                version=urllib.parse.quote(version, safe=""),
+                path=urllib.parse.quote(path, safe="/"),
+            )
             _download(url, obj, size, algo, digest)
-        except (OSError, urllib.error.URLError) as exc:
+        except (OSError, http.client.HTTPException) as exc:
             result.failed[path] = f"{exc.__class__.__name__}: {exc}"
             continue
         result.fetched.append(path)
@@ -301,17 +336,17 @@ def _apply_failures(result: FetchResult) -> None:
             raise FetchError(f"cannot fetch {path}: {reason}")
     subjects: dict[str, str] = {}
     for path, reason in result.failed.items():
-        m = re.match(r"sub-[^/]+", path)
-        if _SUBJECT_FILE.search(path) and m:
-            subjects[m.group(0)] = f"{path} was not fetched ({reason})"
+        sub = _entity(path, "sub")
+        if _SUBJECT_FILE.search(path) and sub:
+            subjects[sub] = f"{path} was not fetched ({reason})"
     for path in result.electrodes_in_tree:
-        sub = path.split("/")[0]
+        sub = _entity(path, "sub")
         if sub in subjects:
             result.excluded[path] = subjects[sub]
             (clone / path).unlink(missing_ok=True)
     # a coordsystem that failed above the subject level (inherited) affects every subject
     for path, reason in result.failed.items():
-        if _ANY_COORDSYSTEM.search(path) and not path.startswith("sub-"):
+        if _ANY_COORDSYSTEM.search(path) and not _entity(path, "sub"):
             for e in result.electrodes_in_tree:
                 result.excluded.setdefault(e, f"{path} was not fetched ({reason})")
                 (clone / e).unlink(missing_ok=True)
