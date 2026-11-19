@@ -278,3 +278,24 @@ def test_surface_evidence_alone_refuses_a_lone_file_that_does_not_fit(synthetic_
     assert cand.n_invertible == cand.n_contacts  # the field alone cannot reject it
     assert not cand.eligible and bad.verdict == "refused"
     assert "no electrodes file matches the field" in bad.reason
+
+
+def test_write_merges_into_existing_ownership_and_keeps_other_tracks(synthetic_dataset):
+    from ieeg_geometry.ownership import OwnedPath, write_ownership
+
+    other = OwnedPath(
+        "sub-9/ieeg/sub-9_space-fsaverage_electrodes.tsv",
+        "electrodes",
+        (("sub-9/ieeg/sub-9_electrodes.tsv", "0" * 40),),
+        "freesurfer-talairach",
+        None,
+    )
+    write_ownership(synthetic_dataset, "0.0.1", [other])
+    written = spm.write(spm.plan_dataset(synthetic_dataset), synthetic_dataset)
+    owned = read_ownership(synthetic_dataset)
+    assert owned is not None
+    assert {e.path for e in owned.entries} == {other.path, *written}
+    assert next(e for e in owned.entries if e.path == other.path).method == "freesurfer-talairach"
+    spm.write(spm.plan_dataset(synthetic_dataset), synthetic_dataset)  # rerun keeps it too
+    again = read_ownership(synthetic_dataset)
+    assert again is not None and other.path in {e.path for e in again.entries}
