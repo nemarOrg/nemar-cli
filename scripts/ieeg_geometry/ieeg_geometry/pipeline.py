@@ -591,6 +591,17 @@ def report_json(report: dict) -> str:
 # ---- apply ------------------------------------------------------------------------------------
 
 
+def recover_surfaces(surfaces_dir: Path | None) -> bool:
+    """Restore `geometry/` from `.geometry.old` after a crash between the two renames."""
+    if surfaces_dir is None:
+        return False
+    target, old = Path(surfaces_dir) / "geometry", Path(surfaces_dir) / ".geometry.old"
+    if not target.exists() and old.is_dir():
+        os.replace(old, target)
+        return True
+    return False
+
+
 def apply(a: Analysis, surfaces_dir: Path | None) -> list[str]:
     """Write the analyzed plans into the work tree and the surfaces into `surfaces_dir`.
 
@@ -613,11 +624,16 @@ def apply(a: Analysis, surfaces_dir: Path | None) -> list[str]:
         # `surfaces_dir/geometry` ends up exactly the new index and its meshes
         target = Path(surfaces_dir) / "geometry"
         staging = Path(surfaces_dir) / ".geometry.new"
+        old = Path(surfaces_dir) / ".geometry.old"
+        recover_surfaces(surfaces_dir)
         Path(surfaces_dir).mkdir(parents=True, exist_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(built, staging)
-        shutil.rmtree(target, ignore_errors=True)
+        # crash-safe swap: at every instant `geometry/` or `.geometry.old` holds a full copy
+        if target.exists():
+            os.replace(target, old)
         os.replace(staging, target)
+        shutil.rmtree(old, ignore_errors=True)
     return sorted(set(written))
 
 
@@ -639,6 +655,7 @@ def run_dataset(
     from . import fetch
 
     check_dataset_id(dataset_id)
+    recover_surfaces(surfaces_out)  # before anything else, even a dry run
     pipeline_version()  # strict: a missing package fails here, before any network use
     workdir = Path(workdir)
     got = fetch.fetch_files(
