@@ -20,6 +20,8 @@ cd scripts/ieeg_geometry && uv run pytest -q
 | `reference.py` | The vendored references by name (`fsaverage`, `MNI152NLin2009cAsym`) and a strict `brain-mesh v1` reader. Checks `SHA256SUMS` on load. |
 | `verify.py` | `fit` (median, 90th percentile, maximum nearest-vertex distance; ray-parity inside test) and `fit_with_offset` (as declared and with c_ras added). Thresholds and the degenerate-ray handling are in the module docstring. |
 | `spm.py` | SPM `y_` deformation field to `space-IXI549Space` (card B2): per-contact Newton inversion of the field (residual under 0.05 mm), pairing of the field with one electrodes file by surface and invertibility evidence, verification against `MNI152NLin2009cAsym`, a plan object and `write(plans, dataset_dir)`. |
+| `meshwrite.py` | `brain-mesh v1` encoder (byte-identical to the website's), quadric edge collapse (`fast-simplification`) to at most 65,535 vertices per hemisphere, edge statistics, point-to-surface deviation, signed volume for the winding test. |
+| `surfaces_out.py` | Subject surfaces to `geometry/index.json` plus content-addressed `geometry/meshes/<sha256>.mesh.bin`, in the contacts' frame (`c_ras` added to the vertices when the offset frame fits). The written mesh is judged by what decimation changed (ruling 15), not re-graded. Run `python -m ieeg_geometry.surfaces_out <dataset-dir> --out <dir> [--source-commit <sha>]` (the commit defaults to the dataset checkout's HEAD). The index schema is `schema/geometry-index.v1.json` (frozen for the website). |
 | `ownership.py` | `.nemar/ieeg-geometry.json` writer and reader, deterministic bytes, git blob ids of inputs. |
 
 ## Evidence grades

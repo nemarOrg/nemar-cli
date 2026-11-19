@@ -110,3 +110,39 @@ A nearest-vertex median is the wrong plausibility measure against a smooth shell
    This catches the gross errors plausibility exists for (wrong file, sign or unit errors); it does not discriminate small frame errors, which is why ruling 3 also needs independent evidence.
 9. **An SPM field is checked before its contacts are trusted:** at least 2,000 sampled vertices of the subject's own pial surface, inverted through the same field, must land with a median at most 6.0 mm and a 10th percentile at most 2.0 mm from the template shell. This verifies the field's direction and its pairing with the subject; with it, the field counts as ruling 3's independent evidence.
 10. **Pairing ties:** when two electrode files of a subject both fit its surface, the file whose coordsystem `IntendedFor` names the T1 the field was computed from (the field's name without its `y_` prefix) is used; with no such match the subject is refused as "pairing ambiguous".
+
+### 2026-11-19, after B1's first report (PR #2227)
+
+On real FreeSurfer subjects the surface method gives specific evidence everywhere, while the affine (`talairach.xfm`) depth subsets are often refused by the median rule, and the affine and surface positions of the same ECoG contacts disagree by 10 to 15 mm median (the expected error of a 12-parameter affine to MNI305).
+
+11. **The surface method is for cortical contacts only** (ECoG, grid, strip, surface types); depth contacts always take the affine method, never a snap to the pial surface.
+12. **The affine is checked as a transform, then its contacts for plausibility.** At least 2,000 sampled vertices of the subject's pial surface, mapped through the same `talairach.xfm`, must land with a median at most 6.0 mm and a 10th percentile at most 2.0 mm from fsaverage's pial surface (ruling 9's check, for FreeSurfer); then the depth contacts pass ruling 8's rule against fsaverage (at least 95 percent inside, none more than 10.0 mm outside), with the median reported, not judged.
+    The sidecar of every `space-MNI305` file says the positions come from an affine registration with a typical error of 5 to 15 mm, and gives the measured affine-to-surface agreement for that subject when ECoG contacts exist.
+13. **Ruling 4, refined for two specific frames.** When both the declared frame and the offset frame give specific evidence and the offset is at least 3 mm, the frame whose median is at least 0.5 mm and 25 percent lower is used; otherwise the subject is refused as "frame ambiguous".
+
+### 2026-11-19, after the A1 review (PR #2224)
+
+14. **Subject surfaces are display data, so ruling 3 does not apply to them.** A surface and its electrodes come from the same subject's own dataset, and nothing is written into the dataset; a plausible fit is enough to draw the surface, and the index records the grade so the website can say "approximate alignment" for a plausible fit and nothing for a specific one.
+15. **A written mesh is judged by what decimation changed, not re-graded.** Inside flags come from the original closed surface; the written mesh passes when its median contact distance moves by at most 0.5 mm and its 99th percentile surface deviation from the original is at most 1.0 mm. Decimation is quadric edge collapse (`fast-simplification`, MIT), not vertex clustering.
+
+### 2026-11-19, after the C1 review (PR #2225)
+
+16. **The blind shift control.** A shifted copy counts as failing when its median is above 1.0 mm and at least 1.5 times the unshifted median; all six shifts must fail. (The ECoG 2.0 mm rule rejected 14 of 42 verified on005007 files: a grid slid along the cortex stays 1.3 to 2.0 mm from fsaverage6.)
+17. **Prose alone never writes a label until R1 is reviewed.** A candidate from README or description text with only plausible evidence returns needs-human; with specific evidence it may be written. A named template that fits far worse than fsaverage (fsaverage specific on-vertex, the named one plausible at best) returns needs-human, whatever the contact type. Two distinct passing labels from the text return needs-human.
+18. **fsaverage-referenced data is written as `fsaverage`,** with the authors' own term (for example "MNI-305") carried in `iEEGCoordinateSystemDescription`.
+
+### 2026-11-19, after B1's second report (PR #2227)
+
+On every real FreeSurfer subject the `talairach.xfm` transform check passed (median 2.1 to 2.7 mm), but a 40 mm translation of the same transform passed too: a folded pial surface is near some fsaverage vertex from almost anywhere inside the brain.
+After the affine, real depth contacts are only 62 to 75 percent inside fsaverage (2 percent for on003848 RESP0699), and the affine and surface positions of the same ECoG contacts disagree by 11 to 15 mm median.
+
+19. **A transform check must also match shape and position**, not only nearest-vertex distance: the mapped subject vertices' centroid within 5.0 mm of the reference's, and each axis's 2nd-to-98th-percentile extent within 10 percent of the reference's, in addition to ruling 9's distances. This applies to rulings 9 (SPM) and 12 (FreeSurfer); a test shows a 40 mm translation and a 15 percent scale error both fail.
+20. **Affine (`talairach.xfm`) depth positions are not written.** With a 10 to 15 mm typical error they are not worth committing as data; B1 writes only the surface-method `space-fsaverage` files for cortical contacts, and reports the depth contacts it left out. `space-MNI305` output is dropped until a nonlinear path exists (for example `sphere.reg` plus a volume warp), which would need its own card.
+
+### 2026-11-19, after the B2 review (PR #2226)
+
+The field check (ruling 9) proves a field's direction, not which subject or which electrodes file it belongs to: sub-1's field passes against sub-3's surface, and sub-3's native and ACPC files (15 mm apart) fit its own surface equally.
+
+21. **Pairing an electrodes file with an SPM field needs one of:** the file's `IntendedFor` resolving to the T1 the field was computed from (same directory when one is given; a list is searched), or, when `IntendedFor` is absent or names a file that does not exist, template verification of every candidate file with a clear winner (the winner passes ruling 8, every other candidate's inside fraction is at least 0.05 lower). A file whose `IntendedFor` resolves to a different T1 is never paired. Ruling 10's tie-break is subsumed by this.
+22. **Depth-contact rules are chosen by the caller, not by reference metadata.** One function in `verify.py` takes the rule explicitly (median rule or the ruling 8 inside rule); the `smooth` flag in `reference.json` is removed, so no other caller's verdict changes when a reference is added.
+23. **`IXI549Space` is written only for a field on SPM12's template grid** (121 x 145 x 121, 1.5 mm, the template affine); any other grid is needs-human.
