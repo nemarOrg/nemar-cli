@@ -56,6 +56,7 @@ jobs:
       tests: ${{ steps.filter.outputs.tests }}
       email: ${{ steps.filter.outputs.email }}
       zarr: ${{ steps.filter.outputs.zarr }}
+      ieeg_geometry: ${{ steps.filter.outputs.ieeg_geometry }}
       shared: ${{ steps.filter.outputs.shared }}
       decisions: ${{ steps.filter.outputs.decisions }}
       agentdocs: ${{ steps.filter.outputs.agentdocs }}
@@ -268,6 +269,32 @@ jobs:
               # editing only these jobs (a python bump, a new step, a typo in the
               # install line) leaves zarr == 'false' and skips them silently.
               - '.github/workflows/test.yml'
+            # iEEG geometry core library (scripts/ieeg_geometry, its own uv project).
+            ieeg_geometry:
+              - 'scripts/ieeg_geometry/**'
+              - '.github/workflows/test.yml'
+
+  # iEEG geometry core library: ruff, ty and the pytest suite of its own uv project. Real
+  # fixtures cut from public datasets, no mocks; numpy, scipy and nibabel only.
+  ieeg-geometry-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.ieeg_geometry == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Lint, type check and test
+        working-directory: scripts/ieeg_geometry
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run pytest -q
 
   # Zarr conversion engine tests (epic #1108 Phase 1 / #1109).
   # Pure no-mock unit assertions over generate_zarr.py's helpers (path
