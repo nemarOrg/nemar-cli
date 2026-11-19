@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import spm
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -89,6 +90,11 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
                 write(f"      preferred: {result.preferred}")
         if not _types(eset) and eset.contacts:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")
+    spm_lines = spm.report(spm.plan_dataset(dataset), dataset)
+    if spm_lines:
+        write()
+        for line in spm_lines:
+            write(line)
     return 0
 
 

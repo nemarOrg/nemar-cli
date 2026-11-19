@@ -19,6 +19,7 @@ cd scripts/ieeg_geometry && uv run pytest -q
 | `surfaces.py` | FreeSurfer binary (with the c_ras footer), GIfTI (ASCII, Base64Binary, GZipBase64Binary, either array order) and MATLAB v5 `vert`/`tri` or `Vertices`/`Faces` into one `Surface`. MATLAB v7.3 is refused. |
 | `reference.py` | The vendored references by name (`fsaverage`, `MNI152NLin2009cAsym`) and a strict `brain-mesh v1` reader. Checks `SHA256SUMS` on load. |
 | `verify.py` | `fit` (median, 90th percentile, maximum nearest-vertex distance; ray-parity inside test) and `fit_with_offset` (as declared and with c_ras added). Thresholds and the degenerate-ray handling are in the module docstring. |
+| `spm.py` | SPM `y_` deformation field to `space-IXI549Space` (card B2): per-contact Newton inversion of the field (residual under 0.05 mm), pairing of the field with one electrodes file by surface and invertibility evidence, verification against `MNI152NLin2009cAsym`, a plan object and `write(plans, dataset_dir)`. |
 | `ownership.py` | `.nemar/ieeg-geometry.json` writer and reader, deterministic bytes, git blob ids of inputs. |
 
 ## Evidence grades
