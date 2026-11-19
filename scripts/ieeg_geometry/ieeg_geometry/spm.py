@@ -108,7 +108,9 @@ def load_field(path: str | Path) -> DeformationField:
     """Read an SPM deformation field (`nx x ny x nz x 1 x 3` or `nx x ny x nz x 3`)."""
     path = Path(path)
     try:
-        img = nib.Nifti1Image.from_filename(str(path))
+        # mmap=False: read into memory, so a field file replaced or truncated under a running
+        # process can never crash it (a memory-mapped file that changes raises SIGBUS on Linux)
+        img = nib.Nifti1Image.from_filename(str(path), mmap=False)
     except Exception as exc:  # nibabel raises several types for unreadable files
         raise GeometryRefusal("field-unreadable", f"{path.name}: {exc}") from exc
     shape = tuple(img.shape)

@@ -518,10 +518,12 @@ def test_only_spm12s_template_grid_or_a_crop_of_it_is_accepted():
 
 def test_a_field_on_another_grid_needs_a_human_and_nothing_is_written(synthetic_dataset):
     fs = synthetic_dataset / "derivatives" / "freesurfer" / "sub-9"
-    img = nib.Nifti1Image.from_filename(str(fs / "y_sub-9_T1w.nii"))
+    img = nib.Nifti1Image.from_filename(str(fs / "y_sub-9_T1w.nii"), mmap=False)
+    data = np.array(img.dataobj)  # a copy: never save over a path a map still backs
     wide = np.diag([-2.0, 2.0, 2.0, 1.0])
     wide[:3, 3] = [90, -126, -72]
-    nib.save(nib.Nifti1Image(np.asarray(img.dataobj), wide), fs / "y_sub-9_T1w.nii")
+    nib.save(nib.Nifti1Image(data, wide), fs / "y_sub-9_T1w_2mm.nii")
+    (fs / "y_sub-9_T1w.nii").unlink()  # the 2 mm field replaces it, written to a fresh path
     (plan,) = spm.plan_dataset(synthetic_dataset)
     assert plan.verdict == "needs-human" and "SPM12's template grid" in plan.reason
     assert spm.write([plan], synthetic_dataset) == []
