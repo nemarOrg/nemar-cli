@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import freesurfer
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -89,6 +90,7 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
                 write(f"      preferred: {result.preferred}")
         if not _types(eset) and eset.contacts:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")
+    freesurfer.inspect_dataset(dataset, out)
     return 0
 
 
