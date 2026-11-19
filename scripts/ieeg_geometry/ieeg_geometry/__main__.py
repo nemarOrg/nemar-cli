@@ -7,7 +7,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-from . import freesurfer, labels
+from . import freesurfer, labels, spm
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -103,6 +103,11 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")
     _write_suppressed(proposals, write)
     freesurfer.inspect_dataset(dataset, out)
+    spm_lines = spm.report(spm.plan_dataset(dataset), dataset)
+    if spm_lines:
+        write()
+        for line in spm_lines:
+            write(line)
     return 0
 
 

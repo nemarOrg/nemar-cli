@@ -18,6 +18,11 @@ The cut surfaces are open meshes, so the inside-the-brain criterion is not evalu
 `ieeg_geometry/data/fsaverage/*.npz` were built by `tools/build_fsaverage6.py` from the fsaverage pial surfaces in public dataset `on004370` v1.0.0 (`derivatives/freesurfer/lh.pial`, `rh.pial`; header "created by greve on Thu Apr 11 2013"; sha256 `9cb004f61a2eeb977b1b595ad6de6656afdfc1f37ade0c00a8dde91e990a0f29` and `4f752701f74c1626ee3b6239046b9aa793ca4e87c6ae9a6b74a233c04e651212`).
 This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaverage6 files could not be made offline (known limit).
 
+## SPM fixture (`spm_dataset/`, card B2)
+
+`tools/make_spm_fixture.py` builds it from `mini_dataset/sub-2` (electrodes, channels, cut surface; see above) and the full SPM12 field `derivatives/freesurfer/sub-2/y_sub-2_ses-mri01_T1w.nii` of `on004457` v1.0.0 (`data.nemar.org/on004457/v1.0.0/...`, 121 x 145 x 121 voxels, 1.5 mm; sha256 `2570f6896caacf6736bcee0c0a9fe38e70ece8300ac73d22385465cfc5759e2f`).
+The field is cropped to a box around the native contacts (2-voxel margin) with the affine moved, so inversion on the crop equals inversion on the full field (the builder checks it to 1e-4 mm).
+
 ## FreeSurfer fixtures (`fs_dataset/`)
 
 Built by `tools/make_fs_fixtures.py` from on004194 v1.0.0 (CC0): `sub-p02` (UMCU, needs c_ras) and `sub-p03` (NYU, as declared), their `acq-clinical` electrodes, coordsystem and channels files (raw GitHub), and from `data.nemar.org/on004194/v1.0.0/derivatives/freesurfer/sub-p0N/`: `surf/{lh,rh}.{pial,sphere.reg}` .
