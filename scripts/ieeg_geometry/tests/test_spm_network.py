@@ -2,16 +2,14 @@
 
 Measured 2026-11-19 with the card B2 build: every field inverts (residual median at most
 0.005 mm, maximum at most 0.042 mm, 25 MB per field), pairing picks the right file for
-sub-1, sub-2 and sub-4, and sub-3 is genuinely ambiguous (its native and ACPC files both fit the
-surface at 2.6 mm although they differ by 15 mm). Verification against the MNI152NLin2009cAsym
-shell fails L1's sEEG median bound for every subject (7.7 to 10.0 mm against 6.0 mm) while 97 to
-99 percent of the contacts lie inside the shell, so no subject is written today.
+sub-1, sub-2 and sub-4, and sub-3 is a genuine tie (its native and ACPC files both fit the
+surface at 2.6 mm although they differ by 15 mm; IntendedFor breaks the tie, ruling 10). Rulings
+8 and 9 (smooth shell rule, field check on the subject's own pial vertices) decide the rest.
 """
 
 import os
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from ieeg_geometry import spm
@@ -57,32 +55,35 @@ def dataset(tmp_path_factory) -> Path:
     return root
 
 
-def test_every_field_inverts_and_pairing_follows_the_surface_evidence(dataset):
+def test_every_field_inverts_and_pairing_follows_the_evidence(dataset):
     plans = {p.subject: p for p in spm.plan_dataset(dataset)}
     assert set(plans) == {"1", "2", "3", "4"}
-    for s in ("1", "2", "4"):
+    for s in ("1", "2", "3", "4"):
         chosen = plans[s].chosen
-        assert chosen is not None
-        assert chosen.space is None  # the file without a space entity: ACPC for sub-1, native else
-        assert chosen.median_residual_mm < 0.05
+        assert chosen is not None, plans[s].reason
+        inv = plans[s].inversion
+        assert inv is not None and inv.ok.all()
+        assert inv.median_residual < 0.01 and inv.max_residual < 0.05
+    # sub-1: its only file; sub-2 and sub-4: the native file; sub-3: tie broken by IntendedFor
+    spaces = [c.space for s in ("1", "2", "3", "4") if (c := plans[s].chosen) is not None]
+    assert spaces == [None] * 4
     native = plans["2"].chosen
     acpc = next(c for c in plans["2"].candidates if c.space == "ACPC")
     assert native is not None and native.surface_fit is not None and acpc.surface_fit is not None
     assert native.surface_fit["seeg"].median_mm == pytest.approx(2.68, abs=0.05)
     assert not acpc.eligible and acpc.surface_fit["seeg"].median_mm == pytest.approx(9.89, abs=0.05)
-    assert "ambiguous" in plans["3"].reason and plans["3"].chosen is None
-    for s in ("1", "2", "4"):
-        inv = plans[s].inversion
-        assert inv is not None and inv.ok.all()
-        assert inv.median_residual < 0.01 and inv.max_residual < 0.05
+    assert all(c.eligible for c in plans["3"].candidates)  # both fit the surface: a real tie
 
 
-def test_verification_against_the_shell_today_refuses_every_subject(dataset):
+def test_field_checks_and_verification_decide_every_subject(dataset):
     plans = {p.subject: p for p in spm.plan_dataset(dataset)}
-    medians = {"1": 9.49, "2": 7.68, "4": 10.02}
-    for s, median in medians.items():
-        head = plans[s].template_fit["seeg"]
-        assert head.median_mm == pytest.approx(median, abs=0.05)
-        assert head.inside_fraction is not None and head.inside_fraction > 0.95
-        assert plans[s].verdict == "refused" and plans[s].files == {}
-    assert np.isfinite(list(medians.values())).all()
+    for s in ("1", "2", "3", "4"):
+        plan = plans[s]
+        check = plan.field_check
+        assert check is not None and check.passed, (s, check)
+        assert check.n_inverted >= 2000
+        assert check.median_mm <= 6.0 and check.p10_mm <= 2.0
+        head = plan.template_fit["seeg"]
+        assert head.grade == "plausible" and (head.inside_fraction or 0) >= 0.95
+        assert plan.verdict == "write", (s, plan.reason)
+        assert len(plan.files) == 2

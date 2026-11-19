@@ -13,6 +13,7 @@ from ieeg_geometry import spm
 from ieeg_geometry.bids import GeometryRefusal, discover, read_electrode_set
 from ieeg_geometry.ownership import read_ownership
 from ieeg_geometry.reference import load_reference
+from ieeg_geometry.surfaces import Surface
 
 FIXTURE = Path(__file__).parent / "fixtures" / "spm_dataset"
 TEMPLATE_AFFINE = np.array(
@@ -119,16 +120,13 @@ def test_pairing_picks_the_native_file_for_sub2():
     assert plan.inversion is not None and plan.inversion.median_residual < 0.05
 
 
-def test_sub2_verification_against_the_template_shell_is_recorded_and_refused():
-    """Measured on the real field: the contacts sit inside the MNI shell (97 percent) but deep
-    contacts are 7.7 mm from its vertices, over L1's 6.0 mm sEEG median. L1's grade rules, so the
-    subject is refused and nothing is written until the lead rules on the shell reference."""
+def test_cropped_fixture_cannot_run_the_field_check_and_is_refused():
+    """The committed crop covers only the contacts' box, so too few pial vertices invert for
+    ruling 9's check; the full-field result is pinned by the network tests."""
     (plan,) = spm.plan_dataset(FIXTURE)
-    head = plan.template_fit["seeg"]
-    assert head.inside_evaluated and head.inside_fraction is not None
-    assert head.inside_fraction > 0.95
-    assert head.median_mm == pytest.approx(7.68, abs=0.05)
-    assert plan.verdict == "refused" and "verification" in plan.reason
+    assert plan.chosen is not None and plan.chosen.space is None
+    assert plan.field_check is not None and not plan.field_check.passed
+    assert plan.verdict == "refused" and "failed its check" in plan.reason
     assert plan.files == {}
 
 
@@ -147,10 +145,24 @@ def test_inspect_shows_pairing_evidence_residuals_and_verification():
         and "chosen sub-2/ses-ieeg01/ieeg/sub-2_ses-ieeg01_electrodes.tsv" in out
     )
     assert "inversion residual median 0.00" in out
-    assert "verification vs MNI152NLin2009cAsym" in out
+    assert "field check on the subject's pial vertices" in out and "FAIL" in out
 
 
 # ---- the write path on a synthetic subject whose contacts lie on the template -------------
+
+
+def _add_native_surface(dataset: Path) -> None:
+    """The right-hemisphere shell mapped into the subject's native frame, as a GIfTI surface."""
+    shell = load_reference("MNI152NLin2009cAsym")[1]
+    verts = _native(shell.vertices * 0.995).astype(np.float32)
+    faces = shell.faces.astype(np.int32)
+    img = nib.gifti.GiftiImage(
+        darrays=[
+            nib.gifti.GiftiDataArray(verts, intent="NIFTI_INTENT_POINTSET"),
+            nib.gifti.GiftiDataArray(faces, intent="NIFTI_INTENT_TRIANGLE"),
+        ]
+    )
+    nib.save(img, dataset / "derivatives" / "freesurfer" / "sub-9" / "pial.R.surf.gii")
 
 
 @pytest.fixture
@@ -175,6 +187,7 @@ def synthetic_dataset(tmp_path, synthetic_field) -> Path:
     fdir = tmp_path / "derivatives" / "freesurfer" / "sub-9"
     fdir.mkdir(parents=True)
     _write_field(fdir / "y_sub-9_T1w.nii")
+    _add_native_surface(tmp_path)
     return tmp_path
 
 
@@ -227,40 +240,100 @@ def test_second_run_regenerates_identical_bytes_and_authors_files_win(synthetic_
     assert skip.verdict == "skip" and "authors" in skip.reason
 
 
-def test_a_shifted_subject_is_refused_and_nothing_is_written(synthetic_dataset):
+def test_contacts_just_outside_the_shell_fail_verification_and_nothing_is_written(
+    synthetic_dataset,
+):
+    """sEEG contacts 5.5 mm outside the shell fit the pial surface (within 6 mm) but are 0 percent
+    inside the template, so the subject is refused by verification."""
+    shell = load_reference("MNI152NLin2009cAsym")[1]
+    rng = np.random.default_rng(5)
+    base = shell.vertices[rng.choice(len(shell.vertices), 40, replace=False)]
+    out = base * (1 + 5.5 / np.linalg.norm(base, axis=1, keepdims=True))
+    rows = ["name\tx\ty\tz\ttype\themisphere"]
+    for i, p in enumerate(_native(out)):
+        rows.append(f"D{i}\t{p[0]:.4f}\t{p[1]:.4f}\t{p[2]:.4f}\tsEEG\tR")
     tsv = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
-    rows = tsv.read_text().splitlines()
-    shifted = [rows[0]]
-    for r in rows[1:-1]:
-        f = r.split("\t")
-        f[1] = f"{float(f[1]) + 25.0:.4f}"  # 25 mm: still invertible, no longer on the shell
-        shifted.append("\t".join(f))
-    shifted.append(rows[-1])
-    tsv.write_text("\n".join(shifted) + "\n")
+    tsv.write_text("\n".join(rows) + "\n")
     (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.field_check is not None and plan.field_check.passed
+    assert plan.chosen is not None  # pairing is not the reason
     assert plan.verdict == "refused" and "verification" in plan.reason
+    inside = plan.template_fit["seeg"].inside_fraction
+    assert inside is not None and inside < 0.95
     assert spm.write([plan], synthetic_dataset) == []
     assert not list(synthetic_dataset.rglob("*IXI549Space*"))
     assert not (synthetic_dataset / ".nemar").exists()
 
 
-def _add_native_surface(dataset: Path) -> None:
-    """The right-hemisphere shell mapped into the subject's native frame, as a GIfTI surface."""
-    shell = load_reference("MNI152NLin2009cAsym")[1]
-    verts = _native(shell.vertices * 0.995).astype(np.float32)
-    faces = shell.faces.astype(np.int32)
-    img = nib.gifti.GiftiImage(
-        darrays=[
-            nib.gifti.GiftiDataArray(verts, intent="NIFTI_INTENT_POINTSET"),
-            nib.gifti.GiftiDataArray(faces, intent="NIFTI_INTENT_TRIANGLE"),
-        ]
-    )
-    nib.save(img, dataset / "derivatives" / "freesurfer" / "sub-9" / "pial.R.surf.gii")
+def test_field_check_fails_when_the_surface_does_not_belong_to_the_field(synthetic_field):
+    shell = load_reference("MNI152NLin2009cAsym")
+    right = shell[1]
+    own = Surface(_native(right.vertices * 0.995), right.faces)
+    good = spm.check_field(synthetic_field, [own], shell)
+    assert good.passed and good.n_inverted >= 2000
+    assert good.median_mm < 1.0 and good.p10_mm < 1.0
+    wrong = Surface(own.vertices + np.array([30.0, 0, 0]), right.faces)  # another subject's frame
+    bad = spm.check_field(synthetic_field, [wrong], shell)
+    assert not bad.passed and bad.median_mm > spm.FIELD_CHECK_MEDIAN_MM
+    assert "limit" in bad.reason
+
+
+def test_field_check_records_numbers_in_provenance_and_ownership(synthetic_dataset):
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    check = plan.field_check
+    assert check is not None and check.passed and check.n_inverted >= 2000
+    spm.write([plan], synthetic_dataset)
+    owned = read_ownership(synthetic_dataset)
+    assert owned is not None
+    for entry in owned.entries:
+        assert entry.verification is not None
+        assert entry.verification.field_check_median_mm == pytest.approx(check.median_mm, abs=1e-3)
+        assert entry.verification.field_check_p10_mm == pytest.approx(check.p10_mm, abs=1e-3)
+    sidecar = synthetic_dataset / "sub-9/ieeg/sub-9_space-IXI549Space_coordsystem.json"
+    desc = json.loads(sidecar.read_text())["iEEGCoordinateProcessingDescription"]
+    assert "Field check on the subject's own pial surface" in desc and "10th percentile" in desc
+
+
+def test_no_subject_surface_means_the_field_cannot_be_trusted(synthetic_dataset):
+    (synthetic_dataset / "derivatives/freesurfer/sub-9/pial.R.surf.gii").unlink()
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict == "refused" and "no subject pial surface" in plan.reason
+
+
+def test_tie_is_broken_by_intended_for_naming_the_fields_t1(synthetic_dataset):
+    """Two files fit the same surface; IntendedFor decides (ruling 10), else ambiguous."""
+    ieeg = synthetic_dataset / "sub-9" / "ieeg"
+    for suffix in ("electrodes.tsv", "coordsystem.json"):
+        (ieeg / f"sub-9_space-ACPC_{suffix}").write_bytes((ieeg / f"sub-9_{suffix}").read_bytes())
+    side = ieeg / "sub-9_coordsystem.json"
+    acpc = ieeg / "sub-9_space-ACPC_coordsystem.json"
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is None and "pairing ambiguous" in plan.reason
+    doc = json.loads(side.read_text())
+    doc["IntendedFor"] = "/derivatives/freesurfer/sub-9/sub-9_T1w_deFaced.nii"
+    side.write_text(json.dumps(doc))
+    doc2 = json.loads(acpc.read_text())
+    doc2["IntendedFor"] = "/derivatives/acpc/sub-9/sub-9_T1w_acpc_deFaced.nii"
+    acpc.write_text(json.dumps(doc2))
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is not None and plan.chosen.space is None
+    assert plan.verdict == "write", plan.reason
+    doc2["IntendedFor"] = "/derivatives/freesurfer/sub-9/sub-9_T1w.nii"  # both name it: ambiguous
+    acpc.write_text(json.dumps(doc2))
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is None and "pairing ambiguous" in plan.reason
+
+
+def test_names_field_t1_ignores_directories_extension_and_deFaced():
+    f = Path("derivatives/freesurfer/sub-3/y_sub-3_ses-mri01_T1w.nii")
+    assert spm.names_field_t1("/a/b/sub-3_ses-mri01_T1w_deFaced.nii", f)
+    assert spm.names_field_t1("sub-3_ses-mri01_T1w.nii.gz", f)
+    assert not spm.names_field_t1("/a/sub-3_ses-mri01_T1w_acpc_deFaced.nii", f)
+    assert not spm.names_field_t1(None, f)
 
 
 def test_surface_evidence_alone_refuses_a_lone_file_that_does_not_fit(synthetic_dataset):
     """Both files invert fully; only the subject surface separates a match from a wrong file."""
-    _add_native_surface(synthetic_dataset)
     (good,) = spm.plan_dataset(synthetic_dataset)
     assert good.chosen is not None and good.chosen.surface_fit is not None
     assert good.chosen.surface_fit["ecog"].median_mm < 2.0 and good.verdict == "write"

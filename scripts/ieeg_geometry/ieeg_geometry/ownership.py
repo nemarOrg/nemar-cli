@@ -50,6 +50,9 @@ class Verification:
     n_left_out: int = 0
     reason: str | None = None
     offset_applied: tuple[float, float, float] | None = None
+    # SPM track (ruling 9): the field's check on the subject's own pial surface, when run.
+    field_check_median_mm: float | None = None
+    field_check_p10_mm: float | None = None
 
     @classmethod
     def from_fit(cls, fit: Fit, reference: str) -> Verification:
@@ -101,7 +104,11 @@ def _entry_json(e: OwnedPath) -> dict:
         "method": e.method,
         "verification": None
         if e.verification is None
-        else {k: v for k, v in sorted(e.verification.__dict__.items())},
+        else {
+            k: v
+            for k, v in sorted(e.verification.__dict__.items())
+            if v is not None or not k.startswith("field_check_")
+        },
     }
 
 

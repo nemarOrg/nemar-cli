@@ -25,7 +25,8 @@ from __future__ import annotations
 import csv
 import io
 import json
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -235,6 +236,60 @@ def invert_points(
     return Inversion(template, residual, tuple(reasons))
 
 
+# ---- field check (ruling 9) ----------------------------------------------------------------
+
+FIELD_CHECK_SAMPLES = 4000
+FIELD_CHECK_MIN_INVERTED = 2000
+FIELD_CHECK_MEDIAN_MM = 6.0
+FIELD_CHECK_P10_MM = 2.0
+
+
+@dataclass(frozen=True)
+class FieldCheck:
+    """Pial vertices of the subject inverted through the field, measured against the shell."""
+
+    n_sampled: int
+    n_inverted: int
+    median_mm: float
+    p10_mm: float
+    passed: bool
+    reason: str
+
+
+def check_field(
+    field_: DeformationField, pial: list[Surface], reference: list[Surface]
+) -> FieldCheck:
+    """Ruling 9: invert at least 2,000 sampled pial vertices and measure them against the shell.
+
+    A median at most 6.0 mm and a 10th percentile at most 2.0 mm from the template shell's
+    vertices verify the field's direction and its pairing with the subject.
+    """
+    if not pial:
+        return FieldCheck(0, 0, math.nan, math.nan, False, "no subject pial surface to check")
+    vertices = np.vstack([s.vertices for s in pial])
+    n = min(len(vertices), FIELD_CHECK_SAMPLES)
+    idx = np.random.default_rng(0).choice(len(vertices), n, replace=False)
+    inv = invert_points(field_, vertices[idx])
+    ok = inv.ok
+    n_ok = int(ok.sum())
+    if n_ok < FIELD_CHECK_MIN_INVERTED or n_ok < 0.9 * n:
+        return FieldCheck(
+            n, n_ok, math.nan, math.nan, False, f"only {n_ok} of {n} sampled vertices invert"
+        )
+    dist, _ = KDTree(np.vstack([s.vertices for s in reference])).query(inv.template_mm[ok])
+    median, p10 = float(np.median(dist)), float(np.percentile(dist, 10))
+    passed = median <= FIELD_CHECK_MEDIAN_MM and p10 <= FIELD_CHECK_P10_MM
+    reason = (
+        ""
+        if passed
+        else (
+            f"pial vertices land median {median:.2f} mm (limit {FIELD_CHECK_MEDIAN_MM}) and 10th "
+            f"percentile {p10:.2f} mm (limit {FIELD_CHECK_P10_MM}) from the shell"
+        )
+    )
+    return FieldCheck(n, n_ok, median, p10, passed, reason)
+
+
 # ---- pairing -------------------------------------------------------------------------------
 
 
@@ -300,6 +355,7 @@ class Candidate:
     surface_name: str | None
     eligible: bool
     note: str
+    intended_for: str | None = None
 
     @property
     def invertible_fraction(self) -> float:
@@ -333,6 +389,16 @@ def find_fields(dataset: Path, subject: str) -> list[Path]:
             if token in p.relative_to(dataset).parts and p.name.endswith((".nii", ".nii.gz")):
                 found.append(p)
     return found
+
+
+def _intended_for(eset: ElectrodeSet) -> str | None:
+    if eset.coordsystem_path is None:
+        return None
+    try:
+        value = json.loads(eset.coordsystem_path.read_text(encoding="utf-8")).get("IntendedFor")
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, str) else None
 
 
 def evaluate_candidate(
@@ -370,11 +436,30 @@ def evaluate_candidate(
         surface_name=surface_name,
         eligible=eligible,
         note="; ".join(notes),
+        intended_for=_intended_for(eset),
     )
 
 
+def names_field_t1(intended_for: str | None, field_path: Path) -> bool:
+    """True when `IntendedFor` names the image the field was computed from.
+
+    The image is the field's name without its `y_` prefix; the comparison ignores directories,
+    the NIfTI extension and a trailing `_deFaced`.
+    """
+    if not intended_for:
+        return False
+    name = Path(intended_for.strip()).name
+    for ext in (".nii.gz", ".nii"):
+        name = name.removesuffix(ext)
+    name = name.removesuffix("_deFaced").removesuffix("_defaced")
+    stem = field_path.name
+    for ext in (".nii.gz", ".nii"):
+        stem = stem.removesuffix(ext)
+    return name == stem.removeprefix("y_")
+
+
 def choose(candidates: list[Candidate]) -> tuple[Candidate | None, str]:
-    """The paired candidate, or None with the reason. Evidence only, never file names."""
+    """The paired candidate, or None with the reason (a tie goes to IntendedFor, ruling 10)."""
     ok = [c for c in candidates if c.eligible]
     if not ok:
         return None, "no electrodes file matches the field: " + "; ".join(
@@ -385,15 +470,18 @@ def choose(candidates: list[Candidate]) -> tuple[Candidate | None, str]:
     if len(ok) > 1:
         runner = ok[1]
         gain = runner.score - best.score
-        if np.isfinite(gain) and not (
+        separated = np.isfinite(gain) and (
             gain >= OFFSET_MIN_GAIN_MM and gain >= OFFSET_MIN_GAIN_FRACTION * runner.score
-        ):
+        )
+        if not separated:
+            matching = [c for c in ok if names_field_t1(c.intended_for, c.field_path)]
+            if len(matching) == 1:  # ruling 10: IntendedFor names the T1 the field came from
+                return matching[0], ""
             return None, (
                 f"pairing ambiguous: {best.electrodes_path.name} ({best.score:.2f} mm) and "
-                f"{runner.electrodes_path.name} ({runner.score:.2f} mm) both fit"
+                f"{runner.electrodes_path.name} ({runner.score:.2f} mm) both fit and "
+                f"IntendedFor does not single out the field's T1"
             )
-        if not np.isfinite(best.score):
-            return None, "pairing ambiguous: several files invert and no surface separates them"
     return best, ""
 
 
@@ -410,6 +498,7 @@ class SubjectPlan:
     chosen: Candidate | None = None
     inversion: Inversion | None = None
     template_fit: dict[str, Fit] = field(default_factory=dict)
+    field_check: FieldCheck | None = None
     # dataset-relative path -> file bytes
     files: dict[str, bytes] = field(default_factory=dict)
     owned: list[OwnedPath] = field(default_factory=list)
@@ -451,6 +540,7 @@ def _coordsystem_bytes(
     inv: Inversion,
     fits: dict[str, Fit],
     n_refused: int,
+    check: FieldCheck,
 ) -> bytes:
     head = _headline(fits)
     assert head is not None
@@ -462,9 +552,12 @@ def _coordsystem_bytes(
         f"Computed by NEMAR (ieeg-geometry {pipeline_version()}). Source: {rel_source}, "
         f"mapped to the SPM template space by inverting the dataset's SPM deformation field "
         f"{rel_field} (inversion residual median {inv.median_residual:.3f} mm, maximum "
-        f"{inv.max_residual:.3f} mm). Verified against the {REFERENCE} brain surface "
-        f"({grades}; median distance {head.median_mm:.2f} mm, 90th percentile "
-        f"{head.p90_mm:.2f} mm). SPM template spaces differ from {REFERENCE} by a few "
+        f"{inv.max_residual:.3f} mm). Field check on the subject's own pial surface "
+        f"({check.n_inverted} sampled vertices inverted): median {check.median_mm:.2f} mm, 10th "
+        f"percentile {check.p10_mm:.2f} mm from the template shell. "
+        f"Verified against the {REFERENCE} brain surface ({grades}; median distance "
+        f"{head.median_mm:.2f} mm, 90th percentile {head.p90_mm:.2f} mm). "
+        f"SPM template spaces differ from {REFERENCE} by a few "
         f"millimeters.{refused}"
     )
     doc = {
@@ -563,6 +656,11 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
         return plan
     cand, eset, inv, field_ = best
     plan.chosen, plan.inversion = cand, inv
+    _, pial = _best_surface_set(eset, loaded)
+    plan.field_check = check = check_field(field_, pial, reference)
+    if not check.passed:
+        plan.reason = f"the field failed its check on the subject's own surface: {check.reason}"
+        return plan
     fits = fit_groups(eset, np.where(inv.ok[:, None], inv.template_mm, np.nan), reference)
     plan.template_fit = fits
     if not _all_pass(fits):
@@ -582,11 +680,15 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
     n_refused = int((~inv.ok).sum()) - sum(c.missing_coordinates for c in eset.contacts)
     plan.files = {
         tsv_rel: _electrodes_bytes(cand.electrodes_path, inv.template_mm, inv.ok),
-        json_rel: _coordsystem_bytes(rel_src, rel_field, inv, fits, n_refused),
+        json_rel: _coordsystem_bytes(rel_src, rel_field, inv, fits, n_refused, check),
     }
     head = _headline(fits)
     assert head is not None
-    verification = Verification.from_fit(head, REFERENCE)
+    verification = replace(
+        Verification.from_fit(head, REFERENCE),
+        field_check_median_mm=round(check.median_mm, 3),
+        field_check_p10_mm=round(check.p10_mm, 3),
+    )
     inputs = (
         (rel_src, blob_id(cand.electrodes_path)),
         (rel_field, blob_id(field_.path)),
@@ -679,6 +781,13 @@ def report(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
                 f"  chosen {_rel(plan.chosen.electrodes_path, dataset)}; inversion residual "
                 f"median {inv.median_residual:.4f} mm, max {inv.max_residual:.4f} mm"
             )
+            if plan.field_check:
+                fc = plan.field_check
+                lines.append(
+                    f"  field check on the subject's pial vertices: {fc.n_inverted}/{fc.n_sampled} "
+                    f"invert, median {fc.median_mm:.2f} mm, 10th percentile {fc.p10_mm:.2f} mm "
+                    f"from the shell -> {'pass' if fc.passed else 'FAIL'}"
+                )
             lines.append(f"  verification vs {REFERENCE}: {_fits_line(plan.template_fit)}")
         for rel in plan.files:
             lines.append(f"  would write {rel}")
