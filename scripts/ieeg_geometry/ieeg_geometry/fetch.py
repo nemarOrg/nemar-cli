@@ -131,24 +131,28 @@ def fetch_version(dataset_id: str, api_url: str = API_URL) -> str:
     return version
 
 
-def _git(clone: Path | None, *args: str, stdin: bytes | None = None) -> str:
+def _git(clone: Path | None, *args: str, stdin: bytes | None = None, attempts: int = 1) -> str:
     cmd = ["git", *(["-C", str(clone)] if clone else []), "--literal-pathspecs", *args]
     env = os.environ | {"GIT_TERMINAL_PROMPT": "0"}
-    try:
-        done = subprocess.run(
-            cmd,
-            input=stdin,
-            capture_output=True,
-            check=True,
-            timeout=_GIT_TIMEOUT_S,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        detail = getattr(exc, "stderr", b"") or b""
-        raise FetchError(
-            f"git {args[0]} failed: {exc.__class__.__name__} "
-            f"{detail.decode(errors='replace')[:300]}"
-        ) from exc
+    for attempt in range(1, attempts + 1):
+        try:
+            done = subprocess.run(
+                cmd,
+                input=stdin,
+                capture_output=True,
+                check=True,
+                timeout=_GIT_TIMEOUT_S,
+                env=env,
+            )
+            break
+        except (OSError, subprocess.SubprocessError) as exc:
+            if attempt < attempts:
+                continue
+            detail = getattr(exc, "stderr", b"") or b""
+            raise FetchError(
+                f"git {args[0]} failed: {exc.__class__.__name__} "
+                f"{detail.decode(errors='replace')[:300]}"
+            ) from exc
     return done.stdout.decode("utf-8", errors="replace")
 
 
@@ -167,6 +171,7 @@ def clone_tree(dataset_id: str, workdir: Path, repo_url: str = REPO_URL) -> Path
         "--filter=blob:none",
         repo_url.format(id=dataset_id),
         str(clone),
+        attempts=_ATTEMPTS,
     )
     return clone
 
@@ -242,6 +247,7 @@ def fetch_files(
             "--pathspec-from-file=-",
             "--pathspec-file-nul",
             stdin="\0".join(todo).encode() + b"\0",
+            attempts=_ATTEMPTS,
         )
     result = FetchResult(
         clone,
