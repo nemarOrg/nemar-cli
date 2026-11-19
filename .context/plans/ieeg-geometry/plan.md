@@ -146,3 +146,7 @@ The field check (ruling 9) proves a field's direction, not which subject or whic
 21. **Pairing an electrodes file with an SPM field needs one of:** the file's `IntendedFor` resolving to the T1 the field was computed from (same directory when one is given; a list is searched), or, when `IntendedFor` is absent or names a file that does not exist, template verification of every candidate file with a clear winner (the winner passes ruling 8, every other candidate's inside fraction is at least 0.05 lower). A file whose `IntendedFor` resolves to a different T1 is never paired. Ruling 10's tie-break is subsumed by this.
 22. **Depth-contact rules are chosen by the caller, not by reference metadata.** One function in `verify.py` takes the rule explicitly (median rule or the ruling 8 inside rule); the `smooth` flag in `reference.json` is removed, so no other caller's verdict changes when a reference is added.
 23. **`IXI549Space` is written only for a field on SPM12's template grid** (121 x 145 x 121, 1.5 mm, the template affine); any other grid is needs-human.
+
+### 2026-11-19, after B1's registration check (PR #2227)
+
+24. **A registration is also checked for coherence.** Centroid, extent and hemisphere side cannot see a scrambled `sphere.reg` (it still covers fsaverage6 evenly), so an affine fit from the sampled subject positions to their mapped fsaverage6 positions must leave a median residual of at most 15.0 mm (real on004194 subjects 5.6 to 7.7 mm; scrambled about 53 mm).
