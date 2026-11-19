@@ -3,7 +3,12 @@ name = "ieeg-geometry"
 version = "0.1.0"
 description = "Readers, surface reference data and a geometric verifier for iEEG electrode positions"
 requires-python = ">=3.12,<3.13"
-dependencies = ["numpy>=2.0", "scipy>=1.13", "nibabel>=5.2"]
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "nibabel>=5.2",
+    "fast-simplification>=0.2.0",
+]
 
 [dependency-groups]
 dev = [

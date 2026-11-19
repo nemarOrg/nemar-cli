@@ -7,12 +7,14 @@ electrocorticography (ECoG) contacts, `plausible` for depth contacts; a surface 
 `plausible` is enough, and the grade is recorded). FreeSurfer surfaces are in tkr RAS and the
 contacts were in scanner RAS, so when the offset frame is chosen the mesh gets `c_ras` ADDED to
 its vertices and lands in the contacts' frame. Each hemisphere is decimated to at most 65,535
-vertices, re-checked against the contacts, and written with the website's encoder.
+vertices by quadric edge collapse and written with the website's encoder; the written mesh is
+judged by what decimation changed (median contact distance and surface deviation), not re-graded.
 
 Layout under the output directory (the data plane path is not this module's concern):
-`geometry/index.json` and `geometry/sub-<subject>/<electrodes file stem>/{lh,rh}.mesh.bin`
-(only the hemispheres present). `python -m ieeg_geometry.surfaces_out <dataset-dir> --out <dir>`
-prints one decision line per electrodes file.
+`geometry/index.json` and `geometry/meshes/<sha256>.mesh.bin` (content-addressed: a mesh used by
+several entries is stored once; only the hemispheres present are written).
+`python -m ieeg_geometry.surfaces_out <dataset-dir> --out <dir>` prints one decision line per
+electrodes file.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from importlib import metadata
@@ -30,18 +33,28 @@ from pathlib import Path
 import numpy as np
 
 from .bids import ECOG, Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
-from .meshwrite import MAX_HEMISPHERE_BYTES, MAX_VERTICES, decimate, encode_brain_mesh
+from .meshwrite import (
+    MAX_HEMISPHERE_BYTES,
+    MAX_VERTICES,
+    decimate,
+    edge_stats,
+    encode_brain_mesh,
+    surface_deviation,
+)
 from .reference import read_brain_mesh
 from .surfaces import Surface, read_surface
 from .verify import SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
 
 INDEX_SCHEMA = "nemar-ieeg-geometry-index"
 INDEX_VERSION = 1
-_HEMI_FILE = {"L": "lh", "R": "rh"}
 _FS_NAME = re.compile(r"^[lr]h\.pial(\.T1)?$", re.I)
 _HEMI_TOKEN = re.compile(r"(^|[._\-])(lh|rh|left|right|l|r)(?=[._\-]|$)", re.I)
 _SKIP_DIRS = {".git", ".datalad", ".nemar", "node_modules"}
 _SIDE_PURITY = 0.95
+MIN_ECOG_CONTACTS = 8
+# ruling 15: what decimation may change, measured against the original surface
+MAX_MEDIAN_SHIFT_MM = 0.5
+MAX_P99_DEVIATION_MM = 1.0
 
 
 def pipeline_version() -> str:
@@ -103,11 +116,12 @@ def _assign_hemisphere(s: Surface) -> Surface:
 
 
 def _contacts_for_fit(eset: ElectrodeSet) -> tuple[str, np.ndarray, list[str | None]] | None:
-    """ECoG contacts when the file has any (their rule is specific), else every other contact
-    under the depth rule. Contacts missing a coordinate are dropped by `fit`."""
+    """ECoG contacts when the file has at least `MIN_ECOG_CONTACTS` of them (their rule is
+    specific), else every contact under the depth rule. Contacts missing a coordinate are
+    dropped by `fit`."""
     has = [c for c in eset.contacts if not c.missing_coordinates]
     ecog = [c for c in has if c.type == ECOG]
-    chosen, kind = (ecog, "ecog") if ecog else (has, "seeg")
+    chosen, kind = (ecog, "ecog") if len(ecog) >= MIN_ECOG_CONTACTS else (has, "seeg")
     if not chosen:
         return None
     xyz = np.array([[c.x, c.y, c.z] for c in chosen], dtype=float)
@@ -125,14 +139,25 @@ class Candidate:
     @property
     def own_rank(self) -> tuple:
         grade = 0 if self.fit.grade == SPECIFIC else 1
-        return (0 if self.chosen == "as_declared" else 1, grade, self.fit.median_mm)
+        pair = 0 if len(self.surfaces) == 2 else 1  # a full pair outranks one hemisphere
+        return (0 if self.chosen == "as_declared" else 1, grade, pair, self.fit.median_mm)
+
+
+def _describe_fit(label: str, f: Fit) -> str:
+    text = f"{label} median {f.median_mm:.2f} mm, {f.grade}"
+    if f.near_or_inside_fraction is not None:
+        text += f", {f.near_or_inside_fraction:.0%} inside or near"
+    if f.reason:
+        text += f", {f.reason}"
+    if f.n_left_out:
+        text += f", {f.n_left_out} on the absent side"
+    return text
 
 
 def _describe(result: OffsetFit) -> str:
-    a = result.as_declared
-    text = f"as declared {a.median_mm:.2f} mm ({a.grade})"
+    text = _describe_fit("as declared", result.as_declared)
     if result.with_c_ras is not None:
-        text += f", with c_ras {result.with_c_ras.median_mm:.2f} mm ({result.with_c_ras.grade})"
+        text += "; " + _describe_fit("with c_ras", result.with_c_ras)
     return text
 
 
@@ -162,16 +187,6 @@ def evaluate_candidate(
     return Candidate(paths, surfaces, result, choice, chosen), ""
 
 
-def _written_hemisphere(
-    surface: Surface, shift: np.ndarray, max_vertices: int
-) -> tuple[np.ndarray, np.ndarray, bytes]:
-    verts, faces = decimate(surface.vertices + shift, surface.faces, max_vertices)
-    data = encode_brain_mesh(verts, faces)
-    if len(data) > MAX_HEMISPHERE_BYTES:
-        raise GeometryRefusal("mesh-too-large", f"{len(data)} bytes exceeds the hemisphere budget")
-    return verts, faces, data
-
-
 def _round(value):
     if isinstance(value, float):
         return round(value, 3)
@@ -183,6 +198,33 @@ def _fit_record(f: Fit) -> dict:
     return {k: (None if isinstance(v, float) and v != v else v) for k, v in record.items()}
 
 
+def dataset_commit(dataset: Path) -> str:
+    """HEAD of the dataset's own git checkout (the directory must be its top level)."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(dataset), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(dataset), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GeometryRefusal(
+            "source-commit-missing", f"{dataset} is not a git checkout; pass --source-commit"
+        ) from exc
+    if Path(top).resolve() != Path(dataset).resolve():
+        raise GeometryRefusal(
+            "source-commit-missing",
+            f"{dataset} is inside another repository; pass --source-commit",
+        )
+    return head
+
+
 def build_geometry(
     dataset: Path,
     out_dir: Path,
@@ -190,8 +232,13 @@ def build_geometry(
     source_commit: str | None = None,
     max_vertices: int = MAX_VERTICES,
 ) -> tuple[dict, list[str]]:
-    """Write `out_dir/geometry/`; returns the index and the per-file decision lines."""
+    """Write `out_dir/geometry/`; returns the index and the per-file decision lines.
+
+    `source_commit` defaults to the dataset checkout's `git rev-parse HEAD`; with neither, the
+    index is refused (`source-commit-missing`).
+    """
     dataset, out_dir = Path(dataset), Path(out_dir)
+    source_commit = source_commit or dataset_commit(dataset)
     geometry = out_dir / "geometry"
     entries: list[dict] = []
     skipped: list[dict] = []
@@ -276,36 +323,59 @@ def _write_entry(
     c_ras = best.result.c_ras if best.chosen == "c_ras" else None
     # contacts were in scanner RAS: add c_ras to the surface to put the mesh in their frame
     shift = np.asarray(c_ras if c_ras is not None else (0.0, 0.0, 0.0), dtype=float)
-    stem = item.electrodes_path.stem
-    folder = geometry / f"sub-{item.subject}" / stem
-    written: list[Surface] = []
-    payload: dict[str, tuple[bytes, int, int]] = {}
+    payload: dict[str, bytes] = {}
+    stats: dict[str, dict] = {}
+    decoded: list[Surface] = []
+    decimated = False
+    p99 = 0.0
     try:
         for s in sorted(best.surfaces, key=lambda s: s.hemisphere or ""):
-            verts, faces, data = _written_hemisphere(s, shift, max_vertices)
-            written.append(Surface(verts, faces, s.hemisphere))
-            payload[str(s.hemisphere)] = (data, len(verts), len(faces))
+            original = s.vertices + shift
+            verts, faces = decimate(original, s.faces, max_vertices)
+            data = encode_brain_mesh(verts, faces)
+            if len(data) > MAX_HEMISPHERE_BYTES:
+                raise GeometryRefusal("mesh-too-large", f"{len(data)} bytes, over the budget")
+            hemi = str(s.hemisphere)
+            payload[hemi] = data
+            back = read_brain_mesh(data, hemisphere=hemi)
+            decoded.append(back)
+            boundary, non_manifold = edge_stats(faces)
+            stats[hemi] = {
+                "vertices": len(verts),
+                "faces": len(faces),
+                "boundary_edges": boundary,
+                "non_manifold_edges": non_manifold,
+            }
+            if len(verts) != len(original):
+                decimated = True
+                dev = surface_deviation(back.vertices, original, s.faces)
+                p99 = max(p99, float(np.percentile(dev, 99)))
     except GeometryRefusal as exc:
-        return None, f"mesh not written, {exc.reason}"
-    # the decimated, quantized mesh must still fit the contacts in their own frame
-    check = [
-        read_brain_mesh(payload[str(s.hemisphere)][0], hemisphere=s.hemisphere) for s in written
-    ]
-    after = fit(xyz, check, kind, hemis)
-    if not after.passed:
-        return None, f"decimation broke the fit ({after.median_mm:.2f} mm, {after.grade})"
-    folder.mkdir(parents=True, exist_ok=True)
+        return None, f"mesh not written, {exc.reason}: {exc.message}"
+    # Ruling 15: the written mesh is judged by what decimation changed. The grade and the inside
+    # flags come from the original closed surface; here only the distances are re-measured.
+    after = fit(xyz, decoded, kind, hemis)
+    shift_mm = after.median_mm - best.fit.median_mm
+    if decimated and (abs(shift_mm) > MAX_MEDIAN_SHIFT_MM or p99 > MAX_P99_DEVIATION_MM):
+        return None, (
+            f"decimation changed the mesh too much (median moved {shift_mm:+.2f} mm, "
+            f"99th percentile deviation {p99:.2f} mm; limits {MAX_MEDIAN_SHIFT_MM} and "
+            f"{MAX_P99_DEVIATION_MM} mm)"
+        )
+    if kind == "ecog" and not after.passed:
+        return None, f"written mesh no longer fits the contacts ({after.median_mm:.2f} mm)"
     meshes: dict[str, dict] = {}
-    for hemi, (data, nv, nf) in sorted(payload.items()):
-        name = f"{_HEMI_FILE[hemi]}.mesh.bin"
-        (folder / name).write_bytes(data)
-        meshes[hemi] = {
-            "path": (folder / name).relative_to(geometry).as_posix(),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-            "vertices": nv,
-            "faces": nf,
-        }
+    (geometry / "meshes").mkdir(parents=True, exist_ok=True)
+    for hemi, data in sorted(payload.items()):
+        digest = hashlib.sha256(data).hexdigest()
+        rel = f"meshes/{digest}.mesh.bin"
+        (geometry / rel).write_bytes(data)
+        meshes[hemi] = {"path": rel, "sha256": digest, "bytes": len(data), **stats[hemi]}
+    written = _fit_record(best.fit) | {
+        k: v
+        for k, v in _fit_record(after).items()
+        if k in ("median_mm", "p90_mm", "max_mm", "n_used")
+    }
     entry = {
         "subject": item.subject,
         "session": item.session,
@@ -313,9 +383,15 @@ def _write_entry(
         "frame": eset.frame,
         "contact_type": kind,
         "frame_choice": best.chosen,
-        "offset_applied": None if c_ras is None else [float(v) for v in c_ras],
+        "vertex_offset_mm": None if c_ras is None else [float(v) for v in c_ras],
         "hemispheres": sorted(payload),
-        "fit": _fit_record(after),
+        "fit": written,
+        "fit_before_decimation": _fit_record(best.fit),
+        "decimation": {
+            "applied": decimated,
+            "median_shift_mm": _round(float(shift_mm)) if decimated else None,
+            "p99_deviation_mm": _round(p99) if decimated else None,
+        },
         "sources": sorted(p.relative_to(dataset).as_posix() for p in best.paths),
         "meshes": meshes,
     }
@@ -330,7 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True, help="output directory")
     parser.add_argument("--source-commit", default=None, help="dataset commit, recorded as is")
     args = parser.parse_args(argv)
-    index, lines = build_geometry(args.dataset_dir, args.out, source_commit=args.source_commit)
+    try:
+        index, lines = build_geometry(args.dataset_dir, args.out, source_commit=args.source_commit)
+    except GeometryRefusal as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
     print("\n".join(lines))
     print(f"{len(index['entries'])} written, {len(index['skipped'])} skipped")
     return 0

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -11,7 +12,14 @@ import pytest
 from jsonschema import Draft202012Validator
 from nibabel.gifti import GiftiDataArray, GiftiImage
 
-from ieeg_geometry.meshwrite import decimate, encode_brain_mesh, signed_volume
+from ieeg_geometry.bids import GeometryRefusal
+from ieeg_geometry.meshwrite import (
+    decimate,
+    edge_stats,
+    encode_brain_mesh,
+    signed_volume,
+    surface_deviation,
+)
 from ieeg_geometry.reference import load_reference, read_brain_mesh
 from ieeg_geometry.surfaces import Surface, read_surface
 from ieeg_geometry.surfaces_out import build_geometry
@@ -99,6 +107,7 @@ def dataset(tmp_path_factory, mini) -> dict:
     _write_electrodes(root / "sub-1" / "ieeg", "sub-1", scanner, hemis)
     _write_electrodes(root / "sub-3" / "ieeg", "sub-3", scanner + [40.0, 0.0, 0.0], hemis)
     _write_electrodes(root / "sub-4" / "ieeg", "sub-4", scanner, hemis)
+    _write_electrodes(root / "sub-4" / "ses-02" / "ieeg", "sub-4_ses-02", scanner, hemis)
     _write_gifti(root / "sourcedata" / "sub-4" / "pial.L.surf.gii", lh.vertices + cras, lh.faces)
     _write_gifti(root / "sourcedata" / "sub-4" / "pial.R.surf.gii", rh.vertices + cras, rh.faces)
     gii_src = mini / GII
@@ -149,8 +158,7 @@ def test_decimation_caps_vertices_and_keeps_outward_winding():
     assert len(sphere.vertices) > 65_535
     assert signed_volume(sphere.vertices, sphere.faces) > 0
     verts, faces = decimate(sphere.vertices, sphere.faces)
-    assert len(verts) <= 65_535
-    assert len(verts) > 30_000  # the cell size search does not over-shrink
+    assert 60_000 < len(verts) <= 65_535  # collapses to the cap, no further
     assert faces.min() >= 0 and faces.max() < len(verts)
     assert (faces[:, 0] != faces[:, 1]).all() and (faces[:, 1] != faces[:, 2]).all()
     assert (faces[:, 0] != faces[:, 2]).all()
@@ -160,8 +168,52 @@ def test_decimation_caps_vertices_and_keeps_outward_winding():
     assert abs(vol_after - vol_before) / vol_before < 0.01
     # the control: the same mesh with reversed winding has a negative signed volume
     assert signed_volume(verts, faces[:, ::-1]) < 0
-    data = encode_brain_mesh(verts, faces)
-    assert len(data) < 1_500_000
+    assert len(encode_brain_mesh(verts, faces)) < 1_500_000
+
+
+def _bumpy_sphere() -> Surface:
+    base = icosphere(6, radius=60.0)  # 40,962 vertices, folded like a cortex in miniature
+    theta = np.arctan2(base.vertices[:, 1], base.vertices[:, 0])
+    phi = np.arccos(base.vertices[:, 2] / 60.0)
+    radius = 60.0 * (
+        1 + 0.15 * np.sin(5 * theta) * np.sin(4 * phi) + 0.05 * np.sin(11 * theta + 3 * phi)
+    )
+    return Surface(base.vertices / 60.0 * radius[:, None], base.faces)
+
+
+def test_decimated_non_trivial_mesh_has_no_boundary_and_near_manifold_edges():
+    bumpy = _bumpy_sphere()
+    assert edge_stats(bumpy.faces) == (0, 0)
+    verts, faces = decimate(bumpy.vertices, bumpy.faces, 5000)
+    boundary, non_manifold = edge_stats(faces)
+    assert len(verts) <= 5000
+    assert boundary == 0
+    assert non_manifold <= 0.001 * (3 * len(faces) / 2)  # at most 0.1 percent of the edges
+    assert signed_volume(verts, faces) > 0
+    # the control: the check can fail, a mesh with faces removed has boundary edges
+    assert edge_stats(faces[:-50])[0] > 0
+
+
+def test_decimation_stays_close_to_the_original_surface():
+    bumpy = _bumpy_sphere()
+    verts, faces = decimate(bumpy.vertices, bumpy.faces, 5000)
+    deviation = surface_deviation(verts, bumpy.vertices, bumpy.faces)
+    assert np.percentile(deviation, 99) < 1.0
+
+
+def test_surface_deviation_is_the_distance_to_the_triangles():
+    verts = np.array([[0.0, 0, 0], [10, 0, 0], [0, 10, 0]])
+    faces = np.array([[0, 1, 2]])
+    points = np.array(
+        [
+            [2.0, 2.0, 3.0],  # above the interior: 3
+            [-3.0, -4.0, 0.0],  # nearest the corner at the origin: 5
+            [5.0, -2.0, 0.0],  # nearest the edge from (0,0,0) to (10,0,0): 2
+            [10.0, 10.0, 0.0],  # nearest the hypotenuse midpoint (5,5,0): sqrt(50)
+        ]
+    )
+    got = surface_deviation(points, verts, faces)
+    np.testing.assert_allclose(got, [3.0, 5.0, 2.0, 50**0.5], atol=1e-9)
 
 
 def test_small_mesh_is_not_decimated():
@@ -174,7 +226,7 @@ def test_small_mesh_is_not_decimated():
 def test_freesurfer_surface_needing_c_ras_lands_in_the_contacts_frame(built):
     entry = _entry(built["index"], "1")
     assert entry["frame_choice"] == "c_ras"
-    np.testing.assert_allclose(entry["offset_applied"], built["cras"])
+    np.testing.assert_allclose(entry["vertex_offset_mm"], built["cras"])
     assert entry["hemispheres"] == ["L", "R"]
     assert entry["fit"]["grade"] == "specific"
     meshes = [_decode(built, entry, h) for h in ("L", "R")]
@@ -195,11 +247,9 @@ def test_one_hemisphere_gifti_writes_only_that_hemisphere(built):
     entry = _entry(built["index"], "2")
     assert entry["hemispheres"] == ["R"]
     assert list(entry["meshes"]) == ["R"]
-    folder = built["out"] / "geometry" / "sub-2" / "sub-2_electrodes"
-    assert (folder / "rh.mesh.bin").exists()
-    assert not (folder / "lh.mesh.bin").exists()
+    assert (built["out"] / "geometry" / entry["meshes"]["R"]["path"]).exists()
     assert entry["frame_choice"] == "as_declared"
-    assert entry["offset_applied"] is None
+    assert entry["vertex_offset_mm"] is None
     assert entry["fit"]["n_left_out"] == 2  # the two left contacts are not evaluated
     # the column-major file was read right: the written mesh keeps the right hemisphere's extent
     mesh = _decode(built, entry, "R")
@@ -213,14 +263,15 @@ def test_a_subject_whose_surface_does_not_fit_is_skipped_and_listed(built):
     skipped = next(s for s in built["index"]["skipped"] if s["subject"] == "3")
     assert skipped["electrodes"] == "sub-3/ieeg/sub-3_electrodes.tsv"
     assert "no frame fits" in skipped["reason"]
-    assert not (built["out"] / "geometry" / "sub-3").exists()
+    assert "inside-unevaluable" not in skipped["reason"]  # the reason is the fit, printed
+    assert "as declared median 15.61 mm, specific" not in skipped["reason"]
     assert any(line.startswith("sub-3:") and "skipped" in line for line in built["lines"])
 
 
 def test_declared_frame_is_preferred_over_c_ras_when_both_surfaces_fit(built):
     entry = _entry(built["index"], "4")
     assert entry["frame_choice"] == "as_declared"
-    assert entry["offset_applied"] is None
+    assert entry["vertex_offset_mm"] is None
     assert entry["sources"] == [
         "sourcedata/sub-4/pial.L.surf.gii",
         "sourcedata/sub-4/pial.R.surf.gii",
@@ -235,7 +286,7 @@ def test_index_validates_and_meshes_match_their_checksums(built):
     Draft202012Validator.check_schema(SCHEMA)
     Draft202012Validator(SCHEMA).validate(index)
     assert index["source_commit"] == "abc123"
-    assert [e["subject"] for e in index["entries"]] == ["1", "2", "4"]
+    assert [e["subject"] for e in index["entries"]] == ["1", "2", "4", "4"]
     for entry in index["entries"]:
         for hemi, mesh in entry["meshes"].items():
             data = (built["out"] / "geometry" / mesh["path"]).read_bytes()
@@ -246,11 +297,14 @@ def test_index_validates_and_meshes_match_their_checksums(built):
 
 
 def test_schema_rejects_a_broken_index(built):
+    renamed = json.loads(json.dumps(built["index"]))
+    renamed["entries"][0]["offset_applied"] = renamed["entries"][0].pop("vertex_offset_mm")
+    assert list(Draft202012Validator(SCHEMA).iter_errors(renamed))
     bad = json.loads(json.dumps(built["index"]))
     bad["entries"][0]["meshes"]["L"]["sha256"] = "nope"
     assert list(Draft202012Validator(SCHEMA).iter_errors(bad))
     bad = json.loads(json.dumps(built["index"]))
-    del bad["entries"][0]["offset_applied"]
+    del bad["entries"][0]["fit_before_decimation"]
     assert list(Draft202012Validator(SCHEMA).iter_errors(bad))
 
 
@@ -266,24 +320,118 @@ def test_rerun_is_byte_identical(built, tmp_path):
 
 
 def test_decimation_that_breaks_the_fit_skips_the_subject(dataset, tmp_path):
-    index, _ = build_geometry(dataset["root"], tmp_path, max_vertices=150)
+    index, _ = build_geometry(dataset["root"], tmp_path, max_vertices=1500, source_commit="abc123")
     skipped = {s["subject"]: s["reason"] for s in index["skipped"]}
-    assert "decimation broke the fit" in skipped["1"]
+    assert "decimation changed the mesh too much" in skipped["1"]
     assert not (tmp_path / "geometry" / "sub-1").exists()
 
 
 def test_forced_decimation_still_fits_when_the_cap_is_generous(dataset, tmp_path):
-    index, _ = build_geometry(dataset["root"], tmp_path, max_vertices=6000)
+    index, _ = build_geometry(dataset["root"], tmp_path, max_vertices=6000, source_commit="abc123")
     entry = _entry(index, "1")
     assert all(m["vertices"] <= 6000 for m in entry["meshes"].values())
     assert entry["fit"]["median_mm"] <= 2.0
 
 
-def test_depth_contacts_on_an_open_surface_are_skipped(mini, tmp_path):
-    index, _ = build_geometry(mini, tmp_path)
+def test_depth_contacts_on_an_open_surface_are_skipped_with_the_exact_reason(mini, tmp_path):
+    index, lines = build_geometry(mini, tmp_path, source_commit="abc123")
     assert index["entries"] == []
-    reasons = " ".join(s["reason"] for s in index["skipped"])
-    assert "no frame fits" in reasons or "no subject surface" in reasons
+    native = next(s for s in index["skipped"] if s["electrodes"].endswith("ieeg01_electrodes.tsv"))
+    assert native["reason"] == (
+        "no surface fits; derivatives/freesurfer/sub-2/pial.?.surf.gii: no frame fits "
+        "(as declared median 2.68 mm, fail, inside-unevaluable)"
+    )
+    assert all("inside-unevaluable" in s["reason"] for s in index["skipped"])
+    assert lines[0].startswith("sub-1: ") and "skipped, " in lines[0]
+
+
+def test_meshes_are_content_addressed_and_shared_between_entries(built):
+    both = [e for e in built["index"]["entries"] if e["subject"] == "4"]
+    assert len(both) == 2
+    assert both[0]["meshes"] == both[1]["meshes"]
+    stored = sorted(p.name for p in (built["out"] / "geometry" / "meshes").iterdir())
+    assert stored == sorted(
+        {Path(m["path"]).name for e in built["index"]["entries"] for m in e["meshes"].values()}
+    )
+    refs = [m for e in built["index"]["entries"] for m in e["meshes"].values()]
+    assert len(stored) < len(refs)  # shared files are stored once
+
+
+def test_entry_records_both_fits_and_the_decimation_summary(built):
+    entry = _entry(built["index"], "1")
+    assert entry["fit_before_decimation"]["grade"] == entry["fit"]["grade"]
+    assert entry["decimation"] == {
+        "applied": False,
+        "median_shift_mm": None,
+        "p99_deviation_mm": None,
+    }
+
+
+def test_decimation_judged_against_the_original_records_its_effect(dataset, tmp_path):
+    index, _ = build_geometry(dataset["root"], tmp_path, max_vertices=8000, source_commit="abc123")
+    entry = _entry(index, "1")
+    dec = entry["decimation"]
+    assert dec["applied"] is True
+    assert abs(dec["median_shift_mm"]) <= 0.5 and dec["p99_deviation_mm"] <= 1.0
+    assert entry["fit"]["median_mm"] != entry["fit_before_decimation"]["median_mm"]
+
+
+def test_few_ecog_contacts_are_fitted_under_the_depth_rule(tmp_path, dataset):
+    root = tmp_path / "ds"
+    shutil.copytree(
+        dataset["root"] / "derivatives" / "freesurfer" / "sub-1",
+        root / "derivatives" / "freesurfer" / "sub-1",
+    )
+    rows = dataset["scanner"][:5]  # five ECoG contacts, below the minimum of eight
+    _write_electrodes(root / "sub-1" / "ieeg", "sub-1", rows, ["L"] * 5)
+    index, _ = build_geometry(root, tmp_path / "out", source_commit="abc123")
+    assert index["entries"][0]["contact_type"] == "seeg"
+
+
+def test_a_full_hemisphere_pair_outranks_a_single_hemisphere(dataset, tmp_path):
+    root = tmp_path / "ds"
+    for name in ("lh.pial", "rh.pial"):
+        dest = root / "derivatives" / "freesurfer" / "sub-1" / "surf"
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy(
+            dataset["root"] / "derivatives" / "freesurfer" / "sub-1" / "surf" / name, dest / name
+        )
+    # a second folder holds only the left hemisphere, with an identical fit
+    single = root / "derivatives" / "aaa" / "sub-1"
+    single.mkdir(parents=True)
+    shutil.copy(dest / "lh.pial", single / "lh.pial")
+    left = dataset["scanner"][:30]
+    _write_electrodes(root / "sub-1" / "ieeg", "sub-1", left, ["L"] * 30)
+    index, _ = build_geometry(root, tmp_path / "out", source_commit="abc123")
+    entry = index["entries"][0]
+    assert entry["hemispheres"] == ["L", "R"]  # "aaa" sorts first, but the pair wins
+
+
+def test_the_source_commit_is_read_from_git_and_required(dataset, tmp_path):
+    root = tmp_path / "ds"
+    shutil.copytree(dataset["root"], root)
+    with pytest.raises(GeometryRefusal, match="source-commit-missing"):
+        build_geometry(root, tmp_path / "out")
+    env = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "PATH": os.environ["PATH"],
+    }
+    cmds = (
+        ["git", "init", "-q"],
+        ["git", "add", "-A"],
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.org", "commit", "-q", "-m", "t"],
+    )
+    for cmd in cmds:
+        subprocess.run(cmd, cwd=root, env=env, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, env=env, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    index, _ = build_geometry(root, tmp_path / "out")
+    assert index["source_commit"] == head
+    # a directory inside another repository is not the dataset's own checkout
+    with pytest.raises(GeometryRefusal, match="inside another repository"):
+        build_geometry(root / "sub-1", tmp_path / "out2")
 
 
 def test_the_command_line_prints_one_decision_per_electrodes_file(dataset, tmp_path):
@@ -295,16 +443,18 @@ def test_the_command_line_prints_one_decision_per_electrodes_file(dataset, tmp_p
             str(dataset["root"]),
             "--out",
             str(tmp_path),
+            "--source-commit",
+            "abc123",
         ],
         capture_output=True,
         text=True,
-        check=True,
     )
+    assert proc.returncode == 0, proc.stderr
     lines = proc.stdout.splitlines()
     assert any("sub-1:" in ln and "written L+R, c_ras, ecog specific" in ln for ln in lines)
     assert any("sub-2:" in ln and "written R" in ln for ln in lines)
     assert any("sub-3:" in ln and "skipped" in ln for ln in lines)
-    assert lines[-1] == "3 written, 1 skipped"
+    assert lines[-1] == "4 written, 1 skipped"
 
 
 def test_vendored_reference_still_reads(tmp_path):
