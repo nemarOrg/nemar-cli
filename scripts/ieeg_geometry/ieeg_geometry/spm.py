@@ -55,7 +55,6 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
-from .labels import pipeline_version
 from .ownership import (
     OwnedPath,
     Ownership,
@@ -73,6 +72,7 @@ from .verify import (
     Fit,
     fit,
 )
+from .version import pipeline_version
 
 LABEL = "IXI549Space"
 REFERENCE = "MNI152NLin2009cAsym"

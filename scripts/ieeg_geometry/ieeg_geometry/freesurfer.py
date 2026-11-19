@@ -44,11 +44,11 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
-from .labels import pipeline_version
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
 from .verify import Fit, OffsetFit, fit_with_offset
+from .version import pipeline_version
 
 SURFACE_MAX_MM = 3.0
 MIN_CONTACTS = 3

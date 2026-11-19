@@ -27,7 +27,6 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from importlib import metadata
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +43,7 @@ from .meshwrite import (
 from .reference import read_brain_mesh
 from .surfaces import Surface, read_surface
 from .verify import SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
+from .version import pipeline_version
 
 INDEX_SCHEMA = "nemar-ieeg-geometry-index"
 INDEX_VERSION = 1
@@ -55,13 +55,6 @@ MIN_ECOG_CONTACTS = 8
 # ruling 15: what decimation may change, measured against the original surface
 MAX_MEDIAN_SHIFT_MM = 0.5
 MAX_P99_DEVIATION_MM = 1.0
-
-
-def pipeline_version() -> str:
-    try:
-        return metadata.version("ieeg-geometry")
-    except metadata.PackageNotFoundError:
-        return "unknown"
 
 
 def _is_surface_file(name: str) -> bool:
