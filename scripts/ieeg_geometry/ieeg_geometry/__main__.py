@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import labels
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -52,6 +53,7 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
     write = lambda s="": print(s, file=out)  # noqa: E731
     refs = {name: load_reference(name) for name in REFERENCE_NAMES}
     items = discover(dataset)
+    readme = labels._readme(dataset)
     if not items:
         write(f"no electrodes.tsv found under sub-* in {dataset}")
         return 1
@@ -59,6 +61,8 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         label = f"sub-{item.subject}" + (f" ses-{item.session}" if item.session else "")
         label += f" space-{item.space}" if item.space else " (no space entity)"
         write(f"{label}: {item.electrodes_path.relative_to(dataset)}")
+        for line in labels.propose(dataset, item, readme).lines():
+            write(f"  {line}")
         try:
             eset = read_electrode_set(item)
         except GeometryRefusal as exc:
