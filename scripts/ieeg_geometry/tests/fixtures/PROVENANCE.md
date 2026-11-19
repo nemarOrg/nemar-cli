@@ -20,5 +20,5 @@ This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaver
 
 ## SPM fixture (`spm_dataset/`, card B2)
 
-`tools/make_spm_fixture.py` builds it from `mini_dataset/sub-2` (electrodes, channels, cut surface; see above) and the full SPM12 field `derivatives/freesurfer/sub-2/y_sub-2_ses-mri01_T1w.nii` of `on004457` v1.0.0 (`data.nemar.org/on004457/v1.0.0/...`, 121 x 145 x 121 voxels, 1.5 mm).
+`tools/make_spm_fixture.py` builds it from `mini_dataset/sub-2` (electrodes, channels, cut surface; see above) and the full SPM12 field `derivatives/freesurfer/sub-2/y_sub-2_ses-mri01_T1w.nii` of `on004457` v1.0.0 (`data.nemar.org/on004457/v1.0.0/...`, 121 x 145 x 121 voxels, 1.5 mm; sha256 `2570f6896caacf6736bcee0c0a9fe38e70ece8300ac73d22385465cfc5759e2f`).
 The field is cropped to a box around the native contacts (2-voxel margin) with the affine moved, so inversion on the crop equals inversion on the full field (the builder checks it to 1e-4 mm).

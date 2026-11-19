@@ -4,7 +4,7 @@ Copies sub-2's native and space-ACPC electrodes and the cut subject surface from
 tests/fixtures/mini_dataset, and crops the SPM field `y_sub-2_ses-mri01_T1w.nii` (121x145x121
 template grid, 1.5 mm) to a box around the native contacts plus a margin. The crop keeps the
 field's values and moves the affine, so inversion on the crop equals inversion on the full
-field (checked here to 1e-6 mm).
+field (checked here to 1e-4 mm).
 
 Usage: uv run python tools/make_spm_fixture.py /path/to/full/y_sub-2_ses-mri01_T1w.nii
 """

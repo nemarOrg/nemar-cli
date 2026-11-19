@@ -1,23 +1,35 @@
 """Real on004457 SPM fields (sub-1 to sub-4), downloaded into the test cache; run with -m network.
 
-Measured 2026-11-19 with the card B2 build: every field inverts (residual median at most
-0.005 mm, maximum at most 0.042 mm, 25 MB per field), pairing picks the right file for
-sub-1, sub-2 and sub-4, and sub-3 is a genuine tie (its native and ACPC files both fit the
-surface at 2.6 mm although they differ by 15 mm; IntendedFor breaks the tie, ruling 10). Rulings
-8 and 9 (smooth shell rule, field check on the subject's own pial vertices) decide the rest.
+Everything comes from one pinned dataset version (`v1.0.0`: electrodes, coordsystems, surfaces
+and fields). Measured 2026-11-19 with the B2 review fixes:
+
+- Every field inverts every contact (residual median at most 0.005 mm, maximum at most 0.042 mm).
+- Pairing basis: sub-1, sub-3 and sub-4 by `IntendedFor` naming the field's T1; sub-2 by template
+  verification (its native `IntendedFor` names a file that does not exist and its `space-ACPC`
+  file names a different T1, so it is the only candidate left).
+- Each chosen file passes the shell inside rule (96.6 to 98.8 percent inside).
+- Ruling 19's shape and position checks FAIL every subject against the vendored shell: the shell
+  holds the cerebellum and brainstem (down to z = -72 mm) that a pial surface lacks, so a z
+  extent is 19 to 22 percent off, and the centroid is 3.5 to 7.6 mm off. The lead decides how
+  to compare (see the B2 report); until then no subject is written.
 """
 
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ieeg_geometry import spm
 
-from .test_network import DATA, RAW, _fetch
+from .test_network import _fetch
 
 pytestmark = pytest.mark.network
 D = "on004457"
+VERSION = "v1.0.0"
+CACHE_KEY = f"{D}-{VERSION}"  # keeps the cache from mixing versions
+RAW = f"https://raw.githubusercontent.com/nemarDatasets/{D}/{VERSION}"
+DATA = f"https://data.nemar.org/{D}/{VERSION}"
 FIELDS = {
     1: "y_sub-1_ses-mri01_T1w_acpc.nii",
     2: "y_sub-2_ses-mri01_T1w.nii",
@@ -25,11 +37,21 @@ FIELDS = {
     4: "y_sub-4_ses-mri01_T1w.nii",
 }
 SURFACES = {1: "pial.L.surf.gii", 2: "pial.R.surf.gii", 3: "pial.L.surf.gii", 4: "pial.R.surf.gii"}
+# T1 images that exist in the dataset (only their presence matters to `IntendedFor`)
+T1_FILES = [
+    "derivatives/freesurfer/sub-1/sub-1_ses-mri01_T1w_acpc_deFaced.nii",
+    "derivatives/acpc/sub-2/sub-2_ses-mri01_T1w_acpc_deFaced.nii",
+    "derivatives/freesurfer/sub-2/sub-2_ses-mri01_T1w_deFaced.nii",
+    "derivatives/acpc/sub-3/sub-3_ses-mri01_T1w_acpc_deFaced.nii",
+    "derivatives/freesurfer/sub-3/sub-3_ses-mri01_T1w_deFaced.nii",
+    "derivatives/acpc/sub-4/sub-4_ses-mri01_T1w_acpc_deFaced.nii",
+    "derivatives/freesurfer/sub-4/sub-4_ses-mri01_T1w_deFaced.nii",
+]
 
 
 @pytest.fixture(scope="module")
 def dataset(tmp_path_factory) -> Path:
-    root = tmp_path_factory.mktemp("on004457")
+    root = tmp_path_factory.mktemp(D)
     for s in (1, 2, 3, 4):
         ieeg = root / f"sub-{s}" / "ses-ieeg01" / "ieeg"
         ieeg.mkdir(parents=True)
@@ -39,51 +61,89 @@ def dataset(tmp_path_factory) -> Path:
             for sp in spaces
             for kind in ("electrodes.tsv", "coordsystem.json")
         ]
-        for name in names:
-            url = f"{RAW}/{D}/HEAD/sub-{s}/ses-ieeg01/ieeg/{name}"
-            os.symlink(_fetch(D, name, url), ieeg / name)
         if s == 2:
-            chan = "sub-2_ses-ieeg01_task-ccep_run-01_channels.tsv"
-            url = f"{RAW}/{D}/HEAD/sub-2/ses-ieeg01/ieeg/{chan}"
-            os.symlink(_fetch(D, chan, url), ieeg / chan)
+            names.append("sub-2_ses-ieeg01_task-ccep_run-01_channels.tsv")
+        for name in names:
+            url = f"{RAW}/sub-{s}/ses-ieeg01/ieeg/{name}"
+            os.symlink(_fetch(CACHE_KEY, name, url), ieeg / name)
         fs = root / "derivatives" / "freesurfer" / f"sub-{s}"
         fs.mkdir(parents=True)
-        base = f"{DATA}/{D}/v1.0.0/derivatives/freesurfer/sub-{s}"
-        os.symlink(_fetch(D, f"y_sub-{s}.nii", f"{base}/{FIELDS[s]}"), fs / FIELDS[s])
+        base = f"{DATA}/derivatives/freesurfer/sub-{s}"
+        field_file = _fetch(CACHE_KEY, f"y_sub-{s}.nii", f"{base}/{FIELDS[s]}")
+        os.symlink(field_file, fs / FIELDS[s])
         gii = SURFACES[s]
-        os.symlink(_fetch(D, f"sub-{s}_{gii}", f"{base}/{gii}"), fs / gii)
+        os.symlink(_fetch(CACHE_KEY, f"sub-{s}_{gii}", f"{base}/{gii}"), fs / gii)
+    for rel in T1_FILES:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"")
     return root
 
 
-def test_every_field_inverts_and_pairing_follows_the_evidence(dataset):
-    plans = {p.subject: p for p in spm.plan_dataset(dataset)}
+@pytest.fixture(scope="module")
+def plans(dataset):
+    return {p.subject: p for p in spm.plan_dataset(dataset)}
+
+
+def test_every_field_inverts_and_pairing_follows_the_basis(plans):
     assert set(plans) == {"1", "2", "3", "4"}
-    for s in ("1", "2", "3", "4"):
-        chosen = plans[s].chosen
-        assert chosen is not None, plans[s].reason
-        inv = plans[s].inversion
+    basis = {s: plans[s].basis for s in plans}
+    assert basis["1"] == basis["3"] == basis["4"] == "IntendedFor names the field's T1"
+    assert basis["2"].startswith("template verification")
+    for s, plan in plans.items():
+        assert plan.chosen is not None and plan.chosen.space is None, (s, plan.reason)
+        inv = plan.inversion
         assert inv is not None and inv.ok.all()
         assert inv.median_residual < 0.01 and inv.max_residual < 0.05
-    # sub-1: its only file; sub-2 and sub-4: the native file; sub-3: tie broken by IntendedFor
-    spaces = [c.space for s in ("1", "2", "3", "4") if (c := plans[s].chosen) is not None]
-    assert spaces == [None] * 4
-    native = plans["2"].chosen
-    acpc = next(c for c in plans["2"].candidates if c.space == "ACPC")
-    assert native is not None and native.surface_fit is not None and acpc.surface_fit is not None
-    assert native.surface_fit["seeg"].median_mm == pytest.approx(2.68, abs=0.05)
-    assert not acpc.eligible and acpc.surface_fit["seeg"].median_mm == pytest.approx(9.89, abs=0.05)
-    assert all(c.eligible for c in plans["3"].candidates)  # both fit the surface: a real tie
+    acpc2 = next(c for c in plans["2"].candidates if c.space == "ACPC")
+    assert acpc2.intended == spm.INTENDED_OTHER  # names the acpc T1, a different image
+    assert plans["2"].chosen.intended == spm.INTENDED_UNKNOWN  # type: ignore[union-attr]
+    for s in ("3", "4"):
+        acpc = next(c for c in plans[s].candidates if c.space == "ACPC")
+        assert acpc.intended == spm.INTENDED_OTHER
+    native2 = plans["2"].chosen
+    assert native2 is not None and native2.surface_fit is not None
+    assert native2.surface_fit["seeg"].median_mm == pytest.approx(2.68, abs=0.05)
 
 
-def test_field_checks_and_verification_decide_every_subject(dataset):
-    plans = {p.subject: p for p in spm.plan_dataset(dataset)}
-    for s in ("1", "2", "3", "4"):
-        plan = plans[s]
-        check = plan.field_check
-        assert check is not None and check.passed, (s, check)
-        assert check.n_inverted >= 2000
-        assert check.median_mm <= 6.0 and check.p10_mm <= 2.0
-        head = plan.template_fit["seeg"]
-        assert head.grade == "plausible" and (head.inside_fraction or 0) >= 0.95
-        assert plan.verdict == "write", (s, plan.reason)
-        assert len(plan.files) == 2
+def test_chosen_files_pass_the_shell_inside_rule(plans):
+    inside = {"1": 0.966, "2": 0.976, "3": 0.980, "4": 0.988}
+    for s, expected in inside.items():
+        head = plans[s].chosen.template_fit["seeg"]  # type: ignore[union-attr]
+        assert head.grade == "plausible"
+        assert head.inside_fraction == pytest.approx(expected, abs=0.005)
+        assert head.max_outside_mm is not None and head.max_outside_mm <= 10.0
+
+
+def test_ruling_19_checks_currently_fail_every_subject_against_the_whole_shell(plans):
+    expected = {  # (centroid mm, worst extent difference)
+        "1": (7.2, 0.19),
+        "2": (3.5, 0.21),
+        "3": (7.6, 0.22),
+        "4": (3.7, 0.19),
+    }
+    for s, (centroid, extent) in expected.items():
+        check = plans[s].field_check
+        assert check is not None and check.n_inverted == 4000
+        assert check.median_mm <= 6.0 and check.p10_mm <= 2.0  # ruling 9 passes
+        assert check.centroid_mm == pytest.approx(centroid, abs=0.1)
+        assert check.extent_deviation == pytest.approx(extent, abs=0.01)
+        assert not check.passed and plans[s].verdict == "refused" and plans[s].files == {}
+
+
+def test_pinned_template_coordinates_of_real_contacts(dataset):
+    """A few real contacts mapped to template millimeters (guards the inversion itself)."""
+    pins = {
+        2: {"RX1": (0.94, 33.2, 10.19), "RQ9": (31.79, -48.29, 45.08)},
+        3: {"LD1": (-23.14, -31.33, -11.99), "LP14": (-15.5, 25.75, 62.59)},
+    }
+    from ieeg_geometry.bids import discover, read_electrode_set
+
+    for s, wanted in pins.items():
+        field = spm.load_field(dataset / "derivatives/freesurfer" / f"sub-{s}" / FIELDS[s])
+        item = next(i for i in discover(dataset) if i.subject == str(s) and i.space is None)
+        eset = read_electrode_set(item)
+        inv = spm.invert_points(field, eset.xyz_mm)
+        for i, c in enumerate(eset.contacts):
+            if c.name in wanted:
+                assert inv.template_mm[i] == pytest.approx(wanted[c.name], abs=0.02)
+    assert np.isfinite(inv.template_mm).all()
