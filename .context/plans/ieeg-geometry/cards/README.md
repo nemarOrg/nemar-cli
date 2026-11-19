@@ -3,7 +3,8 @@
 - You implement exactly one card: one branch, one pull request (PR), in the worktree the card names; use absolute paths.
 - Read `AGENTS.md` in the repository first and follow it: Bun for JavaScript and TypeScript, uv for Python (never pip or conda), Biome for lint, Ruff and Ty for Python, `pytest` for Python tests, real tests with no mocks of business logic (`.rules/testing.md`), American spelling, no em-dashes in prose, abbreviations defined on first use.
 - This repository is public: no host names, private paths or credentials in code, tests, commits or PR text.
-- Git in nemar-cli worktrees: the repository configures a git-annex filter that is not installed here, so prefix git commands that touch the working tree with `-c filter.annex.process= -c filter.annex.smudge=cat -c filter.annex.clean=cat` (for example `git -c filter.annex.process= status`).
+- Git in nemar-cli worktrees: the repository configures a git-annex filter that is not installed here, so start every shell command that runs git with `export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=filter.annex.process GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1=filter.annex.smudge GIT_CONFIG_VALUE_1=cat GIT_CONFIG_KEY_2=filter.annex.clean GIT_CONFIG_VALUE_2=cat;` (the shell is zsh, so a `-c` list in a variable does not split).
+  The pre-commit hook type-checks the backend: run `bun install` at the worktree root and in `backend/` once before your first commit.
 - Only the manager merges. Push once per review round. Never force-push or rebase a pushed branch.
 - Commits are atomic, under 50 characters, with no emojis and no AI or co-author attribution.
 - Stay inside the card's Scope; anything else goes in the report as a patch note.
