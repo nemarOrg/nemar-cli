@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +67,8 @@ class ElectrodeSet:
     declared_units: str
     scale_to_mm: float
     contacts: list[Contact] = field(default_factory=list)
+    units_assumed: bool = False
+    warnings: tuple[str, ...] = ()
 
     @property
     def xyz_mm(self) -> np.ndarray:
@@ -100,6 +103,7 @@ class Discovered:
     subject: str
     session: str | None
     space: str | None
+    coordsystem_inherited: bool = False  # the sidecar sits at a higher level (BIDS inheritance)
 
 
 def _entities(prefix: str) -> dict[str, str]:
@@ -109,6 +113,34 @@ def _entities(prefix: str) -> dict[str, str]:
             key, _, value = part.partition("-")
             out[key] = value
     return out
+
+
+def _inherited_coordsystem(root: Path, electrodes: Path, entities: dict[str, str]) -> Path | None:
+    """The coordsystem that applies to an electrodes file by the BIDS inheritance principle.
+
+    Looked for in the file's folder, then each parent up to the dataset root; a candidate's
+    entities must be a subset of the electrodes file's (same keys and values). In the nearest
+    folder that has candidates, the one with the most entities wins (ties: name order).
+    """
+    folder = electrodes.parent
+    while True:
+        best: tuple[int, str, Path] | None = None
+        for cand in folder.glob("*coordsystem.json"):
+            if cand.name != "coordsystem.json" and not cand.name.endswith("_coordsystem.json"):
+                continue
+            prefix = (
+                cand.name[: -len("_coordsystem.json")] if cand.name != "coordsystem.json" else ""
+            )
+            cand_entities = _entities(prefix)
+            if all(entities.get(k) == v for k, v in cand_entities.items()):
+                key = (-len(cand_entities), cand.name)
+                if best is None or key < (best[0], best[1]):
+                    best = (key[0], key[1], cand)
+        if best is not None:
+            return best[2]
+        if folder == root or folder.parent == folder:
+            return None
+        folder = folder.parent
 
 
 def discover(dataset_dir: str | Path) -> list[Discovered]:
@@ -125,11 +157,17 @@ def discover(dataset_dir: str | Path) -> list[Discovered]:
             prefix = tsv.name[: -len("_electrodes.tsv")]
             ents = _entities(prefix)
             coord = tsv.with_name(prefix + "_coordsystem.json")
+            inherited = False
+            if not os.path.lexists(coord):  # a dangling link is not an absent file
+                higher = _inherited_coordsystem(root, tsv, ents)
+                if higher is not None:
+                    coord, inherited = higher, True
             channels = tuple(sorted(tsv.parent.glob(f"{_channel_stem(ents)}*_channels.tsv")))
             found.append(
                 Discovered(
                     electrodes_path=tsv,
-                    coordsystem_path=coord if coord.exists() else None,
+                    coordsystem_path=coord if inherited or coord.exists() else None,
+                    coordsystem_inherited=inherited,
                     channels_paths=channels,
                     subject=ents.get("sub", sub_dir.name.removeprefix("sub-")),
                     session=ents.get("ses"),
@@ -160,8 +198,8 @@ def _to_float(token: str, *, where: str = "") -> float:
     return value
 
 
-def _read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    with path.open(newline="", encoding="utf-8-sig") as fh:
+def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[str, str]]]:
+    with path.open(newline="", encoding="utf-8-sig", errors=errors) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         rows = list(reader)
         return list(reader.fieldnames or []), rows
@@ -173,35 +211,66 @@ def _normalize_type(token: str | None) -> ContactType | None:
     return _TYPES.get(token.strip().lower())
 
 
-def _channel_types(paths: tuple[Path, ...]) -> dict[str, ContactType]:
+def _channel_types(
+    paths: tuple[Path, ...],
+) -> tuple[dict[str, ContactType], tuple[str, ...]]:
+    """Contact types from channels files, and a warning per file whose name or type cells
+    contained undecodable bytes (replaced by U+FFFD; those cells may not match)."""
     types: dict[str, ContactType] = {}
+    warnings: list[str] = []
     for path in paths:
-        _, rows = _read_tsv(path)
+        # A non-UTF-8 byte in another column (on006233's units) is not fatal.
+        _, rows = _read_tsv(path, errors="replace")
+        damaged = 0
         for row in rows:
-            kind = _normalize_type(row.get("type"))
             name = (row.get("name") or "").strip()
+            kind_text = row.get("type")
+            if "\ufffd" in name or "\ufffd" in (kind_text or ""):
+                damaged += 1
+            kind = _normalize_type(kind_text)
             if kind and name:
                 types.setdefault(name, kind)
-    return types
+        if damaged:
+            warnings.append(
+                f"{path.name}: {damaged} name or type cell(s) had undecodable bytes "
+                "(replaced); contact types may be incomplete"
+            )
+    return types, tuple(warnings)
 
 
-def read_electrode_set(item: Discovered) -> ElectrodeSet:
-    """Read one discovered pair. Raises `GeometryRefusal` when units cannot be trusted."""
+def read_electrode_set(item: Discovered, assume_units: str | None = None) -> ElectrodeSet:
+    """Read one discovered pair. Raises `GeometryRefusal` when units cannot be trusted.
+
+    With `assume_units` (`m`, `cm` or `mm`), a missing coordsystem, or one without
+    `iEEGCoordinateUnits`, is read with those units and `units_assumed` is set; the caller must
+    confirm them some other way (the geometric fit does). Units that are declared but
+    unsupported are still refused.
+    """
+    sidecar: dict = {}
     if item.coordsystem_path is None:
-        raise GeometryRefusal(
-            "coordsystem-missing", f"no coordsystem.json beside {item.electrodes_path.name}"
-        )
-    try:
-        sidecar = json.loads(item.coordsystem_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise GeometryRefusal(
-            "coordsystem-unreadable", f"{item.coordsystem_path.name}: {exc}"
-        ) from exc
+        if assume_units is None:
+            raise GeometryRefusal(
+                "coordsystem-missing", f"no coordsystem.json beside {item.electrodes_path.name}"
+            )
+    else:
+        try:
+            sidecar = json.loads(item.coordsystem_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise GeometryRefusal(
+                "coordsystem-unreadable", f"{item.coordsystem_path.name}: {exc}"
+            ) from exc
+        if not isinstance(sidecar, dict):
+            raise GeometryRefusal(
+                "coordsystem-unreadable", f"{item.coordsystem_path.name} is not a JSON object"
+            )
     raw_units = sidecar.get("iEEGCoordinateUnits")
+    assumed = False
     if not isinstance(raw_units, str) or not raw_units.strip():
-        raise GeometryRefusal(
-            "units-missing", f"{item.coordsystem_path.name} has no iEEGCoordinateUnits"
-        )
+        if assume_units is None:
+            raise GeometryRefusal(
+                "units-missing", f"{item.coordsystem_path} has no iEEGCoordinateUnits"
+            )
+        raw_units, assumed = assume_units, True
     units = raw_units.strip().lower()
     if units not in _UNIT_TO_MM:
         raise GeometryRefusal(
@@ -215,7 +284,7 @@ def read_electrode_set(item: Discovered) -> ElectrodeSet:
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
-    from_channels = _channel_types(item.channels_paths)
+    from_channels, warnings = _channel_types(item.channels_paths)
     contacts: list[Contact] = []
     for row in rows:
         name = (row.get("name") or "").strip()
@@ -237,4 +306,6 @@ def read_electrode_set(item: Discovered) -> ElectrodeSet:
         declared_units=units,
         scale_to_mm=scale,
         contacts=contacts,
+        units_assumed=assumed,
+        warnings=warnings,
     )

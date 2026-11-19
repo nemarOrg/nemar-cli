@@ -141,3 +141,16 @@ def test_blob_id_of_a_symlink_is_its_target_text(tmp_path):
     assert staged.startswith("120000 ")
     expected = staged.split()[1]
     assert blob_id(link) == blob_id(target) == expected
+
+
+def test_output_sha256_round_trips_and_is_absent_for_old_entries(tmp_path):
+    new = OwnedPath("a.json", "coordsystem", (("in", "b"),), "m", None, "ab" * 32)
+    old = OwnedPath("b.json", "coordsystem", (("in", "b"),), "m", None)
+    write_ownership(tmp_path, "0.1.0", [new, old])
+    doc = json.loads((tmp_path / ".nemar" / "ieeg-geometry.json").read_text())
+    assert doc["paths"]["a.json"]["output_sha256"] == "ab" * 32
+    assert "output_sha256" not in doc["paths"]["b.json"]
+    record = read_ownership(tmp_path)
+    assert record is not None
+    got = {e.path: e for e in record.entries}
+    assert got["a.json"].output_sha256 == "ab" * 32 and got["b.json"].output_sha256 is None
