@@ -130,3 +130,11 @@ On real FreeSurfer subjects the surface method gives specific evidence everywher
 16. **The blind shift control.** A shifted copy counts as failing when its median is above 1.0 mm and at least 1.5 times the unshifted median; all six shifts must fail. (The ECoG 2.0 mm rule rejected 14 of 42 verified on005007 files: a grid slid along the cortex stays 1.3 to 2.0 mm from fsaverage6.)
 17. **Prose alone never writes a label until R1 is reviewed.** A candidate from README or description text with only plausible evidence returns needs-human; with specific evidence it may be written. A named template that fits far worse than fsaverage (fsaverage specific on-vertex, the named one plausible at best) returns needs-human, whatever the contact type. Two distinct passing labels from the text return needs-human.
 18. **fsaverage-referenced data is written as `fsaverage`,** with the authors' own term (for example "MNI-305") carried in `iEEGCoordinateSystemDescription`.
+
+### 2026-11-19, after B1's second report (PR #2227)
+
+On every real FreeSurfer subject the `talairach.xfm` transform check passed (median 2.1 to 2.7 mm), but a 40 mm translation of the same transform passed too: a folded pial surface is near some fsaverage vertex from almost anywhere inside the brain.
+After the affine, real depth contacts are only 62 to 75 percent inside fsaverage (2 percent for on003848 RESP0699), and the affine and surface positions of the same ECoG contacts disagree by 11 to 15 mm median.
+
+19. **A transform check must also match shape and position**, not only nearest-vertex distance: the mapped subject vertices' centroid within 5.0 mm of the reference's, and each axis's 2nd-to-98th-percentile extent within 10 percent of the reference's, in addition to ruling 9's distances. This applies to rulings 9 (SPM) and 12 (FreeSurfer); a test shows a 40 mm translation and a 15 percent scale error both fail.
+20. **Affine (`talairach.xfm`) depth positions are not written.** With a 10 to 15 mm typical error they are not worth committing as data; B1 writes only the surface-method `space-fsaverage` files for cortical contacts, and reports the depth contacts it left out. `space-MNI305` output is dropped until a nonlinear path exists (for example `sphere.reg` plus a volume warp), which would need its own card.
