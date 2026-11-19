@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.nemar.org/schemas/nemar-ieeg-geometry-index.v1.json",
+  "title": "NEMAR iEEG geometry index, version 1",
+  "description": "Index of the subject surfaces written as brain-mesh v1 files beside a dataset's Zarr copy (geometry/index.json). Mesh paths are relative to the directory holding this file. A mesh is in the frame its electrodes file declares: when offset_applied is not null, that vector (FreeSurfer's c_ras, millimeters) was added to the surface vertices, which are in tkr RAS, to bring them into the contacts' scanner RAS.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "pipeline_version", "source_commit", "entries", "skipped"],
+  "properties": {
+    "schema": { "const": "nemar-ieeg-geometry-index" },
+    "version": { "const": 1 },
+    "pipeline_version": { "type": "string", "minLength": 1 },
+    "source_commit": { "type": ["string", "null"] },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } },
+    "skipped": { "type": "array", "items": { "$ref": "#/$defs/skipped" } }
+  },
+  "$defs": {
+    "hemisphere": { "enum": ["L", "R"] },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject",
+        "session",
+        "electrodes",
+        "frame",
+        "contact_type",
+        "frame_choice",
+        "offset_applied",
+        "hemispheres",
+        "fit",
+        "sources",
+        "meshes"
+      ],
+      "properties": {
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Label without the sub- prefix."
+        },
+        "session": {
+          "type": ["string", "null"],
+          "description": "Label without the ses- prefix."
+        },
+        "electrodes": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Dataset-relative path of the electrodes.tsv the mesh was verified against."
+        },
+        "frame": {
+          "type": ["string", "null"],
+          "description": "iEEGCoordinateSystem of that electrodes file's coordsystem.json."
+        },
+        "contact_type": {
+          "enum": ["ecog", "seeg"],
+          "description": "Which contacts were fitted: ECoG contacts when the file has any, else all contacts under the depth (sEEG) rule."
+        },
+        "frame_choice": { "enum": ["as_declared", "c_ras"] },
+        "offset_applied": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+          ]
+        },
+        "hemispheres": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/hemisphere" },
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "fit": { "$ref": "#/$defs/fit" },
+        "sources": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "meshes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/hemisphere" },
+          "additionalProperties": { "$ref": "#/$defs/mesh" },
+          "minProperties": 1,
+          "maxProperties": 2
+        }
+      }
+    },
+    "fit": {
+      "type": "object",
+      "description": "The contacts' fit to the written (decimated, quantized) mesh, in the verifier's own fields.",
+      "additionalProperties": false,
+      "required": [
+        "median_mm",
+        "p90_mm",
+        "max_mm",
+        "n_used",
+        "n_total",
+        "rule",
+        "grade",
+        "passed",
+        "inside_fraction",
+        "near_or_inside_fraction",
+        "inside_evaluated",
+        "n_ambiguous",
+        "n_left_out",
+        "reason"
+      ],
+      "properties": {
+        "median_mm": { "type": "number" },
+        "p90_mm": { "type": "number" },
+        "max_mm": { "type": "number" },
+        "n_used": { "type": "integer", "minimum": 0 },
+        "n_total": { "type": "integer", "minimum": 0 },
+        "rule": { "type": "string" },
+        "grade": {
+          "enum": ["specific", "plausible"],
+          "description": "specific: ECoG contacts within 2.0 mm; plausible: the depth rule."
+        },
+        "passed": { "const": true },
+        "inside_fraction": { "type": ["number", "null"] },
+        "near_or_inside_fraction": { "type": ["number", "null"] },
+        "inside_evaluated": { "type": "boolean" },
+        "n_ambiguous": { "type": "integer", "minimum": 0 },
+        "n_left_out": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Contacts on the side of an absent hemisphere, not evaluated."
+        },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "mesh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "vertices", "faces"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^sub-[^/]+/[^/]+/(lh|rh)\\.mesh\\.bin$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 40, "maximum": 1500000 },
+        "vertices": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "faces": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "session", "electrodes", "reason"],
+      "properties": {
+        "subject": { "type": "string" },
+        "session": { "type": ["string", "null"] },
+        "electrodes": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}
