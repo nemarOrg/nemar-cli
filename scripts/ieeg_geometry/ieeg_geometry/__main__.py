@@ -9,7 +9,6 @@ JSON report; it writes into the work tree only with `--apply`.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -133,7 +132,7 @@ def _write_suppressed(proposals: dict, write) -> None:
             write(f"  and {len(files) - 20} more")
 
 
-def run(args: argparse.Namespace, out=None) -> int:
+def run(args: argparse.Namespace, out=None, urls: dict[str, str] | None = None) -> int:
     """The `run` subcommand: exit 0 on a report, 1 when the run cannot proceed, 2 when a track
     failed unexpectedly (the report is still printed)."""
     try:
@@ -143,9 +142,9 @@ def run(args: argparse.Namespace, out=None) -> int:
             version=args.version,
             do_apply=args.apply,
             surfaces_out=args.surfaces_out,
-            repo_url=os.environ.get("IEEG_GEOMETRY_REPO_URL"),
-            data_url=os.environ.get("IEEG_GEOMETRY_DATA_URL"),
-            api_url=os.environ.get("IEEG_GEOMETRY_API_URL"),
+            repo_url=(urls or {}).get("repo_url"),
+            data_url=(urls or {}).get("data_url"),
+            api_url=(urls or {}).get("api_url"),
         )
     except (pipeline.RefusedDataset, fetch.FetchError, GeometryRefusal) as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -165,7 +164,7 @@ def run(args: argparse.Namespace, out=None) -> int:
     return 2 if analysis.errors else 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, urls: dict[str, str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ieeg_geometry")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("inspect", help="report frame, units, contacts and surface fits (read-only)")
@@ -178,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--surfaces-out", type=Path, default=None, help="where --apply puts geometry/")
     args = parser.parse_args(argv)
     if args.command == "run":
-        return run(args)
+        return run(args, urls=urls)
     return inspect(args.dataset_dir)
 
 

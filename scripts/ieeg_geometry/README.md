@@ -14,8 +14,9 @@ cd scripts/ieeg_geometry && uv run pytest -q
 
 `run` fetches exactly the files a dataset's geometry needs, runs the four tracks in order (labels, FreeSurfer, SPM, subject surfaces) and prints one JSON report (`schema/geometry-report.v1.json`).
 It writes nothing unless `--apply` is given; `--apply` writes into the git work tree `DIR/<dataset-id>` and the surfaces into `--surfaces-out`, and never commits, pushes, opens a pull request or uploads.
-Exit codes: 0 report printed, 1 the run cannot proceed (a protected id, a tree or version failure, a dataset-level file that cannot be fetched), 2 a track failed unexpectedly (the report is still printed, with the track's decisions `skipped`).
-`IEEG_GEOMETRY_REPO_URL`, `IEEG_GEOMETRY_DATA_URL` and `IEEG_GEOMETRY_API_URL` replace the repository, data plane and API URL templates (`{id}`, `{version}`, `{path}`); the tests point them at local files.
+Exit codes: 0 report printed, 1 the run cannot proceed (a protected id, a tree or version failure, a dataset-level file that cannot be fetched), 2 a track failed unexpectedly (the report is still printed, with the track's decisions `skipped`; `--apply` then writes nothing, neither the work tree nor `--surfaces-out`).
+`--surfaces-out DIR/geometry/` ends up exactly the new index and the meshes it references (the directory is replaced, so meshes an earlier run wrote and the new index no longer names are gone).
+The repository, data plane and API URL templates are module constants of `fetch.py`; `run_dataset` and `main(argv, urls=...)` accept replacements (the tests point them at local files).
 
 ## Modules
 

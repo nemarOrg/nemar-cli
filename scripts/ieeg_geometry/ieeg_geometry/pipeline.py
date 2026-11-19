@@ -34,7 +34,7 @@ TRACKS = ("labels", "freesurfer", "spm", "surfaces")
 STATUSES = ("written", "unchanged", "kept", "needs-human", "refused", "skipped")
 # live or standing datasets that no run may touch (AGENTS.md: live datasets, standing fixtures)
 PROTECTED_IDS = frozenset({"nm000103", "nm000104", "nm000105", "nm000106", "nm000107", "nm099998"})
-_ID = re.compile(r"^[a-z]{2}\d{6}$")
+_ID = re.compile(r"[a-z]{2}[0-9]{6}")
 OWNERSHIP_REL = ".nemar/ieeg-geometry.json"
 EARLIER_TRACK = "covered-by-earlier-track"
 
@@ -44,7 +44,7 @@ class RefusedDataset(Exception):
 
 
 def check_dataset_id(dataset_id: str) -> str:
-    if not _ID.match(dataset_id):
+    if not _ID.fullmatch(dataset_id):
         raise RefusedDataset(f"{dataset_id!r} is not a dataset id such as on004457")
     if dataset_id in PROTECTED_IDS:
         raise RefusedDataset(f"{dataset_id} is a live or standing dataset; the run refuses it")
@@ -142,14 +142,14 @@ def _cover(covered: Coverage, subject: str, session: str | None, space: str) -> 
     covered.setdefault((subject, session), set()).add(space.lower())
 
 
-def label_coverage(plan: labels.Plan, dataset: Path) -> Coverage:
+def label_coverage(plan: labels.Plan | None, dataset: Path) -> Coverage:
     """Subject-and-space pairs the label track writes in this run or owns from an earlier one.
 
     Only files that the track plans to write, and paths it already owns, count: a template file
     that another track owns is not the label track's cover.
     """
     covered: Coverage = {}
-    for proposal in plan.proposals:
+    for proposal in plan.proposals if plan else ():
         if proposal.files and proposal.label:
             # a sidecar for an unlabeled file declares that file's own frame: also cover
             _cover(covered, proposal.subject, proposal.session, proposal.label)
@@ -252,9 +252,13 @@ def analyze(
     covered: Coverage = {}
     try:
         a.label_plan = labels.plan_dataset(dataset, a.pipeline_version)
-        covered = label_coverage(a.label_plan, dataset)
     except Exception as exc:  # noqa: BLE001 - a track failure is reported, not fatal
         a.errors["labels"] = f"{type(exc).__name__}: {exc}"
+    try:
+        # also without a label plan: what the label track owns still guards the later tracks
+        covered = label_coverage(a.label_plan, dataset)
+    except Exception as exc:  # noqa: BLE001
+        a.errors["labels"] = a.errors.get("labels", f"{type(exc).__name__}: {exc}")
     try:
         a.fs_results = freesurfer.plan_dataset(dataset)
         guard_freesurfer(a.fs_results, covered)
@@ -592,8 +596,10 @@ def apply(a: Analysis, surfaces_dir: Path | None) -> list[str]:
 
     Never commits, pushes, opens a pull request or uploads. Returns the work-tree paths
     written, relative to the dataset. Plans are written in track order against the same
-    snapshot they were made from.
+    snapshot they were made from. Fails closed: when any track errored, nothing is written.
     """
+    if a.errors:
+        return []
     written: list[str] = []
     if a.label_plan is not None:
         written += [_rel(p, a.dataset) for p in labels.write(a.label_plan, a.dataset)]
@@ -602,10 +608,16 @@ def apply(a: Analysis, surfaces_dir: Path | None) -> list[str]:
         written += [e.path for e in entries]
     if a.spm_plans:
         written += spm.write(a.spm_plans, a.dataset)
-    if surfaces_dir is not None and a.surface_dir is not None:
-        shutil.copytree(
-            a.surface_dir / "geometry", Path(surfaces_dir) / "geometry", dirs_exist_ok=True
-        )
+    built = a.surface_dir / "geometry" if a.surface_dir is not None else None
+    if surfaces_dir is not None and built is not None and built.is_dir():
+        # `surfaces_dir/geometry` ends up exactly the new index and its meshes
+        target = Path(surfaces_dir) / "geometry"
+        staging = Path(surfaces_dir) / ".geometry.new"
+        Path(surfaces_dir).mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(built, staging)
+        shutil.rmtree(target, ignore_errors=True)
+        os.replace(staging, target)
     return sorted(set(written))
 
 
@@ -650,6 +662,8 @@ def run_dataset(
             electrodes_in_tree=got.electrodes_in_tree,
         )
         a.report["mode"] = "apply" if do_apply else "dry-run"
+        if do_apply and a.errors:
+            a.report["warnings"] = sorted([*a.report["warnings"], "apply skipped: a track failed"])
         written = apply(a, surfaces_out) if do_apply else []
     return a, written
 
