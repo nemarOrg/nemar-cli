@@ -74,8 +74,8 @@ def test_on004457_spm_and_surfaces():
 
 
 def test_a_dataset_with_nothing_to_do_changes_nothing():
-    report = _dry_run("on004551")
+    report = _dry_run("on004859")
     by_track = _by_track(report)
-    assert all(by_track[t]["written"] == 0 for t in ("freesurfer", "spm", "surfaces"))
-    if by_track["labels"]["written"] == 0:
-        assert report["changes"] == {"add": [], "change": [], "remove": [], "kept": []}
+    assert all(by_track[t]["written"] == 0 for t in by_track)
+    assert report["changes"] == {"add": [], "change": [], "remove": [], "kept": []}
+    assert report["warnings"] == []
