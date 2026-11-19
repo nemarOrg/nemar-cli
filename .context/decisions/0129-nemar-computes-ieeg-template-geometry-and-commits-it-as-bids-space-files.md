@@ -21,7 +21,7 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
    An electrodes file with no coordinate-system sidecar at all gets the missing `..._coordsystem.json` when its label is verified.
    An existing author file is never edited.
 2. **Verification gates every write.** Positions are accepted only when the contacts fit the reference surface of the claimed space: the median distance to the nearest surface vertex is at most 2.0 mm for electrocorticography (ECoG) contacts; for stereo-EEG (sEEG) depth contacts and contacts of unknown type, the median is at most 6.0 mm and at least 95 percent lie inside the closed pial surfaces.
-   A label found without any textual evidence is accepted only when the median is at most 0.5 mm (contacts on template vertices).
+   A label found without any textual evidence is accepted only when the median is at most 1.0 mm against the vendored fsaverage6 (contacts on full-resolution fsaverage vertices measure about 0.7 mm against it) and the same contacts shifted by 10 mm along each axis fail the ECoG rule.
    A frame declared `ACPC` or `ScanRAS`, or tied by `IntendedFor` to the subject's own scan, is never relabeled; it can only be transformed.
    `MNI` without a variant and `Talairach` are never written as labels.
 3. **Provenance.** `iEEGCoordinateProcessingDescription` starts "Computed by NEMAR" and names the source files, the method, the pipeline version and the verification distances; `iEEGCoordinateProcessingReference` links the method page on docs.nemar.org.
