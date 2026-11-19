@@ -18,6 +18,8 @@ from ieeg_geometry.surfaces import (
     read_surface,
 )
 
+from .conftest import icosphere
+
 GII = "derivatives/freesurfer/sub-2/pial.R.surf.gii"
 
 
@@ -98,23 +100,51 @@ def test_read_surface_dispatches_on_suffix(mini):
 
 
 @pytest.mark.parametrize(
-    ("names", "faces_base"),
-    [(("vert", "tri"), 1), (("Vertices", "Faces"), 1), (("vertices", "faces"), 0)],
+    "names", [("vert", "tri"), ("Vertices", "Faces"), ("pos", "tri"), ("pnt", "tri")]
 )
-def test_matlab_struct_fields(tmp_path, sphere, names, faces_base):
+def test_matlab_struct_fields_are_one_based(tmp_path, sphere, names):
     path = tmp_path / "MNI_cortex_left.mat"
-    cortex = {names[0]: sphere.vertices, names[1]: sphere.faces + faces_base}
-    scipy.io.savemat(path, {"cortex": cortex})
+    scipy.io.savemat(path, {"cortex": {names[0]: sphere.vertices, names[1]: sphere.faces + 1}})
     surf = read_mat(path)
     np.testing.assert_allclose(surf.vertices, sphere.vertices)
     np.testing.assert_array_equal(surf.faces, sphere.faces)
     assert surf.hemisphere == "L"
 
 
-def test_matlab_top_level_variables(tmp_path, sphere):
+def test_matlab_top_level_variables_and_transposed_arrays(tmp_path, sphere):
     path = tmp_path / "x.mat"
-    scipy.io.savemat(path, {"vert": sphere.vertices, "tri": sphere.faces + 1})
-    np.testing.assert_array_equal(read_mat(path).faces, sphere.faces)
+    scipy.io.savemat(path, {"vert": sphere.vertices.T, "tri": (sphere.faces + 1).T})
+    surf = read_mat(path)
+    np.testing.assert_allclose(surf.vertices, sphere.vertices)
+    np.testing.assert_array_equal(surf.faces, sphere.faces)
+
+
+def test_matlab_zero_based_faces_are_refused(tmp_path, sphere):
+    path = tmp_path / "x.mat"
+    scipy.io.savemat(path, {"cortex": {"vert": sphere.vertices, "tri": sphere.faces}})
+    with pytest.raises(GeometryRefusal) as exc:
+        read_mat(path)
+    assert exc.value.reason == "mat-faces-base"
+
+
+def test_matlab_other_shapes_are_refused(tmp_path, sphere):
+    path = tmp_path / "x.mat"
+    scipy.io.savemat(path, {"cortex": {"vert": sphere.vertices[:, :2], "tri": sphere.faces + 1}})
+    with pytest.raises(GeometryRefusal) as exc:
+        read_mat(path)
+    assert exc.value.reason == "mat-shape"
+
+
+def test_matlab_meters_are_scaled_and_implausible_extents_refused(tmp_path):
+    small = icosphere(2, radius=0.08)  # a 160 mm head expressed in meters
+    path = tmp_path / "m.mat"
+    scipy.io.savemat(path, {"cortex": {"vert": small.vertices, "tri": small.faces + 1}})
+    assert np.ptp(read_mat(path).vertices, axis=0).max() == pytest.approx(160.0, rel=0.01)
+    tiny = icosphere(2, radius=0.0001)
+    scipy.io.savemat(path, {"cortex": {"vert": tiny.vertices, "tri": tiny.faces + 1}})
+    with pytest.raises(GeometryRefusal) as exc:
+        read_mat(path)
+    assert exc.value.reason == "mat-units"
 
 
 def test_matlab_v73_is_refused(tmp_path):
@@ -160,3 +190,58 @@ def test_closed_detection(sphere):
 )
 def test_guess_hemisphere(name, hemi):
     assert guess_hemisphere(name) == hemi
+
+
+def test_gifti_transform_is_applied_and_spaces_recorded(tmp_path, sphere):
+    from nibabel.gifti import GiftiCoordSystem
+
+    xform = np.eye(4)
+    xform[:3, 3] = [100.0, 0.0, -5.0]
+    point = GiftiDataArray(
+        sphere.vertices.astype(np.float32), intent="NIFTI_INTENT_POINTSET", datatype="float32"
+    )
+    point.coordsys = GiftiCoordSystem(dataspace=0, xformspace=4, xform=xform)
+    tri = GiftiDataArray(sphere.faces.astype(np.int32), intent="NIFTI_INTENT_TRIANGLE")
+    path = tmp_path / "lh.pial.surf.gii"
+    nib.save(GiftiImage(darrays=[point, tri]), str(path))
+    surf = read_gifti(path)
+    np.testing.assert_allclose(surf.vertices, sphere.vertices + [100.0, 0.0, -5.0], atol=1e-4)
+    assert surf.spaces == ("unknown", "mni")
+
+
+def test_gifti_volgeom_metadata_is_c_ras(tmp_path, sphere):
+    from nibabel.gifti import GiftiMetaData
+
+    meta = GiftiMetaData({"VolGeomC_R": "1.5", "VolGeomC_A": "-2.5", "VolGeomC_S": "3"})
+    point = GiftiDataArray(
+        sphere.vertices.astype(np.float32),
+        intent="NIFTI_INTENT_POINTSET",
+        datatype="float32",
+        meta=meta,
+    )
+    tri = GiftiDataArray(sphere.faces.astype(np.int32), intent="NIFTI_INTENT_TRIANGLE")
+    path = tmp_path / "rh.pial.surf.gii"
+    nib.save(GiftiImage(darrays=[point, tri]), str(path))
+    assert read_gifti(path).c_ras == (1.5, -2.5, 3.0)
+
+
+def test_malformed_volume_info_keeps_the_geometry(tmp_path, sphere):
+    path = tmp_path / "lh.pial"
+    info = {
+        "head": np.array([2, 0, 20]),
+        "valid": "1  # volume info valid",
+        "filename": "x.mgz",
+        "volume": np.array([256, 256, 256]),
+        "voxelsize": np.array([1.0, 1.0, 1.0]),
+        "xras": np.array([-1.0, 0, 0]),
+        "yras": np.array([0, 0, -1.0]),
+        "zras": np.array([0, 1.0, 0]),
+        "cras": np.array([1.0, 2.0, 3.0]),
+    }
+    nib.freesurfer.write_geometry(str(path), sphere.vertices, sphere.faces, volume_info=info)
+    assert read_freesurfer(path).c_ras == (1.0, 2.0, 3.0)
+    path.write_bytes(path.read_bytes()[:-60])  # cut into the footer
+    with pytest.warns(UserWarning, match="c_ras unknown"):
+        surf = read_freesurfer(path)
+    assert surf.c_ras is None
+    np.testing.assert_allclose(surf.vertices, sphere.vertices, atol=1e-5)
