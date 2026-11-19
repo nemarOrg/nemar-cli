@@ -12,3 +12,8 @@ All data are cut from public CC0 datasets (NEMAR mirrors of OpenNeuro datasets).
 
 Because the cut keeps each contact's true nearest vertex, nearest-vertex fits on the fixtures equal the fits on the full surfaces (on004457 sub-2: native 2.68 mm, `space-ACPC` 9.89 mm median).
 The cut surfaces are open meshes, so the inside-the-brain criterion is not evaluated on them.
+
+## Vendored fsaverage6 source
+
+`ieeg_geometry/data/fsaverage/*.npz` were built by `tools/build_fsaverage6.py` from the fsaverage pial surfaces in public dataset `on004370` v1.0.0 (`derivatives/freesurfer/lh.pial`, `rh.pial`; header "created by greve on Thu Apr 11 2013"; sha256 `9cb004f61a2eeb977b1b595ad6de6656afdfc1f37ade0c00a8dde91e990a0f29` and `4f752701f74c1626ee3b6239046b9aa793ca4e87c6ae9a6b74a233c04e651212`).
+This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaverage6 files could not be made offline (known limit).
