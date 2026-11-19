@@ -34,8 +34,6 @@ class Surface:
     name: str = field(default="")
     # True for a template shell made of two halves cut exactly at x = 0 (the implicit cap).
     midline_cut: bool = False
-    # True for a smooth template shell (no sulci): nearest-vertex medians are not judged on it.
-    smooth: bool = False
     # (data space, transformed space) when a GIfTI transform was applied to the vertices.
     spaces: tuple[str, str] | None = None
 

@@ -8,9 +8,10 @@ Grades (lead rulings of 2026-11-19, plan.md):
   contacts with a median of at most 6.0 mm and at least 90 percent of contacts inside the
   reference surface or within 5.0 mm of it. Depth contacts in the right frame measure only
   82 to 89 percent strictly inside, so this is a plausibility check, not a frame proof.
-  Against a reference marked `smooth` (vendored `reference.json`, e.g. the MNI shell) the
-  depth rule is instead at least 95 percent inside and no contact more than 10.0 mm outside
-  (nearest-vertex distance); the median is reported, not judged (ruling 8).
+  The caller can pass `depth_rule=INSIDE_RULE` (ruling 8, for a template shell without sulci):
+  at least 95 percent inside and no contact more than 10.0 mm outside (nearest-vertex
+  distance, an upper bound); the median is then reported, not judged. The rule is chosen by
+  the caller, never by the reference, so adding a reference changes no other caller's verdict.
 - `fail`: neither.
 
 Inside test: ray parity along three fixed, irrational directions. A hit within 1e-7 of a
@@ -52,8 +53,10 @@ SEEG_NEAR_MM = 5.0
 SEEG_PLAUSIBLE_FRACTION = 0.90
 TEMPLATE_VERTEX_MM = 1.0
 SHIFT_CONTROL_MM = 10.0
-SMOOTH_INSIDE_FRACTION = 0.95
-SMOOTH_MAX_OUTSIDE_MM = 10.0
+INSIDE_MIN_FRACTION = 0.95
+INSIDE_MAX_OUTSIDE_MM = 10.0
+MEDIAN_RULE = "median"
+INSIDE_RULE = "inside"
 OFFSET_MIN_GAIN_MM = 1.5
 OFFSET_MIN_GAIN_FRACTION = 0.25
 OFFSET_IMMATERIAL_MM = 3.0
@@ -84,13 +87,17 @@ class Fit:
     n_left_out: int = 0
     reason: str | None = None
     offset_applied: tuple[float, float, float] | None = None
+    max_outside_mm: float | None = None
 
     @property
     def passed(self) -> bool:
         return self.grade != FAIL
 
     def as_dict(self) -> dict:
-        return asdict(self) | {"passed": self.passed}
+        """The frozen v1 field set (geometry-index schema); `max_outside_mm` is left out of it."""
+        out = asdict(self) | {"passed": self.passed}
+        out.pop("max_outside_mm")
+        return out
 
 
 @dataclass(frozen=True)
@@ -235,8 +242,14 @@ def fit(
     hemispheres: Sequence[str | None] | None = None,
     *,
     offset_applied: tuple[float, float, float] | None = None,
+    depth_rule: str = MEDIAN_RULE,
 ) -> Fit:
-    """Nearest-vertex fit of contacts (N x 3, millimeters) to one or both hemispheres."""
+    """Nearest-vertex fit of contacts (N x 3, millimeters) to one or both hemispheres.
+
+    `depth_rule` applies to non-ECoG contacts: `MEDIAN_RULE` (default) or `INSIDE_RULE`.
+    """
+    if depth_rule not in (MEDIAN_RULE, INSIDE_RULE):
+        raise ValueError(f"unknown depth rule {depth_rule!r}")
     surfaces = _as_list(surface)
     pts_all = np.asarray(contacts_mm, dtype=float).reshape(-1, 3)
     n_total = len(pts_all)
@@ -246,12 +259,18 @@ def fit(
     )
     pts = pts_all[finite]
     seeg_rule = contact_type != "ecog"
-    rule = (
-        f"median <= {SEEG_MEDIAN_MM} mm and >= {SEEG_PLAUSIBLE_FRACTION:.0%} inside "
-        f"or within {SEEG_NEAR_MM} mm"
-        if seeg_rule
-        else f"median <= {ECOG_MEDIAN_MM} mm"
-    )
+    if not seeg_rule:
+        rule = f"median <= {ECOG_MEDIAN_MM} mm"
+    elif depth_rule == INSIDE_RULE:
+        rule = (
+            f">= {INSIDE_MIN_FRACTION:.0%} inside and none more than "
+            f"{INSIDE_MAX_OUTSIDE_MM} mm outside (median reported, not judged)"
+        )
+    else:
+        rule = (
+            f"median <= {SEEG_MEDIAN_MM} mm and >= {SEEG_PLAUSIBLE_FRACTION:.0%} inside "
+            f"or within {SEEG_NEAR_MM} mm"
+        )
     n_left_out = 0
     sides = {s.hemisphere for s in surfaces}
     only = next(iter(sides)) if len(sides) == 1 else None
@@ -286,15 +305,10 @@ def fit(
     near = inside | (dist <= SEEG_NEAR_MM)
     inside_fraction = float(inside.mean())
     near_fraction = float(near.mean())
-    if all(s.smooth for s in surfaces):
-        outside = ~inside
-        farthest = float(dist[outside].max()) if outside.any() else 0.0
-        ok = inside_fraction >= SMOOTH_INSIDE_FRACTION and farthest <= SMOOTH_MAX_OUTSIDE_MM
-        smooth_rule = (
-            f">= {SMOOTH_INSIDE_FRACTION:.0%} inside and none more than "
-            f"{SMOOTH_MAX_OUTSIDE_MM} mm outside (median reported, not judged)"
-        )
-        base = {**base, "rule": smooth_rule}
+    outside = ~inside
+    farthest = float(dist[outside].max()) if outside.any() else 0.0
+    if depth_rule == INSIDE_RULE:
+        ok = inside_fraction >= INSIDE_MIN_FRACTION and farthest <= INSIDE_MAX_OUTSIDE_MM
     else:
         ok = median <= SEEG_MEDIAN_MM and near_fraction >= SEEG_PLAUSIBLE_FRACTION
     return Fit(
@@ -302,6 +316,7 @@ def fit(
         inside_fraction=inside_fraction,
         near_or_inside_fraction=near_fraction,
         inside_evaluated=True,
+        max_outside_mm=farthest,
         n_ambiguous=n_amb,
         **stats,
         **base,

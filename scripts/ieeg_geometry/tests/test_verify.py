@@ -6,6 +6,7 @@ from ieeg_geometry.bids import discover, read_electrode_set
 from ieeg_geometry.surfaces import Surface
 from ieeg_geometry.verify import (
     _DIRECTIONS,
+    INSIDE_RULE,
     Fit,
     OffsetFit,
     _inside,
@@ -206,30 +207,30 @@ def test_native_electrodes_beat_acpc_on_the_cut_fixture(mini):
     assert fit(sets[None].xyz_mm, surface, "seeg").reason == "inside-unevaluable"
 
 
-def _smooth(surface):
-    surface.smooth = True
-    return surface
-
-
-def test_smooth_reference_judges_inside_and_outside_distance_not_the_median(sphere):
-    smooth = _smooth(icosphere(3))
+def test_inside_rule_judges_inside_and_outside_distance_not_the_median(sphere):
     deep = np.array([[0.0, 0, 0.5]] * 20)  # 9.5 mm from the nearest vertex: median over 6 mm
-    assert fit(deep, sphere, "seeg").grade == "fail"  # an ordinary surface judges the median
-    result = fit(deep, smooth, "seeg")
+    assert fit(deep, sphere, "seeg").grade == "fail"  # the default rule judges the median
+    result = fit(deep, sphere, "seeg", depth_rule=INSIDE_RULE)
     assert result.grade == "plausible" and result.median_mm > 6.0
     assert "median reported, not judged" in result.rule
+    assert result.max_outside_mm == 0.0
 
 
-def test_smooth_reference_fails_a_contact_12_mm_outside_and_too_few_inside():
-    smooth = _smooth(icosphere(3))
+def test_inside_rule_fails_a_contact_12_mm_outside_and_too_few_inside(sphere):
     inside = [[0.0, 0, 0.5]] * 19
-    assert fit(np.array(inside + [[0.0, 0, 8.0]]), smooth, "seeg").grade == "plausible"
-    far = fit(np.array(inside + [[0.0, 0, 22.0]]), smooth, "seeg")  # 12 mm outside
-    assert far.grade == "fail" and far.inside_fraction == 0.95
-    few = fit(np.array(inside[:17] + [[0.0, 0, 12.0]] * 3), smooth, "seeg")  # 85 percent inside
+    ok = fit(np.array(inside + [[0.0, 0, 8.0]]), sphere, "seeg", depth_rule=INSIDE_RULE)
+    assert ok.grade == "plausible"
+    far = fit(np.array(inside + [[0.0, 0, 22.0]]), sphere, "seeg", depth_rule=INSIDE_RULE)
+    assert far.grade == "fail" and far.inside_fraction == 0.95  # 12 mm outside
+    assert far.max_outside_mm is not None and far.max_outside_mm > 10.0
+    few = fit(np.array(inside[:17] + [[0.0, 0, 12.0]] * 3), sphere, "seeg", depth_rule=INSIDE_RULE)
     assert few.grade == "fail"
 
 
-def test_smooth_flag_comes_from_vendored_metadata():
-    assert all(s.smooth for s in load_reference("MNI152NLin2009cAsym"))
-    assert not any(s.smooth for s in load_reference("fsaverage"))
+def test_the_rule_is_the_callers_and_a_reference_never_changes_it():
+    mni = load_reference("MNI152NLin2009cAsym")
+    deep = np.array([[30.0, -20.0, 20.0]] * 10)
+    assert fit(deep, mni, "seeg").rule.startswith("median <=")
+    assert fit(deep, mni, "seeg", depth_rule=INSIDE_RULE).rule.startswith(">=")
+    with pytest.raises(ValueError):
+        fit(deep, mni, "seeg", depth_rule="smooth")

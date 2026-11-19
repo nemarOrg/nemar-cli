@@ -30,7 +30,7 @@ cd scripts/ieeg_geometry && uv run pytest -q
 `specific` (ECoG contacts with a median nearest-vertex distance of at most 2.0 mm, or contacts on template vertices at most 1.0 mm whose 10 mm shift fails), `plausible` (depth contacts with a median of at most 6.0 mm and at least 90 percent inside or within 5.0 mm of the surface), or `fail`.
 Depth contacts in the right frame measure only 82 to 89 percent strictly inside the pial surface, so `plausible` is a plausibility check, not proof of a frame.
 FreeSurfer surfaces are in tkr RAS and scanner RAS = tkr RAS + c_ras, so contacts declared in scanner RAS are brought into the surface frame by subtracting c_ras (checked on on003848 sub-RESP0699: 33.3 mm as declared, 1.37 mm subtracted).
-Against a reference marked `smooth` in its vendored `reference.json` (the MNI shell), depth contacts are judged by at least 95 percent inside and none more than 10.0 mm outside; the median is reported, not judged (ruling 8).
+A caller can pass `depth_rule=INSIDE_RULE` to `fit` (the SPM track does, against the MNI shell): at least 95 percent inside and none more than 10.0 mm outside, the median reported, not judged (ruling 8). The default is the median rule; no reference changes any caller's verdict (ruling 22).
 Open references: the MNI shell uses the implicit cap at x = 0; any other open surface fails closed with `inside-unevaluable` for depth contacts.
 
 Nearest-vertex distances are biased upward for points that lie on the surface itself: a point on the surface but between vertices reads about 0.50 mm on fsaverage6 and 0.74 mm on the MNI shell.

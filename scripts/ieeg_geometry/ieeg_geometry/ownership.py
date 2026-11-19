@@ -53,6 +53,7 @@ class Verification:
     # SPM track (ruling 9): the field's check on the subject's own pial surface, when run.
     field_check_median_mm: float | None = None
     field_check_p10_mm: float | None = None
+    max_outside_mm: float | None = None
 
     @classmethod
     def from_fit(cls, fit: Fit, reference: str) -> Verification:
@@ -75,6 +76,7 @@ class Verification:
             inside_fraction=num(fit.inside_fraction),
             near_or_inside_fraction=num(fit.near_or_inside_fraction),
             inside_evaluated=fit.inside_evaluated,
+            max_outside_mm=num(fit.max_outside_mm),
             n_ambiguous=fit.n_ambiguous,
             n_left_out=fit.n_left_out,
             reason=fit.reason,
@@ -107,7 +109,7 @@ def _entry_json(e: OwnedPath) -> dict:
         else {
             k: v
             for k, v in sorted(e.verification.__dict__.items())
-            if v is not None or not k.startswith("field_check_")
+            if v is not None or not k.startswith(("field_check_", "max_outside"))
         },
     }
 
