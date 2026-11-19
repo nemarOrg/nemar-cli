@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from importlib import metadata
 from pathlib import Path
 
-from . import freesurfer
+from . import freesurfer, labels
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -53,6 +54,11 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
     write = lambda s="": print(s, file=out)  # noqa: E731
     refs = {name: load_reference(name) for name in REFERENCE_NAMES}
     items = discover(dataset)
+    try:
+        proposals = {p.electrodes: p for p in labels.plan_dataset(dataset).proposals}
+    except metadata.PackageNotFoundError as exc:
+        proposals = {}
+        write(f"label proposals unavailable: the ieeg-geometry package version is unknown ({exc})")
     if not items:
         write(f"no electrodes.tsv found under sub-* in {dataset}")
         return 1
@@ -60,11 +66,16 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         label = f"sub-{item.subject}" + (f" ses-{item.session}" if item.session else "")
         label += f" space-{item.space}" if item.space else " (no space entity)"
         write(f"{label}: {item.electrodes_path.relative_to(dataset)}")
+        proposal = proposals.get(item.electrodes_path.relative_to(dataset).as_posix())
+        for line in proposal.lines() if proposal else []:
+            write(f"  {line}")
         try:
             eset = read_electrode_set(item)
         except GeometryRefusal as exc:
             write(f"  refused: {exc.reason} ({exc.message})")
             continue
+        for warning in eset.warnings:
+            write(f"  warning: {warning}")
         counts = ", ".join(f"{t}={n}" for t, n in eset.type_counts().items())
         write(f"  frame {eset.frame}, units {eset.declared_units} (x{eset.scale_to_mm:g} to mm)")
         write(f"  contacts {len(eset.contacts)} ({counts}), missing coordinates {eset.n_missing}")
@@ -90,8 +101,24 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
                 write(f"      preferred: {result.preferred}")
         if not _types(eset) and eset.contacts:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")
+    _write_suppressed(proposals, write)
     freesurfer.inspect_dataset(dataset, out)
     return 0
+
+
+def _write_suppressed(proposals: dict, write) -> None:
+    """Dataset-level reasons that stopped blind trials, with the files they affect."""
+    by_reason: dict[str, list[str]] = {}
+    for proposal in proposals.values():
+        for reason in proposal.suppressed:
+            by_reason.setdefault(reason, []).append(proposal.electrodes)
+    for reason, files in sorted(by_reason.items()):
+        write()
+        write(f"blind trials suppressed by {reason} ({len(files)} file(s) need a human label):")
+        for name in files[:20]:
+            write(f"  {name}")
+        if len(files) > 20:
+            write(f"  and {len(files) - 20} more")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -8,10 +9,12 @@ import numpy as np
 import pytest
 
 from ieeg_geometry import freesurfer as fsm
+from ieeg_geometry import labels
 from ieeg_geometry.ownership import OwnedPath, read_ownership, write_ownership
 from ieeg_geometry.reference import load_reference
 
 FIX = Path(__file__).parent / "fixtures" / "fs_dataset"
+LABELS_FIX = Path(__file__).parent / "fixtures" / "labels"
 P02 = "sub-p02/ses-umcuiemu01/ieeg/sub-p02_ses-umcuiemu01_acq-clinical"
 P03 = "sub-p03/ses-nyuecog01/ieeg/sub-p03_ses-nyuecog01_acq-clinical"
 P02_FS_COORD = P02 + "_space-fsaverage_coordsystem.json"
@@ -180,21 +183,24 @@ def test_without_sphere_reg_nothing_is_placed(ds):
 
 
 def test_write_outputs_merges_ownership_and_is_idempotent(ds):
-    other = OwnedPath(
-        "sub-x/other_space-IXI549Space_electrodes.tsv",
-        "electrodes",
-        (("a", "b"),),
-        "spm-deformation",
-    )
-    write_ownership(ds, "0.0.1", [other])
+    # a real entry written by the label track (C1) into the same dataset
+    shutil.copytree(LABELS_FIX / "on006107", ds, dirs_exist_ok=True)
+    assert labels.write(labels.plan_dataset(ds), ds)
+    c1_owned = read_ownership(ds)
+    assert c1_owned is not None
+    c1_entries = {e.path: e for e in c1_owned.entries}
+    assert c1_entries and all(e.method != fsm.METHOD for e in c1_entries.values())
     entries = fsm.write_outputs(ds, fsm.plan_dataset(ds))
     paths = {e.path for e in entries}
     assert any(p.endswith("_space-fsaverage_electrodes.tsv") for p in paths)
     owned = read_ownership(ds)
     assert owned is not None
     by_path = {e.path: e for e in owned.entries}
-    assert other.path in by_path and by_path[other.path].method == "spm-deformation"
+    assert {p: by_path[p] for p in c1_entries} == c1_entries  # C1's entries survive unchanged
     assert paths <= set(by_path)
+    for e in entries:
+        assert e.output_sha256 == hashlib.sha256((ds / e.path).read_bytes()).hexdigest()
+    assert labels.write(labels.plan_dataset(ds), ds) == []  # and C1 still sees its files intact
     for e in entries:
         assert (ds / e.path).exists()
     sidecar = json.loads((ds / P02_FS_COORD).read_text())
@@ -335,3 +341,21 @@ def test_pipeline_version_is_the_installed_package_version():
     from importlib import metadata
 
     assert fsm.pipeline_version() == metadata.version("ieeg-geometry")
+
+
+def test_hand_edited_owned_output_is_kept_not_regenerated_or_removed(ds):
+    fsm.write_outputs(ds, fsm.plan_dataset(ds))
+    edited = ds / P02_FS
+    edited.write_text(edited.read_text() + "# curator note\n")
+    kept = edited.read_bytes()
+    results = fsm.plan_dataset(ds)
+    assert fsm.hand_edited_outputs(ds, results) == [P02_FS]
+    fsm.write_outputs(ds, results)
+    assert edited.read_bytes() == kept  # regeneration never overwrites a hand edit
+    # and a hand-edited file whose output is no longer produced is not deleted either
+    for f in (ds / "derivatives/freesurfer/sub-p02/surf").glob("*.sphere.reg"):
+        f.write_bytes(b"damaged")
+    results = fsm.plan_dataset(ds)
+    assert P02_FS not in {e.path for e in fsm.stale_outputs(ds, results)}
+    fsm.write_outputs(ds, results)
+    assert edited.read_bytes() == kept

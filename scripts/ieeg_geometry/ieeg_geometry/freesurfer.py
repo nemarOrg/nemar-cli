@@ -32,11 +32,11 @@ Run `python -m ieeg_geometry.freesurfer <dataset-dir>` for a read-only report.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass, field, replace
-from importlib import metadata
 from pathlib import Path
 
 import nibabel as nib
@@ -44,6 +44,7 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .labels import pipeline_version
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
@@ -79,10 +80,6 @@ _LEFT_TEXT = {
     LEFT_SPHERE_UNREADABLE: "cortical contacts whose sphere.reg is unreadable or mismatched",
     LEFT_REGISTRATION: "cortical contacts of a subject whose registration check failed",
 }
-
-
-def pipeline_version() -> str:
-    return metadata.version("ieeg-geometry")  # raises PackageNotFoundError when not installed
 
 
 # ---- vendored fsaverage6 sphere ---------------------------------------------------------------
@@ -720,16 +717,40 @@ def _json_bytes(out: OutputFile) -> bytes:
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _untouched(path: Path, entry: OwnedPath | None) -> bool:
+    """True when the file is absent or still holds the bytes the pipeline recorded writing.
+
+    An owned file whose bytes differ from `output_sha256` (or an entry without one) was edited
+    by hand: it is kept, never regenerated or deleted (the same rule as the label track).
+    """
+    if not path.exists():
+        return True
+    return (
+        entry is not None
+        and entry.output_sha256 is not None
+        and _sha(path.read_bytes()) == entry.output_sha256
+    )
+
+
 def stale_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list[OwnedPath]:
     """Owned `space-fsaverage` outputs of an earlier run that the current plan no longer gives.
 
     Pipeline-owned paths are regenerated, never kept as corrections (plan item 3): an owned
-    path of this method that no result produces any more is stale.
+    path of this method that no result produces any more is stale. Hand-edited stale files are
+    listed by `hand_edited_outputs` instead and are not removed.
     """
-    existing = read_ownership(dataset_dir)
+    dataset = Path(dataset_dir)
+    return [e for e in _stale_all(dataset, results) if _untouched(dataset / e.path, e)]
+
+
+def _stale_all(dataset: Path, results: list[SubjectResult]) -> list[OwnedPath]:
+    existing = read_ownership(dataset)
     if existing is None:
         return []
-    dataset = Path(dataset_dir)
     produced = {
         _rel(path, dataset)
         for res in results
@@ -737,6 +758,27 @@ def stale_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
         for path in (out.electrodes_path, out.coordsystem_path)
     }
     return [e for e in existing.entries if e.method == METHOD and e.path not in produced]
+
+
+def hand_edited_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list[str]:
+    """Owned paths of this method that were edited by hand and are therefore kept as they are."""
+    dataset = Path(dataset_dir)
+    existing = read_ownership(dataset)
+    if existing is None:
+        return []
+    owned = {e.path: e for e in existing.entries if e.method == METHOD}
+    paths = [e.path for e in _stale_all(dataset, results)]
+    paths += [
+        _rel(path, dataset)
+        for res in results
+        for out in res.outputs
+        for path in (out.electrodes_path, out.coordsystem_path)
+    ]
+    return sorted(
+        p
+        for p in paths
+        if p in owned and not _untouched(dataset / p, owned[p]) and (dataset / p).exists()
+    )
 
 
 def _verification(out: OutputFile) -> Verification:
@@ -754,10 +796,14 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
 
     The existing ownership file is read and merged: only entries for the paths written here
     (and the stale paths of this method, which are deleted with their entries) are replaced or
-    removed; other tracks' entries survive. Output bytes are deterministic, so a rerun on
+    removed; other tracks' entries survive. Each entry records `output_sha256`. An owned file
+    whose bytes no longer match its recorded hash was hand-edited and is kept untouched, with
+    its old entry (see `hand_edited_outputs`). Output bytes are deterministic, so a rerun on
     unchanged inputs rewrites identical files. Returns the entries this call wrote.
     """
     dataset = Path(dataset_dir)
+    existing = read_ownership(dataset)
+    owned = {e.path: e for e in existing.entries} if existing else {}
     stale = stale_outputs(dataset, results)
     entries: list[OwnedPath] = []
     for res in results:
@@ -774,16 +820,18 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
                 (out.electrodes_path, _tsv_bytes(out), "electrodes"),
                 (out.coordsystem_path, _json_bytes(out), "coordsystem"),
             ):
+                rel = _rel(path, dataset)
+                if not _untouched(path, owned.get(rel)):
+                    continue  # hand-edited: kept, with its old entry
                 path.write_bytes(data)
                 entries.append(
-                    OwnedPath(_rel(path, dataset), kind, inputs, out.method, verification)
+                    OwnedPath(rel, kind, inputs, out.method, verification, output_sha256=_sha(data))
                 )
     for entry in stale:
         (dataset / entry.path).unlink(missing_ok=True)
     if entries or stale:
-        existing = read_ownership(dataset)
         drop = {e.path for e in entries} | {e.path for e in stale}
-        kept = [e for e in (existing.entries if existing else []) if e.path not in drop]
+        kept = [e for e in owned.values() if e.path not in drop]
         write_ownership(dataset, pipeline_version(), kept + entries)
     return entries
 
@@ -827,6 +875,8 @@ def inspect_dataset(dataset: Path, out=sys.stdout) -> int:
         print(line, file=out)
     for entry in stale_outputs(dataset, results):
         print(f"stale owned output, would be removed on write: {entry.path}", file=out)
+    for path in hand_edited_outputs(dataset, results):
+        print(f"hand-edited owned output, kept as it is: {path}", file=out)
     return len(results)
 
 
