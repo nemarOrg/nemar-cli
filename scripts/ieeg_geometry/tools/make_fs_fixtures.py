@@ -10,9 +10,9 @@ Usage, from the repository root:
 `surf/{lh,rh}.{pial,sphere.reg}` files. Each pial surface is cut to the vertices within
 (the nearest vertex; MARGIN_MM is rounding slack) of any contact, in the declared frame and
 in the frame with c_ras subtracted, and to the faces made only of kept vertices. The
-matching `sphere.reg` is cut to the same vertices, so vertex indices stay aligned between the two. About
-10,000 evenly spaced vertices per hemisphere are kept as well, so the registration check
-(an even sample of the pial vertices) sees the whole brain.
+matching `sphere.reg` is cut to the same vertices, so vertex indices stay aligned between
+the two. About 10,000 evenly spaced vertices per hemisphere are kept as well, so the
+registration check (an even sample of the pial vertices) sees the whole brain.
 """
 
 from __future__ import annotations
