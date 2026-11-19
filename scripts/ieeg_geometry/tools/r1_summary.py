@@ -50,7 +50,10 @@ def load_reports(path: Path) -> dict[str, dict]:
                     and m.name.endswith(".json")
                     and not Path(m.name).name.startswith(".")
                 ):
-                    reports[Path(m.name).stem] = json.load(tar.extractfile(m))
+                    member = tar.extractfile(m)
+                    if member is None:
+                        raise ValueError(f"{m.name} is not a regular file")
+                    reports[Path(m.name).stem] = json.load(member)
     else:
         for f in sorted(path.glob("*.json")):
             reports[f.stem] = json.loads(f.read_text())
