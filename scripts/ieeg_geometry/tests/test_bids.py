@@ -110,3 +110,41 @@ def test_type_column_synonyms_and_hemisphere(tmp_path):
     eset = _read(_dataset(tmp_path, tsv, {"iEEGCoordinateUnits": "mm"}))
     assert [c.type for c in eset.contacts] == ["seeg", "ecog", "ecog", "ecog", "seeg"]
     assert [c.hemisphere for c in eset.contacts] == ["L", "R", None, "R", None]
+
+
+def test_assume_units_covers_a_missing_coordsystem_and_missing_units(tmp_path):
+    root = _dataset(tmp_path, "name\tx\ty\tz\nA1\t1\t2\t3\n", None)
+    (item,) = discover(root)
+    eset = read_electrode_set(item, assume_units="mm")
+    assert eset.units_assumed and eset.scale_to_mm == 1.0 and eset.xyz_mm.tolist() == [[1, 2, 3]]
+    with pytest.raises(GeometryRefusal) as exc:
+        read_electrode_set(item)
+    assert exc.value.reason == "coordsystem-missing"
+    other = tmp_path / "other"
+    root = _dataset(other, "name\tx\ty\tz\nA1\t1\t2\t3\n", {"iEEGCoordinateSystem": "Other"})
+    (item,) = discover(root)
+    assert read_electrode_set(item, assume_units="m").scale_to_mm == 1000.0
+    with pytest.raises(GeometryRefusal) as exc:
+        read_electrode_set(item)
+    assert exc.value.reason == "units-missing"
+
+
+def test_assume_units_never_overrides_declared_units(tmp_path):
+    root = _dataset(tmp_path, "name\tx\ty\tz\nA1\t1\t2\t3\n", {"iEEGCoordinateUnits": "cm"})
+    (item,) = discover(root)
+    eset = read_electrode_set(item, assume_units="mm")
+    assert not eset.units_assumed and eset.scale_to_mm == 10.0
+    bad = tmp_path / "bad"
+    root = _dataset(bad, "name\tx\ty\tz\nA1\t1\t2\t3\n", {"iEEGCoordinateUnits": "pixels"})
+    (item,) = discover(root)
+    with pytest.raises(GeometryRefusal) as exc:
+        read_electrode_set(item, assume_units="mm")
+    assert exc.value.reason == "units-unsupported"
+
+
+def test_a_coordsystem_that_is_not_an_object_is_refused(tmp_path):
+    root = _dataset(tmp_path, "name\tx\ty\tz\nA1\t1\t2\t3\n", "[1, 2]")
+    (item,) = discover(root)
+    with pytest.raises(GeometryRefusal) as exc:
+        read_electrode_set(item, assume_units="mm")
+    assert exc.value.reason == "coordsystem-unreadable"

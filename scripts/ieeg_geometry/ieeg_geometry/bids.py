@@ -66,6 +66,7 @@ class ElectrodeSet:
     declared_units: str
     scale_to_mm: float
     contacts: list[Contact] = field(default_factory=list)
+    units_assumed: bool = False
 
     @property
     def xyz_mm(self) -> np.ndarray:
@@ -185,23 +186,39 @@ def _channel_types(paths: tuple[Path, ...]) -> dict[str, ContactType]:
     return types
 
 
-def read_electrode_set(item: Discovered) -> ElectrodeSet:
-    """Read one discovered pair. Raises `GeometryRefusal` when units cannot be trusted."""
+def read_electrode_set(item: Discovered, assume_units: str | None = None) -> ElectrodeSet:
+    """Read one discovered pair. Raises `GeometryRefusal` when units cannot be trusted.
+
+    With `assume_units` (`m`, `cm` or `mm`), a missing coordsystem, or one without
+    `iEEGCoordinateUnits`, is read with those units and `units_assumed` is set; the caller must
+    confirm them some other way (the geometric fit does). Units that are declared but
+    unsupported are still refused.
+    """
+    sidecar: dict = {}
     if item.coordsystem_path is None:
-        raise GeometryRefusal(
-            "coordsystem-missing", f"no coordsystem.json beside {item.electrodes_path.name}"
-        )
-    try:
-        sidecar = json.loads(item.coordsystem_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise GeometryRefusal(
-            "coordsystem-unreadable", f"{item.coordsystem_path.name}: {exc}"
-        ) from exc
+        if assume_units is None:
+            raise GeometryRefusal(
+                "coordsystem-missing", f"no coordsystem.json beside {item.electrodes_path.name}"
+            )
+    else:
+        try:
+            sidecar = json.loads(item.coordsystem_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise GeometryRefusal(
+                "coordsystem-unreadable", f"{item.coordsystem_path.name}: {exc}"
+            ) from exc
+        if not isinstance(sidecar, dict):
+            raise GeometryRefusal(
+                "coordsystem-unreadable", f"{item.coordsystem_path.name} is not a JSON object"
+            )
     raw_units = sidecar.get("iEEGCoordinateUnits")
+    assumed = False
     if not isinstance(raw_units, str) or not raw_units.strip():
-        raise GeometryRefusal(
-            "units-missing", f"{item.coordsystem_path.name} has no iEEGCoordinateUnits"
-        )
+        if assume_units is None:
+            raise GeometryRefusal(
+                "units-missing", f"{item.coordsystem_path} has no iEEGCoordinateUnits"
+            )
+        raw_units, assumed = assume_units, True
     units = raw_units.strip().lower()
     if units not in _UNIT_TO_MM:
         raise GeometryRefusal(
@@ -237,4 +254,5 @@ def read_electrode_set(item: Discovered) -> ElectrodeSet:
         declared_units=units,
         scale_to_mm=scale,
         contacts=contacts,
+        units_assumed=assumed,
     )
