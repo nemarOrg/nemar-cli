@@ -1,13 +1,20 @@
-"""Command line: `python -m ieeg_geometry inspect <dataset-dir>` (read-only)."""
+"""Command line.
+
+`python -m ieeg_geometry inspect <dataset-dir>` reports one checkout (read-only).
+`python -m ieeg_geometry run <dataset-id> --workdir DIR [--version V] [--apply]
+[--surfaces-out DIR]` fetches what a dataset's geometry needs, runs every track and prints one
+JSON report; it writes into the work tree only with `--apply`.
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from importlib import metadata
 from pathlib import Path
 
-from . import freesurfer, labels, spm
+from . import fetch, freesurfer, labels, pipeline, spm
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -126,12 +133,52 @@ def _write_suppressed(proposals: dict, write) -> None:
             write(f"  and {len(files) - 20} more")
 
 
+def run(args: argparse.Namespace, out=None) -> int:
+    """The `run` subcommand: exit 0 on a report, 1 when the run cannot proceed, 2 when a track
+    failed unexpectedly (the report is still printed)."""
+    try:
+        analysis, written = pipeline.run_dataset(
+            args.dataset_id,
+            args.workdir,
+            version=args.version,
+            do_apply=args.apply,
+            surfaces_out=args.surfaces_out,
+            repo_url=os.environ.get("IEEG_GEOMETRY_REPO_URL"),
+            data_url=os.environ.get("IEEG_GEOMETRY_DATA_URL"),
+            api_url=os.environ.get("IEEG_GEOMETRY_API_URL"),
+        )
+    except (pipeline.RefusedDataset, fetch.FetchError, GeometryRefusal) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    except metadata.PackageNotFoundError as exc:
+        print(
+            f"the ieeg-geometry package is not installed, so no version is known: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    report = analysis.report
+    if args.apply and args.surfaces_out is None:
+        report["warnings"] = sorted(
+            [*report["warnings"], "surfaces not written: no --surfaces-out"]
+        )
+    (out or sys.stdout).write(pipeline.report_json(report))
+    return 2 if analysis.errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ieeg_geometry")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("inspect", help="report frame, units, contacts and surface fits (read-only)")
     p.add_argument("dataset_dir", type=Path)
+    r = sub.add_parser("run", help="one pipeline over a dataset; JSON report on standard output")
+    r.add_argument("dataset_id", help="for example on004457")
+    r.add_argument("--version", default=None, help="dataset version (default: the latest release)")
+    r.add_argument("--workdir", type=Path, required=True, help="where the git work tree lives")
+    r.add_argument("--apply", action="store_true", help="write into the work tree (never commits)")
+    r.add_argument("--surfaces-out", type=Path, default=None, help="where --apply puts geometry/")
     args = parser.parse_args(argv)
+    if args.command == "run":
+        return run(args)
     return inspect(args.dataset_dir)
 
 
