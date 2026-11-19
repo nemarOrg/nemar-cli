@@ -7,7 +7,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-from . import labels
+from . import freesurfer, labels
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -102,6 +102,7 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         if not _types(eset) and eset.contacts:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")
     _write_suppressed(proposals, write)
+    freesurfer.inspect_dataset(dataset, out)
     return 0
 
 

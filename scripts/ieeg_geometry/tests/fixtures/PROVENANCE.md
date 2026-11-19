@@ -17,3 +17,13 @@ The cut surfaces are open meshes, so the inside-the-brain criterion is not evalu
 
 `ieeg_geometry/data/fsaverage/*.npz` were built by `tools/build_fsaverage6.py` from the fsaverage pial surfaces in public dataset `on004370` v1.0.0 (`derivatives/freesurfer/lh.pial`, `rh.pial`; header "created by greve on Thu Apr 11 2013"; sha256 `9cb004f61a2eeb977b1b595ad6de6656afdfc1f37ade0c00a8dde91e990a0f29` and `4f752701f74c1626ee3b6239046b9aa793ca4e87c6ae9a6b74a233c04e651212`).
 This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaverage6 files could not be made offline (known limit).
+
+## FreeSurfer fixtures (`fs_dataset/`)
+
+Built by `tools/make_fs_fixtures.py` from on004194 v1.0.0 (CC0): `sub-p02` (UMCU, needs c_ras) and `sub-p03` (NYU, as declared), their `acq-clinical` electrodes, coordsystem and channels files (raw GitHub), and from `data.nemar.org/on004194/v1.0.0/derivatives/freesurfer/sub-p0N/`: `surf/{lh,rh}.{pial,sphere.reg}` .
+Pial surfaces are cut to the nearest vertex of each contact (in the declared frame and with c_ras subtracted) plus about 10,000 evenly spaced vertices per hemisphere, so the registration check sees an even sample of the whole brain; the `volume info` footer is kept and each `sphere.reg` is cut to the same vertices so indices stay aligned.
+The cut surfaces are open, so depth-contact inside tests are not evaluated on them (the frame decisions here rest on ECoG contacts); full-surface checks are in `tests/test_freesurfer_network.py`.
+
+## Vendored fsaverage6 `sphere.reg`
+
+`lh.sphere.reg.npz` and `rh.sphere.reg.npz` hold the first 40962 vertices of fsaverage's `sphere.reg` (identical to its `sphere`, and identical for the two hemispheres) from `derivatives/freesurfer/fsaverage/surf/` of on004194 v1.0.0; `tools/build_fsaverage6_sphere.py`.
