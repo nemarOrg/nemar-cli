@@ -100,3 +100,22 @@ So a pial-surface fit is a strong test for contacts on the cortex and only a pla
 5. **Open references.** The MNI152NLin2009cAsym shell is two halves cut exactly at x = 0: its inside test is ray parity with each point assigned to the half on its side of x = 0 and rays pointing away from the midline (the implicit cap). Any other open reference fails closed with the reason `inside-unevaluable`.
 6. **One-hemisphere surfaces.** Only contacts on the supplied hemisphere's side (the `hemisphere` column, else the sign of x in the surface's frame) are evaluated, and the count left out is reported.
 7. **Real-data tests** that need full surfaces are marked `network`, download into a cache, and are run by the manager at review; CI runs the rest.
+
+### 2026-11-19, after B2's first report (PR #2226)
+
+On real on004457 fields the inversion is exact (median residual 0.005 mm) but depth contacts measure 7.7 to 10.0 mm median from the MNI152NLin2009cAsym shell, which is a smooth gray-plus-white isosurface with no sulci; 97 to 99 percent are inside it.
+A nearest-vertex median is the wrong plausibility measure against a smooth shell.
+
+8. **Plausibility of depth contacts against the MNI shell** (and any other reference marked `smooth` in its vendored metadata): at least 95 percent inside (implicit cap) and no contact more than 10.0 mm outside; the median is reported, not judged.
+   This catches the gross errors plausibility exists for (wrong file, sign or unit errors); it does not discriminate small frame errors, which is why ruling 3 also needs independent evidence.
+9. **An SPM field is checked before its contacts are trusted:** at least 2,000 sampled vertices of the subject's own pial surface, inverted through the same field, must land with a median at most 6.0 mm and a 10th percentile at most 2.0 mm from the template shell. This verifies the field's direction and its pairing with the subject; with it, the field counts as ruling 3's independent evidence.
+10. **Pairing ties:** when two electrode files of a subject both fit its surface, the file whose coordsystem `IntendedFor` names the T1 the field was computed from (the field's name without its `y_` prefix) is used; with no such match the subject is refused as "pairing ambiguous".
+
+### 2026-11-19, after B1's first report (PR #2227)
+
+On real FreeSurfer subjects the surface method gives specific evidence everywhere, while the affine (`talairach.xfm`) depth subsets are often refused by the median rule, and the affine and surface positions of the same ECoG contacts disagree by 10 to 15 mm median (the expected error of a 12-parameter affine to MNI305).
+
+11. **The surface method is for cortical contacts only** (ECoG, grid, strip, surface types); depth contacts always take the affine method, never a snap to the pial surface.
+12. **The affine is checked as a transform, then its contacts for plausibility.** At least 2,000 sampled vertices of the subject's pial surface, mapped through the same `talairach.xfm`, must land with a median at most 6.0 mm and a 10th percentile at most 2.0 mm from fsaverage's pial surface (ruling 9's check, for FreeSurfer); then the depth contacts pass ruling 8's rule against fsaverage (at least 95 percent inside, none more than 10.0 mm outside), with the median reported, not judged.
+    The sidecar of every `space-MNI305` file says the positions come from an affine registration with a typical error of 5 to 15 mm, and gives the measured affine-to-surface agreement for that subject when ECoG contacts exist.
+13. **Ruling 4, refined for two specific frames.** When both the declared frame and the offset frame give specific evidence and the offset is at least 3 mm, the frame whose median is at least 0.5 mm and 25 percent lower is used; otherwise the subject is refused as "frame ambiguous".
