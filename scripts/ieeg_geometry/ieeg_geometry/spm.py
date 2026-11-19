@@ -55,7 +55,6 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
-from .labels import pipeline_version
 from .ownership import (
     OwnedPath,
     Ownership,
@@ -73,6 +72,7 @@ from .verify import (
     Fit,
     fit,
 )
+from .version import pipeline_version
 
 LABEL = "IXI549Space"
 REFERENCE = "MNI152NLin2009cAsym"
@@ -955,31 +955,62 @@ def _untouched(dataset: Path, entry: OwnedPath) -> bool:
     )
 
 
-def _drop_stale(
+def stale_units(
     dataset: Path, entries: dict[str, OwnedPath], plan: SubjectPlan, keep: set[str]
-) -> bool:
-    """Remove this plan's previously owned outputs that are no longer wanted (in `keep`).
+) -> tuple[list[list[OwnedPath]], list[OwnedPath]]:
+    """This plan's previously owned outputs that are no longer wanted (not in `keep`).
 
-    A unit (electrodes file plus coordsystem file) goes only when every existing file of it is
-    untouched since our write; if either was hand-edited both stay, with their entries.
+    Returns `(removable, hand_edited)`. A unit (electrodes file plus coordsystem file) is
+    removable only when every existing file of it is untouched since our write; if either was
+    hand-edited both stay (`hand_edited`). Reads only.
     """
     units: dict[str, list[OwnedPath]] = {}
     for e in entries.values():
         if _owned_by(e, plan) and e.path not in keep:
             units.setdefault(_unit_key(e.path), []).append(e)
-    changed = False
+    removable: list[list[OwnedPath]] = []
+    hand_edited: list[OwnedPath] = []
     for members in units.values():
         present = [e for e in members if os.path.lexists(dataset / e.path)]
         if all(_untouched(dataset, e) for e in present):
-            for e in present:
-                (dataset / e.path).unlink()
-            for e in members:
-                del entries[e.path]
-            changed = True
+            removable.append(members)
         else:
-            for e in present:
-                plan.kept[e.path] = "hand-edited, kept"
-    return changed
+            hand_edited += present
+    return removable, hand_edited
+
+
+def _drop_stale(
+    dataset: Path, entries: dict[str, OwnedPath], plan: SubjectPlan, keep: set[str]
+) -> bool:
+    """Remove this plan's previously owned outputs that are no longer wanted (in `keep`)."""
+    removable, hand_edited = stale_units(dataset, entries, plan, keep)
+    for e in hand_edited:
+        plan.kept[e.path] = "hand-edited, kept"
+    for members in removable:
+        for e in members:
+            if os.path.lexists(dataset / e.path):
+                (dataset / e.path).unlink()
+            del entries[e.path]
+    return bool(removable)
+
+
+def blocked_files(
+    dataset: Path, entries: dict[str, OwnedPath], plan: SubjectPlan
+) -> dict[str, str]:
+    """Paths of a `write` plan that already hold something this pipeline may not replace."""
+    blocked: dict[str, str] = {}
+    for rel, data in plan.files.items():
+        target = dataset / rel
+        entry = entries.get(rel)
+        if not os.path.lexists(target):
+            continue
+        if target.is_symlink():
+            blocked[rel] = "symbolic link, kept"
+        elif target.read_bytes() != data and not (
+            entry is not None and entry.output_sha256 == _sha(target.read_bytes())
+        ):
+            blocked[rel] = "hand-edited, kept" if entry is not None else "not ours, kept"
+    return blocked
 
 
 def write(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
@@ -1005,18 +1036,7 @@ def write(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
         elif plan.verdict == "write":
             changed |= _drop_stale(dataset, entries, plan, set(plan.files))
             owned = {o.path: o for o in plan.owned}
-            blocked: dict[str, str] = {}
-            for rel, data in plan.files.items():
-                target = dataset / rel
-                entry = entries.get(rel)
-                if not os.path.lexists(target):
-                    continue
-                if target.is_symlink():
-                    blocked[rel] = "symbolic link, kept"
-                elif target.read_bytes() != data and not (
-                    entry is not None and entry.output_sha256 == _sha(target.read_bytes())
-                ):
-                    blocked[rel] = "hand-edited, kept" if entry is not None else "not ours, kept"
+            blocked = blocked_files(dataset, entries, plan)
             if blocked:
                 plan.kept = {rel: blocked.get(rel, "kept with its pair") for rel in plan.files}
                 continue

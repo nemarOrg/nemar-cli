@@ -8,8 +8,15 @@ Plan: `.context/plans/ieeg-geometry/plan.md`.
 
 ```bash
 uv run --project scripts/ieeg_geometry python -m ieeg_geometry inspect <dataset-dir>   # read-only report
+uv run --project scripts/ieeg_geometry python -m ieeg_geometry run <dataset-id> --workdir DIR [--version V] [--apply] [--surfaces-out DIR]
 cd scripts/ieeg_geometry && uv run pytest -q
 ```
+
+`run` fetches exactly the files a dataset's geometry needs, runs the four tracks in order (labels, FreeSurfer, SPM, subject surfaces) and prints one JSON report (`schema/geometry-report.v1.json`).
+It writes nothing unless `--apply` is given; `--apply` writes into the git work tree `DIR/<dataset-id>` and the surfaces into `--surfaces-out`, and never commits, pushes, opens a pull request or uploads.
+Exit codes: 0 report printed, 1 the run cannot proceed (a protected id, a tree or version failure, a dataset-level file that cannot be fetched), 2 a track failed unexpectedly (the report is still printed, with the track's decisions `skipped`; `--apply` then writes nothing, neither the work tree nor `--surfaces-out`).
+`--surfaces-out DIR/geometry/` ends up exactly the new index and the meshes it references (the directory is replaced, so meshes an earlier run wrote and the new index no longer names are gone).
+The repository, data plane and API URL templates are module constants of `fetch.py`; `run_dataset` and `main(argv, urls=...)` accept replacements (the tests point them at local files).
 
 ## Modules
 
@@ -24,6 +31,9 @@ cd scripts/ieeg_geometry && uv run pytest -q
 | `meshwrite.py` | `brain-mesh v1` encoder (byte-identical to the website's), quadric edge collapse (`fast-simplification`) to at most 65,535 vertices per hemisphere, edge statistics, point-to-surface deviation, signed volume for the winding test. |
 | `surfaces_out.py` | Subject surfaces to `geometry/index.json` plus content-addressed `geometry/meshes/<sha256>.mesh.bin`, in the contacts' frame (`c_ras` added to the vertices when the offset frame fits). The written mesh is judged by what decimation changed (ruling 15), not re-graded. Run `python -m ieeg_geometry.surfaces_out <dataset-dir> --out <dir> [--source-commit <sha>]` (the commit defaults to the dataset checkout's HEAD). The index schema is `schema/geometry-index.v1.json` (frozen for the website). |
 | `labels.py` | Label inference for electrodes files whose frame is missing, wrong or non-standard: candidates from the sidecar (including an inherited one), the description and README, then blind trials of `fsaverage` and `MNI152NLin2009cAsym`; accepted only on the evidence rules in the module docstring (lead rulings 16 to 18). `plan_dataset` builds a plan, `write(plan, dir)` writes a missing sidecar or a `space-<label>` pair and records it in the ownership file (with the SHA-256 of what was written; hand-edited files are kept, and so is a legacy owned file with no `output_sha256` whose bytes differ). `inspect` prints each proposal and what suppressed blind trials. |
+| `version.py` | The one strict `pipeline_version()` (the installed package version; a missing package raises). Every module and every output uses it; there is no `unknown` fallback. |
+| `fetch.py` | A blobless `git clone --no-checkout` of `nemarDatasets/<id>`, a checkout of only the paths the tracks read (electrodes, coordsystem and channels files, README, `dataset_description.json`, `.nemar/ieeg-geometry.json`, subject `lh/rh.pial`, `sphere.reg`, GIfTI pial, MATLAB cortex files and SPM `y_` fields; never recordings), and urllib downloads of annexed content from `data.nemar.org/<id>/<version>/<path>` into the clone's own annex object path (size and hash checked against the annex key), so links resolve and blob ids are git's. The version comes from `api.nemar.org/datasets/<id>`. A file that cannot be fetched is reported and its subject's electrodes files are removed from the work tree (decision `skipped`); a failed README, description or ownership file, the tree, the version, or more than 2 GB fails the run. |
+| `pipeline.py` | `analyze` plans every track against one snapshot and builds the report; `apply` writes the plans. Cross-track rule (ruling 4 across tracks): the label track's written files and its owned paths cover a subject-and-space (and a sidecar it writes covers the file's own label); FreeSurfer then SPM never write a covered one, and each kept FreeSurfer output covers its space for SPM. The tracks' own plan and write functions decide everything else. Ids `nm000103` to `nm000107` and `nm099998` are refused. |
 | `ownership.py` | `.nemar/ieeg-geometry.json` writer and reader, deterministic bytes, git blob ids of inputs, optional `output_sha256` of the written bytes. |
 
 ## Evidence grades

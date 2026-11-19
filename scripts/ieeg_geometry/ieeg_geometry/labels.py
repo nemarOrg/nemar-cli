@@ -52,7 +52,6 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 from functools import cache
-from importlib import metadata
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +69,7 @@ from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_o
 from .reference import load_reference
 from .surfaces import Surface
 from .verify import FAIL, PLAUSIBLE, SPECIFIC, TEMPLATE_VERTEX_MM, Fit, fit
+from .version import pipeline_version
 
 METHOD_URL = "https://docs.nemar.org/data/ieeg-geometry/"
 # Valid `iEEGCoordinateSystem` template labels: BIDS specification, appendix "Coordinate
@@ -115,11 +115,6 @@ ALREADY = "already-labeled"
 KEPT = "hand-edited, kept"
 
 _GRADE_ORDER = {SPECIFIC: 0, PLAUSIBLE: 1, FAIL: 2}
-
-
-def pipeline_version() -> str:
-    """The installed package version (raises when the package is not installed)."""
-    return metadata.version("ieeg-geometry")
 
 
 @cache

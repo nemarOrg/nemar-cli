@@ -27,12 +27,12 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from importlib import metadata
 from pathlib import Path
 
 import numpy as np
 
 from .bids import ECOG, Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .labels import DEPRECATED_LABELS, TEMPLATE_LABELS
 from .meshwrite import (
     MAX_HEMISPHERE_BYTES,
     MAX_VERTICES,
@@ -44,6 +44,7 @@ from .meshwrite import (
 from .reference import read_brain_mesh
 from .surfaces import Surface, read_surface
 from .verify import SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
+from .version import pipeline_version
 
 INDEX_SCHEMA = "nemar-ieeg-geometry-index"
 INDEX_VERSION = 1
@@ -55,13 +56,6 @@ MIN_ECOG_CONTACTS = 8
 # ruling 15: what decimation may change, measured against the original surface
 MAX_MEDIAN_SHIFT_MM = 0.5
 MAX_P99_DEVIATION_MM = 1.0
-
-
-def pipeline_version() -> str:
-    try:
-        return metadata.version("ieeg-geometry")
-    except metadata.PackageNotFoundError:
-        return "unknown"
 
 
 def _is_surface_file(name: str) -> bool:
@@ -252,6 +246,14 @@ def build_geometry(
         lines.append(f"sub-{item.subject}: {rel}: skipped, {reason}")
 
     for item in discover(dataset):
+        if item.space in TEMPLATE_LABELS or item.space in DEPRECATED_LABELS:
+            continue  # subject surfaces describe the subject's own frames, not template files
+        # a subject without surfaces is skipped first, so a sidecar another track adds to the
+        # electrodes file cannot change the reason a rerun gives
+        sets = find_surface_sets(dataset, item.subject)
+        if not sets:
+            skip(item, "no subject surface file found")
+            continue
         try:
             eset = read_electrode_set(item)
         except GeometryRefusal as exc:
@@ -262,10 +264,6 @@ def build_geometry(
             skip(item, "no contact has all of x, y, z")
             continue
         kind, xyz, hemis = picked
-        sets = find_surface_sets(dataset, item.subject)
-        if not sets:
-            skip(item, "no subject surface file found")
-            continue
         candidates: list[Candidate] = []
         reasons: list[str] = []
         for paths in sets:
