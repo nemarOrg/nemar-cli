@@ -176,19 +176,14 @@ def _add_native_surface(dataset: Path) -> None:
 
 @pytest.fixture
 def synthetic_dataset(tmp_path, synthetic_field) -> Path:
-    """A subject with 40 ECoG contacts on the MNI shell, in a native frame the field maps."""
-    ref = load_reference("MNI152NLin2009cAsym")
-    rng = np.random.default_rng(3)
-    verts = ref[1].vertices  # right hemisphere
-    template = verts[rng.choice(len(verts), 40, replace=False)]
-    template = template * 0.995  # nudge inside the shell, well under 2 mm
-    native = _native(template)
+    """A subject with 40 sEEG contacts inside the right MNI shell, in a native frame."""
+    native = _native(_shell_points(40, 11, min_x=20.0) * 0.9)
     ieeg = tmp_path / "sub-9" / "ieeg"
     ieeg.mkdir(parents=True)
     rows = ["name\tx\ty\tz\tsize\ttype\themisphere"]
     for i, p in enumerate(native):
-        rows.append(f"G{i + 1}\t{p[0]:.4f}\t{p[1]:.4f}\t{p[2]:.4f}\t4\tECoG\tR")
-    rows.append("G41\tn/a\tn/a\tn/a\t4\tECoG\tR")
+        rows.append(f"G{i + 1}\t{p[0]:.4f}\t{p[1]:.4f}\t{p[2]:.4f}\t4\tsEEG\tR")
+    rows.append("G41\tn/a\tn/a\tn/a\t4\tsEEG\tR")
     (ieeg / "sub-9_electrodes.tsv").write_text("\n".join(rows) + "\n")
     (ieeg / "sub-9_coordsystem.json").write_text(
         json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm"})
@@ -203,7 +198,7 @@ def synthetic_dataset(tmp_path, synthetic_field) -> Path:
 def test_verified_subject_is_written_with_provenance_and_ownership(synthetic_dataset):
     (plan,) = spm.plan_dataset(synthetic_dataset)
     assert plan.verdict == "write", plan.reason
-    assert plan.template_fit["ecog"].grade == "specific"
+    assert plan.template_fit["seeg"].grade == "plausible"
     written = spm.write([plan], synthetic_dataset)
     tsv = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_space-IXI549Space_electrodes.tsv"
     sidecar = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_space-IXI549Space_coordsystem.json"
@@ -430,7 +425,7 @@ def test_intended_for_names_the_t1_and_a_different_t1_is_never_paired(synthetic_
 
 def test_a_clear_template_verification_winner_pairs_without_intended_for(synthetic_dataset):
     """Two sEEG files invert fully; one lies inside the shell, the other 5.5 mm outside it."""
-    _seeg_file(synthetic_dataset, _shell_points(40, 5, min_x=20.0) * 0.9)
+    _seeg_file(synthetic_dataset, _shell_points(40, 11, min_x=20.0) * 0.9)
     _seeg_file(
         synthetic_dataset, _outside(_shell_points(40, 6), 5.5), "sub-9_space-ACPC_electrodes.tsv"
     )
@@ -528,37 +523,127 @@ def test_a_refused_rerun_removes_previous_outputs_and_keeps_other_tracks(synthet
     assert owned.pipeline_version == spm.pipeline_version()
 
 
-def test_owned_files_record_their_hash_and_hand_edits_are_kept(synthetic_dataset):
+def _write_once(dataset: Path):
+    plans = spm.plan_dataset(dataset)
+    written = spm.write(plans, dataset)
+    rels = {Path(w).name.split("_space-")[-1]: dataset / w for w in written}
+    return written, rels["IXI549Space_electrodes.tsv"], rels["IXI549Space_coordsystem.json"]
+
+
+def test_owned_files_record_their_hash(synthetic_dataset):
     import hashlib
 
-    plans = spm.plan_dataset(synthetic_dataset)
-    written = spm.write(plans, synthetic_dataset)
+    _write_once(synthetic_dataset)
     owned = read_ownership(synthetic_dataset)
-    assert owned is not None
+    assert owned is not None and len(owned.entries) == 2
     for entry in owned.entries:
         data = (synthetic_dataset / entry.path).read_bytes()
         assert entry.output_sha256 == hashlib.sha256(data).hexdigest()
-    sidecar = synthetic_dataset / next(w for w in written if w.endswith("coordsystem.json"))
-    sidecar.write_text(sidecar.read_text().replace("Computed by NEMAR", "Edited by hand, NEMAR"))
-    edited = sidecar.read_bytes()
-    (rerun,) = spm.plan_dataset(synthetic_dataset)
-    again = spm.write([rerun], synthetic_dataset)
-    assert sidecar.read_bytes() == edited  # kept, not overwritten
-    assert rerun.kept == {sidecar.relative_to(synthetic_dataset).as_posix(): "hand-edited, kept"}
-    assert sidecar.relative_to(synthetic_dataset).as_posix() not in again
-    # an untouched owned file whose content would change is regenerated
-    tsv = synthetic_dataset / next(w for w in written if w.endswith("electrodes.tsv"))
-    entry = next(e for e in owned.entries if e.path.endswith("electrodes.tsv"))
-    tsv.write_text("stale\n")
-    from dataclasses import replace
 
-    from ieeg_geometry.ownership import write_ownership
 
-    others = [e for e in owned.entries if e is not entry]
-    stale = replace(entry, output_sha256=hashlib.sha256(b"stale\n").hexdigest())
-    write_ownership(synthetic_dataset, "0.0.1", [*others, stale])
-    (third,) = spm.plan_dataset(synthetic_dataset)
-    spm.write([third], synthetic_dataset)
-    assert tsv.read_text() != "stale\n" and not third.kept.get(
-        tsv.relative_to(synthetic_dataset).as_posix()
+@pytest.mark.parametrize("which", ["sidecar", "tsv"])
+def test_a_hand_edit_of_either_file_keeps_both_files(synthetic_dataset, which):
+    """The electrodes file and its coordsystem file are one unit (as in B1)."""
+    written, tsv, sidecar = _write_once(synthetic_dataset)
+    # a changed input makes the regenerated content differ, so a kept file is visible
+    side = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_coordsystem.json"
+    side.write_text(
+        json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm", "x": 1})
     )
+    edited = tsv if which == "tsv" else sidecar
+    edited.write_text(
+        edited.read_text() + "\n"
+        if which == "tsv"
+        else edited.read_text().replace("NEMAR", "NEMAR (edited)")
+    )
+    before = {p: p.read_bytes() for p in (tsv, sidecar)}
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict == "write"
+    again = spm.write([plan], synthetic_dataset)
+    assert again == [] and {p: p.read_bytes() for p in (tsv, sidecar)} == before
+    rel = {p: p.relative_to(synthetic_dataset).as_posix() for p in (tsv, sidecar)}
+    assert plan.kept[rel[edited]] == "hand-edited, kept"
+    other = sidecar if edited is tsv else tsv
+    assert plan.kept[rel[other]] == "kept with its pair"
+
+
+def test_untouched_pair_is_regenerated_when_its_content_changes(synthetic_dataset):
+    _, tsv, sidecar = _write_once(synthetic_dataset)
+    side = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_coordsystem.json"
+    side.write_text(
+        json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm", "x": 1})
+    )
+    old = sidecar.read_bytes()
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    again = spm.write([plan], synthetic_dataset)
+    assert not plan.kept and len(again) == 2
+    assert sidecar.read_bytes() == old  # the sidecar text does not depend on that input
+
+
+def test_a_refused_rerun_leaves_a_hand_edited_file_in_place(synthetic_dataset):
+    _, tsv, sidecar = _write_once(synthetic_dataset)
+    tsv.write_text(tsv.read_text() + "\n")
+    (synthetic_dataset / "derivatives/freesurfer/sub-9/pial.R.surf.gii").unlink()
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict == "refused"
+    spm.write([plan], synthetic_dataset)
+    assert tsv.exists() and sidecar.exists()  # neither deleted: the unit has a hand edit
+    owned = read_ownership(synthetic_dataset)
+    assert owned is not None and {e.path for e in owned.entries} == {
+        p.relative_to(synthetic_dataset).as_posix() for p in (tsv, sidecar)
+    }
+    assert set(plan.kept) == {p.relative_to(synthetic_dataset).as_posix() for p in (tsv, sidecar)}
+
+
+def test_a_changed_pairing_removes_the_other_files_untouched_outputs(synthetic_dataset):
+    """The output name keeps the source's other entities, so a different file means new paths."""
+    _, old_tsv, old_sidecar = _write_once(synthetic_dataset)
+    ieeg = synthetic_dataset / "sub-9" / "ieeg"
+    for suffix in ("electrodes.tsv", "coordsystem.json"):
+        (ieeg / f"sub-9_{suffix}").rename(ieeg / f"sub-9_acq-b_{suffix}")
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is not None and "acq-b" in plan.chosen.electrodes_path.name
+    written = spm.write([plan], synthetic_dataset)
+    assert all("sub-9_acq-b_space-IXI549Space" in w for w in written) and len(written) == 2
+    assert not old_tsv.exists() and not old_sidecar.exists()
+    owned = read_ownership(synthetic_dataset)
+    assert owned is not None and {e.path for e in owned.entries} == set(written)
+
+
+def test_subject_relative_intended_for_is_read_both_ways(tmp_path):
+    fs = tmp_path / "derivatives" / "freesurfer" / "sub-3"
+    fs.mkdir(parents=True)
+    field_path = fs / "y_sub-3_ses-mri01_T1w.nii"
+    anat = tmp_path / "sub-3" / "ses-1" / "anat"
+    anat.mkdir(parents=True)
+    (anat / "sub-3_ses-1_T1w.nii").write_bytes(b"")
+    status, subject = spm.intended_for_status, tmp_path / "sub-3"
+    # legacy subject-relative value naming a different existing T1: never paired
+    assert status("ses-1/anat/sub-3_ses-1_T1w.nii", field_path, tmp_path, subject) == (
+        spm.INTENDED_OTHER
+    )
+    # read dataset-relative only, the same value names nothing that exists
+    assert status("ses-1/anat/sub-3_ses-1_T1w.nii", field_path, tmp_path) == spm.INTENDED_UNKNOWN
+    # a subject-relative value that is the field's T1 pairs
+    (fs.parent.parent.parent / "sub-3" / "derivatives").mkdir(parents=True)
+    own = tmp_path / "sub-3" / "derivatives" / "x"
+    own.mkdir()
+    (tmp_path / "derivatives" / "freesurfer" / "sub-3" / "sub-3_ses-mri01_T1w.nii").write_bytes(b"")
+    assert status("sub-3_ses-mri01_T1w.nii", field_path, tmp_path, subject) == spm.INTENDED_UNKNOWN
+    assert status(
+        "derivatives/freesurfer/sub-3/sub-3_ses-mri01_T1w.nii", field_path, tmp_path, subject
+    ) == (spm.INTENDED_MATCH)
+
+
+@pytest.mark.parametrize("mixed", [True, False])
+def test_files_with_cortical_contacts_are_refused_with_their_own_reason(synthetic_dataset, mixed):
+    tsv = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
+    rows = tsv.read_text().splitlines()
+    rows = [r.replace("sEEG", "ECoG") if (not mixed or i % 2) else r for i, r in enumerate(rows)]
+    tsv.write_text("\n".join(rows) + "\n")
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict == "refused" and plan.chosen is None
+    assert "the SPM path writes depth-only files" in plan.reason
+    assert "FreeSurfer surface method" in plan.reason
+    assert ("mixed contact types" in plan.reason) is mixed
+    assert spm.write([plan], synthetic_dataset) == []

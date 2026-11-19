@@ -15,8 +15,9 @@ surface are inverted through the field and must land with a median of at most 6.
 10th percentile of at most 2.0 mm from the template shell, their centroid within 10.0 mm of the
 shell's, and each axis's 2nd-to-98th-percentile extent within 10 percent of the shell's, the
 shell taken on the pial's hemisphere and cut to z of at least -40 mm (the cerebellum and
-brainstem have no pial counterpart; ruling 25). This proves the field's direction and position.
-It does not prove which subject
+brainstem have no pial counterpart; ruling 25). This excludes a reversed or grossly wrong field
+(errors of roughly 10 mm or more); it does not prove position beyond that (a 5 mm or 10 mm
+shift in y passes, a 10 mm shift in z or an 8 mm shift in x fails). It does not prove which subject
 or electrodes file the field belongs to: sub-1's field passes against sub-3's surface.
 
 Pairing (ruling 21): a file is paired with a field when its coordsystem `IntendedFor` resolves
@@ -26,6 +27,9 @@ existing T1 is never paired. Otherwise (absent, or naming a file that does not e
 candidate is verified against the `MNI152NLin2009cAsym` shell with the inside rule (ruling 8)
 and there must be a clear winner: it passes, and every other candidate's inside fraction is at
 least 0.05 lower.
+
+Only depth contacts (sEEG, DBS, unknown) are written: a file with cortical (ECoG) contacts is
+refused with its own reason, because the surface method (FreeSurfer track) places those.
 
 Verification: the inverted contacts are fit to the shell with `INSIDE_RULE` (at least 95
 percent inside, none more than 10.0 mm outside; the median is reported, not judged, because a
@@ -257,7 +261,13 @@ SPM12_AFFINE = np.array(
 
 
 def on_spm12_grid(field_: DeformationField) -> bool:
-    """True for a field on SPM12's template grid, or a crop of it (same lattice, inside it)."""
+    """True for a field on SPM12's template grid, or a crop of it.
+
+    A crop is accepted when its voxels are SPM12's 1.5 mm voxels on the same lattice (same
+    linear part, origin an integer number of voxels from the template's) and it lies inside the
+    121 x 145 x 121 grid; this is ruling 23's intent (only SPM12's template space is labeled
+    `IXI549Space`) and also admits the committed test crop.
+    """
     if not np.allclose(field_.affine[:3, :3], SPM12_AFFINE[:3, :3], atol=1e-3):
         return False
     origin = np.linalg.solve(SPM12_AFFINE[:3, :3], field_.affine[:3, 3] - SPM12_AFFINE[:3, 3])
@@ -393,6 +403,14 @@ def _inside_fraction(fits: dict[str, Fit] | None) -> float:
     return min(f.inside_fraction if f.inside_fraction is not None else 1.0 for f in fits.values())
 
 
+CORTICAL_MIXED = (
+    "mixed contact types: the SPM path writes depth-only files; the cortical contacts "
+    "belong to the FreeSurfer surface method"
+)
+CORTICAL_ONLY = (
+    "cortical contacts only: the SPM path writes depth-only files; the cortical contacts "
+    "belong to the FreeSurfer surface method"
+)
 INTENDED_MATCH = "match"
 INTENDED_OTHER = "other"
 INTENDED_UNKNOWN = "unknown"
@@ -408,34 +426,46 @@ def _t1_stem(name: str) -> str:
 
 
 def intended_for_status(
-    intended_for: str | list[str] | None, field_path: Path, dataset: Path
+    intended_for: str | list[str] | None,
+    field_path: Path,
+    dataset: Path,
+    subject_dir: Path | None = None,
 ) -> str:
     """How a coordsystem `IntendedFor` relates to the field's T1 (ruling 21).
 
-    `match`: an entry resolves to an existing file that is the T1 the field was computed from
-    (the field's name without `y_`, in the field's directory when the entry gives a directory).
-    `other`: entries resolve to existing files and none is the field's T1. `unknown`: absent,
-    or no entry names an existing file.
+    Each entry is read dataset-relative (BIDS, with or without a leading slash or `bids::`)
+    and, when `subject_dir` is given, subject-relative (the legacy `ses-1/anat/x.nii` form).
+    `match`: an entry has an existing reading and every existing reading is the T1 the field
+    was computed from (the field's name without `y_`, in the field's directory when the entry
+    gives a directory); a list is searched. `other`: entries name existing files and none is
+    clean (a value naming a different existing T1 by either reading is never paired).
+    `unknown`: absent, or no entry names an existing file.
     """
     if intended_for is None:
         return INTENDED_UNKNOWN
     entries = [intended_for] if isinstance(intended_for, str) else list(intended_for)
     want = _t1_stem(field_path.name).removeprefix("y_")
     field_dir = field_path.parent.relative_to(dataset).as_posix()
-    existing = other = False
+    anywhere = False
     for raw in entries:
         if not isinstance(raw, str) or not raw.strip():
             continue
         rel = raw.strip().removeprefix("bids::").lstrip("/")
-        if not os.path.lexists(dataset / rel):
+        readings = [rel]
+        if subject_dir is not None:
+            readings.append((subject_dir / rel).relative_to(dataset).as_posix())
+        existing = [r for r in dict.fromkeys(readings) if os.path.lexists(dataset / r)]
+        if not existing:
             continue
-        existing = True
-        directory = Path(rel).parent.as_posix()
-        same_dir = directory in ("", ".") or directory == field_dir
-        if _t1_stem(Path(rel).name) == want and same_dir:
+        anywhere = True
+        clean = all(
+            _t1_stem(Path(r).name) == want
+            and (Path(r).parent.as_posix() in ("", ".") or Path(r).parent.as_posix() == field_dir)
+            for r in existing
+        )
+        if clean:
             return INTENDED_MATCH
-        other = True
-    return INTENDED_OTHER if existing and other else INTENDED_UNKNOWN
+    return INTENDED_OTHER if anywhere else INTENDED_UNKNOWN
 
 
 @dataclass
@@ -526,7 +556,11 @@ def evaluate_candidate(
     n_inv = int(inv.ok[present].sum()) if present else 0
     eligible = bool(present) and n_inv / len(present) >= MIN_INVERTIBLE_FRACTION
     notes = []
-    if not eligible:
+    cortical = [i for i in present if eset.contacts[i].type == "ecog"]
+    if cortical:
+        eligible = False
+        notes.append(CORTICAL_MIXED if len(cortical) < len(present) else CORTICAL_ONLY)
+    elif not eligible:
         notes.append(f"only {n_inv}/{len(present)} contacts invert inside the field's grid")
     surf = _best_surface_set(eset, surface_sets)
     surface_fit = fit_groups(eset, eset.xyz_mm, surf.surfaces) if surf else None
@@ -545,7 +579,9 @@ def evaluate_candidate(
         max_residual_mm=inv.max_residual,
         surface_fit=surface_fit,
         surface_name=surf.name if surf else None,
-        intended=intended_for_status(_intended_for(eset), field_.path, dataset),
+        intended=intended_for_status(
+            _intended_for(eset), field_.path, dataset, dataset / f"sub-{eset.subject}"
+        ),
         template_fit=template_fit,
         eligible=eligible,
         note="; ".join(notes),
@@ -881,6 +917,7 @@ def _owned_by(entry: OwnedPath, plan: SubjectPlan) -> bool:
     prefix = f"sub-{plan.subject}" + (f"_ses-{plan.session}" if plan.session else "") + "_"
     return (
         name.startswith(prefix)
+        and (plan.session is not None or not name.startswith(f"sub-{plan.subject}_ses-"))
         and f"_space-{LABEL}_" in name
         and Path(entry.path).parts[0] == f"sub-{plan.subject}"
     )
@@ -890,15 +927,60 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _unit_key(path: str) -> str:
+    """The electrodes file and its coordsystem file are one unit: they share this key."""
+    for suffix in ("_electrodes.tsv", "_coordsystem.json"):
+        if path.endswith(suffix):
+            return path[: -len(suffix)]
+    return path
+
+
+def _untouched(dataset: Path, entry: OwnedPath) -> bool:
+    target = dataset / entry.path
+    return (
+        not target.is_symlink()
+        and entry.output_sha256 is not None
+        and _sha(target.read_bytes()) == entry.output_sha256
+    )
+
+
+def _drop_stale(
+    dataset: Path, entries: dict[str, OwnedPath], plan: SubjectPlan, keep: set[str]
+) -> bool:
+    """Remove this plan's previously owned outputs that are no longer wanted (in `keep`).
+
+    A unit (electrodes file plus coordsystem file) goes only when every existing file of it is
+    untouched since our write; if either was hand-edited both stay, with their entries.
+    """
+    units: dict[str, list[OwnedPath]] = {}
+    for e in entries.values():
+        if _owned_by(e, plan) and e.path not in keep:
+            units.setdefault(_unit_key(e.path), []).append(e)
+    changed = False
+    for members in units.values():
+        present = [e for e in members if os.path.lexists(dataset / e.path)]
+        if all(_untouched(dataset, e) for e in present):
+            for e in present:
+                (dataset / e.path).unlink()
+            for e in members:
+                del entries[e.path]
+            changed = True
+        else:
+            for e in present:
+                plan.kept[e.path] = "hand-edited, kept"
+    return changed
+
+
 def write(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
     """Write the files of every `write` plan and merge them into `.nemar/ieeg-geometry.json`.
 
     Other owners' entries are kept. A pipeline-owned file is regenerated only while its bytes
-    still match the recorded `output_sha256`; a hand-edited owned file, a file the authors
-    own, or a symbolic link is kept as it is and listed in `plan.kept` (as C1 does). A subject
-    that is now refused or needs a human loses the outputs it was previously given and their
-    entries, unless hand-edited. Reruns on unchanged inputs produce byte-identical files. The
-    record carries the current pipeline version.
+    still match the recorded `output_sha256`. The electrodes file and its coordsystem file are
+    one unit: if either is hand-edited, owned by the authors, or a symbolic link, both are kept
+    as they are and listed in `plan.kept` (as C1 and B1 do). Outputs of a different earlier
+    pairing, and the outputs of a subject that is now refused or needs a human, are removed
+    when untouched. Reruns on unchanged inputs produce byte-identical files. The record carries
+    the current pipeline version.
     """
     dataset = Path(dataset_dir)
     existing = read_ownership(dataset)
@@ -908,39 +990,29 @@ def write(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
     for plan in plans:
         plan.kept = {}
         if plan.verdict in ("refused", "needs-human"):
-            for e in [e for e in entries.values() if _owned_by(e, plan)]:
-                target = dataset / e.path
-                if not os.path.lexists(target):
-                    del entries[e.path]
-                    changed = True
-                elif (
-                    not target.is_symlink()
-                    and e.output_sha256 is not None
-                    and _sha(target.read_bytes()) == e.output_sha256
-                ):
-                    target.unlink()
-                    del entries[e.path]
-                    changed = True
-                else:
-                    plan.kept[e.path] = "hand-edited, kept"
+            changed |= _drop_stale(dataset, entries, plan, set())
         elif plan.verdict == "write":
+            changed |= _drop_stale(dataset, entries, plan, set(plan.files))
             owned = {o.path: o for o in plan.owned}
+            blocked: dict[str, str] = {}
             for rel, data in plan.files.items():
                 target = dataset / rel
                 entry = entries.get(rel)
                 if not os.path.lexists(target):
-                    target.write_bytes(data)
-                elif target.is_symlink():
-                    plan.kept[rel] = "symbolic link, kept"
                     continue
-                elif target.read_bytes() != data:
-                    if entry is not None and entry.output_sha256 == _sha(target.read_bytes()):
-                        target.write_bytes(data)  # ours and untouched: regenerate
-                    else:
-                        plan.kept[rel] = (
-                            "hand-edited, kept" if entry is not None else "not ours, kept"
-                        )
-                        continue
+                if target.is_symlink():
+                    blocked[rel] = "symbolic link, kept"
+                elif target.read_bytes() != data and not (
+                    entry is not None and entry.output_sha256 == _sha(target.read_bytes())
+                ):
+                    blocked[rel] = "hand-edited, kept" if entry is not None else "not ours, kept"
+            if blocked:
+                plan.kept = {rel: blocked.get(rel, "kept with its pair") for rel in plan.files}
+                continue
+            for rel, data in plan.files.items():
+                target = dataset / rel
+                if not target.exists() or target.read_bytes() != data:
+                    target.write_bytes(data)
                 written.append(rel)
                 if entries.get(rel) != owned[rel]:
                     entries[rel] = owned[rel]
