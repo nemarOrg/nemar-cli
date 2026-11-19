@@ -183,7 +183,12 @@ def _f(median: float, grade: str) -> Fit:
     [
         (_f(3.0, "plausible"), _f(1.0, "plausible"), (4, 4, 4), "as_declared"),  # declared passes
         (_f(12.0, "fail"), _f(3.0, "plausible"), (4, 4, 4), "c_ras"),  # clear gain
-        (_f(12.0, "fail"), _f(3.0, "plausible"), (1, 1, 1), "as_declared"),  # under 3 mm
+        (
+            _f(12.0, "fail"),
+            _f(3.0, "plausible"),
+            (1, 1, 1),
+            None,
+        ),  # offset under 3 mm cannot rescue a failed declared frame
         (_f(6.5, "fail"), _f(5.5, "plausible"), (4, 4, 4), "ambiguous"),  # gain under 1.5 mm
         (_f(7.5, "fail"), _f(5.9, "plausible"), (4, 4, 4), "ambiguous"),  # gain under 25 percent
         (_f(12.0, "fail"), _f(9.0, "fail"), (4, 4, 4), None),  # neither passes
@@ -234,3 +239,32 @@ def test_the_rule_is_the_callers_and_a_reference_never_changes_it():
     assert fit(deep, mni, "seeg", depth_rule=INSIDE_RULE).rule.startswith(">=")
     with pytest.raises(ValueError):
         fit(deep, mni, "seeg", depth_rule="smooth")
+
+
+def _offset_fit(declared, shifted, c_ras=(10.0, 0.0, 0.0), grades=("specific", "specific")):
+    from ieeg_geometry.verify import Fit, OffsetFit
+
+    def mk(median, grade):
+        return Fit(median, median, median, 10, 10, "r", grade)
+
+    return OffsetFit(mk(declared, grades[0]), mk(shifted, grades[1]), c_ras)
+
+
+@pytest.mark.parametrize(
+    ("declared", "shifted", "c_ras", "expected"),
+    [
+        (1.82, 1.11, (10.0, 0.0, 0.0), "c_ras"),  # on004194 sub-p01: 0.71 mm and 39 percent lower
+        (1.11, 1.82, (10.0, 0.0, 0.0), "as_declared"),
+        (1.82, 1.50, (10.0, 0.0, 0.0), "ambiguous"),  # under 0.5 mm and 25 percent
+        (1.0, 0.6, (10.0, 0.0, 0.0), "ambiguous"),  # 40 percent but only 0.4 mm
+        (1.82, 1.11, (2.0, 0.0, 0.0), "as_declared"),  # offset under 3 mm: immaterial
+    ],
+)
+def test_two_specific_frames_ruling_13(declared, shifted, c_ras, expected):
+    assert _offset_fit(declared, shifted, c_ras).preferred == expected
+
+
+def test_failed_declared_frame_with_tiny_offset_is_not_a_pass():
+    fit_ = _offset_fit(3.0, 1.0, (2.0, 0.0, 0.0), grades=("fail", "specific"))
+    assert fit_.preferred is None
+    assert _offset_fit(3.0, 1.0, (10.0, 0.0, 0.0), grades=("fail", "specific")).preferred == "c_ras"

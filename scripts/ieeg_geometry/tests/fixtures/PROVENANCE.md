@@ -22,3 +22,13 @@ This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaver
 
 `tools/make_spm_fixture.py` builds it from `mini_dataset/sub-2` (electrodes, channels, cut surface; see above) and the full SPM12 field `derivatives/freesurfer/sub-2/y_sub-2_ses-mri01_T1w.nii` of `on004457` v1.0.0 (`data.nemar.org/on004457/v1.0.0/...`, 121 x 145 x 121 voxels, 1.5 mm; sha256 `2570f6896caacf6736bcee0c0a9fe38e70ece8300ac73d22385465cfc5759e2f`).
 The field is cropped to a box around the native contacts (2-voxel margin) with the affine moved, so inversion on the crop equals inversion on the full field (the builder checks it to 1e-4 mm).
+
+## FreeSurfer fixtures (`fs_dataset/`)
+
+Built by `tools/make_fs_fixtures.py` from on004194 v1.0.0 (CC0): `sub-p02` (UMCU, needs c_ras) and `sub-p03` (NYU, as declared), their `acq-clinical` electrodes, coordsystem and channels files (raw GitHub), and from `data.nemar.org/on004194/v1.0.0/derivatives/freesurfer/sub-p0N/`: `surf/{lh,rh}.{pial,sphere.reg}` .
+Pial surfaces are cut to the nearest vertex of each contact (in the declared frame and with c_ras subtracted) plus about 10,000 evenly spaced vertices per hemisphere, so the registration check sees an even sample of the whole brain; the `volume info` footer is kept and each `sphere.reg` is cut to the same vertices so indices stay aligned.
+The cut surfaces are open, so depth-contact inside tests are not evaluated on them (the frame decisions here rest on ECoG contacts); full-surface checks are in `tests/test_freesurfer_network.py`.
+
+## Vendored fsaverage6 `sphere.reg`
+
+`lh.sphere.reg.npz` and `rh.sphere.reg.npz` hold the first 40962 vertices of fsaverage's `sphere.reg` (identical to its `sphere`, and identical for the two hemispheres) from `derivatives/freesurfer/fsaverage/surf/` of on004194 v1.0.0; `tools/build_fsaverage6_sphere.py`.

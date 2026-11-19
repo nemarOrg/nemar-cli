@@ -60,6 +60,7 @@ INSIDE_RULE = "inside"
 OFFSET_MIN_GAIN_MM = 1.5
 OFFSET_MIN_GAIN_FRACTION = 0.25
 OFFSET_IMMATERIAL_MM = 3.0
+SPECIFIC_MIN_GAIN_MM = 0.5
 _EDGE_EPS = 1e-7
 _DIRECTIONS = np.array(
     [[0.5773, 0.3123, 0.7541], [-0.2719, 0.8341, -0.4823], [0.1693, -0.4417, 0.8812]]
@@ -112,22 +113,41 @@ class OffsetFit:
     def preferred(self) -> str | None:
         """The frame to use, by lead ruling 4.
 
-        `"as_declared"` when the declared frame passes, or when c_ras is under 3 mm (the choice
-        is immaterial); `"c_ras"` when the declared frame fails and the offset frame passes with
-        a median at least 1.5 mm and 25 percent lower; `"ambiguous"` when the offset passes but
-        by less than that; None when neither frame passes.
+        Two specific frames with an offset of at least 3 mm (ruling 13): the one whose median
+        is at least 0.5 mm and 25 percent lower, else `"ambiguous"`. Otherwise `"as_declared"`
+        when the declared frame passes; `"c_ras"` when the declared frame fails and the offset
+        frame passes with a median at least 1.5 mm and 25 percent lower; `"ambiguous"` when the
+        offset passes but by less than that; None when neither frame passes, including a
+        failed declared frame with an offset under 3 mm (too small to rescue it).
         """
         a, b = self.as_declared, self.with_c_ras
+        if (
+            a.grade == SPECIFIC
+            and b is not None
+            and b.grade == SPECIFIC
+            and self.c_ras is not None
+            and float(np.linalg.norm(self.c_ras)) >= OFFSET_IMMATERIAL_MM
+        ):  # ruling 13: two specific frames and a material offset
+            if _clearly_lower(b.median_mm, a.median_mm, SPECIFIC_MIN_GAIN_MM):
+                return "c_ras"
+            if _clearly_lower(a.median_mm, b.median_mm, SPECIFIC_MIN_GAIN_MM):
+                return "as_declared"
+            return "ambiguous"
         if a.passed:
             return "as_declared"
         if b is None or not b.passed:
             return None
         if self.c_ras is not None and float(np.linalg.norm(self.c_ras)) < OFFSET_IMMATERIAL_MM:
-            return "as_declared"
+            return None  # the declared frame failed and an offset under 3 mm cannot rescue it
         gain = a.median_mm - b.median_mm
         if gain >= OFFSET_MIN_GAIN_MM and gain >= OFFSET_MIN_GAIN_FRACTION * a.median_mm:
             return "c_ras"
         return "ambiguous"
+
+
+def _clearly_lower(low: float, high: float, min_gain_mm: float) -> bool:
+    gain = high - low
+    return gain >= min_gain_mm and gain >= OFFSET_MIN_GAIN_FRACTION * high
 
 
 def _as_list(surface: Surface | Sequence[Surface]) -> list[Surface]:
