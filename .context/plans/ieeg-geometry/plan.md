@@ -85,3 +85,18 @@ on004457 is a fixture throughout: one hemisphere per subject, the `space-ACPC` m
 | One-hemisphere surfaces make contralateral contacts float | A2 review | label "left hemisphere only" and draw the template for the other side | lead |
 | N.0.1 regeneration conflicts with ADR 0111's refusal rules | D1 | amend ADR 0111 explicitly before P2 | owner |
 | Volume of version DOIs from one-time N.0.1s | R1 | batch per dataset, one N.0.1 each, behind the re-pull caps | owner |
+
+## Lead rulings
+
+### 2026-11-19, after the L1 review (PR #2223)
+
+The review measured, on full closed real surfaces, that sEEG contacts in their correct frame are only 82 to 89 percent inside the pial surface (outer shaft contacts sit in bone or cerebrospinal fluid), and that 10 to 20 mm frame errors change the median and the inside fraction too little to separate them.
+So a pial-surface fit is a strong test for contacts on the cortex and only a plausibility check for depth contacts.
+
+1. **Two kinds of evidence.** `fit` reports `specific` evidence (ECoG or surface contacts passing the ECoG rule, or contacts on template vertices at a median of at most 1.0 mm with the 10 mm shift control failing) or `plausible` evidence (the sEEG rule) or a fail.
+2. **The sEEG plausibility rule** replaces "95 percent inside": median at most 6.0 mm and at least 90 percent of contacts inside or within 5.0 mm of the reference surface.
+3. **A write needs specific evidence, or plausible evidence plus independent frame evidence.** Independent evidence is one of: ECoG contacts of the same subject that give specific evidence in the same frame; a declared frame or a transform shipped by the dataset that already names the target space (tracks B, and C's near-miss labels such as `MNI152NLin6ASym`); a template named in prose (C's candidate 2). A blind label (C's candidate 3) needs specific evidence.
+4. **The c_ras choice.** Keep the declared frame whenever it is plausible; use c_ras only when the declared frame fails and the offset frame passes with a median at least 1.5 mm and 25 percent lower; if the offset is under 3 mm the choice is immaterial and the declared frame is kept; anything else is refused as "frame ambiguous".
+5. **Open references.** The MNI152NLin2009cAsym shell is two halves cut exactly at x = 0: its inside test is ray parity with each point assigned to the half on its side of x = 0 and rays pointing away from the midline (the implicit cap). Any other open reference fails closed with the reason `inside-unevaluable`.
+6. **One-hemisphere surfaces.** Only contacts on the supplied hemisphere's side (the `hemisphere` column, else the sign of x in the surface's frame) are evaluated, and the count left out is reported.
+7. **Real-data tests** that need full surfaces are marked `network`, download into a cache, and are run by the manager at review; CI runs the rest.
