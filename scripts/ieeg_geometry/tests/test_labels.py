@@ -1,5 +1,6 @@
 """Label inference: real excerpts of public CC0 datasets (see fixtures/labels/README.md)."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -573,20 +574,77 @@ def test_pipeline_files_are_not_authors_files_on_rerun(native_sidecar):
     }
 
 
-def test_a_changed_owned_file_is_regenerated_and_its_entry_replaced(no_sidecar):
+def test_an_untouched_owned_file_is_regenerated_when_the_evidence_changes(no_sidecar):
     labels.write(labels.plan_dataset(no_sidecar), no_sidecar)
     sidecar = next(no_sidecar.rglob("*_coordsystem.json"))
-    sidecar.write_text("{}")  # stale content at a pipeline-owned path
+    assert "geometric verification" in sidecar.read_text()
+    (no_sidecar / "README.md").write_text("Contacts are in MNI305 space.")  # now a named template
     plan = labels.plan_dataset(no_sidecar)
-    assert plan.files  # an owned sidecar is regenerated, not read as the authors' frame
-    written = labels.write(plan, no_sidecar)
-    assert (
-        written == [sidecar]
-        and json.loads(sidecar.read_text())["iEEGCoordinateSystem"] == "fsaverage"
-    )
+    assert plan.files and _only(plan).status == labels.ACCEPTED
+    assert labels.write(plan, no_sidecar) == [sidecar]
+    assert "Authors' term" in sidecar.read_text()
     owned = read_ownership(no_sidecar)
     assert owned is not None and len(owned.entries) == 1
+    entry = owned.entries[0]
+    assert entry.output_sha256 == hashlib.sha256(sidecar.read_bytes()).hexdigest()
     assert not labels.plan_dataset(no_sidecar).files
+
+
+def test_a_hand_edited_owned_file_is_kept(no_sidecar):
+    labels.write(labels.plan_dataset(no_sidecar), no_sidecar)
+    sidecar = next(no_sidecar.rglob("*_coordsystem.json"))
+    doc = json.loads(sidecar.read_text())
+    doc["iEEGCoordinateSystemDescription"] = "Edited by the dataset owner."
+    sidecar.write_text(json.dumps(doc))
+    edited = _tree(no_sidecar)
+    (no_sidecar / "README.md").write_text("Contacts are in MNI305 space.")  # would regenerate
+    prop = _only(labels.plan_dataset(no_sidecar))
+    assert prop.status == labels.KEPT and not prop.files
+    assert labels.write(labels.plan_dataset(no_sidecar), no_sidecar) == []
+    assert {k: v for k, v in _tree(no_sidecar).items() if k != "README.md"} == {
+        k: v for k, v in edited.items() if k != "README.md"
+    }
+
+
+def test_a_stale_plan_never_overwrites_a_hand_edited_file(no_sidecar):
+    plan = labels.plan_dataset(no_sidecar)
+    labels.write(plan, no_sidecar)
+    sidecar = next(no_sidecar.rglob("*_coordsystem.json"))
+    sidecar.write_text("{}")  # edited after the pipeline wrote it
+    with pytest.raises(GeometryRefusal) as exc:
+        labels.write(plan, no_sidecar)  # the same, now stale, plan
+    assert exc.value.reason == "write-conflict" and "hand-edited" in str(exc.value)
+    assert sidecar.read_text() == "{}"
+
+
+def test_a_rerun_with_a_new_pipeline_version_rewrites_nothing(native_sidecar):
+    labels.write(labels.plan_dataset(native_sidecar, version="0.1.0"), native_sidecar)
+    before = _tree(native_sidecar)
+    plan = labels.plan_dataset(native_sidecar, version="0.2.0")
+    assert not plan.files and plan.pipeline_version == "0.2.0"
+    assert {p.status for p in plan.proposals} <= {labels.ALREADY, labels.SKIPPED}
+    assert labels.write(plan, native_sidecar) == []
+    assert _tree(native_sidecar) == before
+    assert b"ieeg-geometry 0.1.0" in next(
+        v for k, v in before.items() if k.endswith("_space-fsaverage_coordsystem.json")
+    )
+
+
+def test_a_new_version_with_changed_evidence_does_rewrite(no_sidecar):
+    labels.write(labels.plan_dataset(no_sidecar, version="0.1.0"), no_sidecar)
+    (no_sidecar / "README.md").write_text("Contacts are in MNI305 space.")
+    plan = labels.plan_dataset(no_sidecar, version="0.2.0")
+    assert labels.write(plan, no_sidecar)
+    assert "ieeg-geometry 0.2.0" in next(no_sidecar.rglob("*_coordsystem.json")).read_text()
+
+
+def test_one_unexpected_error_becomes_a_skipped_proposal(no_sidecar, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected fault")
+
+    monkeypatch.setattr(labels, "_blind_evidence", boom)
+    prop = _only(labels.plan_dataset(no_sidecar))
+    assert prop.status == labels.SKIPPED and "RuntimeError: injected fault" in prop.reason
 
 
 def test_ownership_is_recorded_before_the_files(no_sidecar):
@@ -761,3 +819,115 @@ def test_prose_normalization(text, expected):
 def test_classify_frame_value_does_not_map_fsaverage_sym_to_fsaverage():
     hit = labels.classify_frame_value("fsaverage-sym")
     assert isinstance(hit, labels.Named) and hit.label == "fsaverageSym"
+
+
+# --- inherited coordsystems ---------------------------------------------------------------------
+
+
+def _shared(tmp_path, frame, **extra):
+    """Two electrodes files (acq and run entities) under one subject-level coordsystem."""
+    folder = tmp_path / "sub-1" / "ieeg"
+    folder.mkdir(parents=True)
+    pts = _fsaverage_points()
+    for name in ("sub-1_acq-a_electrodes.tsv", "sub-1_run-1_electrodes.tsv"):
+        rows = [f"C{i}\t{x:.6f}\t{y:.6f}\t{z:.6f}\t0" for i, (x, y, z) in enumerate(pts)]
+        (folder / name).write_text(HEADER + "\n".join(rows) + "\n")
+    body = {"iEEGCoordinateSystem": frame, "iEEGCoordinateUnits": "mm", **extra}
+    (tmp_path / "sub-1" / "sub-1_coordsystem.json").write_text(json.dumps(body))
+    return tmp_path
+
+
+@pytest.mark.parametrize("frame", ["ACPC", "ScanRAS", "native"])
+def test_a_protected_inherited_coordsystem_is_never_relabeled(tmp_path, frame):
+    ds = _shared(tmp_path, frame)
+    plan = labels.plan_dataset(ds)
+    assert len(plan.proposals) == 2
+    assert {p.status for p in plan.proposals} == {labels.SKIPPED} and not plan.files
+
+
+def test_an_inherited_coordsystem_with_intended_for_is_protected(tmp_path):
+    ds = _shared(tmp_path, "Other", IntendedFor="bids::sub-1/anat/sub-1_T1w.nii.gz")
+    assert {p.status for p in labels.plan_dataset(ds).proposals} == {labels.SKIPPED}
+
+
+def test_a_valid_inherited_label_is_left_alone(tmp_path):
+    ds = _shared(tmp_path, "fsaverage")
+    plan = labels.plan_dataset(ds)
+    assert {p.status for p in plan.proposals} == {labels.ALREADY} and not plan.files
+
+
+def test_a_wrong_inherited_coordsystem_gets_a_pair_never_a_missing_sidecar(tmp_path):
+    ds = _shared(tmp_path, "Other", iEEGCoordinateSystemDescription="patient-native RAS")
+    before = _tree(ds)
+    plan = labels.plan_dataset(ds)
+    assert {p.status for p in plan.proposals} == {labels.ACCEPTED}
+    paths = sorted(f.path for f in plan.files)
+    assert paths == [
+        "sub-1/ieeg/sub-1_acq-a_space-fsaverage_coordsystem.json",
+        "sub-1/ieeg/sub-1_acq-a_space-fsaverage_electrodes.tsv",
+        "sub-1/ieeg/sub-1_run-1_space-fsaverage_coordsystem.json",
+        "sub-1/ieeg/sub-1_run-1_space-fsaverage_electrodes.tsv",
+    ]
+    labels.write(plan, ds)
+    after = _tree(ds)
+    assert all(after[k] == v for k, v in before.items())  # the shared sidecar is untouched
+    assert "sub-1/ieeg/sub-1_acq-a_coordsystem.json" not in after
+
+
+def test_a_dangling_exact_link_is_not_replaced_by_an_inherited_sidecar(tmp_path):
+    import os
+
+    ds = _shared(tmp_path, "Other")
+    os.symlink("../../.git/annex/x.json", ds / "sub-1" / "ieeg" / "sub-1_acq-a_coordsystem.json")
+    statuses = {p.electrodes: p.status for p in labels.plan_dataset(ds).proposals}
+    assert statuses["sub-1/ieeg/sub-1_acq-a_electrodes.tsv"] == labels.SKIPPED
+
+
+def test_a_sidecar_name_variant_is_declared_in_the_description(tmp_path):
+    elec = _points_file(tmp_path, _fsaverage_points())
+    _sidecar(elec, "FSAVERAGE ")
+    labels.write(labels.plan_dataset(tmp_path), tmp_path)
+    pair = next(tmp_path.rglob("*_space-fsaverage_coordsystem.json"))
+    text = json.loads(pair.read_text())["iEEGCoordinateSystemDescription"]
+    assert "declared it as 'FSAVERAGE '" in text and "not a valid BIDS label as written" in text
+
+
+# --- inspect ------------------------------------------------------------------------------------
+
+
+def _inspect(path) -> str:
+    import io
+
+    from ieeg_geometry.__main__ import inspect
+
+    out = io.StringIO()
+    inspect(Path(path), out)
+    return out.getvalue()
+
+
+def test_inspect_lists_what_suppressed_blind_trials(tmp_path):
+    shutil.copytree(FIX / "on006107", tmp_path / "ds")
+    (tmp_path / "ds" / "README.md").write_text("Positions are given in MNI space.")
+    out = _inspect(tmp_path / "ds")
+    assert (
+        "blind trials suppressed by MNI without a variant in README 'MNI' "
+        "(1 file(s) need a human label)" in out
+    )
+    assert "  sub-01/ses-01/ieeg/sub-01_ses-01_electrodes.tsv" in out
+    (tmp_path / "ds" / "README.md").write_text("Positions are in Talairach space.")
+    assert "blind trials suppressed by Talairach in README 'Talairach'" in _inspect(tmp_path / "ds")
+
+
+def test_inspect_reports_a_missing_package_version_once(tmp_path, monkeypatch):
+    from importlib import metadata
+
+    def missing(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(metadata, "version", missing)
+    shutil.copytree(FIX / "on006107", tmp_path / "ds")
+    out = _inspect(tmp_path / "ds")
+    assert (
+        out.count("label proposals unavailable") == 1 and "frame" not in out.split("unavailable")[0]
+    )
+    assert "contacts" in out or "refused" in out  # the rest of the report still runs

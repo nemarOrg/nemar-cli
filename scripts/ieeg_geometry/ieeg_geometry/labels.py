@@ -44,6 +44,7 @@ it. Every written path is recorded in `.nemar/ieeg-geometry.json`.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -111,6 +112,7 @@ REJECTED = "rejected"
 NEEDS_HUMAN = "needs-human"
 SKIPPED = "skipped"
 ALREADY = "already-labeled"
+KEPT = "hand-edited, kept"
 
 _GRADE_ORDER = {SPECIFIC: 0, PLAUSIBLE: 1, FAIL: 2}
 
@@ -213,7 +215,13 @@ def _negated(text: str, start: int) -> bool:
 
 
 def scan_prose(text: str) -> tuple[list[Named], bool]:
-    """Template names in prose, in order of appearance, and whether an unspecific `MNI` appears.
+    """Template names in prose, in order of appearance, and whether an unspecific `MNI` appears."""
+    named, generic = scan_prose_detail(text)
+    return named, bool(generic)
+
+
+def scan_prose_detail(text: str) -> tuple[list[Named], list[str]]:
+    """Like `scan_prose`, with the unspecific `MNI` snippets found instead of a flag.
 
     Mentions in a negated clause ("not in MNI305 space") are ignored. Non-breaking and soft
     hyphens and full-width forms are normalized first.
@@ -230,7 +238,9 @@ def scan_prose(text: str) -> tuple[list[Named], bool]:
     for _, item in sorted(found, key=lambda p: p[0]):
         if all(item.label != n.label for n in named):
             named.append(item)
-    generic = any(not _negated(blanked, m.start()) for m in _GENERIC_MNI.finditer(blanked))
+    generic = [
+        m.group(0) for m in _GENERIC_MNI.finditer(blanked) if not _negated(blanked, m.start())
+    ]
     return named, generic
 
 
@@ -248,6 +258,7 @@ class Attempt:
     reason: str
     fit: Fit | None = None
     by_type: str = ""
+    term: str = ""  # the authors' words, as written
 
     def line(self) -> str:
         measured = ""
@@ -328,7 +339,14 @@ class PlannedFile:
 
     @property
     def entry(self) -> OwnedPath:
-        return OwnedPath(self.path, self.kind, self.inputs, self.method, self.verification)
+        return OwnedPath(
+            self.path,
+            self.kind,
+            self.inputs,
+            self.method,
+            self.verification,
+            hashlib.sha256(self.content).hexdigest(),
+        )
 
 
 @dataclass(frozen=True)
@@ -342,6 +360,7 @@ class Proposal:
     label: str | None = None
     attempts: tuple[Attempt, ...] = ()
     files: tuple[PlannedFile, ...] = ()
+    suppressed: tuple[str, ...] = ()  # why blind trials did not run (needs-human only)
 
     def lines(self) -> list[str]:
         head = f"label: {self.status}"
@@ -427,6 +446,12 @@ def _texts(
             f"{label} template space. The authors named no template; the frame was found by "
             "geometric verification."
         )
+    elif attempt.source == "sidecar":
+        system = (
+            f"{label} template space. The authors declared it as {attempt.term!r} in "
+            f"iEEGCoordinateSystem, which is not a valid BIDS label as written; the correctly "
+            f"named {label} is used here."
+        )
     else:
         system = f"{label} template space. Authors' term: {attempt.evidence}."
     action = (
@@ -505,14 +530,41 @@ def _template_label_of(sibling: Discovered) -> str | None:
     return written_label(hit.label) if isinstance(hit, Named) else None
 
 
-def _unchanged(f: PlannedFile, dataset: Path, owned: dict[str, OwnedPath]) -> bool:
+_VERSION = re.compile(r"\(ieeg-geometry [^)]*\)")
+
+
+def _without_version(data: bytes) -> bytes:
+    return _VERSION.sub("(ieeg-geometry)", data.decode("utf-8", errors="replace")).encode()
+
+
+def _same_entry(a: OwnedPath | None, b: OwnedPath) -> bool:
+    return a is not None and replace(a, output_sha256=None) == replace(b, output_sha256=None)
+
+
+def _file_state(f: PlannedFile, dataset: Path, owned: dict[str, OwnedPath]) -> str:
+    """How a planned file stands against the disk and the ownership record.
+
+    `new` (absent), `unchanged` (same bytes and entry, or differing only in the pipeline version
+    string), `record` (same bytes, entry to refresh), `regenerate` (owned, untouched since our
+    write, content differs), `hand-edited` (owned, bytes match neither the new content nor the
+    recorded hash), `foreign` (not owned, content differs), `link` (a symbolic link).
+    """
     target = dataset / f.path
-    return (
-        target.is_file()
-        and not target.is_symlink()
-        and owned.get(f.path) == f.entry
-        and target.read_bytes() == f.content
-    )
+    if not os.path.lexists(target):
+        return "new"
+    if target.is_symlink():
+        return "link"
+    disk = target.read_bytes()
+    entry = owned.get(f.path)
+    if disk == f.content:
+        return "unchanged" if entry == f.entry else "record"
+    if entry is None:
+        return "foreign"
+    if _same_entry(entry, f.entry) and _without_version(disk) == _without_version(f.content):
+        return "unchanged"
+    if entry.output_sha256 is not None and hashlib.sha256(disk).hexdigest() == entry.output_sha256:
+        return "regenerate"
+    return "hand-edited"
 
 
 def propose(
@@ -522,6 +574,7 @@ def propose(
     *,
     siblings: tuple[Discovered, ...] = (),
     owned: dict[str, OwnedPath] | None = None,
+    version: str | None = None,
 ) -> Proposal:
     """The proposal for one electrodes file. Reads only; writes nothing.
 
@@ -550,11 +603,7 @@ def propose(
 
     if item.space is not None:
         return done(SKIPPED, f"the file names its frame in space-{item.space}")
-    if (
-        item.coordsystem_path is None
-        and os.path.lexists(coord_target)
-        and rel(coord_target) not in own
-    ):
+    if os.path.lexists(coord_target) and not coord_target.exists() and rel(coord_target) not in own:
         return done(SKIPPED, "the coordsystem is a link whose content is not present")
     if sidecar.get("IntendedFor"):
         return done(SKIPPED, "the coordsystem has an IntendedFor naming the subject's own image")
@@ -575,12 +624,14 @@ def propose(
 
     candidates: list[tuple[Named, str, str]] = []  # (name, source, where)
     unknown_mni = talairach = False
+    suppress: list[str] = []  # why blind trials would not run
     no_reference_in_sidecar: str | None = None
 
     def add(named: Named, source: str, where: str) -> None:
         nonlocal talairach
         if named.label == "Talairach":
             talairach = True
+            suppress.append(f"Talairach in {where} {named.text!r}")
         elif all(named.label != c[0].label for c in candidates):
             candidates.append((named, source, where))
 
@@ -589,12 +640,14 @@ def propose(
         if isinstance(hit, Named):
             if hit.label == "Talairach":
                 talairach = True
+                suppress.append(f"Talairach in iEEGCoordinateSystem {hit.text!r}")
             elif reference_for(hit.label) is None:
                 no_reference_in_sidecar = hit.label
             else:
                 add(hit, "sidecar", "iEEGCoordinateSystem")
         elif hit == "mni-unknown":
             unknown_mni = True
+            suppress.append(f"MNI without a variant in iEEGCoordinateSystem {frame!r}")
     for source, where, text in (
         (
             "description",
@@ -603,8 +656,9 @@ def propose(
         ),
         ("README", "README", read_readme(dataset) if readme is None else readme),
     ):
-        names, generic = scan_prose(text)
-        unknown_mni = unknown_mni or generic
+        names, generic = scan_prose_detail(text)
+        unknown_mni = unknown_mni or bool(generic)
+        suppress += [f"MNI without a variant in {where} {g!r}" for g in dict.fromkeys(generic)]
         for n in names:
             add(n, source, where)
 
@@ -615,7 +669,7 @@ def propose(
         )
 
     attempts: list[Attempt] = []
-    version = pipeline_version()
+    version = version or pipeline_version()
     fs_blind: tuple[Fit, bool, str, str] | None = None
 
     def fsaverage_blind() -> tuple[Fit, bool, str, str]:
@@ -682,7 +736,9 @@ def propose(
             )
         ok = grade != FAIL
         reason = f"{grade} evidence" if ok else "fit failed"
-        attempt = Attempt(named.label, source, evidence, ref, grade, ok, reason, f, by_type)
+        attempt = Attempt(
+            named.label, source, evidence, ref, grade, ok, reason, f, by_type, named.text
+        )
         attempts.append(attempt)
         if ok:
             passing.append(attempt)
@@ -714,7 +770,7 @@ def propose(
 
     if unknown_mni or talairach:
         reason = MNI_UNKNOWN if unknown_mni else "Talairach is never written"
-        return done(NEEDS_HUMAN, reason, attempts=tuple(attempts))
+        return done(NEEDS_HUMAN, reason, attempts=tuple(attempts), suppressed=tuple(suppress))
     if n_finite < MIN_BLIND_CONTACTS:
         return done(
             REJECTED,
@@ -750,27 +806,56 @@ def _accept(done, dataset, item, eset, attempt, attempts, version, owned) -> Pro
         files = _build_files(dataset, item, eset, attempt, version)
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, IndexError) as exc:
         return done(SKIPPED, f"cannot copy positions: {type(exc).__name__}: {exc}")
-    if all(_unchanged(f, dataset, owned) for f in files):
-        return done(ALREADY, "pipeline output unchanged", label=label, attempts=tuple(attempts))
-    return done(ACCEPTED, attempt.evidence, label=label, attempts=tuple(attempts), files=files)
+    states = [_file_state(f, dataset, owned) for f in files]
+    kw = dict(label=label, attempts=tuple(attempts))
+    if "hand-edited" in states:
+        return done(KEPT, "an owned file was edited since the pipeline wrote it", **kw)
+    if "foreign" in states or "link" in states:
+        return done(SKIPPED, "a file already sits at a path this would write", **kw)
+    if all(st == "unchanged" for st in states):
+        return done(ALREADY, "pipeline output unchanged", **kw)
+    return done(ACCEPTED, attempt.evidence, files=files, **kw)
 
 
-def plan_dataset(dataset_dir: str | Path) -> Plan:
-    """Proposals for every electrodes file of a dataset checkout. Reads only."""
+def plan_dataset(dataset_dir: str | Path, version: str | None = None) -> Plan:
+    """Proposals for every electrodes file of a dataset checkout. Reads only.
+
+    One unexpected error in a file becomes a skipped proposal carrying the exception text.
+    `version` defaults to the installed package version (an absent package raises
+    `importlib.metadata.PackageNotFoundError` here, once, not per file).
+    """
+    version = version or pipeline_version()
     dataset = Path(dataset_dir)
     readme = read_readme(dataset)
     items = tuple(discover(dataset))
     ownership = read_ownership(dataset)
     owned = {e.path: e for e in ownership.entries} if ownership else {}
-    proposals = tuple(propose(dataset, item, readme, siblings=items, owned=owned) for item in items)
-    return Plan(str(dataset), pipeline_version(), proposals)
+    proposals = []
+    for item in items:
+        try:
+            proposals.append(
+                propose(dataset, item, readme, siblings=items, owned=owned, version=version)
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop the run
+            proposals.append(
+                Proposal(
+                    item.electrodes_path.relative_to(dataset).as_posix(),
+                    item.subject,
+                    item.session,
+                    None,
+                    SKIPPED,
+                    f"unexpected {type(exc).__name__}: {exc}",
+                )
+            )
+    return Plan(str(dataset), version, tuple(proposals))
 
 
 def write(plan: Plan, dataset_dir: str | Path) -> list[Path]:
     """Write the plan's files and record them in `.nemar/ieeg-geometry.json`.
 
     Conflicts are checked before anything is written: a path that exists with different bytes
-    and is not in the ownership record, or that is a symbolic link (an annexed file), refuses the
+    and is not in the ownership record, a symbolic link (an annexed file), or an owned file
+    whose bytes match neither the new content nor the recorded SHA-256 (hand-edited) refuses the
     whole write. Ownership is written before the files, so a partial write never leaves a file
     unrecorded. Entries for rewritten paths are replaced. A plan whose files all exist unchanged
     and recorded touches nothing, so a second run on its own output changes no byte.
@@ -781,22 +866,13 @@ def write(plan: Plan, dataset_dir: str | Path) -> list[Path]:
     to_write: list[PlannedFile] = []
     to_record: list[PlannedFile] = []
     for f in plan.files:
-        target = dataset / f.path
-        if os.path.lexists(target):
-            if target.is_symlink():
-                raise GeometryRefusal(
-                    "write-conflict", f"{f.path} is a link; never written through"
-                )
-            same = target.read_bytes() == f.content
-            if not same and f.path not in entries:
-                raise GeometryRefusal("write-conflict", f"{f.path} exists with different content")
-            if not same:
-                to_write.append(f)
-            if entries.get(f.path) != f.entry:
-                to_record.append(f)
-            continue
-        to_write.append(f)
-        to_record.append(f)
+        state = _file_state(f, dataset, entries)
+        if state in ("link", "foreign", "hand-edited"):
+            raise GeometryRefusal("write-conflict", f"{f.path}: {state}, never overwritten")
+        if state in ("new", "regenerate"):
+            to_write.append(f)
+        if state != "unchanged":
+            to_record.append(f)
     if not to_write and not to_record:
         return []
     for f in to_record:
