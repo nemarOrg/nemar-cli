@@ -28,6 +28,38 @@ def ds(tmp_path: Path) -> Path:
     return target
 
 
+@pytest.fixture
+def ds_affine(ds: Path) -> Path:
+    """p03 with the sEEG contacts that the affine method places outside fsaverage removed.
+
+    Real outer contacts sit outside the brain, so the full file fails the 95 percent inside
+    rule (see test_outer_depth_contacts_are_refused); this keeps a set that can pass.
+    """
+    from ieeg_geometry.verify import points_inside
+
+    path = ds / f"{P03}_electrodes.tsv"
+    header, rows = _read_tsv(path)
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    matrix = _independent_matrix(ds / "derivatives/freesurfer/sub-p03/mri/transforms/talairach.xfm")
+    c_ras = np.asarray(res.frame.c_ras)
+    mapped = {r["name"] for o in res.outputs if o.label == "fsaverage" for r in o.rows}
+    keep = []
+    for r in rows:
+        if r["type"] != "depth":
+            if r["name"] in mapped:  # drop ECoG contacts floating above the pial surface
+                keep.append(r)
+            continue
+        tkr = np.array([float(r[a]) for a in "xyz"])
+        mni = (matrix @ np.append(tkr + c_ras, 1.0))[:3]
+        inside = points_inside(mni[None, :], load_reference("fsaverage"))
+        assert inside is not None
+        if inside[0][0]:
+            keep.append(r)
+    lines = ["\t".join(header)] + ["\t".join(r[h] for h in header) for r in keep]
+    path.write_text("\n".join(lines) + "\n")
+    return ds
+
+
 def _by_sub(results, sub):
     return next(r for r in results if r.subject == sub)
 
@@ -130,7 +162,8 @@ def test_surface_method_matches_independent_registration(ds):
     assert np.allclose(out.xyz[0], fs6.pial[hemi][j], atol=1e-3)
 
 
-def test_affine_contact_matches_numpy_from_the_matrix(ds):
+def test_affine_contact_matches_numpy_from_the_matrix(ds_affine):
+    ds = ds_affine
     res = _by_sub(fsm.plan_dataset(ds), "p03")
     out = next(o for o in res.outputs if o.label == "MNI305")
     assert out.method == fsm.METHOD_AFFINE
@@ -142,6 +175,38 @@ def test_affine_contact_matches_numpy_from_the_matrix(ds):
         scanner_h = np.append(tkr + c_ras, 1.0)  # tkr RAS + c_ras = scanner RAS
         assert np.allclose(got, (matrix @ scanner_h)[:3], atol=1e-9)
     assert out.verification.passed
+
+
+def test_outer_depth_contacts_are_refused(ds):
+    """The real p03 depth contacts include ones outside the brain: the 95 percent rule refuses."""
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    assert [o.label for o in res.outputs] == ["fsaverage"]
+    assert any(r.scope == "MNI305" and r.reason == "verification-failed" for r in res.refusals)
+    assert res.transform_check is not None and res.transform_check[0] <= 6.0
+
+
+def test_depth_contacts_never_use_the_surface_method(ds_affine):
+    res = _by_sub(fsm.plan_dataset(ds_affine), "p03")
+    seeg = {
+        r["name"] for r in _read_tsv(ds_affine / f"{P03}_electrodes.tsv")[1] if r["type"] == "depth"
+    }
+    surface = next(o for o in res.outputs if o.label == "fsaverage")
+    assert not seeg & {r["name"] for r in surface.rows}
+    affine = next(o for o in res.outputs if o.label == "MNI305")
+    assert seeg <= {r["name"] for r in affine.rows}
+
+
+def test_failed_transform_check_refuses_the_affine_set(ds_affine):
+    xfm = ds_affine / "derivatives/freesurfer/sub-p03/mri/transforms/talairach.xfm"
+    text = xfm.read_text()
+    # a 40 mm translation still lands near some fold of the pial surface and passes the
+    # check; tripling the scale does not
+    for old, new in (("1.114478", "3.114478"), ("1.024043", "3.024043"), ("1.097219", "3.097219")):
+        text = text.replace(old, new)
+    xfm.write_text(text)
+    res = _by_sub(fsm.plan_dataset(ds_affine), "p03")
+    assert all(o.label != "MNI305" for o in res.outputs)
+    assert any(r.reason == "transform-check-failed" for r in res.refusals), res.refusals
 
 
 def test_neither_frame_is_refused_with_distances(ds):
@@ -226,7 +291,8 @@ def test_depth_contacts_need_the_shipped_transform_to_decide_a_frame(sphere):
     assert exc.value.reason == "frame-evidence-insufficient"
 
 
-def test_write_outputs_merges_ownership_and_is_idempotent(ds):
+def test_write_outputs_merges_ownership_and_is_idempotent(ds_affine):
+    ds = ds_affine
     other = OwnedPath(
         "sub-x/other_space-IXI549Space_electrodes.tsv",
         "electrodes",
@@ -251,7 +317,10 @@ def test_write_outputs_merges_ownership_and_is_idempotent(ds):
     assert sidecar["iEEGCoordinateProcessingDescription"].startswith("Computed by NEMAR")
     assert sidecar["iEEGCoordinateProcessingReference"] == fsm.METHOD_REFERENCE
     affine = json.loads((ds / P03_MNI_COORD).read_text())
-    assert "approximate" in affine["iEEGCoordinateProcessingDescription"]
+    text = affine["iEEGCoordinateProcessingDescription"]
+    assert "approximate" in text and "5 to 15 mm" in text and "transform check" in text
+    meta = by_path[P03.removesuffix("") + "_space-MNI305_electrodes.tsv"].verification
+    assert meta is not None and "transform check" in meta.rule
     before = {p: (ds / p).read_bytes() for p in paths}
     ownership_before = (ds / ".nemar/ieeg-geometry.json").read_bytes()
     # second run: our outputs are owned, so they are regenerated, not taken as the authors'
@@ -277,5 +346,6 @@ def test_report_shows_decision_methods_and_verification(ds):
     assert result.returncode == 0, result.stderr
     out = result.stdout
     assert "frame decision: scanner RAS (c_ras subtracted)" in out
-    assert "methods: 111 contacts by surface registration (fsaverage), 13 by talairach.xfm" in out
+    assert "methods: 90 contacts by surface registration (fsaverage), 34 by talairach.xfm" in out
+    assert "transform check: 2240 subject pial vertices" in out
     assert "verified vs fsaverage" in out

@@ -27,7 +27,7 @@ import csv
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from pathlib import Path
 
@@ -39,10 +39,13 @@ from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_elec
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums, load_reference
 from .surfaces import Surface, read_freesurfer
-from .verify import Fit, OffsetFit, fit, fit_with_offset
+from .verify import Fit, OffsetFit, fit, fit_depth_inside, fit_with_offset
 
 SURFACE_MAX_MM = 3.0
 MIN_CONTACTS = 3
+TRANSFORM_SAMPLES = 2000
+TRANSFORM_MEDIAN_MM = 6.0
+TRANSFORM_P10_MM = 2.0
 METHOD_REFERENCE = "https://docs.nemar.org/data/ieeg-geometry/"
 LABEL_SURFACE = "fsaverage"
 LABEL_AFFINE = "MNI305"
@@ -304,6 +307,8 @@ class OutputFile:
     inputs: list[Path]
     pial_distance_median_mm: float | None = None
     pial_distance_max_mm: float | None = None
+    transform_check: tuple[float, float, int] | None = None
+    affine_vs_surface_mm: tuple[float, float] | None = None
 
 
 @dataclass
@@ -325,6 +330,7 @@ class SubjectResult:
     # median and 90th percentile distance between the affine and surface-based positions of
     # the surface-mapped contacts: a direct measure of the affine error, not a gate
     affine_vs_surface_mm: tuple[float, float] | None = None
+    transform_check: tuple[float, float, int] | None = None
     outputs: list[OutputFile] = field(default_factory=list)
     refusals: list[Refusal] = field(default_factory=list)
     skipped: list[Refusal] = field(default_factory=list)
@@ -362,6 +368,33 @@ def _read_raw(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         reader = csv.DictReader(fh, delimiter="\t")
         rows = list(reader)
         return list(reader.fieldnames or []), rows
+
+
+def check_transform(
+    xfm: np.ndarray, surfaces: dict[str, Surface], c_ras: tuple[float, float, float]
+) -> tuple[float, float, int]:
+    """Lead ruling 12: the subject's own pial vertices through `talairach.xfm` against fsaverage.
+
+    At least 2,000 pial vertices (evenly spaced over both hemispheres, tkr RAS plus c_ras gives
+    scanner RAS) are mapped and measured to the nearest fsaverage6 pial vertex. Returns the
+    median, the 10th percentile and the number sampled; raises `GeometryRefusal` when the
+    median exceeds 6.0 mm or the 10th percentile exceeds 2.0 mm.
+    """
+    verts = np.vstack([s.vertices for s in surfaces.values()])
+    step = max(1, len(verts) // TRANSFORM_SAMPLES)
+    sample = verts[::step]
+    fs6 = load_fsaverage6()
+    tree = KDTree(np.vstack([fs6.pial["L"], fs6.pial["R"]]))
+    dist, _ = tree.query(apply_affine(xfm, sample + np.asarray(c_ras)))
+    median, p10 = float(np.median(dist)), float(np.percentile(dist, 10))
+    if len(sample) < TRANSFORM_SAMPLES or median > TRANSFORM_MEDIAN_MM or p10 > TRANSFORM_P10_MM:
+        raise GeometryRefusal(
+            "transform-check-failed",
+            f"{len(sample)} subject pial vertices through talairach.xfm: median {median:.2f} mm "
+            f"(at most {TRANSFORM_MEDIAN_MM}), 10th percentile {p10:.2f} mm "
+            f"(at most {TRANSFORM_P10_MM})",
+        )
+    return median, p10, len(sample)
 
 
 def map_to_fsaverage6(
@@ -433,6 +466,7 @@ def _describe(
     n: int,
     pial: tuple[float, float] | None,
     agreement: tuple[float, float] | None = None,
+    transform: tuple[float, float, int] | None = None,
 ) -> str:
     rel = ", ".join(sorted(_rel(p, dataset) for p in inputs))
     frame = (
@@ -458,6 +492,16 @@ def _describe(
             "talairach.xfm; this affine method is approximate and does not follow individual "
             "cortical folding"
         )
+        how += (
+            "; typical error of an affine template position is 5 to 15 mm, so use these "
+            "positions for approximate localization only"
+        )
+        if transform is not None:
+            how += (
+                f"; transform check: {transform[2]} of the subject's pial vertices through "
+                f"the transform land a median {transform[0]:.2f} mm (10th percentile "
+                f"{transform[1]:.2f} mm) from the fsaverage pial surface"
+            )
         if agreement is not None:
             how += (
                 "; for this subject's contacts that the surface method placed, the affine and "
@@ -469,6 +513,10 @@ def _describe(
         f"90th percentile {verification.p90_mm:.2f} mm, {verification.grade} ({verification.rule})"
     )
     return f"{head}{how}; inputs: {rel}{check}."
+
+
+def _pct(v: float | None) -> str:
+    return "n/a" if v is None else f"{v:.0%}"
 
 
 def _rel(path: Path, dataset: Path) -> str:
@@ -537,13 +585,14 @@ def compute_subject(
     mapped = np.zeros(len(xyz), dtype=bool)
     fs6_pos = np.full_like(xyz, np.nan)
     pial_dist = np.full(len(xyz), np.nan)
-    if LABEL_SURFACE in wanted:
+    cortical = finite & np.array([c.type == "ecog" for c in eset.contacts], dtype=bool)
+    if LABEL_SURFACE in wanted and cortical.any():  # ruling 11: depth contacts never snap
         try:
-            m, p, d = map_to_fsaverage6(tkr[finite], subject, surfaces)
+            m, p, d = map_to_fsaverage6(tkr[cortical], subject, surfaces)
         except GeometryRefusal as exc:
             result.refusals.append(Refusal(LABEL_SURFACE, exc.reason, exc.message))
         else:
-            mapped[finite], fs6_pos[finite], pial_dist[finite] = m, p, d
+            mapped[cortical], fs6_pos[cortical], pial_dist[cortical] = m, p, d
     affine_sel = finite & ~mapped if LABEL_SURFACE in wanted else finite.copy()
     result.n_surface = int(mapped.sum())
     if mapped.any() and xfm is not None:
@@ -557,7 +606,10 @@ def compute_subject(
         if not len(idx):
             return
         hemis = [eset.contacts[i].hemisphere for i in idx]
-        verification = fit(pos[idx], fsaverage, rule_type, hemis)
+        if rule_type == "depth":
+            verification = fit_depth_inside(pos[idx], fsaverage)
+        else:
+            verification = fit(pos[idx], fsaverage, rule_type, hemis)
         inputs = [item.electrodes_path] + [p for p in (item.coordsystem_path,) if p is not None]
         inputs += list(subject.pial.values())
         if method == METHOD_SURFACE:
@@ -570,7 +622,8 @@ def compute_subject(
                     label,
                     "verification-failed",
                     f"{len(idx)} contacts, median {verification.median_mm:.2f} mm, "
-                    f"{verification.rule}"
+                    f"inside {_pct(verification.inside_fraction)}, "
+                    f"farthest {verification.max_mm:.1f} mm, {verification.rule}"
                     + (f", {verification.reason}" if verification.reason else ""),
                 )
             )
@@ -600,10 +653,15 @@ def compute_subject(
                     len(idx),
                     pial,
                     result.affine_vs_surface_mm,
+                    result.transform_check if method == METHOD_AFFINE else None,
                 ),
                 inputs=inputs,
                 pial_distance_median_mm=None if pial is None else pial[0],
                 pial_distance_max_mm=None if pial is None else pial[1],
+                transform_check=result.transform_check if method == METHOD_AFFINE else None,
+                affine_vs_surface_mm=(
+                    result.affine_vs_surface_mm if method == METHOD_AFFINE else None
+                ),
             )
         )
 
@@ -616,9 +674,14 @@ def compute_subject(
                 Refusal(LABEL_AFFINE, "xfm-missing", "no talairach.xfm for the affine method")
             )
         else:
-            pos = np.full_like(xyz, np.nan)
-            pos[affine_sel] = apply_affine(xfm, scanner[affine_sel])
-            emit(LABEL_AFFINE, METHOD_AFFINE, affine_sel, pos, "seeg")
+            try:
+                result.transform_check = check_transform(xfm, surfaces, c_ras)
+            except GeometryRefusal as exc:
+                result.refusals.append(Refusal(LABEL_AFFINE, exc.reason, exc.message))
+            else:
+                pos = np.full_like(xyz, np.nan)
+                pos[affine_sel] = apply_affine(xfm, scanner[affine_sel])
+                emit(LABEL_AFFINE, METHOD_AFFINE, affine_sel, pos, "depth")
     return result
 
 
@@ -710,6 +773,19 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
                 )
             )
             verification = Verification.from_fit(out.verification, "fsaverage")
+            notes = []
+            if out.transform_check is not None:
+                t = out.transform_check
+                notes.append(
+                    f"transform check {t[2]} pial vertices median {t[0]:.2f} mm p10 {t[1]:.2f} mm"
+                )
+            if out.affine_vs_surface_mm is not None:
+                a = out.affine_vs_surface_mm
+                notes.append(f"affine vs surface median {a[0]:.2f} mm p90 {a[1]:.2f} mm")
+            if notes:
+                verification = replace(
+                    verification, rule=verification.rule + "; " + "; ".join(notes)
+                )
             for path, data, kind in (
                 (out.electrodes_path, _tsv_bytes(out), "electrodes"),
                 (out.coordsystem_path, _json_bytes(out), "coordsystem"),
@@ -748,6 +824,12 @@ def report_lines(dataset: Path, results: list[SubjectResult]) -> list[str]:
                 f"  methods: {res.n_surface} contacts by surface registration (fsaverage), "
                 f"{res.n_affine} by talairach.xfm (MNI305)"
             )
+            if res.transform_check is not None:
+                t = res.transform_check
+                lines.append(
+                    f"  transform check: {t[2]} subject pial vertices through talairach.xfm, "
+                    f"median {t[0]:.2f} mm, p10 {t[1]:.2f} mm from fsaverage6 pial"
+                )
             if res.affine_vs_surface_mm is not None:
                 lines.append(
                     "  affine vs surface positions of the surface-mapped contacts: median "

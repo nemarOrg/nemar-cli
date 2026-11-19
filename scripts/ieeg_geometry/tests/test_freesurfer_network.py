@@ -60,9 +60,10 @@ def test_on003848_resp0699_needs_c_ras():
     assert fit.as_declared.median_mm == pytest.approx(33.28, abs=0.05)
     assert fit.with_c_ras is not None and fit.with_c_ras.median_mm == pytest.approx(1.37, abs=0.05)
     assert res.frame.independent == "shipped talairach.xfm"
-    assert res.n_surface + res.n_affine == 64
-    surface = [o for o in res.outputs if o.label == "fsaverage"]
-    assert surface and surface[0].verification.grade == "specific"
+    assert res.n_surface == 0 and res.n_affine == 64  # ruling 11: depth contacts go affine
+    assert res.transform_check is not None and res.transform_check[0] <= 6.0
+    # ruling 8/12: the real depth contacts are only 75 percent inside fsaverage, so refused
+    assert res.outputs == [] and res.refusals[0].reason == "verification-failed"
 
 
 def test_on004473_sub1_acpc_written_and_scanras_refused():
@@ -82,7 +83,8 @@ def test_on004473_sub1_acpc_written_and_scanras_refused():
     acpc = _one(results, "1", "ACPC")
     assert acpc.frame is not None and acpc.frame.grade == "plausible"
     assert acpc.frame.fits["seeg"].as_declared.median_mm == pytest.approx(3.14, abs=0.05)
-    assert any(o.label == "fsaverage" for o in acpc.outputs)  # units were meters
+    assert acpc.n_affine == 119 and acpc.transform_check is not None  # units were meters
+    assert acpc.outputs == [] and acpc.refusals[0].reason == "verification-failed"
     scan = _one(results, "1", "ScanRAS")
     assert scan.outputs == [] and scan.refusals[0].reason == "frame-not-found"
 
@@ -100,7 +102,7 @@ def test_on005415_sub72_meters():
     )
     res = _one(fsm.plan_dataset(ds), "72")
     assert res.frame is not None
-    assert res.n_surface + res.n_affine == 174
+    assert res.n_surface == 0 and res.n_affine == 174
     assert all(abs(float(v)) < 200 for o in res.outputs for row in o.xyz for v in row)  # mm
 
 
@@ -117,7 +119,7 @@ def test_on004194_nyu_declared_and_umcu_c_ras():
     p02, p03 = _one(results, "p02"), _one(results, "p03")
     assert p02.frame is not None and p02.frame.frame == "scanner"
     assert p03.frame is not None and p03.frame.frame == "tkr"
-    assert p02.n_surface == 56 and p03.n_surface == 111
+    assert p02.n_surface == 56 and p03.n_surface == 90
     for res in (p02, p03):
         surface = next(o for o in res.outputs if o.label == "fsaverage")
         assert surface.verification.grade == "specific"
