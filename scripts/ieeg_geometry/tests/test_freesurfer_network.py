@@ -107,3 +107,5 @@ def test_on004194_cortical_subjects():
         assert [o.frame_fit.grade for o in res.outputs] == ["specific"]
         reg = res.outputs[0].registration  # on full surfaces
         assert reg.n_sampled >= 2000 and reg.centroid_mm <= 5.0 and reg.extent_error <= 0.10
+        assert reg.side_fraction >= 0.98  # measured 0.991 to 0.994
+        assert 3.0 <= reg.affine_residual_mm <= 10.0  # measured 5.65 to 7.69 mm

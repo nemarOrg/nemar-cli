@@ -10,6 +10,7 @@ import pytest
 
 from ieeg_geometry import freesurfer as fsm
 from ieeg_geometry import labels
+from ieeg_geometry.bids import GeometryRefusal
 from ieeg_geometry.ownership import OwnedPath, read_ownership, write_ownership
 from ieeg_geometry.reference import load_reference
 
@@ -343,19 +344,137 @@ def test_pipeline_version_is_the_installed_package_version():
     assert fsm.pipeline_version() == metadata.version("ieeg-geometry")
 
 
-def test_hand_edited_owned_output_is_kept_not_regenerated_or_removed(ds):
+def _owned(ds: Path) -> dict:
+    record = read_ownership(ds)
+    assert record is not None
+    return {e.path: e for e in record.entries}
+
+
+def test_a_pair_with_one_hand_edited_file_is_kept_whole(ds):
     fsm.write_outputs(ds, fsm.plan_dataset(ds))
-    edited = ds / P02_FS
-    edited.write_text(edited.read_text() + "# curator note\n")
-    kept = edited.read_bytes()
+    tsv, sidecar = ds / P02_FS, ds / P02_FS_COORD
+    tsv.write_text(tsv.read_text() + "# curator note\n")  # only the TSV is edited
+    kept_tsv = tsv.read_bytes()
+    sidecar.write_text(sidecar.read_text().replace("Computed by NEMAR", "Computed by NEMAR "))
+    sidecar_edited = sidecar.read_bytes()
+    sidecar.write_bytes(sidecar_edited.replace(b"Computed by NEMAR ", b"Computed by NEMAR"))
+    kept_json = sidecar.read_bytes()  # the sidecar is back to the bytes the pipeline wrote
+    owned_before = _owned(ds)
     results = fsm.plan_dataset(ds)
-    assert fsm.hand_edited_outputs(ds, results) == [P02_FS]
+    assert fsm.hand_edited_outputs(ds, results) == sorted([P02_FS, P02_FS_COORD])
     fsm.write_outputs(ds, results)
-    assert edited.read_bytes() == kept  # regeneration never overwrites a hand edit
-    # and a hand-edited file whose output is no longer produced is not deleted either
+    assert tsv.read_bytes() == kept_tsv and sidecar.read_bytes() == kept_json
+    owned_after = _owned(ds)
+    assert owned_after[P02_FS] == owned_before[P02_FS]
+    assert owned_after[P02_FS_COORD] == owned_before[P02_FS_COORD]
+    # the pair stays whole when its output stops being produced, too
     for f in (ds / "derivatives/freesurfer/sub-p02/surf").glob("*.sphere.reg"):
         f.write_bytes(b"damaged")
     results = fsm.plan_dataset(ds)
-    assert P02_FS not in {e.path for e in fsm.stale_outputs(ds, results)}
+    assert not {P02_FS, P02_FS_COORD} & {e.path for e in fsm.stale_outputs(ds, results)}
     fsm.write_outputs(ds, results)
-    assert edited.read_bytes() == kept
+    assert tsv.read_bytes() == kept_tsv and sidecar.read_bytes() == kept_json
+
+
+# ---- the registration conditions, one at a time ------------------------------------------------
+
+
+def _registration_inputs(ds: Path):
+    from ieeg_geometry.surfaces import read_freesurfer
+
+    root = ds / "derivatives/freesurfer/sub-p03"
+    subject = fsm.find_subject_dirs(ds, "p03", "nyuecog01")[0]
+    surfaces = {
+        h: read_freesurfer(root / "surf" / f"{s}.pial") for h, s in (("L", "lh"), ("R", "rh"))
+    }
+    return surfaces, fsm.load_spheres(subject, surfaces)
+
+
+def _sample_index(surface, per=1000):
+    return np.arange(0, len(surface.vertices), max(1, len(surface.vertices) // per))
+
+
+def _retarget(spheres, surfaces, transform):
+    """Spheres whose sampled vertices map to where `transform` moves their honest targets.
+
+    `transform(hemi, positions)` returns new positions; each is snapped to the nearest
+    fsaverage6 pial vertex of the hemisphere, so the mapping stays a real chain.
+    """
+    from scipy.spatial import KDTree
+
+    fs6 = fsm.load_fsaverage6()
+    out = {h: s.copy() for h, s in spheres.items()}
+    for hemi, surf in surfaces.items():
+        idx = _sample_index(surf)
+        honest = fsm.to_fsaverage6(hemi, spheres[hemi][idx])
+        _, vertex = KDTree(fs6.pial[hemi]).query(transform(hemi, honest))
+        out[hemi][idx] = fs6.sphere[hemi][vertex]
+    return out
+
+
+def test_the_honest_registration_passes_every_condition(ds):
+    surfaces, spheres = _registration_inputs(ds)
+    check = fsm.measure_registration(surfaces, spheres)
+    assert fsm.failed_conditions(check) == []
+
+
+def test_only_the_side_condition_fails(ds):
+    surfaces, spheres = _registration_inputs(ds)
+    fs6 = fsm.load_fsaverage6()
+    wrong_side = fs6.pial["L"][int(np.argmax(fs6.pial["L"][:, 0]))]  # a left vertex with x > 0
+    assert wrong_side[0] > 0
+
+    def move(hemi, pos):
+        pos = pos.copy()
+        if hemi == "L":
+            pos[: int(0.1 * len(pos))] = wrong_side
+        return pos
+
+    check = fsm.measure_registration(surfaces, _retarget(spheres, surfaces, move))
+    assert fsm.failed_conditions(check) == ["side"], check.describe()
+
+
+def test_only_the_centroid_condition_fails(ds):
+    """Everything moved 8 mm in y: an affine fit absorbs it, the centroid does not."""
+    surfaces, spheres = _registration_inputs(ds)
+    check = fsm.measure_registration(
+        surfaces, _retarget(spheres, surfaces, lambda h, pos: pos + np.array([0.0, 8.0, 0.0]))
+    )
+    assert fsm.failed_conditions(check) == ["centroid"], check.describe()
+
+
+def test_only_the_extent_condition_fails(ds):
+    """Everything scaled to 70 percent about the mean: an affine fit absorbs it, the extent not."""
+    surfaces, spheres = _registration_inputs(ds)
+    center = np.vstack([fsm.load_fsaverage6().pial[h] for h in ("L", "R")]).mean(axis=0)
+    check = fsm.measure_registration(
+        surfaces, _retarget(spheres, surfaces, lambda h, pos: center + (pos - center) * 0.7)
+    )
+    assert fsm.failed_conditions(check) == ["extent"], check.describe()
+
+
+def test_only_the_affine_condition_fails(ds):
+    """The honest targets in a shuffled order: every marginal is intact, the geometry is not."""
+    surfaces, spheres = _registration_inputs(ds)
+    rng = np.random.default_rng(5)
+    check = fsm.measure_registration(
+        surfaces, _retarget(spheres, surfaces, lambda h, pos: rng.permutation(pos))
+    )
+    assert fsm.failed_conditions(check) == ["affine"], check.describe()
+
+
+def test_an_equal_count_hemisphere_swap_is_refused(ds):
+    """Left and right with the same vertex count, each given the other's sphere.reg."""
+    from ieeg_geometry.surfaces import Surface
+
+    surfaces, spheres = _registration_inputs(ds)
+    left = surfaces["L"]
+    mirrored = Surface(left.vertices * np.array([-1.0, 1.0, 1.0]), left.faces, "R")
+    paired = {"L": left, "R": mirrored}
+    honest = {"L": spheres["L"], "R": spheres["L"] * np.array([-1.0, 1.0, 1.0])}
+    swapped = {"L": honest["R"], "R": honest["L"]}
+    assert len(paired["L"].vertices) == len(paired["R"].vertices)
+    with pytest.raises(GeometryRefusal) as exc:
+        fsm.check_registration(paired, swapped)
+    assert exc.value.reason == "registration-check-failed"
+    assert fsm.failed_conditions(fsm.measure_registration(paired, swapped))

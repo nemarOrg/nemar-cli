@@ -387,6 +387,32 @@ def check_registration(
     covers the template evenly). Raises `GeometryRefusal` `registration-check-failed` with the
     numbers otherwise.
     """
+    check = measure_registration(surfaces, spheres)
+    if failed_conditions(check):
+        raise GeometryRefusal("registration-check-failed", check.describe())
+    return check
+
+
+def failed_conditions(check: RegistrationCheck) -> list[str]:
+    """The names of the registration conditions a measurement violates (empty when it passes)."""
+    failed = []
+    if check.n_sampled < REG_SAMPLES:
+        failed.append("samples")
+    if check.side_fraction < REG_SIDE_FRACTION:
+        failed.append("side")
+    if check.centroid_mm > REG_CENTROID_MM:
+        failed.append("centroid")
+    if check.extent_error > REG_EXTENT_FRACTION:
+        failed.append("extent")
+    if check.affine_residual_mm > REG_AFFINE_RESIDUAL_MM:
+        failed.append("affine")
+    return failed
+
+
+def measure_registration(
+    surfaces: dict[str, Surface], spheres: dict[str, np.ndarray]
+) -> RegistrationCheck:
+    """The registration numbers of `check_registration`, without judging them."""
     hemis = [h for h in spheres if h in surfaces]
     if not hemis:
         raise GeometryRefusal("registration-check-failed", "no hemisphere has a sphere.reg")
@@ -408,23 +434,13 @@ def check_registration(
 
     design = np.c_[own_a, np.ones(len(own_a))]
     coef = np.linalg.lstsq(design, mapped_a, rcond=None)[0]
-    check = RegistrationCheck(
+    return RegistrationCheck(
         n_sampled=len(own_a),
         side_fraction=float(side.mean()),
         centroid_mm=float(np.linalg.norm(mapped_a.mean(axis=0) - ref.mean(axis=0))),
         extent_error=float(np.max(np.abs(extent(mapped_a) / extent(ref) - 1.0))),
         affine_residual_mm=float(np.median(np.linalg.norm(design @ coef - mapped_a, axis=1))),
     )
-    failed = (
-        check.n_sampled < REG_SAMPLES
-        or check.side_fraction < REG_SIDE_FRACTION
-        or check.centroid_mm > REG_CENTROID_MM
-        or check.extent_error > REG_EXTENT_FRACTION
-        or check.affine_residual_mm > REG_AFFINE_RESIDUAL_MM
-    )
-    if failed:
-        raise GeometryRefusal("registration-check-failed", check.describe())
-    return check
 
 
 def map_to_fsaverage6(
@@ -717,6 +733,18 @@ def _json_bytes(out: OutputFile) -> bytes:
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _partner(rel: str) -> str:
+    """The other file of an electrodes/coordsystem pair."""
+    if rel.endswith("_electrodes.tsv"):
+        return rel[: -len("_electrodes.tsv")] + "_coordsystem.json"
+    return rel[: -len("_coordsystem.json")] + "_electrodes.tsv"
+
+
+def _pair_untouched(dataset: Path, rel: str, owned: dict[str, OwnedPath]) -> bool:
+    """True when neither file of the pair was edited by hand (the pair is one unit)."""
+    return all(_untouched(dataset / p, owned.get(p)) for p in (rel, _partner(rel)))
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -744,7 +772,9 @@ def stale_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
     listed by `hand_edited_outputs` instead and are not removed.
     """
     dataset = Path(dataset_dir)
-    return [e for e in _stale_all(dataset, results) if _untouched(dataset / e.path, e)]
+    existing = read_ownership(dataset)
+    owned = {e.path: e for e in existing.entries} if existing else {}
+    return [e for e in _stale_all(dataset, results) if _pair_untouched(dataset, e.path, owned)]
 
 
 def _stale_all(dataset: Path, results: list[SubjectResult]) -> list[OwnedPath]:
@@ -774,10 +804,11 @@ def hand_edited_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -
         for out in res.outputs
         for path in (out.electrodes_path, out.coordsystem_path)
     ]
+    all_owned = {e.path: e for e in existing.entries}
     return sorted(
         p
-        for p in paths
-        if p in owned and not _untouched(dataset / p, owned[p]) and (dataset / p).exists()
+        for p in set(paths)
+        if p in owned and (dataset / p).exists() and not _pair_untouched(dataset, p, all_owned)
     )
 
 
@@ -816,13 +847,14 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
                 )
             )
             verification = _verification(out)
+            # decided before either file is written: the pair is one unit
+            if not _pair_untouched(dataset, _rel(out.electrodes_path, dataset), owned):
+                continue  # either file of the pair was hand-edited: keep both
             for path, data, kind in (
                 (out.electrodes_path, _tsv_bytes(out), "electrodes"),
                 (out.coordsystem_path, _json_bytes(out), "coordsystem"),
             ):
                 rel = _rel(path, dataset)
-                if not _untouched(path, owned.get(rel)):
-                    continue  # hand-edited: kept, with its old entry
                 path.write_bytes(data)
                 entries.append(
                     OwnedPath(rel, kind, inputs, out.method, verification, output_sha256=_sha(data))
