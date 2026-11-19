@@ -235,8 +235,11 @@ def _annex_object(clone: Path, rel: str) -> tuple[Path, int, str, str] | None:
     if os.path.isabs(target) or ".git/annex/objects/" not in target or m is None:
         raise OSError(f"symbolic link {target!r} is not a relative git-annex key with a size")
     objects = (clone / ".git" / "annex" / "objects").resolve()
-    obj = Path(os.path.normpath(link.parent / target))
-    if not obj.resolve().is_relative_to(objects):
+    # the link resolves from its physical directory: a symlinked parent counts as where it leads
+    obj = Path(os.path.normpath(link.parent.resolve() / target))
+    if not link.parent.resolve().is_relative_to(
+        clone.resolve()
+    ) or not obj.resolve().is_relative_to(objects):
         raise OSError(f"symbolic link {target!r} points outside the clone's annex objects")
     backend = m.group(1).removesuffix("E")
     algo = backend.lower() if backend.lower() in hashlib.algorithms_available else ""
