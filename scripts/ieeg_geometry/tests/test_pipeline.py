@@ -702,3 +702,43 @@ def test_a_nested_failed_sidecar_excludes_its_subjects_electrodes(source, tmp_pa
     assert nested in got.failed
     assert SUB01 in got.excluded and not (got.clone / SUB01).exists()
     assert P02 not in got.excluded
+
+
+def test_a_crash_between_the_swap_renames_is_recovered_at_the_next_run(remote, tmp_path):
+    work, surfaces = tmp_path / "w", tmp_path / "surf"
+    _run(remote, work, apply=True, surfaces_out=surfaces)
+    _run(remote, work, apply=True, surfaces_out=surfaces)  # a rerun sees the applied files
+    expected = (surfaces / "geometry" / "index.json").read_bytes()
+    # the crash state: geometry/ already moved aside, the new one not yet in place
+    (surfaces / "geometry").rename(surfaces / ".geometry.old")
+    (surfaces / ".geometry.new").mkdir()
+    (surfaces / ".geometry.new" / "partial").write_text("x")
+    _run(remote, work, surfaces_out=surfaces)  # even a dry run restores first
+    assert (surfaces / "geometry" / "index.json").read_bytes() == expected
+    assert not (surfaces / ".geometry.old").exists()
+    # and an apply after a crash ends with exactly the new tree and no leftovers
+    (surfaces / "geometry").rename(surfaces / ".geometry.old")
+    _run(remote, work, apply=True, surfaces_out=surfaces)
+    assert (surfaces / "geometry" / "index.json").read_bytes() == expected
+    assert sorted(p.name for p in surfaces.iterdir()) == ["geometry"]
+
+
+def test_a_symlinked_parent_directory_leading_outside_the_clone_is_refused(source, tmp_path):
+    remote = build_remote(source, tmp_path / "remote")
+    first = _fetch(remote, tmp_path)
+    clone = first.clone
+    surf = clone / "derivatives/freesurfer/sub-p02/surf"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    rel = "derivatives/freesurfer/sub-p02/surf/lh.pial"
+    shutil.move(str(surf), str(outside / "surf"))
+    surf.symlink_to(outside / "surf")
+    # a reused clone: the link now sits beneath a symlinked directory
+    (outside / "surf" / "lh.pial").unlink()
+    key = "MD5E-s5--" + hashlib.md5(b"hello").hexdigest() + ".pial"  # noqa: S324
+    (outside / "surf" / "lh.pial").symlink_to(f"../../../../.git/annex/objects/ab/cd/{key}/{key}")
+    before = _snapshot(outside)
+    got = _fetch(remote, tmp_path)
+    assert "outside the clone" in got.failed[rel] and rel not in got.fetched
+    assert _snapshot(outside) == before
+    assert not (tmp_path / ".git").exists() and not list(outside.rglob(".git"))
