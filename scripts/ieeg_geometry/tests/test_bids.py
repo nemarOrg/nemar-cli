@@ -90,3 +90,23 @@ def test_type_from_column_then_channels_then_unknown(tmp_path):
 def test_type_from_channels_alone_on_real_fixture(mini):
     item = next(d for d in discover(mini) if d.subject == "2" and d.space is None)
     assert read_electrode_set(item).type_counts() == {"seeg": 149, "unknown": 16}
+
+
+@pytest.mark.parametrize("token", ["abc", "inf", "-Infinity", "1,5"])
+def test_unparsable_coordinates_are_refused(tmp_path, token):
+    root = _dataset(tmp_path, f"name\tx\ty\tz\nA\t{token}\t1\t2\n", {"iEEGCoordinateUnits": "mm"})
+    with pytest.raises(GeometryRefusal) as exc:
+        _read(root)
+    assert exc.value.reason == "electrodes-value"
+    assert "'A'" in exc.value.message
+
+
+def test_type_column_synonyms_and_hemisphere(tmp_path):
+    tsv = (
+        "name\tx\ty\tz\ttype\themisphere\n"
+        "A\t1\t1\t1\tdepth\tL\nB\t1\t1\t1\tgrid\tR\nC\t1\t1\t1\tstrip\tn/a\n"
+        "D\t1\t1\t1\tsurface\tr\nE\t1\t1\t1\tSEEG\tX\n"
+    )
+    eset = _read(_dataset(tmp_path, tsv, {"iEEGCoordinateUnits": "mm"}))
+    assert [c.type for c in eset.contacts] == ["seeg", "ecog", "ecog", "ecog", "seeg"]
+    assert [c.hemisphere for c in eset.contacts] == ["L", "R", None, "R", None]

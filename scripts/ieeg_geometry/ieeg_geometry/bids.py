@@ -18,7 +18,16 @@ SEEG: ContactType = "seeg"
 ECOG: ContactType = "ecog"
 DBS: ContactType = "dbs"
 UNKNOWN: ContactType = "unknown"
-_TYPES = {"seeg": SEEG, "ecog": ECOG, "dbs": DBS}
+# BIDS `type` values seen in electrodes.tsv and channels.tsv, folded to three contact kinds.
+_TYPES = {
+    "seeg": SEEG,
+    "depth": SEEG,
+    "ecog": ECOG,
+    "grid": ECOG,
+    "strip": ECOG,
+    "surface": ECOG,
+    "dbs": DBS,
+}
 
 
 class GeometryRefusal(Exception):
@@ -37,6 +46,7 @@ class Contact:
     y: float
     z: float
     type: ContactType = UNKNOWN
+    hemisphere: str | None = None  # "L" or "R" from the electrodes `hemisphere` column
 
     @property
     def missing_coordinates(self) -> bool:
@@ -75,6 +85,9 @@ class ElectrodeSet:
     def xyz_for(self, contact_type: ContactType) -> np.ndarray:
         rows = [[c.x, c.y, c.z] for c in self.contacts if c.type == contact_type]
         return np.array(rows, dtype=float).reshape(-1, 3)
+
+    def hemispheres_for(self, contact_type: ContactType) -> list[str | None]:
+        return [c.hemisphere for c in self.contacts if c.type == contact_type]
 
 
 @dataclass(frozen=True)
@@ -133,14 +146,18 @@ def _channel_stem(ents: dict[str, str]) -> str:
     return stem
 
 
-def _to_float(token: str) -> float:
+def _to_float(token: str, *, where: str = "") -> float:
+    """A coordinate; `n/a`, `NaN` and empty are missing, anything unparsable is refused."""
     token = token.strip()
     if token.lower() in _MISSING:
         return math.nan
     try:
-        return float(token)
+        value = float(token)
     except ValueError:
-        return math.nan
+        value = math.nan
+    if not math.isfinite(value):
+        raise GeometryRefusal("electrodes-value", f"{where}unparsable coordinate {token!r}")
+    return value
 
 
 def _read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -203,8 +220,12 @@ def read_electrode_set(item: Discovered) -> ElectrodeSet:
     for row in rows:
         name = (row.get("name") or "").strip()
         kind = _normalize_type(row.get("type")) or from_channels.get(name) or UNKNOWN
-        xyz = [_to_float(row.get(axis) or "") * scale for axis in ("x", "y", "z")]
-        contacts.append(Contact(name, xyz[0], xyz[1], xyz[2], kind))
+        where = f"{item.electrodes_path.name}, contact {name!r}: "
+        xyz = [_to_float(row.get(axis) or "", where=where) * scale for axis in ("x", "y", "z")]
+        hemi = (row.get("hemisphere") or "").strip().upper()
+        contacts.append(
+            Contact(name, xyz[0], xyz[1], xyz[2], kind, hemi if hemi in ("L", "R") else None)
+        )
     frame = sidecar.get("iEEGCoordinateSystem")
     return ElectrodeSet(
         electrodes_path=item.electrodes_path,
