@@ -742,3 +742,23 @@ def test_a_symlinked_parent_directory_leading_outside_the_clone_is_refused(sourc
     assert "outside the clone" in got.failed[rel] and rel not in got.fetched
     assert _snapshot(outside) == before
     assert not (tmp_path / ".git").exists() and not list(outside.rglob(".git"))
+
+
+def test_a_rerun_on_an_applied_tree_gives_a_byte_identical_surface_index(remote, tmp_path):
+    work, first, second = tmp_path / "w", tmp_path / "s1", tmp_path / "s2"
+    a, _ = _run(remote, work, apply=True, surfaces_out=first)
+    applied = a.report["changes"]["add"]
+    assert any("space-fsaverage" in p for p in applied) and any(
+        "space-IXI549Space" in p for p in applied
+    )
+    b, _ = _run(remote, work, apply=True, surfaces_out=second)
+    assert (first / "geometry" / "index.json").read_bytes() == (
+        second / "geometry" / "index.json"
+    ).read_bytes()
+    listed = json.dumps(b.report["surface_entries"]) + json.dumps(
+        [r["decisions"]["surfaces"] for r in b.report["files"]]
+    )
+    assert "space-fsaverage" not in listed and "space-IXI549Space" not in listed
+    assert sorted(p.name for p in (first / "geometry" / "meshes").iterdir()) == sorted(
+        p.name for p in (second / "geometry" / "meshes").iterdir()
+    )
