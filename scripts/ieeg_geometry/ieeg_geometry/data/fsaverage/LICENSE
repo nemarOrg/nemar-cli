@@ -195,12 +195,16 @@ respect to FreeSurfer.
 ----------------------------------------------------------------------------
 NOTICE OF MODIFICATION (FreeSurfer Software License Part B, 1(d))
 
-The files lh.pial.npz and rh.pial.npz in this directory are MODIFIED versions of
-FreeSurfer's fsaverage pial surfaces and are not the original Software.
+The files lh.pial.npz, rh.pial.npz, lh.sphere.reg.npz and rh.sphere.reg.npz in this
+directory are MODIFIED versions of FreeSurfer's fsaverage pial and sphere.reg surfaces and are
+not the original Software.
 Modifications: (1) only the first 40962 vertices of each hemisphere were kept, which is
 the fsaverage6 vertex set, with coordinates copied unchanged; (2) the 81920 triangles of
 fsaverage6 were recovered from the fsaverage triangles; (3) the data are stored as
-compressed NumPy arrays (float32 vertices, uint32 faces).
+compressed NumPy arrays (float32 vertices, uint32 faces); (4) the two sphere.reg files hold
+only the first 40962 vertices of fsaverage's sphere.reg (float32, no triangles, no footer).
+The sphere.reg source was read from the same kind of public dataset (on004194 v1.0.0,
+derivatives/freesurfer/fsaverage/surf/); build script tools/build_fsaverage6_sphere.py.
 The source fsaverage pial surfaces carry the FreeSurfer header "created by greve on
 Thu Apr 11 2013" and were read from a public dataset that redistributes them. Build script:
 scripts/ieeg_geometry/tools/build_fsaverage6.py in the nemar-cli repository.
