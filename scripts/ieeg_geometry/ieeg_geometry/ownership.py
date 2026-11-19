@@ -1,4 +1,10 @@
-"""`.nemar/ieeg-geometry.json`: the paths the pipeline owns, with inputs and verification."""
+"""`.nemar/ieeg-geometry.json`: the paths the pipeline owns, with inputs and verification.
+
+An entry may carry `output_sha256`, the SHA-256 of the bytes the pipeline wrote. A rerun
+regenerates an owned file only while its bytes still match that hash; a legacy entry without
+`output_sha256` whose file differs from the new output is treated as hand-edited and never
+regenerated (the label tracks keep it and report it).
+"""
 
 from __future__ import annotations
 

@@ -361,6 +361,7 @@ class Proposal:
     attempts: tuple[Attempt, ...] = ()
     files: tuple[PlannedFile, ...] = ()
     suppressed: tuple[str, ...] = ()  # why blind trials did not run (needs-human only)
+    warnings: tuple[str, ...] = ()  # e.g. undecodable bytes in a channels file
 
     def lines(self) -> list[str]:
         head = f"label: {self.status}"
@@ -369,6 +370,7 @@ class Proposal:
         out = [f"{head} ({self.reason})"]
         out += [f"    {a.line()}" for a in self.attempts]
         out += [f"    would write {f.path}" for f in self.files]
+        out += [f"    warning: {w}" for w in self.warnings]
         return out
 
 
@@ -598,8 +600,12 @@ def propose(
     frame = sidecar.get("iEEGCoordinateSystem")
     frame = frame if isinstance(frame, str) else None
 
+    warnings: tuple[str, ...] = ()
+
     def done(status: str, reason: str, **kw) -> Proposal:
-        return Proposal(relpath, item.subject, item.session, frame, status, reason, **kw)
+        return Proposal(
+            relpath, item.subject, item.session, frame, status, reason, warnings=warnings, **kw
+        )
 
     if item.space is not None:
         return done(SKIPPED, f"the file names its frame in space-{item.space}")
@@ -618,9 +624,11 @@ def propose(
         return done(SKIPPED, f"unreadable: {exc.reason}")
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, KeyError) as exc:
         return done(SKIPPED, f"unreadable: {type(exc).__name__}: {exc}")
-    n_finite = len(_finite_pts(eset))
-    if n_finite < MIN_CONTACTS:
-        return done(SKIPPED, f"fewer than {MIN_CONTACTS} contacts with coordinates")
+    warnings = eset.warnings
+    pts_ok = _finite_pts(eset)
+    n_finite = len(pts_ok)
+    if n_finite < MIN_CONTACTS or len(np.unique(pts_ok, axis=0)) < MIN_CONTACTS:
+        return done(SKIPPED, f"fewer than {MIN_CONTACTS} distinct contact positions")
 
     candidates: list[tuple[Named, str, str]] = []  # (name, source, where)
     unknown_mni = talairach = False

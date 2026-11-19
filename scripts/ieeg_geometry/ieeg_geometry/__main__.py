@@ -74,6 +74,8 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         except GeometryRefusal as exc:
             write(f"  refused: {exc.reason} ({exc.message})")
             continue
+        for warning in eset.warnings:
+            write(f"  warning: {warning}")
         counts = ", ".join(f"{t}={n}" for t, n in eset.type_counts().items())
         write(f"  frame {eset.frame}, units {eset.declared_units} (x{eset.scale_to_mm:g} to mm)")
         write(f"  contacts {len(eset.contacts)} ({counts}), missing coordinates {eset.n_missing}")

@@ -68,6 +68,7 @@ class ElectrodeSet:
     scale_to_mm: float
     contacts: list[Contact] = field(default_factory=list)
     units_assumed: bool = False
+    warnings: tuple[str, ...] = ()
 
     @property
     def xyz_mm(self) -> np.ndarray:
@@ -210,17 +211,31 @@ def _normalize_type(token: str | None) -> ContactType | None:
     return _TYPES.get(token.strip().lower())
 
 
-def _channel_types(paths: tuple[Path, ...]) -> dict[str, ContactType]:
+def _channel_types(
+    paths: tuple[Path, ...],
+) -> tuple[dict[str, ContactType], tuple[str, ...]]:
+    """Contact types from channels files, and a warning per file whose name or type cells
+    contained undecodable bytes (replaced by U+FFFD; those cells may not match)."""
     types: dict[str, ContactType] = {}
+    warnings: list[str] = []
     for path in paths:
-        # Only name and type are used; a non-UTF-8 byte in another column (on006233) is not fatal.
+        # A non-UTF-8 byte in another column (on006233's units) is not fatal.
         _, rows = _read_tsv(path, errors="replace")
+        damaged = 0
         for row in rows:
-            kind = _normalize_type(row.get("type"))
             name = (row.get("name") or "").strip()
+            kind_text = row.get("type")
+            if "\ufffd" in name or "\ufffd" in (kind_text or ""):
+                damaged += 1
+            kind = _normalize_type(kind_text)
             if kind and name:
                 types.setdefault(name, kind)
-    return types
+        if damaged:
+            warnings.append(
+                f"{path.name}: {damaged} name or type cell(s) had undecodable bytes "
+                "(replaced); contact types may be incomplete"
+            )
+    return types, tuple(warnings)
 
 
 def read_electrode_set(item: Discovered, assume_units: str | None = None) -> ElectrodeSet:
@@ -269,7 +284,7 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
-    from_channels = _channel_types(item.channels_paths)
+    from_channels, warnings = _channel_types(item.channels_paths)
     contacts: list[Contact] = []
     for row in rows:
         name = (row.get("name") or "").strip()
@@ -292,4 +307,5 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
         scale_to_mm=scale,
         contacts=contacts,
         units_assumed=assumed,
+        warnings=warnings,
     )

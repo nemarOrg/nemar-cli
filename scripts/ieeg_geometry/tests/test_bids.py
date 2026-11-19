@@ -193,3 +193,16 @@ def test_channels_file_with_a_non_utf8_byte_still_gives_types(tmp_path):
         b"name\ttype\tunits\nA1\tECOG\t\x83V\n"  # a Latin or Shift-JIS micro sign, as in on006233
     )
     assert _read(tmp_path).contacts[0].type == "ecog"
+
+
+def test_damaged_name_or_type_cells_warn_but_other_columns_do_not(tmp_path):
+    ieeg = tmp_path / "sub-01" / "ieeg"
+    ieeg.mkdir(parents=True)
+    (ieeg / "sub-01_electrodes.tsv").write_text("name\tx\ty\tz\nA1\t1\t2\t3\n")
+    (ieeg / "sub-01_coordsystem.json").write_text('{"iEEGCoordinateUnits": "mm"}')
+    channels = ieeg / "sub-01_task-x_channels.tsv"
+    channels.write_bytes(b"name\ttype\tunits\nA1\tECOG\t\x83V\n")
+    assert _read(tmp_path).warnings == ()  # only the units cell is damaged
+    channels.write_bytes(b"name\ttype\tunits\nA\x83\tECOG\tuV\nA2\tEC\x83G\tuV\n")
+    (warning,) = _read(tmp_path).warnings
+    assert "2 name or type cell(s)" in warning and "sub-01_task-x_channels.tsv" in warning

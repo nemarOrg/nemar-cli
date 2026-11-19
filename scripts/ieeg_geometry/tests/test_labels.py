@@ -638,13 +638,23 @@ def test_a_new_version_with_changed_evidence_does_rewrite(no_sidecar):
     assert "ieeg-geometry 0.2.0" in next(no_sidecar.rglob("*_coordsystem.json")).read_text()
 
 
-def test_one_unexpected_error_becomes_a_skipped_proposal(no_sidecar, monkeypatch):
-    def boom(*args, **kwargs):
-        raise RuntimeError("injected fault")
+def test_identical_contact_positions_are_not_a_fit(tmp_path):
+    """Twelve contacts at the origin touch a template vertex; that proves nothing."""
+    _points_file(tmp_path, np.zeros((12, 3)))
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.SKIPPED and "distinct contact positions" in prop.reason
 
-    monkeypatch.setattr(labels, "_blind_evidence", boom)
+
+def test_channels_bytes_that_are_not_utf8_surface_as_a_warning(no_sidecar):
+    channels = next(no_sidecar.rglob("*_channels.tsv"))
+    lines = channels.read_bytes().split(b"\n")
+    lines[1] = lines[1].replace(b"A1", b"A\x83")  # a damaged name cell, as on006233's units
+    channels.write_bytes(b"\n".join(lines))
     prop = _only(labels.plan_dataset(no_sidecar))
-    assert prop.status == labels.SKIPPED and "RuntimeError: injected fault" in prop.reason
+    assert prop.status == labels.ACCEPTED
+    assert any("undecodable bytes" in w for w in prop.warnings)
+    assert any("warning:" in line for line in prop.lines())
+    assert "warning:" in _inspect(no_sidecar)
 
 
 def test_ownership_is_recorded_before_the_files(no_sidecar):
@@ -921,7 +931,7 @@ def test_inspect_lists_what_suppressed_blind_trials(tmp_path):
 def test_inspect_reports_a_missing_package_version_once(tmp_path, monkeypatch):
     from importlib import metadata
 
-    def missing(name):
+    def missing(name):  # simulates an environment fault (no package metadata), not business logic
         raise metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr(metadata, "version", missing)
