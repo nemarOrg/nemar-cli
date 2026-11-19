@@ -20,8 +20,12 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
 1. **Form.** A computed result is a `sub-X[_ses-Y]_space-<label>_electrodes.tsv` and `..._space-<label>_coordsystem.json` pair beside the authors' files, in millimeters.
    An electrodes file with no coordinate-system sidecar at all gets the missing `..._coordsystem.json` when its label is verified.
    An existing author file is never edited.
-2. **Verification gates every write.** Positions are accepted only when the contacts fit the reference surface of the claimed space: the median distance to the nearest surface vertex is at most 2.0 mm for electrocorticography (ECoG) contacts; for stereo-EEG (sEEG) depth contacts and contacts of unknown type, the median is at most 6.0 mm and at least 95 percent lie inside the closed pial surfaces.
-   A label found without any textual evidence is accepted only when the median is at most 1.0 mm against the vendored fsaverage6 (contacts on full-resolution fsaverage vertices measure about 0.7 mm against it) and the same contacts shifted by 10 mm along each axis fail the ECoG rule.
+2. **Verification gates every write.** Each result is fitted to the reference surface of the claimed space and graded.
+   Specific evidence: electrocorticography (ECoG) or surface contacts with a median nearest-vertex distance of at most 2.0 mm, or contacts on template vertices (median at most 1.0 mm against the vendored fsaverage6, while the same contacts shifted by 10 mm along each axis fail).
+   Plausible evidence: depth (sEEG) contacts with a median of at most 6.0 mm and at least 90 percent inside or within 5.0 mm of the surface; a pial-surface fit cannot tell a depth implant's correct frame from one 10 to 20 mm off, so this is a plausibility check only.
+   A write needs specific evidence, or plausible evidence plus independent frame evidence: ECoG contacts of the same subject that give specific evidence, a transform or near-miss label in the dataset that already names the target space, or a template named in the dataset's own text.
+   A label found without any textual evidence needs specific evidence.
+   A reference surface whose inside cannot be evaluated fails closed.
    A frame declared `ACPC` or `ScanRAS`, or tied by `IntendedFor` to the subject's own scan, is never relabeled; it can only be transformed.
    `MNI` without a variant and `Talairach` are never written as labels.
 3. **Provenance.** `iEEGCoordinateProcessingDescription` starts "Computed by NEMAR" and names the source files, the method, the pipeline version and the verification distances; `iEEGCoordinateProcessingReference` links the method page on docs.nemar.org.
