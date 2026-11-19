@@ -104,7 +104,7 @@ Detail: [`.rules/release-and-repull.md`](.rules/release-and-repull.md).
 
 ### The vector visibility switch is the owner's
 
-`VECTORIZE_VISIBILITY_FILTER` stays out of `backend/wrangler-sccn.toml` (`backend/test/vectorize-switch-flag.test.ts` fails a change that adds one); only the owner turns it on (ADR 0126).
+`VECTORIZE_VISIBILITY_FILTER = "1"` is set in production `[vars]` and staging `[env.dev.vars]`, by the owner (ADR 0126); `backend/test/vectorize-switch-flag.test.ts` fails a change that sets it anywhere else or changes its value.
 
 ### The compute switches are the owner's
 
