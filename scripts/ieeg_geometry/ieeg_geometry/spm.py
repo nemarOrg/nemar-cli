@@ -425,6 +425,14 @@ def _t1_stem(name: str) -> str:
     return name
 
 
+def _inside_dataset(dataset: Path, path: Path) -> str | None:
+    """`path` relative to the dataset after normalizing `..`, or None when it leaves the dataset."""
+    rel = os.path.normpath(path.relative_to(dataset) if path.is_relative_to(dataset) else path)
+    if os.path.isabs(rel) or rel == ".." or rel.startswith("../"):
+        return None
+    return Path(rel).as_posix()
+
+
 def intended_for_status(
     intended_for: str | list[str] | None,
     field_path: Path,
@@ -451,9 +459,10 @@ def intended_for_status(
         if not isinstance(raw, str) or not raw.strip():
             continue
         rel = raw.strip().removeprefix("bids::").lstrip("/")
-        readings = [rel]
+        readings = [_inside_dataset(dataset, dataset / rel)]
         if subject_dir is not None:
-            readings.append((subject_dir / rel).relative_to(dataset).as_posix())
+            readings.append(_inside_dataset(dataset, subject_dir / rel))
+        readings = [r for r in readings if r is not None]
         existing = [r for r in dict.fromkeys(readings) if os.path.lexists(dataset / r)]
         if not existing:
             continue

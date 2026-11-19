@@ -1,5 +1,7 @@
 """SPM deformation inversion, pairing, verification and writing (card B2)."""
 
+import functools
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,6 +16,7 @@ from ieeg_geometry.bids import GeometryRefusal, discover, read_electrode_set
 from ieeg_geometry.ownership import read_ownership
 from ieeg_geometry.reference import load_reference
 from ieeg_geometry.surfaces import Surface
+from ieeg_geometry.verify import points_inside
 
 FIXTURE = Path(__file__).parent / "fixtures" / "spm_dataset"
 TEMPLATE_AFFINE = np.array(
@@ -177,7 +180,7 @@ def _add_native_surface(dataset: Path) -> None:
 @pytest.fixture
 def synthetic_dataset(tmp_path, synthetic_field) -> Path:
     """A subject with 40 sEEG contacts inside the right MNI shell, in a native frame."""
-    native = _native(_shell_points(40, 11, min_x=20.0) * 0.9)
+    native = _native(_inside_points(40))
     ieeg = tmp_path / "sub-9" / "ieeg"
     ieeg.mkdir(parents=True)
     rows = ["name\tx\ty\tz\tsize\ttype\themisphere"]
@@ -263,6 +266,34 @@ def _shell_points(n: int, seed: int, min_x: float = -1e9) -> np.ndarray:
     return pool[rng.choice(len(pool), n, replace=False)]
 
 
+def _is_inside(points: np.ndarray) -> np.ndarray:
+    result = points_inside(points, load_reference("MNI152NLin2009cAsym"))
+    assert result is not None
+    return result[0]
+
+
+@functools.cache
+def _inside_pool() -> np.ndarray:
+    shell = load_reference("MNI152NLin2009cAsym")[1]
+    pool = shell.vertices[shell.vertices[:, 0] >= 20.0] * 0.9
+    return pool[_is_inside(pool)]
+
+
+def _inside_points(n: int, seed: int = 0) -> np.ndarray:
+    """`n` right-hemisphere points that the ray-parity test puts inside the shell, any seed."""
+    pool = _inside_pool()
+    assert len(pool) >= n
+    return pool[np.random.default_rng(seed).choice(len(pool), n, replace=False)]
+
+
+def _outside_points(n: int, mm: float = 5.5, seed: int = 0) -> np.ndarray:
+    """`n` points `mm` outside the shell that the inside test puts outside, any seed."""
+    pool = _outside(_shell_points(400, seed), mm)
+    pool = pool[~_is_inside(pool)]
+    assert len(pool) >= n
+    return pool[:n]
+
+
 def _outside(points: np.ndarray, mm: float) -> np.ndarray:
     return points * (1 + mm / np.linalg.norm(points, axis=1, keepdims=True))
 
@@ -271,7 +302,7 @@ def test_contacts_just_outside_the_shell_fail_verification_and_nothing_is_writte
     synthetic_dataset,
 ):
     """sEEG contacts 5.5 mm outside the shell invert fine but are mostly outside the template."""
-    _seeg_file(synthetic_dataset, _outside(_shell_points(40, 5), 5.5))
+    _seeg_file(synthetic_dataset, _outside_points(40))
     (plan,) = spm.plan_dataset(synthetic_dataset)
     assert plan.chosen is None and plan.verdict == "refused"
     assert "template verification" in plan.reason
@@ -287,7 +318,7 @@ def test_intended_for_match_pairs_then_verification_still_refuses_a_bad_file(syn
     doc = json.loads(side.read_text())
     doc["IntendedFor"] = "/derivatives/freesurfer/sub-9/sub-9_T1w.nii"
     side.write_text(json.dumps(doc))
-    _seeg_file(synthetic_dataset, _outside(_shell_points(40, 5), 5.5))
+    _seeg_file(synthetic_dataset, _outside_points(40))
     (plan,) = spm.plan_dataset(synthetic_dataset)
     assert plan.chosen is not None and plan.basis == "IntendedFor names the field's T1"
     assert plan.verdict == "refused" and "verification against" in plan.reason
@@ -425,10 +456,8 @@ def test_intended_for_names_the_t1_and_a_different_t1_is_never_paired(synthetic_
 
 def test_a_clear_template_verification_winner_pairs_without_intended_for(synthetic_dataset):
     """Two sEEG files invert fully; one lies inside the shell, the other 5.5 mm outside it."""
-    _seeg_file(synthetic_dataset, _shell_points(40, 11, min_x=20.0) * 0.9)
-    _seeg_file(
-        synthetic_dataset, _outside(_shell_points(40, 6), 5.5), "sub-9_space-ACPC_electrodes.tsv"
-    )
+    _seeg_file(synthetic_dataset, _inside_points(40))
+    _seeg_file(synthetic_dataset, _outside_points(40, seed=6), "sub-9_space-ACPC_electrodes.tsv")
     ieeg = synthetic_dataset / "sub-9" / "ieeg"
     (ieeg / "sub-9_space-ACPC_coordsystem.json").write_bytes(
         (ieeg / "sub-9_coordsystem.json").read_bytes()
@@ -531,8 +560,6 @@ def _write_once(dataset: Path):
 
 
 def test_owned_files_record_their_hash(synthetic_dataset):
-    import hashlib
-
     _write_once(synthetic_dataset)
     owned = read_ownership(synthetic_dataset)
     assert owned is not None and len(owned.entries) == 2
@@ -567,17 +594,29 @@ def test_a_hand_edit_of_either_file_keeps_both_files(synthetic_dataset, which):
     assert plan.kept[rel[other]] == "kept with its pair"
 
 
+def _tsv_entry(dataset: Path):
+    owned = read_ownership(dataset)
+    assert owned is not None
+    return next(e for e in owned.entries if e.path.endswith("electrodes.tsv"))
+
+
 def test_untouched_pair_is_regenerated_when_its_content_changes(synthetic_dataset):
     _, tsv, sidecar = _write_once(synthetic_dataset)
-    side = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_coordsystem.json"
-    side.write_text(
-        json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm", "x": 1})
-    )
-    old = sidecar.read_bytes()
+    old_bytes = tsv.read_bytes()
+    old_entry = _tsv_entry(synthetic_dataset)
+    source = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
+    rows = source.read_text().splitlines()
+    first = rows[1].split("\t")
+    first[1] = f"{float(first[1]) + 0.2:.4f}"  # a changed input
+    rows[1] = "\t".join(first)
+    source.write_text("\n".join(rows) + "\n")
     (plan,) = spm.plan_dataset(synthetic_dataset)
     again = spm.write([plan], synthetic_dataset)
     assert not plan.kept and len(again) == 2
-    assert sidecar.read_bytes() == old  # the sidecar text does not depend on that input
+    assert tsv.read_bytes() != old_bytes  # regenerated with the new input
+    new_entry = _tsv_entry(synthetic_dataset)
+    assert new_entry.output_sha256 != old_entry.output_sha256
+    assert new_entry.output_sha256 == hashlib.sha256(tsv.read_bytes()).hexdigest()
 
 
 def test_a_refused_rerun_leaves_a_hand_edited_file_in_place(synthetic_dataset):
@@ -618,21 +657,103 @@ def test_subject_relative_intended_for_is_read_both_ways(tmp_path):
     anat.mkdir(parents=True)
     (anat / "sub-3_ses-1_T1w.nii").write_bytes(b"")
     status, subject = spm.intended_for_status, tmp_path / "sub-3"
-    # legacy subject-relative value naming a different existing T1: never paired
-    assert status("ses-1/anat/sub-3_ses-1_T1w.nii", field_path, tmp_path, subject) == (
-        spm.INTENDED_OTHER
-    )
+    legacy = "ses-1/anat/sub-3_ses-1_T1w.nii"
+    # read as subject-relative it names a different existing T1: never paired
+    assert status(legacy, field_path, tmp_path, subject) == spm.INTENDED_OTHER
     # read dataset-relative only, the same value names nothing that exists
-    assert status("ses-1/anat/sub-3_ses-1_T1w.nii", field_path, tmp_path) == spm.INTENDED_UNKNOWN
-    # a subject-relative value that is the field's T1 pairs
-    (fs.parent.parent.parent / "sub-3" / "derivatives").mkdir(parents=True)
-    own = tmp_path / "sub-3" / "derivatives" / "x"
-    own.mkdir()
-    (tmp_path / "derivatives" / "freesurfer" / "sub-3" / "sub-3_ses-mri01_T1w.nii").write_bytes(b"")
-    assert status("sub-3_ses-mri01_T1w.nii", field_path, tmp_path, subject) == spm.INTENDED_UNKNOWN
-    assert status(
-        "derivatives/freesurfer/sub-3/sub-3_ses-mri01_T1w.nii", field_path, tmp_path, subject
-    ) == (spm.INTENDED_MATCH)
+    assert status(legacy, field_path, tmp_path) == spm.INTENDED_UNKNOWN
+    # a dataset-relative value that is the field's T1 pairs
+    (fs / "sub-3_ses-mri01_T1w.nii").write_bytes(b"")
+    own = "derivatives/freesurfer/sub-3/sub-3_ses-mri01_T1w.nii"
+    assert status(own, field_path, tmp_path, subject) == spm.INTENDED_MATCH
+
+
+def test_an_intended_for_that_leaves_the_dataset_is_unknown(tmp_path):
+    root = tmp_path / "ds"
+    fs = root / "derivatives" / "freesurfer" / "sub-3"
+    fs.mkdir(parents=True)
+    field_path = fs / "y_sub-3_T1w.nii"
+    (tmp_path / "sub-3_T1w.nii").write_bytes(b"")  # exists, but outside the dataset
+    (fs / "sub-3_T1w.nii").write_bytes(b"")
+    status = spm.intended_for_status
+    assert status("../sub-3_T1w.nii", field_path, root, root / "sub-3") == spm.INTENDED_UNKNOWN
+    assert status("sub-3/../../sub-3_T1w.nii", field_path, root, root / "sub-3") == (
+        spm.INTENDED_UNKNOWN
+    )
+    inside = "derivatives/freesurfer/x/../sub-3/sub-3_T1w.nii"  # `..` that stays inside
+    assert status(inside, field_path, root, root / "sub-3") == spm.INTENDED_MATCH
+
+
+def _subject_relative_dataset(dataset: Path, value: str, *, field_in_subject: bool) -> None:
+    anat = dataset / "sub-9" / "anat"
+    anat.mkdir(parents=True)
+    (anat / "sub-9_T1w.nii").write_bytes(b"")
+    (anat / "sub-9_T1w_other.nii").write_bytes(b"")
+    if field_in_subject:  # the field lives beside the subject's own T1
+        (dataset / "derivatives/freesurfer/sub-9/y_sub-9_T1w.nii").rename(anat / "y_sub-9_T1w.nii")
+    side = dataset / "sub-9" / "ieeg" / "sub-9_coordsystem.json"
+    doc = json.loads(side.read_text())
+    doc["IntendedFor"] = value
+    side.write_text(json.dumps(doc))
+
+
+def test_legacy_subject_relative_intended_for_naming_another_t1_is_never_paired(synthetic_dataset):
+    _subject_relative_dataset(synthetic_dataset, "anat/sub-9_T1w_other.nii", field_in_subject=False)
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is None and plan.verdict == "refused"
+    assert "different T1" in plan.reason
+    # the file would otherwise pair by template verification (it is the only candidate)
+    assert plan.candidates[0].intended == spm.INTENDED_OTHER and plan.candidates[0].eligible
+
+
+def test_legacy_subject_relative_intended_for_naming_the_fields_t1_pairs(synthetic_dataset):
+    _subject_relative_dataset(synthetic_dataset, "anat/sub-9_T1w.nii", field_in_subject=True)
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.chosen is not None, plan.reason
+    assert plan.basis == "IntendedFor names the field's T1" and plan.verdict == "write"
+
+
+def test_a_session_plans_outputs_survive_a_no_session_plans_refusal_and_repairing(
+    synthetic_dataset,
+):
+    """`_owned_by` must not claim `sub-9_ses-1_...` outputs for the no-session plan."""
+    from ieeg_geometry.ownership import OwnedPath, write_ownership
+
+    ses = synthetic_dataset / "sub-9" / "ses-1" / "ieeg"
+    ses.mkdir(parents=True)
+    entries = []
+    for kind, name in (("electrodes", "electrodes.tsv"), ("coordsystem", "coordsystem.json")):
+        path = ses / f"sub-9_ses-1_space-IXI549Space_{name}"
+        data = f"{kind}\n".encode()
+        path.write_bytes(data)
+        entries.append(
+            OwnedPath(
+                path.relative_to(synthetic_dataset).as_posix(),
+                kind,
+                (),
+                spm.METHOD,
+                None,
+                hashlib.sha256(data).hexdigest(),
+            )
+        )
+    write_ownership(synthetic_dataset, "0.0.1", entries)
+
+    def survives() -> bool:
+        owned = read_ownership(synthetic_dataset)
+        assert owned is not None
+        return all((synthetic_dataset / e.path).exists() for e in entries) and {
+            e.path for e in entries
+        } <= {e.path for e in owned.entries}
+
+    no_session = [p for p in spm.plan_dataset(synthetic_dataset) if p.session is None]
+    assert [p.verdict for p in no_session] == ["write"]
+    spm.write(no_session, synthetic_dataset)  # a change of pairing for the no-session plan
+    assert survives()
+    (synthetic_dataset / "derivatives/freesurfer/sub-9/pial.R.surf.gii").unlink()
+    refused = [p for p in spm.plan_dataset(synthetic_dataset) if p.session is None]
+    assert [p.verdict for p in refused] == ["refused"]
+    spm.write(refused, synthetic_dataset)
+    assert survives()
 
 
 @pytest.mark.parametrize("mixed", [True, False])
