@@ -54,7 +54,7 @@ def test_contacts_on_fsaverage_vertices_pass_fsaverage_only():
     contacts = fs[0].vertices[::700]
     on = fit(contacts, fs, "ecog")
     assert on.median_mm == 0.0
-    assert on.passed
+    assert on.grade == "specific"
     assert not fit(contacts, mni, "ecog").passed
     shifted = fit(contacts + np.array([20.0, 0.0, 0.0]), fs, "ecog")
     assert not shifted.passed

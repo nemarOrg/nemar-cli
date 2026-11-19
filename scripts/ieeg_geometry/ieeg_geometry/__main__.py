@@ -13,11 +13,16 @@ from .verify import Fit, fit, fit_with_offset
 
 
 def _fmt(f: Fit) -> str:
-    inside = "" if f.inside_fraction is None else f", inside {f.inside_fraction:.0%}"
-    verdict = "PASS" if f.passed else "fail"
+    extra = ""
+    if f.near_or_inside_fraction is not None:
+        extra += f", inside-or-near {f.near_or_inside_fraction:.0%}"
+    if f.n_left_out:
+        extra += f", {f.n_left_out} on the other side left out"
+    if f.reason:
+        extra += f", {f.reason}"
     return (
         f"median {f.median_mm:.2f} mm, p90 {f.p90_mm:.2f}, max {f.max_mm:.2f}, "
-        f"n={f.n_used}/{f.n_total}{inside} -> {verdict}"
+        f"n={f.n_used}/{f.n_total}{extra} -> {f.grade}"
     )
 
 
@@ -65,7 +70,8 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         for ctype in _types(eset):
             pts = eset.xyz_for(ctype)
             for name, surfaces in refs.items():
-                write(f"  [{ctype}] vs {name}: {_fmt(fit(pts, surfaces, ctype))}")
+                hemis = eset.hemispheres_for(ctype)
+                write(f"  [{ctype}] vs {name}: {_fmt(fit(pts, surfaces, ctype, hemis))}")
             for group in find_subject_surfaces(dataset, item.subject):
                 try:
                     surfs: list[Surface] = [read_surface(p) for p in group]
@@ -73,13 +79,13 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
                     write(f"  [{ctype}] surface {group[0].parent.name}: refused {exc.reason}")
                     continue
                 c_ras = next((s.c_ras for s in surfs if s.c_ras is not None), None)
-                result = fit_with_offset(pts, surfs, ctype, c_ras)
+                result = fit_with_offset(pts, surfs, ctype, c_ras, eset.hemispheres_for(ctype))
                 where = "+".join(sorted(p.name for p in group))
                 write(f"  [{ctype}] vs subject surface {where}:")
                 write(f"      as declared: {_fmt(result.as_declared)}")
                 if result.with_c_ras is not None and result.c_ras is not None:
                     c = ", ".join(f"{v:.2f}" for v in result.c_ras)
-                    write(f"      with c_ras ({c}): {_fmt(result.with_c_ras)}")
+                    write(f"      with c_ras ({c}) subtracted: {_fmt(result.with_c_ras)}")
                 write(f"      preferred: {result.preferred}")
         if not _types(eset) and eset.contacts:
             write(f"  no contact has all of x, y, z ({UNKNOWN} types included)")

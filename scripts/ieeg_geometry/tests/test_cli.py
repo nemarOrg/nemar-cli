@@ -18,8 +18,8 @@ def test_inspect_reports_frame_units_types_and_fits(mini):
     assert "contacts 165 (seeg=149, unknown=16)" in out
     assert "vs fsaverage:" in out and "vs MNI152NLin2009cAsym:" in out
     assert "vs subject surface lh.pial+rh.pial" in out
-    assert "with c_ras (3.10, -10.25, 16.30)" in out
-    assert "preferred: as_declared" in out
+    assert "with c_ras (3.10, -10.25, 16.30) subtracted" in out
+    assert "inside-unevaluable" in out  # the cut fixture surfaces are open
     assert "median 2.67 mm" in out  # sub-2 native sEEG against its own surface
 
 

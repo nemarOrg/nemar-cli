@@ -82,5 +82,6 @@ def load_reference(name: str) -> list[Surface]:
         else:
             path = directory / f"{hemi}.mesh.bin"
             surfaces.append(read_brain_mesh(path.read_bytes(), hemisphere=label, source=str(path)))
+            surfaces[-1].midline_cut = True
         surfaces[-1].name = name
     return surfaces
