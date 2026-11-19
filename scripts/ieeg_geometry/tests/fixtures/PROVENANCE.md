@@ -21,7 +21,7 @@ This is not FreeSurfer's own distribution; a comparison with FreeSurfer's fsaver
 ## FreeSurfer fixtures (`fs_dataset/`)
 
 Built by `tools/make_fs_fixtures.py` from on004194 v1.0.0 (CC0): `sub-p02` (UMCU, needs c_ras) and `sub-p03` (NYU, as declared), their `acq-clinical` electrodes, coordsystem and channels files (raw GitHub), and from `data.nemar.org/on004194/v1.0.0/derivatives/freesurfer/sub-p0N/`: `surf/{lh,rh}.{pial,sphere.reg}` .
-Pial surfaces are cut to vertices within (nearest-vertex distance + 2 mm) of any contact, in the declared frame and with c_ras subtracted, keeping the `volume info` footer; each `sphere.reg` is cut to the same vertices so indices stay aligned.
+Pial surfaces are cut to the nearest vertex of each contact (in the declared frame and with c_ras subtracted) plus about 10,000 evenly spaced vertices per hemisphere, so the registration check sees an even sample of the whole brain; the `volume info` footer is kept and each `sphere.reg` is cut to the same vertices so indices stay aligned.
 The cut surfaces are open, so depth-contact inside tests are not evaluated on them (the frame decisions here rest on ECoG contacts); full-surface checks are in `tests/test_freesurfer_network.py`.
 
 ## Vendored fsaverage6 `sphere.reg`

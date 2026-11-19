@@ -8,9 +8,11 @@ Usage, from the repository root:
 `sub-p02` and `sub-p03` electrodes, coordsystem and channels files, and under
 `derivatives/freesurfer/sub-p0N/` the
 `surf/{lh,rh}.{pial,sphere.reg}` files. Each pial surface is cut to the vertices within
-(nearest-vertex distance + MARGIN_MM) of any contact, in the declared frame and in the frame
-with c_ras subtracted, and to the faces made only of kept vertices. The matching `sphere.reg`
-is cut to the same vertices, so vertex indices stay aligned between the two.
+(the nearest vertex; MARGIN_MM is rounding slack) of any contact, in the declared frame and
+in the frame with c_ras subtracted, and to the faces made only of kept vertices. The matching `sphere.reg`
+is cut to the same vertices, so vertex indices stay aligned between the two. About
+10,000 evenly spaced vertices per hemisphere are kept as well, so the registration check
+(an even sample of the pial vertices) sees the whole brain.
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import KDTree
 
-MARGIN_MM = 2.0
+MARGIN_MM = 1e-6  # keeps exactly the nearest vertex of each contact
+SPREAD_PER_HEMI = 10000
 SUBJECTS = {"p02": "umcuiemu01", "p03": "nyuecog01"}
 
 
@@ -78,6 +81,9 @@ def main(source: str, fixture_dir: str) -> None:
             )
             c_ras = np.asarray(meta["cras"], dtype=float)
             keep = keep_mask(verts, points, MARGIN_MM) | keep_mask(verts, points - c_ras, MARGIN_MM)
+            keep[:: len(verts) // SPREAD_PER_HEMI] = (
+                True  # an even sample for the registration check
+            )
             v, f = cut(verts, faces, keep)
             note = f"cut from on004194 sub-{sub}"
             nib.freesurfer.write_geometry(

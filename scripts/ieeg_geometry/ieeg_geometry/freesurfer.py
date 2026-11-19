@@ -10,7 +10,16 @@ this module
 2. maps every cortical contact within 3.0 mm of the subject's pial surface through the surface
    registration to the nearest fsaverage6 vertex (nearest pial vertex, its `sphere.reg`
    position, nearest fsaverage6 sphere vertex, that vertex's fsaverage6 pial position);
-3. verifies the set against fsaverage with L1's `fit` and refuses (never writes) a failing set.
+3. checks the registration itself: at least 2,000 of the subject's pial vertices are mapped
+   through the same `sphere.reg` chain and must land on the correct hemisphere side, with a
+   centroid within 5.0 mm and per-axis 2nd-to-98th-percentile extents within 10 percent of
+   fsaverage6 pial, and consistently with the vertices' own positions (an affine fit of the
+   subject positions to the mapped ones leaves a median residual of at most 15 mm; a scrambled
+   or mismatched `sphere.reg` leaves about 50 mm). A failing registration refuses the subject.
+
+The mapped positions are on fsaverage6 vertices by construction, so a distance to fsaverage
+would prove nothing; the evidence is the subject-side fit in the chosen frame plus the
+registration check.
 
 Depth (sEEG, DBS) and unknown-type contacts are not written (lead ruling 20: an affine
 `talairach.xfm` position has a typical error of 10 to 15 mm and is not worth committing as
@@ -36,12 +45,17 @@ from scipy.spatial import KDTree
 
 from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
-from .reference import DATA_DIR, _check_sums, load_reference
+from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
-from .verify import Fit, OffsetFit, fit, fit_with_offset
+from .verify import Fit, OffsetFit, fit_with_offset
 
 SURFACE_MAX_MM = 3.0
 MIN_CONTACTS = 3
+REG_SAMPLES = 2000
+REG_SIDE_FRACTION = 0.95
+REG_CENTROID_MM = 5.0
+REG_EXTENT_FRACTION = 0.10
+REG_AFFINE_RESIDUAL_MM = 15.0
 METHOD_REFERENCE = "https://docs.nemar.org/data/ieeg-geometry/"
 LABEL = "fsaverage"
 METHOD = "freesurfer-sphere-reg-fsaverage6"
@@ -52,20 +66,23 @@ LEFT_DEPTH = "depth-or-unknown-type"
 LEFT_FAR = "cortical-beyond-3mm"
 LEFT_NO_SPHERE = "no-sphere-reg"
 LEFT_MISSING = "missing-coordinates"
+LEFT_FRAME = "frame-refused"
+LEFT_SPHERE_UNREADABLE = "sphere-reg-unreadable"
+LEFT_REGISTRATION = "registration-refused"
 _LEFT_TEXT = {
     LEFT_DEPTH: "depth or unknown-type contacts (affine template positions are too inaccurate "
     "to commit)",
     LEFT_FAR: f"cortical contacts more than {SURFACE_MAX_MM:.1f} mm from the pial surface",
     LEFT_NO_SPHERE: "cortical contacts on a hemisphere without sphere.reg",
     LEFT_MISSING: "contacts without x, y, z",
+    LEFT_FRAME: "cortical contacts of a file whose frame was refused",
+    LEFT_SPHERE_UNREADABLE: "cortical contacts whose sphere.reg is unreadable or mismatched",
+    LEFT_REGISTRATION: "cortical contacts of a subject whose registration check failed",
 }
 
 
 def pipeline_version() -> str:
-    try:
-        return metadata.version("ieeg-geometry")
-    except metadata.PackageNotFoundError:  # running from a source checkout without install
-        return "0+unknown"
+    return metadata.version("ieeg-geometry")  # raises PackageNotFoundError when not installed
 
 
 # ---- vendored fsaverage6 sphere ---------------------------------------------------------------
@@ -249,7 +266,8 @@ class OutputFile:
     header: list[str]
     rows: list[dict[str, str]]
     xyz: np.ndarray
-    verification: Fit
+    frame_fit: Fit  # the cortical contacts against the subject's own pial in the chosen frame
+    registration: RegistrationCheck
     description: str
     inputs: list[Path]
     pial_distance_median_mm: float
@@ -313,8 +331,110 @@ def _read_raw(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return list(reader.fieldnames or []), rows
 
 
+def load_spheres(subject: SubjectDir, surfaces: dict[str, Surface]) -> dict[str, np.ndarray]:
+    """The subject's `sphere.reg` vertices per hemisphere that has both files.
+
+    Raises `GeometryRefusal` (`sphere-reg-unreadable`, `sphere-reg-mismatch`) for a file that
+    cannot be read or whose vertex count differs from the pial surface's.
+    """
+    spheres: dict[str, np.ndarray] = {}
+    for hemi, path in subject.sphere_reg.items():
+        try:
+            sphere = np.asarray(nib.freesurfer.read_geometry(str(path))[0], dtype=float)
+        except Exception as exc:  # nibabel raises several types for a malformed file
+            raise GeometryRefusal("sphere-reg-unreadable", f"{path.name}: {exc}") from exc
+        if len(sphere) != len(surfaces[hemi].vertices):
+            raise GeometryRefusal(
+                "sphere-reg-mismatch",
+                f"{path.name} has {len(sphere)} vertices, pial has {len(surfaces[hemi].vertices)}",
+            )
+        spheres[hemi] = sphere
+    return spheres
+
+
+def to_fsaverage6(hemi: str, sphere_positions: np.ndarray) -> np.ndarray:
+    """fsaverage6 pial positions for subject `sphere.reg` positions of one hemisphere."""
+    _, j = load_fsaverage6().trees[hemi].query(_unit(sphere_positions))
+    return load_fsaverage6().pial[hemi][j]
+
+
+@dataclass(frozen=True)
+class RegistrationCheck:
+    n_sampled: int
+    side_fraction: float
+    centroid_mm: float
+    extent_error: float  # largest per-axis relative difference of the 2nd-98th percentile extent
+    affine_residual_mm: float  # median residual of an affine fit of subject to mapped positions
+
+    def describe(self) -> str:
+        return (
+            f"{self.n_sampled} subject pial vertices mapped through sphere.reg: "
+            f"{self.side_fraction:.1%} on the correct hemisphere side, centroid "
+            f"{self.centroid_mm:.2f} mm from fsaverage6 pial, extent within "
+            f"{self.extent_error:.1%}, affine consistency residual median "
+            f"{self.affine_residual_mm:.2f} mm"
+        )
+
+
+def check_registration(
+    surfaces: dict[str, Surface], spheres: dict[str, np.ndarray]
+) -> RegistrationCheck:
+    """Check the `sphere.reg` chain on an even sample of the subject's own pial vertices.
+
+    At least 2,000 vertices (evenly spaced in vertex order, shared over the hemispheres that
+    have a `sphere.reg`) are mapped to fsaverage6 pial. Requires: at least 95 percent land on
+    the side of x = 0 that belongs to their hemisphere; the mapped centroid within 5.0 mm of
+    fsaverage6 pial's and each axis's 2nd-to-98th-percentile extent within 10 percent; and an
+    affine fit from the subject positions to the mapped ones with a median residual of at most
+    15 mm (nearest-vertex distance alone cannot see a scrambled registration, which still
+    covers the template evenly). Raises `GeometryRefusal` `registration-check-failed` with the
+    numbers otherwise.
+    """
+    hemis = [h for h in spheres if h in surfaces]
+    if not hemis:
+        raise GeometryRefusal("registration-check-failed", "no hemisphere has a sphere.reg")
+    per = -(-REG_SAMPLES // len(hemis))
+    own, mapped, ok = [], [], []
+    for hemi in hemis:
+        verts = surfaces[hemi].vertices
+        idx = np.arange(0, len(verts), max(1, len(verts) // per))
+        own.append(verts[idx])
+        m = to_fsaverage6(hemi, spheres[hemi][idx])
+        mapped.append(m)
+        ok.append(m[:, 0] < 0 if hemi == "L" else m[:, 0] > 0)
+    own_a, mapped_a, side = np.vstack(own), np.vstack(mapped), np.concatenate(ok)
+    fs6 = load_fsaverage6()
+    ref = np.vstack([fs6.pial[h] for h in hemis])
+
+    def extent(a: np.ndarray) -> np.ndarray:
+        return np.percentile(a, 98, axis=0) - np.percentile(a, 2, axis=0)
+
+    design = np.c_[own_a, np.ones(len(own_a))]
+    coef = np.linalg.lstsq(design, mapped_a, rcond=None)[0]
+    check = RegistrationCheck(
+        n_sampled=len(own_a),
+        side_fraction=float(side.mean()),
+        centroid_mm=float(np.linalg.norm(mapped_a.mean(axis=0) - ref.mean(axis=0))),
+        extent_error=float(np.max(np.abs(extent(mapped_a) / extent(ref) - 1.0))),
+        affine_residual_mm=float(np.median(np.linalg.norm(design @ coef - mapped_a, axis=1))),
+    )
+    failed = (
+        check.n_sampled < REG_SAMPLES
+        or check.side_fraction < REG_SIDE_FRACTION
+        or check.centroid_mm > REG_CENTROID_MM
+        or check.extent_error > REG_EXTENT_FRACTION
+        or check.affine_residual_mm > REG_AFFINE_RESIDUAL_MM
+    )
+    if failed:
+        raise GeometryRefusal("registration-check-failed", check.describe())
+    return check
+
+
 def map_to_fsaverage6(
-    tkr: np.ndarray, subject: SubjectDir, surfaces: dict[str, Surface]
+    tkr: np.ndarray,
+    subject: SubjectDir,
+    surfaces: dict[str, Surface],
+    spheres: dict[str, np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Surface method for contacts in tkr RAS.
 
@@ -323,7 +443,6 @@ def map_to_fsaverage6(
     nearest hemisphere lacks `sphere.reg`. Path: nearest subject pial vertex, its `sphere.reg`
     position, the nearest fsaverage6 sphere vertex, that vertex's fsaverage6 pial position.
     """
-    fs6 = load_fsaverage6()
     n = len(tkr)
     best = np.full(n, np.inf)
     best_hemi = np.full(n, "", dtype="<U1")
@@ -339,22 +458,10 @@ def map_to_fsaverage6(
         sel = (best_hemi == hemi) & (best <= SURFACE_MAX_MM)
         if not sel.any():
             continue
-        path = subject.sphere_reg.get(hemi)
-        if path is None:
+        if hemi not in spheres:
             no_sphere[sel] = True
             continue
-        try:
-            sphere = nib.freesurfer.read_geometry(str(path))[0]
-        except Exception as exc:  # nibabel raises several types for a malformed file
-            raise GeometryRefusal("sphere-reg-unreadable", f"{path.name}: {exc}") from exc
-        if len(sphere) != len(surfaces[hemi].vertices):
-            raise GeometryRefusal(
-                "sphere-reg-mismatch",
-                f"{path.name} has {len(sphere)} vertices, pial has {len(surfaces[hemi].vertices)}",
-            )
-        pos = _unit(np.asarray(sphere, dtype=float)[best_idx[sel]])
-        _, j = fs6.trees[hemi].query(pos)
-        out[sel] = fs6.pial[hemi][j]
+        out[sel] = to_fsaverage6(hemi, spheres[hemi][best_idx[sel]])
         mapped[sel] = True
     return mapped, out, best, no_sphere
 
@@ -381,7 +488,8 @@ def _describe(
     inputs: list[Path],
     dataset: Path,
     decision: FrameDecision,
-    verification: Fit,
+    frame_fit: Fit,
+    registration: RegistrationCheck,
     n: int,
     pial: tuple[float, float],
     left_out: dict[str, int],
@@ -394,14 +502,14 @@ def _describe(
     )
     return (
         f"Computed by NEMAR (ieeg_geometry {pipeline_version()}) from {_rel(source, dataset)}, "
-        f"{n} cortical contacts, frame check: {frame}, {decision.grade} evidence from "
-        f"cortical contacts; method: each contact within {SURFACE_MAX_MM:.1f} mm of the subject "
-        f"pial surface (median {pial[0]:.2f} mm, maximum {pial[1]:.2f} mm) was moved to the "
-        "fsaverage6 vertex that the subject's FreeSurfer sphere.reg registration assigns to its "
-        "nearest pial vertex, so positions sit on fsaverage6 vertices and are surface-based; "
-        f"inputs: {rel}; verified against fsaverage: median {verification.median_mm:.2f} mm, "
-        f"90th percentile {verification.p90_mm:.2f} mm, {verification.grade} "
-        f"({verification.rule}); contacts of the source file not placed: "
+        f"{n} cortical contacts; method: each contact within {SURFACE_MAX_MM:.1f} mm of the "
+        f"subject pial surface (median {pial[0]:.2f} mm, maximum {pial[1]:.2f} mm) was moved to "
+        "the fsaverage6 vertex that the subject's FreeSurfer sphere.reg registration assigns to "
+        "its nearest pial vertex, so positions are on fsaverage6 vertices by construction; "
+        f"evidence: {frame}, the subject-side fit of the cortical contacts to the subject's "
+        f"own pial surface gives median {frame_fit.median_mm:.2f} mm, "
+        f"90th percentile {frame_fit.p90_mm:.2f} mm ({frame_fit.grade}); registration check: "
+        f"{registration.describe()}; inputs: {rel}; contacts of the source file not placed: "
         f"{left_out_text(left_out)}."
     )
 
@@ -413,12 +521,12 @@ def _rel(path: Path, dataset: Path) -> str:
         return path.as_posix()
 
 
-def _count_left_out(eset: ElectrodeSet) -> dict[str, int]:
+def _count_left_out(eset: ElectrodeSet, cortical_reason: str) -> dict[str, int]:
     """Counts for a refused file: nothing was placed, so every contact is left out."""
     missing = sum(c.missing_coordinates for c in eset.contacts)
     depth = sum(not c.missing_coordinates and not is_cortical(c.type) for c in eset.contacts)
     cortical = len(eset.contacts) - missing - depth
-    counts = {LEFT_MISSING: missing, LEFT_DEPTH: depth, LEFT_FAR: cortical}
+    counts = {LEFT_MISSING: missing, LEFT_DEPTH: depth, cortical_reason: cortical}
     return {k: v for k, v in counts.items() if v}
 
 
@@ -462,7 +570,7 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
         decision = decide_frame(eset, list(surfaces.values()), c_ras)
     except GeometryRefusal as exc:
         result.refusals.append(Refusal("file", exc.reason, exc.message))
-        result.left_out = _count_left_out(eset)
+        result.left_out = _count_left_out(eset, LEFT_FRAME)
         return result
     result.frame = decision
 
@@ -473,40 +581,41 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
     left = {
         LEFT_MISSING: int((~finite).sum()),
         LEFT_DEPTH: int((finite & ~cortical).sum()),
-        LEFT_FAR: 0,
-        LEFT_NO_SPHERE: 0,
     }
+
+    def refuse(reason: str, message: str, left_reason: str) -> SubjectResult:
+        left[left_reason] = int(cortical.sum())
+        result.left_out = {k: v for k, v in left.items() if v}
+        result.refusals.append(Refusal(LABEL, reason, message))
+        return result
+
+    try:
+        spheres = load_spheres(subject, surfaces)
+    except GeometryRefusal as exc:
+        return refuse(exc.reason, exc.message, LEFT_SPHERE_UNREADABLE)
+    registration = None
+    if spheres:
+        try:
+            registration = check_registration(surfaces, spheres)
+        except GeometryRefusal as exc:
+            return refuse(exc.reason, exc.message, LEFT_REGISTRATION)
     positions = np.full_like(xyz, np.nan)
     pial_dist = np.full(len(xyz), np.nan)
     mapped = np.zeros(len(xyz), dtype=bool)
-    try:
-        m, p, d, no_sphere = map_to_fsaverage6(tkr[cortical], subject, surfaces)
-    except GeometryRefusal as exc:
-        left[LEFT_FAR] = int(cortical.sum())
-        result.left_out = {k: v for k, v in left.items() if v}
-        result.refusals.append(Refusal(LABEL, exc.reason, exc.message))
-        return result
+    m, p, d, no_sphere = map_to_fsaverage6(tkr[cortical], subject, surfaces, spheres)
     mapped[cortical], positions[cortical], pial_dist[cortical] = m, p, d
     left[LEFT_NO_SPHERE] = int(no_sphere.sum())
     left[LEFT_FAR] = int((~m & ~no_sphere).sum())
     result.left_out = {k: v for k, v in left.items() if v}
     result.n_surface = int(mapped.sum())
     idx = np.flatnonzero(mapped)
-    if not len(idx):
+    if not len(idx) or registration is None:
         result.refusals.append(
             Refusal(LABEL, "no-contacts-placed", f"left out: {left_out_text(result.left_out)}")
         )
         return result
-    verification = fit(positions[idx], load_reference("fsaverage"), "ecog")
-    if not verification.passed:
-        result.refusals.append(
-            Refusal(
-                LABEL,
-                "verification-failed",
-                f"{len(idx)} contacts, median {verification.median_mm:.2f} mm, {verification.rule}",
-            )
-        )
-        return result
+    chosen = decision.fit.with_c_ras if decision.choice == "c_ras" else decision.fit.as_declared
+    assert chosen is not None
     header, raw = _read_raw(item.electrodes_path)
     inputs = [item.electrodes_path] + [p for p in (item.coordsystem_path,) if p is not None]
     inputs += list(subject.pial.values()) + list(subject.sphere_reg.values())
@@ -522,13 +631,15 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
             header=header,
             rows=[raw[i] for i in idx],
             xyz=positions[idx],
-            verification=verification,
+            frame_fit=chosen,
+            registration=registration,
             description=_describe(
                 item.electrodes_path,
                 inputs,
                 dataset,
                 decision,
-                verification,
+                chosen,
+                registration,
                 len(idx),
                 pial,
                 result.left_out,
@@ -571,7 +682,7 @@ def _resolve_duplicates(results: list[SubjectResult]) -> list[SubjectResult]:
     best: dict[Path, tuple[float, OutputFile]] = {}
     for res in results:
         for out in res.outputs:
-            score = out.verification.median_mm
+            score = out.frame_fit.median_mm
             if out.electrodes_path not in best or score < best[out.electrodes_path][0]:
                 best[out.electrodes_path] = (score, out)
     for res in results:
@@ -609,15 +720,45 @@ def _json_bytes(out: OutputFile) -> bytes:
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def stale_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list[OwnedPath]:
+    """Owned `space-fsaverage` outputs of an earlier run that the current plan no longer gives.
+
+    Pipeline-owned paths are regenerated, never kept as corrections (plan item 3): an owned
+    path of this method that no result produces any more is stale.
+    """
+    existing = read_ownership(dataset_dir)
+    if existing is None:
+        return []
+    dataset = Path(dataset_dir)
+    produced = {
+        _rel(path, dataset)
+        for res in results
+        for out in res.outputs
+        for path in (out.electrodes_path, out.coordsystem_path)
+    }
+    return [e for e in existing.entries if e.method == METHOD and e.path not in produced]
+
+
+def _verification(out: OutputFile) -> Verification:
+    """Ownership verification: the subject-side fit plus the registration check numbers."""
+    base = Verification.from_fit(out.frame_fit, "subject pial surface")
+    rule = (
+        f"{base.rule}; on fsaverage6 vertices by construction; registration check: "
+        f"{out.registration.describe()}; left out: {left_out_text(out.left_out)}"
+    )
+    return replace(base, rule=rule)
+
+
 def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list[OwnedPath]:
     """Write every verified output file and record it in `.nemar/ieeg-geometry.json`.
 
     The existing ownership file is read and merged: only entries for the paths written here
-    are replaced, other tracks' entries survive. Output bytes are deterministic, so a rerun on
-    unchanged inputs rewrites identical files. The ownership verification names the contacts
-    left out and why. Returns the entries this call wrote.
+    (and the stale paths of this method, which are deleted with their entries) are replaced or
+    removed; other tracks' entries survive. Output bytes are deterministic, so a rerun on
+    unchanged inputs rewrites identical files. Returns the entries this call wrote.
     """
     dataset = Path(dataset_dir)
+    stale = stale_outputs(dataset, results)
     entries: list[OwnedPath] = []
     for res in results:
         for out in res.outputs:
@@ -628,11 +769,7 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
                     if p.exists() or p.is_symlink()
                 )
             )
-            verification = Verification.from_fit(out.verification, "fsaverage")
-            verification = replace(
-                verification,
-                rule=f"{verification.rule}; left out: {left_out_text(out.left_out)}",
-            )
+            verification = _verification(out)
             for path, data, kind in (
                 (out.electrodes_path, _tsv_bytes(out), "electrodes"),
                 (out.coordsystem_path, _json_bytes(out), "coordsystem"),
@@ -641,10 +778,12 @@ def write_outputs(dataset_dir: str | Path, results: list[SubjectResult]) -> list
                 entries.append(
                     OwnedPath(_rel(path, dataset), kind, inputs, out.method, verification)
                 )
-    if entries:
+    for entry in stale:
+        (dataset / entry.path).unlink(missing_ok=True)
+    if entries or stale:
         existing = read_ownership(dataset)
-        mine = {e.path for e in entries}
-        kept = [e for e in (existing.entries if existing else []) if e.path not in mine]
+        drop = {e.path for e in entries} | {e.path for e in stale}
+        kept = [e for e in (existing.entries if existing else []) if e.path not in drop]
         write_ownership(dataset, pipeline_version(), kept + entries)
     return entries
 
@@ -668,13 +807,14 @@ def report_lines(dataset: Path, results: list[SubjectResult]) -> list[str]:
         if res.left_out:
             lines.append(f"  left out: {left_out_text(res.left_out)}")
         for out in res.outputs:
-            v = out.verification
+            f = out.frame_fit
             lines.append(
-                f"  output {out.electrodes_path.name}: {len(out.rows)} contacts, verified vs "
-                f"fsaverage median {v.median_mm:.2f} mm p90 {v.p90_mm:.2f} -> {v.grade}, pial "
-                f"distance median {out.pial_distance_median_mm:.2f} "
-                f"max {out.pial_distance_max_mm:.2f} mm"
+                f"  output {out.electrodes_path.name}: {len(out.rows)} contacts on fsaverage6 "
+                f"vertices by construction; subject-side fit median {f.median_mm:.2f} mm "
+                f"p90 {f.p90_mm:.2f} -> {f.grade}, pial distance median "
+                f"{out.pial_distance_median_mm:.2f} max {out.pial_distance_max_mm:.2f} mm"
             )
+            lines.append(f"    registration check: {out.registration.describe()}")
         for r in res.refusals:
             lines.append(f"  refused ({r.scope}): {r.reason}, {r.message}")
     return lines
@@ -685,6 +825,8 @@ def inspect_dataset(dataset: Path, out=sys.stdout) -> int:
     results = plan_dataset(dataset)
     for line in report_lines(dataset, results):
         print(line, file=out)
+    for entry in stale_outputs(dataset, results):
+        print(f"stale owned output, would be removed on write: {entry.path}", file=out)
     return len(results)
 
 

@@ -66,7 +66,7 @@ def test_surface_method_lands_on_fsaverage6_vertices(ds):
     fs6 = np.vstack([fsm.load_fsaverage6().pial["L"], fsm.load_fsaverage6().pial["R"]])
     for p in out.xyz:
         assert np.abs(fs6 - p).sum(axis=1).min() < 1e-3  # float32 round trip
-    assert out.verification.grade == "specific"
+    assert out.frame_fit.grade == "specific"
     assert out.method == fsm.METHOD
     assert out.pial_distance_max_mm <= fsm.SURFACE_MAX_MM
 
@@ -167,7 +167,7 @@ def test_subject_without_cortical_contacts_places_nothing(ds):
     res = _by_sub(fsm.plan_dataset(ds), "p03")
     assert res.outputs == []
     assert res.refusals[0].reason == "too-few-cortical-contacts"
-    assert res.left_out == {fsm.LEFT_DEPTH: 30}
+    assert res.left_out == {fsm.LEFT_DEPTH: 30}  # no cortical contact left to name a reason for
 
 
 def test_without_sphere_reg_nothing_is_placed(ds):
@@ -207,6 +207,11 @@ def test_write_outputs_merges_ownership_and_is_idempotent(ds):
     assert "not placed" in text
     meta = by_path[f"{P03}_space-fsaverage_electrodes.tsv"].verification
     assert meta is not None and "left out: 30 depth or unknown-type contacts" in meta.rule
+    assert (
+        "registration check" in meta.rule and "on fsaverage6 vertices by construction" in meta.rule
+    )
+    assert meta.reference == "subject pial surface" and meta.grade == "specific"
+    assert "registration check" in text and "by construction" in text
     before = {p: (ds / p).read_bytes() for p in paths}
     ownership_before = (ds / ".nemar/ieeg-geometry.json").read_bytes()
     # second run: our outputs are owned, so they are regenerated, not taken as the authors'
@@ -235,4 +240,98 @@ def test_report_shows_decision_methods_and_verification(ds):
     assert "placed by surface registration (fsaverage): 90 contacts" in out
     assert "left out: 30 depth or unknown-type contacts" in out
     assert "4 cortical contacts more than 3.0 mm from the pial surface" in out
-    assert "verified vs fsaverage" in out
+    assert "on fsaverage6 vertices by construction" in out
+    assert "registration check: " in out
+
+
+def _write_sphere(path: Path, positions: np.ndarray) -> None:
+    import nibabel as nib
+
+    faces = nib.freesurfer.read_geometry(str(path))[1]
+    nib.freesurfer.write_geometry(str(path), positions, faces)
+
+
+def _sphere_path(ds: Path, hemi: str) -> Path:
+    return ds / f"derivatives/freesurfer/sub-p03/surf/{hemi}.sphere.reg"
+
+
+def test_registration_check_numbers_for_the_fixtures(ds):
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    reg = res.outputs[0].registration
+    assert reg.n_sampled >= 2000 and reg.side_fraction >= 0.95
+    assert reg.centroid_mm <= 5.0 and reg.extent_error <= 0.10
+
+
+@pytest.mark.parametrize("damage", ["scrambled", "mirrored"])
+def test_a_damaged_sphere_reg_is_refused(ds, damage):
+    import nibabel as nib
+
+    for hemi in ("lh", "rh"):
+        path = _sphere_path(ds, hemi)
+        pos = nib.freesurfer.read_geometry(str(path))[0]
+        if damage == "scrambled":
+            pos = pos[np.random.default_rng(1).permutation(len(pos))]
+        else:  # the other hemisphere's side of the sphere
+            pos = pos * np.array([-1.0, 1.0, 1.0])
+        _write_sphere(path, pos)
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    assert res.outputs == []
+    assert res.refusals[0].reason == "registration-check-failed"
+    assert "centroid" in res.refusals[0].message
+    assert res.left_out[fsm.LEFT_REGISTRATION] == 94
+
+
+def test_a_sphere_reg_with_the_wrong_vertex_count_is_refused(ds):
+    import shutil as sh
+
+    sh.copy(_sphere_path(ds, "rh"), _sphere_path(ds, "lh"))  # hemisphere swapped
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    assert res.outputs == [] and res.refusals[0].reason == "sphere-reg-mismatch"
+    assert res.left_out[fsm.LEFT_SPHERE_UNREADABLE] == 94
+
+
+def test_an_unreadable_sphere_reg_has_its_own_reason(ds):
+    _sphere_path(ds, "lh").write_bytes(b"not a surface")
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    assert res.refusals[0].reason == "sphere-reg-unreadable"
+    assert res.left_out[fsm.LEFT_SPHERE_UNREADABLE] == 94
+    assert fsm.LEFT_FAR not in res.left_out
+
+
+def test_a_refused_frame_has_its_own_left_out_reason(ds):
+    path = ds / f"{P03}_electrodes.tsv"
+    header, rows = _read_tsv(path)
+    for r in rows:
+        r["x"] = f"{float(r['x']) + 40.0:.3f}"
+    lines = ["\t".join(header)] + ["\t".join(r[h] for h in header) for r in rows]
+    path.write_text("\n".join(lines) + "\n")
+    res = _by_sub(fsm.plan_dataset(ds), "p03")
+    assert res.left_out == {fsm.LEFT_DEPTH: 30, fsm.LEFT_FRAME: 94}
+    assert fsm.LEFT_FAR not in res.left_out
+
+
+def test_stale_owned_output_is_removed_with_its_entry(ds):
+    first = fsm.write_outputs(ds, fsm.plan_dataset(ds))
+    stale = {e.path for e in first if "sub-p03" in e.path}
+    assert stale and all((ds / p).exists() for p in stale)
+    other = OwnedPath("sub-x/o_space-IXI549Space_electrodes.tsv", "electrodes", (), "spm")
+    owned = read_ownership(ds)
+    assert owned is not None
+    write_ownership(ds, "0.0.1", [*owned.entries, other])
+    _sphere_path(ds, "lh").write_bytes(b"damaged")  # p03 now refuses; its owned outputs are stale
+    results = fsm.plan_dataset(ds)  # the owned files do not hide the subject from the plan
+    assert _by_sub(results, "p03").refusals[0].reason == "sphere-reg-unreadable"
+    assert {e.path for e in fsm.stale_outputs(ds, results)} == stale
+    fsm.write_outputs(ds, results)
+    assert not any((ds / p).exists() for p in stale)
+    after = read_ownership(ds)
+    assert after is not None
+    paths = {e.path for e in after.entries}
+    assert not stale & paths and other.path in paths  # p02's and the other track's survive
+    assert any("sub-p02" in p for p in paths)
+
+
+def test_pipeline_version_is_the_installed_package_version():
+    from importlib import metadata
+
+    assert fsm.pipeline_version() == metadata.version("ieeg-geometry")

@@ -104,4 +104,6 @@ def test_on004194_cortical_subjects():
     assert (p01.n_surface, p02.n_surface, p03.n_surface) == (56, 56, 90)
     assert p01.left_out[fsm.LEFT_DEPTH] == 8 and p03.left_out[fsm.LEFT_DEPTH] == 30
     for res in (p01, p02, p03):
-        assert [o.verification.grade for o in res.outputs] == ["specific"]
+        assert [o.frame_fit.grade for o in res.outputs] == ["specific"]
+        reg = res.outputs[0].registration  # on full surfaces
+        assert reg.n_sampled >= 2000 and reg.centroid_mm <= 5.0 and reg.extent_error <= 0.10
