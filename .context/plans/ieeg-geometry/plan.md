@@ -124,3 +124,9 @@ On real FreeSurfer subjects the surface method gives specific evidence everywher
 
 14. **Subject surfaces are display data, so ruling 3 does not apply to them.** A surface and its electrodes come from the same subject's own dataset, and nothing is written into the dataset; a plausible fit is enough to draw the surface, and the index records the grade so the website can say "approximate alignment" for a plausible fit and nothing for a specific one.
 15. **A written mesh is judged by what decimation changed, not re-graded.** Inside flags come from the original closed surface; the written mesh passes when its median contact distance moves by at most 0.5 mm and its 99th percentile surface deviation from the original is at most 1.0 mm. Decimation is quadric edge collapse (`fast-simplification`, MIT), not vertex clustering.
+
+### 2026-11-19, after the C1 review (PR #2225)
+
+16. **The blind shift control.** A shifted copy counts as failing when its median is above 1.0 mm and at least 1.5 times the unshifted median; all six shifts must fail. (The ECoG 2.0 mm rule rejected 14 of 42 verified on005007 files: a grid slid along the cortex stays 1.3 to 2.0 mm from fsaverage6.)
+17. **Prose alone never writes a label until R1 is reviewed.** A candidate from README or description text with only plausible evidence returns needs-human; with specific evidence it may be written. A named template that fits far worse than fsaverage (fsaverage specific on-vertex, the named one plausible at best) returns needs-human, whatever the contact type. Two distinct passing labels from the text return needs-human.
+18. **fsaverage-referenced data is written as `fsaverage`,** with the authors' own term (for example "MNI-305") carried in `iEEGCoordinateSystemDescription`.
