@@ -32,3 +32,7 @@ The cut surfaces are open, so depth-contact inside tests are not evaluated on th
 ## Vendored fsaverage6 `sphere.reg`
 
 `lh.sphere.reg.npz` and `rh.sphere.reg.npz` hold the first 40962 vertices of fsaverage's `sphere.reg` (identical to its `sphere`, and identical for the two hemispheres) from `derivatives/freesurfer/fsaverage/surf/` of on004194 v1.0.0; `tools/build_fsaverage6_sphere.py`.
+
+## Pipeline test dataset (`tests/test_pipeline.py`, card P1)
+
+Composed at test time from `fs_dataset/`, `spm_dataset/`, `mini_dataset/` and `labels/on006107/` (no new committed bytes), plus a synthetic `sub-9` (40 sEEG contacts inside the MNI shell, a full SPM12-grid field and the subject's own surface, built with the helpers of `test_spm.py`). `tests/remote.py` serves it as a local git repository (surfaces, spheres and `y_` fields as git-annex MD5E links) with the annexed bytes in a data tree and a release file, all through `file://` URLs.
