@@ -1,4 +1,10 @@
-"""`.nemar/ieeg-geometry.json`: the paths the pipeline owns, with inputs and verification."""
+"""`.nemar/ieeg-geometry.json`: the paths the pipeline owns, with inputs and verification.
+
+An entry may carry `output_sha256`, the SHA-256 of the bytes the pipeline wrote. A rerun
+regenerates an owned file only while its bytes still match that hash; a legacy entry without
+`output_sha256` whose file differs from the new output is treated as hand-edited and never
+regenerated (the label tracks keep it and report it).
+"""
 
 from __future__ import annotations
 
@@ -91,6 +97,7 @@ class OwnedPath:
     inputs: tuple[tuple[str, str], ...]  # (path, git blob id)
     method: str
     verification: Verification | None = None
+    output_sha256: str | None = None  # SHA-256 of the bytes the pipeline wrote; absent in old files
 
 
 @dataclass
@@ -100,7 +107,8 @@ class Ownership:
 
 
 def _entry_json(e: OwnedPath) -> dict:
-    return {
+    extra = {} if e.output_sha256 is None else {"output_sha256": e.output_sha256}
+    return extra | {
         "kind": e.kind,
         "inputs": [{"blob": blob, "path": path} for path, blob in sorted(e.inputs)],
         "method": e.method,
@@ -159,6 +167,7 @@ def read_ownership(dataset_dir: str | Path) -> Ownership | None:
                 inputs=tuple((i["path"], i["blob"]) for i in body["inputs"]),
                 method=body["method"],
                 verification=_verification(v) if v else None,
+                output_sha256=body.get("output_sha256"),
             )
         )
     return Ownership(doc["pipeline_version"], entries)

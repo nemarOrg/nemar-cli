@@ -152,9 +152,17 @@ def test_inspect_shows_pairing_evidence_residuals_and_verification():
 # ---- the write path on a synthetic subject whose contacts lie on the template -------------
 
 
+def _cerebrum(surface: Surface, min_z: float = -40.0) -> Surface:
+    """The part of a shell at or above `min_z`: what a pial surface has (no cerebellum)."""
+    keep = surface.vertices[:, 2] >= min_z
+    remap = np.cumsum(keep) - 1
+    faces = surface.faces[keep[surface.faces].all(axis=1)]
+    return Surface(surface.vertices[keep], remap[faces], surface.hemisphere)
+
+
 def _add_native_surface(dataset: Path) -> None:
-    """The right-hemisphere shell mapped into the subject's native frame, as a GIfTI surface."""
-    shell = load_reference("MNI152NLin2009cAsym")[1]
+    """The right cerebrum of the shell mapped into the subject's native frame, as GIfTI."""
+    shell = _cerebrum(load_reference("MNI152NLin2009cAsym")[1])
     verts = _native(shell.vertices * 0.995).astype(np.float32)
     faces = shell.faces.astype(np.int32)
     img = nib.gifti.GiftiImage(
@@ -294,7 +302,7 @@ def test_intended_for_match_pairs_then_verification_still_refuses_a_bad_file(syn
 
 def test_field_check_fails_when_the_surface_does_not_belong_to_the_field(synthetic_field):
     shell = load_reference("MNI152NLin2009cAsym")
-    right = shell[1]
+    right = _cerebrum(shell[1])
     own = Surface(_native(right.vertices * 0.995), right.faces, "R")
     good = spm.check_field(synthetic_field, [own], shell)
     assert good.passed and good.n_inverted >= 2000
@@ -309,7 +317,7 @@ def test_field_check_fails_when_the_surface_does_not_belong_to_the_field(synthet
 def test_a_40_mm_translation_and_a_15_percent_scale_error_both_fail(synthetic_field):
     """Ruling 19: the shape and position checks, not only the nearest-vertex distances."""
     shell = load_reference("MNI152NLin2009cAsym")
-    right = shell[1]
+    right = _cerebrum(shell[1])
     template = right.vertices * 0.995
     moved = spm.check_field(
         synthetic_field, [Surface(_native(template + [0.0, 40.0, 0.0]), right.faces, "R")], shell
@@ -518,3 +526,39 @@ def test_a_refused_rerun_removes_previous_outputs_and_keeps_other_tracks(synthet
     owned = read_ownership(synthetic_dataset)
     assert owned is not None and [e.path for e in owned.entries] == [other.path]
     assert owned.pipeline_version == spm.pipeline_version()
+
+
+def test_owned_files_record_their_hash_and_hand_edits_are_kept(synthetic_dataset):
+    import hashlib
+
+    plans = spm.plan_dataset(synthetic_dataset)
+    written = spm.write(plans, synthetic_dataset)
+    owned = read_ownership(synthetic_dataset)
+    assert owned is not None
+    for entry in owned.entries:
+        data = (synthetic_dataset / entry.path).read_bytes()
+        assert entry.output_sha256 == hashlib.sha256(data).hexdigest()
+    sidecar = synthetic_dataset / next(w for w in written if w.endswith("coordsystem.json"))
+    sidecar.write_text(sidecar.read_text().replace("Computed by NEMAR", "Edited by hand, NEMAR"))
+    edited = sidecar.read_bytes()
+    (rerun,) = spm.plan_dataset(synthetic_dataset)
+    again = spm.write([rerun], synthetic_dataset)
+    assert sidecar.read_bytes() == edited  # kept, not overwritten
+    assert rerun.kept == {sidecar.relative_to(synthetic_dataset).as_posix(): "hand-edited, kept"}
+    assert sidecar.relative_to(synthetic_dataset).as_posix() not in again
+    # an untouched owned file whose content would change is regenerated
+    tsv = synthetic_dataset / next(w for w in written if w.endswith("electrodes.tsv"))
+    entry = next(e for e in owned.entries if e.path.endswith("electrodes.tsv"))
+    tsv.write_text("stale\n")
+    from dataclasses import replace
+
+    from ieeg_geometry.ownership import write_ownership
+
+    others = [e for e in owned.entries if e is not entry]
+    stale = replace(entry, output_sha256=hashlib.sha256(b"stale\n").hexdigest())
+    write_ownership(synthetic_dataset, "0.0.1", [*others, stale])
+    (third,) = spm.plan_dataset(synthetic_dataset)
+    spm.write([third], synthetic_dataset)
+    assert tsv.read_text() != "stale\n" and not third.kept.get(
+        tsv.relative_to(synthetic_dataset).as_posix()
+    )

@@ -12,9 +12,11 @@ the grid, is refused. Output is in millimeters of the field's template grid, lab
 
 Field check (rulings 9 and 19): at least 2,000 sampled vertices of the subject's own pial
 surface are inverted through the field and must land with a median of at most 6.0 mm and a
-10th percentile of at most 2.0 mm from the template shell, their centroid within 5.0 mm of the
-shell's (same hemisphere), and each axis's 2nd-to-98th-percentile extent within 10 percent of
-the shell's. This proves the field's direction and position. It does not prove which subject
+10th percentile of at most 2.0 mm from the template shell, their centroid within 10.0 mm of the
+shell's, and each axis's 2nd-to-98th-percentile extent within 10 percent of the shell's, the
+shell taken on the pial's hemisphere and cut to z of at least -40 mm (the cerebellum and
+brainstem have no pial counterpart; ruling 25). This proves the field's direction and position.
+It does not prove which subject
 or electrodes file the field belongs to: sub-1's field passes against sub-3's surface.
 
 Pairing (ruling 21): a file is paired with a field when its coordsystem `IntendedFor` resolves
@@ -35,13 +37,13 @@ surface, is independent frame evidence (lead ruling 3).
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import math
 import os
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import nibabel as nib
@@ -49,6 +51,7 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .labels import pipeline_version
 from .ownership import (
     OwnedPath,
     Ownership,
@@ -76,13 +79,6 @@ MAX_ITERATIONS = 20
 MIN_INVERTIBLE_FRACTION = 0.90
 _MAX_STEP_VOXELS = 4.0
 _GRID_EPS = 1e-6
-
-
-def pipeline_version() -> str:
-    try:
-        return version("ieeg-geometry")
-    except PackageNotFoundError:  # pragma: no cover - running from a bare checkout
-        return "0+unknown"
 
 
 @dataclass
@@ -278,7 +274,8 @@ FIELD_CHECK_SAMPLES = 4000
 FIELD_CHECK_MIN_INVERTED = 2000
 FIELD_CHECK_MEDIAN_MM = 6.0
 FIELD_CHECK_P10_MM = 2.0
-FIELD_CHECK_CENTROID_MM = 5.0
+FIELD_CHECK_CENTROID_MM = 10.0
+FIELD_CHECK_SHELL_MIN_Z = -40.0  # ruling 25: cerebrum against cerebrum
 FIELD_CHECK_EXTENT_FRACTION = 0.10
 
 
@@ -307,7 +304,7 @@ def check_field(
     """Rulings 9 and 19: where the subject's own pial vertices land, and the shape they take.
 
     At least 2,000 sampled vertices invert; median at most 6.0 mm and 10th percentile at most
-    2.0 mm from the shell; centroid within 5.0 mm and each axis's 2nd-to-98th-percentile
+    2.0 mm from the shell; centroid within 10.0 mm and each axis's 2nd-to-98th-percentile
     extent within 10 percent of the shell's, the shell taken on the pial's hemisphere.
     """
     if not pial:
@@ -325,8 +322,9 @@ def check_field(
         hemis = {"L" if float(np.median(mapped[:, 0])) < 0 else "R"}
     want = hemis
     shell = [s for s in reference if s.hemisphere in want] or list(reference)
-    ref_pts = np.vstack([s.vertices for s in shell])
-    dist, _ = KDTree(ref_pts).query(mapped)
+    all_pts = np.vstack([s.vertices for s in shell])
+    dist, _ = KDTree(all_pts).query(mapped)
+    ref_pts = all_pts[all_pts[:, 2] >= FIELD_CHECK_SHELL_MIN_Z]  # no cerebellum or brainstem
     median, p10 = float(np.median(dist)), float(np.percentile(dist, 10))
     centroid = float(np.linalg.norm(mapped.mean(axis=0) - ref_pts.mean(axis=0)))
     ext = np.percentile(mapped, 98, axis=0) - np.percentile(mapped, 2, axis=0)
@@ -643,6 +641,7 @@ class SubjectPlan:
     # dataset-relative path -> file bytes
     files: dict[str, bytes] = field(default_factory=dict)
     owned: list[OwnedPath] = field(default_factory=list)
+    kept: dict[str, str] = field(default_factory=dict)  # path -> why `write` left it alone
 
 
 def _output_stem(electrodes_path: Path, subject: str, session: str | None) -> str:
@@ -863,8 +862,12 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
         inputs.append((_rel(eset.coordsystem_path, dataset), blob_id(eset.coordsystem_path)))
     inputs += [(_rel(p, dataset), blob_id(p)) for p in surf.paths]
     plan.owned = [
-        OwnedPath(tsv_rel, "electrodes", tuple(inputs), METHOD, verification),
-        OwnedPath(json_rel, "coordsystem", tuple(inputs), METHOD, verification),
+        OwnedPath(
+            tsv_rel, "electrodes", tuple(inputs), METHOD, verification, _sha(plan.files[tsv_rel])
+        ),
+        OwnedPath(
+            json_rel, "coordsystem", tuple(inputs), METHOD, verification, _sha(plan.files[json_rel])
+        ),
     ]
     plan.verdict = "write"
     return plan
@@ -883,41 +886,67 @@ def _owned_by(entry: OwnedPath, plan: SubjectPlan) -> bool:
     )
 
 
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def write(plans: list[SubjectPlan], dataset_dir: str | Path) -> list[str]:
     """Write the files of every `write` plan and merge them into `.nemar/ieeg-geometry.json`.
 
-    Other owners' entries are kept; a path this pipeline owns is replaced. A subject that is now
-    refused or needs a human loses the outputs it was previously given (and their entries),
-    because pipeline-owned paths are regenerated, never kept stale. Reruns on unchanged inputs
-    produce byte-identical files. The record carries the current pipeline version.
+    Other owners' entries are kept. A pipeline-owned file is regenerated only while its bytes
+    still match the recorded `output_sha256`; a hand-edited owned file, a file the authors
+    own, or a symbolic link is kept as it is and listed in `plan.kept` (as C1 does). A subject
+    that is now refused or needs a human loses the outputs it was previously given and their
+    entries, unless hand-edited. Reruns on unchanged inputs produce byte-identical files. The
+    record carries the current pipeline version.
     """
     dataset = Path(dataset_dir)
     existing = read_ownership(dataset)
-    kept = list(existing.entries) if existing else []
+    entries = {e.path: e for e in (existing.entries if existing else [])}
     written: list[str] = []
-    new_owned: list[OwnedPath] = []
     changed = False
     for plan in plans:
+        plan.kept = {}
         if plan.verdict in ("refused", "needs-human"):
-            stale = [e for e in kept if _owned_by(e, plan)]
-            for e in stale:
-                (dataset / e.path).unlink(missing_ok=True)
-            if stale:
-                kept = [e for e in kept if e not in stale]
-                changed = True
+            for e in [e for e in entries.values() if _owned_by(e, plan)]:
+                target = dataset / e.path
+                if not os.path.lexists(target):
+                    del entries[e.path]
+                    changed = True
+                elif (
+                    not target.is_symlink()
+                    and e.output_sha256 is not None
+                    and _sha(target.read_bytes()) == e.output_sha256
+                ):
+                    target.unlink()
+                    del entries[e.path]
+                    changed = True
+                else:
+                    plan.kept[e.path] = "hand-edited, kept"
         elif plan.verdict == "write":
+            owned = {o.path: o for o in plan.owned}
             for rel, data in plan.files.items():
                 target = dataset / rel
-                if not target.exists() or target.read_bytes() != data:
+                entry = entries.get(rel)
+                if not os.path.lexists(target):
                     target.write_bytes(data)
+                elif target.is_symlink():
+                    plan.kept[rel] = "symbolic link, kept"
+                    continue
+                elif target.read_bytes() != data:
+                    if entry is not None and entry.output_sha256 == _sha(target.read_bytes()):
+                        target.write_bytes(data)  # ours and untouched: regenerate
+                    else:
+                        plan.kept[rel] = (
+                            "hand-edited, kept" if entry is not None else "not ours, kept"
+                        )
+                        continue
                 written.append(rel)
-            new_owned.extend(plan.owned)
-    if new_owned:
-        replaced = {o.path for o in new_owned}
-        kept = [e for e in kept if e.path not in replaced]
-        changed = True
+                if entries.get(rel) != owned[rel]:
+                    entries[rel] = owned[rel]
+                    changed = True
     if changed:
-        write_ownership(dataset, pipeline_version(), kept + new_owned)
+        write_ownership(dataset, pipeline_version(), list(entries.values()))
     return written
 
 

@@ -8,10 +8,9 @@ and fields). Measured 2026-11-19 with the B2 review fixes:
   verification (its native `IntendedFor` names a file that does not exist and its `space-ACPC`
   file names a different T1, so it is the only candidate left).
 - Each chosen file passes the shell inside rule (96.6 to 98.8 percent inside).
-- Ruling 19's shape and position checks FAIL every subject against the vendored shell: the shell
-  holds the cerebellum and brainstem (down to z = -72 mm) that a pial surface lacks, so a z
-  extent is 19 to 22 percent off, and the centroid is 3.5 to 7.6 mm off. The lead decides how
-  to compare (see the B2 report); until then no subject is written.
+- Rulings 19 and 25 (shape and position, shell cut to z >= -40 mm, centroid limit 10 mm): every
+  subject passes (centroid 5.0 to 8.7 mm, worst extent difference 4 to 9 percent) and is written.
+  Against the whole shell (cerebellum and brainstem included) the extent was 19 to 22 percent off.
 """
 
 import os
@@ -114,20 +113,22 @@ def test_chosen_files_pass_the_shell_inside_rule(plans):
         assert head.max_outside_mm is not None and head.max_outside_mm <= 10.0
 
 
-def test_ruling_19_checks_currently_fail_every_subject_against_the_whole_shell(plans):
+def test_field_checks_pass_and_every_subject_is_written(plans):
+    """Rulings 9, 19 and 25: the shell cut to z >= -40 mm for extent and centroid."""
     expected = {  # (centroid mm, worst extent difference)
-        "1": (7.2, 0.19),
-        "2": (3.5, 0.21),
-        "3": (7.6, 0.22),
-        "4": (3.7, 0.19),
+        "1": (6.5, 0.04),
+        "2": (5.0, 0.08),
+        "3": (8.7, 0.09),
+        "4": (5.4, 0.07),
     }
     for s, (centroid, extent) in expected.items():
         check = plans[s].field_check
         assert check is not None and check.n_inverted == 4000
-        assert check.median_mm <= 6.0 and check.p10_mm <= 2.0  # ruling 9 passes
+        assert check.median_mm <= 6.0 and check.p10_mm <= 2.0
         assert check.centroid_mm == pytest.approx(centroid, abs=0.1)
         assert check.extent_deviation == pytest.approx(extent, abs=0.01)
-        assert not check.passed and plans[s].verdict == "refused" and plans[s].files == {}
+        assert check.passed and plans[s].verdict == "write", (s, plans[s].reason)
+        assert len(plans[s].files) == 2 and all(o.output_sha256 for o in plans[s].owned)
 
 
 def test_pinned_template_coordinates_of_real_contacts(dataset):
