@@ -19,6 +19,7 @@ cd scripts/ieeg_geometry && uv run pytest -q
 | `surfaces.py` | FreeSurfer binary (with the c_ras footer), GIfTI (ASCII, Base64Binary, GZipBase64Binary, either array order) and MATLAB v5 `vert`/`tri` or `Vertices`/`Faces` into one `Surface`. MATLAB v7.3 is refused. |
 | `reference.py` | The vendored references by name (`fsaverage`, `MNI152NLin2009cAsym`) and a strict `brain-mesh v1` reader. Checks `SHA256SUMS` on load. |
 | `verify.py` | `fit` (median, 90th percentile, maximum nearest-vertex distance; ray-parity inside test) and `fit_with_offset` (as declared and with c_ras added). Thresholds and the degenerate-ray handling are in the module docstring. |
+| `freesurfer.py` | Track B1: for subjects with a FreeSurfer subject directory, decides tkr RAS versus scanner RAS (c_ras) against the subject's pial surfaces, maps contacts within 3.0 mm of the pial surface to fsaverage6 through `sphere.reg` (`space-fsaverage`), maps the rest through `talairach.xfm` (`space-MNI305`, approximate), verifies each set against fsaverage and writes only sets that pass, merging into `.nemar/ieeg-geometry.json`. Report: `python -m ieeg_geometry.freesurfer <dataset-dir>` (also appended to `inspect`). |
 | `ownership.py` | `.nemar/ieeg-geometry.json` writer and reader, deterministic bytes, git blob ids of inputs. |
 
 ## Evidence grades
@@ -39,7 +40,7 @@ A median near 0 therefore means the contacts sit on template vertices, not merel
 
 ## Vendored data (`ieeg_geometry/data/`)
 
-- `fsaverage/`: fsaverage6 pial surfaces (both hemispheres) derived from fsaverage, a modified version marked as such in `LICENSE` (FreeSurfer Software License, which allows redistribution with its terms). Rebuild with `tools/build_fsaverage6.py`.
+- `fsaverage/`: fsaverage6 pial and `sphere.reg` surfaces (both hemispheres; `sphere.reg` rebuilt with `tools/build_fsaverage6_sphere.py` from fsaverage's `sphere.reg` in on004194 v1.0.0) derived from fsaverage, a modified version marked as such in `LICENSE` (FreeSurfer Software License, which allows redistribution with its terms). Rebuild with `tools/build_fsaverage6.py`.
   Provenance and known limit: the source is the copy of FreeSurfer's fsaverage pial surfaces shipped by public dataset on004370 (`derivatives/freesurfer/{lh,rh}.pial`, header "created by greve on Thu Apr 11 2013", sha256 `9cb004f6...0f29` for lh and `4f752701...1212` for rh), not a download from FreeSurfer's distribution.
   The fsaverage6 vertices and triangles were derived from it; a comparison against FreeSurfer's own fsaverage6 files was not possible offline.
 - `mni152nlin2009casym/`: the website's `brain-mesh v1` MNI152NLin2009cAsym tissue shell, copied with its license and provenance. It is a gray-plus-white-matter isosurface cut at x = 0, not a cortical pial surface and not closed; its inside test uses the implicit cap.
