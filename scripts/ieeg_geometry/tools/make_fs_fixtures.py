@@ -6,8 +6,8 @@ Usage, from the repository root:
 
 `<dataset-checkout-dir>` mirrors on004194 v1.0.0 (see tests/fixtures/PROVENANCE.md): the
 `sub-p02` and `sub-p03` electrodes, coordsystem and channels files, and under
-`derivatives/freesurfer/sub-p0N/` the `surf/{lh,rh}.{pial,sphere.reg}` files and
-`mri/transforms/talairach.xfm`. Each pial surface is cut to the vertices within
+`derivatives/freesurfer/sub-p0N/` the
+`surf/{lh,rh}.{pial,sphere.reg}` files. Each pial surface is cut to the vertices within
 (nearest-vertex distance + MARGIN_MM) of any contact, in the declared frame and in the frame
 with c_ras subtracted, and to the faces made only of kept vertices. The matching `sphere.reg`
 is cut to the same vertices, so vertex indices stay aligned between the two.
@@ -71,12 +71,7 @@ def main(source: str, fixture_dir: str) -> None:
         points = read_xyz(ieeg_src / f"{stem}_acq-clinical_electrodes.tsv")
         fs_src = src / "derivatives" / "freesurfer" / f"sub-{sub}"
         fs_dst = dst / "derivatives" / "freesurfer" / f"sub-{sub}"
-        (fs_dst / "mri" / "transforms").mkdir(parents=True)
         (fs_dst / "surf").mkdir(parents=True)
-        shutil.copy(
-            fs_src / "mri" / "transforms" / "talairach.xfm",
-            fs_dst / "mri" / "transforms" / "talairach.xfm",
-        )
         for hemi in ("lh", "rh"):
             verts, faces, meta = nib.freesurfer.read_geometry(
                 str(fs_src / "surf" / f"{hemi}.pial"), read_metadata=True

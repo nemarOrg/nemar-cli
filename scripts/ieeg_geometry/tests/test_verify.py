@@ -238,15 +238,3 @@ def test_failed_declared_frame_with_tiny_offset_is_not_a_pass():
     fit_ = _offset_fit(3.0, 1.0, (2.0, 0.0, 0.0), grades=("fail", "specific"))
     assert fit_.preferred is None
     assert _offset_fit(3.0, 1.0, (10.0, 0.0, 0.0), grades=("fail", "specific")).preferred == "c_ras"
-
-
-def test_depth_inside_rule(sphere):
-    from ieeg_geometry.verify import fit_depth_inside
-
-    inside = np.array([[0.0, 0, 0]] * 20 + [[3.0, 0, 0]] * 20)
-    assert fit_depth_inside(inside, sphere).grade == "plausible"
-    mostly_out = np.vstack([inside, [[14.0, 0, 0]] * 5])  # 5 of 45 outside, 4 mm away
-    assert fit_depth_inside(mostly_out, sphere).passed is False  # 89 percent inside
-    far = np.vstack([inside] * 3 + [[[25.0, 0, 0]]])  # one contact 15 mm outside
-    assert fit_depth_inside(far, sphere).passed is False
-    assert fit_depth_inside(far, sphere).max_mm > 10.0

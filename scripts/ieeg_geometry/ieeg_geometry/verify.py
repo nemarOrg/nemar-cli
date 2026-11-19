@@ -53,8 +53,6 @@ OFFSET_MIN_GAIN_MM = 1.5
 OFFSET_MIN_GAIN_FRACTION = 0.25
 OFFSET_IMMATERIAL_MM = 3.0
 SPECIFIC_MIN_GAIN_MM = 0.5
-DEPTH_INSIDE_FRACTION = 0.95
-DEPTH_MAX_OUTSIDE_MM = 10.0
 _EDGE_EPS = 1e-7
 _DIRECTIONS = np.array(
     [[0.5773, 0.3123, 0.7541], [-0.2719, 0.8341, -0.4823], [0.1693, -0.4417, 0.8812]]
@@ -341,49 +339,3 @@ def fit_with_offset(
         offset_applied=(float(shift[0]), float(shift[1]), float(shift[2])),
     )
     return OffsetFit(declared, shifted, c)
-
-
-def fit_depth_inside(
-    contacts_mm: np.ndarray,
-    surface: Surface | Sequence[Surface],
-    *,
-    min_inside_fraction: float = DEPTH_INSIDE_FRACTION,
-    max_outside_mm: float = DEPTH_MAX_OUTSIDE_MM,
-) -> Fit:
-    """Plausibility of depth contacts against a smooth reference (lead ruling 8 and 12).
-
-    Passes (`plausible`) when at least `min_inside_fraction` of the contacts are inside the
-    reference and no contact outside it is farther than `max_outside_mm` from its nearest
-    vertex. The median is reported, not judged. An open surface that cannot be evaluated fails
-    closed with `inside-unevaluable`.
-    """
-    surfaces = _as_list(surface)
-    pts = np.asarray(contacts_mm, dtype=float).reshape(-1, 3)
-    n_total = len(pts)
-    pts = pts[np.isfinite(pts).all(axis=1)]
-    rule = f"inside >= {min_inside_fraction:.0%} and none more than {max_outside_mm} mm outside"
-    base: dict[str, Any] = dict(n_total=n_total, rule=rule)
-    if not len(pts) or not surfaces:
-        return Fit(math.nan, math.nan, math.nan, len(pts), grade=FAIL, **base)
-    dist, _ = KDTree(np.vstack([s.vertices for s in surfaces])).query(pts)
-    stats: dict[str, Any] = dict(
-        median_mm=float(np.median(dist)),
-        p90_mm=float(np.percentile(dist, 90)),
-        max_mm=float(dist.max()),
-        n_used=len(pts),
-    )
-    result = points_inside(pts, surfaces)
-    if result is None:
-        return Fit(grade=FAIL, reason="inside-unevaluable", **stats, **base)
-    inside, n_amb = result
-    outside_far = float(dist[~inside].max()) if (~inside).any() else 0.0
-    ok = float(inside.mean()) >= min_inside_fraction and outside_far <= max_outside_mm
-    return Fit(
-        grade=PLAUSIBLE if ok else FAIL,
-        inside_fraction=float(inside.mean()),
-        near_or_inside_fraction=float((inside | (dist <= SEEG_NEAR_MM)).mean()),
-        inside_evaluated=True,
-        n_ambiguous=n_amb,
-        **stats,
-        **base,
-    )
