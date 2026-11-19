@@ -150,3 +150,7 @@ The field check (ruling 9) proves a field's direction, not which subject or whic
 ### 2026-11-19, after B1's registration check (PR #2227)
 
 24. **A registration is also checked for coherence.** Centroid, extent and hemisphere side cannot see a scrambled `sphere.reg` (it still covers fsaverage6 evenly), so an affine fit from the sampled subject positions to their mapped fsaverage6 positions must leave a median residual of at most 15.0 mm (real on004194 subjects 5.6 to 7.7 mm; scrambled about 53 mm).
+
+### 2026-11-19, after B2 applied ruling 19 (PR #2226)
+
+25. **Ruling 19 against the MNI shell compares cerebrum with cerebrum.** The shell includes the cerebellum and brainstem, which a pial surface lacks, and SPM's IXI549 space sits a steady 4 to 6 mm from MNI152NLin2009cAsym. For an SPM field check the shell is cut to z at least -40 mm before the extent and centroid are computed; the extent limit stays 10 percent and the centroid limit is 10.0 mm (a 40 mm translation still fails). The FreeSurfer registration check (rulings 19 and 24, against fsaverage6 pial) is unchanged.
