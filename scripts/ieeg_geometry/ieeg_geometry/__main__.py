@@ -53,7 +53,7 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
     write = lambda s="": print(s, file=out)  # noqa: E731
     refs = {name: load_reference(name) for name in REFERENCE_NAMES}
     items = discover(dataset)
-    readme = labels._readme(dataset)
+    proposals = {p.electrodes: p for p in labels.plan_dataset(dataset).proposals}
     if not items:
         write(f"no electrodes.tsv found under sub-* in {dataset}")
         return 1
@@ -61,7 +61,7 @@ def inspect(dataset: Path, out=sys.stdout) -> int:
         label = f"sub-{item.subject}" + (f" ses-{item.session}" if item.session else "")
         label += f" space-{item.space}" if item.space else " (no space entity)"
         write(f"{label}: {item.electrodes_path.relative_to(dataset)}")
-        for line in labels.propose(dataset, item, readme).lines():
+        for line in proposals[item.electrodes_path.relative_to(dataset).as_posix()].lines():
             write(f"  {line}")
         try:
             eset = read_electrode_set(item)

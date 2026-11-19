@@ -1,4 +1,4 @@
-"""Label inference: real excerpts of public CC0 datasets (see fixtures/PROVENANCE.md)."""
+"""Label inference: real excerpts of public CC0 datasets (see fixtures/labels/README.md)."""
 
 import json
 import shutil
@@ -95,7 +95,9 @@ def test_missing_coordsystem_gets_a_fsaverage_sidecar(no_sidecar):
         "sub-01/ses-01/ieeg/sub-01_ses-01_electrodes.tsv"
         in doc["iEEGCoordinateProcessingDescription"]
     )
-    assert "median distance" in doc["iEEGCoordinateProcessingDescription"]
+    assert "median 0.73 mm" in doc["iEEGCoordinateProcessingDescription"]
+    assert "Units assumed mm, confirmed by the fit." in doc["iEEGCoordinateProcessingDescription"]
+    assert "geometric verification" in doc["iEEGCoordinateSystemDescription"]
     assert doc["iEEGCoordinateProcessingReference"] == "https://docs.nemar.org/data/ieeg-geometry/"
     owned = read_ownership(no_sidecar)
     assert owned is not None and [e.path for e in owned.entries] == [planned.path]
@@ -260,7 +262,7 @@ def test_sidecar_variant_spelling_maps_to_the_valid_label(tmp_path):
     ]
 
 
-def test_a_named_mni152_is_refused_when_contacts_sit_on_fsaverage(native_sidecar):
+def test_a_named_mni152_is_needs_human_when_contacts_sit_on_fsaverage(native_sidecar):
     for channels in native_sidecar.rglob("*_channels.tsv"):
         channels.unlink()  # no contact types: depth rule, which the MNI shell passes
     coord = next(native_sidecar.rglob("*_coordsystem.json"))
@@ -271,7 +273,29 @@ def test_a_named_mni152_is_refused_when_contacts_sit_on_fsaverage(native_sidecar
     first = prop.attempts[0]
     assert first.label == "MNI152NLin6ASym" and not first.accepted
     assert "fsaverage vertices" in first.reason
-    assert prop.status == labels.ACCEPTED and prop.label == "fsaverage"  # the README's MNI305
+    assert prop.status == labels.NEEDS_HUMAN and not prop.files
+
+
+@pytest.mark.parametrize("keep_channels", [True, False])
+def test_readme_naming_mni152_for_fsaverage_contacts_is_not_written(tmp_path, keep_channels):
+    """on005007 sub-01: contacts on fsaverage, a README naming MNI152NLin6ASym (reviewer probe)."""
+    ds = tmp_path / "ds"
+    shutil.copytree(FIX / "on005007", ds)
+    (ds / "README.md").write_text("Electrode coordinates are in MNI152NLin6ASym space.")
+    if not keep_channels:
+        for channels in ds.rglob("*_channels.tsv"):
+            channels.unlink()
+    prop = _only(labels.plan_dataset(ds))
+    assert prop.status == labels.NEEDS_HUMAN and not prop.files
+    assert labels.write(labels.plan_dataset(ds), ds) == []
+
+
+def test_on005007_sub01_is_accepted_blind_with_a_slid_grid_control(tmp_path):
+    ds = tmp_path / "ds"
+    shutil.copytree(FIX / "on005007", ds)
+    prop = _only(labels.plan_dataset(ds))
+    assert prop.status == labels.ACCEPTED and prop.label == "fsaverage"
+    assert prop.attempts[0].fit is not None and prop.attempts[0].fit.median_mm <= 1.0
 
 
 def test_plausible_depth_contacts_pass_when_named_but_not_blind(tmp_path):
@@ -378,12 +402,6 @@ def test_classify_frame_value_unspecific_and_unknown():
     assert labels.classify_frame_value("patient-native") is None
 
 
-def test_the_template_list_matches_the_pinned_bids_appendix():
-    assert len(labels.TEMPLATE_LABELS) == 22
-    assert {"MNI305", "fsaverage", "MNI152NLin2009bSym", "IXI549Space"} <= labels.TEMPLATE_LABELS
-    assert not {"ACPC", "ScanRAS", "Other", "fsaverage6"} & labels.TEMPLATE_LABELS
-
-
 def test_reference_and_written_labels():
     assert labels.reference_for("MNI305") == "fsaverage"
     assert labels.reference_for("MNI152NLin6ASym") == "MNI152NLin2009cAsym"
@@ -432,3 +450,314 @@ def test_blind_trial_needs_the_shift_control_on_every_axis(tmp_path):
     prop = _only(labels.plan_dataset(tmp_path))
     assert prop.status == labels.REJECTED and not prop.files
     assert "a 10 mm shift still fits" in prop.attempts[0].reason
+
+
+# --- review round: prose, negation, guards ------------------------------------------------------
+
+
+def _fsaverage_points(scale=1.0, n=80) -> np.ndarray:
+    verts = load_reference("fsaverage")[0].vertices
+    idx = np.random.default_rng(1).choice(len(verts), n, replace=False)
+    return verts[idx] * scale
+
+
+def _blend_points(k=0.95, w=0.5, n=80) -> np.ndarray:
+    """Halfway between fsaverage and its nearest MNI152 vertices: plausible for both."""
+    from scipy.spatial import KDTree
+
+    fs = load_reference("fsaverage")[0].vertices
+    mni = load_reference("MNI152NLin2009cAsym")[0].vertices
+    chosen = fs[np.random.default_rng(0).choice(len(fs), n, replace=False)]
+    return k * (w * chosen + (1 - w) * mni[KDTree(mni).query(chosen)[1]])
+
+
+def test_two_distinct_passing_labels_need_a_human(tmp_path):
+    _points_file(tmp_path, _blend_points())  # plausible against both templates
+    (tmp_path / "README.md").write_text(
+        "Positions in MNI305 for some, MNI152NLin2009cAsym for others."
+    )
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert [a.grade for a in prop.attempts] == ["plausible", "plausible"]
+    assert prop.status == labels.NEEDS_HUMAN and "two distinct" in prop.reason and not prop.files
+
+
+def test_prose_with_only_plausible_evidence_needs_a_human(tmp_path):
+    _points_file(tmp_path, _fsaverage_points(scale=0.9))
+    (tmp_path / "README.md").write_text(
+        "Electrodes are in native space. Figures show results on fsaverage."
+    )
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.attempts[0].grade == "plausible"
+    assert prop.status == labels.NEEDS_HUMAN and not prop.files
+
+
+def test_a_sidecar_name_with_plausible_evidence_is_still_written(tmp_path):
+    elec = _points_file(tmp_path, _fsaverage_points(scale=0.9))
+    _sidecar(elec, "FSAVERAGE")
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.ACCEPTED and prop.attempts[0].source == "sidecar"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Coordinates are not in MNI305 space.",
+        "Positions are in native space, never in MNI305.",
+        "Not MNI305: these are native positions.",
+    ],
+)
+def test_negated_mentions_are_ignored(no_sidecar, text):
+    (no_sidecar / "README.md").write_text(text)
+    prop = _only(labels.plan_dataset(no_sidecar))
+    assert prop.status == labels.ACCEPTED and prop.attempts[0].source == "blind trial"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        "acpc",
+        "ACPC",
+        "ScanRAS",
+        "scanner",
+        "Scanner RAS",
+        "ScannerRAS",
+        "native",
+        "Native-RAS",
+        "ACPC-aligned T1",
+        "Pixels",
+    ],
+)
+def test_never_relabeled_frames_by_canonical_prefix(no_sidecar, frame):
+    _sidecar(next(no_sidecar.rglob("*_electrodes.tsv")), frame)
+    prop = _only(labels.plan_dataset(no_sidecar))
+    assert prop.status == labels.SKIPPED and not prop.files and not prop.attempts
+
+
+def test_authors_template_file_under_acq_or_another_name_blocks_a_pair(native_sidecar):
+    ieeg = native_sidecar / "sub-001" / "ses-1" / "ieeg"
+    base = ieeg / "sub-001_ses-1_electrodes.tsv"
+    (ieeg / "sub-001_ses-1_acq-a_space-MNI305_electrodes.tsv").write_bytes(base.read_bytes())
+    prop = next(
+        p
+        for p in labels.plan_dataset(native_sidecar).proposals
+        if p.electrodes == "sub-001/ses-1/ieeg/sub-001_ses-1_electrodes.tsv"
+    )
+    assert prop.status == labels.ALREADY and not prop.files
+
+
+def test_authors_sidecar_frame_on_another_acq_blocks_a_pair(native_sidecar):
+    ieeg = native_sidecar / "sub-001" / "ses-1" / "ieeg"
+    other = ieeg / "sub-001_ses-1_acq-b_electrodes.tsv"
+    other.write_bytes((ieeg / "sub-001_ses-1_electrodes.tsv").read_bytes())
+    _sidecar(other, "MNI305")
+    prop = next(
+        p for p in labels.plan_dataset(native_sidecar).proposals if "acq-b" not in p.electrodes
+    )
+    assert prop.status == labels.ALREADY and not prop.files
+
+
+def test_pipeline_files_are_not_authors_files_on_rerun(native_sidecar):
+    labels.write(labels.plan_dataset(native_sidecar), native_sidecar)
+    before = _tree(native_sidecar)
+    plan = labels.plan_dataset(native_sidecar)
+    orig = next(p for p in plan.proposals if "space" not in p.electrodes)
+    assert orig.status == labels.ALREADY and orig.reason == "pipeline output unchanged"
+    # the same rerun, with the ownership record gone, now sees the files as the authors'
+    (native_sidecar / ".nemar" / "ieeg-geometry.json").unlink()
+    orig = next(
+        p for p in labels.plan_dataset(native_sidecar).proposals if "space" not in p.electrodes
+    )
+    assert orig.status == labels.ALREADY and "authors'" in orig.reason
+    assert {k: v for k, v in _tree(native_sidecar).items() if k != ".nemar/ieeg-geometry.json"} == {
+        k: v for k, v in before.items() if k != ".nemar/ieeg-geometry.json"
+    }
+
+
+def test_a_changed_owned_file_is_regenerated_and_its_entry_replaced(no_sidecar):
+    labels.write(labels.plan_dataset(no_sidecar), no_sidecar)
+    sidecar = next(no_sidecar.rglob("*_coordsystem.json"))
+    sidecar.write_text("{}")  # stale content at a pipeline-owned path
+    plan = labels.plan_dataset(no_sidecar)
+    assert plan.files  # an owned sidecar is regenerated, not read as the authors' frame
+    written = labels.write(plan, no_sidecar)
+    assert (
+        written == [sidecar]
+        and json.loads(sidecar.read_text())["iEEGCoordinateSystem"] == "fsaverage"
+    )
+    owned = read_ownership(no_sidecar)
+    assert owned is not None and len(owned.entries) == 1
+    assert not labels.plan_dataset(no_sidecar).files
+
+
+def test_ownership_is_recorded_before_the_files(no_sidecar):
+    import os
+
+    plan = labels.plan_dataset(no_sidecar)
+    folder = next(no_sidecar.rglob("*_electrodes.tsv")).parent
+    folder.chmod(0o555)
+    try:
+        if os.access(folder, os.W_OK):
+            pytest.skip("directory permissions are not enforced here")
+        with pytest.raises(PermissionError):
+            labels.write(plan, no_sidecar)
+    finally:
+        folder.chmod(0o755)
+    owned = read_ownership(no_sidecar)
+    assert owned is not None and [e.path for e in owned.entries] == [plan.files[0].path]
+    assert not (no_sidecar / plan.files[0].path).exists()
+
+
+def test_a_dangling_annex_sidecar_is_refused_and_never_written_through(no_sidecar):
+    import os
+
+    elec = next(no_sidecar.rglob("*_electrodes.tsv"))
+    link = elec.with_name(elec.name.replace("electrodes.tsv", "coordsystem.json"))
+    os.symlink("../../../.git/annex/objects/XX/key.json", link)
+    prop = _only(labels.plan_dataset(no_sidecar))
+    assert prop.status == labels.SKIPPED and "link" in prop.reason and not prop.files
+
+
+def test_write_refuses_a_symlink_target(no_sidecar):
+    import os
+
+    plan = labels.plan_dataset(no_sidecar)
+    target = no_sidecar / plan.files[0].path
+    os.symlink("nowhere.json", target)
+    with pytest.raises(GeometryRefusal) as exc:
+        labels.write(plan, no_sidecar)
+    assert exc.value.reason == "write-conflict" and not (no_sidecar / "nowhere.json").exists()
+    assert not (no_sidecar / ".nemar").exists()
+
+
+def test_meters_file_with_trailing_blank_line(tmp_path):
+    pts = _mni_points()
+    elec = _points_file(tmp_path, pts / 1000.0)
+    _sidecar(
+        elec,
+        "Other",
+        iEEGCoordinateUnits="m",
+        iEEGCoordinateSystemDescription="MNI152NLin2009cAsym",
+    )
+    elec.write_text(elec.read_text() + "\n\n")
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.ACCEPTED
+    content = next(f for f in prop.files if f.path.endswith(".tsv")).content.decode()
+    assert "\n\n" not in content and len(content.splitlines()) == len(pts) + 1
+
+
+def test_a_malformed_row_is_skipped_with_a_reason(tmp_path):
+    elec = _points_file(tmp_path, _mni_points() / 1000.0)
+    _sidecar(
+        elec,
+        "Other",
+        iEEGCoordinateUnits="m",
+        iEEGCoordinateSystemDescription="MNI152NLin2009cAsym",
+    )
+    elec.write_text(elec.read_text() + "C99\t1.0\n")  # a truncated row
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.SKIPPED and "cannot copy positions" in prop.reason
+    elec.write_text(elec.read_text().replace("C99\t1.0\n", "C99\tx\ty\tz\t0\n"))
+    assert _only(labels.plan_dataset(tmp_path)).status == labels.SKIPPED
+
+
+def test_a_sidecar_naming_a_template_without_a_reference_needs_a_human(tmp_path):
+    elec = _points_file(tmp_path, _fsaverage_points())
+    _sidecar(elec, "MNI-Colin27")  # contacts really are on fsaverage; no blind override
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.NEEDS_HUMAN and not prop.files and not prop.attempts
+
+
+def test_a_blind_trial_needs_ten_contacts(tmp_path):
+    _points_file(tmp_path, _fsaverage_points(n=9))
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.REJECTED and "fewer than 10" in prop.reason
+    _points_file(tmp_path, _fsaverage_points(n=10))
+    assert _only(labels.plan_dataset(tmp_path)).status == labels.ACCEPTED
+
+
+def test_description_names_every_contact_type(tmp_path):
+    pts = _fsaverage_points(n=40)
+    path = tmp_path / "sub-1" / "ieeg" / "sub-1_electrodes.tsv"
+    path.parent.mkdir(parents=True)
+    rows = [
+        f"C{i}\t{x:.6f}\t{y:.6f}\t{z:.6f}\t{'ECOG' if i < 20 else 'SEEG'}"
+        for i, (x, y, z) in enumerate(pts)
+    ]
+    path.write_text("name\tx\ty\tz\ttype\n" + "\n".join(rows) + "\n")
+    (tmp_path / "README.md").write_text("Contacts are in MNI305 space.")
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.ACCEPTED
+    text = json.loads(prop.files[0].content)["iEEGCoordinateProcessingDescription"]
+    assert "ecog 20 contacts" in text and "seeg 20 contacts" in text
+
+
+def test_the_authors_term_is_in_the_system_description(native_sidecar):
+    labels.write(labels.plan_dataset(native_sidecar), native_sidecar)
+    pair = next(native_sidecar.rglob("*_space-fsaverage_coordsystem.json"))
+    doc = json.loads(pair.read_text())
+    assert "Authors' term: README 'MNI-305'" in doc["iEEGCoordinateSystemDescription"]
+
+
+def test_the_authors_term_is_in_a_new_sidecar(readme_only):
+    labels.write(labels.plan_dataset(readme_only), readme_only)
+    doc = json.loads(next(readme_only.rglob("*_coordsystem.json")).read_text())
+    assert "Authors' term: README 'MNI305'" in doc["iEEGCoordinateSystemDescription"]
+
+
+def test_pipeline_version_is_the_installed_package_version():
+    from importlib import metadata
+
+    assert labels.pipeline_version() == metadata.version("ieeg-geometry")
+
+
+# BIDS specification, appendix "Coordinate Systems", "Standard template identifiers" first column,
+# src/appendices/coordinate-systems.md on master, read 2026-11-19.
+BIDS_APPENDIX_IDENTIFIERS = r"""
+ICBM452AirSpace
+ICBM452Warp5Space
+IXI549Space
+fsaverage
+fsaverageSym
+fsLR
+MNIColin27
+MNI152Lin
+MNI152NLin2009\[a-c\]\[Sym\|Asym\]
+MNI152NLin6Sym
+MNI152NLin6ASym
+MNI305
+NIHPD
+OASIS30AntsOASISAnts
+OASIS30Atropos
+Talairach
+UNCInfant
+"""
+
+
+def test_the_template_list_is_the_pinned_bids_appendix():
+    expected: set[str] = set()
+    for line in BIDS_APPENDIX_IDENTIFIERS.split():
+        if "[a-c]" in line.replace("\\", ""):
+            expected |= {f"MNI152NLin2009{v}{s}" for v in "abc" for s in ("Sym", "Asym")}
+        else:
+            expected.add(line)
+    assert labels.TEMPLATE_LABELS == expected
+    assert "MNI152NLin2009bSym" in labels.TEMPLATE_LABELS
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("MNI­305 coordinates", ["MNI305"]),  # soft hyphen
+        ("ＭＮＩ３０５ coordinates", ["MNI305"]),  # full-width
+        ("the fsaverage-sym surface", []),
+        ("the fsaverage sym surface", []),
+        ("the fsaverage surface", ["fsaverage"]),
+    ],
+)
+def test_prose_normalization(text, expected):
+    assert [n.label for n in labels.scan_prose(text)[0]] == expected
+
+
+def test_classify_frame_value_does_not_map_fsaverage_sym_to_fsaverage():
+    hit = labels.classify_frame_value("fsaverage-sym")
+    assert isinstance(hit, labels.Named) and hit.label == "fsaverageSym"
