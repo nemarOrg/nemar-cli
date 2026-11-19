@@ -86,6 +86,7 @@ class OwnedPath:
     inputs: tuple[tuple[str, str], ...]  # (path, git blob id)
     method: str
     verification: Verification | None = None
+    output_sha256: str | None = None  # SHA-256 of the bytes the pipeline wrote; absent in old files
 
 
 @dataclass
@@ -95,7 +96,8 @@ class Ownership:
 
 
 def _entry_json(e: OwnedPath) -> dict:
-    return {
+    extra = {} if e.output_sha256 is None else {"output_sha256": e.output_sha256}
+    return extra | {
         "kind": e.kind,
         "inputs": [{"blob": blob, "path": path} for path, blob in sorted(e.inputs)],
         "method": e.method,
@@ -150,6 +152,7 @@ def read_ownership(dataset_dir: str | Path) -> Ownership | None:
                 inputs=tuple((i["path"], i["blob"]) for i in body["inputs"]),
                 method=body["method"],
                 verification=_verification(v) if v else None,
+                output_sha256=body.get("output_sha256"),
             )
         )
     return Ownership(doc["pipeline_version"], entries)

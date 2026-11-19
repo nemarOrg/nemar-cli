@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,6 +102,7 @@ class Discovered:
     subject: str
     session: str | None
     space: str | None
+    coordsystem_inherited: bool = False  # the sidecar sits at a higher level (BIDS inheritance)
 
 
 def _entities(prefix: str) -> dict[str, str]:
@@ -110,6 +112,34 @@ def _entities(prefix: str) -> dict[str, str]:
             key, _, value = part.partition("-")
             out[key] = value
     return out
+
+
+def _inherited_coordsystem(root: Path, electrodes: Path, entities: dict[str, str]) -> Path | None:
+    """The coordsystem that applies to an electrodes file by the BIDS inheritance principle.
+
+    Looked for in the file's folder, then each parent up to the dataset root; a candidate's
+    entities must be a subset of the electrodes file's (same keys and values). In the nearest
+    folder that has candidates, the one with the most entities wins (ties: name order).
+    """
+    folder = electrodes.parent
+    while True:
+        best: tuple[int, str, Path] | None = None
+        for cand in folder.glob("*coordsystem.json"):
+            if cand.name != "coordsystem.json" and not cand.name.endswith("_coordsystem.json"):
+                continue
+            prefix = (
+                cand.name[: -len("_coordsystem.json")] if cand.name != "coordsystem.json" else ""
+            )
+            cand_entities = _entities(prefix)
+            if all(entities.get(k) == v for k, v in cand_entities.items()):
+                key = (-len(cand_entities), cand.name)
+                if best is None or key < (best[0], best[1]):
+                    best = (key[0], key[1], cand)
+        if best is not None:
+            return best[2]
+        if folder == root or folder.parent == folder:
+            return None
+        folder = folder.parent
 
 
 def discover(dataset_dir: str | Path) -> list[Discovered]:
@@ -126,11 +156,17 @@ def discover(dataset_dir: str | Path) -> list[Discovered]:
             prefix = tsv.name[: -len("_electrodes.tsv")]
             ents = _entities(prefix)
             coord = tsv.with_name(prefix + "_coordsystem.json")
+            inherited = False
+            if not os.path.lexists(coord):  # a dangling link is not an absent file
+                higher = _inherited_coordsystem(root, tsv, ents)
+                if higher is not None:
+                    coord, inherited = higher, True
             channels = tuple(sorted(tsv.parent.glob(f"{_channel_stem(ents)}*_channels.tsv")))
             found.append(
                 Discovered(
                     electrodes_path=tsv,
-                    coordsystem_path=coord if coord.exists() else None,
+                    coordsystem_path=coord if inherited or coord.exists() else None,
+                    coordsystem_inherited=inherited,
                     channels_paths=channels,
                     subject=ents.get("sub", sub_dir.name.removeprefix("sub-")),
                     session=ents.get("ses"),
@@ -161,8 +197,8 @@ def _to_float(token: str, *, where: str = "") -> float:
     return value
 
 
-def _read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    with path.open(newline="", encoding="utf-8-sig") as fh:
+def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[str, str]]]:
+    with path.open(newline="", encoding="utf-8-sig", errors=errors) as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         rows = list(reader)
         return list(reader.fieldnames or []), rows
@@ -177,7 +213,8 @@ def _normalize_type(token: str | None) -> ContactType | None:
 def _channel_types(paths: tuple[Path, ...]) -> dict[str, ContactType]:
     types: dict[str, ContactType] = {}
     for path in paths:
-        _, rows = _read_tsv(path)
+        # Only name and type are used; a non-UTF-8 byte in another column (on006233) is not fatal.
+        _, rows = _read_tsv(path, errors="replace")
         for row in rows:
             kind = _normalize_type(row.get("type"))
             name = (row.get("name") or "").strip()
