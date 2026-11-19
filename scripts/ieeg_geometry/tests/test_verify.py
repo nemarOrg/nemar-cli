@@ -204,3 +204,32 @@ def test_native_electrodes_beat_acpc_on_the_cut_fixture(mini):
     assert acpc.median_mm == pytest.approx(9.89, abs=0.1)  # the census value on the full surface
     # the fixture surface is open, so depth contacts cannot be evaluated against it
     assert fit(sets[None].xyz_mm, surface, "seeg").reason == "inside-unevaluable"
+
+
+def _smooth(surface):
+    surface.smooth = True
+    return surface
+
+
+def test_smooth_reference_judges_inside_and_outside_distance_not_the_median(sphere):
+    smooth = _smooth(icosphere(3))
+    deep = np.array([[0.0, 0, 0.5]] * 20)  # 9.5 mm from the nearest vertex: median over 6 mm
+    assert fit(deep, sphere, "seeg").grade == "fail"  # an ordinary surface judges the median
+    result = fit(deep, smooth, "seeg")
+    assert result.grade == "plausible" and result.median_mm > 6.0
+    assert "median reported, not judged" in result.rule
+
+
+def test_smooth_reference_fails_a_contact_12_mm_outside_and_too_few_inside():
+    smooth = _smooth(icosphere(3))
+    inside = [[0.0, 0, 0.5]] * 19
+    assert fit(np.array(inside + [[0.0, 0, 8.0]]), smooth, "seeg").grade == "plausible"
+    far = fit(np.array(inside + [[0.0, 0, 22.0]]), smooth, "seeg")  # 12 mm outside
+    assert far.grade == "fail" and far.inside_fraction == 0.95
+    few = fit(np.array(inside[:17] + [[0.0, 0, 12.0]] * 3), smooth, "seeg")  # 85 percent inside
+    assert few.grade == "fail"
+
+
+def test_smooth_flag_comes_from_vendored_metadata():
+    assert all(s.smooth for s in load_reference("MNI152NLin2009cAsym"))
+    assert not any(s.smooth for s in load_reference("fsaverage"))

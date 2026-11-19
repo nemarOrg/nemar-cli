@@ -8,6 +8,9 @@ Grades (lead rulings of 2026-11-19, plan.md):
   contacts with a median of at most 6.0 mm and at least 90 percent of contacts inside the
   reference surface or within 5.0 mm of it. Depth contacts in the right frame measure only
   82 to 89 percent strictly inside, so this is a plausibility check, not a frame proof.
+  Against a reference marked `smooth` (vendored `reference.json`, e.g. the MNI shell) the
+  depth rule is instead at least 95 percent inside and no contact more than 10.0 mm outside
+  (nearest-vertex distance); the median is reported, not judged (ruling 8).
 - `fail`: neither.
 
 Inside test: ray parity along three fixed, irrational directions. A hit within 1e-7 of a
@@ -49,6 +52,8 @@ SEEG_NEAR_MM = 5.0
 SEEG_PLAUSIBLE_FRACTION = 0.90
 TEMPLATE_VERTEX_MM = 1.0
 SHIFT_CONTROL_MM = 10.0
+SMOOTH_INSIDE_FRACTION = 0.95
+SMOOTH_MAX_OUTSIDE_MM = 10.0
 OFFSET_MIN_GAIN_MM = 1.5
 OFFSET_MIN_GAIN_FRACTION = 0.25
 OFFSET_IMMATERIAL_MM = 3.0
@@ -281,7 +286,17 @@ def fit(
     near = inside | (dist <= SEEG_NEAR_MM)
     inside_fraction = float(inside.mean())
     near_fraction = float(near.mean())
-    ok = median <= SEEG_MEDIAN_MM and near_fraction >= SEEG_PLAUSIBLE_FRACTION
+    if all(s.smooth for s in surfaces):
+        outside = ~inside
+        farthest = float(dist[outside].max()) if outside.any() else 0.0
+        ok = inside_fraction >= SMOOTH_INSIDE_FRACTION and farthest <= SMOOTH_MAX_OUTSIDE_MM
+        smooth_rule = (
+            f">= {SMOOTH_INSIDE_FRACTION:.0%} inside and none more than "
+            f"{SMOOTH_MAX_OUTSIDE_MM} mm outside (median reported, not judged)"
+        )
+        base = {**base, "rule": smooth_rule}
+    else:
+        ok = median <= SEEG_MEDIAN_MM and near_fraction >= SEEG_PLAUSIBLE_FRACTION
     return Fit(
         grade=PLAUSIBLE if ok else FAIL,
         inside_fraction=inside_fraction,

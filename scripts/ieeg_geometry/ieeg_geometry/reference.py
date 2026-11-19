@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 from pathlib import Path
 
@@ -73,6 +74,7 @@ def load_reference(name: str) -> list[Surface]:
         )
     directory = DATA_DIR / _DIRS[name]
     _check_sums(directory)
+    meta = json.loads((directory / "reference.json").read_text(encoding="utf-8"))
     surfaces: list[Surface] = []
     for hemi, label in (("lh", "L"), ("rh", "R")):
         if name == "fsaverage":
@@ -84,4 +86,5 @@ def load_reference(name: str) -> list[Surface]:
             surfaces.append(read_brain_mesh(path.read_bytes(), hemisphere=label, source=str(path)))
             surfaces[-1].midline_cut = True
         surfaces[-1].name = name
+        surfaces[-1].smooth = bool(meta.get("smooth", False))
     return surfaces
