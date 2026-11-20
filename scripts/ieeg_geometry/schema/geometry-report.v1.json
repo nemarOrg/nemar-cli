@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://docs.nemar.org/schemas/nemar-ieeg-geometry-report.v1.json",
+  "$id": "urn:nemar:schema:ieeg-geometry-report:v1",
   "title": "NEMAR iEEG geometry report, version 1",
   "description": "What one run of the iEEG geometry pipeline over a dataset decided, per electrodes file and per track (labels, freesurfer, spm, surfaces), and what an apply would add, change or remove. Deterministic for the same dataset commit and pipeline version: no timestamps, no absolute paths. A status of written means the run writes (dry run) or wrote (apply) the listed outputs; unchanged means the outputs already exist byte for byte; kept means an owned file was edited by hand or sits where this would write and is left alone; needs-human and refused are never written; skipped means the track does not apply or the file was not fetched.",
   "type": "object",

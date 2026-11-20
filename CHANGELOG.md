@@ -26,8 +26,8 @@ earlier releases are described only by their generated notes.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
 - **Release order, for operators.**
   (a) Deploy the backend before publishing the CLI, because the Worker refuses another planner's plan.
-  (b) Apply `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch` to `nemarDatasets/.github` only after the CLI release carrying `scripts/ieeg_geometry` is published; an older tag lacks the package and every automatic re-pull would fail with `auto-cli-version`.
-  (c) Merge geometry pull requests only after the patch is live.
+  (b) Apply `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch` to `nemarDatasets/.github`, before or after the release: the step skips for a CLI tag that lacks `scripts/ieeg_geometry`.
+  (c) Merge geometry pull requests only after the CLI release carrying the package is published and the patch is live.
   (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
 - **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
 

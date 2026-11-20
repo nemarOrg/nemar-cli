@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://docs.nemar.org/schemas/nemar-ieeg-geometry-index.v1.json",
+  "$id": "urn:nemar:schema:ieeg-geometry-index:v1",
   "title": "NEMAR iEEG geometry index, version 1",
   "description": "Index of the subject surfaces written as brain-mesh v1 files beside a dataset's Zarr copy (geometry/index.json). Mesh paths are relative to the directory holding this file and content-addressed (meshes/<sha256>.mesh.bin), so entries may share a file. A mesh is in the frame its electrodes file declares: when vertex_offset_mm is not null, that vector (FreeSurfer's c_ras, millimeters) was ADDED to the surface vertices, which are in tkr RAS, to bring them into the contacts' scanner RAS. A grade of plausible (depth contacts) means an approximate alignment; specific means contacts on the cortex agree within 2.0 mm. Subject surfaces are display data, so plausible is enough to be listed.",
   "type": "object",
