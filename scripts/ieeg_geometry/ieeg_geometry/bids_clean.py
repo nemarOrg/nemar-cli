@@ -45,6 +45,7 @@ NA = "n/a"
 _MISSING = frozenset({"", "n/a", "na", "nan"})
 _NUMBER = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?", re.ASCII)
 _INDEX = re.compile(r"[0-9]+", re.ASCII)
+_INTEGER = re.compile(r"[+-]?[0-9]+", re.ASCII)  # schema 1.2.7 `integer`: [+-]?\d+
 _HEMISPHERE = {"l": "L", "lh": "L", "left": "L", "r": "R", "rh": "R", "right": "R"}
 
 
@@ -175,7 +176,7 @@ def _passes(definition: object, cells: list[str]) -> bool:
     low, high = definition.get("Minimum"), definition.get("Maximum")
     bounded = isinstance(low, int | float) or isinstance(high, int | float)
     numeric = "Units" in definition or fmt == "number" or bounded
-    if fmt not in (None, "string", "number", "index"):
+    if fmt not in (None, "string", "number", "index", "integer"):
         return False  # label, boolean, date, time, rrid, unknown: not checked here, so dropped
     for cell in cells:
         if cell == NA:
@@ -183,6 +184,8 @@ def _passes(definition: object, cells: list[str]) -> bool:
         if isinstance(levels, dict) and cell not in levels:
             return False
         if fmt == "index" and not _INDEX.fullmatch(cell):
+            return False
+        if fmt == "integer" and not _INTEGER.fullmatch(cell):
             return False
         if numeric:
             if not _NUMBER.fullmatch(cell):

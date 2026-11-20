@@ -184,6 +184,8 @@ def test_an_ambiguous_folder_does_not_keep_a_column_the_root_defines(tmp_path):
     [
         ({"Format": "index"}, "3", True),
         ({"Format": "index"}, "-1", False),
+        ({"Format": "integer"}, "-3", True),
+        ({"Format": "integer"}, "1.5", False),
         ({"Format": "string"}, "a b", True),
         ({}, "a b", True),
         ({"Format": "label"}, "a b", False),
