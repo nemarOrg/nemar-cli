@@ -4,6 +4,10 @@
 `python -m ieeg_geometry run <dataset-id> --workdir DIR [--version V] [--apply]
 [--surfaces-out DIR]` fetches what a dataset's geometry needs, runs every track and prints one
 JSON report; it writes into the work tree only with `--apply`.
+`python -m ieeg_geometry pr <dataset-id> --workdir DIR [--version V] [--surfaces-out DIR]
+[--dry-run]` opens the dataset pull request (see `pr.py`); `python -m ieeg_geometry
+upload-surfaces <dataset-id> --surfaces DIR [--bucket B] [--profile P] [--dry-run]` puts the
+subject surfaces on the data plane (see `upload.py`).
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-from . import fetch, freesurfer, labels, pipeline, spm
+from . import fetch, freesurfer, labels, pipeline, pr, spm, upload
 from .bids import UNKNOWN, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
 from .reference import REFERENCE_NAMES, load_reference
 from .surfaces import Surface, read_surface
@@ -164,6 +168,43 @@ def run(args: argparse.Namespace, out=None, urls: dict[str, str] | None = None) 
     return 2 if analysis.errors else 0
 
 
+def open_pr(args: argparse.Namespace, urls: dict[str, str] | None = None) -> int:
+    """The `pr` subcommand: exit 0 with the URL (or the dry-run body), 1 on a refusal."""
+    try:
+        pr.open_pr(
+            args.dataset_id,
+            args.workdir,
+            version=args.version,
+            dry_run=args.dry_run,
+            surfaces_out=args.surfaces_out,
+            urls=urls,
+            expect_remote=(urls or {}).get("repo_url"),  # only tests pass urls
+        )
+    except (pr.PrRefusal, pipeline.RefusedDataset, fetch.FetchError, GeometryRefusal) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    except metadata.PackageNotFoundError as exc:
+        print(f"the ieeg-geometry package is not installed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def upload_surfaces(args: argparse.Namespace) -> int:
+    """The `upload-surfaces` subcommand: exit 0 when done, 1 on a refusal or an aws failure."""
+    try:
+        upload.upload(
+            args.dataset_id,
+            args.surfaces,
+            bucket=args.bucket,
+            profile=args.profile,
+            dry_run=args.dry_run,
+        )
+    except (upload.UploadRefusal, pipeline.RefusedDataset) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None, urls: dict[str, str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ieeg_geometry")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -175,9 +216,25 @@ def main(argv: list[str] | None = None, urls: dict[str, str] | None = None) -> i
     r.add_argument("--workdir", type=Path, required=True, help="where the git work tree lives")
     r.add_argument("--apply", action="store_true", help="write into the work tree (never commits)")
     r.add_argument("--surfaces-out", type=Path, default=None, help="where --apply puts geometry/")
+    o = sub.add_parser("pr", help="open the dataset pull request with the pipeline's outputs")
+    o.add_argument("dataset_id", help="for example on004457")
+    o.add_argument("--version", default=None, help="dataset version (default: the latest release)")
+    o.add_argument("--workdir", type=Path, required=True, help="a directory for the fresh clone")
+    o.add_argument("--surfaces-out", type=Path, default=None, help="where geometry/ is written")
+    o.add_argument("--dry-run", action="store_true", help="everything but the push and the PR")
+    u = sub.add_parser("upload-surfaces", help="put the subject surfaces on the data plane")
+    u.add_argument("dataset_id", help="for example on004457")
+    u.add_argument("--surfaces", type=Path, required=True, help="the directory holding geometry/")
+    u.add_argument("--bucket", default=upload.BUCKET, help="default: %(default)s")
+    u.add_argument("--profile", default=None, help="the AWS profile to use")
+    u.add_argument("--dry-run", action="store_true", help="list the plan, write nothing")
     args = parser.parse_args(argv)
     if args.command == "run":
         return run(args, urls=urls)
+    if args.command == "pr":
+        return open_pr(args, urls=urls)
+    if args.command == "upload-surfaces":
+        return upload_surfaces(args)
     return inspect(args.dataset_dir)
 
 

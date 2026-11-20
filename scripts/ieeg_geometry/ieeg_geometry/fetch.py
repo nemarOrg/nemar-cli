@@ -159,9 +159,25 @@ def fetch_version(dataset_id: str, api_url: str = API_URL) -> str:
     return version
 
 
+# A dataset repository's attributes may name the git-annex filter, and the machine's global git
+# configuration may set it (even to a command that is not installed, or `required`). Every git
+# call here and in `pr` runs with the filter turned into `cat`, so nothing is annexed or
+# initialized and the bytes git stores are the bytes on disk. Annexed files are symbolic links,
+# which no filter touches.
+NEUTRAL_GIT_CONFIG = (
+    "filter.annex.process=",
+    "filter.annex.required=false",  # git-annex sets it true; a failing neutral clean must not abort
+    "filter.annex.clean=cat",
+    "filter.annex.smudge=cat",
+    "annex.largefiles=nothing",
+    "core.attributesFile=/dev/null",
+)
+
+
 def _git(clone: Path | None, *args: str, stdin: bytes | None = None, attempts: int = 1) -> str:
-    cmd = ["git", *(["-C", str(clone)] if clone else []), "--literal-pathspecs", *args]
-    env = os.environ | {"GIT_TERMINAL_PROMPT": "0"}
+    config = [x for c in NEUTRAL_GIT_CONFIG for x in ("-c", c)]
+    cmd = ["git", *config, *(["-C", str(clone)] if clone else []), "--literal-pathspecs", *args]
+    env = os.environ | {"GIT_TERMINAL_PROMPT": "0", "GIT_ATTR_NOSYSTEM": "1"}
     for attempt in range(1, attempts + 1):
         try:
             done = subprocess.run(
