@@ -8,6 +8,7 @@ import dataclasses
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -548,6 +549,66 @@ def test_crlf_blobs_under_an_lf_attribute_are_not_changes_and_stay_byte_identica
     assert _git(bare, "rev-parse", f"{BRANCH}:README.md") == _git(
         bare, "rev-parse", "main:README.md"
     )
+
+
+ODD_DESCRIPTION = (
+    '{\r\n  "Name": "x",\r\n  "GeneratedBy": [{"Name": "a", "Version": "9.9"}],\r\n'
+    '    "Version" :   "1.0.0",\r\n  "Z": 1\r\n}'
+)  # CRLF, odd spacing, an inner Version, no trailing newline
+
+
+def _blob(bare: Path, ref: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(bare), "cat-file", "blob", ref], check=True, capture_output=True
+    ).stdout
+
+
+def test_bump_version_edits_only_the_version_and_tells_the_reviewer(env, tmp_path):
+    served, bare, log, work = env
+    adv = tmp_path / "adv2"
+    _git(tmp_path, "clone", "-q", str(bare), str(adv))
+    (adv / "dataset_description.json").write_bytes(ODD_DESCRIPTION.encode())
+    _git(adv, "add", "dataset_description.json")
+    _git(adv, "commit", "-q", "-m", "crlf description")
+    _git(adv, "push", "-q", "origin", "main")
+    assert _pr(served, work, "--bump-version") == 0
+    new = _blob(bare, f"{BRANCH}:dataset_description.json")
+    assert new == ODD_DESCRIPTION.replace('"1.0.0"', '"1.0.1"').encode()
+    names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert sorted(names) == sorted(
+        [*_expected_changes(served, tmp_path), "dataset_description.json"]
+    )
+    body = _calls(log)[0]["body"]
+    assert "from `1.0.0` to `1.0.1`" in body and "tags `v1.0.1`" in body
+    assert "do not also run `nemar dataset release`" in body
+    assert "cut the patch" not in body
+
+
+def test_without_the_flag_the_version_is_untouched_and_the_release_step_is_named(env):
+    served, bare, log, work = env
+    assert _pr(served, work) == 0
+    assert "dataset_description.json" not in _git(bare, "diff", "--name-only", "main", BRANCH)
+    assert "nemar dataset release on000001 --type patch" in _calls(log)[0]["body"]
+
+
+def test_bump_version_refuses_a_main_version_without_a_release_tag(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.2"}\n'})
+    assert _pr(served, work, "--bump-version") == 1
+    assert "has no release tag" in capsys.readouterr().err
+    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+
+
+def test_bump_version_refuses_a_changes_file_ahead_of_the_version(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _advance(
+        bare,
+        tmp_path,
+        {"dataset_description.json": '{"Version": "1.0.0"}\n', "CHANGES": "1.0.3 2024\n - x\n"},
+    )
+    assert _pr(served, work, "--bump-version") == 1
+    assert "CHANGES lists 1.0.3" in capsys.readouterr().err
+    assert not _calls(log)
 
 
 def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):

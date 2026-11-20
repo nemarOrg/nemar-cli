@@ -29,7 +29,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import fetch, pipeline
+from . import fetch, pipeline, versionbump
 from .ownership import OwnedPath, read_ownership
 from .version import pipeline_version
 
@@ -42,6 +42,7 @@ _TIMEOUT_S = 900
 NEUTRAL_GIT_CONFIG = fetch.NEUTRAL_GIT_CONFIG  # one definition; every git call here uses it
 UNRELEASED_DIRS = (".nemar/", ".github/")  # main may change these after a release
 UNRELEASED_FILES = (".gitattributes",)  # exact names, not prefixes
+DESCRIPTION = "dataset_description.json"
 
 
 class PrRefusal(Exception):
@@ -233,6 +234,7 @@ def build_body(
     n_surface_sets: int,
     release_note: str | None = None,
     fetch_failed: dict[str, str] | None = None,
+    version_bump: tuple[str, str] | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -248,6 +250,15 @@ def build_body(
         f"source commit `{report['source_commit']}`",
         *([f"- Source: {release_note}"] if release_note else []),
         *_not_fetched(fetch_failed or {}),
+        *(
+            [
+                f"- Version: `{DESCRIPTION}` `Version` goes from `{version_bump[0]}` to "
+                f"`{version_bump[1]}` in this pull request, so the version check passes and "
+                f"merging it tags `v{version_bump[1]}`"
+            ]
+            if version_bump
+            else []
+        ),
         f"- Pipeline: `{report['pipeline_version']}`",
         f"- Files: {len(added)} added, {len(changed)} changed, {len(removed)} removed",
         f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
@@ -272,7 +283,14 @@ def build_body(
                 break
     if removed:
         lines += _removed_section(removed)
-    if _is_mirror(report["dataset"]):
+    if _is_mirror(report["dataset"]) and version_bump:
+        lines += [
+            "",
+            f"Merging this pull request cuts `v{version_bump[1]}` (the release workflow tags the "
+            "Version on `main`); do not also run `nemar dataset release`, which would cut a "
+            "further patch.",
+        ]
+    elif _is_mirror(report["dataset"]):
         lines += [
             "",
             "After this is merged, cut the patch: "
@@ -376,11 +394,35 @@ def _same_remote(a: str, b: str) -> bool:
     return a.removesuffix("/").removesuffix(".git") == b.removesuffix("/").removesuffix(".git")
 
 
+def _plan_bump(clone: Path) -> tuple[str, str]:
+    """(current, next) Version for `--bump-version`, from `main`'s description, the release tags
+    and `CHANGES`; a `PrRefusal` when no safe bump exists (see `versionbump`)."""
+    try:
+        description = (clone / DESCRIPTION).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PrRefusal(f"cannot read {DESCRIPTION} to bump the version: {exc}") from exc
+    names = set(_paths(clone, "ls-tree", "--name-only", "HEAD"))
+    changes = next(
+        (
+            _git(clone, "show", f"HEAD:{n}", neutral=True)
+            for n in versionbump.CHANGES_NAMES
+            if n in names
+        ),
+        None,
+    )
+    tags = _git(clone, "tag", "--list").split()
+    try:
+        return versionbump.plan(description, tags, changes)
+    except versionbump.BumpRefusal as exc:
+        raise PrRefusal(f"--bump-version: {exc}") from exc
+
+
 def open_pr(
     dataset_id: str,
     workdir: Path,
     *,
     version: str | None = None,
+    bump_version: bool = False,
     dry_run: bool = False,
     surfaces_out: Path | None = None,
     urls: dict[str, str] | None = None,
@@ -430,6 +472,7 @@ def open_pr(
         out.write(f"warning: {release_note} (a real run refuses)\n")
     if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
         raise PrRefusal(f"branch {branch} already exists on the remote; nothing was pushed")
+    bump = _plan_bump(clone) if bump_version else None
     checked_out = _paths(clone, "ls-files")
     _git(clone, "read-tree", "HEAD")  # the index is main's whole tree; only changes will differ
     never_checked_out = _paths(clone, "ls-files") - checked_out
@@ -457,12 +500,19 @@ def open_pr(
         shown = "; ".join(bad[:10]) + (f"; and {len(bad) - 10} more" if len(bad) > 10 else "")
         raise PrRefusal(f"the work tree differs from main outside the reported changes: {shown}")
 
-    for rel in sorted(set(changes["add"]) | set(changes["change"])):
+    to_stage = set(changes["add"]) | set(changes["change"])
+    if bump:
+        target = clone / DESCRIPTION
+        text = versionbump.apply(target.read_bytes().decode("utf-8"), bump[1])
+        target.write_bytes(text.encode("utf-8"))  # only the version's characters differ
+        to_stage.add(DESCRIPTION)
+        expected = expected | {DESCRIPTION}
+    for rel in sorted(to_stage):
         _git(clone, "add", "--", rel, neutral=True)
     for rel in sorted(changes["remove"]):
         _git(clone, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel, neutral=True)
     check_staged(_paths(clone, "diff", "--cached", "--name-only", "--no-renames"), expected)
-    verify_staged_bytes(clone, set(changes["add"]) | set(changes["change"]))
+    verify_staged_bytes(clone, to_stage)
     ownership = read_ownership(clone)
     owned = {e.path: e for e in ownership.entries} if ownership else {}
     body = build_body(
@@ -471,6 +521,7 @@ def open_pr(
         n_surface_sets=len(report.get("surface_entries", [])),
         release_note=release_note,
         fetch_failed=got.failed,
+        version_bump=bump,
     )
     check_body_size(body)
     _git(clone, "checkout", "-q", "-b", branch)
