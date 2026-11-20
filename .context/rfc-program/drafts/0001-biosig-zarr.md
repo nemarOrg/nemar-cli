@@ -1,17 +1,26 @@
 ---
 number: 1
 title: "biosig-zarr: a Zarr format for biosignal recordings, with .bzx as its single-file form"
-status: draft
 scope: org
+dataset: null
 shepherd: Seyed Yahya Shirazi
-window_days: 21
+authors: [Seyed Yahya Shirazi]
 discussion: null
 opened_at: null
-decided_at: null
+window_days: 21
+extension: null
+final_comment_at: null
+proposed_disposition: null
 decision: null
-spec_base: 2.0.0
-spec_proposed: 3.0.0-draft.1
+decided_at: null
+decided_by: null
+adr: null
+supersedes_rfc: null
+withdrawn_at: null
+withdrawn_reason: null
 ---
+
+The specification text this RFC proposes is the comparison `2.0.0...3.0.0-draft.1` in nemarOrg/biosig-zarr.
 
 # NEMAR RFC 0001: biosig-zarr, with `.bzx` as its single-file form
 
@@ -28,7 +37,7 @@ In this RFC, "store" always means a biosig-zarr store: the Zarr version 3 store 
 Any other Zarr store is called a Zarr store.
 
 As of 2026-11-20, NEMAR serves 231,259 stores, 98.4% of the 235,038 recordings in its 910 public datasets (about 116,000 hours of recordings), and the count grows as datasets arrive.
-The other 3,779 recordings have no source data available to convert.
+The other 3,779 recordings are counted by the catalog as unavailable for conversion (**Unverified:** why each one is unavailable was not checked).
 Our data viewer reads these stores to show any recording in a browser without a download,
 and our Model Context Protocol (MCP) server reads them to let research agents query and analyze signals directly.
 With a written specification, other archives, viewers and analysis tools can use the same stores.
@@ -108,7 +117,9 @@ The reproduction used synthetic files.
 A version 2 store cannot show the problem even when the writer knows about it, because it has no field that claims continuity.
 BIDS contributors have raised the same limit (all links checked 2026-11-20):
 
-- [bids-specification#1771](https://github.com/bids-standard/bids-specification/issues/1771), the origin issue of BIDS Extension Proposal (BEP) 047 for audio and video:
+- BIDS Extension Proposal (BEP) 045, "Peripheral" physiology ([proposal page](https://bids.neuroimaging.io/extensions/beps/bep_045.html), [bids-specification#2267](https://github.com/bids-standard/bids-specification/pull/2267), opened 2025-11-22 and still open on 2026-11-20):
+  the BIDS extension for raw physiological recordings, where irregular and sparse sampling is part of the discussion.
+- [bids-specification#1771](https://github.com/bids-standard/bids-specification/issues/1771), the origin issue of BEP 047 for audio and video:
   on 2024-04-22 a commenter asked whether a recording that stopped and resumed is one file or several, quoting the EDF+ discontinuous mode.
   The working answer was separate runs aligned through `scans.tsv`.
 - [bids-specification#1796](https://github.com/bids-standard/bids-specification/issues/1796), "allow timestamps for physio table" (2024-04-18):
@@ -190,6 +201,11 @@ The whole version 2 text is open for comment, including its 33 open questions.
 Section 13 points at the ones where outside experience would help most.
 
 ## 5. Proposal, part A: the time model (`format_version` 3)
+
+Three different things at NEMAR carry the number 3, and only one of them is this proposal.
+`format_version` 3 here is the version of a single store.
+The dataset index, `index.json`, has its own `format_version`, which is already 3 and describes the index, not the stores.
+The conversion engine has its own version number too (nemar-cli ADR 0033), which says which build of the converter produced a store.
 
 Everything in sections 5 and 6 is proposed for comment.
 The owner has ruled on each item, and the rulings (D1 to D12 of 2026-11-20, noted in brackets) are the position NEMAR brings to the RFC.
@@ -274,7 +290,7 @@ Every signal array carries a required attribute `missing_value`: the stored valu
 
 | Data type | `missing_value` | Effect |
 | --- | --- | --- |
-| `int16` | `-32768` | Data codes span `[-32767, 32767]`. |
+| `int16` | `-32768` | Data codes span `[-32767, 32767]` (65,534 steps). |
 | `int32` | `-2147483648` | Data codes span `[-2147483647, 2147483647]`. |
 | `float32`, `float64` | `"NaN"` | None. |
 | any | `null` | Every stored value is data (allowed only for a bit-exact copy, 6.3). |
@@ -286,6 +302,9 @@ Every signal array carries a required attribute `missing_value`: the stored valu
 - `valid_intervals` describes the acquisition (the recorder was off),
   and `missing_value` describes one channel at one sample (a sensor off, a dropped packet).
 - NEMAR's profile always reserves the code.
+- Reserving `-32768` changes the version 2 quantization.
+  Version 2 maps each channel's physical range onto all 65,536 `int16` codes, with `offset = pmin + 32768 * scale`;
+  version 3 maps it onto the 65,534 codes from `-32767` to `32767`, so `scale` grows by a factor of 65,535/65,534 and `offset` moves to the middle of that range.
 
 ### 5.5 Jittered streams: kept as measured by default [D5]
 
@@ -340,10 +359,16 @@ The root then lists `"channel_groups": ["eeg_250hz"]` and `"timestamped_groups":
 ### 5.7 Four layers of reader safety [D1]
 
 No single omission should let a reader misread.
+That is not yet true for NEMAR's own readers.
+A `uniform` group with gaps or a declared missing value is laid out exactly like a version 2 group.
+NEMAR's server-side read path checks the version of the dataset's `index.json`, not the `format_version` of each store,
+so without a change it would return the filler in a gap as data.
+For that reason this RFC adds a rollout rule (section 15): every NEMAR reader refuses a store whose `format_version` is above 2 before the first version 3 store reaches the serving bucket,
+and the dataset index records each store's `format_version`.
 
 The first layer is the version.
 A writer that implements this proposal writes `format_version` 3 for every store, including a plain continuous recording.
-A reader must refuse a version above the highest it implements; biosigIO 1.2.13 and earlier refuse 3 (verified in its source by the design research, 2026-11-20).
+A reader must refuse a version above the highest it implements; biosigIO 0.6.0 to 1.2.13 refuse 3 (the check arrived in 0.6.0; verified in its source by the design research, 2026-11-20).
 
 The second layer is the kind.
 A reader reads `kind` before any array, refuses a kind it does not implement, and never infers a kind from a name or from which children exist.
@@ -615,7 +640,7 @@ and validation of Zarr files was incomplete.
 Those facts will change, so check them again before relying on them.
 
 What we do instead is export.
-NEMAR builds NWB output on request from the store and the BIDS dataset at a known commit, and never keeps it as a second stored copy.
+NEMAR would build NWB output on request from the store and the BIDS dataset at a known commit, and would never keep it as a second stored copy; no such export exists yet.
 To keep that export simple, the dequantization formula matches NWB's `conversion` and `offset`, given per channel,
 and event columns follow BIDS and HED, which the `ndx-hed` extension maps onto NWB.
 The `continuity` vocabulary proposed in section 5.6 is NWB's.
@@ -746,10 +771,10 @@ A short answer with a real file behind it is worth more than a long one without.
 We write these criteria before comments open, so they cannot be fitted to the comments.
 
 The shepherd, who is the owner of the NEMAR platform, decides, and records the decision and its reasons in the RFC.
-The comment window is 21 calendar days from the day the RFC is opened.
+The comment window is 21 days, measured to the minute from `opened_at` in Coordinated Universal Time (UTC); the opening post prints the exact close.
 One extension of at most 14 days is possible, granted before the close with a stated reason.
 Every comment gets a written response before the decision: accepted, rejected with a reason, or moved to a named follow-up.
-The RFC ends accepted (the text becomes `3.0.0`), accepted with listed changes, or withdrawn.
+The RFC ends accepted (the text, revised from the comments and with each change listed in the change log, becomes `3.0.0`), rejected, or withdrawn.
 
 The proposal is accepted if all of these hold at the close:
 
@@ -769,9 +794,12 @@ The criteria above assume the RFC may open and close on the text and its test ve
 
 ## 15. What happens after acceptance
 
+- Before any version 3 store reaches NEMAR's serving bucket, every NEMAR reader refuses a store whose `format_version` is above 2, and the dataset index records each store's `format_version`.
+  This is a rollout rule, not a comment item.
 - The `3.0.0-draft.1` text is revised from the comments and tagged `3.0.0`.
 - biosigIO gains a version 3 writer and reader; NEMAR's readers gain the interval, start time and missing value rules.
-- NEMAR re-converts its stores through the normal queue, recordings whose source can be discontinuous first.
+- NEMAR re-converts its stores through the normal queue, recordings whose source can be discontinuous first, and states how long version 2 and version 3 stores coexist (measured before the RFC opens).
+- Until then, biosigIO refuses discontinuous EDF+D and BDF+D sources with gaps (neuromechanist/biosigio#180), so no new store repeats the shifted-samples defect.
 - Version 2 stores stay readable throughout.
 
 None of that work is part of this RFC, and none of it starts before the decision.

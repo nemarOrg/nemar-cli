@@ -36,8 +36,31 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T10:09-08:00 | RFC-0001 proposes (research/irregular-and-resolution-design.md): D12 epoched sources refused in NEMAR profile for now; community question | owner |  |
 | 2026-11-20T10:19-08:00 | RFC-0001 ends with a History of the format section: dated format_version table (1, 2, proposed 3) and the store count (owner: more than 230,000), measured at writing time | owner |  |
 | 2026-11-20T10:21-08:00 | Spec tags: the moved text is tagged 2.0.0 (format version 2 as served, no normative change); RFC-0001's text is 3.0.0-draft.1 when it opens, 3.0.0 only if accepted. 2.0.0-draft.1 was stale | owner |  |
+| 2026-11-20T11:17-08:00 | Create a public epic issue via /project:epic-dev for the RFC program; the manager loop drives the steps | owner |  |
+| 2026-11-20T11:17-08:00 | Relicensing: the owner relicenses the spec text to the agreed licenses (W3C for text, Apache 2.0 for schemas, vectors and code); LICENSE records it was relicensed from CC BY-NC-ND 4.0 with the date. The format page is REMOVED from docs.nemar.org and replaced by a short pointer to nemarOrg/biosig-zarr (no rendered copy, no pinned-tag fetch); Q12 is moot | owner |  |
+| 2026-11-20T11:17-08:00 | 2.0.0 is a full release (not pre-release); its notes list the four Proposed parts (biosig-zarr tag in stores, .bzx, generated_by, conformance classes) as not yet implemented | owner |  |
+| 2026-11-20T11:17-08:00 | Rule: at most one RFC open for comment at a time (rfc-check enforces it). RFC-0002 opens only after RFC-0001 closes | owner |  |
+| 2026-11-20T11:24-08:00 | C0 review applied: new steps O0, E0, A2, S1, B6, O4b, N1, C3, C4; B3 is a pointer page; Q12 moot; Q19 asks the owner about Slots | lead |  |
+| 2026-11-20T11:24-08:00 | Q1: | owner |  |
+| 2026-11-20T11:24-08:00 | Q2: | owner |  |
+| 2026-11-20T11:24-08:00 | Q3: | owner |  |
+| 2026-11-20T11:24-08:00 | Q4: | owner |  |
+| 2026-11-20T11:24-08:00 | Q5: | owner |  |
+| 2026-11-20T11:24-08:00 | Q6: | owner |  |
+| 2026-11-20T11:24-08:00 | Q7: | owner |  |
+| 2026-11-20T11:24-08:00 | Plan approved (owner: 'plan is good, move forward', 2026-11-20); lead pushes feature/rfc-program | owner |  |
+| 2026-11-20T11:35-08:00 | #2217: no in-place patch; the biosig-zarr tag rename lands with the version 3 writer via re-conversion; A2's ADR records it (owner confirmed, comment posted 2026-11-20) | owner |  |
+| 2026-11-20T12:18-08:00 | New repo nemarOrg/nemar-doi: the registry of every NEMAR DOI with a page at doi.nemar.org; it delegates the nm and on dataset DOIs to nemar-cli, which keeps its own registry; a Fable planner designs and initializes it (separate track, not an RFC program step) | owner |  |
+| 2026-11-20T12:18-08:00 | RFC-0002 scope: all nm datasets | owner |  |
+| 2026-11-20T12:18-08:00 | Open RFC-0001 as soon as possible: prioritize the B and R chains | owner |  |
+| 2026-11-20T12:18-08:00 | Rationale for the 21-day window: AI-assisted review by knowledgeable people is welcome, so RFCs are fast-paced; stated in the rfcs process doc, the A1 ADR and the docs page | owner |  |
+| 2026-11-20T12:27-08:00 | Opening an RFC sends a community email to NEMAR account holders (rfcs category, unsubscribe footer); the owner also posts on LinkedIn and the BIDS Google group; N1 drafts all three | owner |  |
+| 2026-11-20T12:27-08:00 | New nemar-cli feature (separate epic): mail categories news, rfcs, maintenance, recalls; recalls are mandatory and cannot be unsubscribed; one-click unsubscribe web page plus a section under the website's user settings page | owner |  |
 
 ## Log
 
 | Time | Event |
 |---|---|
+| 2026-11-20T11:12-08:00 | O1 repo and O2 done by lead on owner's instruction; V1 dispatched; C0 reviews running |
+| 2026-11-20T11:27-08:00 | E0: epic #2239; V1 2240, A2 2241, A1 2242, S1 2243, R1 2244, R3 2245, B1 2246, B2 2247, R2 2248, B3 2249, B6 2250, B4 2251, B5 2252, N1 2253, V2 2254; V1 PR 2238 |
+| 2026-11-20T12:20-08:00 | Q13 acted on: w3id.org/biosig-zarr registration PR perma-id/w3id.org#7250 (302 to nemarOrg/biosig-zarr), awaiting w3id maintainers |

@@ -37,10 +37,14 @@ The full `bun test` of nemar-cli (about 80 minutes) is never run for this progra
 
 1. `MB tick <board> --manager mba-claude-sonnet --state running --next 30m`.
 2. Reconcile every step in `active` or `review` with its PR and worktree, per the skill.
-3. Push nothing at the first tick.
-   The branch `feature/rfc-program` exists only locally until the owner approves this plan; once the owner says "approved", push it with `git push -u origin feature/rfc-program` and log it.
+3. Before any dispatch, run `git ls-remote origin feature/rfc-program`.
+   If it prints nothing, step O0 is not done: ask the owner once to approve the plan, and dispatch nothing until the lead has pushed the branch and logged the approval.
+4. For every step already in state `owner`, ask the owner now, once, with the exact commands from `plan.md` section 5 (O1's two browser steps at the time of writing).
+5. Read `risks.md` and ask about any risk whose "Read by" date is within two days.
 
 ## Blocked steps and questions
+
+Ask an open question when the step it names is the next one to unblock (its other dependencies are `done` or `active`), batched by Needed by, at most four per call; also ask any question whose Needed by is within two days.
 
 Steps that wait on an owner answer are `blocked`, and their Next cell names the questions (for example "waits on Q1 to Q7").
 When every question a blocked step names is `answered`, record each answer with `decide <text> --by owner`, set the questions `closed`, and set the step `todo`.
@@ -48,7 +52,8 @@ Answers become live facts on the card at dispatch: paste them under a heading "O
 
 ## Owner steps
 
-Steps with tier `owner` (O1, O1b, O2, O4, O5, O6) are never dispatched.
+Steps with tier `owner` (O0, O1, O1b, O2, O4, O4b, O5, O6) are never dispatched, and neither are the lead's checkpoint steps C3 and C4 or the lead's step E0, which run in the owner's session.
+Steps in state `owner`, and C3 and C4, are exempt from the timebox, silent-worker and twice-the-timebox handlers; they are asked about, never escalated.
 When an owner step's dependencies are `done`, set it `owner`, and ask the owner once, with the exact commands from `plan.md` section 5, to run it and say when it is done.
 Verify by observation before setting it `done`:
 
@@ -57,17 +62,24 @@ Verify by observation before setting it `done`:
 | O1 | `gh api repos/nemarOrg/rfcs -q .has_discussions` prints `true`, and `gh api graphql -f query='{repository(owner:"nemarOrg",name:"rfcs"){discussionCategories(first:20){nodes{name}}}}'` lists `RFCs` |
 | O1b | `gh api repos/nemarOrg/rfcs/rulesets` lists a ruleset whose rules include `required_status_checks` with `rfc-check` |
 | O2 | `gh api repos/nemarOrg/biosig-zarr -q .visibility` prints `public`, and the biosigio#179 comment exists (`gh issue view 179 -R neuromechanist/biosigio --comments`) |
-| O4 | `gh release view 2.0.0 -R nemarOrg/biosig-zarr` succeeds |
+| O0 | `git ls-remote origin feature/rfc-program` prints a line, and `board-log.md` Decisions holds "plan approved" by owner |
+| E0 | `gh issue list -R nemarOrg/nemar-cli --search "RFC program in:title" --state open` lists the epic issue |
+| O4 | `gh release view 2.0.0 -R nemarOrg/biosig-zarr --json isPrerelease -q .isPrerelease` prints `false` |
+| O4b | `gh release view 3.0.0-draft.1 -R nemarOrg/biosig-zarr --json isPrerelease -q .isPrerelease` prints `true` |
+| R2, B3 (owner-merged) | `gh pr view N -R nemarOrg/docs --json mergedAt -q .mergedAt` prints a time; then set the step `done` |
+| C3, C4 | the lead's checkpoint PR into `feature/rfc-program` is merged and the owner's decision is recorded in the RFC file on `main` of nemarOrg/rfcs |
 | O5, O6 | the RFC PR is merged, and `gh api repos/nemarOrg/rfcs/contents/README.md` lists the RFC as `open` |
 
 ## Event handlers specific to this program
 
 - **A PR to nemarOrg/docs passes its merge gate** (R2, B3): set the step `owner`, and ask the owner to review and merge it; the manager never merges in nemarOrg/docs.
-- **An RFC text PR passes its merge gate** (B4, V2): set the step `done` with Next "draft waits for the owner to open it", leave the PR open, and unblock the owner step.
+- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
+- **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; S1 needs the lead's earlier EDF scan results; N1 needs Q15): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
+- **An RFC closes** (its close instant passes): set C3 (or C4) `todo` and notify the owner and the lead that the checkpoint is due.
 - **A worker reports that a needed read was refused** (for example a production query in V1): do not retry and do not work around it; set the step `owner` and hand the owner the exact command from the worker's report.
 - **A reviewer argues against an owner decision in `plan.md` section 2**: give the finding the outcome "rejected: owner decision of 2026-11-20", citing the item.
 - **An ADR number collides** (another PR took it first): the worker takes the next unused number and renames the file; this is mechanical and needs no escalation.
-- **A checkpoint is due** (see `checkpoints.md`): stop dispatching the steps it gates, notify the owner and the lead, and wait for the lead's card PR.
+- **A checkpoint is due** (see `checkpoints.md`): stop dispatching the steps in its Gates column, notify the owner and the lead, and wait for the lead's card PR.
 
 ## Never, in addition to the skill's list
 
