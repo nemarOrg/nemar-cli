@@ -23,9 +23,19 @@ Version strings carry no `v` prefix in D1 (`1.0.0`); the git tag and the public 
 | Version rows whose dataset row is missing | 0 | `q1c-version-rows-without-dataset.raw` |
 | All DOIs share one prefix | `10.82901/` on all 1,628 rows | `q1e-doi-shape.raw` |
 
+Command: `SELECT sql FROM sqlite_master WHERE name IN ('dataset_versions')`, run through `d1-select.sh`.
+Raw output: .context/rfc-program/evidence/v1/q0-schema.raw
+Raw output: .context/rfc-program/evidence/v1/q0-version-shapes.raw
+Raw output: .context/rfc-program/evidence/v1/q1c-version-rows-without-dataset.raw
+Raw output: .context/rfc-program/evidence/v1/q1e-doi-shape.raw
+
 ## 1. Version DOIs in total, and by prefix
 
-Command: `SELECT substr(dataset_id,1,2) AS prefix, count(*) FROM dataset_versions WHERE doi IS NOT NULL GROUP BY prefix` -> `q1-doi-by-prefix.json`.
+Command: `SELECT substr(dataset_id,1,2) AS prefix, count(*) FROM dataset_versions WHERE doi IS NOT NULL GROUP BY prefix`, run through `d1-select.sh`.
+Raw output: .context/rfc-program/evidence/v1/q1-doi-by-prefix.json
+Raw output: .context/rfc-program/evidence/v1/q1b-versions-by-prefix-visibility.raw
+Raw output: .context/rfc-program/evidence/v1/q1d-ezid-status.raw
+Raw output: .context/rfc-program/evidence/v1/q5b-api-latest-version.txt
 
 | Prefix | Version DOIs |
 |---|---|
@@ -50,7 +60,11 @@ Of the 1,628 DOIs, 13 have a DataCite status other than the default: 6 `public` 
 
 ## 2. Datasets by number of versions, and mirrors by highest major
 
-Command: `SELECT prefix, nv, count(*) FROM (SELECT substr(dataset_id,1,2) AS prefix, dataset_id, count(*) AS nv FROM dataset_versions GROUP BY dataset_id) GROUP BY prefix, nv` -> `q2a-versions-per-dataset.raw`.
+Command: `SELECT prefix, nv, count(*) FROM (SELECT substr(dataset_id,1,2) AS prefix, dataset_id, count(*) AS nv FROM dataset_versions GROUP BY dataset_id) GROUP BY prefix, nv`, run through `d1-select.sh`.
+Raw output: .context/rfc-program/evidence/v1/q2a-versions-per-dataset.raw
+Raw output: .context/rfc-program/evidence/v1/q2b-highest-major-by-prefix.raw
+Raw output: .context/rfc-program/evidence/v1/q2c-version-strings.raw
+Raw output: .context/rfc-program/evidence/v1/q4c-repull-records.raw
 All datasets with version rows, public and private.
 
 | Versions per dataset | `nm` datasets | `on` datasets (mirrors) |
@@ -91,7 +105,12 @@ The 24 `on` figure equals the 24 `on` datasets with two or more versions.
 ## 3. Mirror versions that are `N.0.0` with a recorded `source_version`, and mirrors with no known upstream tag
 
 A mirror version is `N.0.0` with a recorded `source_version` (ADR 0111).
-Command: `SELECT substr(dataset_id,1,2), source_version_basis, source_version IS NOT NULL, version LIKE '%.0.0', count(*) ... GROUP BY ...` -> `q3a-source-version-basis.raw`.
+Command: `SELECT substr(dataset_id,1,2), source_version_basis, source_version IS NOT NULL, version LIKE '%.0.0', count(*) ... GROUP BY ...`, run through `d1-select.sh`.
+Raw output: .context/rfc-program/evidence/v1/q3a-source-version-basis.raw
+Raw output: .context/rfc-program/evidence/v1/q3b-mirrors-by-state.raw
+Raw output: .context/rfc-program/evidence/v1/q3c-source-version-sample.raw
+Raw output: .context/rfc-program/evidence/v1/q3e-null-basis-mirrors.raw
+Raw output: .context/rfc-program/evidence/v1/q3f-withdrawn-mirrors.raw
 
 | Group | Version rows |
 |---|---|
@@ -111,7 +130,9 @@ Sample of the recorded pairs (60 rows): `q3c-source-version-sample.raw`.
 One finding for the RFC: 19 non-`N.0.0` mirror versions (NEMAR's own `1.0.x` corrections) also carry a recorded `source_version`, the upstream tag they derive from.
 The documented rule "a mirror is `N.0.0` with a recorded `source_version`" therefore tests both conditions, and `source_version` alone does not identify a mirror version.
 
-Mirrors with no known upstream tag, `nemar admin upstream-status --json` (production, read-only) -> `q3d-upstream-status.json`.
+Mirrors with no known upstream tag are measured by a second command.
+Command: `nemar admin upstream-status --json` (production, read-only).
+Raw output: .context/rfc-program/evidence/v1/q3d-upstream-status.json
 The command exited with status 2 and the document says `"complete": false` with `"could_not_see": ["2 mirror(s) could not be compared with OpenNeuro"]`, so two mirrors were not compared; the other 619 were.
 621 mirrors were examined (6 withdrawn mirrors are outside that population).
 
@@ -137,6 +158,16 @@ The 81 are therefore 43 mirrors with basis `unknown` plus 38 mirrors with no ver
 On 2026-10-29, 568 of 611 mirrors were `not_examined`; today none is, so the backfill has run.
 
 ## 4. Origins of a sample of versions
+
+Command: `bun run .context/rfc-program/evidence/v1/sample-and-fetch.ts` (draws the sample with seed 20261120, then runs `gh api repos/nemarDatasets/ID/commits/vX.Y.Z` and `gh api repos/nemarDatasets/ID/commits/SHA/pulls` for each sampled version), followed by `classify.ts`.
+Raw output: .context/rfc-program/evidence/v1/q4a-multiversion-datasets.raw
+Raw output: .context/rfc-program/evidence/v1/q4b-sample-github-raw.json
+Raw output: .context/rfc-program/evidence/v1/q4c-nopr-commits.json
+Raw output: .context/rfc-program/evidence/v1/q4d-merge-message-pr-check.json
+Raw output: .context/rfc-program/evidence/v1/q4e-range-prs.json
+Raw output: .context/rfc-program/evidence/v1/q4f-classification.json
+Raw output: .context/rfc-program/evidence/v1/q4f-classification-summary.json
+Raw output: .context/rfc-program/evidence/v1/q4f-classification.tsv
 
 Method.
 Pool: public, non-anonymous datasets with more than one version row in D1 (`q4a-multiversion-datasets.raw`: `SELECT v.dataset_id, d.visibility, ..., v.version, v.created_at, v.source_version, v.source_version_basis FROM dataset_versions v JOIN datasets d ... WHERE v.dataset_id IN (SELECT dataset_id FROM dataset_versions GROUP BY dataset_id HAVING count(*)>1)`), intersected with the public API list.
@@ -191,7 +222,9 @@ Commit author fields are not authenticated, and none of the 42 sampled tagged co
 
 ## 5. Datasets reporting HED, re-measured from the public API
 
-Command: the ten `curl` reads above, summarized by `sample-and-fetch.ts` -> `q5-hed-and-totals.json` (`has_hed` equal to 1).
+Command: `curl 'https://api.nemar.org/datasets?limit=100&offset=N'` for `N` = 0, 100, ..., 900, summarized by `sample-and-fetch.ts` (`has_hed` equal to 1).
+Raw output: .context/rfc-program/evidence/v1/q5-hed-and-totals.json
+Raw output: .context/rfc-program/evidence/v1/api-datasets-offset-0.json
 
 | Prefix | Public datasets | Reporting HED |
 |---|---|---|
@@ -210,5 +243,8 @@ No read was refused.
 
 ## Deviations from the card
 
-- The card's worktree command names `origin/feature/rfc-program`, which is not pushed; the branch was created from the local `feature/rfc-program` at `bcb6ac46`.
-- The card allows one script; four small Bun scripts and one shell helper are saved (`sample-and-fetch.ts`, `nopr-commits.ts`, `range-prs.ts`, `classify.ts`, `api-crosscheck.ts`, `d1-select.sh`) so each number can be reproduced.
+- The card's worktree command names `origin/feature/rfc-program`, which was not yet pushed when the work started; the branch was created from the local `feature/rfc-program` at `bcb6ac46`, before the integration branch was pushed.
+  The PR now targets `feature/rfc-program`, and that branch has been merged into this one.
+- The card allows one script; five small Bun scripts and one shell helper are saved (`sample-and-fetch.ts`, `nopr-commits.ts`, `range-prs.ts`, `classify.ts`, `api-crosscheck.ts`, `d1-select.sh`) so each number can be reproduced.
+  The manager accepted this deviation; the scripts stay inside the card's Scope.
+- The D1 count (44 mirrors with only `unknown` rows) and the status command's count (43 mirrors with basis `unknown`) differ by one and are left unreconciled (section 3).
