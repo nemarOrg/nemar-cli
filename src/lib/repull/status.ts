@@ -88,6 +88,11 @@ export function statusLines(row: RepullRow, screens: RepullScreen[] | null): str
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}=${v}`);
   if (counts.length > 0) lines.push(`  Counts: ${counts.join(", ")}`);
+  if (typeof row.counts.pipeline_failed === "number" && row.counts.pipeline_failed > 0) {
+    lines.push(
+      `  Pipeline: regeneration failed; N.0.1 has no pipeline files (attempts ${row.counts.pipeline_attempts ?? "unknown"})`,
+    );
+  }
   if (row.last_error) lines.push(`  Last error: ${row.last_error}`);
   lines.push(`  Created ${row.created_at} UTC, updated ${row.updated_at} UTC`);
   if (screens === null) {
