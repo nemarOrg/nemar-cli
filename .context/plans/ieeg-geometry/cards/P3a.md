@@ -6,7 +6,7 @@ Timebox: M, 1.5 days; escalate at 3 days or two failed approaches
 Needs: none
 Depends: P1 (merged)
 Branch: feat/ieeg-geometry-p3a-pr-upload
-Worktree: /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/ieeg-geometry-p3a (branch from `origin/epic/ieeg-geometry`)
+Worktree: <worktree>-p3a (branch from `origin/epic/ieeg-geometry`)
 Plan: plan.md rulings 26 and 27, owner decisions of 2026-11-20; step P3a
 
 ## Goal

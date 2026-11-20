@@ -6,8 +6,8 @@ Timebox: S, half a day; escalate at 1 day
 Needs: none
 Depends: none
 Branch: docs/ieeg-geometry-method
-Worktree: /Users/yahya/Documents/git/nemar/docs-worktrees/ieeg-geometry-method (`git -C /Users/yahya/Documents/git/nemar/docs fetch origin && git -C /Users/yahya/Documents/git/nemar/docs worktree add <path> -b docs/ieeg-geometry-method origin/main`)
-Plan: /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/ieeg-geometry/.context/plans/ieeg-geometry/plan.md (settled design, all rulings, owner decisions); step DOC1
+Worktree: <docs-worktree> (`git -C <docs-checkout> fetch origin && git -C <docs-checkout> worktree add <path> -b docs/ieeg-geometry-method origin/main`)
+Plan: .context/plans/ieeg-geometry/plan.md (settled design, all rulings, owner decisions); step DOC1
 
 ## Goal
 
