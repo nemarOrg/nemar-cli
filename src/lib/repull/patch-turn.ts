@@ -17,6 +17,12 @@
  *    `patch_synthesized`. With nothing to replay (no correction, every conflict left upstream's), the
  *    record completes.
  *
+ * The iEEG geometry pipeline's files (ADR 0111, the amendment of 2026-11-19; `pipeline-run.ts`) are
+ * neither corrections nor conflicts: a mirror that has any (the record's `pipeline_owned` count)
+ * gets N.0.1 even with no correction, made of the pipeline run again on the new `main`, and no N.0.1
+ * is made when that run changes nothing and nothing else is replayed. A run that fails leaves the
+ * previous pipeline files out, is recorded on the record, and holds nothing else back.
+ *
  * It asks before it pushes (`--yes` answers): N.0.1's merge mints a second version DOI.
  */
 
@@ -25,10 +31,10 @@ import { repullPatchTrailerLine, repullTrailerLines } from "../../../shared/repu
 import { type RepullRow, patchVersionOf } from "../../../shared/repull-state.js";
 import { getApiUrl } from "../api/client.js";
 import { transitionRepull } from "../api/repull.js";
-import { defaultPlanPath } from "./digest.js";
+import { type PlanBody, defaultPlanPath } from "./digest.js";
 import { listPrefixSizes } from "./execute/copy.js";
 import { MOVED_REF_FETCH_DEPTH } from "./execute/head.js";
-import { fetchInto, originRefs } from "./execute/origin.js";
+import { type OriginScratch, fetchInto, originRefs } from "./execute/origin.js";
 import {
   acceptsHead,
   checkMain,
@@ -36,7 +42,9 @@ import {
   pushRelease,
   releaseRefOf,
 } from "./execute/pull-request.js";
+import { blobAt } from "./execute/resynthesize.js";
 import { ExecuteRefused, readReviewedPlan } from "./execute/verify-plan.js";
+import { git, hasCommit } from "./execute/workdir.js";
 import {
   type PatchSelection,
   assertPatchLedger,
@@ -46,6 +54,13 @@ import {
   patchCommit,
   patchSelection,
 } from "./patch.js";
+import { OWNERSHIP_PATH, isPipelineOutputPath } from "./pipeline-owned.js";
+import {
+  type PipelineFiles,
+  type Regeneration,
+  isEmptyRegeneration,
+  regenerate,
+} from "./pipeline-run.js";
 import { nemarBucket } from "./release.js";
 import { openNeuroGraphqlUrl } from "./sources.js";
 import {
@@ -58,10 +73,19 @@ import {
 } from "./steps.js";
 
 /** End the record: `released -> complete`. */
-async function complete(ctx: ResumeContext, row: RepullRow, why: string): Promise<Turn> {
+async function complete(
+  ctx: ResumeContext,
+  row: RepullRow,
+  why: string,
+  counts?: Record<string, number>,
+): Promise<Turn> {
   let done: RepullRow;
   try {
-    done = await transitionRepull(row.id, { from: "released", to: "complete" });
+    done = await transitionRepull(row.id, {
+      from: "released",
+      to: "complete",
+      ...(counts ? { fields: { counts } } : {}),
+    });
   } catch (err) {
     throw apiRefused(err, "The record could not be completed");
   }
@@ -88,7 +112,12 @@ async function recordPlan(ctx: ResumeContext, row: RepullRow) {
 }
 
 /** The body of N.0.1's pull request: counts, never a path or a key. */
-export function patchBody(row: RepullRow, s: PatchSelection, version: string): string {
+export function patchBody(
+  row: RepullRow,
+  s: PatchSelection,
+  version: string,
+  pipeline: Regeneration | null = null,
+): string {
   return [
     `NEMAR's corrections of re-pull #${row.id} (upstream ${row.upstream_ds} ${row.from_tag} to ${row.to_tag}), replayed onto v${row.to_version} as v${version} of ${row.dataset_id} (ADR 0111).`,
     "",
@@ -98,6 +127,13 @@ export function patchBody(row: RepullRow, s: PatchSelection, version: string): s
     `- Plan digest: ${row.plan_digest}`,
     `- Corrections the plan listed: ${s.corrections}; conflicts resolved to NEMAR's side: ${s.resolutions}`,
     `- Paths replayed: ${s.paths.length}; description keys replayed: ${s.keys.length}`,
+    ...(pipeline === null
+      ? []
+      : [
+          pipeline.ok
+            ? `- iEEG geometry pipeline files regenerated from the new snapshot: ${pipeline.files.write.size} written, ${pipeline.files.remove.length} removed, ${pipeline.files.kept} kept as they are`
+            : `- iEEG geometry pipeline files: the regeneration failed (${pipeline.code}), so this pull request carries none of the previous pipeline files`,
+        ]),
     "- Version DOIs this pull request mints when merged: 1",
     "",
     `\`nemar admin repull resume ${row.dataset_id}\` takes this pull request through the identifier screen and the gates, and \`nemar admin repull merge ${row.dataset_id}\` (or \`nemar admin pr-reviews\`, through the same gate) squash-merges it under the daily merge cap; a merge mints a version DOI that cannot be withdrawn.`,
@@ -117,6 +153,9 @@ export function patchBody(row: RepullRow, s: PatchSelection, version: string): s
 export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Turn> {
   const corrections = row.counts.corrections;
   const conflicts = row.counts.conflicts;
+  // A record that does not say has no pipeline-owned path: it was planned before the count existed,
+  // and such a plan read a pipeline file as a correction.
+  const pipelineOwned = row.counts.pipeline_owned ?? 0;
   const takeOurs = ctx.opts.takeOurs ?? [];
   if (typeof corrections !== "number" || typeof conflicts !== "number") {
     // Unknown is never zero: a record that does not say is not completed.
@@ -127,7 +166,7 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
     );
     return { kind: "done", result: { row, outcome: "released" } };
   }
-  if (corrections === 0 && conflicts === 0 && takeOurs.length === 0) {
+  if (corrections === 0 && conflicts === 0 && takeOurs.length === 0 && pipelineOwned === 0) {
     return complete(ctx, row, "");
   }
   if (conflicts > 0 && takeOurs.length === 0 && !ctx.opts.keepUpstream) {
@@ -162,14 +201,25 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
         },
       };
     }
-    if (!hasReplay(selection)) {
+    if (pipelineOwned !== planPipelineOwned(body)) {
+      throw new ExecuteRefused(
+        "patch-plan-mismatch",
+        `The plan lists ${planPipelineOwned(body)} pipeline-owned path(s) and re-pull #${row.id} records ${pipelineOwned}; they are the same plan only when they agree.`,
+      );
+    }
+    if (!hasReplay(selection) && pipelineOwned === 0) {
       return complete(
         ctx,
         row,
         ": the plan has no correction, and every conflict stays on upstream's side",
       );
     }
-    return await makePatch(ctx, row, selection, version);
+    return await makePatch(ctx, row, selection, version, {
+      owned: pipelineOwnedPaths(body),
+      upstreamWins: pipelineUpstreamWins(body),
+      unowned: pipelineStrings(body, "unowned"),
+      edited: pipelineStrings(body, "edited"),
+    });
   } catch (err) {
     // A fact about the record or its plan is recorded on it; a problem of this run (the file it was
     // given, a resolution it named, a declined confirmation) is not, and writes nothing.
@@ -181,8 +231,57 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
   }
 }
 
+function planPipelineOwned(body: PlanBody): number {
+  const n = (body.counts as unknown as { pipeline_owned?: unknown } | null)?.pipeline_owned;
+  return typeof n === "number" ? n : 0;
+}
+
+function pipelineSection(body: PlanBody): Array<{ path: string; upstream_wins: boolean }> {
+  const section = (body as unknown as { pipeline_owned?: { paths?: unknown } }).pipeline_owned;
+  const rows = section?.paths;
+  if (rows === undefined) return [];
+  if (
+    !Array.isArray(rows) ||
+    !rows.every(
+      (r) =>
+        r &&
+        typeof r === "object" &&
+        typeof r.path === "string" &&
+        typeof r.upstream_wins === "boolean",
+    )
+  ) {
+    throw new ExecuteRefused(
+      "plan-schema",
+      "The plan's pipeline-owned section does not have the planner's shape.",
+    );
+  }
+  return rows as Array<{ path: string; upstream_wins: boolean }>;
+}
+
+const pipelineOwnedPaths = (body: PlanBody) => new Set(pipelineSection(body).map((r) => r.path));
+const pipelineUpstreamWins = (body: PlanBody) =>
+  new Set(
+    pipelineSection(body)
+      .filter((r) => r.upstream_wins)
+      .map((r) => r.path),
+  );
+
+/** A list of paths of the plan's pipeline-owned section (`unowned`, `edited`); none in an older plan. */
+function pipelineStrings(body: PlanBody, key: "unowned" | "edited"): Set<string> {
+  const v = (body as unknown as { pipeline_owned?: Record<string, unknown> }).pipeline_owned?.[key];
+  if (v === undefined) return new Set();
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+    throw new ExecuteRefused(
+      "plan-schema",
+      "The plan's pipeline-owned section does not have the planner's shape.",
+    );
+  }
+  return new Set(v as string[]);
+}
+
 /** Refusals that are about this run, not the record: nothing is recorded for them (exit 1). */
 const RUN_PROBLEMS = new Set([
+  "pipeline-regeneration-failed",
   "take-ours-invalid",
   "declined",
   "plan-unreadable",
@@ -194,11 +293,82 @@ const RUN_PROBLEMS = new Set([
   "plan-not-the-record",
 ]);
 
+/**
+ * A failure to run (the process could not start, timed out, or its clone or network failed) is
+ * retried, at most {@link PIPELINE_ATTEMPTS} times, counted on the record; every other failure is a
+ * check the bridge applied to what the run produced (version, report, outputs, undeclared writes),
+ * which no retry mends, so it settles at once. A failure settles the same way after its last
+ * attempt: N.0.1 goes on without the previous pipeline files and `pipeline_failed` is counted.
+ */
+const RETRYABLE_FAILURES = new Set([
+  "pipeline-run-failed",
+  "pipeline-unavailable",
+  "pipeline-snapshot",
+]);
+export const PIPELINE_ATTEMPTS = 3;
+
+/** Whether N.0.1's pushed commit changed a path of the pipeline's shape beside its parent. */
+async function patchHoldsPipelineFiles(
+  dir: string,
+  commit: string,
+  parent: string,
+): Promise<boolean> {
+  const r = await git(dir, ["diff", "--name-only", "-z", parent, commit], { ok: true });
+  return r.stdout.split("\0").some((p) => p === OWNERSHIP_PATH || isPipelineOutputPath(p));
+}
+
+/** What `makePatch` needs of the plan to regenerate the pipeline's files. */
+interface PipelineArgs {
+  owned: ReadonlySet<string>;
+  upstreamWins: ReadonlySet<string>;
+  /** Listed paths that are not owned: the pipeline is handed a record without them. */
+  unowned: ReadonlySet<string>;
+  /** Hand-edited pipeline files N.0.1 replays: the pipeline finds them as NEMAR had them. */
+  edited: ReadonlySet<string>;
+}
+
+/** Run the pipeline on `parent`, the new `main`; a failure is a value, never a throw. */
+async function regenerateOn(
+  ctx: ResumeContext,
+  scratch: OriginScratch,
+  row: RepullRow,
+  parent: string,
+  args: PipelineArgs,
+): Promise<Regeneration> {
+  if (!(await hasCommit(scratch.dir, parent)) && !(await fetchInto(scratch, parent, 1))) {
+    throw refused(
+      "origin-unreadable",
+      "The new main could not be fetched from NEMAR's repository.",
+    );
+  }
+  // The hand-edited files N.0.1 replays, as NEMAR's main held them at the base.
+  const preserve = new Map<string, string>();
+  if (args.edited.size > 0 && !(await hasCommit(scratch.dir, row.base_sha))) {
+    await fetchInto(scratch, row.base_sha, 1);
+  }
+  for (const path of args.edited) {
+    const text = await blobAt(scratch.dir, row.base_sha, path);
+    if (text !== null) preserve.set(path, text);
+  }
+  return regenerate({
+    unowned: args.unowned,
+    preserve,
+    datasetId: ctx.datasetId,
+    version: row.to_version,
+    commit: parent,
+    repo: scratch.dir,
+    owned: args.owned,
+    upstreamWins: args.upstreamWins,
+    env: ctx.env,
+  });
+}
+
 async function makePatch(
   ctx: ResumeContext,
   row: RepullRow,
   selection: PatchSelection,
   version: string,
+  pipelineArgs: PipelineArgs,
 ): Promise<Turn> {
   const nemar = await nemarBucket(ctx);
   const { scratch } = nemar;
@@ -218,33 +388,106 @@ async function makePatch(
   });
   const ref = releaseRefOf(version);
   const existing = (await originRefs(scratch, [ref])).get(ref);
-  let commit: string;
-  let parent: string;
-  let keys: string[];
+  const branchForeign = () =>
+    new ExecuteRefused(
+      "branch-foreign",
+      `release/v${version} exists on NEMAR's repository and is not this re-pull's N.0.1 commit with these resolutions${pipelineArgs.owned.size > 0 ? " and this regeneration of the iEEG geometry pipeline's files" : ""}; run resume with the resolutions the earlier run was given, or decline N.0.1 with nemar admin repull abandon ${ctx.datasetId}.`,
+    );
+  const unavailableOnResume = () =>
+    refused(
+      "pipeline-unavailable-on-resume",
+      `release/v${version} was pushed with iEEG geometry pipeline files that this run did not reproduce (or with other resolutions); resume again with the resolutions the earlier run was given, where the pipeline runs as it did then (its pinned environment), or decline N.0.1 with nemar admin repull abandon ${ctx.datasetId}.`,
+    );
+  let found: { commit: string; parent: string } | null = null;
   if (existing) {
     // A branch an earlier run pushed: it must hold the very commit this makes for its own parent.
     if (!(await fetchInto(scratch, ref, MOVED_REF_FETCH_DEPTH))) {
       throw refused("origin-unreadable", `release/v${version} could not be fetched.`);
     }
-    const found = await findPatchCommit({ dir: scratch.dir, row, head: existing });
-    const made = found
-      ? await patchCommit({ scratch, row, selection, parent: found.parent })
-      : null;
-    if (!found || !made || made.sha !== found.commit) {
-      throw new ExecuteRefused(
-        "branch-foreign",
-        `release/v${version} exists on NEMAR's repository and is not this re-pull's N.0.1 commit with these resolutions; run resume with the resolutions the earlier run was given, or decline N.0.1 with nemar admin repull abandon ${ctx.datasetId}.`,
-      );
-    }
-    commit = found.commit;
-    parent = found.parent;
-    keys = made.keys;
-  } else {
-    const made = await patchCommit({ scratch, row, selection, parent: main });
-    commit = made.sha;
-    parent = main;
-    keys = made.keys;
+    found = await findPatchCommit({ dir: scratch.dir, row, head: existing });
+    if (!found) throw branchForeign();
   }
+  const parent = found ? found.parent : main;
+  // The pipeline's files, regenerated on the new `main`: the same bytes every time for the same
+  // snapshot and pipeline version. The commit N.0.1 pushes (recorded as `patch_head_sha`, its tree
+  // holding every regenerated byte) is the digest a later resume compares against, so a resume has
+  // to run where the pipeline reproduces the output (the workflow's pinned Linux environment).
+  const pipeline =
+    pipelineArgs.owned.size > 0
+      ? await regenerateOn(ctx, scratch, row, parent, pipelineArgs)
+      : null;
+  const files: PipelineFiles | undefined =
+    pipeline?.ok && !isEmptyRegeneration(pipeline.files) ? pipeline.files : undefined;
+  // A version or a report that is not the pinned one is the CLI's and the package's disagreement,
+  // which no retry mends: N.0.1 goes on without the previous pipeline files, and the count says so.
+  // Any other failure (the run, the clone, the network) may be only this machine: nothing is pushed
+  // and the record stays `released`, so the next tick runs it again.
+  const attempts = (row.counts.pipeline_attempts ?? 0) + 1;
+  if (
+    pipeline &&
+    !pipeline.ok &&
+    RETRYABLE_FAILURES.has(pipeline.code) &&
+    attempts < PIPELINE_ATTEMPTS
+  ) {
+    const words = `[patch:pipeline-regeneration-failed] The iEEG geometry pipeline could not be run (${pipeline.code}), attempt ${attempts} of ${PIPELINE_ATTEMPTS}; N.0.1 is not made yet, resume again where the pipeline runs.`;
+    try {
+      await transitionRepull(row.id, {
+        from: "released",
+        to: "released",
+        fields: { counts: { pipeline_attempts: attempts } },
+        error: words,
+      });
+    } catch (err) {
+      throw apiRefused(err, "The pipeline attempt could not be recorded");
+    }
+    throw refused(
+      "pipeline-regeneration-failed",
+      words.slice("[patch:pipeline-regeneration-failed] ".length),
+    );
+  }
+  if (found && pipelineArgs.owned.size > 0 && (pipeline === null || !pipeline.ok || !files)) {
+    // The branch holds an N.0.1 made with pipeline files this run cannot reproduce.
+    const pushedHasFiles = await patchHoldsPipelineFiles(scratch.dir, found.commit, parent);
+    if (pushedHasFiles) throw unavailableOnResume();
+  }
+  // A failure that settles is counted, with the attempts that led to it when it was retried.
+  const settleCounts: Record<string, number> | undefined =
+    pipeline && !pipeline.ok
+      ? {
+          pipeline_failed: 1,
+          ...(RETRYABLE_FAILURES.has(pipeline.code) ? { pipeline_attempts: attempts } : {}),
+        }
+      : undefined;
+  if (pipeline && !pipeline.ok) {
+    await recordStepError(
+      row,
+      `[patch:${pipeline.code}] ${pipeline.message} N.0.1 carries none of the previous iEEG geometry pipeline files.`,
+      ctx.opts.out,
+    );
+    ctx.opts.out(
+      `The iEEG geometry pipeline's files were not regenerated (${pipeline.code}); N.0.1 carries none of the previous ones.`,
+    );
+  } else if (files) {
+    ctx.opts.out(
+      `Regenerated the iEEG geometry pipeline's files: ${files.write.size} written, ${files.remove.length} removed.`,
+    );
+  }
+  if (!found && !hasReplay(selection) && files === undefined) {
+    return complete(
+      ctx,
+      row,
+      pipeline && !pipeline.ok
+        ? ": nothing else is replayed, and the pipeline's files were not regenerated"
+        : ": nothing is replayed, and the pipeline's files are as the new snapshot leaves them",
+      settleCounts,
+    );
+  }
+  const made = await patchCommit({ scratch, row, selection, parent, pipeline: files });
+  if (found && made.sha !== found.commit) {
+    throw pipelineArgs.owned.size > 0 ? unavailableOnResume() : branchForeign();
+  }
+  const commit = found ? found.commit : made.sha;
+  const keys = made.keys;
 
   // The keys it replays are NEMAR's: in the bucket at their size, at nemar-s3, not dead.
   let listing: Map<string, number>;
@@ -270,7 +513,7 @@ async function makePatch(
     !existing &&
     ctx.opts.confirm &&
     !(await ctx.opts.confirm(
-      `Make v${version} of ${ctx.datasetId}: replay ${selection.paths.length} path(s) and ${selection.keys.length} description key(s) onto main (${selection.corrections} correction(s), ${selection.resolutions} conflict(s) resolved to NEMAR's side, ${selection.unresolved} left on upstream's side), push release/v${version} and open its pull request? Its merge will mint one more version DOI, which cannot be withdrawn.`,
+      `Make v${version} of ${ctx.datasetId}: replay ${selection.paths.length} path(s) and ${selection.keys.length} description key(s) onto main (${selection.corrections} correction(s), ${selection.resolutions} conflict(s) resolved to NEMAR's side, ${selection.unresolved} left on upstream's side${files ? `; ${files.write.size} iEEG geometry pipeline file(s) written, ${files.remove.length} removed` : ""}), push release/v${version} and open its pull request? Its merge will mint one more version DOI, which cannot be withdrawn.`,
     ))
   ) {
     throw new ExecuteRefused("declined", "Not confirmed; nothing was pushed.");
@@ -292,7 +535,7 @@ async function makePatch(
     base: ctx.base,
     datasetId: ctx.datasetId,
     version,
-    body: patchBody(row, selection, version),
+    body: patchBody(row, selection, version, pipeline),
     acceptHead: (sha) =>
       acceptsHead({ work: scratch.dir, from: commit, head: sha, ref, env: scratch.env }),
   });
@@ -307,7 +550,10 @@ async function makePatch(
         patch_pr_number: pr.number,
         patch_head_sha: pr.head,
         patch_base_sha: parent,
-        counts: { resolutions: selection.resolutions },
+        counts: {
+          resolutions: selection.resolutions,
+          ...(settleCounts ?? {}),
+        },
       },
     });
   } catch (err) {

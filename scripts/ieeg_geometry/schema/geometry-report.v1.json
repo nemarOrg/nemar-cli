@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nemar:schema:ieeg-geometry-report:v1",
+  "title": "NEMAR iEEG geometry report, version 1",
+  "description": "What one run of the iEEG geometry pipeline over a dataset decided, per electrodes file and per track (labels, freesurfer, spm, surfaces), and what an apply would add, change or remove. Deterministic for the same dataset commit and pipeline version: no timestamps, no absolute paths. A status of written means the run writes (dry run) or wrote (apply) the listed outputs; unchanged means the outputs already exist byte for byte; kept means an owned file was edited by hand or sits where this would write and is left alone; needs-human and refused are never written; skipped means the track does not apply or the file was not fetched.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "mode",
+    "dataset",
+    "dataset_version",
+    "source_commit",
+    "pipeline_version",
+    "files",
+    "suppressions",
+    "warnings",
+    "counts",
+    "changes",
+    "surface_entries"
+  ],
+  "properties": {
+    "schema": { "const": "nemar-ieeg-geometry-report" },
+    "version": { "const": 1 },
+    "mode": { "enum": ["dry-run", "apply"] },
+    "dataset": { "type": "string", "pattern": "^[a-z]{2}[0-9]{6}$" },
+    "dataset_version": { "type": "string", "minLength": 1 },
+    "source_commit": { "type": "string", "minLength": 1 },
+    "pipeline_version": { "type": "string", "minLength": 1 },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "suppressions": {
+      "description": "Dataset-level reasons that stopped blind label trials, with the electrodes files they affect.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reason", "files"],
+        "properties": {
+          "reason": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["electrodes_files", "by_track", "changes"],
+      "properties": {
+        "electrodes_files": { "type": "integer", "minimum": 0 },
+        "by_track": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["labels", "freesurfer", "spm", "surfaces"],
+          "properties": {
+            "labels": { "$ref": "#/$defs/status_counts" },
+            "freesurfer": { "$ref": "#/$defs/status_counts" },
+            "spm": { "$ref": "#/$defs/status_counts" },
+            "surfaces": { "$ref": "#/$defs/status_counts" }
+          }
+        },
+        "changes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["add", "change", "remove", "kept"],
+          "properties": {
+            "add": { "type": "integer", "minimum": 0 },
+            "change": { "type": "integer", "minimum": 0 },
+            "remove": { "type": "integer", "minimum": 0 },
+            "kept": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "changes": {
+      "description": "Work-tree paths (relative to the dataset) an apply adds, changes or removes, and owned paths it leaves as they are (kept).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["add", "change", "remove", "kept"],
+      "properties": {
+        "add": { "$ref": "#/$defs/paths" },
+        "change": { "$ref": "#/$defs/paths" },
+        "remove": { "$ref": "#/$defs/paths" },
+        "kept": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "surface_entries": {
+      "description": "The entries of geometry/index.json (schema nemar-ieeg-geometry-index, version 1), one per electrodes file with a drawable subject surface.",
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  },
+  "$defs": {
+    "paths": { "type": "array", "items": { "type": "string" } },
+    "status": {
+      "enum": ["written", "unchanged", "kept", "needs-human", "refused", "skipped"]
+    },
+    "status_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["written", "unchanged", "kept", "needs-human", "refused", "skipped"],
+      "properties": {
+        "written": { "type": "integer", "minimum": 0 },
+        "unchanged": { "type": "integer", "minimum": 0 },
+        "kept": { "type": "integer", "minimum": 0 },
+        "needs-human": { "type": "integer", "minimum": 0 },
+        "refused": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "evidence", "numbers", "outputs"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "reason": { "type": "string" },
+        "evidence": {
+          "description": "Evidence grade of the written positions or surface fit (specific or plausible), null when nothing was written.",
+          "type": ["string", "null"]
+        },
+        "numbers": {
+          "description": "The key numbers of the decision (distances in millimeters, counts, fractions); keys depend on the track and are additive, so a reader ignores keys it does not know. labels (written): label_rule (on-vertex-1.0mm, ecog-2.0mm or depth-plausible, the rule that graded the evidence), median_mm, p90_mm, n_used, and shift_control_min_median_mm (the smallest median over the six 10 mm axis shifts, both directions of each axis, of the on-vertex shift control; the value the grade was judged by; on-vertex rule only). freesurfer (written): frame_fit_median_mm, fit_rule (ecog-2.0mm), n_placed, left_out, pial_distance_median_mm, and the registration check numbers registration_side_fraction, registration_centroid_mm, registration_extent_error (largest per-axis relative difference) and registration_affine_residual_mm (the four registration numbers are also present on a refusal after the registration check ran, as with registration-check-failed). spm: inversion_residual_median_mm, the field check numbers field_check_median_mm, field_check_p10_mm, field_check_centroid_mm and field_check_extent_deviation (also present on refusals that ran the check), inside_fraction, and depth_contact_median_mm (the depth contacts against the template shell, reported not judged). surfaces: median_mm, frame_choice, contact_type (the type of the fitted contacts) and fit_rule (ecog-2.0mm or depth, the rule applied).",
+          "type": "object"
+        },
+        "outputs": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["electrodes", "subject", "session", "space", "decisions"],
+      "properties": {
+        "electrodes": { "type": "string" },
+        "subject": { "type": ["string", "null"] },
+        "session": { "type": ["string", "null"] },
+        "space": { "type": ["string", "null"] },
+        "decisions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["labels", "freesurfer", "spm", "surfaces"],
+          "properties": {
+            "labels": { "$ref": "#/$defs/decision" },
+            "freesurfer": { "$ref": "#/$defs/decision" },
+            "spm": { "$ref": "#/$defs/decision" },
+            "surfaces": { "$ref": "#/$defs/decision" }
+          }
+        }
+      }
+    }
+  }
+}

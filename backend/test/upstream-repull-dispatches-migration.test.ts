@@ -461,7 +461,7 @@ describe("the dispatch service's own statements on D1", () => {
     // The link by key, as the automatic create's batch runs it.
     const repull = await d1
       .prepare(
-        "INSERT INTO upstream_repulls (dataset_id, upstream_ds, from_tag, to_tag, attempt, from_version, to_version, plan_digest, planner, origin, actor_user_id, status, base_sha, synth_tree, synth_sha, branch, pr_number, head_sha) VALUES ('on099991', 'ds099991', '1.0.0', '1.0.1', 1, '1.0.0', '2.0.0', ?, 2, 'automatic', 1, 'pr_open', ?, ?, ?, 'release/v2.0.0', 3, ?) RETURNING id",
+        "INSERT INTO upstream_repulls (dataset_id, upstream_ds, from_tag, to_tag, attempt, from_version, to_version, plan_digest, planner, origin, actor_user_id, status, base_sha, synth_tree, synth_sha, branch, pr_number, head_sha) VALUES ('on099991', 'ds099991', '1.0.0', '1.0.1', 1, '1.0.0', '2.0.0', ?, 3, 'automatic', 1, 'pr_open', ?, ?, ?, 'release/v2.0.0', 3, ?) RETURNING id",
       )
       .bind(
         `sha256:${"0".repeat(64)}`,
