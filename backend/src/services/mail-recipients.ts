@@ -79,7 +79,7 @@ export async function communityRecipients(
 
   // The category a person's stored choice can switch off, or null for one nobody may (a recall).
   const switchable = rule.canBeTurnedOff && isCommunityMailCategory(category) ? category : null;
-  return (result.results ?? [])
+  return result.results
     .filter(
       (row) => switchable === null || parseEmailPreferences(row.email_preferences)[switchable],
     )
