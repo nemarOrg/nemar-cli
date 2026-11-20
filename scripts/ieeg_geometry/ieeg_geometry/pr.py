@@ -13,9 +13,9 @@ existing work directory, no git identity, a clone not on `main`, a branch that a
 the remote, an errored track, an apply that changed nothing, any difference outside `changes`,
 a staged set that is not exactly `changes`, a staged blob that is not the work-tree bytes (a
 git-annex filter must never turn a sidecar into a pointer), and, for a real run only, a
-remote that is not `nemarDatasets/<id>` and a `main` that moved past the released version in
-anything but `.nemar/`, `.github/` and `.gitattributes` (the pipeline reads its large inputs
-at the release).
+remote that is not `nemarDatasets/<id>` and a missing release tag. A `main` ahead of the
+release is recorded in the body (every changed path, at most 50 listed), not refused: the
+files are computed from `main`.
 """
 
 from __future__ import annotations
@@ -274,10 +274,29 @@ def check_body_size(body: str) -> None:
 # ---- the release ------------------------------------------------------------------------------
 
 
+MAX_LISTED_PATHS = 50  # paths named in the Source section before a count stands for the rest
+MAX_LISTED_CHARS = 8_000  # and a character budget, so long names cannot crowd out the body
+
+
+def _path_list(paths: list[str]) -> str:
+    """Sorted paths as sub-bullets: at most 50 and 8,000 characters, then a count of the rest."""
+    shown: list[str] = []
+    used = 0
+    for p in paths[:MAX_LISTED_PATHS]:
+        used += len(p) + 8
+        if used > MAX_LISTED_CHARS:
+            break
+        shown.append(f"  - `{p}`")
+    rest = len(paths) - len(shown)
+    if rest:
+        shown.append(f"  - and {rest} more")
+    return "\n".join(shown)
+
+
 def release_status(clone: Path, version: str) -> tuple[str, bool]:
-    """(note for the body, whether a real run may proceed). The pipeline reads small files
-    from `main` and large ones from the release `version`; they agree when `main` is the
-    release or moved only under `.nemar/`, `.github/` and `.gitattributes`."""
+    """(note for the body, whether a real run may proceed). A real run needs the release tag.
+    The pipeline computes from the fresh clone of `main`, which the mirror's patch release
+    will publish, so a `main` ahead of the release is recorded in the body, not refused."""
     head = _git(clone, "rev-parse", "HEAD").strip()
     try:
         tag = _git(clone, "rev-parse", "--verify", "-q", f"refs/tags/{version}^{{commit}}").strip()
@@ -292,10 +311,13 @@ def release_status(clone: Path, version: str) -> tuple[str, bool]:
     other = sorted(p for p in moved if not (p.startswith(UNRELEASED_DIRS) or p in UNRELEASED_FILES))
     if other:
         return (
-            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) and changed "
-            f"{len(other)} path(s) outside `.nemar/`, `.github/` and `.gitattributes` "
-            f"(first: `{other[0]}`)",
-            False,
+            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}); "
+            f"{len(other)} path(s) outside `.nemar/`, `.github/` and `.gitattributes` changed "
+            "since the release (every path changed, sorted):\n"
+            f"{_path_list(sorted(moved))}\n"
+            "  These files were computed from `main`, which the patch release will publish "
+            "together with these changes.",
+            True,
         )
     return (
         f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
@@ -364,7 +386,7 @@ def open_pr(
         raise PrRefusal(f"the clone is not on {BASE}; the pull request is made against {BASE}")
     release_note, release_ok = release_status(clone, got.version)
     if not release_ok and not dry_run:
-        raise PrRefusal(f"{release_note}; the pipeline's inputs may differ from the release")
+        raise PrRefusal(f"{release_note}; the release is the pipeline's reference")
     if not release_ok:
         out.write(f"warning: {release_note} (a real run refuses)\n")
     if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():

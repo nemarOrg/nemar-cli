@@ -427,20 +427,36 @@ def test_a_main_ahead_of_the_release_only_under_nemar_is_recorded_in_the_body(en
     )
 
 
-def test_a_main_ahead_of_the_release_in_dataset_files_is_refused_for_a_real_run(
-    env, tmp_path, capsys
-):
+def test_a_main_ahead_of_the_release_in_dataset_files_proceeds_and_lists_the_paths(env, tmp_path):
     served, bare, log, work = env
-    _advance(bare, tmp_path, {"sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n"})
-    assert _pr(served, work) == 1
-    err = capsys.readouterr().err
-    assert "ahead of release" in err and "outside `.nemar/`, `.github/` and `.gitattributes`" in err
-    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
-    # a dry run goes on, with a warning and the note in the printed body
-    assert _pr(served, tmp_path / "w2", dry=True) == 0
-    out = capsys.readouterr().out
-    assert "warning: `main`" in out and "(a real run refuses)" in out
-    assert "- Source: `main`" in out
+    _advance(
+        bare,
+        tmp_path,
+        {"sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n", ".bidsignore": "x\n"},
+    )
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert "is ahead of release" in body
+    assert "- `.bidsignore`" in body and "- `sub-1/ieeg/sub-1_new_electrodes.tsv`" in body
+    assert body.index("`.bidsignore`") < body.index("`sub-1/ieeg/")  # sorted
+    assert "computed from `main`, which the patch release will publish" in body
+    assert "refuses" not in body
+
+
+def test_more_than_fifty_changed_paths_are_listed_as_fifty_and_a_count(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {f"extra/f{i:03d}.txt": "x\n" for i in range(60)})
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert body.count("- `extra/f") == 50 and "and 10 more" in body
+    assert "`extra/f049.txt`" in body and "`extra/f050.txt`" not in body
+    assert len(body) <= pr.GITHUB_BODY_MAX
+
+
+def test_the_path_list_stays_inside_the_character_budget():
+    long = [f"d/{i:03d}/" + "n" * 400 for i in range(50)]
+    text = pr._path_list(long)
+    assert len(text) < pr.MAX_LISTED_CHARS + 200 and "more" in text.splitlines()[-1]
 
 
 def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
@@ -488,12 +504,12 @@ def test_an_oversized_body_is_refused_before_any_branch_commit_or_push(env, monk
     assert not _calls(log)
 
 
-def test_a_gitattributes_lookalike_is_not_allowed_to_move_after_the_release(env, tmp_path, capsys):
+def test_a_gitattributes_lookalike_counts_as_a_dataset_file_and_is_listed(env, tmp_path):
     served, bare, log, work = env
     _advance(bare, tmp_path, {".gitattributesX": "x\n", ".nemar/metadata.json": "{}\n"})
-    assert _pr(served, work) == 1
-    assert "`.gitattributesX`" in capsys.readouterr().err
-    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert "- `.gitattributesX`" in body and "1 path(s) outside" in body
 
 
 def _missing_annex_machine(monkeypatch):
