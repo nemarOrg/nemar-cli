@@ -33,9 +33,10 @@ export const PLAN_FILE_VERSION = 1;
  * made with.
  *
  * 1: Phase 5's planner. 2: the enrichment's generated `participants.tsv` is a standard edit, and
- * a `repull-scrubbed` ledger line is not a recorded correction.
+ * a `repull-scrubbed` ledger line is not a recorded correction. 3: a path the iEEG geometry
+ * pipeline added and lists in `.nemar/ieeg-geometry.json` is `pipeline-owned`, not a correction.
  */
-export const PLANNER_VERSION = 2;
+export const PLANNER_VERSION = 3;
 
 /** The fields of a plan file that are NOT part of the digested body. */
 export const VOLATILE_FIELDS = [

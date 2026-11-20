@@ -6161,8 +6161,17 @@ def _s3_child_prefixes(url: str) -> list[str]:
     return [f"s3://{bucket}/{p}" for p in res.stdout.split() if p and p != "None"]
 
 
-def _rm_recursive(url: str) -> None:
+# Prefixes under `<id>/zarr/` that the Zarr rebuild does not own: `geometry/` holds the
+# subject surfaces that `ieeg_geometry upload-surfaces` writes (ADR 0129). A `--wipe` of
+# the serving prefix must leave them in place.
+WIPE_KEEP = ("geometry/",)
+
+
+def _rm_recursive(url: str, keep: tuple[str, ...] = ()) -> None:
     """Recursively delete an S3 prefix, sharded across child prefixes.
+
+    `keep` lists child prefixes (each ending in `/`, relative to `url`) that stay: no shard
+    is made for one, and the final sweep excludes it.
 
     `aws s3 rm --recursive` is single-process and paces at its profile's request
     concurrency, so a large prefix serializes into a long, near-idle wall-clock
@@ -6185,6 +6194,9 @@ def _rm_recursive(url: str) -> None:
             flush=True,
         )
         children = []
+    children = [
+        c for c in children if not any(c.startswith(url + k) for k in keep)
+    ]
     if children:
         print(f"[zarr] deleting {url} across {len(children)} shard(s)", flush=True)
         errors: list[BaseException] = []
@@ -6210,7 +6222,10 @@ def _rm_recursive(url: str) -> None:
     # Sweep: catches loose keys at the top level, and is a cheap no-op once the
     # shards have done the bulk.
     _aws(
-        ["aws", "s3", "rm", url, "--recursive", "--only-show-errors"],
+        [
+            "aws", "s3", "rm", url, "--recursive", "--only-show-errors",
+            *[arg for k in keep for arg in ("--exclude", f"{k}*")],
+        ],
         timeout=_AWS_RM_TIMEOUT,
         retries=_AWS_RM_RETRIES,
     )
@@ -10265,7 +10280,8 @@ def main() -> int:
     ap.add_argument(
         "--wipe",
         action="store_true",
-        help="erase s3://<bucket>/<id>/zarr/ before rebuilding. Recovery only (a "
+        help="erase s3://<bucket>/<id>/zarr/ before rebuilding, except its geometry/ "
+        "prefix (subject surfaces, not a Zarr store). Recovery only (a "
         "corrupt prefix, or an index that no longer describes what is on S3): it "
         "destroys the serving copy before the replacement exists, so the dataset "
         "has no viewer for the length of the run. Use with --clean.",
@@ -10513,7 +10529,7 @@ def main() -> int:
             print(f"[zarr] --wipe: s3://{bucket}/{prefix} already empty; skipping wipe", flush=True)
         else:
             print(f"[zarr] --wipe: erasing s3://{bucket}/{prefix} before full rebuild", flush=True)
-            _rm_recursive(f"s3://{bucket}/{prefix}")
+            _rm_recursive(f"s3://{bucket}/{prefix}", keep=WIPE_KEEP)
     print(
         f"[zarr] {dataset_id} head={head[:8]} prior={(prior_commit or 'none')[:8]} "
         f"full={full} convert={len(convert)} remove={len(remove)}",

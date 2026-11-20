@@ -15,6 +15,36 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
+  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
+  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
+  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **Re-pull planner version 2 to 3.**
+  A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
+  `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
+- **Release order, for operators.**
+  (a) Have the Worker on planner 3 before running the new CLI on a geometry dataset.
+  The Worker refuses another planner's plan on the automatic path (`auto-planner-version`).
+  A manual 0.10.36 CLI against a 0.10.35 Worker gets a 400 when it writes a new count: `invalid-body` at create, `field-invalid` on a transition.
+  The backend deploy and the npm publish run concurrently from `main`, so check the `version` in `/health` and `npm view nemar-cli version` before step (c).
+  (b) The central `nemarDatasets/.github` `run-upstream-repull.yml` carries the geometry step (applied 2026-11-20, nemarDatasets/.github#156).
+  It skips for a CLI tag that lacks `scripts/ieeg_geometry`.
+  (c) Merge geometry pull requests only after the CLI release carrying the package is published and the patch is live.
+  (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
+- **Rollback.** Roll the Worker and the CLI back together, never the Worker alone.
+  A 0.10.35 Worker stores and returns the new counts on records that already hold them.
+  It refuses with a 400 (`invalid-body` at create, `field-invalid` on a transition) any write that names `pipeline_owned`, `pipeline_failed` or `pipeline_attempts`, which a 0.10.36 CLI sends.
+  Records holding `pipeline_owned` were planned under planner 3, and 0.10.35 cannot execute or regenerate them: plan them again, or leave them until the roll forward.
+- **Zarr `--wipe` keeps `<id>/zarr/geometry/`.**
+  `generate_zarr.py --wipe` erases a dataset's Zarr prefix except the subject-surface display data the pipeline uploads there.
+- **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
+
+### Decisions
+
+- **ADR 0128: the Zarr serving copy is not an NWB container (#2218).** A decision record only; no behavior change.
+
 ### Staging
 
 - **Staging semantic search has the vector visibility filter on too (ADR 0126).**
