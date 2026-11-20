@@ -210,6 +210,37 @@ def test_decisions_carry_reason_evidence_and_numbers(dry):
     assert spm_decision["reason"].startswith("paired by")
 
 
+def test_decisions_carry_every_number_a_summary_needs(dry):
+    report, _ = dry
+
+    def nums(electrodes, track):
+        row = next(r for r in report["files"] if r["electrodes"] == electrodes)
+        return row["decisions"][track]["numbers"]
+
+    lab = nums(SUB01, "labels")
+    assert lab["label_rule"] in ("on-vertex-1.0mm", "ecog-2.0mm", "depth-plausible")
+    fs = nums(P02, "freesurfer")
+    assert fs["fit_rule"] == "ecog-2.0mm"
+    for key in (
+        "registration_side_fraction",
+        "registration_centroid_mm",
+        "registration_extent_error",
+        "registration_affine_residual_mm",
+    ):
+        assert isinstance(fs[key], float), key
+    sp = nums(SUB9, "spm")
+    for key in (
+        "field_check_median_mm",
+        "field_check_p10_mm",
+        "field_check_centroid_mm",
+        "field_check_extent_deviation",
+        "depth_contact_median_mm",
+    ):
+        assert isinstance(sp[key], float), key
+    entries = report["surface_entries"]
+    assert entries and all(e["fit_rule"] in ("ecog-2.0mm", "depth") for e in entries)
+
+
 def test_the_dry_run_lists_every_file_an_apply_would_add(dry):
     report, clone = dry
     add = report["changes"]["add"]

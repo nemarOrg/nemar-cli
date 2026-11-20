@@ -124,7 +124,7 @@
           "type": ["string", "null"]
         },
         "numbers": {
-          "description": "The key numbers of the decision (distances in millimeters, counts, fractions); keys depend on the track.",
+          "description": "The key numbers of the decision (distances in millimeters, counts, fractions); keys depend on the track and are additive, so a reader ignores keys it does not know. labels (written): label_rule (on-vertex-1.0mm, ecog-2.0mm or depth-plausible, the rule that graded the evidence), median_mm, p90_mm, n_used, and shift_control_min_median_mm (the smallest median over six 10 mm axis shifts, reported not judged; on-vertex rule only). freesurfer (written): frame_fit_median_mm, fit_rule (ecog-2.0mm), n_placed, left_out, pial_distance_median_mm, and the registration check numbers registration_side_fraction, registration_centroid_mm, registration_extent_error (largest per-axis relative difference) and registration_affine_residual_mm. spm: inversion_residual_median_mm, the field check numbers field_check_median_mm, field_check_p10_mm, field_check_centroid_mm and field_check_extent_deviation (also present on refusals that ran the check), inside_fraction, and depth_contact_median_mm (the depth contacts against the template shell, reported not judged). surfaces: median_mm, frame_choice, contact_type (the type of the fitted contacts) and fit_rule (ecog-2.0mm or depth, the rule applied).",
           "type": "object"
         },
         "outputs": { "$ref": "#/$defs/paths" }

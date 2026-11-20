@@ -79,3 +79,28 @@ def test_a_dataset_with_nothing_to_do_changes_nothing():
     assert all(by_track[t]["written"] == 0 for t in by_track)
     assert report["changes"] == {"add": [], "change": [], "remove": [], "kept": []}
     assert report["warnings"] == []
+
+
+def _decisions(report: dict, subject: str, track: str) -> list[dict]:
+    return [
+        f["decisions"][track] for f in report["files"] if f["electrodes"].startswith(f"{subject}/")
+    ]
+
+
+def test_on004457_sub3_spm_decision_carries_its_field_check_numbers():
+    report = _dry_run("on004457")
+    written = [d for d in _decisions(report, "sub-3", "spm") if d["status"] == "written"]
+    assert len(written) == 1
+    nums = written[0]["numbers"]
+    assert nums["field_check_centroid_mm"] == pytest.approx(8.7, abs=0.1)
+    assert nums["field_check_extent_deviation"] == pytest.approx(0.087, abs=0.005)
+    assert isinstance(nums["depth_contact_median_mm"], float)
+
+
+def test_on002799_sub294_surface_is_ecog_with_the_ecog_rule():
+    report = _dry_run("on002799")
+    entries = [e for e in report["surface_entries"] if e["subject"] == "294"]
+    assert entries
+    assert all(e["contact_type"] == "ecog" and e["fit_rule"] == "ecog-2.0mm" for e in entries)
+    fs = [d for d in _decisions(report, "sub-294", "freesurfer") if d["status"] == "written"]
+    assert fs and fs[0]["numbers"]["registration_centroid_mm"] == pytest.approx(4.28, abs=0.05)
