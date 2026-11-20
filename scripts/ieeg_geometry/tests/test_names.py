@@ -162,6 +162,9 @@ def test_only_ascii_digits_are_digits():
     assert join_channels(["A\u0661"], ["A1"]) == {}
     assert join_channels(["POL A\u0661"], ["A\u0661"]) == {"POL A\u0661": ("A\u0661",)}
     assert join_channels(["A01REF"], ["A\u0661"]) == {}
+    assert join_channels(["A\u0661"], ["A_\u0661"]) == {}
+    assert join_channels(["A0\u0661"], ["A\u0661"]) == {}
+    assert join_channels(["A\u0661REF"], ["A\u0661"]) == {}
 
 
 def test_the_join_map_is_the_one_both_repositories_commit():
@@ -262,3 +265,12 @@ def test_an_exact_type_beats_a_renamed_one_from_another_file(tmp_path):
     types, warnings = _typed(tmp_path, ["A1"], [("POL A1", "ECOG")], [("A1", "SEEG")])
     assert types == {"A1": "seeg"}
     assert warnings == ()
+
+
+def test_exact_types_that_disagree_across_files_leave_the_contact_untyped(tmp_path):
+    types, warnings = _typed(
+        tmp_path, ["A1", "A2"], [("A1", "SEEG"), ("A2", "ECOG")], [("A1", "ECOG")]
+    )
+    assert types == {"A1": UNKNOWN, "A2": ECOG}
+    assert len(warnings) == 1
+    assert "A1" in warnings[0] and "ecog, seeg" in warnings[0]

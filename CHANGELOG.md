@@ -23,7 +23,7 @@ earlier releases are described only by their generated notes.
   A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
 - **The geometry package reads renamed channels files.**
   Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel) so contact types still come from `channels.tsv`.
-  A contact whose types disagree stays untyped, with a warning; no data file is changed.
+  A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
