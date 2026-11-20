@@ -149,3 +149,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:40-08:00 | proposal P2 opened: Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges |
 | 2026-11-20T14:40-08:00 | B6 technical lens: 0 crit, 6 imp, 8 sugg. Q28 Q29 answered; P2 Store Contract card proposed; Q30 asked (sub-sample gap test) |
 | 2026-11-20T14:41-08:00 | B6 r1 findings sent back with Q28, Q29, Q30; impl-B4 told Q28, Q30. Owner allows Opus xhigh / Fable high for contracts and specs |
+| 2026-11-20T14:43-08:00 | B4 r1 fixes 2b867e82 verified (rfc-check pass, draft, opened_at null, EDF+D wording); PR body opening post updated in place since its EDF claim changed (accepted, checklist appended); 6 B4/B6 disagreements forwarded to impl-B6 |
+| 2026-11-20T14:46-08:00 | B6 r1 fixes a126aea0 verified (scope, sign-offs, CI green); r2 delta reviews for B4 and B6 with seam check dispatched; Agents today 34/40 |

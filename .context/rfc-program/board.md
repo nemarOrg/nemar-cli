@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T14:37-08:00 |
-| Next tick | 2026-11-20T15:07-08:00 |
+| Last tick | 2026-11-20T14:46-08:00 |
+| Next tick | 2026-11-20T15:16-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 32 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 34 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -76,9 +76,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
 | O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | done | B2 | - |  | - | - | release 2.0.0 on 36112961, isPrerelease false (verified) |
 | B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | done | O4 | docs#128 | r1 code+comments (1 Sonnet): no PR findings; stop item resolved by Q23 | 2026-11-20T16:05-08:00 | 4h | merged by manager on owner instruction (691d5f4f); CI green after billing fix |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | active | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r1 fixes: 7 important, ~11 sugg, Q28 Q30 EDF+D; then r2 delta and B4/B6 seam check |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | review | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r2 delta review on head a126aea0 (CI green; original_rate reverted; Q28 Q30 applied) |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
-| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | active | R1, B2, A2 | rfcs#2 |  | 2026-11-20T16:05-08:00 | 2d | r1 fixes: 6 important, ~13 sugg, Q25 EDF+D wording and gap test, align with B6 names and question numbers |
+| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | review | R1, B2, A2 | rfcs#2 |  | 2026-11-20T16:05-08:00 | 2d | r2 delta + seam review on head 2b867e82 |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - |  | - | 4h | waits on B4 and Q15 |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, S1, N1, B5 (Q26) and mail epic #2260 P1-P3; O1b done |
@@ -154,8 +154,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | impl-B2 | implementer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:30-08:00 | done |
 | rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
-| impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | running |
-| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | running |
+| impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | done |
+| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | done |
 | impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | done |
 | rev-B3 | reviewer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:20-08:00 | done |
 | rev-B4-decisions | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T16:45-08:00 | done |
@@ -163,3 +163,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B6-decisions | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
 | rev-B6-technical | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
 | rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | done |
+| rev-B4-r2 | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T18:15-08:00 | running |
+| rev-B6-r2 | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T18:15-08:00 | running |
