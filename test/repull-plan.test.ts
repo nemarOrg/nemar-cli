@@ -1283,7 +1283,7 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
     });
 
     test("they are listed in their own section, and the ownership record is never a path", () => {
-      expect(pipeline(body)).toEqual({
+      expect(pipeline(body)).toMatchObject({
         status: "ok",
         ignored: 0,
         paths: OWNED.map((path) => ({ path, upstream_wins: false })).sort((a, b) =>
@@ -1454,7 +1454,7 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
     const fx = await buildRepullFixture({ noContributorEdits: true });
     try {
       const body = (await plan(fx)).body as Body;
-      expect(pipeline(body)).toEqual({ status: "absent", ignored: 0, paths: [] });
+      expect(pipeline(body)).toMatchObject({ status: "absent", ignored: 0, paths: [] });
       expect(counts(body)).toMatchObject({ pipeline_owned: 0, doi_count: 1 });
       expect((body.versions as { n1: string | null }).n1).toBeNull();
     } finally {

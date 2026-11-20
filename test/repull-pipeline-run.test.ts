@@ -275,7 +275,8 @@ describe("the ownership record", () => {
         ".nemar/corrections.jsonl": {},
       }),
     );
-    expect(owned).toEqual({ status: "ok", paths: [SIDECAR, OUT].sort(), ignored: 5 });
+    expect(owned).toMatchObject({ status: "ok", paths: [SIDECAR, OUT].sort(), ignored: 5 });
+    expect(owned.hashes.get(OUT)).toBeNull();
   });
 
   test("a file that does not parse, or is not the record, is unreadable, never none", () => {
@@ -288,7 +289,7 @@ describe("the ownership record", () => {
     ]) {
       expect(readPipelineOwned(bytes).status).toBe("unreadable");
     }
-    expect(readPipelineOwned(null)).toEqual({ status: "absent", paths: [], ignored: 0 });
+    expect(readPipelineOwned(null)).toMatchObject({ status: "absent", paths: [], ignored: 0 });
   });
 
   test("dropping a path leaves the rest, sorted; dropping none leaves the bytes", () => {
