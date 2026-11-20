@@ -205,6 +205,40 @@ def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[
         return list(reader.fieldnames or []), rows
 
 
+def check_source_table(path: Path) -> None:
+    """Refuse the source electrodes table at `path` unless the table writers can copy it.
+
+    Called by the three table writers (labels, FreeSurfer, SPM) when they plan, right after
+    `read_electrode_set`. `read_electrode_set` itself does not call it, so the surfaces track,
+    which reads only x, y and z, is not refused by a repeated name or a ragged row.
+    """
+    header, rows = _read_tsv(path)
+    check_table(header, rows, path.name)
+
+
+def check_table(header: list[str], rows: list[dict], name: str) -> None:
+    """Refuse an electrodes table the writers could not copy faithfully.
+
+    One rule for every track: a repeated column name, a row with fewer or more cells than the
+    header, and an empty or repeated electrode name are refused with a named reason, never
+    padded, cut or dropped quietly.
+    """
+    if len(set(header)) != len(header):
+        raise GeometryRefusal("electrodes-columns", f"{name} repeats a column name")
+    for number, row in enumerate(rows, start=2):
+        if None in row or None in row.values():
+            raise GeometryRefusal(
+                "electrodes-rows", f"{name} line {number} does not have {len(header)} cells"
+            )
+    if "name" in header:
+        names = [(row.get("name") or "").strip() for row in rows]
+        if any(n.lower() in ("", "n/a") for n in names):
+            raise GeometryRefusal("electrodes-names", f"{name} has an empty electrode name")
+        if len(set(names)) != len(names):
+            dup = sorted({n for n in names if names.count(n) > 1})[0]
+            raise GeometryRefusal("electrodes-names", f"{name} repeats electrode name {dup!r}")
+
+
 def _normalize_type(token: str | None) -> ContactType | None:
     if token is None:
         return None

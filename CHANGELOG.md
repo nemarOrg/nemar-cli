@@ -21,6 +21,12 @@ earlier releases are described only by their generated notes.
   The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
   Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
   A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
+  They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
+  Every written electrodes table now uses `n/a` for any missing value, puts `name`, `x`, `y`, `z`, `size` first, and keeps a column BIDS does not define only when the dataset's own `*_electrodes.json` defines it; other columns stay in the authors' file only.
+  The fetch now also checks out `*_electrodes.json` sidecars at every level; a row with a missing or repeated `name`, or a short or long row, is refused with a named reason (`electrodes-names`, `electrodes-rows`, `electrodes-columns`), and the report gains an optional `electrodes_cleaning` list of what each written table dropped, added or coerced.
+  The package version is 0.1.1.
+  Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
 - **`pr` computes from `main` when it is ahead of the release and records the paths.**
   A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
   A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
