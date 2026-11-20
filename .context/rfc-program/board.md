@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 13 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 14 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -65,13 +65,13 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - |  | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - |  | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
-| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | review | O0 | 2269 |  | 2026-11-20T12:57-08:00 | 4h | r1 review (1 Sonnet, docs-only) on head 7f14f13d |
+| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
 | S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | rfcs#1 |  | 2026-11-20T12:57-08:00 | 2d | r1 fixes (5 important, 9 suggestions) + Q21, Q22; then r2 delta review |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - |  | - | - | owner step after R1 merges |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - |  | - | 4h | lead completes at C1a (R1 merged) |
-| B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | A2 | - |  | - | 1d | waits on A2 merged (Q8 answered) |
+| B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | claude-sonnet | active | A2 | - |  | 2026-11-20T14:25-08:00 | 1d | impl-B1 running |
 | B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | - | blocked | B1 | - |  | - | 1d | waits on B1 merged (Q11 answered) |
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | - | blocked | A1, R1 | - |  | - | 1d | waits on A1 and R1 merged (Q17 answered); owner merges |
 | O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | blocked | B2 | - |  | - | - | owner step after B2 merges; Q13, Q14 recorded only |
@@ -134,4 +134,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-A1 | reviewer | claude-sonnet | Sonnet high | A1 | 2026-11-20T13:30-08:00 | done |
 | rev-R1-code | reviewer | claude-sonnet | Sonnet high | R1 | 2026-11-20T13:45-08:00 | done |
 | rev-R1-tests | reviewer | claude-sonnet | Sonnet high | R1 | 2026-11-20T13:45-08:00 | done |
-| rev-A2 | reviewer | claude-sonnet | Sonnet high | A2 | 2026-11-20T14:08-08:00 | running |
+| rev-A2 | reviewer | claude-sonnet | Sonnet high | A2 | 2026-11-20T14:08-08:00 | done |
+| impl-B1 | implementer | claude-sonnet | Sonnet xhigh | B1 | 2026-11-20T14:25-08:00 | running |

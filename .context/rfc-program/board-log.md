@@ -96,3 +96,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:12-08:00 | Q21 answer redirects: owner wants comments under the Discussion and the RFCs category type changed; clarification asked (category format is an owner setting; Q5 support-address path) |
 | 2026-11-20T13:15-08:00 | A2 PR 2269 head 7f14f13d verified (3 files, 0128 +1 line, index 10 pass); review dispatched |
 | 2026-11-20T13:15-08:00 | R1 r1 review: code lens 5 important, 7 sugg; tests lens 0 crit/imp (32/32 mutations caught), 2 sugg; all sent back with Q21, Q22; clock lag stated in text, cron unchanged per card |
+| 2026-11-20T13:16-08:00 | A2 r1 review: clean of critical/important; 2 suggestions sent back to impl-A2 |
+| 2026-11-20T13:18-08:00 | A2 merged: PR 2269 squash 0184cb051d77587144f501a327b3928c9da97033 (ADR 0131); B1 unblocked to todo |
+| 2026-11-20T13:18-08:00 | Dispatched B1 (claude-sonnet) with Q8, Q9, Q11, Q13, Q14 and tag decisions; Agents today 13/40 |
