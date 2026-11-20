@@ -20,9 +20,11 @@ The board's Steps table is in dispatch priority order, and Depends on the board 
 | claude-opus | B4 | R1, B2 and A2 merged |
 | claude-sonnet | N1 | B4 done, Q15 answered |
 | claude-sonnet | R3 | R1 merged; card completed at C1a |
-| claude-opus | B5 | B2 merged, B6 done; card completed at C1 |
+| claude-opus | A3 | none (Q34); its PR merges only once every lower-numbered ADR is on its base |
+| claude-opus | B5a | B2 merged, O4 done; card written at C1 round 1 (Q33) |
+| claude-opus | B5 | B5a merged, O4d done, B6 done; card completed at C1, rescoped by Q33 |
 | claude-opus | SC1 | B6 and O4b done (Q29, proposal P2) |
-| claude-opus | B4b | B5 merged into `draft/3.0.0`, O4c done |
+| claude-opus | B4b | B5 merged into `draft/3.0.0`, O4c and O4d done |
 | claude-opus | V2 | checkpoint C2 completed the card |
 
 ## Collisions
@@ -39,5 +41,7 @@ The board's Steps table is in dispatch priority order, and Depends on the board 
 | B3, R2 | nemarOrg/docs | may run together; the second to merge takes the base in and reruns its gate |
 | SC1, any other docs PR | nemarOrg/docs | may run together; the second to merge takes the base in and reruns its gate |
 | B5, B6 | `draft/3.0.0` in nemarOrg/biosig-zarr; B5 edits a few lines of `spec/index.md` | B5 branches from `draft/3.0.0` after B6 is done; no other change lands on `draft/3.0.0` while B5 is open |
+| B5a, B5 | `conformance/`, `tools/`, `conformance.yml`, `CHANGELOG.md` | B5 after B5a merges and O4d; B5 merges `main` into its branch first |
+| A3, mail epic #2260 | `.context/decisions/` and the ADR index | A3 takes the next free number above the mail epic's 0132 and merges only after every lower number is on its base |
 | B4b, B4 | the open draft PR nemarOrg/rfcs#2 | B4b after B4 is done and O4c; it pushes one commit to that PR's branch |
 | R3, mail epic #2260 | `backend/src/services/` and `shared/contract/` in nemar-cli, different files | may run together; the second to merge takes the base in and reruns its gate |

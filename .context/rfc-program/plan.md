@@ -47,6 +47,7 @@ The owner decisions of 2026-11-20 (section 2) are settled; a worker or reviewer 
 | Tooling PRs into `main` of nemarOrg/rfcs (R1) | the manager, after the merge gate |
 | Step PRs into `main` of nemarOrg/biosig-zarr (B1, B2) | the manager, after the merge gate |
 | The version 3 text PR in nemarOrg/biosig-zarr (B6, branch `draft/3.0.0`) | nobody before RFC-0001 is accepted; then the owner |
+| B5a's PR into `main` of nemarOrg/biosig-zarr (the version 2 schemas and vectors, editorial by the owner's ruling Q33) | the manager, after the merge gate, with a merge commit |
 | B5's PR into `draft/3.0.0` of nemarOrg/biosig-zarr (not into `main`) | the manager, after the merge gate, with a merge commit |
 | B4b's commit on the open RFC-0001 draft PR | nobody merges; the PR stays a draft |
 | RFC text PRs in nemarOrg/rfcs (B4, V2) | nobody until the owner opens the RFC: merging one with `opened_at` set is the act of opening it |
@@ -151,8 +152,9 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
    The explicit sample resolution field, the irregular and sparse series requirement, and the independence from RFC-9 (owner decisions 5, 8 and 9) are proposed in RFC-0001 (B4), not written into the moved text,
    so the move stays verifiable word for word; B2's report gives B4 the line numbers to quote.
 5. **The schemas and conformance vectors (B5)** were an outline until the owner answered Q9 (the vectors live in biosig-zarr; nemar-cli vendors them by digest) and Q10 (text plus schemas and a few real vectors, no packer); the lead completed the card at checkpoint C1.
-   Everything B5 makes lands on `draft/3.0.0`, not `main`, because `GOVERNANCE.md` makes any schema change normative and `main` carries only accepted text; the owner then tags `3.0.0-draft.2` (O4c), and B4b points RFC-0001 at it.
-   Q9 amends nemar-cli's proposed ADR 0124 decision 3: format-level vectors are canonical in biosig-zarr and vendored into nemar-cli by release tag and manifest digest, while the NEMAR-profile cases stay in nemar-cli; a nemar-cli ADR records it with the first change that vendors them (C3, item 0).
+   The owner ruled, as editor (Q33), that the version 2 schemas and vectors, which only transcribe the `2.0.0` text, are editorial: B5a puts them on `main`, released as `2.0.1` (O4d).
+   B5 then puts the version 3 schemas and vectors on `draft/3.0.0`, after taking `main` in, so the draft carries both; `3.0.0-draft.2` is tagged on it (O4c), and B4b points RFC-0001 at it.
+   Q9 amends nemar-cli's proposed ADR 0124 decision 3: format-level vectors are canonical in biosig-zarr and vendored into nemar-cli by release tag and manifest digest, while the NEMAR-profile cases stay in nemar-cli; the lead's card A3 records it now in a nemar-cli ADR (Q34).
 6. **Issue 2217's in-place patch is withdrawn** (the lead's reading of D2 and ADR 0128's "never patched afterward"): the rename of the format tag lands with the version 3 writer through re-conversion; A2 records it, and the owner confirms it on the A2 PR.
 7. **Where decisions are recorded:** specification decisions in nemarOrg/biosig-zarr's `.context/decisions/`, NEMAR profile and rollout decisions in nemar-cli, each linking its RFC.
 8. **The version 3 text lives on the branch `draft/3.0.0`** in nemarOrg/biosig-zarr; `main` carries only accepted text.
@@ -182,12 +184,15 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
 | B6 | The version 3 text RFC-0001 proposes, on `draft/3.0.0` | lead | O4, A2 | `spec/` on `draft/3.0.0` | nemarOrg/biosig-zarr, draft PR left open |
 | O4b | The owner tags `3.0.0-draft.1` | owner | B6 | one tag | nemarOrg/biosig-zarr |
 | B4 | The RFC-0001 text is written and reviewed as a draft PR | lead | R1, B2, A2 | `text/0001-biosig-zarr.md` | nemarOrg/rfcs, PR left open |
-| B5 | Schemas and the first conformance vectors, on `draft/3.0.0` | lead | B2, B6, Q9, Q10 | `schemas/`, `conformance/`, `tools/`, `conformance.yml` (card B5, written at C1) | nemarOrg/biosig-zarr, `draft/3.0.0` (manager merges) |
-| O4c | The owner tags `3.0.0-draft.2` on B5's merge commit | owner | B5 | one tag | nemarOrg/biosig-zarr |
+| A3 | An ADR supersedes ADR 0124 decision 3 in part: format-level vectors are canonical in biosig-zarr, nemar-cli vendors them (Q9, Q34) | lead | Q9, Q34 | `.context/decisions/` | nemar-cli, `feature/rfc-program` (merges only once every lower-numbered ADR is on its base) |
+| B5a | Version 2 schemas and vectors on `main` (Q33) | lead | B2, O4, Q9, Q10, Q33 | `schemas/v2/`, `conformance/`, `tools/`, `conformance.yml` | nemarOrg/biosig-zarr, `main` (manager merges) |
+| O4d | The manager, on the owner's say-so, releases `2.0.1` on B5a's merge commit | owner | B5a | one release | nemarOrg/biosig-zarr |
+| B5 | Version 3 schemas and vectors on `draft/3.0.0`, with `main` taken in | lead | B5a, O4d, B6, Q9, Q10 | `schemas/v3/`, additions to `conformance/` and `tools/` | nemarOrg/biosig-zarr, `draft/3.0.0` (manager merges) |
+| O4c | The manager, on the owner's say-so (Q36), tags `3.0.0-draft.2` on B5's merge commit | owner | B5 | one tag | nemarOrg/biosig-zarr |
 | B4b | RFC-0001 points at `3.0.0-draft.2` and states the license of quoted text | lead | O4c | `text/0001-biosig-zarr.md` on the open draft PR | nemarOrg/rfcs, PR left open |
 | SC1 | The Store Contract states the version 3 NEMAR profile choices, as what NEMAR will do after RFC-0001 is accepted (Q29) | lead | B6, O4b | `src/content/docs/platform/zarr/store-contract.md` | nemarOrg/docs, `main` (owner merges, or authorizes the manager) |
-| N1 | The RFC-0001 announcements are drafted | worker | B4, Q15 answered | `.context/rfc-program/owner/announce-0001/` | nemar-cli, `feature/rfc-program` |
-| O5 | The owner opens RFC-0001 | owner | B4, B6, O4b, O1b, S1, N1, B5 (Q26), O4c, B4b, the mail epic #2260's P1 to P3 plus the privacy-policy text in production (owner, 2026-11-20), Q10 and Q18 answered | the thread, the merge, announcements | nemarOrg/rfcs |
+| N1 | The RFC-0001 announcements are drafted | worker | B4, Q15 answered (revised by Q31 and Q32) | `.context/rfc-program/owner/announce-0001/` | nemar-cli, `feature/rfc-program` |
+| O5 | The owner opens RFC-0001 | owner | B4, B6, O4b, O1b, S1, N1, B5a and O4d, B5 (Q26), O4c, B4b, the mail epic #2260's P1 to P3 plus the privacy-policy text in production (owner, 2026-11-20), Q10 and Q18 answered | the thread, the merge, announcements | nemarOrg/rfcs |
 | C3 | Checkpoint: RFC-0001 has closed; the lead drafts the decision and outlines the follow-through epic | lead | O5 and the close | `checkpoints.md` row C3 | nemar-cli |
 | V2 | The RFC-0002 text is written and reviewed as a draft PR | outline | V1, O5 | written at checkpoint C2 | nemarOrg/rfcs, PR left open |
 | O6 | The owner opens RFC-0002 (only after RFC-0001 has closed) | owner | V2, C3 | the thread, the merge, announcements | nemarOrg/rfcs |
@@ -259,7 +264,19 @@ gh release create 3.0.0-draft.1 -R nemarOrg/biosig-zarr --target "$SHA" --prerel
   --notes "The text NEMAR RFC 0001 proposes. Not accepted; see nemarOrg/rfcs."
 ```
 
+### O4d. Release 2.0.1 (after B5a merges into `main`)
+
+Run by the manager on the owner's say-so (Q33), recorded with `decide` first (runbook, "Never"); replace `B5A_PR` with B5a's PR number:
+
+```bash
+SHA=$(gh pr view B5A_PR -R nemarOrg/biosig-zarr --json mergeCommit -q .mergeCommit.oid)
+gh release create 2.0.1 -R nemarOrg/biosig-zarr --target "$SHA" --title "2.0.1" \
+  --notes "Format version 2, editorial release: the first JSON Schemas for format version 2 and conformance vectors cut from a CC0 recording. The text is unchanged from 2.0.0. The editor ruled these additions editorial on 2026-11-20 (see CHANGELOG.md)."
+```
+
 ### O4c. Tag 3.0.0-draft.2 (after B5 merges into `draft/3.0.0`)
+
+Run by the manager on the owner's say-so (Q36), recorded with `decide` first (runbook, "Never").
 
 ```bash
 SHA=$(git ls-remote https://github.com/nemarOrg/biosig-zarr refs/heads/draft/3.0.0 | cut -f1)
