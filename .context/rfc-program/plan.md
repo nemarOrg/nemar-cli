@@ -285,6 +285,7 @@ gh release create 3.0.0-draft.1 -R nemarOrg/biosig-zarr --target "$SHA" --prerel
 - **Open item:** no comment in PR 2231's conversation or review comments, or in issue 2568, discusses EDF's limit on irregular or sparse sampling (searched for "EDF", "irregular", "sparse", "timestamp").
   The thread the owner means was not found; it may be in the BEP047 working document or another venue.
   B4 cites it only once the owner supplies the link (question Q18).
+  Later the same day, research found the closest match: a 2024-04-22 thread in BIDS issue 1771 (the issue BEP047 grew from), where EDF+D was raised; the preview draft cites it, and B4 keeps it unless Q18 supplies a better link.
 - Related BIDS threads that do discuss the limit, any of which B4 may cite:
   - `https://github.com/bids-standard/bids-specification/issues/1796`, "[ENH] allow timestamps for physio table" (2024-04-18): an optional timestamp column for irregularly sampled tables, and nominal against effective sampling frequency.
   - `https://github.com/bids-standard/bids-specification/issues/2313`, "Storing sparse/non-continuous peripheral physiological data" (2026-01-19, for BEP045): sparse data and continuous data with a changing sampling rate.
