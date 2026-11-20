@@ -86,6 +86,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:41-08:00 | Owner authorizes Opus xhigh or Fable high for writing contracts and specifications (frontier tier allowed for this work) | owner |  |
 | 2026-11-20T14:49-08:00 | O4b: owner confirmed; manager created pre-release 3.0.0-draft.1 on biosig-zarr 08a990b7 | owner |  |
 | 2026-11-20T14:49-08:00 | Q15: N1 drafts targeted notes for all listed audiences (OME-Zarr/Zarr, hdmf-zarr/NWB, BEP 045 threads, MNE-Python 13429); the owner sends them | owner |  |
+| 2026-11-20T14:58-08:00 | Q31 (revises Q15): no notes in ome/ngff, zarr-specs, hdmf-zarr, BIDS GitHub threads or MNE issues; announcements go to biosignal community venues (EEGLAB and others the owner names) | owner |  |
+| 2026-11-20T14:59-08:00 | Q32: RFC-0001 community notes go to the EEGLAB mailing list, the MNE Forum and Neurostars (plus the email, LinkedIn and BIDS Google group) | owner |  |
 
 ## Log
 
@@ -157,3 +159,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:47-08:00 | B4 r2: 1 important seam defect (in-effect for valid_intervals), resolved by aligning RFC to spec; B6 r2 suggestions sent back |
 | 2026-11-20T14:48-08:00 | B4 done (rfcs#2 b49245f2, draft open) and B6 done (biosig-zarr#4 08a990b7, draft open) per runbook handler; O4b set owner; N1 now waits only on Q15 |
 | 2026-11-20T14:50-08:00 | O4b done; Q15 answered; N1 dispatched (Agents today 35/40). P2 (Store Contract card), B5 (C1) and R3 (C1a) cards wait on the lead session |
+| 2026-11-20T14:57-08:00 | N1 PR 2273 head a38ab2a0 verified (7 files in scope, CLOSE_UTC in all, notice JSON ok, no @handles in notes); review dispatched; Q31 asked |
+| 2026-11-20T14:58-08:00 | N1 r1 review: 0 crit/imp, 4 sugg. Q31 revises Q15 (biosignal venues, not other repos); Q32 asks which venues |
+| 2026-11-20T14:59-08:00 | N1 fix round: venues per Q31/Q32, review suggestions applied |

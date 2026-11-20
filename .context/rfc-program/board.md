@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 35 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 36 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -80,7 +80,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | done | B6 | - |  | - | - | pre-release 3.0.0-draft.1 on 08a990b7, isPrerelease true (verified); compare link 200 |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
-| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | active | B4 | - |  | 2026-11-20T18:45-08:00 | 4h | impl-N1 running |
+| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | active | B4 | 2273 |  | 2026-11-20T18:45-08:00 | 4h | r1 fixes: notes rewritten for EEGLAB list, MNE Forum, Neurostars (Q31, Q32); UTC defined; then r2 delta |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, S1, N1, B5 (Q26) and mail epic #2260 P1-P3; O1b done |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
@@ -121,6 +121,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q28 | - | B6 makes reading version 2 stores a MUST for every version 3 reader (version 1 a SHOULD). D2 only says the back catalog stays readable as v2. Keep the MUST? | Keep MUST, mark it open for comment (Recommended) / Keep MUST, not open / Make it SHOULD | none | 2026-11-22T17:00 | closed | Keep MUST for reading v2, settled (not open); version 1 is expired, so no v1 reading requirement (owner, 2026-11-20T17:45-08:00) |
 | Q29 | - | B6 puts NEMAR profile choices for v3 (D5, D7, D11, D12, no timestamped group in index.json) in the spec's NEMAR profile section, which also names the Store Contract as authoritative. Where should they live? | Spec profile section, Store Contract updated at rollout (Recommended) / Store Contract only / Both now | none | 2026-11-22T17:00 | closed | Both now: spec profile section keeps the v3 NEMAR choices, and the docs Store Contract is updated now (new docs card by the lead) (owner, 2026-11-20T17:45-08:00) |
 | Q30 | - | Q25 test is ill-defined under B6: a 2.00-2.04 s gap at 10 Hz is shorter than one sample and cannot be written in valid_intervals (grid indices). How should sub-sample gaps be handled? | Test with a gap of at least one sample, plus an RFC question on sub-sample gaps (Recommended) / Lead redesigns gaps in source time / Drop the test | none | 2026-11-21T17:00 | closed | Test with a gap of at least one sample, state sub-sample gaps need the timestamped kind, add an RFC question (owner, 2026-11-20T17:55-08:00) |
+| Q31 | - | N1 community notes: mention RFC-9 authors and hdmf-zarr maintainers by GitHub handle (notifies them when posted) or leave them unmentioned? | Leave unmentioned, post in their repos (Recommended) / Mention by handle | none | 2026-11-22T17:00 | closed | Do not post in other projects' repos; RFC-0001 is NEMAR's question for the biosignal community; post on EEGLAB and other venues (owner, 2026-11-20T19:10-08:00) |
+| Q32 | - | Which biosignal community venues get an RFC-0001 note (Q31)? | EEGLAB list, MNE Forum, FieldTrip list, Neurostars (Recommended) / EEGLAB list only / Other | none | 2026-11-22T17:00 | closed | EEGLAB mailing list, MNE Forum, Neurostars (owner, 2026-11-20T19:15-08:00) |
 
 ## Proposals
 
@@ -166,3 +168,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B4-r2 | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T18:15-08:00 | done |
 | rev-B6-r2 | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T18:15-08:00 | done |
 | impl-N1 | implementer | claude-sonnet | Sonnet high | N1 | 2026-11-20T18:45-08:00 | running |
+| rev-N1 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:00-08:00 | done |
