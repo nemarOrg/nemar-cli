@@ -571,51 +571,55 @@ If RFC-9 changes, a `.bzx` file written today stays valid.
 
 ## 9. Why not NWB on Zarr
 
-This is the question NEMAR is asked most often about its stores, so the whole answer is here.
+We are asked this about our stores more than anything else.
 
 NWB has a Zarr backend, [`hdmf-zarr`](https://nwb.org/tools/core/hdmf-zarr/), built on the Hierarchical Data Modeling Framework (HDMF).
 It is a great tool.
-It brings the complete NWB data model, with its typed objects, links and schema, to cloud object storage, and for a laboratory that keeps a session's full record in NWB it is the right choice.
+It puts the whole NWB data model, with typed objects, links and a schema, on cloud object storage.
+A laboratory that keeps each session's full record in NWB should use it.
 
-It does not fit NEMAR's case, and the reason is the shape of the data more than the quality of the tool.
-NEMAR serves human, low-frequency biosignals organized around signal files that follow BIDS principles:
-a data file sits beside its metadata sidecars.
-NWB is a container that holds the metadata.
-A biosig-zarr store is an alternative to the data file, and the sidecars beside it stay the record.
+Our data has a different shape.
+NEMAR serves human, low-frequency biosignals organized the way BIDS organizes them:
+one data file per recording, with its metadata in sidecar files next to it.
+An NWB file holds its metadata inside.
+A biosig-zarr store stands in for the data file and leaves the sidecars where they are, as the record.
 
-NEMAR's decision record on this (ADR 0128, "The Zarr serving copy is not an NWB container", accepted 2026-11-18) gives three reasons.
+ADR 0128 ("The Zarr serving copy is not an NWB container", accepted 2026-11-18) gives three reasons.
 
-1. **Separate scope.**
-   NWB is the complete archival record of a session.
-   A store is one recording's normalized signal, and the BIDS dataset is the record.
-   Conforming would need session, subject and device fields that stores leave out on purpose, and would copy metadata that BIDS already holds.
-   A second copy of metadata that can change drifts.
-2. **Technical incompatibility.**
-   NWB time series are time-first with one conversion factor per series; stores are channels-first with a scale per channel.
-   NWB uses typed objects linked by references, a schema cached in the file, and compound types that need Zarr extension data types.
-   Its consolidated metadata would go stale each time NEMAR rewrites a store in place.
-3. **The NWB Zarr specification was not settled.**
-   When checked on 2026-11-18, the maintainers described the backend as under development, a recent release had moved to a layout older readers cannot open, and validation of Zarr files was incomplete.
-   These facts will age, and they should be rechecked before anyone relies on them.
+First, the scope differs.
+An NWB file is the archival record of a whole session.
+A store holds one recording's normalized signal, and the BIDS dataset around it is the record.
+To conform, a store would need session, subject and device fields that we leave out on purpose, and it would duplicate metadata that BIDS already holds.
+Two copies of metadata that can change will drift apart.
 
-**What NEMAR does instead.**
-Any NWB output NEMAR produces is a stateless export, generated on request from the store and the BIDS dataset at a known commit, never a second stored copy.
-Two things are aligned on purpose so that export stays simple:
-the dequantization formula is NWB's `conversion` and `offset` given per channel,
+Second, the layouts do not match.
+NWB stores a time series time-first, with one conversion factor for the series (electrical series can add a per-channel `channel_conversion`).
+Our stores are channels-first, with a scale per channel.
+NWB also links typed objects by reference, caches its schema in the file, and uses compound types that need Zarr's extension data types.
+Its consolidated metadata would go stale every time we rewrite a store in place.
+
+Third, the NWB Zarr specification was still moving.
+On 2026-11-18 the maintainers described the backend as under development,
+a recent release had switched to a layout that older readers cannot open,
+and validation of Zarr files was incomplete.
+Those facts will change, so check them again before relying on them.
+
+What we do instead is export.
+NEMAR builds NWB output on request from the store and the BIDS dataset at a known commit, and never keeps it as a second stored copy.
+To keep that export simple, the dequantization formula matches NWB's `conversion` and `offset`, given per channel,
 and event columns follow BIDS and HED, which the `ndx-hed` extension maps onto NWB.
 The `continuity` vocabulary proposed in section 5.6 is NWB's.
 
-**When this is revisited.**
-The record says to revisit when any two of these hold:
-a named consumer needs NWB with a concrete tool that reads it;
+We will revisit the decision when any two of these hold:
+a named user needs NWB and has a concrete tool that reads it;
 the Distributed Archives for Neurophysiology Data Integration (DANDI) accepts Zarr NWB uploads and the NWB Inspector validates Zarr;
-`hdmf-zarr` drops its under-development status;
-MNE-Python gains NWB reading and writing;
+`hdmf-zarr` is no longer marked as under development;
+MNE-Python can read and write NWB;
 NWB gains core types for scalp EEG or MEG.
 Revisiting means building the export, not changing the store.
 
 The decision itself is settled (section 11).
-What is open for comment is whether its reasoning is fair and current, and what an export would need to be useful (questions 33 to 35).
+We ask for comment on whether its reasoning is fair and current, and on what an export would need to be useful (questions 33 to 35).
 
 ## 10. Alternatives considered
 
