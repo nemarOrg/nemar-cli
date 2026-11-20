@@ -7,6 +7,10 @@
  * Cloudflare path calls the `send_email` binding (epic #1893, ADR 0110).
  */
 
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  type CommunityMailPreferences,
+} from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
@@ -284,10 +288,15 @@ function sendFailureText(error: unknown, address: string): string {
   return redactAddressIn(error instanceof Error ? error.message : String(error), address);
 }
 
-export interface EmailPreferences {
-  user_approval: boolean;
-  publication_request: boolean;
-  announcements: boolean;
+/**
+ * The alerts an admin or owner receives about their own work. Each is switched per account in
+ * `users.email_preferences` and read by {@link getAdminEmailsForCategory}, which is why none of the
+ * community categories (news, RFCs, maintenance, recalls) is among them: a community message has
+ * no "at least one admin must receive it" fallback and must never reach that code (ADR 0132).
+ */
+export const ADMIN_ALERT_CATEGORIES = [
+  "user_approval",
+  "publication_request",
   /**
    * The anonymity sweep found something on an anonymous deposit (#1409).
    *
@@ -297,7 +306,7 @@ export interface EmailPreferences {
    * have been disclosed. Coupling the two would let the second be switched off
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
-  dataset_anonymity: boolean;
+  "dataset_anonymity",
   /**
    * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
    *
@@ -306,24 +315,36 @@ export interface EmailPreferences {
    * hearing which published datasets carry identifiers. Opted in by default,
    * like every category here, so a stored row from before it existed receives it.
    */
-  identifier_sweep: boolean;
+  "identifier_sweep",
   /**
    * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
    * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
    * the ticket stream without losing approval or publication mail. Opted in by default.
    */
-  support_tickets: boolean;
-}
+  "support_tickets",
+] as const;
 
-export type EmailCategory = keyof EmailPreferences;
+export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
+
+export type AdminAlertPreferences = { [K in AdminAlertCategory]: boolean };
+
+/**
+ * Everything `users.email_preferences` can say: the admin alerts plus the three community
+ * categories a person may turn off. A recall is not here, because nothing may turn it off.
+ * `announcements`, the one key that used to cover all community mail, is retired (ADR 0132,
+ * migration 0146); it is carried into `news`, `rfcs` and `maintenance` and no longer stored.
+ */
+export type EmailPreferences = AdminAlertPreferences & CommunityMailPreferences;
 
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
-  announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
   support_tickets: true,
+  news: true,
+  rfcs: true,
+  maintenance: true,
 };
 
 interface ResendResponse {
@@ -338,23 +359,23 @@ interface AdminRow {
 }
 
 /**
- * Parse email preferences from DB JSON string, defaulting to all enabled
+ * Parse email preferences from DB JSON string, defaulting to all enabled.
+ *
+ * `!== false` for every key, so a key a row has never seen opts IN rather than out: defaulting a
+ * new alert to off would silently give every current admin no anonymity mail at all, and a
+ * community category an account never chose is on by default (ADR 0132, owner decision of
+ * 2026-11-20: news is opt-out). A row stored before the community keys existed is rewritten
+ * with explicit values by migration 0146, so "missing" here means "created after it".
  */
 export function parseEmailPreferences(raw: string | null): EmailPreferences {
   if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
   try {
     const parsed = JSON.parse(raw);
-    return {
-      user_approval: parsed.user_approval !== false,
-      publication_request: parsed.publication_request !== false,
-      announcements: parsed.announcements !== false,
-      // `!== false` throughout, so a row stored before this key existed opts
-      // IN rather than out. Defaulting a new alert to off would silently give
-      // every current admin no anonymity mail at all.
-      dataset_anonymity: parsed.dataset_anonymity !== false,
-      identifier_sweep: parsed.identifier_sweep !== false,
-      support_tickets: parsed.support_tickets !== false,
-    };
+    const result = { ...DEFAULT_EMAIL_PREFERENCES };
+    for (const key of [...ADMIN_ALERT_CATEGORIES, ...COMMUNITY_MAIL_CATEGORIES]) {
+      result[key] = parsed[key] !== false;
+    }
+    return result;
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
     return { ...DEFAULT_EMAIL_PREFERENCES };
@@ -415,7 +436,7 @@ export function isAdminNotificationAllowed(env: AdminNotificationEnv | undefined
  */
 export async function getAdminEmailsForCategory(
   db: D1Database,
-  category: EmailCategory,
+  category: AdminAlertCategory,
   env: AdminNotificationEnv,
 ): Promise<string[]> {
   if (!isAdminNotificationAllowed(env)) {
