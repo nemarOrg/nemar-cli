@@ -1,6 +1,6 @@
 # RFC program: plan
 
-**Status:** draft for the owner's approval, 2026-11-20.
+**Status:** revised after the C0 pack review, 2026-11-20; waits for the owner's approval (step O0).
 **Owner:** Seyed Yahya Shirazi.
 **Lead:** Opus (lead tier) wrote this pack; a Sonnet manager runs it with the `project:manager-loop` skill.
 
@@ -43,9 +43,10 @@ The owner decisions of 2026-11-20 (section 2) are settled; a worker or reviewer 
 
 | Pull request (PR) | Who merges |
 | --- | --- |
-| Step PRs into `feature/rfc-program` in nemarOrg/nemar-cli (A1, V1) | the manager, after the merge gate |
+| Step PRs into `feature/rfc-program` in nemarOrg/nemar-cli (A1, A2, V1, S1, N1) | the manager, after the merge gate |
 | Tooling PRs into `main` of nemarOrg/rfcs (R1) | the manager, after the merge gate |
 | Step PRs into `main` of nemarOrg/biosig-zarr (B1, B2) | the manager, after the merge gate |
+| The version 3 text PR in nemarOrg/biosig-zarr (B6, branch `draft/3.0.0`) | nobody before RFC-0001 is accepted; then the owner |
 | RFC text PRs in nemarOrg/rfcs (B4, V2) | nobody until the owner opens the RFC: merging one with `opened_at` set is the act of opening it |
 | Any PR to nemarOrg/docs (R2, B3) | the owner; a docs merge publishes |
 | `feature/rfc-program` into `dev` | the owner, through `/project:epic-dev --finalize`; never an admin merge |
@@ -68,9 +69,11 @@ When this program ends:
 1. nemarOrg/rfcs exists, holds the process, the template, the index and two working checks (`rfc-check` and `rfc-clock`), and is protected by a ruleset that requires `rfc-check`.
 2. An ADR in nemar-cli adopts the process, marked provisional, to be reviewed after the first two RFCs.
 3. docs.nemar.org has a page `/policies/rfcs/` that explains the process and links to the index.
-4. nemarOrg/biosig-zarr exists, initialized with `/project:init-project`, holding the specification text moved from docs.nemar.org, and tagged `2.0.0` by the owner.
-5. The RFC-0001 text (the whole biosig-zarr format, with `.bzx` as its single-file form) is reviewed and waits as a draft PR for the owner to open it.
-6. The counts that RFC-0002 needs are measured, and the RFC-0002 text (dataset version legibility) is reviewed and waits as a draft PR for the owner to open it.
+4. nemarOrg/biosig-zarr exists, initialized with `/project:init-project`, holding the specification text moved from docs.nemar.org and relicensed, tagged `2.0.0` by the owner; docs.nemar.org points to it instead of copying it.
+5. An ADR supersedes the parts of ADR 0128 the owner changed (A2), and the version 3 text RFC-0001 proposes sits on `draft/3.0.0`, tagged `3.0.0-draft.1` (B6, O4b).
+6. The back catalog the rollout touches is measured (S1), and the announcements are drafted (N1).
+7. The RFC-0001 text (the whole biosig-zarr format, with `.bzx` as its single-file form) is reviewed and waits as a draft PR for the owner to open it.
+8. The counts that RFC-0002 needs are measured, and the RFC-0002 text (dataset version legibility) is reviewed and waits as a draft PR for the owner to open it.
 
 Opening an RFC, deciding it, and announcing it are the owner's acts, outside the manager's reach.
 
@@ -122,7 +125,14 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
    an origin recorded for each version, with the upstream tag shown;
    revisiting the rule that a re-pull is a major version;
    and `+N` or another version grammar.
-   It opens after RFC-0001, and after a read-only count of the version Digital Object Identifiers (DOIs) already minted.
+   It opens after RFC-0001 closes, and after a read-only count of the version Digital Object Identifiers (DOIs) already minted.
+11. **Later owner decisions** (2026-11-20, recorded in `board-log.md` Decisions, which override anything above):
+   D1 to D12 of the time and resolution design are adopted and RFC-0001 proposes them as `format_version` 3;
+   RFC-0001 addresses the whole biosignal community, opens with the measured impact, defines "store" as a biosig-zarr store, and ends with a history of the format;
+   the moved text is tagged `2.0.0`, a full release whose notes list the four parts the text marks Proposed; RFC-0001's text is `3.0.0-draft.1`;
+   the owner relicenses the specification text to the agreed licenses, recorded in `LICENSE.md`, and the format page on docs.nemar.org is removed and replaced by a pointer;
+   at most one RFC is open for comment at a time, enforced by `rfc-check`;
+   the program has a public epic issue made with `/project:epic-dev` (step E0), and the manager loop drives the steps.
 
 ## 3. Lead decisions made while writing this pack
 
@@ -130,7 +140,7 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
    nemarOrg/biosig-zarr has no `rfc/` directory; its README links to the RFC.
    This replaces the `rfc/` directory in the planning note's layout.
 2. **A draft RFC is a PR, not a merged file.**
-   The draft PR takes its number when it is opened (the next number unused by merged files and open PRs), and a number is never reused, even when a draft is withdrawn.
+   The draft PR takes its number when it is opened (the next number unused by merged files and by every PR, open or closed, that ever added a `text/` file), and a number is never reused, even when a draft is withdrawn.
    Merging the PR with `opened_at` and `discussion` set is the act of opening the RFC, so only the owner merges an RFC text PR.
 3. **No reader or writer library lives in nemarOrg/biosig-zarr.**
    Python packing goes to biosigIO and TypeScript reading to nemar-cli, outside this program.
@@ -138,28 +148,42 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
    The explicit sample resolution field, the irregular and sparse series requirement, and the independence from RFC-9 (owner decisions 5, 8 and 9) are proposed in RFC-0001 (B4), not written into the moved text,
    so the move stays verifiable word for word; B2's report gives B4 the line numbers to quote.
 5. **The schemas and conformance vectors (B5) are an outline** until the owner answers where the vectors live (Q9) and whether RFC-0001 may open without an implementation (Q10).
+6. **Issue 2217's in-place patch is withdrawn** (the lead's reading of D2 and ADR 0128's "never patched afterward"): the rename of the format tag lands with the version 3 writer through re-conversion; A2 records it, and the owner confirms it on the A2 PR.
+7. **Where decisions are recorded:** specification decisions in nemarOrg/biosig-zarr's `.context/decisions/`, NEMAR profile and rollout decisions in nemar-cli, each linking its RFC.
+8. **The version 3 text lives on the branch `draft/3.0.0`** in nemarOrg/biosig-zarr; `main` carries only accepted text.
+9. **Readers refuse version 3 before it is served:** every NEMAR reader refuses a store whose `format_version` is above 2, and the dataset index records each store's `format_version`, before any version 3 store reaches the serving bucket (design review, finding 1); RFC-0001 states it as a rollout rule and C3 puts it first in the follow-through.
+10. **The interim EDF+D fix is owned outside this program:** neuromechanist/biosigio#180, step 1 (refuse EDF+D and BDF+D sources with gaps), is a draft PR by a worker, owned by the owner as biosigIO's maintainer; RFC-0001 cites it, and S1 counts the affected stores.
 
 ## 4. Steps
 
 | ID | Goal | Tier | Depends | Owns | Repository and integration branch |
 | --- | --- | --- | --- | --- | --- |
-| O1 | The owner creates nemarOrg/rfcs and turns on its Discussions | owner | none | settings | nemarOrg/rfcs |
-| A1 | An ADR adopts the RFC process, provisional | worker | Q1 to Q7 answered | `.context/decisions/` | nemar-cli, `feature/rfc-program` |
-| R1 | nemarOrg/rfcs holds the process, template, schema, index, `rfc-check` and `rfc-clock`, all tested | worker-hard | O1, Q1 to Q7 answered | the whole repository | nemarOrg/rfcs, `main` |
+| O0 | The owner approves this plan; the lead pushes `feature/rfc-program` | owner | C0 | the approval | nemar-cli |
+| E0 | The lead creates the public epic issue and sub-issues with `/project:epic-dev` | lead | O0 | the epic issue, `.claude/epic.local.md` | nemar-cli |
+| O1 | The owner creates nemarOrg/rfcs and turns on its Discussions (repository and Discussions done 2026-11-20; two browser steps remain) | owner | none | settings | nemarOrg/rfcs |
+| O2 | The owner creates nemarOrg/biosig-zarr and amends biosigio#179 (done 2026-11-20) | owner | none | settings, one comment | nemarOrg/biosig-zarr |
+| V1 | The counts RFC-0002 needs are measured, read-only | worker | none (PR after O0) | `.context/rfc-program/evidence/` | nemar-cli, `feature/rfc-program` |
+| A1 | An ADR adopts the RFC process, provisional | worker | O0 | `.context/decisions/` | nemar-cli, `feature/rfc-program` |
+| A2 | An ADR supersedes the parts of ADR 0128 the owner changed | lead | O0 | `.context/decisions/` | nemar-cli, `feature/rfc-program` |
+| S1 | The back catalog the rollout touches, and conversion throughput, are measured read-only | worker | O0 | `.context/rfc-program/evidence/` | nemar-cli, `feature/rfc-program` |
+| R1 | nemarOrg/rfcs holds the process, template, schema, index, `rfc-check` and `rfc-clock`, all tested | worker-hard | O0, O1 | the whole repository | nemarOrg/rfcs, `main` |
 | O1b | The owner adds the `main` ruleset requiring `rfc-check` | owner | R1 | settings | nemarOrg/rfcs |
 | R2 | docs.nemar.org has `/policies/rfcs/` | worker | A1, R1, Q17 answered | `src/content/docs/policies/rfcs.md`, sidebar | nemarOrg/docs, `main` (owner merges) |
-| R3 | The weekly report shows the open RFCs and when `rfc-clock` last ran | outline | R1, Q7 | to be written at checkpoint C1 | nemar-cli, `feature/rfc-program` |
-| O2 | The owner creates nemarOrg/biosig-zarr and amends biosigio#179 | owner | none | settings, one comment | nemarOrg/biosig-zarr |
-| B1 | biosig-zarr is initialized with `/project:init-project`, plus the files it does not create | worker-hard | O2, Q8 answered | the whole repository | nemarOrg/biosig-zarr, `main` |
+| R3 | The weekly report shows the open RFCs and when `rfc-clock` last ran | outline | R1 | written at checkpoint C1a | nemar-cli, `feature/rfc-program` |
+| B1 | biosig-zarr is initialized with `/project:init-project`, plus the files it does not create | worker-hard | A2, Q8 answered | the whole repository | nemarOrg/biosig-zarr, `main` |
 | B2 | The specification text is moved into `spec/index.md` as plain Markdown | worker | B1, Q11 answered | `spec/`, `CHANGELOG.md`, `README.md` | nemarOrg/biosig-zarr, `main` |
 | O4 | The owner tags `2.0.0` | owner | B2 | one tag | nemarOrg/biosig-zarr |
-| B3 | docs.nemar.org renders the specification from the pinned tag, with a per-page license notice | worker-hard | O4, Q12 answered | docs build step, the format page | nemarOrg/docs, `main` (owner merges) |
-| B4 | The RFC-0001 text is written and reviewed as a draft PR | lead | R1, B2 | `text/0001-biosig-zarr.md` | nemarOrg/rfcs, PR left open |
-| B5 | Schemas and the first conformance vectors | outline | B2, Q9, Q10 | to be written at checkpoint C1 | nemarOrg/biosig-zarr |
-| O5 | The owner opens RFC-0001 | owner | B4, O1b, Q15 answered | the thread, the merge, announcements | nemarOrg/rfcs |
-| V1 | The counts RFC-0002 needs are measured, read-only | worker | none | `.context/rfc-program/evidence/` | nemar-cli, `feature/rfc-program` |
-| V2 | The RFC-0002 text is written and reviewed as a draft PR | outline | V1, O5 | to be written at checkpoint C2 | nemarOrg/rfcs, PR left open |
-| O6 | The owner opens RFC-0002 | owner | V2 | the thread, the merge, announcements | nemarOrg/rfcs |
+| B3 | docs.nemar.org's format page becomes a pointer to nemarOrg/biosig-zarr | worker | O4 | the format page | nemarOrg/docs, `main` (owner merges) |
+| B6 | The version 3 text RFC-0001 proposes, on `draft/3.0.0` | lead | O4, A2 | `spec/` on `draft/3.0.0` | nemarOrg/biosig-zarr, draft PR left open |
+| O4b | The owner tags `3.0.0-draft.1` | owner | B6 | one tag | nemarOrg/biosig-zarr |
+| B4 | The RFC-0001 text is written and reviewed as a draft PR | lead | R1, B2, A2 | `text/0001-biosig-zarr.md` | nemarOrg/rfcs, PR left open |
+| B5 | Schemas and the first conformance vectors | outline | B2, Q9, Q10 | written at checkpoint C1 | nemarOrg/biosig-zarr |
+| N1 | The RFC-0001 announcements are drafted | worker | B4, Q15 answered | `.context/rfc-program/owner/announce-0001/` | nemar-cli, `feature/rfc-program` |
+| O5 | The owner opens RFC-0001 | owner | B4, B6, O4b, O1b, S1, N1, Q10 and Q18 answered | the thread, the merge, announcements | nemarOrg/rfcs |
+| C3 | Checkpoint: RFC-0001 has closed; the lead drafts the decision and outlines the follow-through epic | lead | O5 and the close | `checkpoints.md` row C3 | nemar-cli |
+| V2 | The RFC-0002 text is written and reviewed as a draft PR | outline | V1, O5 | written at checkpoint C2 | nemarOrg/rfcs, PR left open |
+| O6 | The owner opens RFC-0002 (only after RFC-0001 has closed) | owner | V2, C3 | the thread, the merge, announcements | nemarOrg/rfcs |
+| C4 | Checkpoint: RFC-0002 has closed; decision draft and the review of the process ADR | lead | O6 and the close | `checkpoints.md` row C4 | nemar-cli |
 
 Acceptance gates are literal on each card in [`cards/`](cards/).
 Owner steps have no card; their exact commands are in section 5.
@@ -168,7 +192,14 @@ Owner steps have no card; their exact commands are in section 5.
 
 Nothing in this section is run by the manager or a worker.
 
+### O0. Approve the plan
+
+The owner says "approved" in the session after reading this plan as revised after C0.
+The lead then runs `git -C /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/rfc-program push -u origin feature/rfc-program` and records the approval with `decide "plan approved" --by owner`.
+
 ### O1. Create nemarOrg/rfcs and turn on Discussions
+
+Done 2026-11-20 (run by the lead on the owner's instruction), with an initial README commit on `main`; only the two browser steps below remain.
 
 ```bash
 gh repo create nemarOrg/rfcs --public --disable-wiki \
@@ -191,6 +222,8 @@ run from a clone of nemarOrg/rfcs; R1 writes `ops/ruleset-main.json`.
 
 ### O2. Create nemarOrg/biosig-zarr and amend biosigio#179
 
+Done 2026-11-20 (run by the lead on the owner's instruction), with an initial README commit on `main`.
+
 ```bash
 gh repo create nemarOrg/biosig-zarr --public --disable-wiki \
   --description "biosig-zarr: a Zarr v3 layout for one biosignal recording, and its single-file form .bzx"
@@ -198,12 +231,24 @@ gh issue comment 179 -R neuromechanist/biosigio \
   --body-file /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/rfc-program/.context/rfc-program/owner/biosigio-179-amendment.md
 ```
 
-### O4. Tag the first draft (after B2 merges)
+### O4. Release 2.0.0 (after B2 merges)
+
+Tag B2's merge commit, not whatever `main` holds later (replace `B2_PR` with B2's PR number):
 
 ```bash
-SHA=$(gh api repos/nemarOrg/biosig-zarr/commits/main -q .sha)
-gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" \
-  --title "2.0.0" --notes "Format version 2 as NEMAR serves it, moved from docs.nemar.org; no normative change."
+SHA=$(gh pr view B2_PR -R nemarOrg/biosig-zarr --json mergeCommit -q .mergeCommit.oid)
+gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" --title "2.0.0" \
+  --notes "Format version 2, moved from docs.nemar.org with no normative change and relicensed (see LICENSE.md). Four parts the text marks Proposed are not yet implemented in NEMAR's stores: the biosig-zarr tag inside stores, .bzx, generated_by, and the conformance classes."
+```
+
+Questions Q13 (a w3id.org identifier) and Q14 (DOIs for specification releases) are recorded for this step but change nothing in it; if answered "yes", they are owner acts after the release.
+
+### O4b. Tag 3.0.0-draft.1 (after B6 passes its merge gate; the PR stays open)
+
+```bash
+SHA=$(gh pr view draft/3.0.0 -R nemarOrg/biosig-zarr --json headRefOid -q .headRefOid)
+gh release create 3.0.0-draft.1 -R nemarOrg/biosig-zarr --target "$SHA" --prerelease --title "3.0.0-draft.1" \
+  --notes "The text NEMAR RFC 0001 proposes. Not accepted; see nemarOrg/rfcs."
 ```
 
 ### O5 and O6. Open an RFC
@@ -220,12 +265,14 @@ gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" \
 
    The two IDs come from the first command; `opening-post.md` is the opening post the RFC PR carries in its body (R1's template defines it).
 2. On the RFC PR, set `discussion` (the URL), `opened_at` (the `createdAt`, to the minute) and `window_days: 21`; `rfc-check` must pass; merge it.
-3. Announce through the channels the process lists (R1's `PROCESS.md`).
+3. Announce from N1's drafts in `.context/rfc-program/owner/announce-0001/`, after filling `{{CLOSE_UTC}}` and `{{THREAD_URL}}`, through the channels the process lists (R1's `PROCESS.md`).
+   Only one RFC is open at a time: O6 waits until RFC-0001 has closed.
    Broadcast mail is production-only and honors the `announcements` preference.
 
 ## 6. Out of scope
 
-- Any reader, writer or packer code (biosigIO, nemar-cli's Zarr reader in #2144, `nemar dataset download --zarr` in #2216).
+- Any reader, writer or packer code (biosigIO, nemar-cli's Zarr reader in #2144, `nemar dataset download --zarr` in #2216); C3 outlines it as a follow-through epic after acceptance (see `checkpoints.md`).
+- The EDF+D interim fix (neuromechanist/biosigio#180, step 1), owned by the owner as biosigIO's maintainer; this program cites it and S1 counts the affected stores.
 - Building whatever RFC-0002 decides.
 - The five automatic re-pulls held after `copy-failed (HeadObject:access-denied)` (on003774, on003751, on003708, on003702, on003626), found while planning; the owner tracks them separately.
 
@@ -245,6 +292,9 @@ gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" \
 
 ## Appendix: pack review (checkpoint C0)
 
-Not yet run.
-Before the first tick, an executability reviewer (worker tier) and a design reviewer (lead tier) read this pack;
-each finding is listed here with its disposition (fixed, rejected with a reason).
+Run 2026-11-20: an executability review (Sonnet) and a design review (Opus).
+Every finding was applied unless marked otherwise.
+
+Executability: 1 B4 starts from the preview draft, gates on no "Unverified" and no banner; 2 moot, both repositories have an initial commit; 3 step O0 and a runbook rule refuse dispatch before the branch is on origin; 4 V1's row fixed; 5 owner-state steps asked at the first tick and exempt from timebox handlers; 6 B4 says what to do without Q18 and where D1 to D12 are; 7 handlers for owner merges, C3 and C4 as steps, risk dates, checkpoint gates, when to ask questions; 8 B2's report pasted for B4; 9 V1, S1 and B4 gates can fail; 10 O5's questions aligned, Q13 and Q14 recorded only, R3 completes at C1a; 11 asked as Q19 (owner owns Slots); 12 settled by the owner: epic issue (E0); 13 no change, the answers are on the board; 14 `_typos.toml` in R1; 15 O4 tags B2's merge commit.
+
+Design: 1 reader refusal before serving, in the draft and C3; 2 card A2; 3 card B6 and step O4b; 4 and 5 rules added to R1; 6 lead decision 7; 7 settled by the owner: relicense and remove the docs page (B3 rewritten); 8 B2 records the UUID only in an ADR, Q11 reworded; 9 settled by the owner: full release, notes list the Proposed parts, tag scheme in GOVERNANCE.md; 10 disambiguation in the draft; 11 card S1; 12 lead decision 10; 13 draft fixed; 14 C3's follow-through list; 15 card N1 and Q15 widened; 16 settled by the owner: one RFC at a time; 17 draft front matter and section 14 fixed; 18 close instant defined in R1 and the draft; 19 moot; 20 draft marked.
