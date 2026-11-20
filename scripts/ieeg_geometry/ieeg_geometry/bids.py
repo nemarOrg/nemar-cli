@@ -6,10 +6,13 @@ import csv
 import json
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from .names import join_channels
 
 _MISSING = {"", "n/a", "na", "nan"}
 _UNIT_TO_MM = {"m": 1000.0, "cm": 10.0, "mm": 1.0}
@@ -212,16 +215,21 @@ def _normalize_type(token: str | None) -> ContactType | None:
 
 
 def _channel_types(
-    paths: tuple[Path, ...],
+    paths: tuple[Path, ...], contact_names: Sequence[str] = ()
 ) -> tuple[dict[str, ContactType], tuple[str, ...]]:
     """Contact types from channels files, and a warning per file whose name or type cells
-    contained undecodable bytes (replaced by U+FFFD; those cells may not match)."""
+    contained undecodable bytes (replaced by U+FFFD; those cells may not match).
+
+    A channel named as the recording header names it (`POL A1-AV`, `EEG G_03-REF`) gives its type
+    to the contact `names.join_channels` pairs it with, so a channels file may be renamed while
+    electrodes.tsv keeps the contact names; a bipolar channel gives it to both contacts."""
     types: dict[str, ContactType] = {}
     warnings: list[str] = []
     for path in paths:
         # A non-UTF-8 byte in another column (on006233's units) is not fatal.
         _, rows = _read_tsv(path, errors="replace")
         damaged = 0
+        typed: list[tuple[str, ContactType]] = []
         for row in rows:
             name = (row.get("name") or "").strip()
             kind_text = row.get("type")
@@ -229,7 +237,12 @@ def _channel_types(
                 damaged += 1
             kind = _normalize_type(kind_text)
             if kind and name:
+                typed.append((name, kind))
                 types.setdefault(name, kind)
+        paired = join_channels([name for name, _ in typed], contact_names) if contact_names else {}
+        for name, kind in typed:
+            for contact in paired.get(name, ()):
+                types.setdefault(contact, kind)
         if damaged:
             warnings.append(
                 f"{path.name}: {damaged} name or type cell(s) had undecodable bytes "
@@ -284,7 +297,9 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
-    from_channels, warnings = _channel_types(item.channels_paths)
+    from_channels, warnings = _channel_types(
+        item.channels_paths, [(row.get("name") or "").strip() for row in rows]
+    )
     contacts: list[Contact] = []
     for row in rows:
         name = (row.get("name") or "").strip()
