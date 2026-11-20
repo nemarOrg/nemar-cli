@@ -40,7 +40,7 @@ The text this RFC proposes is tagged `3.0.0-draft.1` when the RFC opens, and bec
 
 ## 2. Who should read this
 
-- **People who record, share or analyze EEG, MEG, intracranial EEG (iEEG) or electromyography (EMG) data.**
+- **People who record, share or analyze biosignals of any kind**: EEG, MEG, iEEG, EMG, ECG, physiology, motion, wearables and more.
   Sections 3, 5, 6 and 13 are for you: does the time model fit your recordings, and does the store say enough about what was done to your samples?
 - **People who build Zarr readers, writers and viewers.**
   Sections 4, 7 and 8 are for you: is the layout readable with your tool, and are the packing rules ones you can implement?
