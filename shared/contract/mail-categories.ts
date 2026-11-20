@@ -136,3 +136,11 @@ export function mailCategoryDescription(id: MailCategory): string {
 export function mailRecallWhy(): string {
   return ACCOUNT_COPY["mail.recall.why"];
 }
+
+/**
+ * The refusal an admin who is not an owner gets for naming an admin alert on another account
+ * (`PUT /admin/email-preferences?user=`), worded for the CLI flags that produce it: `--all` and
+ * the five alert flags all include alerts, so the way forward is the three category flags.
+ */
+export const COMMUNITY_ONLY_REFUSAL =
+  "Only owners can change another account's admin alerts. As an admin you can change another account's mail categories only: use --news, --rfcs and --maintenance, not --all or the alert flags.";

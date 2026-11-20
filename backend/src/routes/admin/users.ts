@@ -13,6 +13,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 import {
   COMMUNITY_MAIL_CATEGORIES,
+  COMMUNITY_ONLY_REFUSAL,
   type CommunityMailPreferences,
   RECALL_PREFERENCE,
   mailRecallWhy,
@@ -1984,10 +1985,6 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     recall: z.unknown().optional(),
   });
 
-  /** What an admin may see of, and change on, an account that is not their own and not an owner's call. */
-  const COMMUNITY_ONLY_NOTE =
-    "Only owners can change another account's admin alerts; any admin can change its news, rfcs and maintenance categories";
-
   /** The preferences a caller may see for `target`: all of them, or the community ones only. */
   function preferencesView(prefs: EmailPreferences, communityOnly: boolean) {
     const community = Object.fromEntries(
@@ -2058,33 +2055,36 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const crossAccount = target.id !== user.id;
     const communityOnly = crossAccount && user.role !== "owner";
     if (communityOnly && ADMIN_ALERT_CATEGORIES.some((key) => body[key] !== undefined)) {
-      return c.json({ error: COMMUNITY_ONLY_NOTE }, 403);
+      return c.json({ error: COMMUNITY_ONLY_REFUSAL }, 403);
     }
 
-    // Load existing preferences
-    const row = await db
-      .prepare("SELECT email_preferences FROM users WHERE id = ?")
-      .bind(target.id)
-      .first<{ email_preferences: string | null }>();
-
-    const current = parseEmailPreferences(row?.email_preferences ?? null);
-    const next: EmailPreferences = { ...current };
+    // ONLY the keys the request names are written, as a per-key json_set evaluated when the
+    // statement runs (saveEmailPreferences): reading the blob here and writing all of it back
+    // would revert a concurrent write to any other key, and diff the audit against a stale copy.
+    const changes: Partial<EmailPreferences> = {};
     for (const key of [...ADMIN_ALERT_CATEGORIES, ...COMMUNITY_MAIL_CATEGORIES]) {
       const value = body[key];
-      if (value !== undefined) next[key] = value;
+      if (value !== undefined) changes[key] = value;
     }
 
     const applied = await saveEmailPreferences(db, {
       targetId: target.id,
       targetUsername: target.username,
       actorId: user.id,
-      current,
-      next,
-      via: crossAccount ? "admin" : "cli",
+      changes,
+      via: crossAccount ? "admin" : "self",
     });
     if (!applied) return c.json({ error: "User not found" }, 404);
 
-    return c.json({ ...preferencesView(next, communityOnly), username: target.username });
+    // Answer with what is stored now, which includes any concurrent write, not with a guess.
+    const row = await db
+      .prepare("SELECT email_preferences FROM users WHERE id = ?")
+      .bind(target.id)
+      .first<{ email_preferences: string | null }>();
+    return c.json({
+      ...preferencesView(parseEmailPreferences(row?.email_preferences ?? null), communityOnly),
+      username: target.username,
+    });
   });
 
   // ============================================================================
@@ -2206,7 +2206,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * A queued announcement (epic #1893 phase 2) finishes after the POST has answered: the
    * consumer writes one outcome per message to the audit row. `unknown_count` is sends whose
    * outcome the provider never confirmed (a timeout, an internal error); they are not retried
-   * because a retry could deliver twice. `failed_recipients` holds the redacted addresses the
+   * because a retry could deliver twice. `skipped_count` is recipients left unsent on purpose
+   * (the account went away, its address changed or it switched the category off after the
+   * announcement was queued); they are not failures, and they count toward `done`.
+   * `failed_recipients` holds the redacted addresses the
    * row stores, never full ones.
    */
   admin.get("/notify/:id", async (c) => {
@@ -2216,7 +2219,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
     const row = await c.env.DB.prepare(
       `SELECT id, status, subject, recipient_group, queued_count, delivered_count,
-              failure_count, unknown_count, failed_recipients, sent_at
+              failure_count, unknown_count, skipped_count, failed_recipients, sent_at
          FROM broadcast_emails WHERE id = ?`,
     )
       .bind(id)
@@ -2229,6 +2232,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         delivered_count: number;
         failure_count: number;
         unknown_count: number;
+        skipped_count: number;
         failed_recipients: string | null;
         sent_at: string;
       }>();
@@ -2249,6 +2253,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       delivered_count: row.delivered_count,
       failure_count: row.failure_count,
       unknown_count: row.unknown_count,
+      skipped_count: row.skipped_count,
       failed_recipients: Array.isArray(failed) ? failed : [],
       sent_at: row.sent_at,
     });

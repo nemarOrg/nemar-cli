@@ -15,6 +15,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { COMMUNITY_ONLY_REFUSAL } from "../../shared/contract/mail-categories.js";
 import { adminRoutes } from "../src/routes/admin";
 import { parseEmailPreferences } from "../src/services/email";
 import { saveEmailPreferences } from "../src/services/mail-preferences";
@@ -166,8 +167,8 @@ describe("a person's own change", () => {
     });
     const rows = audits("mail_category_changed");
     expect(rows.map((r) => JSON.parse(r.details))).toEqual([
-      { category: "news", on: false, via: "cli" },
-      { category: "rfcs", on: false, via: "cli" },
+      { category: "news", on: false, via: "self" },
+      { category: "rfcs", on: false, via: "self" },
     ]);
     expect(
       rows.every(
@@ -188,6 +189,75 @@ describe("a person's own change", () => {
     await call("PUT", ADMIN_KEY, "", { support_tickets: false });
     expect(parseEmailPreferences(storedPrefs("theadmin")).support_tickets).toBe(false);
     expect(audits("mail_category_changed")).toEqual([]);
+  });
+});
+
+/**
+ * A D1 that lands another writer's change just before the first batch it is asked to run, which is
+ * where a request's read-then-write is exposed: anything the route read earlier is now stale. The
+ * write goes through the real database, so the interleaving is real, only deterministic.
+ */
+function withConcurrentWriteBeforeBatch(d1: D1Database, write: () => void): D1Database {
+  let fired = false;
+  return {
+    prepare: (sql: string) => d1.prepare(sql),
+    batch: (statements: D1PreparedStatement[]) => {
+      if (!fired) {
+        fired = true;
+        write();
+      }
+      return d1.batch(statements);
+    },
+  } as unknown as D1Database;
+}
+
+describe("a concurrent write between the read and the save", () => {
+  test("is not reverted: only the keys the request names are written", async () => {
+    // Another request switches an admin alert off while this one turns news off. A route that read
+    // the blob and wrote all of it back would restore support_tickets to true.
+    env = {
+      ...env,
+      DB: withConcurrentWriteBeforeBatch(realD1(db), () =>
+        db
+          .query(
+            `UPDATE users SET email_preferences = '{"support_tickets":false}' WHERE username = 'theadmin'`,
+          )
+          .run(),
+      ),
+    } as Bindings;
+    const res = await call("PUT", ADMIN_KEY, "", { news: false });
+    expect(res.status).toBe(200);
+    expect(parseEmailPreferences(storedPrefs("theadmin"))).toMatchObject({
+      support_tickets: false,
+      news: false,
+    });
+    // The answer reports what is stored, concurrent write included.
+    expect(await res.json()).toMatchObject({ support_tickets: false, news: false });
+  });
+
+  test("the audit diffs against the value actually replaced, not a copy read earlier", async () => {
+    // By the time the batch runs, news is already off (another writer turned it off), so this
+    // request replaces false with false and changes nothing: no consent row may claim on -> off.
+    env = {
+      ...env,
+      DB: withConcurrentWriteBeforeBatch(realD1(db), () =>
+        db
+          .query(
+            `UPDATE users SET email_preferences = '{"news":false}' WHERE username = 'theadmin'`,
+          )
+          .run(),
+      ),
+    } as Bindings;
+    const res = await call("PUT", ADMIN_KEY, "", { news: false });
+    expect(res.status).toBe(200);
+    expect(audits("mail_category_changed")).toEqual([]);
+
+    // And the converse: a real change to a key another writer left alone is recorded once.
+    const next = await call("PUT", ADMIN_KEY, "", { news: true });
+    expect(next.status).toBe(200);
+    expect(audits("mail_category_changed").map((r) => JSON.parse(r.details))).toEqual([
+      { category: "news", on: true, via: "self" },
+    ]);
   });
 });
 
@@ -260,9 +330,29 @@ describe("acting for another account (D8)", () => {
       news: false,
     });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toContain("Only owners");
+    const refusal = ((await res.json()) as { error: string }).error;
+    expect(refusal).toContain("Only owners");
+    // The CLI's --all sends every alert plus the categories; the sentence names the flags that work.
+    expect(refusal).toContain("--news, --rfcs and --maintenance");
     expect(storedPrefs("otheradmin")).toBeNull();
     expect(audits()).toEqual([]);
+  });
+
+  test("an admin's --all-shaped request for another account is refused whole", async () => {
+    const res = await call("PUT", ADMIN_KEY, "?user=target", {
+      user_approval: false,
+      publication_request: false,
+      dataset_anonymity: false,
+      identifier_sweep: false,
+      support_tickets: false,
+      news: false,
+      rfcs: false,
+      maintenance: false,
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe(COMMUNITY_ONLY_REFUSAL);
+    // Nothing was applied, including the community keys that would have been allowed alone.
+    expect(storedPrefs("target")).toBe('{"news":false,"rfcs":true,"maintenance":true}');
   });
 
   test("an owner may change another account's admin alerts and community categories together", async () => {
@@ -293,22 +383,33 @@ describe("saveEmailPreferences on an account that vanished mid-request", () => {
   test("writes neither the preferences nor any audit row", async () => {
     // A request cannot reach this through the route (the target is resolved live first), so the
     // statements the route runs are driven directly: the update matches no live row, and the
-    // audit rows, which are conditional on it, must not claim a change that did not happen.
+    // audit rows, which are conditional on a live row, must not claim a change that did not happen.
     const id = idOf("target");
     if (id === undefined) throw new Error("seed failed");
     db.query("UPDATE users SET deleted_at = datetime('now') WHERE id = ?").run(id);
-    const current = parseEmailPreferences(storedPrefs("target"));
     const applied = await saveEmailPreferences(realD1(db), {
       targetId: id,
       targetUsername: "target",
       actorId: idOf("theowner") as number,
-      current,
-      next: { ...current, news: true, rfcs: false },
+      changes: { news: true, rfcs: false },
       via: "admin",
     });
     expect(applied).toBe(false);
     expect(audits()).toEqual([]);
     expect(storedPrefs("target")).toBe('{"news":false,"rfcs":true,"maintenance":true}');
+  });
+
+  test("a column that holds garbage is replaced by an object holding the keys set", async () => {
+    db.query("UPDATE users SET email_preferences = '{not json' WHERE username = 'target'").run();
+    const applied = await saveEmailPreferences(realD1(db), {
+      targetId: idOf("target") as number,
+      targetUsername: "target",
+      actorId: idOf("target") as number,
+      changes: { rfcs: false },
+      via: "self",
+    });
+    expect(applied).toBe(true);
+    expect(JSON.parse(storedPrefs("target") as string)).toEqual({ rfcs: false });
   });
 });
 
