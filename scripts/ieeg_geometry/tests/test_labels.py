@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ieeg_geometry import labels, load_reference, read_ownership
+from ieeg_geometry import labels, load_reference, read_ownership, verify
 from ieeg_geometry.bids import GeometryRefusal, discover, read_electrode_set
 from ieeg_geometry.verify import (
     ECOG_MEDIAN_MM,
@@ -956,7 +956,7 @@ def test_blind_label_reports_the_shift_control_value_it_was_judged_by(no_sidecar
     pts = labels._finite_pts(read_electrode_set(discover(no_sidecar)[0], assume_units="mm"))
     tree = labels._tree("fsaverage")
     six = [
-        float(np.median(tree.query(pts + sign * labels.SHIFT_MM * np.eye(3)[axis])[0]))
+        float(np.median(tree.query(pts + sign * verify.SHIFT_CONTROL_MM * np.eye(3)[axis])[0]))
         for axis in range(3)
         for sign in (-1.0, 1.0)
     ]

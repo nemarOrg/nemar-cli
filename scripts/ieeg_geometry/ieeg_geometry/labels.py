@@ -73,7 +73,6 @@ from .verify import (
     PLAUSIBLE,
     RULE_ON_VERTEX,
     SPECIFIC,
-    TEMPLATE_VERTEX_MM,
     Fit,
     fit,
 )
@@ -112,8 +111,6 @@ NEVER_RELABEL_PREFIXES = ("acpc", "scanras", "scanner", "native", "pixels")
 MNI_UNKNOWN = "MNI variant unknown, needs a human label"
 MIN_CONTACTS = 3
 MIN_BLIND_CONTACTS = 10
-SHIFT_MM = 10.0
-SHIFT_RATIO = 1.5
 
 ACCEPTED = "accepted"
 REJECTED = "rejected"
@@ -306,27 +303,20 @@ def _blind_evidence(eset: ElectrodeSet, name: str) -> tuple[Fit, bool, str, str]
         f"all {base.n_used} contacts pooled (median {base.median_mm:.2f} mm, "
         f"90th percentile {base.p90_mm:.2f} mm)"
     )
-    if base.median_mm > TEMPLATE_VERTEX_MM or base.grade != SPECIFIC:
-        return base, False, f"median {base.median_mm:.2f} mm is not on template vertices", summary
-    tree = _tree(name)
-    medians = []
-    for axis in range(3):
-        for sign in (-1.0, 1.0):
-            delta = np.zeros(3)
-            delta[axis] = sign * SHIFT_MM
-            medians.append(float(np.median(tree.query(pts + delta)[0])))
-    if any(m <= TEMPLATE_VERTEX_MM or m < SHIFT_RATIO * base.median_mm for m in medians):
-        return (
-            base,
-            False,
-            f"a 10 mm shift still fits (shifted medians down to {min(medians):.2f} mm)",
-            summary,
+    if base.grade == SPECIFIC and base.rule_id == RULE_ON_VERTEX:
+        reason = (
+            f"median {base.median_mm:.2f} mm; every 10 mm shift fails "
+            f"(nearest {base.shift_control_median_mm:.1f} mm)"
         )
-    reason = (
-        f"median {base.median_mm:.2f} mm; every 10 mm shift fails (nearest {min(medians):.1f} mm)"
-    )
-    judged = replace(base, rule_id=RULE_ON_VERTEX, shift_control_median_mm=min(medians))
-    return judged, True, reason, summary
+        return base, True, reason, summary
+    if base.shift_control_median_mm is not None:
+        reason = (
+            f"a 10 mm shift still fits (shifted medians down to "
+            f"{base.shift_control_median_mm:.2f} mm)"
+        )
+    else:
+        reason = f"median {base.median_mm:.2f} mm is not on template vertices"
+    return base, False, reason, summary
 
 
 # --- plan objects ----------------------------------------------------------------------------
@@ -448,8 +438,6 @@ def _coordsystem_bytes(label: str, system_description: str, description: str) ->
 def _texts(
     attempt: Attempt, src: str, version: str, copied: bool, assumed: bool
 ) -> tuple[str, str]:
-    f = attempt.fit
-    assert f is not None
     label = written_label(attempt.label)
     if attempt.source == "blind trial":
         system = (
@@ -482,7 +470,8 @@ def _texts(
 def _build_files(
     dataset: Path, item: Discovered, eset: ElectrodeSet, attempt: Attempt, version: str
 ) -> tuple[PlannedFile, ...]:
-    assert attempt.fit is not None and attempt.reference is not None
+    if attempt.fit is None or attempt.reference is None:
+        raise ValueError("the accepted evidence carries no fit or reference")
     label = written_label(attempt.label)
 
     def rel(p: Path) -> str:
@@ -818,16 +807,16 @@ def propose(
 
 def _accept(done, dataset, item, eset, attempt, attempts, version, owned) -> Proposal:
     label = written_label(attempt.label)
+    if attempt.fit is None or attempt.reference is None:
+        return done(SKIPPED, "the accepted evidence carries no fit or reference")
     try:
         files = _build_files(dataset, item, eset, attempt, version)
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, IndexError) as exc:
         return done(SKIPPED, f"cannot copy positions: {type(exc).__name__}: {exc}")
     states = [_file_state(f, dataset, owned) for f in files]
-    if attempt.fit is None or attempt.reference is None:
-        return done(SKIPPED, "the accepted evidence carries no fit or reference")
+    on_vertex = attempt.fit.rule_id == RULE_ON_VERTEX
     shift_min = attempt.fit.shift_control_median_mm
-    if shift_min is not None:
-        shift_min = round(shift_min, 3)
+    shift_min = round(shift_min, 3) if on_vertex and shift_min is not None else None
     kw = dict(
         label=label,
         attempts=tuple(attempts),

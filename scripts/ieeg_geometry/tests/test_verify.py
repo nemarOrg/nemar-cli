@@ -7,6 +7,8 @@ from ieeg_geometry.surfaces import Surface
 from ieeg_geometry.verify import (
     _DIRECTIONS,
     INSIDE_RULE,
+    RULE_ON_VERTEX,
+    SHIFT_CONTROL_MM,
     Fit,
     OffsetFit,
     _inside,
@@ -91,6 +93,36 @@ def test_contacts_on_template_vertices_are_specific_with_a_shift_control():
     assert on.grade == "specific" and on.median_mm == 0.0
     shifted = fit(fs[0].vertices[::700] + [10.0, 0, 0], fs, "unknown")
     assert shifted.grade != "specific"
+
+
+def test_contacts_that_pass_the_x_shift_only_are_not_specific():
+    # a lattice with 10 mm spacing in y: a 10 mm shift along y (or z) lands on vertices again,
+    # while a shift along x (spacing 25 mm) does not
+    lattice = np.array(
+        [[x, y, z] for x in (0, 25, 50) for y in range(0, 100, 10) for z in (0, 25, 50)], float
+    )
+    surface = Surface(lattice, np.array([[0, 1, 2]]))
+    contacts = lattice[(lattice[:, 1] > 0) & (lattice[:, 1] < 90)]
+    x_only = fit(contacts + [SHIFT_CONTROL_MM, 0, 0], surface, "unknown")
+    assert x_only.median_mm > 1.0  # the x shift alone fits nothing
+    on = fit(contacts, surface, "unknown")
+    assert on.median_mm == 0.0 and on.grade != "specific" and on.rule_id != RULE_ON_VERTEX
+    assert on.shift_control_median_mm == 0.0  # the y shift lands on vertices: the control failed
+
+
+def test_the_shift_control_value_is_the_smallest_of_the_six(sphere):
+    fs = load_reference("fsaverage")
+    pts = fs[0].vertices[::700]
+    on = fit(pts, fs, "unknown")
+    from scipy.spatial import KDTree
+
+    tree = KDTree(np.vstack([f.vertices for f in fs]))
+    six = [
+        float(np.median(tree.query(pts + sign * SHIFT_CONTROL_MM * np.eye(3)[a])[0]))
+        for a in range(3)
+        for sign in (-1.0, 1.0)
+    ]
+    assert on.rule_id == RULE_ON_VERTEX and on.shift_control_median_mm == min(six)
 
 
 def test_unknown_and_dbs_use_the_seeg_rule(sphere):
