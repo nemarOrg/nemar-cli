@@ -21,6 +21,10 @@ earlier releases are described only by their generated notes.
   The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
   Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
   A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
+  They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
+  Every written electrodes table now uses `n/a` for any missing value, puts `name`, `x`, `y`, `z`, `size` first, and keeps a column BIDS does not define only when the dataset's own `*_electrodes.json` defines it; other columns stay in the authors' file only.
+  Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
