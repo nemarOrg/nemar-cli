@@ -39,8 +39,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Slot | Platform | Tiers | Max | Can | Notes |
 |---|---|---|---|---|---|
-| claude-sonnet | Claude | worker, worker-hard | 3 | gui, browser | graphical user interface (GUI) or computer use only with the owner's announced consent |
-| claude-opus | Claude | lead | 1 | gui, browser | |
+| claude-sonnet | Claude | worker, worker-hard, reviewer | 3 | gui, browser | graphical user interface (GUI) or computer use only with the owner's announced consent |
+| claude-opus | Claude | lead | 4 | gui, browser |  |
 | codex | Codex | worker, worker-hard, lead | 0 | | owner opens this slot; never computer use or visible runs |
 
 ## Budget
@@ -109,7 +109,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q16 | V2 | For RFC-0002, what does first party mean? | The dataset's source: authors for nm, upstream for on; NEMAR and community are separate origins (Recommended) / NEMAR is the first party | none | 2027-01-15T17:00 | open |  |
 | Q17 | R2 | Does the /policies/rfcs/ page need UC San Diego counsel review before publication? | No, it is a process page (Recommended) / Yes, publish as a draft for counsel | none | 2026-11-27T17:00 | open |  |
 | Q18 | O5 | Link to the BEP047 discussion of EDF's irregular and sparse sampling limit? Not found in PR 2231 or issue 2568. | Supply the link / Cite BIDS issues 1796, 2313, 2463 instead (Recommended) | none | 2026-12-08T17:00 | open |  |
-| Q19 | B4 | Slots: raise claude-opus Max from 1 to 2 (B4, B6 and A2 are lead cards, and checkpoints and advisor consults need the lead too) and add the reviewer tier to claude-sonnet's tiers? | Both (Recommended) / Opus Max 2 only / Neither | none | 2026-11-24T17:00 | open |  |
+| Q19 | B4 | Slots: raise claude-opus Max from 1 to 2 (B4, B6 and A2 are lead cards, and checkpoints and advisor consults need the lead too) and add the reviewer tier to claude-sonnet's tiers? | Both (Recommended) / Opus Max 2 only / Neither | none | 2026-11-24T17:00 | answered | Opus Max 4 (owner, 2026-11-20); reviewer tier added to claude-sonnet per the owner's standing rule that PR review agents use Sonnet (owner, 2026-11-20T11:35-08:00) |
 
 ## Proposals
 
