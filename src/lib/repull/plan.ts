@@ -58,6 +58,7 @@ import {
 } from "./edits.js";
 import { type FromTagSource, bareVersion, resolveFromTag } from "./from-tag.js";
 import { type PathDecision, overlay } from "./overlay.js";
+import { OWNERSHIP_PATH, type PipelineOwned, readPipelineOwned } from "./pipeline-owned.js";
 import {
   type Check,
   type ReleaseFacts,
@@ -377,7 +378,16 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       const texts = await readLocationLogsAt(nemar.path, "refs/heads/git-annex", fresh, git);
       fresh.forEach((k, i) => logs.set(k, texts[i] ?? ""));
     };
+    // The paths NEMAR's iEEG geometry pipeline owns: never corrections (`pipeline-owned.ts`).
+    const pipeline = await readPipelineOwnedAt(oursTree, nemarStore);
+    if (pipeline.status === "unreadable") {
+      refusals.push({
+        code: "pipeline-ownership-unreadable",
+        detail: `${OWNERSHIP_PATH} does not parse as an ownership record, so which paths the pipeline owns is not known`,
+      });
+    }
     const result = await overlay({
+      pipelineOwned: new Set(pipeline.paths),
       base: baseTree,
       theirs: theirsTree,
       ours: oursTree,
@@ -620,6 +630,12 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       return out;
     };
     const descKeys = result.description.keys;
+    // N.0.1 is made for corrections, and for the pipeline's files when the mirror has any.
+    const n1 =
+      corrections.length > 0 || pipeline.paths.length > 0
+        ? bumpVersion(versions.next, "patch")
+        : null;
+    const pipelineUpstreamWins = pipeline.paths.filter((p) => theirsTree.has(p));
     const counts = {
       added: deltas.filter((d) => isAdd(d) && !renamedTo.has(d.path)).length,
       changed: deltas.filter((d) => !isAdd(d)).length,
@@ -648,7 +664,9 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       orphan_bytes_unknown: copyBytesUnknown + localBytesUnknown + recordingBytesUnknown,
       data_changing: dataChanging,
       metadata_only: !dataChanging,
-      doi_count: corrections.length > 0 ? 2 : 1,
+      pipeline_owned: pipeline.paths.length,
+      pipeline_upstream_wins: pipelineUpstreamWins.length,
+      doi_count: n1 !== null ? 2 : 1,
       fetched_bytes: budget.used,
       fetch_refused: result.fetchRefused,
     };
@@ -669,7 +687,6 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       result.gitlinks.length === 0 &&
       result.decisions.every((d) => d.explainedBy.base !== null) &&
       result.description.explainedBase;
-    const n1 = corrections.length > 0 ? bumpVersion(versions.next, "patch") : null;
 
     const body: PlanBody = {
       planner: PLANNER_VERSION,
@@ -704,6 +721,14 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
           removed_by_upstream: result.description.sourceDatasets.removedByUpstream,
         },
         merged_json: result.description.mergedJson,
+      },
+      pipeline_owned: {
+        status: pipeline.status,
+        ignored: pipeline.ignored,
+        paths: pipeline.paths.map((path) => ({
+          path,
+          upstream_wins: pipelineUpstreamWins.includes(path),
+        })),
       },
       corrections: corrections.map((d) => ({ path: d.path, group: d.group, subtype: d.subtype })),
       conflicts: conflicts.map((d) => ({ path: d.path, group: d.group, subtype: d.subtype })),
@@ -868,6 +893,19 @@ async function readLedger(
   } catch (err) {
     return { status: "unreadable", lines: 0, recordedCorrections: 0, error: errorWords(err) };
   }
+}
+
+/** The iEEG geometry pipeline's ownership record on NEMAR's `main`, as its listed paths. */
+async function readPipelineOwnedAt(
+  tree: Map<string, { oid: string }>,
+  store: BlobStore,
+): Promise<PipelineOwned> {
+  const entry = tree.get(OWNERSHIP_PATH);
+  if (!entry) return readPipelineOwned(null);
+  await store.load([entry.oid]);
+  const bytes = store.get(entry.oid);
+  // A record too large to read is not one this knows how to read: unknown is never none.
+  return bytes ? readPipelineOwned(bytes) : { status: "unreadable", paths: [], ignored: 0 };
 }
 
 /**
