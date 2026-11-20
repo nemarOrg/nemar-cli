@@ -3,6 +3,7 @@
 **Status:** accepted
 **Date:** 2026-11-18
 **Owner:** Seyed Yahya Shirazi
+**Superseded in part by:** ADR 0131
 
 ## Context
 
