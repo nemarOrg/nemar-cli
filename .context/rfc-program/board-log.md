@@ -56,6 +56,15 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:18-08:00 | Rationale for the 21-day window: AI-assisted review by knowledgeable people is welcome, so RFCs are fast-paced; stated in the rfcs process doc, the A1 ADR and the docs page | owner |  |
 | 2026-11-20T12:27-08:00 | Opening an RFC sends a community email to NEMAR account holders (rfcs category, unsubscribe footer); the owner also posts on LinkedIn and the BIDS Google group; N1 drafts all three | owner |  |
 | 2026-11-20T12:27-08:00 | New nemar-cli feature (separate epic): mail categories news, rfcs, maintenance, recalls; recalls are mandatory and cannot be unsubscribed; one-click unsubscribe web page plus a section under the website's user settings page | owner |  |
+| 2026-11-20T12:49-08:00 | Q8 (B1): Developer Certificate of Origin sign-off, inbound equals outbound | owner |  |
+| 2026-11-20T12:49-08:00 | Q9 (B5): conformance test files live in nemarOrg/biosig-zarr; nemar-cli vendors them by digest | owner |  |
+| 2026-11-20T12:49-08:00 | Q10 (O5): RFC-0001 opens with text plus schemas and a few real vectors, no packer | owner |  |
+| 2026-11-20T12:49-08:00 | Q11 (B2): mint the Zarr convention uuid now, recorded in a biosig-zarr ADR | owner |  |
+| 2026-11-20T12:49-08:00 | Q13 (O4): register w3id.org/biosig-zarr now, pointing at nemarOrg/biosig-zarr (perma-id/w3id.org#7250) | owner |  |
+| 2026-11-20T12:49-08:00 | Q14 (O4): spec releases get a NEMAR DOI (e.g. nemar.biosig-zarr.v3) through nemar-doi; nemar-process gets nemar.process.vN | owner |  |
+| 2026-11-20T12:49-08:00 | Q17 (R2): no counsel review for /policies/rfcs/; it is a process page | owner |  |
+| 2026-11-20T12:49-08:00 | Q18 (O5): cite BEP 045 peripheral physiology (bids-specification#2267, bep_045 page), not BEP047 | owner |  |
+| 2026-11-20T12:49-08:00 | Q19: claude-opus Max 4; reviewer tier on claude-sonnet (owner applied both to Slots) | owner |  |
 
 ## Log
 
@@ -64,3 +73,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T11:12-08:00 | O1 repo and O2 done by lead on owner's instruction; V1 dispatched; C0 reviews running |
 | 2026-11-20T11:27-08:00 | E0: epic #2239; V1 2240, A2 2241, A1 2242, S1 2243, R1 2244, R3 2245, B1 2246, B2 2247, R2 2248, B3 2249, B6 2250, B4 2251, B5 2252, N1 2253, V2 2254; V1 PR 2238 |
 | 2026-11-20T12:20-08:00 | Q13 acted on: w3id.org/biosig-zarr registration PR perma-id/w3id.org#7250 (302 to nemarOrg/biosig-zarr), awaiting w3id maintainers |
+| 2026-11-20T12:51-08:00 | Session start reconcile: V1 PR 2238 head c8df3be2 fails acceptance (Command: 4, Raw output: 0); prior worker not live; redispatched with send-back; six-script deviation accepted |
+| 2026-11-20T12:51-08:00 | Owner answers Q8 Q9 Q10 Q11 Q13 Q14 Q17 Q18 Q19 recorded and closed; B1 B2 R2 O5 B5 Next updated |
+| 2026-11-20T12:51-08:00 | Dispatched A2 (claude-opus), A1 and R1 (claude-sonnet); Agents today 4/40 |
