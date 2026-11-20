@@ -1,0 +1,41 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT ezid_status, count(*) AS n FROM dataset_versions GROUP BY ezid_status -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "ezid_status": null,
+        "n": 1615
+      },
+      {
+        "ezid_status": "public",
+        "n": 6
+      },
+      {
+        "ezid_status": "unavailable",
+        "n": 7
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 1.2356
+      },
+      "duration": 1.2356,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 3256,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m
