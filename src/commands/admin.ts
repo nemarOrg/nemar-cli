@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
@@ -38,9 +38,12 @@ import {
 } from "../../shared/contract/admin-user.js";
 import {
   ACCOUNT_KIND_VALUES,
+  COMMUNITY_MAIL_CATEGORIES,
   type DuplicateGroup,
   OPERATIONAL_ACCOUNT_KINDS,
   isAccountKind,
+  mailCategoryLabel,
+  mailRecallWhy,
 } from "../../shared/contract/index.js";
 import {
   NEUROBAGEL_CHECKS,
@@ -77,6 +80,7 @@ import {
   userDetailLines,
 } from "../lib/admin-user-lookup.js";
 import {
+  type AdminAlertPreferences,
   type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -8410,10 +8414,22 @@ const emailPrefsCommand = new Command("email-preferences").description(
   "Manage email notification preferences",
 );
 
+/** The admin alerts, with the label `show` and `update` print for each. */
+const ADMIN_ALERT_ROWS: Array<{ key: keyof AdminAlertPreferences; label: string }> = [
+  { key: "user_approval", label: "User approval notifications" },
+  { key: "publication_request", label: "Publication request notifications" },
+  { key: "dataset_anonymity", label: "Anonymity sweep findings" },
+  { key: "identifier_sweep", label: "Identifier sweep weekly report" },
+  { key: "support_tickets", label: "Support tickets assigned to you" },
+];
+
 emailPrefsCommand
   .command("show")
   .description("Show email notification preferences")
-  .option("--user <username>", "(owner only) show another user's preferences")
+  .option(
+    "--user <username>",
+    "(owner or admin) show another user's preferences; an admin sees the community categories only",
+  )
   .action(async (options: { user?: string }) => {
     if (!isAuthenticated()) {
       console.error(chalk.red("Not authenticated. Run: nemar auth login"));
@@ -8427,20 +8443,20 @@ emailPrefsCommand
       spinner.succeed(`${whose} email notification preferences:`);
       console.log();
 
-      const categories: Array<{ key: keyof EmailPreferences; label: string }> = [
-        { key: "user_approval", label: "User approval notifications" },
-        { key: "publication_request", label: "Publication request notifications" },
-        { key: "announcements", label: "Announcement emails" },
-        { key: "dataset_anonymity", label: "Anonymity sweep findings" },
-        { key: "identifier_sweep", label: "Identifier sweep weekly report" },
-        { key: "support_tickets", label: "Support tickets assigned to you" },
-      ];
+      const state = (enabled: boolean) =>
+        enabled ? chalk.green("enabled") : chalk.dim("disabled");
 
-      for (const cat of categories) {
-        const enabled = prefs[cat.key];
-        const status = enabled ? chalk.green("enabled") : chalk.dim("disabled");
-        console.log(`  ${cat.label.padEnd(40)} ${status}`);
+      // The admin alerts are absent when an admin reads another account's preferences.
+      for (const row of ADMIN_ALERT_ROWS) {
+        const enabled = prefs[row.key];
+        if (enabled === undefined) continue;
+        console.log(`  ${row.label.padEnd(40)} ${state(enabled)}`);
       }
+      for (const category of COMMUNITY_MAIL_CATEGORIES) {
+        console.log(`  ${mailCategoryLabel(category).padEnd(40)} ${state(prefs[category])}`);
+      }
+      console.log(`  ${mailCategoryLabel("recall").padEnd(40)} ${chalk.green("always on")}`);
+      console.log(chalk.dim(`  ${mailRecallWhy()}`));
 
       console.log();
       console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
@@ -8455,16 +8471,32 @@ emailPrefsCommand
   .description("Update email notification preferences")
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
-  .option("--announcements <bool>", "Enable/disable announcement emails")
+  .option("--news <bool>", "Enable/disable news emails")
+  .option("--rfcs <bool>", "Enable/disable requests-for-comments emails")
+  .option("--maintenance <bool>", "Enable/disable maintenance emails")
+  .addOption(
+    // Retired by ADR 0132. Registered, hidden, so an old script gets the replacement
+    // flags instead of commander's bare "unknown option".
+    new Option(
+      "--announcements <bool>",
+      "Retired: use --news, --rfcs and --maintenance",
+    ).hideHelp(),
+  )
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
-  .option("--all <bool>", "Enable/disable all notifications")
-  .option("--user <username>", "(owner only) update another user's preferences")
+  .option("--all <bool>", "Enable/disable all notifications (recalls are always on)")
+  .option(
+    "--user <username>",
+    "(owner or admin) update another user's preferences; an admin may change news, rfcs and maintenance only",
+  )
   .action(
     async (options: {
       userApproval?: string;
       publicationRequest?: string;
+      news?: string;
+      rfcs?: string;
+      maintenance?: string;
       announcements?: string;
       datasetAnonymity?: string;
       identifierSweep?: string;
@@ -8474,6 +8506,15 @@ emailPrefsCommand
     }) => {
       if (!isAuthenticated()) {
         console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+        process.exit(1);
+      }
+
+      if (options.announcements !== undefined) {
+        console.error(
+          chalk.red(
+            "--announcements was split into three categories. Use --news, --rfcs and --maintenance instead.",
+          ),
+        );
         process.exit(1);
       }
 
@@ -8494,30 +8535,29 @@ emailPrefsCommand
         const val = parseBool(options.all);
         updates.user_approval = val;
         updates.publication_request = val;
-        updates.announcements = val;
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
         updates.support_tickets = val;
+        for (const category of COMMUNITY_MAIL_CATEGORIES) updates[category] = val;
       } else {
-        const ua = parseBool(options.userApproval);
-        const pr = parseBool(options.publicationRequest);
-        const ann = parseBool(options.announcements);
-        const anon = parseBool(options.datasetAnonymity);
-        const sweep = parseBool(options.identifierSweep);
-        const tickets = parseBool(options.supportTickets);
+        const chosen: Partial<EmailPreferences> = {
+          user_approval: parseBool(options.userApproval),
+          publication_request: parseBool(options.publicationRequest),
+          news: parseBool(options.news),
+          rfcs: parseBool(options.rfcs),
+          maintenance: parseBool(options.maintenance),
+          dataset_anonymity: parseBool(options.datasetAnonymity),
+          identifier_sweep: parseBool(options.identifierSweep),
+          support_tickets: parseBool(options.supportTickets),
+        };
 
-        if (
-          ua === undefined &&
-          pr === undefined &&
-          ann === undefined &&
-          anon === undefined &&
-          sweep === undefined &&
-          tickets === undefined
-        ) {
+        if (Object.values(chosen).every((value) => value === undefined)) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
-          console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --news <bool>                  News emails");
+          console.log("  --rfcs <bool>                  Requests-for-comments emails");
+          console.log("  --maintenance <bool>           Maintenance emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --support-tickets <bool>       Support ticket notifications");
@@ -8525,12 +8565,9 @@ emailPrefsCommand
           process.exit(1);
         }
 
-        if (ua !== undefined) updates.user_approval = ua;
-        if (pr !== undefined) updates.publication_request = pr;
-        if (ann !== undefined) updates.announcements = ann;
-        if (anon !== undefined) updates.dataset_anonymity = anon;
-        if (sweep !== undefined) updates.identifier_sweep = sweep;
-        if (tickets !== undefined) updates.support_tickets = tickets;
+        for (const [key, value] of Object.entries(chosen)) {
+          if (value !== undefined) updates[key as keyof EmailPreferences] = value;
+        }
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8539,23 +8576,27 @@ emailPrefsCommand
         const whose = result.username ? `${result.username}'s` : "Your";
         spinner.succeed(`${whose} email preferences updated:`);
         console.log();
+        const state = (enabled: boolean) =>
+          enabled ? chalk.green("enabled") : chalk.dim("disabled");
+        const alertLabels: Record<keyof AdminAlertPreferences, string> = {
+          user_approval: "User approval:       ",
+          publication_request: "Publication request:  ",
+          dataset_anonymity: "Anonymity findings:   ",
+          identifier_sweep: "Identifier sweep:     ",
+          support_tickets: "Support tickets:      ",
+        };
+        for (const row of ADMIN_ALERT_ROWS) {
+          const enabled = result[row.key];
+          if (enabled === undefined) continue;
+          console.log(`  ${alertLabels[row.key]} ${state(enabled)}`);
+        }
+        for (const category of COMMUNITY_MAIL_CATEGORIES) {
+          console.log(
+            `  ${`${mailCategoryLabel(category)}:`.padEnd(22)} ${state(result[category])}`,
+          );
+        }
         console.log(
-          `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Publication request:   ${result.publication_request ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Announcements:         ${result.announcements ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Anonymity findings:    ${result.dataset_anonymity ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
+          `  ${`${mailCategoryLabel("recall")}:`.padEnd(22)} ${chalk.green("always on")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");
