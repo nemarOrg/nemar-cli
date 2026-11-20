@@ -162,3 +162,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:57-08:00 | N1 PR 2273 head a38ab2a0 verified (7 files in scope, CLOSE_UTC in all, notice JSON ok, no @handles in notes); review dispatched; Q31 asked |
 | 2026-11-20T14:58-08:00 | N1 r1 review: 0 crit/imp, 4 sugg. Q31 revises Q15 (biosignal venues, not other repos); Q32 asks which venues |
 | 2026-11-20T14:59-08:00 | N1 fix round: venues per Q31/Q32, review suggestions applied |
+| 2026-11-20T15:00-08:00 | N1 r1 fix e6b9f881 verified (no external-repo references, publish check green); r2 delta dispatched; Agents today 37/40 |
+| 2026-11-20T15:01-08:00 | proposal P3 opened: Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) |
+| 2026-11-20T15:01-08:00 | N1 merged (0585cc96); stale card text proposed to the lead as P3 |
+| 2026-11-20T15:01-08:00 | Pause: nothing dispatchable. Waits on the lead: S1 scan results, B5 card (C1), R3 card (C1a), P1 runbook rule, P2 Store Contract card, P3 card N1 text. Waits on owner: O5 (after B5, S1, mail epic #2260 P1-P3); Q16 due 2027-01-15 |

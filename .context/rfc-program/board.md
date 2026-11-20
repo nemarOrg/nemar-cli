@@ -17,10 +17,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Repo | nemarOrg/nemar-cli, nemarOrg/rfcs, nemarOrg/biosig-zarr, nemarOrg/docs |
 | Integration branch | feature/rfc-program (nemar-cli); main (rfcs, biosig-zarr; docs owner-merged) |
 | Manager id | mba-claude-sonnet |
-| State | running |
+| State | paused |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T14:50-08:00 |
-| Next tick | 2026-11-20T15:20-08:00 |
+| Last tick | 2026-11-20T15:01-08:00 |
+| Next tick | - |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 36 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 37 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -80,7 +80,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | done | B6 | - |  | - | - | pre-release 3.0.0-draft.1 on 08a990b7, isPrerelease true (verified); compare link 200 |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
-| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | active | B4 | 2273 |  | 2026-11-20T18:45-08:00 | 4h | r1 fixes: notes rewritten for EEGLAB list, MNE Forum, Neurostars (Q31, Q32); UTC defined; then r2 delta |
+| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | done | B4 | 2273 | r1 comments (1 Sonnet): 0 crit/imp, 4 sugg fixed or no change; r2 delta clean; 1 sugg (stale card N1 text) to the lead | 2026-11-20T18:45-08:00 | 4h | merged 0585cc96; drafts in owner/announce-0001 for O5 |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, S1, N1, B5 (Q26) and mail epic #2260 P1-P3; O1b done |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
@@ -130,6 +130,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|
 | P1 | 2026-11-20T13:29-08:00 | Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) | owner, 2026-11-20T15:00: 'That is wrong rule, ask an owner to update the rules clearly' | accepted |
 | P2 | 2026-11-20T14:40-08:00 | Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges | owner answer Q29 'Both now' | open |
+| P3 | 2026-11-20T15:01-08:00 | Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) | N1 r2 review: card text predates Q31/Q32 | open |
 
 ## Agents
 
@@ -167,5 +168,6 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | done |
 | rev-B4-r2 | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T18:15-08:00 | done |
 | rev-B6-r2 | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T18:15-08:00 | done |
-| impl-N1 | implementer | claude-sonnet | Sonnet high | N1 | 2026-11-20T18:45-08:00 | running |
+| impl-N1 | implementer | claude-sonnet | Sonnet high | N1 | 2026-11-20T18:45-08:00 | done |
 | rev-N1 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:00-08:00 | done |
+| rev-N1-r2 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:25-08:00 | done |
