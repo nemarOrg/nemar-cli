@@ -75,7 +75,7 @@ Verify by observation before setting it `done`:
 - **A PR to nemarOrg/docs passes its merge gate** (R2, B3): set the step `owner`, and ask the owner to review and merge it; the manager never merges in nemarOrg/docs.
 - **An RFC text PR or the version 3 text PR passes its merge gate** (B4, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
 - **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; S1 needs the lead's earlier EDF scan results; N1 needs Q15): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
-- **An RFC closes** (its close instant passes): set C3 (or C4) `owner`-like waiting on the lead: notify the owner and the lead that the checkpoint is due.
+- **An RFC closes** (its close instant passes): set C3 (or C4) `todo` and notify the owner and the lead that the checkpoint is due.
 - **A worker reports that a needed read was refused** (for example a production query in V1): do not retry and do not work around it; set the step `owner` and hand the owner the exact command from the worker's report.
 - **A reviewer argues against an owner decision in `plan.md` section 2**: give the finding the outcome "rejected: owner decision of 2026-11-20", citing the item.
 - **An ADR number collides** (another PR took it first): the worker takes the next unused number and renames the file; this is mechanical and needs no escalation.

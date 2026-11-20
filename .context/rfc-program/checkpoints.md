@@ -4,7 +4,7 @@ At a checkpoint the lead (Opus) reads only what the row lists, completes the out
 The manager runs the skill's anticipation pass at each checkpoint.
 
 | ID | Trigger | Gates | The lead reads | The lead produces |
-| --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- | --- |
 | C0 | before the first tick | every step | this pack | done 2026-11-20: an executability review and a design review, every finding with a disposition in `plan.md`'s appendix |
 | C1a | R1 merged | R3 | `PROCESS.md` and the workflows in nemarOrg/rfcs, ADR 0054 | the R3 card (Q7 chose the weekly report line) |
 | C1 | B2 merged and Q9, Q10 answered | B5 | `spec/index.md` in biosig-zarr, the answers, `research/biosig-zarr-repo.md` sections 5, 6 and 10 | the B5 card, sized to Q10, or B5 dropped with a reason |
