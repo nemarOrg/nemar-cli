@@ -54,7 +54,7 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
-from .bids_clean import electrodes_tsv
+from .bids_clean import Cleaning, Table, electrodes_tsv
 from .ownership import (
     OwnedPath,
     Ownership,
@@ -689,6 +689,7 @@ class SubjectPlan:
     files: dict[str, bytes] = field(default_factory=dict)
     owned: list[OwnedPath] = field(default_factory=list)
     kept: dict[str, str] = field(default_factory=dict)  # path -> why `write` left it alone
+    cleaning: dict[str, Cleaning] = field(default_factory=dict)  # electrodes path -> what changed
 
 
 def _output_stem(electrodes_path: Path, subject: str, session: str | None) -> str:
@@ -706,7 +707,7 @@ def _fmt(v: float) -> str:
     return "n/a" if not np.isfinite(v) else f"{v:.3f}"
 
 
-def _electrodes_bytes(source: Path, output: Path, template_mm: np.ndarray, ok: np.ndarray) -> bytes:
+def _electrodes_table(source: Path, output: Path, template_mm: np.ndarray, ok: np.ndarray) -> Table:
     with source.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         header = list(reader.fieldnames or [])
@@ -887,8 +888,10 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
     tsv_rel = _rel(tsv_path, dataset)
     json_rel = _rel(parent / f"{stem}_coordsystem.json", dataset)
     n_refused = int((~inv.ok).sum()) - sum(c.missing_coordinates for c in eset.contacts)
+    table = _electrodes_table(cand.electrodes_path, tsv_path, inv.template_mm, inv.ok)
+    plan.cleaning = {tsv_rel: table.cleaning}
     plan.files = {
-        tsv_rel: _electrodes_bytes(cand.electrodes_path, tsv_path, inv.template_mm, inv.ok),
+        tsv_rel: table.data,
         json_rel: _coordsystem_bytes(rel_src, rel_field, inv, fits, n_refused, check, basis),
     }
     head = _headline(fits)

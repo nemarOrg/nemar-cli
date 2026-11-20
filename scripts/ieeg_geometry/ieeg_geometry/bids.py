@@ -205,6 +205,29 @@ def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[
         return list(reader.fieldnames or []), rows
 
 
+def check_table(header: list[str], rows: list[dict], name: str) -> None:
+    """Refuse an electrodes table the writers could not copy faithfully.
+
+    One rule for every track: a repeated column name, a row with fewer or more cells than the
+    header, and an empty or repeated electrode name are refused with a named reason, never
+    padded, cut or dropped quietly.
+    """
+    if len(set(header)) != len(header):
+        raise GeometryRefusal("electrodes-columns", f"{name} repeats a column name")
+    for number, row in enumerate(rows, start=2):
+        if None in row or None in row.values():
+            raise GeometryRefusal(
+                "electrodes-rows", f"{name} line {number} does not have {len(header)} cells"
+            )
+    if "name" in header:
+        names = [(row.get("name") or "").strip() for row in rows]
+        if any(n.lower() in ("", "n/a") for n in names):
+            raise GeometryRefusal("electrodes-names", f"{name} has an empty electrode name")
+        if len(set(names)) != len(names):
+            dup = sorted({n for n in names if names.count(n) > 1})[0]
+            raise GeometryRefusal("electrodes-names", f"{name} repeats electrode name {dup!r}")
+
+
 def _normalize_type(token: str | None) -> ContactType | None:
     if token is None:
         return None
@@ -284,6 +307,7 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
+    check_table(header, rows, item.electrodes_path.name)
     from_channels, warnings = _channel_types(item.channels_paths)
     contacts: list[Contact] = []
     for row in rows:

@@ -64,7 +64,7 @@ from .bids import (
     discover,
     read_electrode_set,
 )
-from .bids_clean import electrodes_tsv, is_missing
+from .bids_clean import Cleaning, Table, electrodes_tsv, is_missing
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import load_reference
 from .surfaces import Surface
@@ -330,6 +330,7 @@ class PlannedFile:
     inputs: tuple[tuple[str, str], ...]
     method: str
     verification: Verification
+    cleaning: Cleaning | None = None  # what the electrodes table writer changed, for the report
 
     @property
     def entry(self) -> OwnedPath:
@@ -409,14 +410,11 @@ def _prefix(path: Path) -> str:
     return path.name[: -len("_electrodes.tsv")]
 
 
-def _tsv_in_mm(path: Path, scale: float, output: Path) -> bytes:
+def _tsv_in_mm(path: Path, scale: float, output: Path) -> Table:
     with path.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         header = list(reader.fieldnames or [])
         rows: list[dict[str, str | None]] = list(reader)
-    for row in rows:
-        if None in row or None in row.values():  # a short or long row is not copied
-            raise ValueError(f"{path.name}: a row does not have {len(header)} cells")
     if scale != 1.0:
         for row in rows:
             for axis in ("x", "y", "z"):
@@ -496,14 +494,16 @@ def _build_files(
     coord_in = tuple(
         sorted(elec_in + ((rel(item.coordsystem_path), blob_id(item.coordsystem_path)),))
     )
+    table = _tsv_in_mm(item.electrodes_path, eset.scale_to_mm, elec_target)
     return (
         PlannedFile(
             rel(elec_target),
-            _tsv_in_mm(item.electrodes_path, eset.scale_to_mm, elec_target),
+            table.data,
             "electrodes",
             elec_in,
             method,
             verification,
+            table.cleaning,
         ),
         PlannedFile(
             rel(coord_target),
