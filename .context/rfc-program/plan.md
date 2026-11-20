@@ -88,7 +88,7 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
 4. **RFC-0001 is one RFC** for the whole biosig-zarr format, with `.bzx` as its single-file form.
    It explains why the format and the package carry separate names (the store, and the packing of one store into one file),
    and puts the package-specific items up for comment:
-   that the commenters differ (people who use electroencephalography (EEG) and magnetoencephalography (MEG) data, and people who build Zarr tools);
+   that the commenters differ (the whole biosignal community, including electroencephalography (EEG) and magnetoencephalography (MEG), and people who build Zarr tools);
    the names `.bzx` and `biosig-zarr`;
    what a `.bzx` snapshot of a Brain Imaging Data Structure (BIDS) dataset changes around the package (rewritten sidecar fields, `events.parquet` left out, the light events group);
    and whether a fix to the packing rules raises `format_version` (the RFC recommends one `format_version` for both).
