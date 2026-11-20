@@ -15,6 +15,22 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
+  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
+  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
+  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **Re-pull planner version 2 to 3.**
+  A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
+  `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
+- **Release order, for operators.**
+  (a) Deploy the backend before publishing the CLI, because the Worker refuses another planner's plan.
+  (b) Apply `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch` to `nemarDatasets/.github` only after the CLI release carrying `scripts/ieeg_geometry` is published; an older tag lacks the package and every automatic re-pull would fail with `auto-cli-version`.
+  (c) Merge geometry pull requests only after the patch is live.
+  (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
+- **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
+
 ### Staging
 
 - **Staging semantic search has the vector visibility filter on too (ADR 0126).**
