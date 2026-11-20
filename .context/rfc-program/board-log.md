@@ -109,3 +109,9 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:29-08:00 | R2 docs#127 CI 'test' job fails in ~3s with no failed step; main fails the same way since 2026-11-18 (not the diff); rerun once |
 | 2026-11-20T13:30-08:00 | R2 docs#127 head 0d845020 verified (3 files, build ok per worker); deviations accepted: ADR spelled out (docs policy-hygiene), privacy/security routes sentence from ADR 0130 |
 | 2026-11-20T13:30-08:00 | B1 biosig-zarr#1 head d75eda45 verified: scope ok (+.gitignore), text.yml links/lint/spelling green; deviations accepted (W3C 2023 text per card's 'current'); lead questions: JSON-only lint path filter (defer to C1/B5), LICENSE relicense sentence |
+| 2026-11-20T13:31-08:00 | R2 r1 review: 2 suggestions sent back. B1 code lens: clean; sugg CITATION license/date rejected (no SPDX id for W3C 2023; date at owner's tag), JSON filter known; AGENTS.md extra rule to be sent back with text lens |
+| 2026-11-20T13:32-08:00 | B1 text lens: 2 important, 5 sugg; all sent back except 'ADR wins over RFC' (matches ADR 0130/A1) |
+| 2026-11-20T13:32-08:00 | docs CI: 'test' job not started by GitHub: 'recent account payments have failed or your spending limit needs to be increased' (nemarOrg billing); rerun failed the same; owner's to fix; affects R2 docs#127 checks |
+| 2026-11-20T13:32-08:00 | R2 docs#127 r1 fix 6c69dc8f verified; set owner for merge; CI blocked by billing |
+| 2026-11-20T14:14-08:00 | B1 merged: biosig-zarr#1 merge 5794535df619f7daef8d91d79928c7a803a99e8b; B2 unblocked |
+| 2026-11-20T14:14-08:00 | R2: owner chose to merge docs#127 despite billing-blocked CI. B2 dispatched; Agents today 19/40 |
