@@ -61,8 +61,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Started | Timebox | Next |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | done | - | - | - | - | approved 2026-11-20 |
-| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | active | - | - | 2026-11-20T11:12-08:00 | 4h | dispatched from origin/dev before O0 by the lead; PR into feature/rfc-program after O0 |
-| E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | blocked | O0 | - | - | - | lead, in the owner's session, after O0 |
+| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | review | - | 2238 | 2026-11-20T11:12-08:00 | 4h | review PR 2238 into feature/rfc-program |
+| E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | owner | - | - | - | - | repo, Discussions, README done; owner: RFCs Announcement category, org Discussions source |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | - | blocked | O0 | - | - | 4h | after O0 |
