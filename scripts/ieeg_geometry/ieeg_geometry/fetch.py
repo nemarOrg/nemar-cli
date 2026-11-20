@@ -37,8 +37,11 @@ _GIT_TIMEOUT_S = 900
 DATASET_LEVEL = re.compile(
     r"^(README(\.\w+)?|dataset_description\.json|\.nemar/ieeg-geometry\.json)$"
 )
-_SUBJECT_FILE = re.compile(r"(_electrodes\.tsv|_coordsystem\.json|_channels\.tsv)$")
-_ANY_COORDSYSTEM = re.compile(r"_coordsystem\.json$")
+_SUBJECT_FILE = re.compile(
+    r"(_electrodes\.tsv|_electrodes\.json|_coordsystem\.json|_channels\.tsv)$"
+)
+# a coordsystem or an electrodes sidecar at any level (BIDS inheritance), root `electrodes.json` too
+_ANY_COORDSYSTEM = re.compile(r"(_coordsystem\.json|_electrodes\.json|(^|/)electrodes\.json)$")
 _SURFACE_FILE = re.compile(
     r"(^|/)(?:[lr]h\.pial(?:\.T1)?|[lr]h\.sphere\.reg|y_[^/]*\.nii(?:\.gz)?|[^/]*\.gii|[^/]*\.mat)$",
     re.I,
@@ -92,9 +95,10 @@ def _surface_wanted(path: str) -> bool:
 
 
 def select_paths(entries: list[TreeEntry]) -> list[str]:
-    """The paths the tracks read: electrodes, coordsystem and channels files, the README,
-    `dataset_description.json`, the ownership file, and subject surfaces, `sphere.reg` and SPM
-    `y_` fields. Everything else, recordings included, is left alone."""
+    """The paths the tracks read: electrodes (and their JSON sidecars), coordsystem and
+    channels files, the README, `dataset_description.json`, the ownership file, and subject
+    surfaces, `sphere.reg` and SPM `y_` fields. Everything else, recordings included, is left
+    alone."""
     wanted = []
     for e in entries:
         p = e.path
