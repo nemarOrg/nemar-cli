@@ -63,7 +63,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | done | - | - | - | - | approved 2026-11-20 |
 | V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | review | - | 2238 | 2026-11-20T11:12-08:00 | 4h | review PR 2238 into feature/rfc-program |
 | E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
-| O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | owner | - | - | - | - | Discussions on in rfcs and org (verified); RFCs category missing, only defaults exist |
+| O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | - | blocked | O0 | - | - | 4h | after O0 |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | - | blocked | O0 | - | - | 4h | after O0; Q1 to Q7 answered |
