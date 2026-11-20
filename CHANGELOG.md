@@ -27,6 +27,14 @@ earlier releases are described only by their generated notes.
   The fetch now also checks out `*_electrodes.json` sidecars at every level; a row with a missing or repeated `name`, or a short or long row, is refused with a named reason (`electrodes-names`, `electrodes-rows`, `electrodes-columns`), and the report gains an optional `electrodes_cleaning` list of what each written table dropped, added or coerced.
   The package version is 0.1.1.
   Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
+- **`pr` computes from `main` when it is ahead of the release and records the paths.**
+  A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
+  A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
+- **`pr --from-ref <branch>` opens one integration pull request, and `--bump-version` sets the release version.**
+  The clone is of an existing branch (collaborator changes plus NEMAR's BIDS fixes), the geometry is one commit on top pushed to that branch (fast-forward only), and the pull request into `main` is opened or updated; the body lists the commits not on `main`.
+  `--bump-version` keeps a branch Version that is above `main`'s and every tag, otherwise sets the next patch above both (a byte-preserving edit of the `Version` value), so the central version check passes and merging tags the release without a separate `nemar dataset release`; a `CHANGES` entry ahead of it is reported, not refused.
+- **`pr` no longer sees CRLF blobs as modified.**
+  The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.

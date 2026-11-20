@@ -18,9 +18,19 @@ cd scripts/ieeg_geometry && uv run pytest -q
 `pr` clones the dataset's `main` into a fresh `DIR/<id>`, runs the pipeline with `--apply`, refuses when a track errored, when nothing changed, or when the work tree differs from `main` in anything but the report's `changes`, commits those paths once on `nemar/ieeg-geometry-<pipeline version>` with the title "Add NEMAR-computed iEEG geometry (pipeline <version>)", pushes only that branch and opens the pull request against `main` with `gh pr create`; it never merges and never force-pushes, and it refuses a branch that already exists on the remote.
 The body lists every file with its method and evidence grade (shortened in steps only when it would pass GitHub's size limit).
 `git add` and `git commit` run with the git-annex filter neutralized, and every staged file must be a regular file whose blob is the work-tree bytes (never an annex pointer), with the staged set exactly the report's `changes`.
-A real run also refuses a remote that is not `nemarDatasets/<id>`, a missing release tag, and a `main` that moved past the release in anything but `.nemar/`, `.github/` and `.gitattributes` (the pipeline reads large inputs at the release); the body records where `main` stands against the release.
-If `gh pr create` fails after the push, the message gives the command to open the pull request by hand (the body is saved as `DIR/<id>.pr-body.md`) and the command to delete the pushed branch.
-`--dry-run` does everything but the push and the pull request, prints the body, and warns when a real run would refuse for the release reason.
+A real run also refuses a remote that is not `nemarDatasets/<id>`, a missing release tag, and an input that changed after the release and could not be fetched: small files are read from the fresh clone of `main`, annexed files are downloaded from the data plane at the release version.
+Inputs that could not be fetched for another reason are listed in the body under "Not fetched".
+A `main` ahead of the release is not refused: the outputs are computed from the fresh clone of `main`, which the mirror's patch release will publish, so the body's "Source:" section states that `main` is ahead, lists every path changed since the release (sorted; at most 50 and 8,000 characters, then a count) and says the files were computed from `main`.
+
+`--from-ref BRANCH` builds an integration pull request: the fresh clone is of that existing branch (a collaborator's branch merged with NEMAR's BIDS fixes) instead of `main`, the pipeline runs on its tree, the geometry is one commit on top, pushed to the same branch (fast-forward only; refused when the branch moved since the clone), and the pull request into `main` is opened or, when one from that branch is open, its title and body are updated.
+The body lists the commits on the branch that are not on `main`, and the unexpected-change checks apply only to the pipeline's own diff on top of the branch.
+
+`--bump-version` also makes the Version right for the release: the central release workflow tags `v<Version>` from `main` when a pull request merges and the central `version-check` needs the Version to differ from `main`'s, so merging cuts the release and `nemar dataset release` is not run afterwards.
+A branch Version that differs from `main`'s, is `X.Y.Z` and is above every tag is kept (said in the body); otherwise `Version` in `dataset_description.json` is set to the next patch above `main`'s Version and the newest tag, a byte-preserving edit of that one value in the same commit.
+It refuses a Version that is not `X.Y.Z` or a target that is already a tag; a `CHANGES` entry above the Version (normal for a mirror) is reported in the body.
+`CHANGES` is the authors' and is never edited.
+
+`--dry-run` does everything but the push and the pull request, prints the body, and warns when a real run would refuse because the release tag is missing.
 `upload-surfaces` uses the `aws` command line tool (as `scripts/zarr/generate_zarr.py` does, no boto3): it lists `s3://<bucket>/<id>/zarr/geometry/` (bucket `nemar` by default), uploads the meshes the new index references (a content-addressed mesh already there is skipped), then `index.json`, then removes keys under that prefix the index no longer references; no other key is listed, written or removed.
 Both refuse `nm000103` to `nm000107` and `nm099998`.
 `generate_zarr.py --wipe` leaves the `geometry/` prefix in place.
