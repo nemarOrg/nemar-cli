@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T14:22-08:00 |
-| Next tick | 2026-11-20T14:52-08:00 |
+| Last tick | 2026-11-20T14:37-08:00 |
+| Next tick | 2026-11-20T15:07-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 25 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 32 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -75,13 +75,13 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | claude-sonnet | done | B1 | biosig-zarr#2 | r1 code/errors/tests + comments (2 Sonnet): 0 crit/imp; 2 sugg fixed (link-target check), 1 no change; fix diff verified by manager | 2026-11-20T15:30-08:00 | 1d | merged 36112961471b46de1a96e5cb67f9581772d9146e |
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
 | O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | done | B2 | - |  | - | - | release 2.0.0 on 36112961, isPrerelease false (verified) |
-| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | active | O4 | - |  | 2026-11-20T16:05-08:00 | 4h | impl-B3 running; owner merges; docs CI billing-blocked |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | active | O4, A2 | - |  | 2026-11-20T16:05-08:00 | 2d | impl-B6 running on draft/3.0.0; PR stays open |
+| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | done | O4 | docs#128 | r1 code+comments (1 Sonnet): no PR findings; stop item resolved by Q23 | 2026-11-20T16:05-08:00 | 4h | merged by manager on owner instruction (691d5f4f); CI green after billing fix |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | review | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r1 review panel (2 Sonnet) on head e2b3ba79; CI green; PR stays open |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
-| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | active | R1, B2, A2 | - |  | 2026-11-20T16:05-08:00 | 2d | impl-B4 running; draft PR stays open |
+| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | active | R1, B2, A2 | rfcs#2 |  | 2026-11-20T16:05-08:00 | 2d | r1 fixes: 6 important, ~13 sugg, Q25 EDF+D wording and gap test, align with B6 names and question numbers |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - |  | - | 4h | waits on B4 and Q15 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, O1b, S1, N1 AND mail epic #2260 slice P1-P3 in production (owner decision 2026-11-20) |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, S1, N1, B5 (Q26) and mail epic #2260 P1-P3; O1b done |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
@@ -113,6 +113,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q20 | - | ADR 0129 is on dev but not feature/rfc-program (48 behind, merges clean), so the gapless ADR index test fails for A1 (0130) and A2 (0131). How to resolve? | Lead merges origin/dev into feature/rfc-program (Recommended) / Add 129 to TOLERATED_GAPS in the A1 PR, removed when dev merges in / Other | none | 2026-11-21T17:00 | closed | Lead merges origin/dev into feature/rfc-program (owner, 2026-11-20T13:10-08:00) (owner, 2026-11-20T12:54-08:00) |
 | Q21 | - | Which support address do RFC comments without a GitHub account go to (PROCESS.md, A1, R2)? No support@ found in nemar-cli; info@nemar.org exists. | support@nemar.org (Recommended) / info@nemar.org / Other | none | 2026-11-21T17:00 | closed | Keep the Announcement category; comments go under the RFC Discussion; email fallback support@nemar.org, posted with consent (owner, 2026-11-20T14:05-08:00) |
 | Q22 | - | Should ops/ruleset-main.json (rfcs main, requires rfc-check) list a bypass actor so a broken main can be fixed without editing the ruleset? | Repository admins may bypass via pull request only (Recommended) / No bypass / Org admins always | none | 2026-11-21T17:00 | closed | Repository admins may bypass via pull request only (owner, 2026-11-20T14:00-08:00) |
+| Q23 | - | B3 stop: docs platform/zarr/store-contract.md (NEMAR serving contract) restates layout text (attribute tree, dequantization, Level 0). Does it violate K2, or is it NEMAR's own contract that may stay? | Keep it: it is NEMAR's serving contract, B3 merges as is (Recommended) / Lead trims it to link to the spec (new card) / Other | none | 2026-11-22T17:00 | closed | Keep the store contract (NEMAR's own serving contract); B3 merges as is (owner, 2026-11-20T16:30-08:00) |
+| Q24 | - | biosig-zarr tools/check-moved-text.ts reads the docs page from main; after B3 it compares against a pointer. Pin its default source to docs commit a474abfe (one small PR) or retire it? | Pin to a474abfe in a small PR (Recommended) / Retire the tool / Leave it | none | 2026-11-22T17:00 | closed | Pin check-moved-text.ts default source to docs commit a474abfe in a small biosig-zarr PR (owner, 2026-11-20T16:30-08:00) |
+| Q26 | - | B4 text says RFC-0001 opens with schemas, a few real vectors and the 3.0.0-draft.1 tag in place (Q10). Add B5 to O5's dependencies? | Yes, O5 waits on B5 (Recommended) / No, change the RFC sentence | none | 2026-11-22T17:00 | closed | Yes, O5 waits on B5 (owner, 2026-11-20T17:00-08:00) |
+| Q27 | - | biosig-zarr text.yml path filter (card B1) skips PRs touching only tools/** or JSON, so they get no lint. Add tools/**, *.json, package.json, biome.json to the filter? | Yes, small PR (Recommended) / Leave as the card says | none | 2026-11-22T17:00 | closed | Yes, widen biosig-zarr text.yml filter in a small PR (owner, 2026-11-20T17:00-08:00) |
+| Q25 | - | Third-party review: EDF+D can encode irregular samples as timestamped zero-duration records; replace RFC-0001's 'EDF cannot' sentence and add the 2.02 s gap reader test. Apply? | Verify, then apply both (Recommended) / Wording only / Neither | none | 2026-11-21T17:00 | closed | First confirm against the EDF+ spec; if it makes sense apply both (owner, 2026-11-20T17:00-08:00) |
 
 ## Proposals
 
@@ -146,5 +151,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | running |
-| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | running |
-| impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | running |
+| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | done |
+| impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | done |
+| rev-B3 | reviewer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:20-08:00 | done |
+| rev-B4-decisions | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T16:45-08:00 | done |
+| rev-B4-technical | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T16:45-08:00 | done |
+| rev-B6-decisions | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | running |
+| rev-B6-technical | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | running |
+| rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | running |

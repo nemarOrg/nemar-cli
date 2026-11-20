@@ -73,6 +73,13 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:30-08:00 | P1: the runbook's never-change-a-setting rule is wrong; the manager may apply settings that a merged, reviewed file specifies (e.g. ops/ruleset-main.json) without asking each time; the lead rewrites runbook.md in its session | owner |  |
 | 2026-11-20T14:20-08:00 | O4: the owner asked the manager to create release 2.0.0 itself (plan section 5 command, target B2's merge commit, full release) as soon as B2 merges | owner |  |
 | 2026-11-20T14:21-08:00 | O4: owner confirmed; manager created release 2.0.0 of nemarOrg/biosig-zarr on 36112961 | owner |  |
+| 2026-11-20T14:31-08:00 | Q23: docs store-contract.md is NEMAR's serving contract and may keep its layout text; K2 is satisfied by the pointer page; B3 merges as is | owner |  |
+| 2026-11-20T14:31-08:00 | Q24: pin biosig-zarr tools/check-moved-text.ts default source to docs commit a474abfe in a small PR | owner |  |
+| 2026-11-20T14:34-08:00 | B3: owner authorized the manager to merge docs#128 (overrides 'owner merges docs' for this PR) | owner |  |
+| 2026-11-20T14:34-08:00 | Q25: verify the third-party EDF+D claim (EDF+ spec 2.1.2, 2.2.4); if confirmed, correct RFC-0001's EDF sentence and add the 2.02 s gap reader test to B4 and B6 | owner |  |
+| 2026-11-20T14:34-08:00 | Q26: O5 also waits on B5 (schemas and vectors); the lead adds it when writing the B5 card | owner |  |
+| 2026-11-20T14:34-08:00 | Q27: widen biosig-zarr text.yml path filter to tools/**, **/*.json, package.json, biome.json | owner |  |
+| 2026-11-20T14:37-08:00 | Q25 confirmed against EDF+ spec (2.1.1, 2.1.2 duration 0 one-sample EDF+D records, 2.2.4 time-keeping TAL; per-record timestamp, word 'irregular' not used): apply the corrected wording and the 2.02 s gap reader test in B4 and B6 | manager |  |
 
 ## Log
 
@@ -125,3 +132,11 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:20-08:00 | B2 merged: biosig-zarr#2 merge 36112961471b46de1a96e5cb67f9581772d9146e. O4 held: owner asked whether the tag covers the data format; release waits for confirmation |
 | 2026-11-20T14:21-08:00 | O4 done by manager on owner confirmation: release 2.0.0 -> 36112961, prerelease=false. C1 due (B2 merged, Q9, Q10 answered): lead writes B5 card |
 | 2026-11-20T14:22-08:00 | Dispatched B4, B6 (claude-opus) and B3 (claude-sonnet); Agents today 24/40 |
+| 2026-11-20T14:23-08:00 | B3 docs#128 head 82a440f7 verified: 1 file, 15-line pointer to 2.0.0, K2 grep of dist clean per worker and manager; review dispatched |
+| 2026-11-20T14:24-08:00 | B3 review: no PR findings; stop condition S1 (store-contract layout text) asked as Q23; check-moved-text default source asked as Q24 |
+| 2026-11-20T14:31-08:00 | Q23, Q24 answered; B3 to owner for merge; impl-B2 resumed for the Q24 pin PR |
+| 2026-11-20T14:32-08:00 | B4 rfcs#2 draft head 103d14be verified (2 files, rfc-check pass, opened_at null); review panel dispatched. B4 asks: does O5 also wait on B5 (schemas, vectors)? and B4/B6 name cross-check (seam review before O4b) |
+| 2026-11-20T14:32-08:00 | Owner fixed nemarOrg billing; docs#128 CI rerun success. B2 pin PR biosig-zarr#3 head 1c07205c (no CI: text.yml path filter excludes tools/**) |
+| 2026-11-20T14:34-08:00 | B3 merged by manager (owner instruction). Q25 verification started; Q26 Q27 recorded. B6 draft PR biosig-zarr#4 head e2b3ba79 reported |
+| 2026-11-20T14:37-08:00 | B4 r1 review: decisions lens 2 imp 3 sugg; technical lens 4 imp ~10 sugg; all sent back with Q25 and the B6 seam |
+| 2026-11-20T14:37-08:00 | biosig-zarr#3 (Q24 pin + Q27 filter) head 5bde6480, CI green; review dispatched |
