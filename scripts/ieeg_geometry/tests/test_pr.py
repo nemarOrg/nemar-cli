@@ -6,7 +6,9 @@ runs), `gh` is a local executable that records its arguments, and nothing reache
 
 import dataclasses
 import json
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -35,15 +37,41 @@ def remote_repo(remote: Remote) -> Path:
     return Path(remote.repo_url.format(id=DATASET_ID).removeprefix("file://"))
 
 
-def _advance(bare: Path, tmp: Path, files: dict[str, str]) -> None:
+def _advance(
+    bare: Path,
+    tmp: Path,
+    files: dict[str, str],
+    name: str = "advance",
+    *,
+    rename: dict[str, str] | None = None,
+    remove: tuple[str, ...] = (),
+) -> None:
     """A commit on the hosted main after the release tag."""
-    work = tmp / "advance"
+    work = tmp / name
     _git(tmp, "clone", "-q", str(bare), str(work))
+    for old, new in (rename or {}).items():
+        _git(work, "mv", old, new)
+    for gone in remove:
+        _git(work, "rm", "-q", gone)
     for rel, text in files.items():
         (work / rel).parent.mkdir(parents=True, exist_ok=True)
         (work / rel).write_text(text)
-    _git(work, "add", "-A")
+    _git(work, "add", "--", *files)  # not -A: a new attribute must not renormalize old files
     _git(work, "commit", "-q", "-m", "after the release")
+    _git(work, "push", "-q", "origin", "main")
+
+
+def _advance_annexed(bare: Path, tmp: Path, rel: str) -> None:
+    """After the release, main points `rel` at annexed bytes the release does not hold."""
+    work = tmp / "advance-annexed"
+    _git(tmp, "clone", "-q", str(bare), str(work))
+    link = work / rel
+    old = Path(os.readlink(link))
+    link.unlink()
+    key = "MD5E-s5--" + "0" * 32 + Path(rel).suffix
+    os.symlink(old.parent.parent / key / key, link)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "annexed input changed after the release")
     _git(work, "push", "-q", "origin", "main")
 
 
@@ -427,20 +455,316 @@ def test_a_main_ahead_of_the_release_only_under_nemar_is_recorded_in_the_body(en
     )
 
 
-def test_a_main_ahead_of_the_release_in_dataset_files_is_refused_for_a_real_run(
+def test_a_main_ahead_of_the_release_in_dataset_files_proceeds_and_lists_the_paths(env, tmp_path):
+    served, bare, log, work = env
+    _advance(
+        bare,
+        tmp_path,
+        {
+            "sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n",
+            ".bidsignore": "x\n",
+            "sub-\u00e9/notes.txt": "x\n",
+        },
+        rename={"participants.tsv": "participants-renamed.tsv"},
+        remove=("derivatives/other/result.bin",),
+    )
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert "is ahead of release" in body
+    # every path, with no rename detection (both sides of a move) and no quoting of non-ASCII
+    for path in (
+        ".bidsignore",
+        "sub-1/ieeg/sub-1_new_electrodes.tsv",
+        "participants.tsv",
+        "participants-renamed.tsv",
+        "derivatives/other/result.bin",
+        "sub-\u00e9/notes.txt",
+    ):
+        assert f"  - `{path}`" in body, path
+    assert body.index("`.bidsignore`") < body.index("`sub-1/ieeg/")  # sorted
+    # the sentence stays on the Source bullet, before the list
+    source_line = next(ln for ln in body.splitlines() if ln.startswith("- Source:"))
+    assert "were computed from `main`, which the patch release will publish" in source_line
+    assert "refuses" not in body
+
+
+def test_more_than_fifty_changed_paths_are_listed_as_fifty_and_a_count(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {f"extra/f{i:03d}.txt": "x\n" for i in range(60)})
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert body.count("- `extra/f") == 50 and "and 10 more" in body
+    assert "`extra/f049.txt`" in body and "`extra/f050.txt`" not in body
+    assert len(body) <= pr.GITHUB_BODY_MAX
+
+
+def test_the_path_list_stays_inside_the_character_budget():
+    long = [f"d/{i:03d}/" + "n" * 400 for i in range(50)]
+    text = pr._path_list(long)
+    assert len(text) < pr.MAX_LISTED_CHARS + 200 and "more" in text.splitlines()[-1]
+
+
+def test_an_annexed_input_changed_after_the_release_is_refused_for_a_real_run(
     env, tmp_path, capsys
 ):
     served, bare, log, work = env
-    _advance(bare, tmp_path, {"sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n"})
+    rel = next(p for p in served.annexed if p.endswith("pial"))
+    _advance_annexed(bare, tmp_path, rel)
     assert _pr(served, work) == 1
     err = capsys.readouterr().err
-    assert "ahead of release" in err and "outside `.nemar/`, `.github/` and `.gitattributes`" in err
+    assert f"changed after release {VERSION}" in err and f"`{rel}`" in err
     assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
-    # a dry run goes on, with a warning and the note in the printed body
+    # a dry run goes on, with a warning
     assert _pr(served, tmp_path / "w2", dry=True) == 0
+    assert "(a real run refuses)" in capsys.readouterr().out
+
+
+def test_an_input_that_could_not_be_fetched_is_listed_in_the_body(
+    tmp_path,
+    source,  # noqa: F811
+    monkeypatch,
+    capsys,
+):
+    probe = build_remote(source, tmp_path / "probe")
+    rel = next(p for p in probe.annexed if p.endswith("lh.sphere.reg"))
+    remote = build_remote(source, tmp_path / "remote", missing_data=(rel,))
+    served, _bare_repo = _bare(remote, tmp_path / "hosting")
+    standins.activate(monkeypatch, tmp_path / "standins")
+    assert _pr(served, tmp_path / "w", dry=True) == 0
     out = capsys.readouterr().out
-    assert "warning: `main`" in out and "(a real run refuses)" in out
-    assert "- Source: `main`" in out
+    assert "- Not fetched: 1 input file(s)" in out and f"  - `{rel}`: " in out
+
+
+def test_crlf_blobs_under_an_lf_attribute_are_not_changes_and_stay_byte_identical(env, tmp_path):
+    served, bare, log, work = env
+    # the authors committed CRLF bytes, and only later a `text eol=lf` rule
+    _advance(bare, tmp_path, {"README.md": "line one\r\nline two\r\n"}, name="adv-crlf")
+    _advance(bare, tmp_path, {".gitattributes": "* text eol=lf\n"}, name="adv-attr")
+    crlf = "line one\r\nline two\r\n"
+    assert int(_git(bare, "cat-file", "-s", "main:README.md")) == len(crlf)  # CR bytes kept
+    assert _pr(served, work) == 0
+    names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert "README.md" not in names and ".gitattributes" not in names
+    assert sorted(names) == _expected_changes(served, tmp_path)
+    assert _git(bare, "rev-parse", f"{BRANCH}:README.md") == _git(
+        bare, "rev-parse", "main:README.md"
+    )
+
+
+ODD_DESCRIPTION = (
+    '{\r\n  "Name": "x",\r\n  "GeneratedBy": [{"Name": "a", "Version": "9.9"}],\r\n'
+    '    "Version" :   "1.0.0",\r\n  "Z": 1\r\n}'
+)  # CRLF, odd spacing, an inner Version, no trailing newline
+
+
+def _blob(bare: Path, ref: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(bare), "cat-file", "blob", ref], check=True, capture_output=True
+    ).stdout
+
+
+def test_bump_version_edits_only_the_version_and_tells_the_reviewer(env, tmp_path):
+    served, bare, log, work = env
+    adv = tmp_path / "adv2"
+    _git(tmp_path, "clone", "-q", str(bare), str(adv))
+    (adv / "dataset_description.json").write_bytes(ODD_DESCRIPTION.encode())
+    _git(adv, "add", "dataset_description.json")
+    _git(adv, "commit", "-q", "-m", "crlf description")
+    _git(adv, "push", "-q", "origin", "main")
+    assert _pr(served, work, "--bump-version") == 0
+    new = _blob(bare, f"{BRANCH}:dataset_description.json")
+    assert new == ODD_DESCRIPTION.replace('"1.0.0"', '"1.0.1"').encode()
+    names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert sorted(names) == sorted(
+        [*_expected_changes(served, tmp_path), "dataset_description.json"]
+    )
+    body = _calls(log)[0]["body"]
+    assert "from `1.0.0` to `1.0.1`" in body and "tags `v1.0.1`" in body
+    assert "do not also run `nemar dataset release`" in body
+    assert "cut the patch" not in body
+
+
+def test_without_the_flag_the_version_is_untouched_and_the_release_step_is_named(env):
+    served, bare, log, work = env
+    assert _pr(served, work) == 0
+    assert "dataset_description.json" not in _git(bare, "diff", "--name-only", "main", BRANCH)
+    assert "nemar dataset release on000001 --type patch" in _calls(log)[0]["body"]
+
+
+def _integration_branch(bare: Path, tmp: Path, name: str, files: dict[str, str]) -> str:
+    """A collaborator's branch on the remote: one foreign commit on top of main; returns its tip."""
+    work = tmp / f"integ-{name}"
+    _git(tmp, "clone", "-q", str(bare), str(work))
+    _git(work, "checkout", "-q", "-b", name)
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    _git(work, "add", "--", *files)
+    _git(
+        work, "commit", "-q", "--author", "Collab Person <collab@example.org>", "-m", "Fix a thing"
+    )
+    _git(work, "push", "-q", "origin", name)
+    return _git(work, "rev-parse", "HEAD").strip()
+
+
+def _create_call(log: Path) -> dict:
+    return next(c for c in _calls(log) if c["args"][:2] == ["pr", "create"])
+
+
+def test_from_ref_keeps_a_collaborators_version_and_puts_the_geometry_on_top(env, tmp_path):
+    served, bare, log, work = env
+    foreign = _integration_branch(
+        bare,
+        tmp_path,
+        "integ",
+        {"dataset_description.json": '{"Name": "x", "Version": "1.0.4"}\n', "CHANGES": "1.0.3\n"},
+    )
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    # one geometry commit on top of the foreign tip, pushed to the same branch; nothing else pushed
+    assert _git(bare, "rev-parse", "integ~1").strip() == foreign
+    assert _git(bare, "rev-list", "--count", f"{foreign}..integ").strip() == "1"
+    assert _refs(bare) == ["refs/heads/integ", "refs/heads/main"]
+    assert _git(bare, "rev-parse", "main").strip() == served.commit
+    names = _git(bare, "diff", "--name-only", foreign, "integ").split()
+    assert sorted(names) == _expected_changes(served, tmp_path)  # no description change
+    assert _blob(bare, "integ:dataset_description.json") == _blob(
+        bare, f"{foreign}:dataset_description.json"
+    )
+    # the pull request is opened from the branch into main, and the body explains
+    call = _create_call(log)
+    assert call["args"][call["args"].index("--head") + 1] == "integ"
+    assert call["args"][call["args"].index("--base") + 1] == "main"
+    body = call["body"]
+    assert "Integration branch `integ`: 1 commit(s) not on `main`" in body
+    assert f"`{foreign[:7]}` `Collab Person: Fix a thing`" in body
+    assert "is already `1.0.4`" in body and "tags `v1.0.4`" in body
+    assert "CHANGES lists" not in body  # 1.0.3 is not ahead of 1.0.4
+
+
+def test_from_ref_updates_an_open_pull_request_instead_of_opening_another(
+    env, tmp_path, monkeypatch
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    monkeypatch.setenv(
+        "STANDIN_OPEN_PRS",
+        '[{"number": 5, "url": "https://example.org/pull/5", '
+        '"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}]',
+    )
+    assert _pr(served, work, "--from-ref", "integ") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "edit"] in verbs and ["pr", "create"] not in verbs
+    edit = next(c for c in _calls(log) if c["args"][:2] == ["pr", "edit"])
+    assert edit["args"][2] == "5" and "Integration branch `integ`" in edit["body"]
+
+
+def test_from_ref_refuses_when_the_branch_moved_during_the_run(env, tmp_path, monkeypatch, capsys):
+    served, bare, log, work = env
+    foreign = _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    real = pipeline.run_dataset
+
+    def run_then_someone_pushes(*args, **kwargs):
+        got = real(*args, **kwargs)
+        _integration_branch_more(bare, tmp_path)
+        return got
+
+    monkeypatch.setattr(pipeline, "run_dataset", run_then_someone_pushes)
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "moved on the remote" in capsys.readouterr().err
+    assert _git(bare, "rev-list", "--count", f"{foreign}..integ").strip() == "1"  # theirs only
+    assert not _calls(log)
+
+
+@pytest.mark.parametrize(
+    "name", ["main", "refs/heads/main", "-f", "--delete", "a..b", "x.lock", "/x"]
+)
+def test_from_ref_refuses_main_and_anything_but_a_plain_branch_name(env, capsys, name):
+    served, bare, log, work = env
+    assert _pr(served, work, f"--from-ref={name}") == 1
+    assert "plain branch name" in capsys.readouterr().err
+    assert _git(bare, "rev-parse", "main").strip() == served.commit and not _calls(log)
+
+
+_MINE = {"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}
+
+
+def test_from_ref_ignores_a_fork_pull_request_with_the_same_branch_name(env, tmp_path, monkeypatch):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    fork = {"number": 8, "url": "u8", "headRepositoryOwner": {"login": "x"}, "baseRefName": "main"}
+    monkeypatch.setenv("STANDIN_OPEN_PRS", json.dumps([fork]))
+    assert _pr(served, work, "--from-ref", "integ") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "create"] in verbs and ["pr", "edit"] not in verbs
+
+
+def test_from_ref_refuses_when_more_than_one_pull_request_remains(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    rows = [{"number": 5, "url": "u5", **_MINE}, {"number": 6, "url": "u6", **_MINE}]
+    monkeypatch.setenv("STANDIN_OPEN_PRS", json.dumps(rows))
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "2 open pull requests" in capsys.readouterr().err
+    assert not [c for c in _calls(log) if c["args"][:2] in (["pr", "edit"], ["pr", "create"])]
+
+
+@pytest.mark.parametrize("how", ["rewound", "deleted"])
+def test_from_ref_push_is_atomic_against_a_branch_rewound_or_deleted_at_the_last_moment(
+    env, tmp_path, monkeypatch, capsys, how
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    real = pr._git
+
+    def git(clone, *a, **k):
+        if a and a[0] == "push":  # after the ls-remote check, before the push
+            if how == "rewound":
+                _git(bare, "update-ref", "refs/heads/integ", served.commit)
+            else:
+                _git(bare, "update-ref", "-d", "refs/heads/integ")
+        return real(clone, *a, **k)
+
+    monkeypatch.setattr(pr, "_git", git)
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "git push failed" in capsys.readouterr().err
+    left = _git(bare, "rev-parse", "--verify", "-q", "integ").strip() if how == "rewound" else ""
+    assert left in ("", served.commit) and not _calls(log)
+
+
+def _integration_branch_more(bare: Path, tmp: Path) -> None:
+    work = tmp / "integ-more"
+    _git(tmp, "clone", "-q", "--branch", "integ", str(bare), str(work))
+    (work / "CHANGES").write_text("1.0.0\nmore\n")
+    _git(work, "add", "CHANGES")
+    _git(work, "commit", "-q", "-m", "a later push")
+    _git(work, "push", "-q", "origin", "integ")
+
+
+def test_from_ref_bumps_a_version_equal_to_mains(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.0"}\n'})
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "2.0.0 upstream\n"})
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    assert b'"1.0.1"' in _blob(bare, "integ:dataset_description.json")
+    body = _create_call(log)["body"]
+    assert "goes from `1.0.0` to `1.0.1`" in body and "CHANGES lists 2.0.0" in body
+
+
+def test_bump_version_chooses_above_main_when_main_is_ahead_of_the_tags(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.2"}\n'})
+    assert _pr(served, work, "--bump-version") == 0
+    assert b'"1.0.3"' in _blob(bare, f"{BRANCH}:dataset_description.json")
+
+
+def test_bump_version_refuses_a_malformed_version(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Version": "1.0"}\n'})
+    assert _pr(served, work, "--bump-version") == 1
+    assert "not of the form" in capsys.readouterr().err
+    assert not _calls(log)
 
 
 def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
@@ -488,12 +812,12 @@ def test_an_oversized_body_is_refused_before_any_branch_commit_or_push(env, monk
     assert not _calls(log)
 
 
-def test_a_gitattributes_lookalike_is_not_allowed_to_move_after_the_release(env, tmp_path, capsys):
+def test_a_gitattributes_lookalike_counts_as_a_dataset_file_and_is_listed(env, tmp_path):
     served, bare, log, work = env
     _advance(bare, tmp_path, {".gitattributesX": "x\n", ".nemar/metadata.json": "{}\n"})
-    assert _pr(served, work) == 1
-    assert "`.gitattributesX`" in capsys.readouterr().err
-    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert "- `.gitattributesX`" in body and "1 path(s) outside" in body
 
 
 def _missing_annex_machine(monkeypatch):
