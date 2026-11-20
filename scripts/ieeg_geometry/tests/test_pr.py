@@ -36,14 +36,26 @@ def remote_repo(remote: Remote) -> Path:
     return Path(remote.repo_url.format(id=DATASET_ID).removeprefix("file://"))
 
 
-def _advance(bare: Path, tmp: Path, files: dict[str, str]) -> None:
+def _advance(
+    bare: Path,
+    tmp: Path,
+    files: dict[str, str],
+    name: str = "advance",
+    *,
+    rename: dict[str, str] | None = None,
+    remove: tuple[str, ...] = (),
+) -> None:
     """A commit on the hosted main after the release tag."""
-    work = tmp / "advance"
+    work = tmp / name
     _git(tmp, "clone", "-q", str(bare), str(work))
+    for old, new in (rename or {}).items():
+        _git(work, "mv", old, new)
+    for gone in remove:
+        _git(work, "rm", "-q", gone)
     for rel, text in files.items():
         (work / rel).parent.mkdir(parents=True, exist_ok=True)
         (work / rel).write_text(text)
-    _git(work, "add", "-A")
+    _git(work, "add", "--", *files)  # not -A: a new attribute must not renormalize old files
     _git(work, "commit", "-q", "-m", "after the release")
     _git(work, "push", "-q", "origin", "main")
 
@@ -447,14 +459,31 @@ def test_a_main_ahead_of_the_release_in_dataset_files_proceeds_and_lists_the_pat
     _advance(
         bare,
         tmp_path,
-        {"sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n", ".bidsignore": "x\n"},
+        {
+            "sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n",
+            ".bidsignore": "x\n",
+            "sub-\u00e9/notes.txt": "x\n",
+        },
+        rename={"participants.tsv": "participants-renamed.tsv"},
+        remove=("derivatives/other/result.bin",),
     )
     assert _pr(served, work) == 0
     body = _calls(log)[0]["body"]
     assert "is ahead of release" in body
-    assert "- `.bidsignore`" in body and "- `sub-1/ieeg/sub-1_new_electrodes.tsv`" in body
+    # every path, with no rename detection (both sides of a move) and no quoting of non-ASCII
+    for path in (
+        ".bidsignore",
+        "sub-1/ieeg/sub-1_new_electrodes.tsv",
+        "participants.tsv",
+        "participants-renamed.tsv",
+        "derivatives/other/result.bin",
+        "sub-\u00e9/notes.txt",
+    ):
+        assert f"  - `{path}`" in body, path
     assert body.index("`.bidsignore`") < body.index("`sub-1/ieeg/")  # sorted
-    assert "computed from `main`, which the patch release will publish" in body
+    # the sentence stays on the Source bullet, before the list
+    source_line = next(ln for ln in body.splitlines() if ln.startswith("- Source:"))
+    assert "were computed from `main`, which the patch release will publish" in source_line
     assert "refuses" not in body
 
 
@@ -490,7 +519,10 @@ def test_an_annexed_input_changed_after_the_release_is_refused_for_a_real_run(
 
 
 def test_an_input_that_could_not_be_fetched_is_listed_in_the_body(
-    tmp_path, source, monkeypatch, capsys
+    tmp_path,
+    source,  # noqa: F811
+    monkeypatch,
+    capsys,
 ):
     probe = build_remote(source, tmp_path / "probe")
     rel = next(p for p in probe.annexed if p.endswith("lh.sphere.reg"))
@@ -500,6 +532,22 @@ def test_an_input_that_could_not_be_fetched_is_listed_in_the_body(
     assert _pr(served, tmp_path / "w", dry=True) == 0
     out = capsys.readouterr().out
     assert "- Not fetched: 1 input file(s)" in out and f"  - `{rel}`: " in out
+
+
+def test_crlf_blobs_under_an_lf_attribute_are_not_changes_and_stay_byte_identical(env, tmp_path):
+    served, bare, log, work = env
+    # the authors committed CRLF bytes, and only later a `text eol=lf` rule
+    _advance(bare, tmp_path, {"README.md": "line one\r\nline two\r\n"}, name="adv-crlf")
+    _advance(bare, tmp_path, {".gitattributes": "* text eol=lf\n"}, name="adv-attr")
+    crlf = "line one\r\nline two\r\n"
+    assert int(_git(bare, "cat-file", "-s", "main:README.md")) == len(crlf)  # CR bytes kept
+    assert _pr(served, work) == 0
+    names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert "README.md" not in names and ".gitattributes" not in names
+    assert sorted(names) == _expected_changes(served, tmp_path)
+    assert _git(bare, "rev-parse", f"{BRANCH}:README.md") == _git(
+        bare, "rev-parse", "main:README.md"
+    )
 
 
 def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
