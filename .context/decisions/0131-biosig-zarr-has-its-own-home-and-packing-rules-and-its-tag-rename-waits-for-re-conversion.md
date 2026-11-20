@@ -4,12 +4,12 @@
 **Date:** 2026-11-20
 **Owner:** Seyed Yahya Shirazi
 
-Partially supersedes [ADR 0128](0128-the-zarr-serving-copy-is-not-an-nwb-container.md) on four points, listed under "What this supersedes".
+This Architecture Decision Record (ADR) partially supersedes [ADR 0128](0128-the-zarr-serving-copy-is-not-an-nwb-container.md) on four points, listed under "What this supersedes".
 Epic #2239, step #2241.
 
 ## Context
 
-This Architecture Decision Record (ADR) follows the owner's decisions of 2026-11-20,
+This ADR follows the owner's decisions of 2026-11-20,
 which open the biosig-zarr format to public comment through a Request for Comments (RFC) process, starting with RFC-0001 for the whole format and its single-file `.bzx` form.
 Four lines of ADR 0128's Consequences no longer hold.
 ADR 0128 put the specification on docs.nemar.org while pre-beta and moved it to a public repository only at beta.
@@ -29,9 +29,10 @@ An ADR is never edited, so this one records the change.
 2. **The `.bzx` packing rules are NEMAR's own.**
    OME-Zarr RFC-9 (the zipped form of OME-Zarr) is prior art that informed them, not a dependency:
    a later change to RFC-9 is not followed, and a change to the packing rules is made through biosig-zarr's own process.
-3. **No store's metadata is patched in place, so the tag rename moves to the version 3 writer.**
+3. **No store's metadata is patched in place, so the tag rename moves to the next writer.**
    The in-place patch step of issue #2217 is withdrawn.
    The format tag changes from `biosigio-zarr` to `biosig-zarr` only when the version 3 writer produces a store,
+   or, if RFC-0001 does not adopt `format_version` 3, the first writer that replaces the version 2 writer,
    through an engine version bump and re-conversion; existing version 2 stores keep `biosigio-zarr` until they are re-converted,
    and readers keep accepting both names, permanently, as the owner decided on #2217 on 2026-11-18.
    ADR 0128's "with `format_version` unchanged" is superseded; its "never patched afterward" stands and now governs this rename too.
@@ -51,6 +52,7 @@ Everything else in ADR 0128 stands, including that the serving copy is not a Neu
 ## Consequences
 
 - Issue #2217 is closed or rescoped when this ADR merges, as the owner's comment there of 2026-11-20 says.
+- The other #2217 work that rode on the withdrawn rewrite pass, the step 9 corrections to the store documentation and the optional `generated_by` backfill, is not settled by that thread: whether each moves to RFC-0001, to its follow-through epic, or is dropped is to be decided at checkpoint C3.
 - Stores carry the old tag until they are re-converted, so a reader that accepts only `biosig-zarr` would break; none may.
 - A specification change and a NEMAR rollout change may need two records in two repositories; the RFC link ties them together.
 - RFC-0001 states the independence from RFC-9 as an advantage, and NEMAR now owns every future change to the packing rules, with nobody upstream to share that work.
