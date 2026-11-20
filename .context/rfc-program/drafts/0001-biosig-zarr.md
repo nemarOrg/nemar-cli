@@ -25,7 +25,9 @@ The Neuroelectromagnetic Data Archive and Tools Resource (NEMAR) serves every ra
 That store layout has been in production since mid 2026 and is now being written down as its own specification, `biosig-zarr`, so that tools other than NEMAR's can read and write it.
 A store can also be packed into one file with the suffix `.bzx`, so that it can stand in for a data file on a researcher's disk.
 
-This RFC asks the electroencephalography (EEG) and magnetoencephalography (MEG) communities, and the people who build Zarr tools, to comment on the whole format before it is frozen.
+This RFC asks the whole biosignal community to comment on the format before it is frozen:
+anyone who records, shares, analyzes or builds tools for electroencephalography (EEG), magnetoencephalography (MEG), intracranial EEG (iEEG), electromyography (EMG), electrocardiography (ECG), other physiological recordings, motion and wearable sensors, and any other biosignal,
+as well as the people who build Zarr tools.
 It also proposes `format_version` 3, which fixes two things version 2 cannot express:
 
 1. **Time.**
@@ -513,7 +515,7 @@ There are two layers, and they can change separately.
 The package-specific items are up for comment for four reasons.
 
 1. **The commenters differ.**
-   People who use EEG and MEG data care what a store says about a recording.
+   People who record and use biosignals of any kind care what a store says about a recording.
    People who build Zarr tools care whether the archive can be read in place.
    Separate names let each group find its part.
 2. **The names themselves.**
