@@ -57,7 +57,7 @@ Verify by observation before setting it `done`:
 | O1 | `gh api repos/nemarOrg/rfcs -q .has_discussions` prints `true`, and `gh api graphql -f query='{repository(owner:"nemarOrg",name:"rfcs"){discussionCategories(first:20){nodes{name}}}}'` lists `RFCs` |
 | O1b | `gh api repos/nemarOrg/rfcs/rulesets` lists a ruleset whose rules include `required_status_checks` with `rfc-check` |
 | O2 | `gh api repos/nemarOrg/biosig-zarr -q .visibility` prints `public`, and the biosigio#179 comment exists (`gh issue view 179 -R neuromechanist/biosigio --comments`) |
-| O4 | `gh release view 2.0.0-draft.1 -R nemarOrg/biosig-zarr` succeeds |
+| O4 | `gh release view 2.0.0 -R nemarOrg/biosig-zarr` succeeds |
 | O5, O6 | the RFC PR is merged, and `gh api repos/nemarOrg/rfcs/contents/README.md` lists the RFC as `open` |
 
 ## Event handlers specific to this program

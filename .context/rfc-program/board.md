@@ -69,7 +69,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | O2 | - | - | 1d | waits on O2 and Q8 |
 | B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | - | blocked | B1 | - | - | 1d | waits on B1 and Q11 |
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | - | blocked | A1, R1 | - | - | 1d | waits on A1, R1 and Q17; owner merges |
-| O4 | Owner tags 2.0.0-draft.1 | - | owner | - | - | blocked | B2 | - | - | 1d | owner step after B2 merges |
+| O4 | Owner tags 2.0.0 | - | owner | - | - | blocked | B2 | - | - | 1d | owner step after B2 merges |
 | B3 | [docs renders spec from pinned tag](cards/B3.md) | - | worker-hard | - | - | blocked | O4 | - | - | 1d | waits on O4 and Q12; owner merges |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | - | todo | R1, B2 | - | - | 2d | after R1 and B2 merge; PR stays open |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - | - | 2d | lead completes at C1 (Q9, Q10) |

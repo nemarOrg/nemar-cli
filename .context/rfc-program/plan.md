@@ -68,7 +68,7 @@ When this program ends:
 1. nemarOrg/rfcs exists, holds the process, the template, the index and two working checks (`rfc-check` and `rfc-clock`), and is protected by a ruleset that requires `rfc-check`.
 2. An ADR in nemar-cli adopts the process, marked provisional, to be reviewed after the first two RFCs.
 3. docs.nemar.org has a page `/policies/rfcs/` that explains the process and links to the index.
-4. nemarOrg/biosig-zarr exists, initialized with `/project:init-project`, holding the specification text moved from docs.nemar.org, and tagged `2.0.0-draft.1` by the owner.
+4. nemarOrg/biosig-zarr exists, initialized with `/project:init-project`, holding the specification text moved from docs.nemar.org, and tagged `2.0.0` by the owner.
 5. The RFC-0001 text (the whole biosig-zarr format, with `.bzx` as its single-file form) is reviewed and waits as a draft PR for the owner to open it.
 6. The counts that RFC-0002 needs are measured, and the RFC-0002 text (dataset version legibility) is reviewed and waits as a draft PR for the owner to open it.
 
@@ -152,7 +152,7 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
 | O2 | The owner creates nemarOrg/biosig-zarr and amends biosigio#179 | owner | none | settings, one comment | nemarOrg/biosig-zarr |
 | B1 | biosig-zarr is initialized with `/project:init-project`, plus the files it does not create | worker-hard | O2, Q8 answered | the whole repository | nemarOrg/biosig-zarr, `main` |
 | B2 | The specification text is moved into `spec/index.md` as plain Markdown | worker | B1, Q11 answered | `spec/`, `CHANGELOG.md`, `README.md` | nemarOrg/biosig-zarr, `main` |
-| O4 | The owner tags `2.0.0-draft.1` | owner | B2 | one tag | nemarOrg/biosig-zarr |
+| O4 | The owner tags `2.0.0` | owner | B2 | one tag | nemarOrg/biosig-zarr |
 | B3 | docs.nemar.org renders the specification from the pinned tag, with a per-page license notice | worker-hard | O4, Q12 answered | docs build step, the format page | nemarOrg/docs, `main` (owner merges) |
 | B4 | The RFC-0001 text is written and reviewed as a draft PR | lead | R1, B2 | `text/0001-biosig-zarr.md` | nemarOrg/rfcs, PR left open |
 | B5 | Schemas and the first conformance vectors | outline | B2, Q9, Q10 | to be written at checkpoint C1 | nemarOrg/biosig-zarr |
@@ -202,8 +202,8 @@ gh issue comment 179 -R neuromechanist/biosigio \
 
 ```bash
 SHA=$(gh api repos/nemarOrg/biosig-zarr/commits/main -q .sha)
-gh release create 2.0.0-draft.1 -R nemarOrg/biosig-zarr --target "$SHA" --prerelease \
-  --title "2.0.0-draft.1" --notes "The pre-beta text moved from docs.nemar.org; no normative change."
+gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" --prerelease \
+  --title "2.0.0" --notes "Format version 2 as NEMAR serves it, moved from docs.nemar.org; no normative change."
 ```
 
 ### O5 and O6. Open an RFC
