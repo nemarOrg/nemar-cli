@@ -69,6 +69,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:56-08:00 | Mail epic #2260: its minimum slice (P1-P3 plus privacy-policy text) ships to production before RFC-0001 opens; O5 waits on it, and the RFC-0001 email goes out in the rfcs category | owner |  |
 | 2026-11-20T13:12-08:00 | Q22: rfcs main ruleset lists repository admins as bypass actors, pull request only | owner |  |
 | 2026-11-20T13:15-08:00 | Q21: RFCs category stays Announcement format; people comment under the RFC Discussion; email fallback is support@nemar.org, posted with consent | owner |  |
+| 2026-11-20T13:29-08:00 | O1b: the owner asked the manager to apply the rfcs main ruleset itself (overrides the runbook's never-change-a-setting rule for this one act) | owner |  |
+| 2026-11-20T13:30-08:00 | P1: the runbook's never-change-a-setting rule is wrong; the manager may apply settings that a merged, reviewed file specifies (e.g. ops/ruleset-main.json) without asking each time; the lead rewrites runbook.md in its session | owner |  |
 
 ## Log
 
@@ -99,3 +101,11 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:16-08:00 | A2 r1 review: clean of critical/important; 2 suggestions sent back to impl-A2 |
 | 2026-11-20T13:18-08:00 | A2 merged: PR 2269 squash 0184cb051d77587144f501a327b3928c9da97033 (ADR 0131); B1 unblocked to todo |
 | 2026-11-20T13:18-08:00 | Dispatched B1 (claude-sonnet) with Q8, Q9, Q11, Q13, Q14 and tag decisions; Agents today 13/40 |
+| 2026-11-20T13:20-08:00 | R1 r1 fixes head a108a99d verified: lint/typecheck/140 tests green, check ok, fixture exit 1, rfc-check CI pass, scope ok; r2 delta review dispatched |
+| 2026-11-20T13:21-08:00 | R1 merged: rfcs#1 squash c3a3ccc6 (r2 clean; 2 cosmetic suggestions rejected: table alignment does not affect rendering, inline UTC definition satisfies define-once rule) |
+| 2026-11-20T13:21-08:00 | C1a due: owner and lead notified; R3 waits on the lead's card. O1b set owner and asked. R2 dispatched; Agents today 15/40 |
+| 2026-11-20T13:29-08:00 | O1b done by manager on owner instruction: ruleset 27763743 active; verified via gh api rulesets |
+| 2026-11-20T13:29-08:00 | proposal P1 opened: Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) |
+| 2026-11-20T13:29-08:00 | R2 docs#127 CI 'test' job fails in ~3s with no failed step; main fails the same way since 2026-11-18 (not the diff); rerun once |
+| 2026-11-20T13:30-08:00 | R2 docs#127 head 0d845020 verified (3 files, build ok per worker); deviations accepted: ADR spelled out (docs policy-hygiene), privacy/security routes sentence from ADR 0130 |
+| 2026-11-20T13:30-08:00 | B1 biosig-zarr#1 head d75eda45 verified: scope ok (+.gitignore), text.yml links/lint/spelling green; deviations accepted (W3C 2023 text per card's 'current'); lead questions: JSON-only lint path filter (defer to C1/B5), LICENSE relicense sentence |
