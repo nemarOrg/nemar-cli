@@ -60,9 +60,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Started | Timebox | Next |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | - | active | - | - | 2026-11-20T11:12-08:00 | 4h | dispatch now |
-| O1 | Owner creates nemarOrg/rfcs, Discussions, RFCs category | - | owner | - | - | owner | - | - | - | 1d | owner runs plan.md section 5, O1 |
-| O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | owner | - | - | - | 1d | owner runs plan.md section 5, O2 |
+| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | active | - | - | 2026-11-20 | 4h | dispatch now |
+| O1 | Owner creates nemarOrg/rfcs, Discussions, RFCs category | - | owner | - | - | owner | - | - | - | 1d | repo and Discussions on; owner: RFCs Announcement category, org Discussions source |
+| O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - | - | 1d | repo created; biosigio#179 comment posted 2026-11-20 |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | - | blocked | - | - | - | 4h | waits on Q1 to Q7 |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | - | blocked | O1 | - | - | 2d | waits on O1 and Q1 to Q7 |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - | - | 1d | owner step after R1 merges |
