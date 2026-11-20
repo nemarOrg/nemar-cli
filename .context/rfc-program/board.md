@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T12:55-08:00 |
-| Next tick | 2026-11-20T13:25-08:00 |
+| Last tick | 2026-11-20T13:15-08:00 |
+| Next tick | 2026-11-20T13:45-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 9 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 13 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -65,10 +65,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - |  | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - |  | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
-| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | blocked | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | local 9ada28f0 (ADR 0131); push after dev merge and A1 merged (0130 gap) |
-| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | active | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | impl-A1 merging base 068c1306, gates, push, open PR |
+| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | review | O0 | 2269 |  | 2026-11-20T12:57-08:00 | 4h | r1 review (1 Sonnet, docs-only) on head 7f14f13d |
+| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
 | S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
-| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | - |  | 2026-11-20T12:57-08:00 | 2d | impl-R1 running |
+| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | rfcs#1 |  | 2026-11-20T12:57-08:00 | 2d | r1 fixes (5 important, 9 suggestions) + Q21, Q22; then r2 delta review |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - |  | - | - | owner step after R1 merges |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - |  | - | 4h | lead completes at C1a (R1 merged) |
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | A2 | - |  | - | 1d | waits on A2 merged (Q8 answered) |
@@ -111,6 +111,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q18 | O5 | Link to the BEP047 discussion of EDF's irregular and sparse sampling limit? Not found in PR 2231 or issue 2568. | Supply the link / Cite BIDS issues 1796, 2313, 2463 instead (Recommended) | none | 2026-12-08T17:00 | closed | BEP 045 peripheral physiology (bids-specification#2267, bep_045 page), not BEP047 (owner, 2026-11-20T12:18-08:00) |
 | Q19 | B4 | Slots: raise claude-opus Max from 1 to 2 (B4, B6 and A2 are lead cards, and checkpoints and advisor consults need the lead too) and add the reviewer tier to claude-sonnet's tiers? | Both (Recommended) / Opus Max 2 only / Neither | none | 2026-11-24T17:00 | closed | Opus Max 4 (owner, 2026-11-20); reviewer tier added to claude-sonnet per the owner's standing rule that PR review agents use Sonnet (owner, 2026-11-20T11:35-08:00) |
 | Q20 | - | ADR 0129 is on dev but not feature/rfc-program (48 behind, merges clean), so the gapless ADR index test fails for A1 (0130) and A2 (0131). How to resolve? | Lead merges origin/dev into feature/rfc-program (Recommended) / Add 129 to TOLERATED_GAPS in the A1 PR, removed when dev merges in / Other | none | 2026-11-21T17:00 | closed | Lead merges origin/dev into feature/rfc-program (owner, 2026-11-20T13:10-08:00) (owner, 2026-11-20T12:54-08:00) |
+| Q21 | - | Which support address do RFC comments without a GitHub account go to (PROCESS.md, A1, R2)? No support@ found in nemar-cli; info@nemar.org exists. | support@nemar.org (Recommended) / info@nemar.org / Other | none | 2026-11-21T17:00 | closed | Keep the Announcement category; comments go under the RFC Discussion; email fallback support@nemar.org, posted with consent (owner, 2026-11-20T14:05-08:00) |
+| Q22 | - | Should ops/ruleset-main.json (rfcs main, requires rfc-check) list a bypass actor so a broken main can be fixed without editing the ruleset? | Repository admins may bypass via pull request only (Recommended) / No bypass / Org admins always | none | 2026-11-21T17:00 | closed | Repository admins may bypass via pull request only (owner, 2026-11-20T14:00-08:00) |
 
 ## Proposals
 
@@ -123,9 +125,13 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|
 | impl-V1 | implementer | claude-sonnet | Sonnet | V1 | 2026-11-20T13:10-08:00 | done |
 | impl-A2 | implementer | claude-opus | Opus xhigh | A2 | 2026-11-20T12:57-08:00 | done |
-| impl-A1 | implementer | claude-sonnet | Sonnet high | A1 | 2026-11-20T12:57-08:00 | running |
+| impl-A1 | implementer | claude-sonnet | Sonnet high | A1 | 2026-11-20T12:57-08:00 | done |
 | impl-R1 | implementer | claude-sonnet | Sonnet xhigh | R1 | 2026-11-20T12:57-08:00 | running |
 | rev-V1-code | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
 | rev-V1-tests | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
 | lead-devmerge | lead | claude-opus | Opus xhigh | - | 2026-11-20T13:10-08:00 | done |
 | rev-V1-delta | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:18-08:00 | done |
+| rev-A1 | reviewer | claude-sonnet | Sonnet high | A1 | 2026-11-20T13:30-08:00 | done |
+| rev-R1-code | reviewer | claude-sonnet | Sonnet high | R1 | 2026-11-20T13:45-08:00 | done |
+| rev-R1-tests | reviewer | claude-sonnet | Sonnet high | R1 | 2026-11-20T13:45-08:00 | done |
+| rev-A2 | reviewer | claude-sonnet | Sonnet high | A2 | 2026-11-20T14:08-08:00 | running |

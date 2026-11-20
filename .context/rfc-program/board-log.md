@@ -67,6 +67,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:49-08:00 | Q19: claude-opus Max 4; reviewer tier on claude-sonnet (owner applied both to Slots) | owner |  |
 | 2026-11-20T12:54-08:00 | Q20: the lead merges origin/dev into feature/rfc-program (merge, no rebase) so ADR 0129 is in the base; A1 keeps 0130, A2 0131 | owner |  |
 | 2026-11-20T12:56-08:00 | Mail epic #2260: its minimum slice (P1-P3 plus privacy-policy text) ships to production before RFC-0001 opens; O5 waits on it, and the RFC-0001 email goes out in the rfcs category | owner |  |
+| 2026-11-20T13:12-08:00 | Q22: rfcs main ruleset lists repository admins as bypass actors, pull request only | owner |  |
+| 2026-11-20T13:15-08:00 | Q21: RFCs category stays Announcement format; people comment under the RFC Discussion; email fallback is support@nemar.org, posted with consent | owner |  |
 
 ## Log
 
@@ -87,3 +89,10 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:00-08:00 | V1 merged: PR 2238 squash 2d98bd9b into feature/rfc-program (gate: review converged r2 clean, no CI checks on [skip ci] head, mergeable clean) |
 | 2026-11-20T13:01-08:00 | lead-devmerge: merge da3d5838 passed gates but push hit SSL timeout; remote moved to 2d98bd9b; resumed once to redo on current tip. Leftover worktree rfc-devmerge + branch rfc-devmerge-tmp: removal blocked by guard hook, left for owner |
 | 2026-11-20T13:03-08:00 | Q20 done: dev merged into feature/rfc-program, 068c1306 (gates green, ADR index 10 pass); leftover worktrees rfc-devmerge, rfc-devmerge2 and branches rfc-devmerge-tmp, rfc-devmerge2-tmp for owner to delete (guard blocks removal); impl-A1 resumed |
+| 2026-11-20T13:04-08:00 | A1 PR 2268 head 1acee978 verified: scope 2 files, ADR index 10 pass, nemarOrg/rfcs x4; review dispatched |
+| 2026-11-20T13:05-08:00 | A1 r1 review: clean of critical/important; sugg 1 no_change_needed (follows index convention), 2 and 3 sent back as trivial wording fixes |
+| 2026-11-20T13:06-08:00 | A1 merged: PR 2268 squash b20b9e93; A2 resumed to merge base and open PR |
+| 2026-11-20T13:06-08:00 | R1 rfcs#1 head 9fc912c9 verified: scope ok (+.gitignore, accepted), lint/typecheck/119 tests green, check.ts ok and exits 1 on --root window-22 fixture, rfc-check CI pass. Deviations 1-8 accepted pending review; lead questions (support address, ruleset bypass) to owner |
+| 2026-11-20T13:12-08:00 | Q21 answer redirects: owner wants comments under the Discussion and the RFCs category type changed; clarification asked (category format is an owner setting; Q5 support-address path) |
+| 2026-11-20T13:15-08:00 | A2 PR 2269 head 7f14f13d verified (3 files, 0128 +1 line, index 10 pass); review dispatched |
+| 2026-11-20T13:15-08:00 | R1 r1 review: code lens 5 important, 7 sugg; tests lens 0 crit/imp (32/32 mutations caught), 2 sugg; all sent back with Q21, Q22; clock lag stated in text, cron unchanged per card |
