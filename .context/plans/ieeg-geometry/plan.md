@@ -176,3 +176,9 @@ The survey found: no command opens a dataset pull request for geometry yet; the 
 31. **An automatic re-pull's N.0.1 waits for an administrator.** The existing machine-clean rule holds a plan with an N.0.1 for an administrator's merge; that stays, because each N.0.1 mints a version DOI (ADR 0111) and the re-pull switches and caps are the owner's.
 
 32. **Only transient regeneration failures retry.** A failure that reproduces on the same snapshot and pipeline version (a version or report mismatch, invalid output, an undeclared write, or any other check the bridge applies to the pipeline's result) completes N.0.1 without the pipeline files and counts `pipeline_failed`, visible in `nemar admin repull status`; only a failure to run (process could not start, timeout, network) leaves the record at `released` for a retry, at most three times, then it is settled the same way.
+
+### Owner decisions, 2026-11-20, after the seam review
+
+- A mirror's geometry becomes its version N.0.1 in two steps: the owner merges the `pr` pull request, then cuts the patch with the existing `nemar dataset release <id> --type patch` (its own bump pull request, then the tag and the version DOI).
+- ADR 0129 and the ADR 0111 amendment of 2026-11-19 are accepted (flipped in the epic's final pull request, after ADR 0129's stale affine line is corrected).
+- P3b (ruling 29) is deferred out of this epic to its own tracked issue.
