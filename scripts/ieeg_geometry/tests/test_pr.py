@@ -487,3 +487,10 @@ def test_an_oversized_body_is_refused_before_any_branch_commit_or_push(env, monk
     assert _refs(bare) == ["refs/heads/main"]
     assert not _calls(log)
 
+
+def test_a_gitattributes_lookalike_is_not_allowed_to_move_after_the_release(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {".gitattributesX": "x\n", ".nemar/metadata.json": "{}\n"})
+    assert _pr(served, work) == 1
+    assert "`.gitattributesX`" in capsys.readouterr().err
+    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]

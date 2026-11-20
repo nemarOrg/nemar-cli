@@ -48,7 +48,8 @@ NEUTRAL_GIT_CONFIG = (
     "annex.largefiles=nothing",
     "core.attributesFile=/dev/null",
 )
-UNRELEASED_OK = (".nemar/", ".github/", ".gitattributes")  # main may change these after a release
+UNRELEASED_DIRS = (".nemar/", ".github/")  # main may change these after a release
+UNRELEASED_FILES = (".gitattributes",)  # exact names, not prefixes
 
 
 class PrRefusal(Exception):
