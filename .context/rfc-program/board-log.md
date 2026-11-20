@@ -40,6 +40,14 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T11:17-08:00 | Relicensing: the owner relicenses the spec text to the agreed licenses (W3C for text, Apache 2.0 for schemas, vectors and code); LICENSE records it was relicensed from CC BY-NC-ND 4.0 with the date. The format page is REMOVED from docs.nemar.org and replaced by a short pointer to nemarOrg/biosig-zarr (no rendered copy, no pinned-tag fetch); Q12 is moot | owner |  |
 | 2026-11-20T11:17-08:00 | 2.0.0 is a full release (not pre-release); its notes list the four Proposed parts (biosig-zarr tag in stores, .bzx, generated_by, conformance classes) as not yet implemented | owner |  |
 | 2026-11-20T11:17-08:00 | Rule: at most one RFC open for comment at a time (rfc-check enforces it). RFC-0002 opens only after RFC-0001 closes | owner |  |
+| 2026-11-20T11:24-08:00 | C0 review applied: new steps O0, E0, A2, S1, B6, O4b, N1, C3, C4; B3 is a pointer page; Q12 moot; Q19 asks the owner about Slots | lead |  |
+| 2026-11-20T11:24-08:00 | Q1: | owner |  |
+| 2026-11-20T11:24-08:00 | Q2: | owner |  |
+| 2026-11-20T11:24-08:00 | Q3: | owner |  |
+| 2026-11-20T11:24-08:00 | Q4: | owner |  |
+| 2026-11-20T11:24-08:00 | Q5: | owner |  |
+| 2026-11-20T11:24-08:00 | Q6: | owner |  |
+| 2026-11-20T11:24-08:00 | Q7: | owner |  |
 
 ## Log
 
