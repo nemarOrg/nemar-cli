@@ -24,26 +24,29 @@ import tarfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from ieeg_geometry import freesurfer, spm, verify
+
 TRACKS = ("labels", "freesurfer", "spm", "surfaces")
 STATUSES = ("written", "unchanged", "kept", "needs-human", "refused", "skipped")
 NEAR = 0.15
 
 # (track, number key): (limit, kind). "max" values must stay at or below the limit, "min" at or
-# above. The ECoG median rule is 2.0 mm, the depth plausibility median 6.0 mm (rulings 1, 2, 9).
+# above. Every limit is imported from the package module that enforces it, so the summary cannot
+# drift from the rules.
 LIMITS = {
-    ("freesurfer", "frame_fit_median_mm"): (2.0, "max"),
-    ("freesurfer", "registration_affine_residual_mm"): (15.0, "max"),
-    ("freesurfer", "registration_side_fraction"): (0.95, "min"),
-    ("freesurfer", "registration_centroid_mm"): (5.0, "max"),
-    ("freesurfer", "registration_extent_error"): (0.10, "max"),
-    ("spm", "field_check_median_mm"): (6.0, "max"),
-    ("spm", "field_check_p10_mm"): (2.0, "max"),
-    ("spm", "field_check_centroid_mm"): (10.0, "max"),
-    ("spm", "field_check_extent_deviation"): (0.10, "max"),
-    ("spm", "inside_fraction"): (0.95, "min"),
+    ("freesurfer", "frame_fit_median_mm"): (verify.ECOG_MEDIAN_MM, "max"),
+    ("freesurfer", "registration_affine_residual_mm"): (freesurfer.REG_AFFINE_RESIDUAL_MM, "max"),
+    ("freesurfer", "registration_side_fraction"): (freesurfer.REG_SIDE_FRACTION, "min"),
+    ("freesurfer", "registration_centroid_mm"): (freesurfer.REG_CENTROID_MM, "max"),
+    ("freesurfer", "registration_extent_error"): (freesurfer.REG_EXTENT_FRACTION, "max"),
+    ("spm", "field_check_median_mm"): (spm.FIELD_CHECK_MEDIAN_MM, "max"),
+    ("spm", "field_check_p10_mm"): (spm.FIELD_CHECK_P10_MM, "max"),
+    ("spm", "field_check_centroid_mm"): (spm.FIELD_CHECK_CENTROID_MM, "max"),
+    ("spm", "field_check_extent_deviation"): (spm.FIELD_CHECK_EXTENT_FRACTION, "max"),
+    ("spm", "inside_fraction"): (verify.INSIDE_MIN_FRACTION, "min"),
 }
-MEDIAN_LIMIT = {"specific": 2.0, "plausible": 6.0}
-LABEL_MEDIAN_LIMIT = 1.0
+MEDIAN_LIMIT = {"specific": verify.ECOG_MEDIAN_MM, "plausible": verify.SEEG_MEDIAN_MM}
+LABEL_MEDIAN_LIMIT = verify.TEMPLATE_VERTEX_MM
 
 
 MAX_REPORT_BYTES = 5_000_000
