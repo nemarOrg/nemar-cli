@@ -1,0 +1,179 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT d.dataset_id, u.github_username AS owner_github, u.role AS owner_role FROM datasets d LEFT JOIN users u ON u.id=d.owner_user_id WHERE d.dataset_id IN ('nm000146','nm000169','nm000191','nm000197','nm000199','nm000220','nm000229','nm000240','nm000319','nm000346','nm000390','nm000446','nm000465','nm000472','nm000476','on000117','on002578','on002778','on003061','on003078','on003190','on003343','on003739','on004362','on004850','on005262','on005574','on007315','on007327','on007473') ORDER BY d.dataset_id -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "dataset_id": "nm000146",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000169",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000191",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000197",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000199",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000220",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000229",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000240",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000319",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000346",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000390",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000446",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000465",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000472",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "nm000476",
+        "owner_github": "bruAristimunha",
+        "owner_role": "member"
+      },
+      {
+        "dataset_id": "on000117",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on002578",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on002778",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on003061",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on003078",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on003190",
+        "owner_github": "neuromechanist",
+        "owner_role": "owner"
+      },
+      {
+        "dataset_id": "on003343",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on003739",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on004362",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on004850",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on005262",
+        "owner_github": "neuromechanist",
+        "owner_role": "owner"
+      },
+      {
+        "dataset_id": "on005574",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on007315",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on007327",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      },
+      {
+        "dataset_id": "on007473",
+        "owner_github": "nemarAdmin",
+        "owner_role": "admin"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.5233
+      },
+      "duration": 0.5233,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 90,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

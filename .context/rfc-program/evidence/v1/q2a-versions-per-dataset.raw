@@ -1,0 +1,84 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT prefix, nv AS versions_per_dataset, count(*) AS datasets FROM (SELECT substr(dataset_id,1,2) AS prefix, dataset_id, count(*) AS nv FROM dataset_versions GROUP BY dataset_id) GROUP BY prefix, nv ORDER BY prefix, nv -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 1,
+        "datasets": 61
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 2,
+        "datasets": 29
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 3,
+        "datasets": 125
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 4,
+        "datasets": 62
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 5,
+        "datasets": 44
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 6,
+        "datasets": 5
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 7,
+        "datasets": 2
+      },
+      {
+        "prefix": "nm",
+        "versions_per_dataset": 8,
+        "datasets": 1
+      },
+      {
+        "prefix": "on",
+        "versions_per_dataset": 1,
+        "datasets": 565
+      },
+      {
+        "prefix": "on",
+        "versions_per_dataset": 2,
+        "datasets": 23
+      },
+      {
+        "prefix": "on",
+        "versions_per_dataset": 3,
+        "datasets": 1
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 1.1337
+      },
+      "duration": 1.1337,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 2546,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

@@ -1,0 +1,24 @@
+[
+  {
+    "dataset_id": "nm000191",
+    "version": "1.0.1",
+    "sha": "abbc7c006186c4bfb54ce8b3bf0ea0b2d4bd1425",
+    "message_pr": 1,
+    "pr_author": "bruAristimunha",
+    "pr_state": "closed",
+    "merged": true,
+    "merge_commit_sha": "8f6a522f7058c25f27fcfb22ba067a71d8f49583",
+    "sha_matches": false
+  },
+  {
+    "dataset_id": "nm000197",
+    "version": "1.0.1",
+    "sha": "18a113f45ff4291867ccd50d69307db615fe7571",
+    "message_pr": 2,
+    "pr_author": "bruAristimunha",
+    "pr_state": "closed",
+    "merged": true,
+    "merge_commit_sha": "86a2458a9141b95fac11be51e3988912dce9aa2d",
+    "sha_matches": false
+  }
+]
