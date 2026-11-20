@@ -25,11 +25,17 @@ earlier releases are described only by their generated notes.
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
 - **Release order, for operators.**
-  (a) Deploy the backend before publishing the CLI, because the Worker refuses another planner's plan.
-  (b) Apply `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch` to `nemarDatasets/.github`, before or after the release: the step skips for a CLI tag that lacks `scripts/ieeg_geometry`.
+  (a) Have the Worker on planner 3 before running the new CLI on a geometry dataset: the Worker refuses another planner's plan on the automatic path (`auto-planner-version`), and a manual 0.10.36 CLI against a 0.10.35 Worker fails with 400 `field-invalid` when it writes the new counts. The backend deploy and the npm publish run concurrently from `main`, so check `/health` and `npm view nemar-cli version` before step (c).
+  (b) The central `nemarDatasets/.github` `run-upstream-repull.yml` carries the geometry step (applied 2026-11-20, nemarDatasets/.github#156); it skips for a CLI tag that lacks `scripts/ieeg_geometry`.
   (c) Merge geometry pull requests only after the CLI release carrying the package is published and the patch is live.
   (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
+- **Rollback.** Roll the Worker and the CLI back together, never the Worker alone. A 0.10.35 Worker stores and returns the new counts on records that already hold them, but refuses with 400 `field-invalid` any write that names `pipeline_owned`, `pipeline_failed` or `pipeline_attempts`, which a 0.10.36 CLI sends. Records holding `pipeline_owned` were planned under planner 3 and 0.10.35 cannot execute or regenerate them: plan them again, or leave them until the roll forward.
+- **Zarr `--wipe` keeps `<id>/zarr/geometry/`.** `generate_zarr.py --wipe` erases a dataset's Zarr prefix except the subject-surface display data the pipeline uploads there.
 - **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
+
+### Decisions
+
+- **ADR 0128: the Zarr serving copy is not an NWB container (#2218).** A decision record only; no behavior change.
 
 ### Staging
 
