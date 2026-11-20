@@ -144,7 +144,7 @@ function automaticRow(status: Parameters<typeof rowAt>[0], over: Row = {}): numb
       dataset_id: DS,
       upstream_ds: "ds099991",
       origin: "automatic",
-      planner: 2,
+      planner: 3,
       ...over,
     }),
   );

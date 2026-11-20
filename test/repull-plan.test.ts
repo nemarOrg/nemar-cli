@@ -28,10 +28,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { automaticPlanRefusal } from "../shared/repull-state";
 import { sourceSnapshotOf } from "../shared/source-snapshot";
 import { buildDoiBadge } from "../shared/standard-edits/readme";
 import { PLANNER_VERSION } from "../src/lib/repull/digest";
 import { gitBlobOid } from "../src/lib/repull/edits";
+import { assertAutomaticCounts } from "../src/lib/repull/execute/automatic";
 import { type PlanOptions, RepullCannotPlan, planRepull } from "../src/lib/repull/plan";
 import { listBucketObjects } from "../src/lib/repull/sources";
 import { ADMIN_TOKEN, startGitHubStandin } from "./helpers/github-standin";
@@ -1233,5 +1235,246 @@ describe("the bucket listing runs the real aws CLI against an S3 stand-in", () =
     const { listing } = await listWith([[`${NEMAR_ID}/objects/SHA256E-s5--abc.edf`, 5]]);
     expect(listing).toBeInstanceOf(Error);
     expect(String((listing as Error).message)).toContain("annex-uuid");
+  });
+});
+
+describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
+  const OWNED = [PATHS.ieegOwned, PATHS.ieegOwnedSidecar];
+  const pipeline = (body: Body) =>
+    body.pipeline_owned as {
+      status: string;
+      ignored: number;
+      paths: Array<{ path: string; upstream_wins: boolean }>;
+      edited: string[];
+      unowned: string[];
+    };
+
+  describe("NEMAR's main holds the pipeline's outputs and nothing else is NEMAR's", () => {
+    let fx: RepullFixture;
+    let body: Body;
+    beforeAll(async () => {
+      fx = await buildRepullFixture({ ieegGeometry: true, noContributorEdits: true });
+      body = (await plan(fx)).body as Body;
+    });
+    afterAll(() => fx?.cleanup());
+
+    test("each is classified pipeline-owned, and N.0.0 follows upstream by deleting it", () => {
+      for (const path of OWNED) {
+        expect(row(body, path)).toMatchObject({
+          class: "pipeline-owned",
+          subtype: "regenerated",
+          decision: "theirs",
+          target: { kind: "absent" },
+          deleted: true,
+          delta: false,
+          explained_by_base: "pipeline-owned",
+        });
+      }
+    });
+
+    test("none is a correction or an unexplained path, so the privacy ledger has nothing to weigh", () => {
+      expect(counts(body)).toMatchObject({
+        unexplained: 0,
+        corrections: 0,
+        conflicts: 0,
+        pipeline_owned: 2,
+        pipeline_upstream_wins: 0,
+      });
+      expect(body.corrections).toEqual([]);
+      expect(refusalCodes(body)).toEqual([]);
+    });
+
+    test("they are listed in their own section, and the ownership record is never a path", () => {
+      expect(pipeline(body)).toEqual({
+        status: "ok",
+        ignored: 0,
+        edited: [],
+        unowned: [],
+        paths: OWNED.map((path) => ({ path, upstream_wins: false })).sort((a, b) =>
+          a.path < b.path ? -1 : 1,
+        ),
+      });
+      expect(rowsOf(body).has(PATHS.ieegOwnership)).toBe(false);
+    });
+
+    test("N.0.1 is planned for them, with its second version DOI", () => {
+      expect((body.versions as { n1: string | null }).n1).toBe("2.0.1");
+      expect(counts(body).doi_count).toBe(2);
+    });
+
+    test("upstream's changed input is upstream's, and the plan still holds the lineage", () => {
+      expect(row(body, PATHS.ieegInput)).toMatchObject({ class: "take-theirs", delta: true });
+      expect(row(body, PATHS.ieegAddedInput)).toMatchObject({ class: "take-theirs", delta: true });
+      expect((body.lineage as { holds: boolean }).holds).toBe(true);
+    });
+
+    test("the automatic path takes the plan: it states zero unexplained, conflicts and corrections", () => {
+      expect(automaticPlanRefusal(PLANNER_VERSION, counts(body))).toBeNull();
+      expect(() => assertAutomaticCounts(body as never)).not.toThrow();
+    });
+  });
+
+  test("a correction beside them is still a correction, and theirs are not among them", async () => {
+    const fx = await buildRepullFixture({ ieegGeometry: true });
+    try {
+      const body = (await plan(fx)).body as Body;
+      const corrections = (body.corrections as Array<{ path: string }>).map((c) => c.path);
+      expect(corrections.length).toBeGreaterThan(0);
+      for (const path of OWNED) expect(corrections).not.toContain(path);
+      expect(counts(body).pipeline_owned).toBe(2);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("a file upstream adds at an owned path wins, and the plan says so", async () => {
+    const fx = await buildRepullFixture({
+      ieegGeometry: "upstream-wins",
+      noContributorEdits: true,
+    });
+    try {
+      const body = (await plan(fx)).body as Body;
+      expect(row(body, PATHS.ieegOwnedSidecar)).toMatchObject({
+        class: "pipeline-owned",
+        subtype: "upstream-wins",
+        decision: "theirs",
+        delta: true,
+        deleted: false,
+      });
+      expect(row(body, PATHS.ieegOwnedSidecar).target).toMatchObject({ kind: "git" });
+      expect(row(body, PATHS.ieegOwned)).toMatchObject({ subtype: "regenerated" });
+      expect(counts(body)).toMatchObject({
+        pipeline_owned: 2,
+        pipeline_upstream_wins: 1,
+        corrections: 0,
+      });
+      expect(pipeline(body).paths.find((p) => p.path === PATHS.ieegOwnedSidecar)).toEqual({
+        path: PATHS.ieegOwnedSidecar,
+        upstream_wins: true,
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  describe("a listing never takes an upstream path out of the ordinary rules", () => {
+    test("a listed path upstream holds stays a correction, and is ignored by the pipeline", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "lists-upstream",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegInput)).toMatchObject({
+          class: "correction",
+          subtype: "nemar-modified",
+        });
+        expect(counts(body)).toMatchObject({ corrections: 1, pipeline_owned: 0 });
+        expect(pipeline(body)).toEqual({
+          status: "ok",
+          ignored: 1,
+          paths: [],
+          edited: [],
+          unowned: [PATHS.ieegInput],
+        });
+        expect(automaticPlanRefusal(PLANNER_VERSION, counts(body))).not.toBeNull();
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("with a ledger correction recorded, that path still refuses the plan", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "lists-upstream",
+        noContributorEdits: true,
+        recordedCorrection: true,
+      });
+      try {
+        const file = await plan(fx);
+        expect(refusalCodes(file.body as Body)).toContain("ledger-correction-unexplained");
+        expect(file.executable).toBe(false);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("a hand-edited pipeline file is a correction; an untouched one is still owned", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "hand-edited",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegOwned)).toMatchObject({
+          class: "correction",
+          subtype: "nemar-added",
+        });
+        expect(row(body, PATHS.ieegOwnedSidecar)).toMatchObject({ class: "pipeline-owned" });
+        expect(counts(body)).toMatchObject({ corrections: 1, pipeline_owned: 1 });
+        expect((pipeline(body) as unknown as { edited: string[] }).edited).toEqual([
+          PATHS.ieegOwned,
+        ]);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("a record with no hash for a file does not own it", async () => {
+      const fx = await buildRepullFixture({ ieegGeometry: "no-hash", noContributorEdits: true });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(counts(body)).toMatchObject({ corrections: 2, pipeline_owned: 0 });
+        expect(row(body, PATHS.ieegOwned).class).toBe("correction");
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("the sidecar the label track adds for an electrodes file with none is pipeline-owned", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "sidecarless",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegPlainSidecar)).toMatchObject({ class: "pipeline-owned" });
+        expect(counts(body)).toMatchObject({ corrections: 0, pipeline_owned: 1 });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  });
+
+  test("an ownership record that does not parse refuses the plan, never reads as none", async () => {
+    const fx = await buildRepullFixture({ ieegGeometry: "unreadable", noContributorEdits: true });
+    try {
+      const file = await plan(fx);
+      const body = file.body as Body;
+      expect(refusalCodes(body)).toContain("pipeline-ownership-unreadable");
+      expect(file.executable).toBe(false);
+      expect(pipeline(body).status).toBe("unreadable");
+      // The refusal never quotes the file.
+      expect(JSON.stringify(body)).not.toContain("Jane Doe");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  test("a mirror with no pipeline file plans exactly as it did", async () => {
+    const fx = await buildRepullFixture({ noContributorEdits: true });
+    try {
+      const body = (await plan(fx)).body as Body;
+      expect(pipeline(body)).toEqual({
+        status: "absent",
+        ignored: 0,
+        paths: [],
+        edited: [],
+        unowned: [],
+      });
+      expect(counts(body)).toMatchObject({ pipeline_owned: 0, doi_count: 1 });
+      expect((body.versions as { n1: string | null }).n1).toBeNull();
+    } finally {
+      fx.cleanup();
+    }
   });
 });
