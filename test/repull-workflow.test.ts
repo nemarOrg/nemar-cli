@@ -795,7 +795,9 @@ tar -czf "$out" -C "$t" uv-pkg`,
     return dir;
   };
   const run = (fixture: string) => {
-    const uvLog = join(fixture, "..", `uv-${Math.random().toString(36).slice(2)}.log`);
+    const logDir = mkdtempSync(join(tmpdir(), "nemar-repull-uvlog-"));
+    temps.push(logDir);
+    const uvLog = join(logDir, "uv.log");
     return {
       uvLog,
       promise: runStep(GEOMETRY, {
@@ -843,6 +845,34 @@ tar -czf "$out" -C "$t" uv-pkg`,
     const r = await promise;
     expect(r.status).toBe(1);
     expect(r.log).toContain("code=auto-cli-version");
+    expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+    expect(existsSync(uvLog)).toBe(false);
+  });
+
+  test("a package directory without the pin refuses with auto-cli-version, not a skip", async () => {
+    for (const files of [
+      {
+        "src/lib/repull/pipeline-owned.ts": "export {};\n",
+        "scripts/ieeg_geometry/pyproject.toml": 'version = "1.2.3"\n',
+      },
+      { "scripts/ieeg_geometry/pyproject.toml": 'version = "1.2.3"\n' },
+    ]) {
+      const { uvLog, promise } = run(tree(files));
+      const r = await promise;
+      expect(r.status).toBe(1);
+      expect(r.log).toContain("code=auto-cli-version");
+      expect(r.stdout).toContain("::error::");
+      expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+      expect(existsSync(uvLog)).toBe(false);
+    }
+  });
+
+  test("a pin without the package directory refuses with auto-cli-version, not a skip", async () => {
+    const { uvLog, promise } = run(tree({ "src/lib/repull/pipeline-owned.ts": PIN }));
+    const r = await promise;
+    expect(r.status).toBe(1);
+    expect(r.log).toContain("code=auto-cli-version");
+    expect(r.stdout).toContain("::error::");
     expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
     expect(existsSync(uvLog)).toBe(false);
   });
