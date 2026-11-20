@@ -285,6 +285,11 @@ def test_a_damaged_sphere_reg_is_refused(ds, damage):
     assert res.outputs == []
     assert res.refusals[0].reason == "registration-check-failed"
     assert "centroid" in res.refusals[0].message
+    reg = res.refusals[0].registration  # the measurement the refusal was judged by
+    assert reg is not None and f"{reg.centroid_mm:.2f} mm from fsaverage6 pial" in (
+        res.refusals[0].message
+    )
+    assert fsm.failed_conditions(reg)
     assert res.left_out[fsm.LEFT_REGISTRATION] == 94
 
 

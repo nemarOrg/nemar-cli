@@ -68,7 +68,15 @@ from .bids import (
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import load_reference
 from .surfaces import Surface
-from .verify import ECOG_MEDIAN_MM, FAIL, PLAUSIBLE, SPECIFIC, TEMPLATE_VERTEX_MM, Fit, fit
+from .verify import (
+    FAIL,
+    PLAUSIBLE,
+    RULE_ON_VERTEX,
+    SPECIFIC,
+    TEMPLATE_VERTEX_MM,
+    Fit,
+    fit,
+)
 from .version import pipeline_version
 
 METHOD_URL = "https://docs.nemar.org/data/ieeg-geometry/"
@@ -290,31 +298,6 @@ def _finite_pts(eset: ElectrodeSet) -> np.ndarray:
     return pts[np.isfinite(pts).all(axis=1)]
 
 
-def _shift_medians(pts: np.ndarray, name: str) -> list[float]:
-    """Median nearest-vertex distance after a `SHIFT_MM` shift along each of the six axes."""
-    tree = _tree(name)
-    medians = []
-    for axis in range(3):
-        for sign in (-1.0, 1.0):
-            delta = np.zeros(3)
-            delta[axis] = sign * SHIFT_MM
-            medians.append(float(np.median(tree.query(pts + delta)[0])))
-    return medians
-
-
-LABEL_RULE_ON_VERTEX = "on-vertex-1.0mm"
-LABEL_RULE_ECOG = f"ecog-{ECOG_MEDIAN_MM:.1f}mm"
-LABEL_RULE_DEPTH = "depth-plausible"
-
-
-def label_rule(f: Fit) -> str:
-    """Which rule graded a label's evidence: the 2.0 mm ECoG rule, the 1.0 mm on-vertex rule with
-    its shift control (`specific` depth or blind evidence), or the depth plausibility rule."""
-    if f.rule.startswith(f"median <= {ECOG_MEDIAN_MM} mm"):
-        return LABEL_RULE_ECOG
-    return LABEL_RULE_ON_VERTEX if f.grade == SPECIFIC else LABEL_RULE_DEPTH
-
-
 def _blind_evidence(eset: ElectrodeSet, name: str) -> tuple[Fit, bool, str, str]:
     """Template-vertex test with the shift control: (fit, specific?, reason, by-type text)."""
     pts = _finite_pts(eset)
@@ -325,7 +308,13 @@ def _blind_evidence(eset: ElectrodeSet, name: str) -> tuple[Fit, bool, str, str]
     )
     if base.median_mm > TEMPLATE_VERTEX_MM or base.grade != SPECIFIC:
         return base, False, f"median {base.median_mm:.2f} mm is not on template vertices", summary
-    medians = _shift_medians(pts, name)
+    tree = _tree(name)
+    medians = []
+    for axis in range(3):
+        for sign in (-1.0, 1.0):
+            delta = np.zeros(3)
+            delta[axis] = sign * SHIFT_MM
+            medians.append(float(np.median(tree.query(pts + delta)[0])))
     if any(m <= TEMPLATE_VERTEX_MM or m < SHIFT_RATIO * base.median_mm for m in medians):
         return (
             base,
@@ -336,7 +325,8 @@ def _blind_evidence(eset: ElectrodeSet, name: str) -> tuple[Fit, bool, str, str]
     reason = (
         f"median {base.median_mm:.2f} mm; every 10 mm shift fails (nearest {min(medians):.1f} mm)"
     )
-    return base, True, reason, summary
+    judged = replace(base, rule_id=RULE_ON_VERTEX, shift_control_median_mm=min(medians))
+    return judged, True, reason, summary
 
 
 # --- plan objects ----------------------------------------------------------------------------
@@ -376,9 +366,9 @@ class Proposal:
     files: tuple[PlannedFile, ...] = ()
     suppressed: tuple[str, ...] = ()  # why blind trials did not run (needs-human only)
     warnings: tuple[str, ...] = ()  # e.g. undecodable bytes in a channels file
-    rule: str | None = None  # label_rule of the accepted evidence (accepted proposals only)
-    # smallest median over six 10 mm shifts of all finite contacts, reported not judged (the
-    # on-vertex rule's own control is the shift test inside `fit` or `_blind_evidence`)
+    rule: str | None = None  # `Fit.rule_id` of the accepted evidence (accepted proposals only)
+    # the shift-control median the accepted evidence was judged by (on-vertex rule only): the
+    # smallest median over the six 10 mm shifts of a blind trial, the +x shift of a template fit
     shift_control_min_mm: float | None = None
 
     def lines(self) -> list[str]:
@@ -833,15 +823,17 @@ def _accept(done, dataset, item, eset, attempt, attempts, version, owned) -> Pro
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, IndexError) as exc:
         return done(SKIPPED, f"cannot copy positions: {type(exc).__name__}: {exc}")
     states = [_file_state(f, dataset, owned) for f in files]
-    assert attempt.fit is not None and attempt.reference is not None
-    rule = label_rule(attempt.fit)
-    pts = _finite_pts(eset)
-    shift_min = (
-        round(min(_shift_medians(pts, attempt.reference)), 3)
-        if rule == LABEL_RULE_ON_VERTEX and len(pts)
-        else None
+    if attempt.fit is None or attempt.reference is None:
+        return done(SKIPPED, "the accepted evidence carries no fit or reference")
+    shift_min = attempt.fit.shift_control_median_mm
+    if shift_min is not None:
+        shift_min = round(shift_min, 3)
+    kw = dict(
+        label=label,
+        attempts=tuple(attempts),
+        rule=attempt.fit.rule_id or None,
+        shift_control_min_mm=shift_min,
     )
-    kw = dict(label=label, attempts=tuple(attempts), rule=rule, shift_control_min_mm=shift_min)
     if "hand-edited" in states:
         return done(KEPT, "an owned file was edited since the pipeline wrote it", **kw)
     if "foreign" in states or "link" in states:

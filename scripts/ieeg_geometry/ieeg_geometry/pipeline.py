@@ -321,6 +321,17 @@ def _labels_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dic
     return out
 
 
+def _registration_numbers(reg: freesurfer.RegistrationCheck | None) -> dict:
+    if reg is None:
+        return {}
+    return {
+        "registration_side_fraction": _num(reg.side_fraction),
+        "registration_centroid_mm": _num(reg.centroid_mm),
+        "registration_extent_error": _num(reg.extent_error),
+        "registration_affine_residual_mm": _num(reg.affine_residual_mm),
+    }
+
+
 def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for res in a.fs_results:
@@ -339,18 +350,13 @@ def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
                 s = _unit_status(_file_changes(a.dataset, files, owned))
                 status = _worst_written(status, s)
             f = res.outputs[0].frame_fit
-            reg = res.outputs[0].registration
             numbers = {
                 "frame_fit_median_mm": _num(f.median_mm),
                 "n_placed": res.n_surface,
                 "left_out": dict(sorted(res.left_out.items())),
                 "pial_distance_median_mm": _num(res.outputs[0].pial_distance_median_mm),
-                "fit_rule": "ecog-2.0mm",
-                "registration_side_fraction": _num(reg.side_fraction),
-                "registration_centroid_mm": _num(reg.centroid_mm),
-                "registration_extent_error": _num(reg.extent_error),
-                "registration_affine_residual_mm": _num(reg.affine_residual_mm),
-            }
+                "fit_rule": f.rule_id,
+            } | _registration_numbers(res.outputs[0].registration)
             reasons = [f"{o.label}: {o.method}" for o in res.outputs]
             out[rel] = _decision(
                 status,
@@ -364,7 +370,8 @@ def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
             out[rel] = _decision(
                 "refused",
                 f"{r.reason}: {r.message}",
-                numbers={"left_out": dict(sorted(res.left_out.items()))},
+                numbers={"left_out": dict(sorted(res.left_out.items()))}
+                | _registration_numbers(r.registration),
             )
         elif res.skipped:
             r = res.skipped[0]

@@ -98,7 +98,7 @@
             "ecog",
             "seeg"
           ],
-          "description": "The type of the contacts that were fitted: ecog when every fitted contact is ECoG, else seeg (all contacts with coordinates). The rule applied is fit_rule."
+          "description": "The type of the contacts that were fitted: ecog only when every fitted contact is ECoG, seeg otherwise. A file with fewer than 3 ECoG contacts is fitted over all contacts with coordinates, so a mix of types is seeg. The rule applied is fit_rule."
         },
         "fit_rule": {
           "enum": [

@@ -793,3 +793,16 @@ def test_a_rerun_on_an_applied_tree_gives_a_byte_identical_surface_index(remote,
     assert sorted(p.name for p in (first / "geometry" / "meshes").iterdir()) == sorted(
         p.name for p in (second / "geometry" / "meshes").iterdir()
     )
+
+
+def test_a_registration_refusal_record_carries_the_measurement():
+    reg = freesurfer.RegistrationCheck(
+        side_fraction=0.9, centroid_mm=6.25, extent_error=0.2, affine_residual_mm=20.0
+    )
+    assert pipeline._registration_numbers(reg) == {
+        "registration_side_fraction": 0.9,
+        "registration_centroid_mm": 6.25,
+        "registration_extent_error": 0.2,
+        "registration_affine_residual_mm": 20.0,
+    }
+    assert pipeline._registration_numbers(None) == {}

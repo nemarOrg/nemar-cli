@@ -43,7 +43,7 @@ from .meshwrite import (
 )
 from .reference import read_brain_mesh
 from .surfaces import Surface, read_surface
-from .verify import MIN_ECOG_CONTACTS, SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
+from .verify import MIN_ECOG_CONTACTS, RULE_ECOG, SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
 from .version import pipeline_version
 
 INDEX_SCHEMA = "nemar-ieeg-geometry-index"
@@ -108,7 +108,7 @@ def _assign_hemisphere(s: Surface) -> Surface:
     return s
 
 
-FIT_RULE_ECOG = "ecog-2.0mm"
+FIT_RULE_ECOG = RULE_ECOG
 FIT_RULE_DEPTH = "depth"
 
 
