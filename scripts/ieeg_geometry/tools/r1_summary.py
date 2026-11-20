@@ -38,25 +38,40 @@ LIMITS = {
     ("spm", "inside_fraction"): (0.95, "min"),
 }
 MEDIAN_LIMIT = {"specific": 2.0, "plausible": 6.0}
+LABEL_MEDIAN_LIMIT = 1.0
+
+
+MAX_REPORT_BYTES = 5_000_000
+
+
+def _add(reports: dict[str, dict], name: str, raw: bytes) -> None:
+    stem = Path(name).stem
+    if stem in reports:
+        raise ValueError(f"duplicate report for {stem} ({name})")
+    reports[stem] = json.loads(raw)
 
 
 def load_reports(path: Path) -> dict[str, dict]:
+    """Read `<id>.json` reports from a directory or a `.tgz`; refuse duplicates and big files."""
     reports: dict[str, dict] = {}
     if path.is_file():
         with tarfile.open(path) as tar:
             for m in tar.getmembers():
-                if (
-                    m.isfile()
-                    and m.name.endswith(".json")
-                    and not Path(m.name).name.startswith(".")
-                ):
-                    member = tar.extractfile(m)
-                    if member is None:
-                        raise ValueError(f"{m.name} is not a regular file")
-                    reports[Path(m.name).stem] = json.load(member)
+                if not (m.isfile() and m.name.endswith(".json")):
+                    continue
+                if Path(m.name).name.startswith("."):
+                    continue
+                if m.size > MAX_REPORT_BYTES:
+                    raise ValueError(f"{m.name} is {m.size} bytes, over {MAX_REPORT_BYTES}")
+                member = tar.extractfile(m)
+                if member is None:
+                    raise ValueError(f"{m.name} is not a regular file")
+                _add(reports, m.name, member.read(MAX_REPORT_BYTES + 1))
     else:
         for f in sorted(path.glob("*.json")):
-            reports[f.stem] = json.loads(f.read_text())
+            if f.stat().st_size > MAX_REPORT_BYTES:
+                raise ValueError(f"{f.name} is over {MAX_REPORT_BYTES} bytes")
+            _add(reports, f.name, f.read_bytes())
     return reports
 
 
@@ -91,7 +106,11 @@ def margins(report: dict) -> list[dict]:
             for (t, key), (limit, kind) in LIMITS.items():
                 if t == track and nums.get(key) is not None:
                     checks.append((key, nums[key], limit, kind))
-            if track in ("labels", "surfaces") and nums.get("median_mm") is not None:
+            if track == "labels" and nums.get("median_mm") is not None:
+                # README and blind labels are both written on the on-vertex rule with the
+                # shift control (rulings 16 and 17).
+                checks.append(("median_mm", nums["median_mm"], LABEL_MEDIAN_LIMIT, "max"))
+            if track == "surfaces" and nums.get("median_mm") is not None:
                 limit = MEDIAN_LIMIT.get(dec["evidence"] or "")
                 if limit is not None:
                     checks.append(("median_mm", nums["median_mm"], limit, "max"))
@@ -250,9 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         + (", ".join(sorted(d for d in gaining if d.startswith("nm"))) or "none")
     )
 
-    print(
-        "\n## Label medians (the report does not say whether the 2.0 mm or 1.0 mm rule applied)\n"
-    )
+    print("\n## Label medians (judged against the 1.0 mm on-vertex rule)\n")
     rows = []
     for ds in sorted(label_medians):
         v = sorted(label_medians[ds])
