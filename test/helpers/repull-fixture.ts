@@ -27,6 +27,7 @@
  * Every name, date and code in a header below is invented.
  */
 
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -124,6 +125,15 @@ export const PATHS = {
   addedIdentifierJson: "sub-03/eeg/sub-03_task-rest_acq.json",
   /** With `crlfSidecarB`: a sidecar tag B adds whose blob has CRLF line endings. */
   crlfSidecar: "sub-03/eeg/sub-03_task-rest_coordsystem.json",
+  /** With `ieegGeometry`: the subject's electrodes table upstream holds, which the pipeline reads. */
+  ieegInput: "sub-01/ieeg/sub-01_electrodes.tsv",
+  /** With `ieegGeometry`: a subject tag B adds, whose outputs the new run makes. */
+  ieegAddedInput: "sub-03/ieeg/sub-03_electrodes.tsv",
+  /** With `ieegGeometry`: the pipeline's electrodes table and sidecar NEMAR's main holds. */
+  ieegOwned: "sub-01/ieeg/sub-01_space-fsaverage_electrodes.tsv",
+  ieegOwnedSidecar: "sub-01/ieeg/sub-01_space-fsaverage_coordsystem.json",
+  /** With `ieegGeometry`: the pipeline's ownership record. */
+  ieegOwnership: ".nemar/ieeg-geometry.json",
   /** With `symlinkB`: a plain git symlink tag B adds (not an annexed file). */
   symlink: "code/latest",
   /** With `nestedGitattributesB`: a `.gitattributes` tag B adds below the root. */
@@ -172,6 +182,10 @@ function noise(out: Uint8Array, from: number, seed: number): Uint8Array {
 }
 
 const text = (s: string) => new TextEncoder().encode(s);
+
+/** A subject's electrodes table at tag A and at tag B (one contact moved). */
+const IEEG_TABLE_A = "name\tx\ty\tz\nA1\t1.0\t2.0\t3.0\n";
+const IEEG_TABLE_B = "name\tx\ty\tz\nA1\t1.5\t2.0\t3.0\n";
 
 /**
  * Bytes a later upstream snapshot wrote at the same path, of the same size: a recording with the
@@ -317,6 +331,14 @@ export interface FixtureOptions {
   crlfSidecarB?: boolean;
   /** Tag B adds a git symlink (mode 120000) to `code/run.sh`. */
   symlinkB?: boolean;
+  /**
+   * NEMAR's iEEG geometry pipeline owns files on this mirror (ADR 0111, the amendment of
+   * 2026-11-19): upstream holds a subject's electrodes table, NEMAR's `main` holds the pipeline's
+   * `space-fsaverage` outputs for it and the ownership record that lists them, and tag B changes
+   * the table and adds a subject. With `upstream-wins` tag B also adds a file at an owned path;
+   * with `unreadable` the ownership record does not parse.
+   */
+  ieegGeometry?: true | "upstream-wins" | "unreadable";
   /** Tag B adds a nested `.gitattributes` with an `annex.largefiles` rule the annex policy strips. */
   nestedGitattributesB?: boolean;
 }
@@ -608,6 +630,7 @@ async function build(
       ? motionTable(1.1 * 1024 * 1024, 1)
       : "0.1\t0.2\t0.3\n0.4\t0.5\t0.6\n",
     [PATHS.script]: "#!/bin/sh\necho fixture\n",
+    ...(opts.ieegGeometry ? { [PATHS.ieegInput]: IEEG_TABLE_A } : {}),
     ...(opts.privacyEdits
       ? {
           [PATHS.gitHeldEdf]: edfBytes("Qwfixturelast F 02-FEB-1990 Zxfixturename", 400, 9, true),
@@ -796,6 +819,40 @@ async function build(
     const ledger = join(clone, ".nemar/corrections.jsonl");
     write(clone, ".nemar/corrections.jsonl", `${readFileSync(ledger, "utf8")}Jane Doe\n`);
   }
+  if (opts.ieegGeometry) {
+    // The pipeline's outputs as NEMAR committed them, and the record that lists them.
+    const owned = {
+      [PATHS.ieegOwned]: `derived-from\told\t0.1.0\n${IEEG_TABLE_A}`,
+      [PATHS.ieegOwnedSidecar]: `${JSON.stringify({ iEEGCoordinateSystem: "fsaverage", PipelineVersion: "0.1.0" }, null, 2)}\n`,
+    };
+    for (const [path, content] of Object.entries(owned)) write(clone, path, content);
+    write(
+      clone,
+      PATHS.ieegOwnership,
+      opts.ieegGeometry === "unreadable"
+        ? "{ Jane Doe\n"
+        : `${JSON.stringify(
+            {
+              paths: Object.fromEntries(
+                Object.entries(owned).map(([path, content]) => [
+                  path,
+                  {
+                    inputs: [{ blob: "0".repeat(40), path: PATHS.ieegInput }],
+                    kind: "space-label",
+                    method: "stand-in",
+                    output_sha256: createHash("sha256").update(content).digest("hex"),
+                    verification: null,
+                  },
+                ]),
+              ),
+              pipeline_version: "0.1.0",
+              schema: 1,
+            },
+            null,
+            2,
+          )}\n`,
+    );
+  }
   if (!opts.noContributorEdits || opts.sidecarEditOnly) {
     write(
       clone,
@@ -930,6 +987,13 @@ async function build(
     changes[PATHS.participants] = "participant_id\tage\nsub-01\t30\nsub-02\t31\nsub-03\t32\n";
   }
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
+  if (opts.ieegGeometry) {
+    changes[PATHS.ieegInput] = IEEG_TABLE_B;
+    changes[PATHS.ieegAddedInput] = IEEG_TABLE_B;
+  }
+  if (opts.ieegGeometry === "upstream-wins") {
+    changes[PATHS.ieegOwnedSidecar] = `${JSON.stringify({ iEEGCoordinateSystem: "upstream" })}\n`;
+  }
   if (opts.subtypes) {
     changes[PATHS.bothAdded] = `{\n  "TaskName": "rest",\n  "SamplingFrequency": 128\n}\n`;
   }
