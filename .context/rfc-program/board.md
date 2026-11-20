@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T15:09-08:00 |
-| Next tick | 2026-11-20T15:39-08:00 |
+| Last tick | 2026-11-20T15:29-08:00 |
+| Next tick | 2026-11-20T15:59-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 38 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 39 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -67,7 +67,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | EDF+D scan runs in session remi:18769 (nearly stalled); asked for outputs; lead-C1 makes S1 dispatchable either way |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits until remi:18769 scan.py (pid 99119) ends (Q35); then dispatch from the cache copy |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - |  | - | 4h | checkpoint C1a due (R1 merged): lead writes the R3 card |
@@ -123,6 +123,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q30 | - | Q25 test is ill-defined under B6: a 2.00-2.04 s gap at 10 Hz is shorter than one sample and cannot be written in valid_intervals (grid indices). How should sub-sample gaps be handled? | Test with a gap of at least one sample, plus an RFC question on sub-sample gaps (Recommended) / Lead redesigns gaps in source time / Drop the test | none | 2026-11-21T17:00 | closed | Test with a gap of at least one sample, state sub-sample gaps need the timestamped kind, add an RFC question (owner, 2026-11-20T17:55-08:00) |
 | Q31 | - | N1 community notes: mention RFC-9 authors and hdmf-zarr maintainers by GitHub handle (notifies them when posted) or leave them unmentioned? | Leave unmentioned, post in their repos (Recommended) / Mention by handle | none | 2026-11-22T17:00 | closed | Do not post in other projects' repos; RFC-0001 is NEMAR's question for the biosignal community; post on EEGLAB and other venues (owner, 2026-11-20T19:10-08:00) |
 | Q32 | - | Which biosignal community venues get an RFC-0001 note (Q31)? | EEGLAB list, MNE Forum, FieldTrip list, Neurostars (Recommended) / EEGLAB list only / Other | none | 2026-11-22T17:00 | closed | EEGLAB mailing list, MNE Forum, Neurostars (owner, 2026-11-20T19:15-08:00) |
+| Q33 | - | B5 schemas and vectors: all on draft/3.0.0, or v2 ones ruled editorial and released on main as 2.0.1? | All on draft/3.0.0 (Recommended) / v2 parts on main as 2.0.1 | none | 2026-11-22T17:00 | closed | v2 schemas and vectors are editorial, on main, released as 2.0.1; v3 parts on draft/3.0.0 (owner, 2026-11-20T20:20-08:00) |
+| Q34 | - | ADR 0124 amendment (vectors canonical in biosig-zarr, vendored by digest): write at C3 or now after mail ADR 0132 merges? | At C3 (Recommended) / Now, as a lead step | none | 2026-11-22T17:00 | closed | Write the ADR 0124 amendment now, as a lead step (owner, 2026-11-20T20:20-08:00) |
+| Q35 | - | The EDF+D header scan (pid 99119, remi:18769) is still running. Let it finish, then dispatch S1, or stop it and dispatch S1 now? | Let it finish (Recommended) / Stop it now | none | 2026-11-22T17:00 | closed | Owner gave the counts so far; scan is actively progressing (13000/16883); let it finish, S1 after (owner, 2026-11-20T20:20-08:00) |
+| Q36 | - | O4c (tag 3.0.0-draft.2 after B5): owner runs it, or the manager runs it under the new P1 rule? | Manager runs it on owner say-so (Recommended) / Owner runs it | none | 2026-11-24T17:00 | closed | Manager runs O4c on the owner's say-so under the P1 rule (owner, 2026-11-20T20:20-08:00) |
 
 ## Proposals
 
@@ -172,3 +176,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-N1 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:00-08:00 | done |
 | rev-N1-r2 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:25-08:00 | done |
 | lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | running |
+| rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
