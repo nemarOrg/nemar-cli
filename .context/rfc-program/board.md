@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T14:14-08:00 |
-| Next tick | 2026-11-20T14:44-08:00 |
+| Last tick | 2026-11-20T14:22-08:00 |
+| Next tick | 2026-11-20T14:52-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 20 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 25 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -72,14 +72,14 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - |  | - | 4h | checkpoint C1a due (R1 merged): lead writes the R3 card |
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | claude-sonnet | done | A2 | biosig-zarr#1 | r1 code/errors + comments (2 Sonnet): 2 imp, 5 sugg fixed, 3 rejected with reason; fix diff verified by manager | 2026-11-20T14:25-08:00 | 1d | merged 5794535df619f7daef8d91d79928c7a803a99e8b (merge commit, keeps DCO sign-offs) |
-| B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | claude-sonnet | active | B1 | - |  | 2026-11-20T15:30-08:00 | 1d | impl-B2 running |
-| R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | owner | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merging docs#127 now (owner said 'I'll merge now'); manager marks done on merge |
-| O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | blocked | B2 | - |  | - | - | owner step after B2 merges; Q13, Q14 recorded only |
-| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | - | blocked | O4 | - |  | - | 4h | after O4; owner merges |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | - | blocked | O4, A2 | - |  | - | 2d | after O4 and A2; PR stays open |
+| B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | claude-sonnet | done | B1 | biosig-zarr#2 | r1 code/errors/tests + comments (2 Sonnet): 0 crit/imp; 2 sugg fixed (link-target check), 1 no change; fix diff verified by manager | 2026-11-20T15:30-08:00 | 1d | merged 36112961471b46de1a96e5cb67f9581772d9146e |
+| R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
+| O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | done | B2 | - |  | - | - | release 2.0.0 on 36112961, isPrerelease false (verified) |
+| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | active | O4 | - |  | 2026-11-20T16:05-08:00 | 4h | impl-B3 running; owner merges; docs CI billing-blocked |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | active | O4, A2 | - |  | 2026-11-20T16:05-08:00 | 2d | impl-B6 running on draft/3.0.0; PR stays open |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
-| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | - | blocked | R1, B2, A2 | - |  | - | 2d | after R1, B2, A2; starts from drafts/0001; PR stays open |
-| B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | lead completes at C1 when B2 merges (Q9, Q10 answered) |
+| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | active | R1, B2, A2 | - |  | 2026-11-20T16:05-08:00 | 2d | impl-B4 running; draft PR stays open |
+| B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - |  | - | 4h | waits on B4 and Q15 |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, O1b, S1, N1 AND mail epic #2260 slice P1-P3 in production (owner decision 2026-11-20) |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
@@ -142,4 +142,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-R2 | reviewer | claude-sonnet | Sonnet high | R2 | 2026-11-20T15:05-08:00 | done |
 | rev-B1-code | reviewer | claude-sonnet | Sonnet high | B1 | 2026-11-20T15:05-08:00 | done |
 | rev-B1-text | reviewer | claude-sonnet | Sonnet high | B1 | 2026-11-20T15:05-08:00 | done |
-| impl-B2 | implementer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:30-08:00 | running |
+| impl-B2 | implementer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:30-08:00 | done |
+| rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
+| rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
+| impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | running |
+| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | running |
+| impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | running |

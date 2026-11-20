@@ -71,6 +71,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:15-08:00 | Q21: RFCs category stays Announcement format; people comment under the RFC Discussion; email fallback is support@nemar.org, posted with consent | owner |  |
 | 2026-11-20T13:29-08:00 | O1b: the owner asked the manager to apply the rfcs main ruleset itself (overrides the runbook's never-change-a-setting rule for this one act) | owner |  |
 | 2026-11-20T13:30-08:00 | P1: the runbook's never-change-a-setting rule is wrong; the manager may apply settings that a merged, reviewed file specifies (e.g. ops/ruleset-main.json) without asking each time; the lead rewrites runbook.md in its session | owner |  |
+| 2026-11-20T14:20-08:00 | O4: the owner asked the manager to create release 2.0.0 itself (plan section 5 command, target B2's merge commit, full release) as soon as B2 merges | owner |  |
+| 2026-11-20T14:21-08:00 | O4: owner confirmed; manager created release 2.0.0 of nemarOrg/biosig-zarr on 36112961 | owner |  |
 
 ## Log
 
@@ -115,3 +117,11 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T13:32-08:00 | R2 docs#127 r1 fix 6c69dc8f verified; set owner for merge; CI blocked by billing |
 | 2026-11-20T14:14-08:00 | B1 merged: biosig-zarr#1 merge 5794535df619f7daef8d91d79928c7a803a99e8b; B2 unblocked |
 | 2026-11-20T14:14-08:00 | R2: owner chose to merge docs#127 despite billing-blocked CI. B2 dispatched; Agents today 19/40 |
+| 2026-11-20T14:18-08:00 | B2 biosig-zarr#2 head d81399da verified: 0 differing words (7286), 33 OQ, lines 364/195, uuid only in ADR 0004, CI green; _typos.toml deviation accepted (gate needs it, text unchanged) |
+| 2026-11-20T14:19-08:00 | B2 text lens clean; 1 optional sugg no_change_needed (three/four parts mismatch carried to B4 as patch note) |
+| 2026-11-20T14:19-08:00 | R2 done: owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
+| 2026-11-20T14:19-08:00 | B2 code lens: clean, mutations detected; 2 suggestions sent back |
+| 2026-11-20T14:20-08:00 | O4 delegated to manager by owner (2026-11-20T15:55) |
+| 2026-11-20T14:20-08:00 | B2 merged: biosig-zarr#2 merge 36112961471b46de1a96e5cb67f9581772d9146e. O4 held: owner asked whether the tag covers the data format; release waits for confirmation |
+| 2026-11-20T14:21-08:00 | O4 done by manager on owner confirmation: release 2.0.0 -> 36112961, prerelease=false. C1 due (B2 merged, Q9, Q10 answered): lead writes B5 card |
+| 2026-11-20T14:22-08:00 | Dispatched B4, B6 (claude-opus) and B3 (claude-sonnet); Agents today 24/40 |
