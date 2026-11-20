@@ -37,17 +37,7 @@ DOCS_URL = "https://docs.nemar.org/data/ieeg-geometry/"
 BODY_LIMIT = 60_000  # GitHub refuses a pull request body over 65,536 characters
 GITHUB_BODY_MAX = 65_536  # characters GitHub accepts in a pull request body
 _TIMEOUT_S = 900
-# `git add` and `git commit` must store the bytes in the work tree. A dataset repository's
-# attributes may name the git-annex filter and the owner's machine may have it configured;
-# these settings neutralize it (the filter becomes `cat`, nothing is annexed).
-NEUTRAL_GIT_CONFIG = (
-    "filter.annex.process=",
-    "filter.annex.required=false",  # git-annex sets it true; a failing neutral clean must not abort
-    "filter.annex.clean=cat",
-    "filter.annex.smudge=cat",
-    "annex.largefiles=nothing",
-    "core.attributesFile=/dev/null",
-)
+NEUTRAL_GIT_CONFIG = fetch.NEUTRAL_GIT_CONFIG  # one definition; every git call here uses it
 UNRELEASED_DIRS = (".nemar/", ".github/")  # main may change these after a release
 UNRELEASED_FILES = (".gitattributes",)  # exact names, not prefixes
 
@@ -91,8 +81,8 @@ def _run(
     return done.stdout
 
 
-def _git(clone: Path, *args: str, what: str | None = None, neutral: bool = False) -> str:
-    """`neutral` runs git with the git-annex filter and global attributes switched off."""
+def _git(clone: Path, *args: str, what: str | None = None, neutral: bool = True) -> str:
+    """Runs git with the git-annex filter and global attributes switched off (see `fetch`)."""
     config = [x for c in NEUTRAL_GIT_CONFIG for x in ("-c", c)] if neutral else []
     cmd = ["git", *config, "-C", str(clone), "--literal-pathspecs", *args]
     return _run(

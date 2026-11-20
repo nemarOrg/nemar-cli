@@ -494,3 +494,34 @@ def test_a_gitattributes_lookalike_is_not_allowed_to_move_after_the_release(env,
     assert _pr(served, work) == 1
     assert "`.gitattributesX`" in capsys.readouterr().err
     assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+
+
+def _missing_annex_machine(monkeypatch):
+    """The owner's machine: git-annex is configured globally, `required`, and not installed."""
+    for i, (key, value) in enumerate(
+        [
+            ("filter.annex.process", "/nonexistent/git-annex filter-process"),
+            ("filter.annex.required", "true"),
+            ("filter.annex.smudge", "/nonexistent/git-annex smudge -- %f"),
+            ("filter.annex.clean", "/nonexistent/git-annex smudge --clean -- %f"),
+        ]
+    ):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", value)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "4")
+
+
+def test_a_configured_but_missing_annex_filter_does_not_stop_a_dry_or_real_run(
+    env, tmp_path, monkeypatch
+):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {".gitattributes": "* filter=annex\n"})
+    _git(bare, "tag", "-f", VERSION, "main")
+    _missing_annex_machine(monkeypatch)
+    assert _pr(served, tmp_path / "dry", dry=True) == 0
+    assert _pr(served, work) == 0
+    clone = work / DATASET_ID
+    changed = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert changed
+    for rel in changed:
+        assert _git(bare, "show", f"{BRANCH}:{rel}") == (clone / rel).read_text(), rel
