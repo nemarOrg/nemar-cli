@@ -48,6 +48,9 @@ from scipy.spatial import KDTree  # the cKDTree implementation since scipy 1.6
 from .surfaces import Surface
 
 ECOG_MEDIAN_MM = 2.0
+# One minimum for fitting cortical contacts with the ECoG rule, shared by the FreeSurfer track
+# and the subject-surface builder (fewer contacts go under the depth rule or are not placed).
+MIN_ECOG_CONTACTS = 3
 SEEG_MEDIAN_MM = 6.0
 SEEG_NEAR_MM = 5.0
 SEEG_PLAUSIBLE_FRACTION = 0.90

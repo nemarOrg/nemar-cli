@@ -47,11 +47,11 @@ from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_elec
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
-from .verify import Fit, OffsetFit, fit_with_offset
+from .verify import MIN_ECOG_CONTACTS, Fit, OffsetFit, fit_with_offset
 from .version import pipeline_version
 
 SURFACE_MAX_MM = 3.0
-MIN_CONTACTS = 3
+MIN_CONTACTS = MIN_ECOG_CONTACTS
 REG_SAMPLES = 2000
 REG_SIDE_FRACTION = 0.95
 REG_CENTROID_MM = 5.0

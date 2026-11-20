@@ -43,7 +43,7 @@ from .meshwrite import (
 )
 from .reference import read_brain_mesh
 from .surfaces import Surface, read_surface
-from .verify import SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
+from .verify import MIN_ECOG_CONTACTS, SPECIFIC, Fit, OffsetFit, fit, fit_with_offset
 from .version import pipeline_version
 
 INDEX_SCHEMA = "nemar-ieeg-geometry-index"
@@ -52,7 +52,6 @@ _FS_NAME = re.compile(r"^[lr]h\.pial(\.T1)?$", re.I)
 _HEMI_TOKEN = re.compile(r"(^|[._\-])(lh|rh|left|right|l|r)(?=[._\-]|$)", re.I)
 _SKIP_DIRS = {".git", ".datalad", ".nemar", "node_modules"}
 _SIDE_PURITY = 0.95
-MIN_ECOG_CONTACTS = 8
 # ruling 15: what decimation may change, measured against the original surface
 MAX_MEDIAN_SHIFT_MM = 0.5
 MAX_P99_DEVIATION_MM = 1.0
@@ -109,17 +108,28 @@ def _assign_hemisphere(s: Surface) -> Surface:
     return s
 
 
-def _contacts_for_fit(eset: ElectrodeSet) -> tuple[str, np.ndarray, list[str | None]] | None:
-    """ECoG contacts when the file has at least `MIN_ECOG_CONTACTS` of them (their rule is
-    specific), else every contact under the depth rule. Contacts missing a coordinate are
-    dropped by `fit`."""
+FIT_RULE_ECOG = "ecog-2.0mm"
+FIT_RULE_DEPTH = "depth"
+
+
+def _contacts_for_fit(eset: ElectrodeSet) -> tuple[str, str, np.ndarray, list[str | None]] | None:
+    """(rule, contact type, positions, hemispheres) of the contacts to fit.
+
+    ECoG contacts when the file has at least `MIN_ECOG_CONTACTS` of them (the minimum the
+    FreeSurfer track uses; their rule is specific), else every contact under the depth rule. The
+    contact type is what the fitted contacts are (`ecog` only when all of them are ECoG), apart
+    from the rule applied. Contacts missing a coordinate are dropped by `fit`."""
     has = [c for c in eset.contacts if not c.missing_coordinates]
     ecog = [c for c in has if c.type == ECOG]
-    chosen, kind = (ecog, "ecog") if len(ecog) >= MIN_ECOG_CONTACTS else (has, "seeg")
+    if len(ecog) >= MIN_ECOG_CONTACTS:
+        chosen, rule = ecog, "ecog"
+    else:
+        chosen, rule = has, "seeg"
     if not chosen:
         return None
+    contact_type = "ecog" if all(c.type == ECOG for c in chosen) else "seeg"
     xyz = np.array([[c.x, c.y, c.z] for c in chosen], dtype=float)
-    return kind, xyz, [c.hemisphere for c in chosen]
+    return rule, contact_type, xyz, [c.hemisphere for c in chosen]
 
 
 @dataclass
@@ -263,7 +273,7 @@ def build_geometry(
         if picked is None:
             skip(item, "no contact has all of x, y, z")
             continue
-        kind, xyz, hemis = picked
+        kind, contact_type, xyz, hemis = picked
         candidates: list[Candidate] = []
         reasons: list[str] = []
         for paths in sets:
@@ -278,7 +288,7 @@ def build_geometry(
             continue
         best = min(candidates, key=lambda c: (c.own_rank, [p.as_posix() for p in c.paths]))
         entry, problem = _write_entry(
-            dataset, geometry, item, eset, kind, xyz, hemis, best, max_vertices
+            dataset, geometry, item, eset, kind, contact_type, xyz, hemis, best, max_vertices
         )
         if entry is None:
             skip(item, problem)
@@ -286,8 +296,8 @@ def build_geometry(
         entries.append(entry)
         lines.append(
             f"sub-{item.subject}: {entry['electrodes']}: written "
-            f"{'+'.join(entry['hemispheres'])}, {best.chosen}, {kind} {best.fit.grade} "
-            f"median {best.fit.median_mm:.2f} mm, from "
+            f"{'+'.join(entry['hemispheres'])}, {best.chosen}, {contact_type} {best.fit.grade} "
+            f"median {best.fit.median_mm:.2f} mm ({entry['fit_rule']} rule), from "
             f"{best.paths[0].parent.relative_to(dataset).as_posix()}"
         )
     entries.sort(key=lambda e: (e["subject"], e["session"] or "", e["electrodes"]))
@@ -313,6 +323,7 @@ def _write_entry(
     item: Discovered,
     eset: ElectrodeSet,
     kind: str,
+    contact_type: str,
     xyz: np.ndarray,
     hemis: list[str | None],
     best: Candidate,
@@ -379,7 +390,8 @@ def _write_entry(
         "session": item.session,
         "electrodes": item.electrodes_path.relative_to(dataset).as_posix(),
         "frame": eset.frame,
-        "contact_type": kind,
+        "contact_type": contact_type,
+        "fit_rule": FIT_RULE_ECOG if kind == "ecog" else FIT_RULE_DEPTH,
         "frame_choice": best.chosen,
         "vertex_offset_mm": None if c_ras is None else [float(v) for v in c_ras],
         "hemispheres": sorted(payload),

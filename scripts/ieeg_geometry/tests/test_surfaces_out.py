@@ -376,16 +376,30 @@ def test_decimation_judged_against_the_original_records_its_effect(dataset, tmp_
     assert entry["fit"]["median_mm"] != entry["fit_before_decimation"]["median_mm"]
 
 
-def test_few_ecog_contacts_are_fitted_under_the_depth_rule(tmp_path, dataset):
+def _few_contacts(tmp_path, dataset, n):
     root = tmp_path / "ds"
     shutil.copytree(
         dataset["root"] / "derivatives" / "freesurfer" / "sub-1",
         root / "derivatives" / "freesurfer" / "sub-1",
     )
-    rows = dataset["scanner"][:5]  # five ECoG contacts, below the minimum of eight
-    _write_electrodes(root / "sub-1" / "ieeg", "sub-1", rows, ["L"] * 5)
+    _write_electrodes(root / "sub-1" / "ieeg", "sub-1", dataset["scanner"][:n], ["L"] * n)
     index, _ = build_geometry(root, tmp_path / "out", source_commit="abc123")
-    assert index["entries"][0]["contact_type"] == "seeg"
+    return index["entries"][0]
+
+
+def test_three_ecog_contacts_use_the_ecog_rule_like_the_freesurfer_track(tmp_path, dataset):
+    from ieeg_geometry import freesurfer, verify
+
+    assert freesurfer.MIN_CONTACTS == verify.MIN_ECOG_CONTACTS == 3
+    entry = _few_contacts(tmp_path, dataset, 3)
+    assert entry["contact_type"] == "ecog"
+    assert entry["fit_rule"] == "ecog-2.0mm"
+
+
+def test_two_ecog_contacts_fall_back_to_the_depth_rule_but_stay_ecog_typed(tmp_path, dataset):
+    entry = _few_contacts(tmp_path, dataset, 2)
+    assert entry["fit_rule"] == "depth"
+    assert entry["contact_type"] == "ecog"  # the contacts' actual type, not the rule
 
 
 def test_a_full_hemisphere_pair_outranks_a_single_hemisphere(dataset, tmp_path):
