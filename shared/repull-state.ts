@@ -342,6 +342,10 @@ export const REPULL_COUNT_KEYS = [
   "conflicts",
   "corrections",
   "resolutions",
+  // The iEEG geometry pipeline's paths (ADR 0111, the amendment of 2026-11-19): how many the plan
+  // listed, and 1 when N.0.1 was made without regenerating them because the run failed.
+  "pipeline_owned",
+  "pipeline_failed",
   "copied",
   "registered",
   "locked",
