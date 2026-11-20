@@ -12,9 +12,10 @@ refuse the channel, which then joins nothing):
 1. The exact name.
 2. A hyphen that splits the name into two exact contact names: a bipolar pair, both contacts.
 3. Rewrites that change no letter of the contact: whitespace removed; a leading `EEG` or `POL`
-   (either case) and spaces, or `EEG` run into a shaft letter, removed; then the exact name, or a
-   name equal to a contact but for leading zeros in the index and an underscore before it (`G_03`,
-   `G03` and `G3` are one name, on either side), or a bipolar pair whose halves read that way.
+   (upper case only) and spaces, or `EEG` run into a shaft letter, removed; then the exact name, or
+   a name equal to a contact but for leading zeros in the index and an underscore between a shaft
+   letter and the index (`G_03`, `G03` and `G3` are one name, on either side; `G1_2` is not `G12`),
+   or a bipolar pair whose halves read that way.
 4. One trailing reference token removed from any of those forms: `-REF` or `-Ref` (any case, with
    or without a number), `REF` right after the index (`GA_01REF`), `-AV`, or a hyphen and four or
    more digits (`-20000`) that no contact continues the shaft with; then the same comparison.
@@ -34,12 +35,12 @@ from dataclasses import dataclass
 
 EXACT, NORMALIZED, SUFFIX = 0, 1, 2
 
-_SEPARATOR_BEFORE_INDEX = re.compile(r"_$")
-_TRAILING_DIGITS = re.compile(r"(.*?)(\d+)")
-_TYPE_PREFIX = re.compile(r"(?:(?:eeg|pol) +|eeg(?=[A-Za-z]))(\S.*)", re.IGNORECASE)
-_REFERENCE_NAME = re.compile(r"(?:(.+?)-ref\d*|(.+?\d)ref\d*)", re.IGNORECASE)
+_SEPARATOR_BEFORE_INDEX = re.compile(r"(?<=[A-Za-z])_$")
+_TRAILING_DIGITS = re.compile(r"(.*?)([0-9]+)")
+_TYPE_PREFIX = re.compile(r"(?:(?:EEG|POL) +|EEG(?=[A-Za-z]))(\S.*)")
+_REFERENCE_NAME = re.compile(r"(?:(.+?)-ref[0-9]*|(.+?[0-9])ref[0-9]*)", re.IGNORECASE)
 _AVERAGE_REFERENCE = re.compile(r"(.+?)-AV")
-_NUMERIC_TAIL = re.compile(r"(.+?)-([1-9]\d{3,})")
+_NUMERIC_TAIL = re.compile(r"(.+?)-([1-9][0-9]{3,})")
 
 
 def zero_key(name: str) -> str:
@@ -48,7 +49,7 @@ def zero_key(name: str) -> str:
     m = _TRAILING_DIGITS.fullmatch(name)
     if not m:
         return name
-    digits = re.sub(r"^0+(?=\d)", "", m[2])
+    digits = re.sub(r"^0+(?=[0-9])", "", m[2])
     return f"{_SEPARATOR_BEFORE_INDEX.sub('', m[1])}{digits}"
 
 
@@ -56,7 +57,7 @@ def _zero_padding(name: str) -> tuple[str, str]:
     m = _TRAILING_DIGITS.fullmatch(name)
     if not m:
         return name, ""
-    run = re.match(r"0*(?=\d)", m[2])
+    run = re.match(r"0*(?=[0-9])", m[2])
     return m[1], run[0] if run else ""
 
 
@@ -196,7 +197,7 @@ def _match_name(channel: str, index: _Index) -> tuple[int, tuple[str, ...]] | No
             if rule == "numeric_tail":
                 # The tail may be a contact's index on the same shaft: then the name reads two ways.
                 digits = text[len(rest) + 1 :]
-                shaft = re.sub(r"\d+$", "", rest)
+                shaft = re.sub(r"[0-9]+$", "", rest)
                 suffixed += [_Reading((c,), via) for c in index.find(f"{shaft}{digits}", False)]
     if suffixed:
         decided = _decide(suffixed)

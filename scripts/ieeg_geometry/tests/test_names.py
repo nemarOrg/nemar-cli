@@ -5,6 +5,7 @@ The fixtures are the channels and electrodes `name` columns of the `fix-20261018
 same table over the same files.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -67,7 +68,7 @@ def test_every_joined_channel_names_its_contacts_shaft():
     def shaft(name):
         return "".join(ch for ch in name if ch.isalpha()).upper()
 
-    for path in sorted(FIXTURES.glob("*.json")):
+    for path in sorted(FIXTURES.glob("[!_]*.json")):
         for r in json.loads(path.read_text())["recordings"]:
             for channel, contacts in join_channels(r["channels"], r["contacts"]).items():
                 for contact in contacts:
@@ -135,14 +136,50 @@ def test_either_side_may_carry_the_underscore_and_the_zeros():
     }
 
 
-def test_type_word_case_and_the_no_space_forms():
+def test_type_word_is_upper_case_and_the_no_space_forms():
     contacts = ["A1", "A3", "AR1"]
-    got = join_channels(["pol A3", "Eeg A1", "EEGAR1"], contacts)
-    assert got == {"pol A3": ("A3",), "Eeg A1": ("A1",), "EEGAR1": ("AR1",)}
+    # No dataset writes another case: lower and mixed case stay unread (owner, 2026-11-20).
+    assert join_channels(["pol A3", "Eeg A1"], contacts) == {}
+    assert join_channels(["EEGAR1", "POL A3"], contacts) == {"EEGAR1": ("AR1",), "POL A3": ("A3",)}
     # POL with no space is part of the name (known-answer name).
     assert join_channels(["POLAR1"], contacts) == {}
     # REF is a reference only right after an index (known-answer name).
     assert join_channels(["PREF"], ["P"]) == {}
+
+
+def test_an_underscore_after_a_digit_is_part_of_the_name():
+    assert zero_key("G1_2") != zero_key("G12")
+    assert zero_key("GRID_1_2") != zero_key("GRID_12")
+    assert join_channels(["G12"], ["G1_2"]) == {}
+    assert join_channels(["G1_2"], ["G12"]) == {}
+    assert join_channels(["GRID_12"], ["GRID_1_2"]) == {}
+    assert join_channels(["GRID_1_2"], ["GRID_12"]) == {}
+
+
+def test_only_ascii_digits_are_digits():
+    # U+0661 is an Arabic-Indic digit one: `str.isdigit` and Python's `\d` accept it, the
+    # website's `\d` does not, and the two must agree.
+    assert join_channels(["A\u0661"], ["A1"]) == {}
+    assert join_channels(["POL A\u0661"], ["A\u0661"]) == {"POL A\u0661": ("A\u0661",)}
+    assert join_channels(["A01REF"], ["A\u0661"]) == {}
+
+
+def test_the_join_map_is_the_one_both_repositories_commit():
+    path = FIXTURES / "_expected-joins.json"
+    assert (
+        hashlib.sha256(path.read_bytes()).hexdigest()
+        == "9a9aa2aa451f27ef98bdac2ad897d4cbe484e3e0ba59a39acc3b6ca210be580f"
+    )
+    expected = json.loads(path.read_text())
+    actual = {}
+    for fixture in sorted(FIXTURES.glob("[!_]*.json")):
+        doc = json.loads(fixture.read_text())
+        for r in doc["recordings"]:
+            joined = join_channels(r["channels"], r["contacts"])
+            actual[f"{doc['dataset']}/{r['channels_path']}"] = {
+                c: sorted(joined[c]) if c in joined else "refused" for c in r["channels"]
+            }
+    assert actual == expected
 
 
 def test_an_exact_name_keeps_its_contact_and_two_spellings_refuse_each_other():
@@ -174,3 +211,54 @@ def test_contact_types_follow_renamed_channels(tmp_path, dataset, file, counts):
     contacts = read_electrode_set(item).contacts
     assert sum(c.type == ECOG for c in contacts) == counts[-1]
     assert sum(c.type == UNKNOWN for c in contacts) == len(r["contacts"]) - counts[-1]
+
+
+def _typed(tmp_path: Path, contacts: list[str], *channel_files: list[tuple[str, str]]):
+    ieeg = tmp_path / "sub-01" / "ieeg"
+    ieeg.mkdir(parents=True)
+    rows = "".join(f"{name}\t{i}\t0\t0\n" for i, name in enumerate(contacts))
+    (ieeg / "sub-01_electrodes.tsv").write_text("name\tx\ty\tz\n" + rows)
+    (ieeg / "sub-01_coordsystem.json").write_text(json.dumps({"iEEGCoordinateUnits": "mm"}))
+    for n, rows_ in enumerate(channel_files, 1):
+        body = "".join(f"{name}\t{kind}\n" for name, kind in rows_)
+        (ieeg / f"sub-01_task-t{n}_channels.tsv").write_text("name\ttype\n" + body)
+    (item,) = discover(tmp_path)
+    eset = read_electrode_set(item)
+    return {c.name: c.type for c in eset.contacts}, eset.warnings
+
+
+def test_claims_settle_over_every_channel_not_only_the_typed_ones(tmp_path):
+    # A1 is kept by its exact MISC channel, so `POL A1` (SEEG) is refused and A1 has no iEEG type;
+    # `EEG A2-Ref` (EEG) and `POL A2-Ref` (ECOG) both reach A2 the same way and refuse each other.
+    types, _ = _typed(
+        tmp_path,
+        ["A1", "A2"],
+        [("A1", "MISC"), ("POL A1", "SEEG"), ("EEG A2-Ref", "EEG"), ("POL A2-Ref", "ECOG")],
+    )
+    assert types == {"A1": UNKNOWN, "A2": UNKNOWN}
+
+
+def test_a_renamed_channel_types_its_contact_when_nothing_else_claims_it(tmp_path):
+    types, warnings = _typed(
+        tmp_path, ["A1", "A2", "B1"], [("POL A1", "SEEG"), ("A2", "ECOG"), ("EEG B1-Ref", "EEG")]
+    )
+    assert types == {"A1": "seeg", "A2": ECOG, "B1": UNKNOWN}
+    assert warnings == ()
+
+
+def test_types_that_disagree_leave_the_contact_untyped_with_a_warning(tmp_path):
+    types, warnings = _typed(
+        tmp_path,
+        ["A1", "A2"],
+        [("POL A1", "SEEG"), ("A2", "ECOG")],
+        [("POL A1", "ECOG"), ("A2", "ECOG")],
+    )
+    assert types == {"A1": UNKNOWN, "A2": ECOG}
+    assert len(warnings) == 1
+    assert "A1" in warnings[0] and "ecog, seeg" in warnings[0]
+
+
+def test_an_exact_type_beats_a_renamed_one_from_another_file(tmp_path):
+    types, warnings = _typed(tmp_path, ["A1"], [("POL A1", "ECOG")], [("A1", "SEEG")])
+    assert types == {"A1": "seeg"}
+    assert warnings == ()

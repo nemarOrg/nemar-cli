@@ -222,32 +222,58 @@ def _channel_types(
 
     A channel named as the recording header names it (`POL A1-AV`, `EEG G_03-REF`) gives its type
     to the contact `names.join_channels` pairs it with, so a channels file may be renamed while
-    electrodes.tsv keeps the contact names; a bipolar channel gives it to both contacts."""
-    types: dict[str, ContactType] = {}
+    electrodes.tsv keeps the contact names; a bipolar channel gives it to both contacts.
+
+    Every non-empty channel name of a file takes part in the join (a channel of another type, such
+    as `A1` typed MISC, still keeps its contact against a renamed `POL A1`); only channels whose
+    type is seeg, ecog or dbs give a type. Exact names from every file are applied first and are
+    the file's own word; a contact reached only by renamed channels takes their type. Where the
+    types that reach one contact disagree, the contact stays untyped and a warning says so."""
     warnings: list[str] = []
+    exact: dict[str, list[ContactType]] = {}
+    mapped: dict[str, list[ContactType]] = {}
+    own_contacts = set(contact_names)
     for path in paths:
         # A non-UTF-8 byte in another column (on006233's units) is not fatal.
         _, rows = _read_tsv(path, errors="replace")
         damaged = 0
-        typed: list[tuple[str, ContactType]] = []
+        named: list[tuple[str, ContactType | None]] = []
         for row in rows:
             name = (row.get("name") or "").strip()
             kind_text = row.get("type")
             if "\ufffd" in name or "\ufffd" in (kind_text or ""):
                 damaged += 1
-            kind = _normalize_type(kind_text)
-            if kind and name:
-                typed.append((name, kind))
-                types.setdefault(name, kind)
-        paired = join_channels([name for name, _ in typed], contact_names) if contact_names else {}
-        for name, kind in typed:
-            for contact in paired.get(name, ()):
-                types.setdefault(contact, kind)
+            if name:
+                named.append((name, _normalize_type(kind_text)))
+        for name, kind in named:
+            if kind and (not contact_names or name in own_contacts):
+                exact.setdefault(name, []).append(kind)
+        if contact_names:
+            joined = join_channels([name for name, _ in named], contact_names)
+            for name, kind in named:
+                contacts = joined.get(name, ())
+                if kind and contacts and contacts != (name,):
+                    for contact in contacts:
+                        mapped.setdefault(contact, []).append(kind)
         if damaged:
             warnings.append(
                 f"{path.name}: {damaged} name or type cell(s) had undecodable bytes "
                 "(replaced); contact types may be incomplete"
             )
+    types: dict[str, ContactType] = {}
+    conflicted: set[str] = set()
+    for source in (exact, mapped):
+        for contact, kinds in source.items():
+            if contact in types or contact in conflicted:
+                continue
+            if len(set(kinds)) > 1:
+                conflicted.add(contact)
+                warnings.append(
+                    f"contact {contact}: channels files give it more than one type "
+                    f"({', '.join(sorted(set(kinds)))}); left untyped"
+                )
+            else:
+                types[contact] = kinds[0]
     return types, tuple(warnings)
 
 

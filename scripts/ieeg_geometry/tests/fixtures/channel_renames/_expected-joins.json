@@ -1,0 +1,2996 @@
+{
+ "on004194/sub-p04/ses-nyuecog01/ieeg/sub-p04_ses-nyuecog01_task-prf_acq-clinical_run-01_channels.tsv": {
+  "EEG G_01-REF": [
+   "G01"
+  ],
+  "EEG G_02-REF": [
+   "G02"
+  ],
+  "EEG G_03-REF": [
+   "G03"
+  ],
+  "EEG G_04-REF": [
+   "G04"
+  ],
+  "EEG G_05-REF": [
+   "G05"
+  ],
+  "EEG G_06-REF": [
+   "G06"
+  ],
+  "EEG G_07-REF": [
+   "G07"
+  ],
+  "EEG G_08-REF": [
+   "G08"
+  ],
+  "EEG G_09-REF": [
+   "G09"
+  ],
+  "EEG G_10-REF": [
+   "G10"
+  ],
+  "EEG G_11-REF": [
+   "G11"
+  ],
+  "EEG G_12-REF": [
+   "G12"
+  ],
+  "EEG G_13-REF": [
+   "G13"
+  ],
+  "EEG G_14-REF": [
+   "G14"
+  ],
+  "EEG G_15-REF": [
+   "G15"
+  ],
+  "EEG G_16-REF": [
+   "G16"
+  ],
+  "EEG G_17-REF": [
+   "G17"
+  ],
+  "EEG G_18-REF": [
+   "G18"
+  ],
+  "EEG G_19-REF": [
+   "G19"
+  ],
+  "EEG G_20-REF": [
+   "G20"
+  ],
+  "EEG G_21-REF": [
+   "G21"
+  ],
+  "EEG G_22-REF": [
+   "G22"
+  ],
+  "EEG G_23-REF": [
+   "G23"
+  ],
+  "EEG G_24-REF": [
+   "G24"
+  ],
+  "EEG G_25-REF": [
+   "G25"
+  ],
+  "EEG G_26-REF": [
+   "G26"
+  ],
+  "EEG G_27-REF": [
+   "G27"
+  ],
+  "EEG G_28-REF": [
+   "G28"
+  ],
+  "EEG G_29-REF": [
+   "G29"
+  ],
+  "EEG G_30-REF": [
+   "G30"
+  ],
+  "EEG G_31-REF": [
+   "G31"
+  ],
+  "EEG G_32-REF": [
+   "G32"
+  ],
+  "EEG G_33-REF": [
+   "G33"
+  ],
+  "EEG G_34-REF": [
+   "G34"
+  ],
+  "EEG G_35-REF": [
+   "G35"
+  ],
+  "EEG G_36-REF": [
+   "G36"
+  ],
+  "EEG G_37-REF": [
+   "G37"
+  ],
+  "EEG G_38-REF": [
+   "G38"
+  ],
+  "EEG G_39-REF": [
+   "G39"
+  ],
+  "EEG G_40-REF": [
+   "G40"
+  ],
+  "EEG G_41-REF": [
+   "G41"
+  ],
+  "EEG G_42-REF": [
+   "G42"
+  ],
+  "EEG G_43-REF": [
+   "G43"
+  ],
+  "EEG G_44-REF": [
+   "G44"
+  ],
+  "EEG G_45-REF": [
+   "G45"
+  ],
+  "EEG G_46-REF": [
+   "G46"
+  ],
+  "EEG G_47-REF": [
+   "G47"
+  ],
+  "EEG G_48-REF": [
+   "G48"
+  ],
+  "EEG G_49-REF": [
+   "G49"
+  ],
+  "EEG G_50-REF": [
+   "G50"
+  ],
+  "EEG G_51-REF": [
+   "G51"
+  ],
+  "EEG G_52-REF": [
+   "G52"
+  ],
+  "EEG G_53-REF": [
+   "G53"
+  ],
+  "EEG G_54-REF": [
+   "G54"
+  ],
+  "EEG G_55-REF": [
+   "G55"
+  ],
+  "EEG G_56-REF": [
+   "G56"
+  ],
+  "EEG G_57-REF": [
+   "G57"
+  ],
+  "EEG G_58-REF": [
+   "G58"
+  ],
+  "EEG G_59-REF": [
+   "G59"
+  ],
+  "EEG G_60-REF": [
+   "G60"
+  ],
+  "EEG G_61-REF": [
+   "G61"
+  ],
+  "EEG G_62-REF": [
+   "G62"
+  ],
+  "EEG G_63-REF": [
+   "G63"
+  ],
+  "EEG G_64-REF": [
+   "G64"
+  ],
+  "EEG AT_01-REF": [
+   "AT01"
+  ],
+  "EEG AT_02-REF": [
+   "AT02"
+  ],
+  "EEG AT_03-REF": [
+   "AT03"
+  ],
+  "EEG AT_04-REF": [
+   "AT04"
+  ],
+  "EEG MT_01-REF": [
+   "MT01"
+  ],
+  "EEG MT_02-REF": [
+   "MT02"
+  ],
+  "EEG MT_03-REF": [
+   "MT03"
+  ],
+  "EEG MT_04-REF": [
+   "MT04"
+  ],
+  "EEG PT_01-REF": [
+   "PT01"
+  ],
+  "EEG PT_02-REF": [
+   "PT02"
+  ],
+  "EEG PT_03-REF": [
+   "PT03"
+  ],
+  "EEG PT_04-REF": [
+   "PT04"
+  ],
+  "EEG OC_01-REF": [
+   "OC01"
+  ],
+  "EEG OC_02-REF": [
+   "OC02"
+  ],
+  "EEG OC_03-REF": [
+   "OC03"
+  ],
+  "EEG OC_04-REF": [
+   "OC04"
+  ],
+  "EEG OC_05-REF": [
+   "OC05"
+  ],
+  "EEG OC_06-REF": [
+   "OC06"
+  ],
+  "EEG OC_07-REF": [
+   "OC07"
+  ],
+  "EEG OC_08-REF": [
+   "OC08"
+  ],
+  "EEG FR_01-REF": [
+   "FR01"
+  ],
+  "EEG FR_02-REF": [
+   "FR02"
+  ],
+  "EEG FR_03-REF": [
+   "FR03"
+  ],
+  "EEG FR_04-REF": [
+   "FR04"
+  ],
+  "EEG DAMT_01-REF": [
+   "DAMT01"
+  ],
+  "EEG DAMT_02-REF": [
+   "DAMT02"
+  ],
+  "EEG DAMT_03-REF": [
+   "DAMT03"
+  ],
+  "EEG DAMT_04-REF": [
+   "DAMT04"
+  ],
+  "EEG DAMT_05-REF": [
+   "DAMT05"
+  ],
+  "EEG DAMT_06-REF": [
+   "DAMT06"
+  ],
+  "EEG DAMT_07-REF": [
+   "DAMT07"
+  ],
+  "EEG DAMT_08-REF": [
+   "DAMT08"
+  ],
+  "EEG DPMT_01-REF": [
+   "DPMT01"
+  ],
+  "EEG DPMT_02-REF": [
+   "DPMT02"
+  ],
+  "EEG DPMT_03-REF": [
+   "DPMT03"
+  ],
+  "EEG DPMT_04-REF": [
+   "DPMT04"
+  ],
+  "EEG DPMT_05-REF": [
+   "DPMT05"
+  ],
+  "EEG DPMT_06-REF": [
+   "DPMT06"
+  ],
+  "EEG DPMT_07-REF": [
+   "DPMT07"
+  ],
+  "EEG DPMT_08-REF": [
+   "DPMT08"
+  ],
+  "EEG SG_01-REF": "refused",
+  "EEG SG_02-REF": "refused",
+  "EEG SG_03-REF": "refused",
+  "EEG SG_04-REF": "refused",
+  "EEG SG_05-REF": "refused",
+  "EEG SG_06-REF": "refused",
+  "ECG EKG1-REF": "refused",
+  "ECG EKG2-REF": "refused",
+  "DC1-REF": "refused",
+  "DC2-REF": "refused",
+  "DC3-REF": "refused",
+  "DC4-REF": "refused",
+  "DC5-REF": "refused",
+  "DC6-REF": "refused",
+  "DC7-REF": "refused",
+  "DC8-REF": "refused",
+  "DC9-REF": "refused",
+  "DC10-REF": "refused",
+  "DC11-REF": "refused",
+  "DC12-REF": "refused"
+ },
+ "on004194/sub-p05/ses-nyuecog01/ieeg/sub-p05_ses-nyuecog01_task-prf_acq-clinical_run-01_channels.tsv": {
+  "EEGGA_01REF": [
+   "GA01"
+  ],
+  "EEGGA_02REF": [
+   "GA02"
+  ],
+  "EEGGA_03REF": [
+   "GA03"
+  ],
+  "EEGGA_04REF": [
+   "GA04"
+  ],
+  "EEGGA_05REF": [
+   "GA05"
+  ],
+  "EEGGA_06REF": [
+   "GA06"
+  ],
+  "EEGGA_07REF": [
+   "GA07"
+  ],
+  "EEGGA_08REF": [
+   "GA08"
+  ],
+  "EEGGA_09REF": [
+   "GA09"
+  ],
+  "EEGGA_10REF": [
+   "GA10"
+  ],
+  "EEGGA_11REF": [
+   "GA11"
+  ],
+  "EEGGA_12REF": [
+   "GA12"
+  ],
+  "EEGGA_13REF": [
+   "GA13"
+  ],
+  "EEGGA_14REF": [
+   "GA14"
+  ],
+  "EEGGA_15REF": [
+   "GA15"
+  ],
+  "EEGGA_16REF": [
+   "GA16"
+  ],
+  "EEGGA_17REF": [
+   "GA17"
+  ],
+  "EEGGA_18REF": [
+   "GA18"
+  ],
+  "EEGGA_19REF": [
+   "GA19"
+  ],
+  "EEGGA_20REF": [
+   "GA20"
+  ],
+  "EEGGA_21REF": [
+   "GA21"
+  ],
+  "EEGGA_22REF": [
+   "GA22"
+  ],
+  "EEGGA_23REF": [
+   "GA23"
+  ],
+  "EEGGA_24REF": [
+   "GA24"
+  ],
+  "EEGGA_25REF": [
+   "GA25"
+  ],
+  "EEGGA_26REF": [
+   "GA26"
+  ],
+  "EEGGA_27REF": [
+   "GA27"
+  ],
+  "EEGGA_28REF": [
+   "GA28"
+  ],
+  "EEGGA_29REF": [
+   "GA29"
+  ],
+  "EEGGA_30REF": [
+   "GA30"
+  ],
+  "EEGGA_31REF": [
+   "GA31"
+  ],
+  "EEGGA_32REF": [
+   "GA32"
+  ],
+  "EEGGA_33REF": [
+   "GA33"
+  ],
+  "EEGGA_34REF": [
+   "GA34"
+  ],
+  "EEGGA_35REF": [
+   "GA35"
+  ],
+  "EEGGA_36REF": [
+   "GA36"
+  ],
+  "EEGGA_37REF": [
+   "GA37"
+  ],
+  "EEGGA_38REF": [
+   "GA38"
+  ],
+  "EEGGA_39REF": [
+   "GA39"
+  ],
+  "EEGGA_40REF": [
+   "GA40"
+  ],
+  "EEGGA_41REF": [
+   "GA41"
+  ],
+  "EEGGA_42REF": [
+   "GA42"
+  ],
+  "EEGGA_43REF": [
+   "GA43"
+  ],
+  "EEGGA_44REF": [
+   "GA44"
+  ],
+  "EEGGA_45REF": [
+   "GA45"
+  ],
+  "EEGGA_46REF": [
+   "GA46"
+  ],
+  "EEGGA_47REF": [
+   "GA47"
+  ],
+  "EEGGA_48REF": [
+   "GA48"
+  ],
+  "EEGGA_49REF": [
+   "GA49"
+  ],
+  "EEGGA_50REF": [
+   "GA50"
+  ],
+  "EEGGA_51REF": [
+   "GA51"
+  ],
+  "EEGGA_52REF": [
+   "GA52"
+  ],
+  "EEGGA_53REF": [
+   "GA53"
+  ],
+  "EEGGA_54REF": [
+   "GA54"
+  ],
+  "EEGGA_55REF": [
+   "GA55"
+  ],
+  "EEGGA_56REF": [
+   "GA56"
+  ],
+  "EEGGA_57REF": [
+   "GA57"
+  ],
+  "EEGGA_58REF": [
+   "GA58"
+  ],
+  "EEGGA_59REF": [
+   "GA59"
+  ],
+  "EEGGA_60REF": [
+   "GA60"
+  ],
+  "EEGGA_61REF": [
+   "GA61"
+  ],
+  "EEGGA_62REF": [
+   "GA62"
+  ],
+  "EEGGA_63REF": [
+   "GA63"
+  ],
+  "EEGGA_64REF": [
+   "GA64"
+  ],
+  "EEGGB_01REF": [
+   "GB01"
+  ],
+  "EEGGB_02REF": [
+   "GB02"
+  ],
+  "EEGGB_03REF": [
+   "GB03"
+  ],
+  "EEGGB_04REF": [
+   "GB04"
+  ],
+  "EEGGB_05REF": [
+   "GB05"
+  ],
+  "EEGGB_06REF": [
+   "GB06"
+  ],
+  "EEGGB_07REF": [
+   "GB07"
+  ],
+  "EEGGB_08REF": [
+   "GB08"
+  ],
+  "EEGGB_09REF": [
+   "GB09"
+  ],
+  "EEGGB_10REF": [
+   "GB10"
+  ],
+  "EEGGB_11REF": [
+   "GB11"
+  ],
+  "EEGGB_12REF": [
+   "GB12"
+  ],
+  "EEGGB_13REF": [
+   "GB13"
+  ],
+  "EEGGB_14REF": [
+   "GB14"
+  ],
+  "EEGGB_15REF": [
+   "GB15"
+  ],
+  "EEGGB_16REF": [
+   "GB16"
+  ],
+  "EEGGB_17REF": [
+   "GB17"
+  ],
+  "EEGGB_18REF": [
+   "GB18"
+  ],
+  "EEGGB_19REF": [
+   "GB19"
+  ],
+  "EEGGB_20REF": [
+   "GB20"
+  ],
+  "EEGGB_21REF": [
+   "GB21"
+  ],
+  "EEGGB_22REF": [
+   "GB22"
+  ],
+  "EEGGB_23REF": [
+   "GB23"
+  ],
+  "EEGGB_24REF": [
+   "GB24"
+  ],
+  "EEGGB_25REF": [
+   "GB25"
+  ],
+  "EEGGB_26REF": [
+   "GB26"
+  ],
+  "EEGGB_27REF": [
+   "GB27"
+  ],
+  "EEGGB_28REF": [
+   "GB28"
+  ],
+  "EEGGB_29REF": [
+   "GB29"
+  ],
+  "EEGGB_30REF": [
+   "GB30"
+  ],
+  "EEGGB_31REF": [
+   "GB31"
+  ],
+  "EEGGB_32REF": [
+   "GB32"
+  ],
+  "EEGGB_33REF": [
+   "GB33"
+  ],
+  "EEGGB_34REF": [
+   "GB34"
+  ],
+  "EEGGB_35REF": [
+   "GB35"
+  ],
+  "EEGGB_36REF": [
+   "GB36"
+  ],
+  "EEGGB_37REF": [
+   "GB37"
+  ],
+  "EEGGB_38REF": [
+   "GB38"
+  ],
+  "EEGGB_39REF": [
+   "GB39"
+  ],
+  "EEGGB_40REF": [
+   "GB40"
+  ],
+  "EEGGB_41REF": [
+   "GB41"
+  ],
+  "EEGGB_42REF": [
+   "GB42"
+  ],
+  "EEGGB_43REF": [
+   "GB43"
+  ],
+  "EEGGB_44REF": [
+   "GB44"
+  ],
+  "EEGGB_45REF": [
+   "GB45"
+  ],
+  "EEGGB_46REF": [
+   "GB46"
+  ],
+  "EEGGB_47REF": [
+   "GB47"
+  ],
+  "EEGGB_48REF": [
+   "GB48"
+  ],
+  "EEGGB_49REF": [
+   "GB49"
+  ],
+  "EEGGB_50REF": [
+   "GB50"
+  ],
+  "EEGGB_51REF": [
+   "GB51"
+  ],
+  "EEGGB_52REF": [
+   "GB52"
+  ],
+  "EEGGB_53REF": [
+   "GB53"
+  ],
+  "EEGGB_54REF": [
+   "GB54"
+  ],
+  "EEGGB_55REF": [
+   "GB55"
+  ],
+  "EEGGB_56REF": [
+   "GB56"
+  ],
+  "EEGGB_57REF": [
+   "GB57"
+  ],
+  "EEGGB_58REF": [
+   "GB58"
+  ],
+  "EEGGB_59REF": [
+   "GB59"
+  ],
+  "EEGGB_60REF": [
+   "GB60"
+  ],
+  "EEGGB_61REF": [
+   "GB61"
+  ],
+  "EEGGB_62REF": [
+   "GB62"
+  ],
+  "DC1REF": "refused",
+  "DC2REF": "refused",
+  "DC3REF": "refused",
+  "DC4REF": "refused",
+  "DC5REF": "refused",
+  "DC6REF": "refused",
+  "DC7REF": "refused",
+  "DC8REF": "refused",
+  "EEGGB_63REF": [
+   "GB63"
+  ],
+  "EEGGB_64REF": [
+   "GB64"
+  ],
+  "EEGMP_01REF": [
+   "MP01"
+  ],
+  "EEGMP_02REF": [
+   "MP02"
+  ],
+  "EEGMP_03REF": [
+   "MP03"
+  ],
+  "EEGMP_04REF": [
+   "MP04"
+  ],
+  "EEGMP_05REF": [
+   "MP05"
+  ],
+  "EEGMP_06REF": [
+   "MP06"
+  ],
+  "EEGLP_01REF": [
+   "LP01"
+  ],
+  "EEGLP_02REF": [
+   "LP02"
+  ],
+  "EEGLP_03REF": [
+   "LP03"
+  ],
+  "EEGLP_04REF": [
+   "LP04"
+  ],
+  "EEGLP_05REF": [
+   "LP05"
+  ],
+  "EEGLP_06REF": [
+   "LP06"
+  ],
+  "EEGBT_01REF": [
+   "BT01"
+  ],
+  "EEGBT_02REF": [
+   "BT02"
+  ],
+  "EEGBT_03REF": [
+   "BT03"
+  ],
+  "EEGBT_04REF": [
+   "BT04"
+  ],
+  "EEGIO_01REF": [
+   "IO01"
+  ],
+  "EEGIO_02REF": [
+   "IO02"
+  ],
+  "EEGIO_03REF": [
+   "IO03"
+  ],
+  "EEGIO_04REF": [
+   "IO04"
+  ],
+  "EEGIO_05REF": "refused",
+  "EEGIO_06REF": "refused",
+  "EEGDMT_01REF": [
+   "DMT01"
+  ],
+  "EEGDMT_02REF": [
+   "DMT02"
+  ],
+  "EEGDMT_03REF": [
+   "DMT03"
+  ],
+  "EEGDMT_04REF": [
+   "DMT04"
+  ],
+  "EEGDMT_05REF": [
+   "DMT05"
+  ],
+  "EEGDMT_06REF": [
+   "DMT06"
+  ],
+  "EEGDMT_07REF": [
+   "DMT07"
+  ],
+  "EEGDMT_08REF": [
+   "DMT08"
+  ],
+  "EEGDMT_09REF": [
+   "DMT09"
+  ],
+  "EEGDMT_10REF": [
+   "DMT10"
+  ],
+  "EEGDAH_01REF": [
+   "DAH01"
+  ],
+  "EEGDAH_02REF": [
+   "DAH02"
+  ],
+  "EEGDAH_03REF": [
+   "DAH03"
+  ],
+  "EEGDAH_04REF": [
+   "DAH04"
+  ],
+  "EEGDAH_05REF": [
+   "DAH05"
+  ],
+  "EEGDAH_06REF": [
+   "DAH06"
+  ],
+  "EEGDAH_07REF": [
+   "DAH07"
+  ],
+  "EEGDAH_08REF": [
+   "DAH08"
+  ],
+  "EEGDPH_01REF": [
+   "DPH01"
+  ],
+  "EEGDPH_02REF": [
+   "DPH02"
+  ],
+  "EEGDPH_03REF": [
+   "DPH03"
+  ],
+  "EEGDPH_04REF": [
+   "DPH04"
+  ],
+  "EEGDPH_05REF": [
+   "DPH05"
+  ],
+  "EEGDPH_06REF": [
+   "DPH06"
+  ],
+  "EEGDPH_07REF": [
+   "DPH07"
+  ],
+  "EEGDPH_08REF": [
+   "DPH08"
+  ],
+  "EEGSG_01REF": "refused",
+  "EEGSG_02REF": "refused",
+  "EEGSG_03REF": "refused",
+  "EEGSG_04REF": "refused",
+  "EEGSG_05REF": "refused",
+  "EEGSG_06REF": "refused",
+  "ECGEKG1REF": "refused",
+  "ECGEKG2REF": "refused",
+  "PulseDC1REF": "refused",
+  "PulseDC2REF": "refused",
+  "PulseDC3REF": "refused",
+  "PulseDC4REF": "refused",
+  "PulseDC5REF": "refused",
+  "PulseDC6REF": "refused",
+  "PulseDC7REF": "refused",
+  "PulseDC8REF": "refused",
+  "DC9REF": "refused",
+  "DC10REF": "refused",
+  "DC11REF": "refused",
+  "DC12REF": "refused",
+  "PulseRate": "refused",
+  "EDFAnnotations": "refused"
+ },
+ "on004551/sub-012/ses-01/ieeg/sub-012_ses-01_task-sleep_run-01_channels.tsv": {
+  "EEG A1-Ref": [
+   "A1"
+  ],
+  "EEG A2-Ref": [
+   "A2"
+  ],
+  "POL A3": [
+   "A3"
+  ],
+  "POL A4": [
+   "A4"
+  ],
+  "POL A5": [
+   "A5"
+  ],
+  "POL A6": [
+   "A6"
+  ],
+  "POL A7": [
+   "A7"
+  ],
+  "POL A8": [
+   "A8"
+  ],
+  "POL A9": [
+   "A9"
+  ],
+  "POL A10": [
+   "A10"
+  ],
+  "POL A13": [
+   "A13"
+  ],
+  "POL A14": [
+   "A14"
+  ],
+  "POL A15": [
+   "A15"
+  ],
+  "POL A16": [
+   "A16"
+  ],
+  "POL A17": [
+   "A17"
+  ],
+  "POL A18": [
+   "A18"
+  ],
+  "POL A19": [
+   "A19"
+  ],
+  "POL A20": [
+   "A20"
+  ],
+  "POL A21": [
+   "A21"
+  ],
+  "POL E": "refused",
+  "POL A22": [
+   "A22"
+  ],
+  "POL A23": [
+   "A23"
+  ],
+  "POL A11": [
+   "A11"
+  ],
+  "POL A12": [
+   "A12"
+  ],
+  "POL A24": [
+   "A24"
+  ],
+  "POL A25": [
+   "A25"
+  ],
+  "POL A26": [
+   "A26"
+  ],
+  "POL A27": [
+   "A27"
+  ],
+  "POL A28": [
+   "A28"
+  ],
+  "POL A29": [
+   "A29"
+  ],
+  "POL A30": [
+   "A30"
+  ],
+  "POL A31": [
+   "A31"
+  ],
+  "POL A32": [
+   "A32"
+  ],
+  "POL A33": [
+   "A33"
+  ],
+  "POL A34": [
+   "A34"
+  ],
+  "POL A35": [
+   "A35"
+  ],
+  "POL A36": [
+   "A36"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused",
+  "POL DC03": "refused",
+  "POL DC04": "refused",
+  "POL DC05": "refused",
+  "POL DC06": "refused",
+  "POL DC07": "refused",
+  "POL DC08": "refused",
+  "POL A37": [
+   "A37"
+  ],
+  "POL A38": [
+   "A38"
+  ],
+  "POL $A11": "refused",
+  "POL $A12": "refused",
+  "POL A39": [
+   "A39"
+  ],
+  "POL A40": [
+   "A40"
+  ],
+  "POL A41": [
+   "A41"
+  ],
+  "POL A42": [
+   "A42"
+  ],
+  "POL A43": [
+   "A43"
+  ],
+  "POL A44": [
+   "A44"
+  ],
+  "POL A45": [
+   "A45"
+  ],
+  "POL A46": [
+   "A46"
+  ],
+  "POL A47": [
+   "A47"
+  ],
+  "POL A48": [
+   "A48"
+  ],
+  "POL A49": [
+   "A49"
+  ],
+  "POL A50": [
+   "A50"
+  ],
+  "POL A51": [
+   "A51"
+  ],
+  "POL A52": [
+   "A52"
+  ],
+  "POL A53": [
+   "A53"
+  ],
+  "POL A54": [
+   "A54"
+  ],
+  "POL A55": [
+   "A55"
+  ],
+  "POL A56": [
+   "A56"
+  ],
+  "POL A57": [
+   "A57"
+  ],
+  "POL A58": [
+   "A58"
+  ],
+  "POL A59": [
+   "A59"
+  ],
+  "POL A60": [
+   "A60"
+  ],
+  "POL A61": [
+   "A61"
+  ],
+  "POL A62": [
+   "A62"
+  ],
+  "POL A63": [
+   "A63"
+  ],
+  "POL A64": [
+   "A64"
+  ],
+  "POL B1": [
+   "B1"
+  ],
+  "POL B2": [
+   "B2"
+  ],
+  "POL B3": [
+   "B3"
+  ],
+  "POL B4": [
+   "B4"
+  ],
+  "POL B5": [
+   "B5"
+  ],
+  "POL B6": [
+   "B6"
+  ],
+  "POL B7": [
+   "B7"
+  ],
+  "POL B8": [
+   "B8"
+  ],
+  "POL B9": [
+   "B9"
+  ],
+  "POL B10": [
+   "B10"
+  ],
+  "POL B11": [
+   "B11"
+  ],
+  "POL B12": [
+   "B12"
+  ],
+  "POL B13": [
+   "B13"
+  ],
+  "POL B14": [
+   "B14"
+  ],
+  "POL B15": [
+   "B15"
+  ],
+  "POL B16": [
+   "B16"
+  ],
+  "POL B17": [
+   "B17"
+  ],
+  "POL B18": [
+   "B18"
+  ],
+  "POL B19": [
+   "B19"
+  ],
+  "POL B20": [
+   "B20"
+  ],
+  "POL B21": [
+   "B21"
+  ],
+  "POL B22": [
+   "B22"
+  ],
+  "POL B23": [
+   "B23"
+  ],
+  "POL B24": [
+   "B24"
+  ],
+  "POL B25": [
+   "B25"
+  ],
+  "POL B26": [
+   "B26"
+  ],
+  "POL B27": [
+   "B27"
+  ],
+  "POL B28": [
+   "B28"
+  ],
+  "POL B29": [
+   "B29"
+  ],
+  "POL B30": [
+   "B30"
+  ],
+  "POL B31": [
+   "B31"
+  ],
+  "POL B32": [
+   "B32"
+  ],
+  "POL B33": [
+   "B33"
+  ],
+  "POL B34": [
+   "B34"
+  ],
+  "POL B35": [
+   "B35"
+  ],
+  "POL B36": [
+   "B36"
+  ],
+  "POL B37": [
+   "B37"
+  ],
+  "POL B38": [
+   "B38"
+  ],
+  "POL B39": [
+   "B39"
+  ],
+  "POL B40": [
+   "B40"
+  ],
+  "POL B41": [
+   "B41"
+  ],
+  "POL B42": [
+   "B42"
+  ],
+  "POL B43": [
+   "B43"
+  ],
+  "POL B44": [
+   "B44"
+  ],
+  "POL B45": "refused",
+  "POL B46": "refused",
+  "POL B47": "refused",
+  "POL B48": "refused"
+ },
+ "on005007/sub-06/ses-01/ieeg/sub-06_ses-01_task-namingtask_run-01_channels.tsv": {
+  "POL ECG": "refused",
+  "POL N2": "refused",
+  "POL N3": "refused",
+  "POL N4": "refused",
+  "EEG A1-Ref": [
+   "A1"
+  ],
+  "EEG A2-Ref": [
+   "A2"
+  ],
+  "POL A3": [
+   "A3"
+  ],
+  "POL A4": [
+   "A4"
+  ],
+  "POL B1": [
+   "B1"
+  ],
+  "POL B2": [
+   "B2"
+  ],
+  "POL B5": [
+   "B5"
+  ],
+  "POL B6": [
+   "B6"
+  ],
+  "POL B7": [
+   "B7"
+  ],
+  "POL B8": [
+   "B8"
+  ],
+  "EEG C1-Ref": "refused",
+  "EEG C2-Ref": "refused",
+  "EEG C3-Ref": "refused",
+  "EEG C4-Ref": "refused",
+  "EEG C5-Ref": "refused",
+  "POL E": "refused",
+  "EEG C6-Ref": [
+   "C6"
+  ],
+  "POL D1": "refused",
+  "POL B3": [
+   "B3"
+  ],
+  "POL B4": [
+   "B4"
+  ],
+  "POL D2": "refused",
+  "POL D3": "refused",
+  "POL D4": "refused",
+  "POL D5": "refused",
+  "POL D6": [
+   "D6"
+  ],
+  "POL E1": [
+   "E1"
+  ],
+  "POL E2": [
+   "E2"
+  ],
+  "POL E3": [
+   "E3"
+  ],
+  "POL E4": [
+   "E4"
+  ],
+  "POL E5": [
+   "E5"
+  ],
+  "POL E6": [
+   "E6"
+  ],
+  "EEG F1-Ref": [
+   "F1"
+  ],
+  "EEG F2-Ref": [
+   "F2"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused",
+  "POL DC09": "refused",
+  "POL DC10": "refused",
+  "POL DC11": "refused",
+  "POL DC12": "refused",
+  "POL DC13": "refused",
+  "EEG F3-Ref": [
+   "F3"
+  ],
+  "EEG F4-Ref": [
+   "F4"
+  ],
+  "POL $B3": "refused",
+  "POL $B4": "refused",
+  "EEG F5-Ref": [
+   "F5"
+  ],
+  "EEG F6-Ref": [
+   "F6"
+  ],
+  "POL G1": [
+   "G1"
+  ],
+  "POL G2": [
+   "G2"
+  ],
+  "POL G3": [
+   "G3"
+  ],
+  "POL G4": [
+   "G4"
+  ],
+  "POL G5": [
+   "G5"
+  ],
+  "POL G6": [
+   "G6"
+  ],
+  "POL H1": "refused",
+  "POL H2": "refused",
+  "POL H3": "refused",
+  "POL H4": "refused",
+  "POL H5": "refused",
+  "POL H6": [
+   "H6"
+  ],
+  "POL I1": "refused",
+  "POL I2": "refused",
+  "POL I3": "refused",
+  "POL I4": "refused",
+  "POL I5": "refused",
+  "POL I6": [
+   "I6"
+  ],
+  "POL J1": "refused",
+  "POL J2": "refused",
+  "POL J3": "refused",
+  "POL J4": "refused",
+  "POL J5": "refused",
+  "POL J6": [
+   "J6"
+  ],
+  "POL K1": [
+   "K1"
+  ],
+  "POL K2": [
+   "K2"
+  ],
+  "POL K3": [
+   "K3"
+  ],
+  "POL K4": [
+   "K4"
+  ],
+  "POL L1": [
+   "L1"
+  ],
+  "POL L2": [
+   "L2"
+  ],
+  "POL L3": [
+   "L3"
+  ],
+  "POL L4": [
+   "L4"
+  ],
+  "EEG M1-Ref": "refused",
+  "EEG M2-Ref": "refused",
+  "POL M3": "refused",
+  "POL M4": "refused",
+  "POL M5": "refused",
+  "POL M6": [
+   "M6"
+  ]
+ },
+ "on005007/sub-13/ses-01/ieeg/sub-13_ses-01_task-namingtask_run-01_channels.tsv": {
+  "POL ECG": "refused",
+  "POL J2": "refused",
+  "POL J3": "refused",
+  "POL J4": "refused",
+  "EEG A1-Ref": [
+   "A1"
+  ],
+  "EEG A2-Ref": [
+   "A2"
+  ],
+  "POL A3": [
+   "A3"
+  ],
+  "POL A4": [
+   "A4"
+  ],
+  "POL A5": [
+   "A5"
+  ],
+  "POL A6": [
+   "A6"
+  ],
+  "POL B3": [
+   "B3"
+  ],
+  "POL B4": [
+   "B4"
+  ],
+  "POL B5": [
+   "B5"
+  ],
+  "POL B6": [
+   "B6"
+  ],
+  "POL B7": [
+   "B7"
+  ],
+  "POL B8": [
+   "B8"
+  ],
+  "EEG C1-Ref": [
+   "C1"
+  ],
+  "EEG C2-Ref": [
+   "C2"
+  ],
+  "EEG C3-Ref": [
+   "C3"
+  ],
+  "POL E": "refused",
+  "EEG C4-Ref": [
+   "C4"
+  ],
+  "EEG C5-Ref": [
+   "C5"
+  ],
+  "POL B1": [
+   "B1"
+  ],
+  "POL B2": [
+   "B2"
+  ],
+  "EEG C6-Ref": [
+   "C6"
+  ],
+  "POL C7": [
+   "C7"
+  ],
+  "POL C8": [
+   "C8"
+  ],
+  "POL D01": "refused",
+  "POL D02": "refused",
+  "POL D03": "refused",
+  "POL D04": "refused",
+  "POL D05": "refused",
+  "POL D06": "refused",
+  "POL D07": "refused",
+  "POL D08": "refused",
+  "POL D09": "refused",
+  "POL D10": "refused",
+  "POL DC01": "refused",
+  "POL DC02": "refused",
+  "POL E01": "refused",
+  "POL E02": "refused",
+  "POL $B1": "refused",
+  "POL $B2": "refused",
+  "POL E03": "refused",
+  "POL E04": "refused",
+  "POL E05": "refused",
+  "POL E06": "refused",
+  "POL E07": "refused",
+  "POL E08": "refused",
+  "POL E09": "refused",
+  "POL E10": "refused",
+  "POL F01": "refused",
+  "POL F02": "refused",
+  "POL F03": "refused",
+  "POL F04": "refused",
+  "POL F05": "refused",
+  "POL F06": "refused",
+  "POL F07": "refused",
+  "POL F08": [
+   "F08"
+  ],
+  "POL F09": [
+   "F09"
+  ],
+  "EEG F10-Ref": [
+   "F10"
+  ],
+  "POL G01": [
+   "G01"
+  ],
+  "POL G02": [
+   "G02"
+  ],
+  "POL G03": [
+   "G03"
+  ],
+  "POL G04": [
+   "G04"
+  ],
+  "POL G05": [
+   "G05"
+  ],
+  "POL G06": [
+   "G06"
+  ],
+  "POL G07": [
+   "G07"
+  ],
+  "POL G08": [
+   "G08"
+  ],
+  "POL G09": [
+   "G09"
+  ],
+  "POL G10": [
+   "G10"
+  ],
+  "POL H01": [
+   "H01"
+  ],
+  "POL H02": [
+   "H02"
+  ],
+  "POL H03": [
+   "H03"
+  ],
+  "POL H04": [
+   "H04"
+  ],
+  "POL H05": [
+   "H05"
+  ],
+  "POL H06": [
+   "H06"
+  ],
+  "POL H07": [
+   "H07"
+  ],
+  "POL H08": [
+   "H08"
+  ],
+  "POL H09": [
+   "H09"
+  ],
+  "POL H10": [
+   "H10"
+  ],
+  "POL H11": [
+   "H11"
+  ],
+  "POL H12": [
+   "H12"
+  ],
+  "POL H13": [
+   "H13"
+  ],
+  "POL H14": [
+   "H14"
+  ],
+  "POL H15": [
+   "H15"
+  ],
+  "POL H16": [
+   "H16"
+  ],
+  "POL I01": [
+   "I01"
+  ],
+  "POL I02": [
+   "I02"
+  ],
+  "POL I03": [
+   "I03"
+  ],
+  "POL I04": [
+   "I04"
+  ],
+  "POL I05": [
+   "I05"
+  ],
+  "POL I06": [
+   "I06"
+  ],
+  "POL I07": [
+   "I07"
+  ],
+  "POL I08": [
+   "I08"
+  ],
+  "POL I09": [
+   "I09"
+  ],
+  "POL I10": [
+   "I10"
+  ],
+  "POL I11": [
+   "I11"
+  ],
+  "POL I12": [
+   "I12"
+  ],
+  "POL I13": [
+   "I13"
+  ],
+  "POL I14": [
+   "I14"
+  ],
+  "POL I15": [
+   "I15"
+  ],
+  "POL I16": [
+   "I16"
+  ]
+ },
+ "on005545/sub-48/ses-01/ieeg/sub-48_ses-01_task-auditory_run-01_channels.tsv": {
+  "POL A1-A2": [
+   "A1",
+   "A2"
+  ],
+  "POL A11-A12": [
+   "A11",
+   "A12"
+  ],
+  "POL A19-A20": [
+   "A19",
+   "A20"
+  ],
+  "POL A25-A26": [
+   "A25",
+   "A26"
+  ],
+  "POL A31-A32": [
+   "A31",
+   "A32"
+  ],
+  "POL A39-A40": [
+   "A39",
+   "A40"
+  ],
+  "POL A49-A50": [
+   "A49",
+   "A50"
+  ],
+  "POL A2-A3": [
+   "A2",
+   "A3"
+  ],
+  "POL A12-A13": [
+   "A12",
+   "A13"
+  ],
+  "POL A20-A21": [
+   "A20",
+   "A21"
+  ],
+  "POL A26-A27": [
+   "A26",
+   "A27"
+  ],
+  "POL A32-A33": [
+   "A32",
+   "A33"
+  ],
+  "POL A40-A41": [
+   "A40",
+   "A41"
+  ],
+  "POL A50-A51": [
+   "A50",
+   "A51"
+  ],
+  "POL A3-A4": [
+   "A3",
+   "A4"
+  ],
+  "POL A13-A14": [
+   "A13",
+   "A14"
+  ],
+  "POL A21-A22": [
+   "A21",
+   "A22"
+  ],
+  "POL A27-A28": [
+   "A27",
+   "A28"
+  ],
+  "POL A33-A34": [
+   "A33",
+   "A34"
+  ],
+  "POL A41-A42": [
+   "A41",
+   "A42"
+  ],
+  "POL A51-A52": [
+   "A51",
+   "A52"
+  ],
+  "POL A4-A5": [
+   "A4",
+   "A5"
+  ],
+  "POL A14-A15": [
+   "A14",
+   "A15"
+  ],
+  "POL A22-A23": [
+   "A22",
+   "A23"
+  ],
+  "POL A28-A29": [
+   "A28",
+   "A29"
+  ],
+  "POL A34-A35": [
+   "A34",
+   "A35"
+  ],
+  "POL A42-A43": [
+   "A42",
+   "A43"
+  ],
+  "POL A52-A53": [
+   "A52",
+   "A53"
+  ],
+  "POL A5-A6": [
+   "A5",
+   "A6"
+  ],
+  "POL A15-A16": [
+   "A15",
+   "A16"
+  ],
+  "POL A23-A24": [
+   "A23",
+   "A24"
+  ],
+  "POL A29-A30": [
+   "A29",
+   "A30"
+  ],
+  "POL A35-A36": [
+   "A35",
+   "A36"
+  ],
+  "POL A43-A44": [
+   "A43",
+   "A44"
+  ],
+  "POL A53-A54": [
+   "A53",
+   "A54"
+  ],
+  "POL A6-A7": [
+   "A6",
+   "A7"
+  ],
+  "POL A16-A17": [
+   "A16",
+   "A17"
+  ],
+  "POL A36-A37": [
+   "A36",
+   "A37"
+  ],
+  "POL A44-A45": [
+   "A44",
+   "A45"
+  ],
+  "POL A7-A8": [
+   "A7",
+   "A8"
+  ],
+  "POL A17-A18": [
+   "A17",
+   "A18"
+  ],
+  "POL A37-A38": [
+   "A37",
+   "A38"
+  ],
+  "POL A45-A46": [
+   "A45",
+   "A46"
+  ],
+  "POL A8-A9": [
+   "A8",
+   "A9"
+  ],
+  "POL A46-A47": [
+   "A46",
+   "A47"
+  ],
+  "POL A9-A10": [
+   "A10",
+   "A9"
+  ],
+  "POL A47-A48": [
+   "A47",
+   "A48"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused"
+ },
+ "on005545/sub-84/ses-03/ieeg/sub-84_ses-03_task-auditory_run-01_channels.tsv": {
+  "POL B1-B2": [
+   "B01",
+   "B02"
+  ],
+  "POL B17-B18": [
+   "B17",
+   "B18"
+  ],
+  "POL B25-B26": [
+   "B25",
+   "B26"
+  ],
+  "POL B33-B34": [
+   "B33",
+   "B34"
+  ],
+  "POL B41-B42": [
+   "B41",
+   "B42"
+  ],
+  "POL B49-B50": [
+   "B49",
+   "B50"
+  ],
+  "POL B57-B58": [
+   "B57",
+   "B58"
+  ],
+  "POL B2-B3": [
+   "B02",
+   "B03"
+  ],
+  "POL B10-B11": [
+   "B10",
+   "B11"
+  ],
+  "POL B18-B19": [
+   "B18",
+   "B19"
+  ],
+  "POL B26-B27": [
+   "B26",
+   "B27"
+  ],
+  "POL B34-B35": [
+   "B34",
+   "B35"
+  ],
+  "POL B42-B43": [
+   "B42",
+   "B43"
+  ],
+  "POL B50-B51": [
+   "B50",
+   "B51"
+  ],
+  "POL B58-B59": [
+   "B58",
+   "B59"
+  ],
+  "POL B3-B4": [
+   "B03",
+   "B04"
+  ],
+  "POL B11-B12": [
+   "B11",
+   "B12"
+  ],
+  "POL B19-B20": [
+   "B19",
+   "B20"
+  ],
+  "POL B27-B28": [
+   "B27",
+   "B28"
+  ],
+  "POL B35-B36": [
+   "B35",
+   "B36"
+  ],
+  "POL B43-B44": [
+   "B43",
+   "B44"
+  ],
+  "POL B51-B52": [
+   "B51",
+   "B52"
+  ],
+  "POL B59-B60": [
+   "B59",
+   "B60"
+  ],
+  "POL B4-B5": [
+   "B04",
+   "B05"
+  ],
+  "POL B12-B13": [
+   "B12",
+   "B13"
+  ],
+  "POL B20-B21": [
+   "B20",
+   "B21"
+  ],
+  "POL B28-B29": [
+   "B28",
+   "B29"
+  ],
+  "POL B36-B37": [
+   "B36",
+   "B37"
+  ],
+  "POL B44-B45": [
+   "B44",
+   "B45"
+  ],
+  "POL B52-B53": [
+   "B52",
+   "B53"
+  ],
+  "POL B60-B61": [
+   "B60",
+   "B61"
+  ],
+  "POL B5-B6": [
+   "B05",
+   "B06"
+  ],
+  "POL B13-B14": [
+   "B13",
+   "B14"
+  ],
+  "POL B21-B22": [
+   "B21",
+   "B22"
+  ],
+  "POL B29-B30": [
+   "B29",
+   "B30"
+  ],
+  "POL B37-B38": [
+   "B37",
+   "B38"
+  ],
+  "POL B45-B46": [
+   "B45",
+   "B46"
+  ],
+  "POL B53-B54": [
+   "B53",
+   "B54"
+  ],
+  "POL B61-B62": [
+   "B61",
+   "B62"
+  ],
+  "POL B6-B7": [
+   "B06",
+   "B07"
+  ],
+  "POL B14-B15": [
+   "B14",
+   "B15"
+  ],
+  "POL B22-B23": [
+   "B22",
+   "B23"
+  ],
+  "POL B30-B31": [
+   "B30",
+   "B31"
+  ],
+  "POL B38-B39": [
+   "B38",
+   "B39"
+  ],
+  "POL B46-B47": [
+   "B46",
+   "B47"
+  ],
+  "POL B54-B55": [
+   "B54",
+   "B55"
+  ],
+  "POL B62-B63": [
+   "B62",
+   "B63"
+  ],
+  "POL B7-B8": [
+   "B07",
+   "B08"
+  ],
+  "POL B15-B16": [
+   "B15",
+   "B16"
+  ],
+  "POL B23-B24": [
+   "B23",
+   "B24"
+  ],
+  "POL B31-B32": [
+   "B31",
+   "B32"
+  ],
+  "POL B39-B40": [
+   "B39",
+   "B40"
+  ],
+  "POL B47-B48": [
+   "B47",
+   "B48"
+  ],
+  "POL B55-B56": [
+   "B55",
+   "B56"
+  ],
+  "POL B63-B64": [
+   "B63",
+   "B64"
+  ],
+  "POL B1-B9": [
+   "B01",
+   "B09"
+  ],
+  "POL B10-B2": [
+   "B02",
+   "B10"
+  ],
+  "POL B3-B11": [
+   "B03",
+   "B11"
+  ],
+  "POL B4-B12": [
+   "B04",
+   "B12"
+  ],
+  "POL B5-B13": [
+   "B05",
+   "B13"
+  ],
+  "POL B6-B14": [
+   "B06",
+   "B14"
+  ],
+  "POL B7-B15": [
+   "B07",
+   "B15"
+  ],
+  "POL B8-B16": [
+   "B08",
+   "B16"
+  ],
+  "POL B17-B9": [
+   "B09",
+   "B17"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused"
+ },
+ "on005931/sub-06/ses-02/ieeg/sub-06_ses-02_task-game_run-01_channels.tsv": {
+  "POL B1-AV": [
+   "B1"
+  ],
+  "POL B2-AV": [
+   "B2"
+  ],
+  "POL B3-AV": [
+   "B3"
+  ],
+  "POL B4-AV": [
+   "B4"
+  ],
+  "POL B5-AV": [
+   "B5"
+  ],
+  "POL B6-AV": [
+   "B6"
+  ],
+  "POL B7-AV": [
+   "B7"
+  ],
+  "POL B8-AV": [
+   "B8"
+  ],
+  "POL B9-AV": [
+   "B9"
+  ],
+  "POL B10-AV": [
+   "B10"
+  ],
+  "POL B11-AV": [
+   "B11"
+  ],
+  "POL B12-AV": [
+   "B12"
+  ],
+  "POL B13-AV": [
+   "B13"
+  ],
+  "POL B14-AV": [
+   "B14"
+  ],
+  "POL B15-AV": [
+   "B15"
+  ],
+  "POL B16-AV": [
+   "B16"
+  ],
+  "POL B17-AV": [
+   "B17"
+  ],
+  "POL B18-AV": [
+   "B18"
+  ],
+  "POL B19-AV": [
+   "B19"
+  ],
+  "POL B20-AV": [
+   "B20"
+  ],
+  "POL B21-AV": [
+   "B21"
+  ],
+  "POL B22-AV": [
+   "B22"
+  ],
+  "POL B23-AV": [
+   "B23"
+  ],
+  "POL B24-AV": [
+   "B24"
+  ],
+  "POL B25-AV": [
+   "B25"
+  ],
+  "POL B26-AV": [
+   "B26"
+  ],
+  "POL B27-AV": [
+   "B27"
+  ],
+  "POL B28-AV": [
+   "B28"
+  ],
+  "POL B29-AV": [
+   "B29"
+  ],
+  "POL B30-AV": [
+   "B30"
+  ],
+  "POL B31-AV": [
+   "B31"
+  ],
+  "POL B32-AV": [
+   "B32"
+  ],
+  "POL B33-AV": [
+   "B33"
+  ],
+  "POL B34-AV": [
+   "B34"
+  ],
+  "POL B35-AV": [
+   "B35"
+  ],
+  "POL B36-AV": [
+   "B36"
+  ],
+  "POL B37-AV": [
+   "B37"
+  ],
+  "POL B38-AV": [
+   "B38"
+  ],
+  "POL B39-AV": [
+   "B39"
+  ],
+  "POL B40-AV": [
+   "B40"
+  ],
+  "POL B41-AV": [
+   "B41"
+  ],
+  "POL B42-AV": [
+   "B42"
+  ],
+  "POL B43-AV": [
+   "B43"
+  ],
+  "POL B44-AV": [
+   "B44"
+  ],
+  "POL B45-AV": [
+   "B45"
+  ],
+  "POL B46-AV": [
+   "B46"
+  ],
+  "POL B47-AV": [
+   "B47"
+  ],
+  "POL B48-AV": [
+   "B48"
+  ],
+  "POL B49-AV": [
+   "B49"
+  ],
+  "POL B50-AV": [
+   "B50"
+  ],
+  "POL B51-AV": "refused",
+  "POL B52-AV": [
+   "B52"
+  ],
+  "POL B53-AV": [
+   "B53"
+  ],
+  "POL B54-AV": [
+   "B54"
+  ],
+  "POL B55-AV": [
+   "B55"
+  ],
+  "POL B56-AV": [
+   "B56"
+  ],
+  "POL B57-AV": [
+   "B57"
+  ],
+  "POL B58-AV": [
+   "B58"
+  ],
+  "POL B59-AV": "refused",
+  "POL B60-AV": [
+   "B60"
+  ],
+  "POL B61-AV": [
+   "B61"
+  ],
+  "POL B62-AV": [
+   "B62"
+  ],
+  "POL B63-AV": [
+   "B63"
+  ],
+  "POL B64-AV": [
+   "B64"
+  ]
+ },
+ "on006107/sub-29/ses-01/ieeg/sub-29_ses-01_task-sws_run-01_channels.tsv": {
+  "A1-AV": [
+   "A1"
+  ],
+  "A2-AV": [
+   "A2"
+  ],
+  "A3-AV": [
+   "A3"
+  ],
+  "A4-AV": [
+   "A4"
+  ],
+  "A5-AV": [
+   "A5"
+  ],
+  "A6-AV": [
+   "A6"
+  ],
+  "A7-AV": [
+   "A7"
+  ],
+  "A8-AV": [
+   "A8"
+  ],
+  "A9-AV": [
+   "A9"
+  ],
+  "A10-AV": [
+   "A10"
+  ],
+  "A11-AV": [
+   "A11"
+  ],
+  "A12-AV": [
+   "A12"
+  ],
+  "A13-AV": [
+   "A13"
+  ],
+  "A14-AV": [
+   "A14"
+  ],
+  "A15-AV": [
+   "A15"
+  ],
+  "A16-AV": [
+   "A16"
+  ],
+  "A17-AV": [
+   "A17"
+  ],
+  "A18-AV": [
+   "A18"
+  ],
+  "A19-AV": [
+   "A19"
+  ],
+  "A20-AV": [
+   "A20"
+  ],
+  "A21-AV": [
+   "A21"
+  ],
+  "A22-AV": [
+   "A22"
+  ],
+  "A23-AV": [
+   "A23"
+  ],
+  "A24-AV": [
+   "A24"
+  ],
+  "A25-AV": [
+   "A25"
+  ],
+  "A26-AV": [
+   "A26"
+  ],
+  "A27-AV": [
+   "A27"
+  ],
+  "A28-AV": [
+   "A28"
+  ],
+  "A29-AV": [
+   "A29"
+  ],
+  "A30-AV": [
+   "A30"
+  ],
+  "A31-AV": [
+   "A31"
+  ],
+  "A32-AV": [
+   "A32"
+  ],
+  "A33-AV": [
+   "A33"
+  ],
+  "A34-AV": [
+   "A34"
+  ],
+  "A35-AV": [
+   "A35"
+  ],
+  "A36-AV": [
+   "A36"
+  ],
+  "A37-AV": [
+   "A37"
+  ],
+  "A38-AV": [
+   "A38"
+  ],
+  "A39-AV": [
+   "A39"
+  ],
+  "A40-AV": [
+   "A40"
+  ],
+  "A41-AV": [
+   "A41"
+  ],
+  "A42-AV": [
+   "A42"
+  ],
+  "B1-AV": [
+   "B1"
+  ],
+  "B2-AV": [
+   "B2"
+  ],
+  "B3-AV": [
+   "B3"
+  ],
+  "B4-AV": [
+   "B4"
+  ],
+  "B5-AV": [
+   "B5"
+  ],
+  "B6-AV": [
+   "B6"
+  ],
+  "B7-AV": [
+   "B7"
+  ],
+  "B8-AV": [
+   "B8"
+  ],
+  "B9-AV": [
+   "B9"
+  ],
+  "B10-AV": [
+   "B10"
+  ],
+  "B11-AV": [
+   "B11"
+  ],
+  "B12-AV": [
+   "B12"
+  ],
+  "B13-AV": [
+   "B13"
+  ],
+  "B14-AV": [
+   "B14"
+  ],
+  "B15-AV": [
+   "B15"
+  ],
+  "B16-AV": [
+   "B16"
+  ],
+  "B17-AV": [
+   "B17"
+  ],
+  "B18-AV": [
+   "B18"
+  ],
+  "B19-AV": [
+   "B19"
+  ],
+  "B20-AV": [
+   "B20"
+  ],
+  "B21-AV": [
+   "B21"
+  ],
+  "B22-AV": [
+   "B22"
+  ],
+  "B23-AV": [
+   "B23"
+  ],
+  "B24-AV": [
+   "B24"
+  ],
+  "B25-AV": [
+   "B25"
+  ],
+  "B26-AV": [
+   "B26"
+  ],
+  "B27-AV": [
+   "B27"
+  ],
+  "B28-AV": [
+   "B28"
+  ],
+  "B29-AV": [
+   "B29"
+  ],
+  "B30-AV": [
+   "B30"
+  ],
+  "B31-AV": [
+   "B31"
+  ],
+  "B32-AV": [
+   "B32"
+  ],
+  "B33-AV": [
+   "B33"
+  ],
+  "B34-AV": [
+   "B34"
+  ],
+  "B35-AV": [
+   "B35"
+  ],
+  "B36-AV": [
+   "B36"
+  ],
+  "B37-AV": [
+   "B37"
+  ],
+  "B38-AV": [
+   "B38"
+  ],
+  "B39-AV": [
+   "B39"
+  ],
+  "B40-AV": [
+   "B40"
+  ],
+  "B41-AV": [
+   "B41"
+  ],
+  "B42-AV": [
+   "B42"
+  ],
+  "B43-AV": [
+   "B43"
+  ],
+  "B44-AV": [
+   "B44"
+  ],
+  "B45-AV": [
+   "B45"
+  ],
+  "B46-AV": [
+   "B46"
+  ],
+  "B47-AV": [
+   "B47"
+  ],
+  "B48-AV": [
+   "B48"
+  ],
+  "B49-AV": [
+   "B49"
+  ],
+  "B50-AV": [
+   "B50"
+  ],
+  "B51-AV": [
+   "B51"
+  ],
+  "B52-AV": [
+   "B52"
+  ],
+  "B53-AV": [
+   "B53"
+  ],
+  "B54-AV": [
+   "B54"
+  ],
+  "B55-AV": [
+   "B55"
+  ],
+  "B56-AV": [
+   "B56"
+  ],
+  "B57-AV": [
+   "B57"
+  ],
+  "B58-AV": [
+   "B58"
+  ],
+  "B59-AV": [
+   "B59"
+  ],
+  "B60-AV": [
+   "B60"
+  ],
+  "B61-AV": [
+   "B61"
+  ],
+  "B62-AV": [
+   "B62"
+  ],
+  "B63-AV": [
+   "B63"
+  ],
+  "B64-AV": [
+   "B64"
+  ]
+ },
+ "on006233/sub-045/ses-3/ieeg/sub-045_ses-3_task-picture_channels.tsv": {
+  "POL B10-B18": [
+   "B10",
+   "B18"
+  ],
+  "POL B11-B19": [
+   "B11",
+   "B19"
+  ],
+  "POL B12-B20": [
+   "B12",
+   "B20"
+  ],
+  "POL B13-B21": [
+   "B13",
+   "B21"
+  ],
+  "POL B14-B22": [
+   "B14",
+   "B22"
+  ],
+  "POL B15-B23": [
+   "B15",
+   "B23"
+  ],
+  "POL B16-B24": [
+   "B16",
+   "B24"
+  ],
+  "POL B17-B25": [
+   "B17",
+   "B25"
+  ],
+  "POL B18-B26": [
+   "B18",
+   "B26"
+  ],
+  "POL B19-B27": [
+   "B19",
+   "B27"
+  ],
+  "POL B20-B28": [
+   "B20",
+   "B28"
+  ],
+  "POL B21-B29": [
+   "B21",
+   "B29"
+  ],
+  "POL B22-B30": [
+   "B22",
+   "B30"
+  ],
+  "POL B23-B31": [
+   "B23",
+   "B31"
+  ],
+  "POL B24-B32": [
+   "B24",
+   "B32"
+  ],
+  "POL B25-B33": [
+   "B25",
+   "B33"
+  ],
+  "POL B26-B34": [
+   "B26",
+   "B34"
+  ],
+  "POL B27-B35": [
+   "B27",
+   "B35"
+  ],
+  "POL B28-B36": [
+   "B28",
+   "B36"
+  ],
+  "POL B29-B37": [
+   "B29",
+   "B37"
+  ],
+  "POL B30-B38": [
+   "B30",
+   "B38"
+  ],
+  "POL B31-B39": [
+   "B31",
+   "B39"
+  ],
+  "POL B32-B40": [
+   "B32",
+   "B40"
+  ],
+  "POL B33-B41": [
+   "B33",
+   "B41"
+  ],
+  "POL B34-B42": [
+   "B34",
+   "B42"
+  ],
+  "POL B35-B43": [
+   "B35",
+   "B43"
+  ],
+  "POL B36-B44": [
+   "B36",
+   "B44"
+  ],
+  "POL B37-B45": [
+   "B37",
+   "B45"
+  ],
+  "POL B38-B46": [
+   "B38",
+   "B46"
+  ],
+  "POL B39-B47": [
+   "B39",
+   "B47"
+  ],
+  "POL B40-B48": [
+   "B40",
+   "B48"
+  ],
+  "POL B41-B49": [
+   "B41",
+   "B49"
+  ],
+  "POL B42-B50": [
+   "B42",
+   "B50"
+  ],
+  "POL B43-B51": [
+   "B43",
+   "B51"
+  ],
+  "POL B44-B52": [
+   "B44",
+   "B52"
+  ],
+  "POL B45-B53": [
+   "B45",
+   "B53"
+  ],
+  "POL B46-B54": [
+   "B46",
+   "B54"
+  ],
+  "POL B47-B55": [
+   "B47",
+   "B55"
+  ],
+  "POL B48-B56": [
+   "B48",
+   "B56"
+  ],
+  "POL B49-B57": [
+   "B49",
+   "B57"
+  ],
+  "POL B50-B58": [
+   "B50",
+   "B58"
+  ],
+  "POL B51-B59": [
+   "B51",
+   "B59"
+  ],
+  "POL B52-B60": [
+   "B52",
+   "B60"
+  ],
+  "POL B53-B61": [
+   "B53",
+   "B61"
+  ],
+  "POL B54-B62": [
+   "B54",
+   "B62"
+  ],
+  "POL B55-B63": [
+   "B55",
+   "B63"
+  ],
+  "POL B56-B64": [
+   "B56",
+   "B64"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused"
+ },
+ "on006914/sub-045/ses-3/ieeg/sub-045_ses-3_task-picture_channels.tsv": {
+  "POL B10-B18": [
+   "B10",
+   "B18"
+  ],
+  "POL B11-B19": [
+   "B11",
+   "B19"
+  ],
+  "POL B12-B20": [
+   "B12",
+   "B20"
+  ],
+  "POL B13-B21": [
+   "B13",
+   "B21"
+  ],
+  "POL B14-B22": [
+   "B14",
+   "B22"
+  ],
+  "POL B15-B23": [
+   "B15",
+   "B23"
+  ],
+  "POL B16-B24": [
+   "B16",
+   "B24"
+  ],
+  "POL B17-B25": [
+   "B17",
+   "B25"
+  ],
+  "POL B18-B26": [
+   "B18",
+   "B26"
+  ],
+  "POL B19-B27": [
+   "B19",
+   "B27"
+  ],
+  "POL B20-B28": [
+   "B20",
+   "B28"
+  ],
+  "POL B21-B29": [
+   "B21",
+   "B29"
+  ],
+  "POL B22-B30": [
+   "B22",
+   "B30"
+  ],
+  "POL B23-B31": [
+   "B23",
+   "B31"
+  ],
+  "POL B24-B32": [
+   "B24",
+   "B32"
+  ],
+  "POL B25-B33": [
+   "B25",
+   "B33"
+  ],
+  "POL B26-B34": [
+   "B26",
+   "B34"
+  ],
+  "POL B27-B35": [
+   "B27",
+   "B35"
+  ],
+  "POL B28-B36": [
+   "B28",
+   "B36"
+  ],
+  "POL B29-B37": [
+   "B29",
+   "B37"
+  ],
+  "POL B30-B38": [
+   "B30",
+   "B38"
+  ],
+  "POL B31-B39": [
+   "B31",
+   "B39"
+  ],
+  "POL B32-B40": [
+   "B32",
+   "B40"
+  ],
+  "POL B33-B41": [
+   "B33",
+   "B41"
+  ],
+  "POL B34-B42": [
+   "B34",
+   "B42"
+  ],
+  "POL B35-B43": [
+   "B35",
+   "B43"
+  ],
+  "POL B36-B44": [
+   "B36",
+   "B44"
+  ],
+  "POL B37-B45": [
+   "B37",
+   "B45"
+  ],
+  "POL B38-B46": [
+   "B38",
+   "B46"
+  ],
+  "POL B39-B47": [
+   "B39",
+   "B47"
+  ],
+  "POL B40-B48": [
+   "B40",
+   "B48"
+  ],
+  "POL B41-B49": [
+   "B41",
+   "B49"
+  ],
+  "POL B42-B50": [
+   "B42",
+   "B50"
+  ],
+  "POL B43-B51": [
+   "B43",
+   "B51"
+  ],
+  "POL B44-B52": [
+   "B44",
+   "B52"
+  ],
+  "POL B45-B53": [
+   "B45",
+   "B53"
+  ],
+  "POL B46-B54": [
+   "B46",
+   "B54"
+  ],
+  "POL B47-B55": [
+   "B47",
+   "B55"
+  ],
+  "POL B48-B56": [
+   "B48",
+   "B56"
+  ],
+  "POL B49-B57": [
+   "B49",
+   "B57"
+  ],
+  "POL B50-B58": [
+   "B50",
+   "B58"
+  ],
+  "POL B51-B59": [
+   "B51",
+   "B59"
+  ],
+  "POL B52-B60": [
+   "B52",
+   "B60"
+  ],
+  "POL B53-B61": [
+   "B53",
+   "B61"
+  ],
+  "POL B54-B62": [
+   "B54",
+   "B62"
+  ],
+  "POL B55-B63": [
+   "B55",
+   "B63"
+  ],
+  "POL B56-B64": [
+   "B56",
+   "B64"
+  ],
+  "POL DC01": "refused",
+  "POL DC02": "refused"
+ }
+}
