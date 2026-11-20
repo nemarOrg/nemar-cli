@@ -1,7 +1,7 @@
 # R1: dry run over every public iEEG dataset
 
 Run on 2026-11-19 with pipeline `ieeg_geometry` at `origin/epic/ieeg-geometry` 7e735f8b (P1 merged), without `--apply`: nothing was written, pushed or uploaded.
-Per-dataset reports are in `r1/reports.tgz` (167 files, 248 KB compressed; the raw JSON is about 7 MB, over the 5 MB limit, so only the archive is committed).
+Per-dataset reports are in `r1/reports.tgz` (167 files, 208 KB compressed, built with fixed owner and times; the raw JSON is about 7 MB, over the 5 MB limit, so only the archive is committed).
 Every number in the tables below is recomputed from those reports by `scripts/ieeg_geometry/tools/r1_summary.py`; its full output is the appendix, unedited.
 Recompute with `uv run --project scripts/ieeg_geometry python scripts/ieeg_geometry/tools/r1_summary.py .context/plans/ieeg-geometry/r1/reports.tgz .context/plans/ieeg-geometry/census.csv`.
 
@@ -35,7 +35,7 @@ The tool lists every written value within 15 percent; below are those plus the c
 - on002799 sub-294, registration centroid 4.28 mm against 5.0 mm (14 percent), written.
   on002799 sub-331 has a centroid of 5.20 mm, which is why its registration check failed (17 cortical contacts left out, correctly).
 - ECoG median against the 2.0 mm rule: on002799 sub-307 at 1.957 mm (2.1 percent; its surface fit 1.958 mm); on004194 sub-p08 at 1.826 mm (8.7 percent; surface 1.91 mm, 4.5 percent); on002799 sub-331 surface 1.897 mm (5.1 percent), sub-330 1.818 mm, sub-405 1.81 mm; on003848 RESP0699 surface 1.796 mm (10.2 percent); on004194 sub-p09 surface 1.703 mm (14.8 percent, 2 sessions).
-- Label medians: all 1,775 are at or below 0.875 mm, which the 1.0 mm on-vertex rule would pass; against the 2.0 mm ECoG rule none is close.
+- Label medians: both label kinds (README and blind) are written on the 1.0 mm on-vertex rule with the shift control (rulings 16 and 17); all 1,775 medians are at or below 0.875 mm (on006107 sub-145), a 12.5 percent margin, the only one within 15 percent; the tool now judges labels against 1.0 mm.
   The report does not record which rule applied, a patch note for the label track.
 - Surface `plausible` fit: the lowest share of contacts inside or within 5.0 mm of the surface is 0.933 (on004473 sub-12) against 0.90; decimation shifts are at most 0.312 mm of 0.5 mm and 0.106 mm p99 of 1.0 mm.
 
@@ -56,20 +56,41 @@ Subject surfaces that could not be drawn (no frame fits): nm000371 (10 files, `s
 
 | Risk | What the run shows |
 | --- | --- |
-| sEEG depth contacts discriminate poorly | No file is written on `plausible` evidence alone. The 4 SPM files rest on `plausible` depth evidence plus the field check (ruling 3), and their depth fits are the weakest in the run: inside fractions 0.966 to 0.988 against 0.95, medians in the shell 4.4 to 5.3 mm (reported, not judged). The 43 `plausible` surface entries are display only (ruling 14). The run cannot show whether a wrong sEEG frame would pass (the review measured that it would for shifts of 10 to 20 mm); on004457's ACPC files for sub-2, sub-3 and sub-4 were correctly not paired (inside 50.3, 89.2 and 42.4 percent against 97.6, 98.0 and 98.8). Recommendation: keep ruling 3's two-signal requirement. |
+| sEEG depth contacts discriminate poorly | No file is written on `plausible` evidence alone. The 4 SPM files rest on `plausible` depth evidence plus the field check (ruling 3). Two kinds of number must not be confused. The depth-contact numbers in the reports are only `inside_fraction`, 0.966 to 0.988 against the 0.95 rule; the reports do not carry the depth-contact median against the shell (ruling 8 reports it, the report JSON does not). The 4.4 to 5.3 mm figures are `field_check_median_mm`: the subject's own pial vertices, inverted through the field, against the template shell, judged against 6.0 mm (ruling 9) and passed (sub-4 is the closest at 5.33 mm, 11 percent margin). The 43 `plausible` surface entries are display only (ruling 14). The run cannot show whether a wrong sEEG frame would pass (the review measured that it would for shifts of 10 to 20 mm); on004457's ACPC files for sub-2, sub-3 and sub-4 were correctly not paired (inside 50.3, 89.2 and 42.4 percent against 97.6, 98.0 and 98.8). Recommendation: keep ruling 3's two-signal requirement. |
 | fsaverage license | 1,800 written files carry `space-fsaverage` (1,775 labels, 25 FreeSurfer), so the program depends on the vendored fsaverage6 surfaces and their license terms. The run used the vendored copy; it adds no new evidence about redistribution. The owner decision (vendor with license, 2026-11-19) stands; the note in the data README says the copy came from a public dataset, not FreeSurfer's distribution. |
 | One-hemisphere surfaces make contralateral contacts float | 8 of 77 surface entries are one hemisphere (on004457 sub-1 to sub-5 including the ACPC file, on005953 sub-01, on003848 RESP0699). Their `n_left_out` is 0 for all except on005953 (19 of 117 contacts on the other side); on004457's contacts all sit on the supplied side. A2 should label them. |
 | N.0.1 regeneration conflicts with ADR 0111 | Every dataset with new files is a mirror and none has an existing `.nemar/ieeg-geometry.json` (0 files `kept` or `unchanged`), so this run exercises only first writes, not regeneration. The 13 mirrors that would need a version are listed below. |
 | Volume of version DOIs | 13 datasets would need one N.0.1 each (on002799, on003848, on004194, on004370, on004457, on004551, on005007, on005545, on005931, on006107, on006233, on006910, on006914), 2,583 paths in total (the largest: on006910 769, on006914 707, on005545 337, on006233 348). Subject surfaces (10 datasets) need no dataset version. Whether these 13 should be batched behind the re-pull caps is the owner's call. |
 
-## Surprises for the owner
+## Decisions and findings for the owner
 
-- on002799's 8 `space-fsaverage` files sit beside the authors' own `space-MNI152NLin6Asym` files, and each places only 3 to 13 contacts (the rest are depth or farther than 3 mm from the pial surface).
-  They pass (specific evidence), but a template position set with 3 contacts is of little use.
-  Recommendation: add a minimum placed-contact count (for example 10) before any pull request.
-- The two 4 mm-class centroids (on004194 sub-p07 at 4.75 mm, on002799 sub-294 at 4.28 mm) sit close to the 5.0 mm limit; neither is a failure.
-- The label track wrote 1,775 files from README text or blind trials with no human review, as ruling 17 permits for specific evidence; the owner should confirm that is acceptable for the 7 README-labeled datasets before the first pull request.
+Owner decisions of 2026-11-20, recorded at the end of `plan.md`, answer the three questions this report first raised:
+
+- Minimum placed contacts: none; any verified file is written, however few contacts it places (on002799's 3 to 13 contact files included).
+- Unreviewed labels: both kinds are committed, the 6 README-backed datasets (1,551 files) and the 3 blind-trial datasets (224 files), since both rest on specific on-vertex evidence with the shift control.
+- The 13 mirror N.0.1 pull requests are opened all at once, not trickled behind the re-pull caps.
+
+Findings:
+
+- on002799's 8 `space-fsaverage` files sit beside the authors' own `space-MNI152NLin6Asym` files and each places 3 to 13 contacts.
+  The authors' electrodes files list few contacts (3 to 20 per subject; the channel descriptions of sub-294 say they are used for stimulation only); for sub-294 and sub-303 every channel is typed `ECOG` in `channels.tsv`.
+  For sub-294 (3 placed) and sub-303 (4 placed) `left_out` is empty because every listed contact was placed.
+  For the other six subjects the contacts left out are ECoG contacts more than 3 mm from the pial surface (`cortical-beyond-3mm`), not depth contacts.
+- Contact type of on002799 sub-294 and sub-303 (read-only investigation of a fresh dry-run checkout).
+  Their `electrodes.tsv` has no `type` column; the type comes from the subject's `channels.tsv` files (4 and 10 channels, all `ECOG`), through `bids.py`'s fallback from channels files.
+  The FreeSurfer track therefore treated them as cortical contacts (ruling 11), and no sEEG contact was snapped to cortex.
+  The `contact_type: seeg` in their surface entries is a label for the rule applied, not the contacts' type: `surfaces_out._contacts_for_fit` uses the ECoG rule only when a file has at least 8 ECoG contacts (`MIN_ECOG_CONTACTS`), and falls back to the depth rule over all contacts otherwise, while the FreeSurfer track needs only 3 (`MIN_CONTACTS`).
+  This is a product inconsistency, not an error in the written files: the two surface entries are graded `plausible` (display only) where an ECoG rule would apply.
+  Suggested follow-up for the owner of A1: report the rule as `depth_rule` rather than `contact_type`, or align the minimum.
+- The two centroids close to the 5.0 mm limit (on004194 sub-p07 at 4.75 mm, on002799 sub-294 at 4.28 mm) are not failures.
 - 741 electrodes files in 58 datasets carry `iEEGCoordinateUnits: n/a`, which the readers refuse; that is outside the geometry program but caps what the FreeSurfer track can do for them.
+
+## Follow-ups (patch notes)
+
+- Add the registration and field-check numbers (centroid, extent difference, affine residual, side fraction) to the P1 report JSON, so a future summary needs no `inspect` run.
+- Record in each label decision which rule applied (the 1.0 mm on-vertex rule or the 2.0 mm ECoG rule).
+- Record the depth-contact median against the shell for SPM files, next to `inside_fraction`.
+- Resolve the `contact_type` label versus the contact count minimum (above).
 
 ## Appendix: tool output
 
@@ -134,7 +155,7 @@ Subject-surface entries: 77 (distinct dataset and subject: 70).
 - mirrors (`on`, one N.0.1 each): on002799, on003848, on004194, on004370, on004457, on004551, on005007, on005545, on005931, on006107, on006233, on006910, on006914
 - pushed to NEMAR (`nm`, a pull request each): none
 
-## Label medians (the report does not say whether the 2.0 mm or 1.0 mm rule applied)
+## Label medians (judged against the 1.0 mm on-vertex rule)
 
 | dataset | files | median of medians (mm) | largest (mm) | above 0.85 | above 1.0 |
 | --- | --- | --- | --- | --- | --- |
@@ -202,7 +223,7 @@ Total needs-human files: 233 in 7 datasets.
 
 - freesurfer frame_fit_median_mm: 25 values, limit 2.0, closest 1.957 (on002799 sub-307/ses-postop/ieeg/sub-307_ses-postop_space-MNI152NLin6Asym_electrodes.tsv, margin 2.1%)
 - freesurfer registration_affine_residual_mm: 25 values, limit 15.0, closest 8.361 (on002799 sub-303/ses-postop/ieeg/sub-303_ses-postop_space-MNI152NLin6Asym_electrodes.tsv, margin 44.3%)
-- labels median_mm: 1775 values, limit 2.0, closest 0.875 (on006107 sub-145/ses-01/ieeg/sub-145_ses-01_electrodes.tsv, margin 56.2%)
+- labels median_mm: 1775 values, limit 1.0, closest 0.875 (on006107 sub-145/ses-01/ieeg/sub-145_ses-01_electrodes.tsv, margin 12.5%)
 - spm field_check_median_mm: 4 values, limit 6.0, closest 5.332 (on004457 sub-4/ses-ieeg01/ieeg/sub-4_ses-ieeg01_electrodes.tsv, margin 11.1%)
 - spm field_check_p10_mm: 4 values, limit 2.0, closest 1.489 (on004457 sub-4/ses-ieeg01/ieeg/sub-4_ses-ieeg01_electrodes.tsv, margin 25.5%)
 - spm inside_fraction: 4 values, limit 0.95, closest 0.966 (on004457 sub-1/ses-ieeg01/ieeg/sub-1_ses-ieeg01_electrodes.tsv, margin 32.0%)
@@ -211,7 +232,7 @@ Total needs-human files: 233 in 7 datasets.
 - surfaces near_or_inside_fraction: 43 values, limit 0.9, closest 0.933 (on004473 sub-12/ieeg/sub-12_space-ACPC_electrodes.tsv, margin 33.0%)
 - surfaces p99_deviation_mm: 77 values, limit 1.0, closest 0.106 (on003848 sub-RESP0699/ses-1/ieeg/sub-RESP0699_ses-1_electrodes.tsv, margin 89.4%)
 
-Written values within 15% of a threshold: 13
+Written values within 15% of a threshold: 14
 
 | dataset | file | track | number | value | limit | margin |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -226,5 +247,6 @@ Written values within 15% of a threshold: 13
 | on003848 | sub-RESP0699/ses-1/ieeg/sub-RESP0699_ses-1_electrodes.tsv | surfaces | median_mm | 1.796 | 2.0 | 10.2% |
 | on002799 | sub-405/ses-postop/ieeg/sub-405_ses-postop_space-MNI152NLin6Asym_electrodes.tsv | surfaces | median_mm | 1.778 | 2.0 | 11.1% |
 | on004457 | sub-4/ses-ieeg01/ieeg/sub-4_ses-ieeg01_electrodes.tsv | spm | field_check_median_mm | 5.332 | 6.0 | 11.1% |
+| on006107 | sub-145/ses-01/ieeg/sub-145_ses-01_electrodes.tsv | labels | median_mm | 0.875 | 1.0 | 12.5% |
 | on004194 | sub-p09/ses-nyuecog01/ieeg/sub-p09_ses-nyuecog01_acq-clinical_electrodes.tsv | surfaces | median_mm | 1.703 | 2.0 | 14.8% |
 | on004194 | sub-p09/ses-nyuecog02/ieeg/sub-p09_ses-nyuecog02_acq-clinical_electrodes.tsv | surfaces | median_mm | 1.703 | 2.0 | 14.8% |
