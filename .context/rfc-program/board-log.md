@@ -41,3 +41,4 @@ The manager reads the newest rows through `status`, never the whole file.
 
 | Time | Event |
 |---|---|
+| 2026-11-20T11:12-08:00 | O1 repo and O2 done by lead on owner's instruction; V1 dispatched; C0 reviews running |

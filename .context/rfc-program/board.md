@@ -60,7 +60,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Started | Timebox | Next |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | - | todo | - | - | - | 4h | dispatch now |
+| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | - | active | - | - | 2026-11-20T11:12-08:00 | 4h | dispatch now |
 | O1 | Owner creates nemarOrg/rfcs, Discussions, RFCs category | - | owner | - | - | owner | - | - | - | 1d | owner runs plan.md section 5, O1 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | owner | - | - | - | 1d | owner runs plan.md section 5, O2 |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | - | blocked | - | - | - | 4h | waits on Q1 to Q7 |
