@@ -38,6 +38,11 @@ def test_a_version_equal_to_main_is_bumped_above_main_and_the_newest_tag():
     assert _plan("1.0.0", "1.0.0", ["v1.0.0", "v1.0.5"]).new == "1.0.6"
 
 
+def test_a_branch_version_below_main_is_not_kept_even_above_every_tag():
+    got = _plan("1.0.1", "1.0.5", ["v1.0.0"])  # differs from main, above the tags, below main
+    assert (got.new, got.kept) == ("1.0.6", False)
+
+
 def test_a_branch_version_that_is_a_tag_or_below_is_not_kept():
     got = _plan("1.0.3", "1.0.0", ["v1.0.0", "v1.0.3"])
     assert (got.new, got.kept) == ("1.0.4", False)
