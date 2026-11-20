@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T14:46-08:00 |
-| Next tick | 2026-11-20T15:16-08:00 |
+| Last tick | 2026-11-20T14:50-08:00 |
+| Next tick | 2026-11-20T15:20-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 34 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 35 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -76,11 +76,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
 | O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | done | B2 | - |  | - | - | release 2.0.0 on 36112961, isPrerelease false (verified) |
 | B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | done | O4 | docs#128 | r1 code+comments (1 Sonnet): no PR findings; stop item resolved by Q23 | 2026-11-20T16:05-08:00 | 4h | merged by manager on owner instruction (691d5f4f); CI green after billing fix |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | review | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r2 delta review on head a126aea0 (CI green; original_rate reverted; Q28 Q30 applied) |
-| O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
-| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | review | R1, B2, A2 | rfcs#2 |  | 2026-11-20T16:05-08:00 | 2d | r2 delta + seam review on head 2b867e82 |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | done | O4, A2 | biosig-zarr#4 | r1 decisions+technical (2 Sonnet): 7 imp, ~11 sugg fixed; r2 delta clean, 2 sugg fixed, verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: biosig-zarr#4 head 08a990b7 |
+| O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | done | B6 | - |  | - | - | pre-release 3.0.0-draft.1 on 08a990b7, isPrerelease true (verified); compare link 200 |
+| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
-| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - |  | - | 4h | waits on B4 and Q15 |
+| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | active | B4 | - |  | 2026-11-20T18:45-08:00 | 4h | impl-N1 running |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, S1, N1, B5 (Q26) and mail epic #2260 P1-P3; O1b done |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
@@ -105,7 +105,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q12 | B3 | Docs mechanics for the spec page? | Build-time fetch of the pinned tag with digest check and a per-page W3C license notice (Recommended) / Hand-kept copy with the notice | none | 2026-12-01T17:00 | closed | Moot: the owner removed the page and replaced it with a pointer (2026-11-20) |
 | Q13 | O4 | Register w3id.org/biosig-zarr as the permanent identifier (a PR to an outside registry, by the owner)? | Yes, pointing at docs.nemar.org for now (Recommended) / Another scheme / Not now | none | 2026-12-15T17:00 | closed | Yes, register w3id.org/biosig-zarr now (lead files the PR, pointing at nemarOrg/biosig-zarr since the docs page becomes a pointer) (owner, 2026-11-20T12:18-08:00) |
 | Q14 | O4 | Do biosig-zarr spec releases get a DOI? | Yes, through NEMAR's EZID shoulder, from the first beta tag (Recommended) / Not until 1.0 / Never | none | 2027-01-04T17:00 | closed | Yes: spec releases get a NEMAR DOI, for example nemar.biosig-zarr.v3, issued through the new nemar-doi registry; nemar-process gets nemar.process.vN DOIs the same way (owner, 2026-11-20T12:18-08:00) |
-| Q15 | N1 | When RFC-0001 opens, send short notes to: the OME-Zarr RFC-9 authors and the Zarr community, the hdmf-zarr and NWB maintainers, the cited BIDS threads and BEP047, and MNE-Python issue 13429? | All of them (Recommended) / Only Zarr and NWB / None | none | 2027-01-04T17:00 | open |  |
+| Q15 | N1 | When RFC-0001 opens, send short notes to: the OME-Zarr RFC-9 authors and the Zarr community, the hdmf-zarr and NWB maintainers, the cited BIDS threads and BEP047, and MNE-Python issue 13429? | All of them (Recommended) / Only Zarr and NWB / None | none | 2027-01-04T17:00 | closed | All of them: N1 drafts notes for OME-Zarr RFC-9 authors and Zarr community, hdmf-zarr and NWB maintainers, BEP 045 / bids-specification#2267 threads, MNE-Python 13429 (owner, 2026-11-20T18:40-08:00) |
 | Q16 | V2 | For RFC-0002, what does first party mean? | The dataset's source: authors for nm, upstream for on; NEMAR and community are separate origins (Recommended) / NEMAR is the first party | none | 2027-01-15T17:00 | open |  |
 | Q17 | R2 | Does the /policies/rfcs/ page need UC San Diego counsel review before publication? | No, it is a process page (Recommended) / Yes, publish as a draft for counsel | none | 2026-11-27T17:00 | closed | No counsel review; it is a process page (owner, 2026-11-20T11:49-08:00) |
 | Q18 | O5 | Link to the BEP047 discussion of EDF's irregular and sparse sampling limit? Not found in PR 2231 or issue 2568. | Supply the link / Cite BIDS issues 1796, 2313, 2463 instead (Recommended) | none | 2026-12-08T17:00 | closed | BEP 045 peripheral physiology (bids-specification#2267, bep_045 page), not BEP047 (owner, 2026-11-20T12:18-08:00) |
@@ -163,5 +163,6 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B6-decisions | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
 | rev-B6-technical | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
 | rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | done |
-| rev-B4-r2 | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T18:15-08:00 | running |
-| rev-B6-r2 | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T18:15-08:00 | running |
+| rev-B4-r2 | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T18:15-08:00 | done |
+| rev-B6-r2 | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T18:15-08:00 | done |
+| impl-N1 | implementer | claude-sonnet | Sonnet high | N1 | 2026-11-20T18:45-08:00 | running |

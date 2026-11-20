@@ -84,6 +84,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:40-08:00 | Q29: v3 NEMAR profile choices live in the spec's profile section and in the docs Store Contract now; the lead writes a docs card for the Store Contract update | owner |  |
 | 2026-11-20T14:41-08:00 | Q30: required reader test uses a gap of at least one sample (10 Hz, 2.00-2.40 s); sub-sample gaps are not representable on the grid and need the timestamped kind; RFC-0001 adds a commenter question | owner |  |
 | 2026-11-20T14:41-08:00 | Owner authorizes Opus xhigh or Fable high for writing contracts and specifications (frontier tier allowed for this work) | owner |  |
+| 2026-11-20T14:49-08:00 | O4b: owner confirmed; manager created pre-release 3.0.0-draft.1 on biosig-zarr 08a990b7 | owner |  |
+| 2026-11-20T14:49-08:00 | Q15: N1 drafts targeted notes for all listed audiences (OME-Zarr/Zarr, hdmf-zarr/NWB, BEP 045 threads, MNE-Python 13429); the owner sends them | owner |  |
 
 ## Log
 
@@ -151,3 +153,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:41-08:00 | B6 r1 findings sent back with Q28, Q29, Q30; impl-B4 told Q28, Q30. Owner allows Opus xhigh / Fable high for contracts and specs |
 | 2026-11-20T14:43-08:00 | B4 r1 fixes 2b867e82 verified (rfc-check pass, draft, opened_at null, EDF+D wording); PR body opening post updated in place since its EDF claim changed (accepted, checklist appended); 6 B4/B6 disagreements forwarded to impl-B6 |
 | 2026-11-20T14:46-08:00 | B6 r1 fixes a126aea0 verified (scope, sign-offs, CI green); r2 delta reviews for B4 and B6 with seam check dispatched; Agents today 34/40 |
+| 2026-11-20T14:46-08:00 | B6 r2 delta clean (0 crit/imp); 2 suggestions (L169 v1 no-format_version line, L780 exact-copy clause) held to batch with B4 r2 seam items |
+| 2026-11-20T14:47-08:00 | B4 r2: 1 important seam defect (in-effect for valid_intervals), resolved by aligning RFC to spec; B6 r2 suggestions sent back |
+| 2026-11-20T14:48-08:00 | B4 done (rfcs#2 b49245f2, draft open) and B6 done (biosig-zarr#4 08a990b7, draft open) per runbook handler; O4b set owner; N1 now waits only on Q15 |
+| 2026-11-20T14:50-08:00 | O4b done; Q15 answered; N1 dispatched (Agents today 35/40). P2 (Store Contract card), B5 (C1) and R3 (C1a) cards wait on the lead session |
