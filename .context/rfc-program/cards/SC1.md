@@ -37,14 +37,14 @@ Settled:
 - A new section, `## Format version 3: what NEMAR will do`, placed just before `## Format version`, opening with a `:::caution` aside that says, in substance:
   these are proposals in NEMAR RFC 0001; NEMAR serves format version 2 today, and nothing in this section describes a store that exists;
   they take effect only when version 3 rolls out, after RFC-0001 is accepted; until then the rest of this page describes what NEMAR serves.
-- The section lists the six choices of the specification's NEMAR profile section, each in plain words, in this order:
+- The section lists the six choices of the specification's NEMAR profile section, each in plain words, in the specification's own order, so the two can be compared line by line:
   1. uniform groups and the `values` of timestamped groups are stored as `int16`, and every signal array declares its missing value (rulings D4 and D6);
   2. a stream with jittered timing is kept as measured, in a timestamped group, and regularized only on request, with the timing error recorded (D5);
-  3. whether NEMAR's writer makes bit-exact copies is decided after measuring how many recordings qualify (D7);
-  4. NEMAR keys no derived result on a version 3 store until a second definition of its store content digest exists; the digest is NEMAR's machinery, not part of the format (D11);
-  5. an epoched source, which holds only cut trials, is refused for now, and RFC-0001 asks the community about it (D12);
-  6. the dataset's `index.json` does not list a timestamped group among a recording's groups until the index schema carries the group's `kind`.
-- It links the specification's profile section at the tag, `https://github.com/nemarOrg/biosig-zarr/blob/3.0.0-draft.1/spec/index.md#the-nemar-profile`, and the RFC repository, `https://github.com/nemarOrg/rfcs`; it does not copy the specification's text (one canonical copy).
+  3. an epoched source, which holds only cut trials, is refused for now, and RFC-0001 asks the community about it (D12);
+  4. whether NEMAR's writer makes bit-exact copies is decided after measuring how many recordings qualify (D7);
+  5. the dataset's `index.json` does not list a timestamped group among a recording's groups until the index schema carries the group's `kind`;
+  6. NEMAR keys no derived result on a version 3 store until a second definition of its store content digest exists; the digest is NEMAR's machinery, not part of the format (D11).
+- It links the specification's profile section at the tag `3.0.0-draft.1`, `https://github.com/nemarOrg/biosig-zarr/blob/3.0.0-draft.1/spec/index.md#the-nemar-profile`, which exists now; the section is the same at `3.0.0-draft.2`, because card B5 changes no line of it, so the link stays valid and needs no update when that tag is made; and the RFC repository, `https://github.com/nemarOrg/rfcs`; it does not copy the specification's text (one canonical copy).
 - It says that every NEMAR reader refuses a store whose `format_version` is above 2 before any version 3 store is served (plan section 3, lead decision 9).
 - The Note's first sentence, "The fields below describe current v3 stores", becomes unambiguous: it means Zarr version 3 stores at format version 2, and the edit says so.
 - Records are cited by content, not by number: no new bare "ADR" appears (the docs policy-hygiene test bans it on policy pages, and this page follows the same rule for new text).
