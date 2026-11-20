@@ -7,7 +7,13 @@
  * neither be bumped without its outcome row nor miss it.
  */
 
-export type BroadcastOutcome = "delivered" | "failed" | "unknown" | "unqueued";
+/**
+ * `skipped` (epic #2260, migration 0146): the consumer left this recipient unsent on purpose,
+ * because between enqueue and send the account went away, its address changed or it switched the
+ * category off. It has its own counter, `skipped_count`, so it is not a failure; and it is in every
+ * done-check sum, so a row whose last recipient was skipped still reaches `done`.
+ */
+export type BroadcastOutcome = "delivered" | "failed" | "unknown" | "unqueued" | "skipped";
 
 /** SHA-256 hex of the trimmed, lowercased address: the table holds no address. */
 export async function recipientHash(address: string): Promise<string> {
@@ -41,21 +47,25 @@ const DONE_WHEN_COMPLETE = (outcomeSum: string) =>
 const COUNTER_SQL: Record<BroadcastOutcome, string> = {
   delivered: `UPDATE broadcast_emails
    SET delivered_count = delivered_count + 1,
-       ${DONE_WHEN_COMPLETE("delivered_count + 1 + failure_count + unknown_count")}
+       ${DONE_WHEN_COMPLETE("delivered_count + 1 + failure_count + unknown_count + skipped_count")}
  WHERE id = ? AND changes() > 0`,
   unknown: `UPDATE broadcast_emails
    SET unknown_count = unknown_count + 1,
-       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + unknown_count + 1")}
+       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + unknown_count + 1 + skipped_count")}
  WHERE id = ? AND changes() > 0`,
   failed: `UPDATE broadcast_emails
    SET failure_count = failure_count + 1,
        failed_recipients = json_insert(COALESCE(failed_recipients, '[]'), '$[#]', ?),
-       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + 1 + unknown_count")}
+       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + 1 + unknown_count + skipped_count")}
  WHERE id = ? AND changes() > 0`,
   // A remainder that never reached the queue: counted as a failure, no address listed.
   unqueued: `UPDATE broadcast_emails
    SET failure_count = failure_count + 1,
-       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + 1 + unknown_count")}
+       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + 1 + unknown_count + skipped_count")}
+ WHERE id = ? AND changes() > 0`,
+  skipped: `UPDATE broadcast_emails
+   SET skipped_count = skipped_count + 1,
+       ${DONE_WHEN_COMPLETE("delivered_count + failure_count + unknown_count + skipped_count + 1")}
  WHERE id = ? AND changes() > 0`,
 };
 
