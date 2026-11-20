@@ -35,3 +35,4 @@ The iEEG geometry pipeline (`scripts/ieeg_geometry`, ADR 0129, planner version 3
 3. Merge geometry pull requests only after the CLI release carrying `scripts/ieeg_geometry` is published and that patch is live.
 4. A mirror's N.0.1 is two steps: merge the pull request that `python -m ieeg_geometry pr` opened, then run `nemar dataset release <id> --type patch`.
    A `main` ahead of the latest release does not stop the pull request: the geometry is computed from `main`, which that patch release publishes, and the pull request body lists the paths that changed since the release (a missing release tag still refuses).
+   With `pr --bump-version` the pull request itself sets the next patch Version, and merging it cuts that release (the central workflow tags the Version on `main`), so skip the `nemar dataset release` step: it would cut a further patch.

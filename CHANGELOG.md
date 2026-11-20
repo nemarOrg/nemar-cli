@@ -24,6 +24,10 @@ earlier releases are described only by their generated notes.
 - **`pr` computes from `main` when it is ahead of the release and records the paths.**
   A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
   A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
+- **`pr --bump-version` sets the dataset version in the geometry pull request.**
+  It edits only the `Version` value in `dataset_description.json` to the next patch of `main`'s Version (refusing an untagged Version, or a tag or `CHANGES` entry ahead of it), so the central version check passes and merging the pull request tags the release without a separate `nemar dataset release`.
+- **`pr` no longer sees CRLF blobs as modified.**
+  The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
