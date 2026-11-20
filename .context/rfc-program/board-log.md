@@ -49,6 +49,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T11:24-08:00 | Q6: | owner |  |
 | 2026-11-20T11:24-08:00 | Q7: | owner |  |
 | 2026-11-20T11:24-08:00 | Plan approved (owner: 'plan is good, move forward', 2026-11-20); lead pushes feature/rfc-program | owner |  |
+| 2026-11-20T11:35-08:00 | #2217: no in-place patch; the biosig-zarr tag rename lands with the version 3 writer via re-conversion; A2's ADR records it (owner confirmed, comment posted 2026-11-20) | owner |  |
 
 ## Log
 
