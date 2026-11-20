@@ -33,8 +33,13 @@ NEAR = 0.15
 LIMITS = {
     ("freesurfer", "frame_fit_median_mm"): (2.0, "max"),
     ("freesurfer", "registration_affine_residual_mm"): (15.0, "max"),
+    ("freesurfer", "registration_side_fraction"): (0.95, "min"),
+    ("freesurfer", "registration_centroid_mm"): (5.0, "max"),
+    ("freesurfer", "registration_extent_error"): (0.10, "max"),
     ("spm", "field_check_median_mm"): (6.0, "max"),
     ("spm", "field_check_p10_mm"): (2.0, "max"),
+    ("spm", "field_check_centroid_mm"): (10.0, "max"),
+    ("spm", "field_check_extent_deviation"): (0.10, "max"),
     ("spm", "inside_fraction"): (0.95, "min"),
 }
 MEDIAN_LIMIT = {"specific": 2.0, "plausible": 6.0}
@@ -191,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     surface_subjects: set[tuple[str, str]] = set()
     near: list[dict] = []
     all_margins: list[dict] = []
+    rules: dict[str, Counter] = defaultdict(Counter)
     for ds, rep in sorted(reports.items()):
         files += rep["counts"]["electrodes_files"]
         adds += len(rep["changes"]["add"])
@@ -208,6 +214,9 @@ def main(argv: list[str] | None = None) -> int:
                 if d["status"] in ("written", "unchanged"):
                     grades[t][d["evidence"] or "none"] += 1
                     gain[ds][t]["files"] += 1
+                    for rule_key in ("label_rule", "fit_rule"):
+                        if d["numbers"].get(rule_key) is not None:
+                            rules[f"{t} {rule_key}"][d["numbers"][rule_key]] += 1
                     if t == "labels" and d["numbers"].get("median_mm") is not None:
                         label_medians[ds].append(d["numbers"]["median_mm"])
                     subjects[ds][t].add(f["subject"])
@@ -296,6 +305,10 @@ def main(argv: list[str] | None = None) -> int:
             rows,
         )
     )
+
+    print("\n## Rules applied (written decisions)\n")
+    rule_rows = [[k, r, n] for k, c in sorted(rules.items()) for r, n in sorted(c.items())]
+    print(table(["track and field", "rule", "files"], rule_rows))
 
     print("\n## Needs-human files per dataset\n")
     print(table(["dataset", "files"], [[d, n] for d, n in sorted(needs.items())]))
