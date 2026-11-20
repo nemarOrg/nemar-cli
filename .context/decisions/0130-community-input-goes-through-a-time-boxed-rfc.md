@@ -21,7 +21,7 @@ A decision that needs community input goes through an RFC in one public reposito
 3. **Final comment.** Inside the window, the shepherd posts a summary and a proposed disposition at least 7 days before the close; that post is required to accept.
 4. **Who.** Anyone may propose; a NEMAR owner or administrator opens the RFC as its shepherd. The owner decides an organization RFC and answers each objection in writing. NEMAR decides a dataset RFC with the dataset owner's recorded position, and consent for author-owned content.
 5. **Comments without a GitHub account** are accepted through the support address and posted with the sender's consent.
-6. **Outcome.** An accepted RFC, and a rejected one that closes off a reasonable path, produces an ADR, and the first line under its title reads `Decided through NEMAR RFC NNNN (link).` The ADR wins over the RFC where they disagree. Specification decisions are recorded in the specification's own repository, and NEMAR profile and rollout decisions in nemar-cli, each linking its RFC.
+6. **Outcome.** An accepted RFC, and a rejected one that closes off a reasonable path, produces an ADR with this header line: `Decided through NEMAR RFC NNNN (link).` The ADR wins over the RFC where they disagree. Specification decisions are recorded in the specification's own repository, and NEMAR profile and rollout decisions in nemar-cli, each linking its RFC.
 7. **Clock.** A scheduled GitHub Action in `nemarOrg/rfcs` runs the window and feeds a weekly report line.
 8. **Licenses.** MIT License for the tooling and Creative Commons Attribution 4.0 International (CC BY 4.0) for the text.
 
