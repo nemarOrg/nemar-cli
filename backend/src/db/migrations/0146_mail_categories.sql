@@ -4,7 +4,10 @@
 -- three: `news`, `rfcs` and `maintenance` (a recall is never stored, because nothing may turn it
 -- off). Every live row carries today's `announcements` value into all three, explicitly, so an
 -- account that opted out of announcements stays opted out of each category and nobody gains mail.
--- `announcements` is then removed as a stored key.
+-- `announcements` is KEPT, unchanged, for now: migrations apply seconds before the new worker
+-- deploys, and the previous worker reads `announcements` (a missing key as ON). Removing it would
+-- let a notify in that window reach every account that had opted out. Nothing in the new code
+-- reads or writes it; the phase that retires the old group send (phase 3) removes the key.
 --
 -- Only strict JSON `false` counts as an opt-out, the way the parser reads every key
 -- (`!== false`): json_type() tells JSON `false` from `0` and from the string "false", where
@@ -29,7 +32,7 @@ UPDATE users
        END;
 
 -- 2. One summary audit row, written BEFORE the rewrite so it counts what the rewrite will carry
---    (the rewrite removes the key this counts). Not one row per person: that would be a thousand
+--    (the rewrite adds the `news` key this counts rows by). Not one row per person: that would be a thousand
 --    rows saying the same thing. Written only when some live account had stored preferences, so a
 --    database with none (every fresh test database) gains no audit row from this migration.
 INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
@@ -50,19 +53,16 @@ SELECT NULL, 'mail_category_changed', 'migration', '0146',
   )
  WHERE stored > 0;
 
--- 3. Carry the value into the three categories and drop the retired key.
+-- 3. Carry the value into the three categories. The old key stays (see the header).
 UPDATE users
-   SET email_preferences = json_remove(
-         json_set(
-           COALESCE(email_preferences, '{}'),
-           '$.news',
-           json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END),
-           '$.rfcs',
-           json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END),
-           '$.maintenance',
-           json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END)
-         ),
-         '$.announcements'
+   SET email_preferences = json_set(
+         COALESCE(email_preferences, '{}'),
+         '$.news',
+         json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END),
+         '$.rfcs',
+         json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END),
+         '$.maintenance',
+         json(CASE WHEN json_type(email_preferences, '$.announcements') = 'false' THEN 'false' ELSE 'true' END)
        )
  WHERE deleted_at IS NULL
    AND CASE WHEN deleted_at IS NULL THEN json_type(COALESCE(email_preferences, '{}'), '$.news') IS NULL ELSE 0 END;

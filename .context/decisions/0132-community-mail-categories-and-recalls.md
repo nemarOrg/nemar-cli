@@ -21,7 +21,7 @@ Their audience, sender and defaults live in `MAIL_CATEGORY_TABLE` and nowhere el
 A recall has no stored key, no setter and no route: a preference response reports `recall: {on: true, locked: true}` as a constant, and any request that names `recall` is refused by name.
 
 **3. Storage stays in `users.email_preferences`; `announcements` is retired.**
-Migration 0146 carries each live account's `announcements` value into `news`, `rfcs` and `maintenance` explicitly (D2), removes the key, and writes one summary audit row; only strict JSON `false` counts as an opt-out, as the parser has always read every key.
+Migration 0146 carries each live account's `announcements` value into `news`, `rfcs` and `maintenance` explicitly (D2) and writes one summary audit row, and keeps the `announcements` key unchanged until phase P3 removes it, because migrations apply seconds before the worker deploys and the previous worker still reads it (deleting it would let a notify in that window reach every opted-out account); only strict JSON `false` counts as an opt-out, as the parser has always read every key.
 The admin alerts (`user_approval`, `publication_request`, `dataset_anonymity`, `identifier_sweep`, `support_tickets`) are a separate type, and `getAdminEmailsForCategory` accepts only those, so a community category can never reach its first-admin fallback.
 
 **4. Audiences (D3).**
@@ -35,7 +35,7 @@ Only the owner may send one; it needs a reference, a fixed subject prefix and tw
 A policy change goes out as a news item, and only a major one as maintenance plus a site notice (D10).
 
 **6. Every change to a community category is audited.**
-`saveEmailPreferences` writes the new value and one `mail_category_changed` row (`{category, on, via}`) in the same batch, so neither can exist without the other.
+`saveEmailPreferences` writes the new value and one `mail_category_changed` row (`{category, on, via}`) in the same batch, so neither can exist without the other. The write is a per-key `json_set` over only the changed keys, and each audit row fires only when the stored value differs, so a concurrent write to another key is never reverted and the record diffs against the value actually replaced.
 The owner and any admin may turn a category on or off for another account (D8), audited, with `via` `admin`; another account's admin alerts stay the owner's.
 
 **7. Links and footers (built in P2 and P3, decided here).**

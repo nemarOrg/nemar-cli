@@ -108,11 +108,21 @@ describe("0146 carries announcements into the three categories", () => {
   db.exec(TARGET_SQL);
 
   test("an account that opted out of announcements is opted out of all three, explicitly", () => {
-    expect(stored(db, "ann_false")).toEqual({ news: false, rfcs: false, maintenance: false });
+    expect(stored(db, "ann_false")).toEqual({
+      announcements: false,
+      news: false,
+      rfcs: false,
+      maintenance: false,
+    });
   });
 
   test("an account that had them on gets all three on, explicitly (the consent record)", () => {
-    expect(stored(db, "ann_true")).toEqual({ news: true, rfcs: true, maintenance: true });
+    expect(stored(db, "ann_true")).toEqual({
+      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
+    });
   });
 
   test("a NULL, an absent key and an empty object all become explicit all-on", () => {
@@ -125,25 +135,50 @@ describe("0146 carries announcements into the three categories", () => {
     // json_extract() returns 0 for JSON false AND for a JSON 0, so a carry written on it would
     // have turned mail off for these accounts. The parser reads `!== false`; so does the SQL.
     for (const name of ["ann_zero", "ann_string_false", "ann_null"]) {
-      expect(stored(db, name)).toEqual({ news: true, rfcs: true, maintenance: true });
+      expect(stored(db, name)).toMatchObject({ news: true, rfcs: true, maintenance: true });
     }
   });
 
-  test("other keys survive, and the retired key is gone from every live row", () => {
+  test("other keys survive the carry", () => {
     expect(stored(db, "alerts_kept")).toEqual({
       user_approval: false,
       support_tickets: false,
+      announcements: false,
       news: false,
       rfcs: false,
       maintenance: false,
     });
     expect(stored(db, "ann_absent")).toMatchObject({ user_approval: false });
-    const withKey = db
-      .query<{ n: number }, []>(
-        "SELECT count(*) AS n FROM users WHERE deleted_at IS NULL AND email_preferences LIKE '%announcements%'",
-      )
-      .get();
-    expect(withKey?.n).toBe(0);
+  });
+
+  test("the previous worker's rule still reads every opted-out row as opted out (deploy window)", () => {
+    // Migrations apply seconds before the new worker deploys, and the previous worker reads
+    // `announcements` (`!== false`, a missing key as ON). The migration keeps that key unchanged,
+    // so a notify in the window reaches exactly the accounts it would have reached before 0146.
+    // Deleting the key would make every opted-out row read as ON to that worker.
+    for (const s of SEEDS.filter((x) => !x.deleted)) {
+      const before = (() => {
+        if (s.prefs === null || s.prefs === "") return true;
+        try {
+          return JSON.parse(s.prefs)?.announcements !== false;
+        } catch {
+          return true;
+        }
+      })();
+      const rawValue = raw(db, s.name);
+      const after = (() => {
+        try {
+          return JSON.parse(rawValue ?? "{}")?.announcements !== false;
+        } catch {
+          return true;
+        }
+      })();
+      expect({ seed: s.name, announcementsOn: after }).toEqual({
+        seed: s.name,
+        announcementsOn: before,
+      });
+    }
+    expect(stored(db, "ann_false").announcements).toBe(false);
   });
 
   test("a column that is not a JSON object is replaced by explicit all-on", () => {
