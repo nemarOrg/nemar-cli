@@ -59,7 +59,8 @@ const KEY_IS_OFF_SQL = (key: string) =>
  * Set the given keys for the target and leave the rest of the stored blob alone, writing one
  * `mail_category_changed` audit row per community category whose value actually changes, plus
  * (when the actor is not the target) the `email_preferences_updated` row an edit of someone else's
- * preferences has always left.
+ * preferences has always left. That row records only the keys this call changed
+ * (`{target, updated}`), not the whole stored blob.
  *
  * Two properties are the reason this is SQL and not a read-modify-write in the route:
  *
@@ -83,7 +84,15 @@ export async function saveEmailPreferences(
   const entries = Object.entries(changes).filter(
     (entry): entry is [keyof EmailPreferences, boolean] => entry[1] !== undefined,
   );
-  if (entries.length === 0) return true;
+  if (entries.length === 0) {
+    // Nothing to write, but the answer is the same as for a non-empty change: false when the
+    // account is not live, so an empty request cannot report success for a deleted account.
+    const live = await db
+      .prepare("SELECT 1 AS live FROM users WHERE id = ? AND deleted_at IS NULL")
+      .bind(targetId)
+      .first<{ live: number }>();
+    return live !== null;
+  }
 
   const statements: D1PreparedStatement[] = [];
   const communityKeys = new Set<string>(COMMUNITY_MAIL_CATEGORIES);

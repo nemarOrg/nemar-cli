@@ -399,6 +399,21 @@ describe("saveEmailPreferences on an account that vanished mid-request", () => {
     expect(storedPrefs("target")).toBe('{"news":false,"rfcs":true,"maintenance":true}');
   });
 
+  test("an empty change on a deleted account is not-found too, and writes nothing", async () => {
+    const id = idOf("target") as number;
+    const input = {
+      targetId: id,
+      targetUsername: "target",
+      actorId: idOf("theowner") as number,
+      changes: {},
+      via: "admin" as const,
+    };
+    expect(await saveEmailPreferences(realD1(db), input)).toBe(true);
+    db.query("UPDATE users SET deleted_at = datetime('now') WHERE id = ?").run(id);
+    expect(await saveEmailPreferences(realD1(db), input)).toBe(false);
+    expect(audits()).toEqual([]);
+  });
+
   test("a column that holds garbage is replaced by an object holding the keys set", async () => {
     db.query("UPDATE users SET email_preferences = '{not json' WHERE username = 'target'").run();
     const applied = await saveEmailPreferences(realD1(db), {
