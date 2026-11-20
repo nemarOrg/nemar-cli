@@ -65,6 +65,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:49-08:00 | Q17 (R2): no counsel review for /policies/rfcs/; it is a process page | owner |  |
 | 2026-11-20T12:49-08:00 | Q18 (O5): cite BEP 045 peripheral physiology (bids-specification#2267, bep_045 page), not BEP047 | owner |  |
 | 2026-11-20T12:49-08:00 | Q19: claude-opus Max 4; reviewer tier on claude-sonnet (owner applied both to Slots) | owner |  |
+| 2026-11-20T12:54-08:00 | Q20: the lead merges origin/dev into feature/rfc-program (merge, no rebase) so ADR 0129 is in the base; A1 keeps 0130, A2 0131 | owner |  |
 
 ## Log
 
@@ -76,3 +77,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:51-08:00 | Session start reconcile: V1 PR 2238 head c8df3be2 fails acceptance (Command: 4, Raw output: 0); prior worker not live; redispatched with send-back; six-script deviation accepted |
 | 2026-11-20T12:51-08:00 | Owner answers Q8 Q9 Q10 Q11 Q13 Q14 Q17 Q18 Q19 recorded and closed; B1 B2 R2 O5 B5 Next updated |
 | 2026-11-20T12:51-08:00 | Dispatched A2 (claude-opus), A1 and R1 (claude-sonnet); Agents today 4/40 |
+| 2026-11-20T12:52-08:00 | V1 r1 fix head 9d82cef1 verified: Command 7, Raw output 28, no empty files, scope clean; review panel dispatched |
+| 2026-11-20T12:53-08:00 | A1 stop: index test fails on gap 0129 (verified: 0129 on origin/dev only, epic 48 behind dev, merge clean); Q20 asked; A2 told to take 0131 and stop before push on same failure |
+| 2026-11-20T12:54-08:00 | A2 stop: same gap (0129, 0130); local 9ada28f0 ADR 0131; README 0128-line note deviation accepted (follows 0080/0107 convention); its refused test edit not retried |
+| 2026-11-20T12:54-08:00 | V1 r1 review in: code lens clean of critical/important, 6 suggestions; tests lens 4 important, 2 suggestions; all accepted, sent back |
+| 2026-11-20T12:55-08:00 | Dispatched lead-devmerge (Opus) for Q20 and impl-V1 round 2 (9 items); Agents today 8/40 |
