@@ -1650,6 +1650,11 @@ export interface BroadcastStatusResponse {
   failure_count: number;
   /** Sends whose outcome the provider never confirmed; not retried, so none is delivered twice. */
   unknown_count: number;
+  /**
+   * Recipients left unsent on purpose (the account went away, its address changed or it switched
+   * the category off after the send was queued). Absent from a backend that predates epic #2260.
+   */
+  skipped_count?: number;
   /** Redacted addresses (first letter and domain only). */
   failed_recipients: string[];
   sent_at: string;

@@ -8778,7 +8778,12 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
     lines.push(
       `  Unconfirmed: ${s.unknown_count} (not retried; the provider never confirmed them)`,
     );
-    const pending = s.queued_count - s.delivered_count - s.failure_count - s.unknown_count;
+    const skipped = s.skipped_count ?? 0;
+    if (skipped > 0) {
+      lines.push(`  Skipped: ${skipped} (opted out or account changed after the send was queued)`);
+    }
+    const pending =
+      s.queued_count - s.delivered_count - s.failure_count - s.unknown_count - skipped;
     if (pending > 0) lines.push(`  Pending: ${pending}`);
   }
   if (s.failed_recipients.length > 0) {

@@ -176,6 +176,20 @@ describe("nemar admin notify", () => {
     }
   });
 
+  test("--status counts skipped recipients as accounted for, not as pending", async () => {
+    // 10 queued = 6 delivered + 1 failed + 1 unconfirmed + 2 skipped. A pending figure that forgot
+    // the skipped ones would print "Pending: 2" for a send that is finished.
+    const server = startServer({ "GET /admin/notify/7": { ...STATUS_BODY, skipped_count: 2 } });
+    try {
+      const r = await runCli(["admin", "notify", "--status", "7"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Skipped: 2");
+      expect(r.stdout).not.toContain("Pending");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("--status --json prints the raw body", async () => {
     const server = startServer({ "GET /admin/notify/7": STATUS_BODY });
     try {

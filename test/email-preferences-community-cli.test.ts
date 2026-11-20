@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { mailRecallWhy } from "../shared/contract/mail-categories";
+import { COMMUNITY_ONLY_REFUSAL, mailRecallWhy } from "../shared/contract/mail-categories";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -41,7 +41,7 @@ const COMMUNITY_ONLY = {
   username: "someone",
 };
 
-function startServer() {
+function startServer(options: { refuseAlertsForOther?: boolean } = {}) {
   const requests: Array<{ method: string; search: string; body?: unknown }> = [];
   const server = Bun.serve({
     port: 0,
@@ -58,6 +58,10 @@ function startServer() {
       }
       const body = (await req.json()) as Record<string, boolean>;
       requests.push({ method: "PUT", search: url.search, body });
+      // What the backend answers a non-owner admin who names an admin alert on another account.
+      if (options.refuseAlertsForOther && other && "support_tickets" in body) {
+        return Response.json({ error: COMMUNITY_ONLY_REFUSAL }, { status: 403 });
+      }
       return Response.json({ ...(other ? COMMUNITY_ONLY : FULL), ...body });
     },
   });
@@ -224,6 +228,22 @@ describe("update", () => {
         { method: "PUT", search: "?user=someone", body: { news: true } },
       ]);
       expect(`${r.stdout}${r.stderr}`).not.toMatch(/Identifier sweep|User approval/);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an admin's --all with --user is refused by the backend, and the CLI prints the way forward", async () => {
+    const server = startServer({ refuseAlertsForOther: true });
+    try {
+      const r = await runCli(
+        ["admin", "email-preferences", "update", "--all", "false", "--user", "someone"],
+        server.url,
+      );
+      // --all names the admin alerts, which an admin may not change on another account.
+      expect(Object.keys(server.puts()[0].body as object)).toContain("support_tickets");
+      expect(r.stderr + r.stdout).toContain("--news, --rfcs and --maintenance");
+      expect(r.stderr + r.stdout).not.toMatch(/email preferences updated/);
     } finally {
       server.stop();
     }
