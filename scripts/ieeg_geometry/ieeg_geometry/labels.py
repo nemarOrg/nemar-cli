@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import json
 import os
 import re
@@ -65,6 +64,7 @@ from .bids import (
     discover,
     read_electrode_set,
 )
+from .bids_clean import electrodes_tsv, is_missing
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import load_reference
 from .surfaces import Surface
@@ -409,19 +409,21 @@ def _prefix(path: Path) -> str:
     return path.name[: -len("_electrodes.tsv")]
 
 
-def _tsv_in_mm(path: Path, scale: float) -> bytes:
-    raw = path.read_bytes()
-    if scale == 1.0:
-        return raw
-    rows = [r for r in csv.reader(io.StringIO(raw.decode("utf-8-sig")), delimiter="\t") if r]
-    idx = [rows[0].index(a) for a in ("x", "y", "z")]
-    for row in rows[1:]:
-        for i in idx:
-            if row[i].strip().lower() not in ("", "n/a", "na", "nan"):
-                row[i] = f"{float(row[i]) * scale:.6f}".rstrip("0").rstrip(".")
-    out = io.StringIO()
-    csv.writer(out, delimiter="\t", lineterminator="\n").writerows(rows)
-    return out.getvalue().encode("utf-8")
+def _tsv_in_mm(path: Path, scale: float, output: Path) -> bytes:
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        header = list(reader.fieldnames or [])
+        rows: list[dict[str, str | None]] = list(reader)
+    for row in rows:
+        if None in row or None in row.values():  # a short or long row is not copied
+            raise ValueError(f"{path.name}: a row does not have {len(header)} cells")
+    if scale != 1.0:
+        for row in rows:
+            for axis in ("x", "y", "z"):
+                value = row.get(axis)
+                if not is_missing(value):
+                    row[axis] = f"{float(value or '') * scale:.6f}".rstrip("0").rstrip(".")
+    return electrodes_tsv(header, rows, output)
 
 
 def _coordsystem_bytes(label: str, system_description: str, description: str) -> bytes:
@@ -497,7 +499,7 @@ def _build_files(
     return (
         PlannedFile(
             rel(elec_target),
-            _tsv_in_mm(item.electrodes_path, eset.scale_to_mm),
+            _tsv_in_mm(item.electrodes_path, eset.scale_to_mm, elec_target),
             "electrodes",
             elec_in,
             method,

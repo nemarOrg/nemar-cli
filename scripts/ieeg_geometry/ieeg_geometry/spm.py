@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import json
 import math
 import os
@@ -55,6 +54,7 @@ import numpy as np
 from scipy.spatial import KDTree
 
 from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .bids_clean import electrodes_tsv
 from .ownership import (
     OwnedPath,
     Ownership,
@@ -706,19 +706,15 @@ def _fmt(v: float) -> str:
     return "n/a" if not np.isfinite(v) else f"{v:.3f}"
 
 
-def _electrodes_bytes(source: Path, template_mm: np.ndarray, ok: np.ndarray) -> bytes:
+def _electrodes_bytes(source: Path, output: Path, template_mm: np.ndarray, ok: np.ndarray) -> bytes:
     with source.open(newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         header = list(reader.fieldnames or [])
-        rows = list(reader)
-    buf = io.StringIO(newline="")
-    writer = csv.writer(buf, delimiter="\t", lineterminator="\n")
-    writer.writerow(header)
+        rows: list[dict[str, str | None]] = list(reader)
     for i, row in enumerate(rows):
         for axis, col in enumerate(("x", "y", "z")):
             row[col] = _fmt(template_mm[i, axis]) if ok[i] else "n/a"
-        writer.writerow([row.get(h, "n/a") for h in header])
-    return buf.getvalue().encode("utf-8")
+    return electrodes_tsv(header, rows, output)
 
 
 def _coordsystem_bytes(
@@ -887,11 +883,12 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
     rel_field = _rel(field_.path, dataset)
     stem = _output_stem(cand.electrodes_path, subject, session)
     parent = cand.electrodes_path.parent
-    tsv_rel = _rel(parent / f"{stem}_electrodes.tsv", dataset)
+    tsv_path = parent / f"{stem}_electrodes.tsv"
+    tsv_rel = _rel(tsv_path, dataset)
     json_rel = _rel(parent / f"{stem}_coordsystem.json", dataset)
     n_refused = int((~inv.ok).sum()) - sum(c.missing_coordinates for c in eset.contacts)
     plan.files = {
-        tsv_rel: _electrodes_bytes(cand.electrodes_path, inv.template_mm, inv.ok),
+        tsv_rel: _electrodes_bytes(cand.electrodes_path, tsv_path, inv.template_mm, inv.ok),
         json_rel: _coordsystem_bytes(rel_src, rel_field, inv, fits, n_refused, check, basis),
     }
     head = _headline(fits)

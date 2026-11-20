@@ -129,7 +129,9 @@ def test_native_coordsystem_is_untouched_and_a_space_pair_is_added(native_sideca
         f"{ieeg}_space-fsaverage_coordsystem.json",
         f"{ieeg}_space-fsaverage_electrodes.tsv",
     ]
-    assert after[f"{ieeg}_space-fsaverage_electrodes.tsv"] == before[f"{ieeg}_electrodes.tsv"]
+    # the table is the authors' rows, rewritten with LF line endings (a clean source is unchanged)
+    copied = before[f"{ieeg}_electrodes.tsv"].replace(b"\r\n", b"\n")
+    assert after[f"{ieeg}_space-fsaverage_electrodes.tsv"] == copied
     doc = json.loads(after[f"{ieeg}_space-fsaverage_coordsystem.json"])
     assert doc["iEEGCoordinateSystem"] == "fsaverage" and doc["iEEGCoordinateUnits"] == "mm"
     assert "MNI-305" in doc["iEEGCoordinateProcessingDescription"]  # the authors' word is kept
