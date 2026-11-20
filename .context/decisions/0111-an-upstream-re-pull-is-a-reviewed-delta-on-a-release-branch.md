@@ -2522,3 +2522,16 @@ Under decision "corrections replay as N.0.1", such a path, added by NEMAR and un
 2. If upstream adds a file at a pipeline-owned path, upstream's file wins, the path leaves the ownership list, and it is never regenerated again.
 3. The ownership file itself is regenerated with the paths, never replayed; the privacy ledger rules of decision "a ledger change is never reverted" are unchanged, and the pipeline never writes the ledger.
 4. A regeneration that fails leaves the previous pipeline files out of N.0.1, with the failure in the re-pull record; the snapshot's own files are never held back by it.
+
+### Implementation of this amendment (proposed)
+
+5. Only a path shaped like one of the pipeline's outputs (a subject's `_electrodes.tsv` or `_coordsystem.json`) is pipeline-owned.
+   A listed path of any other shape is ignored, so the ownership file, which is NEMAR's own, cannot take another path out of the corrections or the ledger's reach; an ownership file that does not parse refuses the plan (`pipeline-ownership-unreadable`).
+6. The plan counts them (`pipeline_owned`, and `pipeline_upstream_wins` for those upstream holds a file at), keeps them out of `corrections` and `unexplained`, and so the automatic path is not refused for them.
+   The record keeps `pipeline_owned`, and N.0.1 is made when it is above zero: from the pipeline's regenerated files and the replayed corrections, or from the files alone.
+   When the run changes nothing and nothing else is replayed, no N.0.1 is made and the record completes.
+7. The run is the Python package at the CLI's own release, on a private clone of the new `main`, and N.0.1 takes exactly what the package's report names as changed, plus the ownership record when its bytes differ.
+   The report must name the pinned package version and the commit the clone was made at, the files must be small files git holds, and a file the run changed without reporting it fails the regeneration, so the same inputs make the same commit and resume can derive it again.
+8. A failed regeneration is recorded as the count `pipeline_failed`, in the step's error words and in N.0.1's pull request; N.0.1 then carries none of the previous pipeline files and everything else as it would have.
+9. N.0.1 is a patch release, so the automatic path's merge gate holds it for an administrator (`has-corrections`), as it holds any N.0.1.
+   The central workflow needs the package and `uv` at the release it installs (`.context/plans/ieeg-geometry/workflow-patches/`).
