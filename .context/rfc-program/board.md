@@ -76,7 +76,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
 | O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | done | B2 | - |  | - | - | release 2.0.0 on 36112961, isPrerelease false (verified) |
 | B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | claude-sonnet | done | O4 | docs#128 | r1 code+comments (1 Sonnet): no PR findings; stop item resolved by Q23 | 2026-11-20T16:05-08:00 | 4h | merged by manager on owner instruction (691d5f4f); CI green after billing fix |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | review | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r1 review panel (2 Sonnet) on head e2b3ba79; CI green; PR stays open |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | active | O4, A2 | biosig-zarr#4 |  | 2026-11-20T16:05-08:00 | 2d | r1 fixes: 7 important, ~11 sugg, Q28 Q30 EDF+D; then r2 delta and B4/B6 seam check |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | active | R1, B2, A2 | rfcs#2 |  | 2026-11-20T16:05-08:00 | 2d | r1 fixes: 6 important, ~13 sugg, Q25 EDF+D wording and gap test, align with B6 names and question numbers |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | checkpoint C1 due: lead writes the B5 card |
@@ -118,12 +118,16 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q26 | - | B4 text says RFC-0001 opens with schemas, a few real vectors and the 3.0.0-draft.1 tag in place (Q10). Add B5 to O5's dependencies? | Yes, O5 waits on B5 (Recommended) / No, change the RFC sentence | none | 2026-11-22T17:00 | closed | Yes, O5 waits on B5 (owner, 2026-11-20T17:00-08:00) |
 | Q27 | - | biosig-zarr text.yml path filter (card B1) skips PRs touching only tools/** or JSON, so they get no lint. Add tools/**, *.json, package.json, biome.json to the filter? | Yes, small PR (Recommended) / Leave as the card says | none | 2026-11-22T17:00 | closed | Yes, widen biosig-zarr text.yml filter in a small PR (owner, 2026-11-20T17:00-08:00) |
 | Q25 | - | Third-party review: EDF+D can encode irregular samples as timestamped zero-duration records; replace RFC-0001's 'EDF cannot' sentence and add the 2.02 s gap reader test. Apply? | Verify, then apply both (Recommended) / Wording only / Neither | none | 2026-11-21T17:00 | closed | First confirm against the EDF+ spec; if it makes sense apply both (owner, 2026-11-20T17:00-08:00) |
+| Q28 | - | B6 makes reading version 2 stores a MUST for every version 3 reader (version 1 a SHOULD). D2 only says the back catalog stays readable as v2. Keep the MUST? | Keep MUST, mark it open for comment (Recommended) / Keep MUST, not open / Make it SHOULD | none | 2026-11-22T17:00 | closed | Keep MUST for reading v2, settled (not open); version 1 is expired, so no v1 reading requirement (owner, 2026-11-20T17:45-08:00) |
+| Q29 | - | B6 puts NEMAR profile choices for v3 (D5, D7, D11, D12, no timestamped group in index.json) in the spec's NEMAR profile section, which also names the Store Contract as authoritative. Where should they live? | Spec profile section, Store Contract updated at rollout (Recommended) / Store Contract only / Both now | none | 2026-11-22T17:00 | closed | Both now: spec profile section keeps the v3 NEMAR choices, and the docs Store Contract is updated now (new docs card by the lead) (owner, 2026-11-20T17:45-08:00) |
+| Q30 | - | Q25 test is ill-defined under B6: a 2.00-2.04 s gap at 10 Hz is shorter than one sample and cannot be written in valid_intervals (grid indices). How should sub-sample gaps be handled? | Test with a gap of at least one sample, plus an RFC question on sub-sample gaps (Recommended) / Lead redesigns gaps in source time / Drop the test | none | 2026-11-21T17:00 | closed | Test with a gap of at least one sample, state sub-sample gaps need the timestamped kind, add an RFC question (owner, 2026-11-20T17:55-08:00) |
 
 ## Proposals
 
 | ID | Time | Proposal | Why | State |
 |---|---|---|---|---|
 | P1 | 2026-11-20T13:29-08:00 | Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) | owner, 2026-11-20T15:00: 'That is wrong rule, ask an owner to update the rules clearly' | accepted |
+| P2 | 2026-11-20T14:40-08:00 | Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges | owner answer Q29 'Both now' | open |
 
 ## Agents
 
@@ -151,11 +155,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | impl-B4 | implementer | claude-opus | Opus xhigh | B4 | 2026-11-20T16:05-08:00 | running |
-| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | done |
+| impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | running |
 | impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | done |
 | rev-B3 | reviewer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:20-08:00 | done |
 | rev-B4-decisions | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T16:45-08:00 | done |
 | rev-B4-technical | reviewer | claude-sonnet | Sonnet high | B4 | 2026-11-20T16:45-08:00 | done |
-| rev-B6-decisions | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | running |
-| rev-B6-technical | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | running |
-| rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | running |
+| rev-B6-decisions | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
+| rev-B6-technical | reviewer | claude-sonnet | Sonnet high | B6 | 2026-11-20T17:20-08:00 | done |
+| rev-B2pin | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T17:25-08:00 | done |

@@ -80,6 +80,10 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:34-08:00 | Q26: O5 also waits on B5 (schemas and vectors); the lead adds it when writing the B5 card | owner |  |
 | 2026-11-20T14:34-08:00 | Q27: widen biosig-zarr text.yml path filter to tools/**, **/*.json, package.json, biome.json | owner |  |
 | 2026-11-20T14:37-08:00 | Q25 confirmed against EDF+ spec (2.1.1, 2.1.2 duration 0 one-sample EDF+D records, 2.2.4 time-keeping TAL; per-record timestamp, word 'irregular' not used): apply the corrected wording and the 2.02 s gap reader test in B4 and B6 | manager |  |
+| 2026-11-20T14:40-08:00 | Q28: every version 3 reader MUST read version 2 stores, settled; version 1 is expired and carries no reading requirement | owner |  |
+| 2026-11-20T14:40-08:00 | Q29: v3 NEMAR profile choices live in the spec's profile section and in the docs Store Contract now; the lead writes a docs card for the Store Contract update | owner |  |
+| 2026-11-20T14:41-08:00 | Q30: required reader test uses a gap of at least one sample (10 Hz, 2.00-2.40 s); sub-sample gaps are not representable on the grid and need the timestamped kind; RFC-0001 adds a commenter question | owner |  |
+| 2026-11-20T14:41-08:00 | Owner authorizes Opus xhigh or Fable high for writing contracts and specifications (frontier tier allowed for this work) | owner |  |
 
 ## Log
 
@@ -140,3 +144,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:34-08:00 | B3 merged by manager (owner instruction). Q25 verification started; Q26 Q27 recorded. B6 draft PR biosig-zarr#4 head e2b3ba79 reported |
 | 2026-11-20T14:37-08:00 | B4 r1 review: decisions lens 2 imp 3 sugg; technical lens 4 imp ~10 sugg; all sent back with Q25 and the B6 seam |
 | 2026-11-20T14:37-08:00 | biosig-zarr#3 (Q24 pin + Q27 filter) head 5bde6480, CI green; review dispatched |
+| 2026-11-20T14:37-08:00 | biosig-zarr#3 merged (MERGED 796d30e7): review r1 clean (1 Sonnet), CI green; Q24 and Q27 done |
+| 2026-11-20T14:38-08:00 | B6 decisions lens: 0 crit, 1 imp (original_rate rounding), 4 sugg; owner questions Q28 (v2 MUST), Q29 (profile placement) asked |
+| 2026-11-20T14:40-08:00 | proposal P2 opened: Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges |
+| 2026-11-20T14:40-08:00 | B6 technical lens: 0 crit, 6 imp, 8 sugg. Q28 Q29 answered; P2 Store Contract card proposed; Q30 asked (sub-sample gap test) |
+| 2026-11-20T14:41-08:00 | B6 r1 findings sent back with Q28, Q29, Q30; impl-B4 told Q28, Q30. Owner allows Opus xhigh / Fable high for contracts and specs |
