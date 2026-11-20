@@ -1,0 +1,39 @@
+[34m🔧 Using account: [1m[33msccn[39m[34m[22m[39m
+[34m⚡ Running: wrangler d1 execute nemar-db --remote --json --command SELECT substr(dataset_id,1,2) AS prefix, count(*) AS datasets, sum(concept_doi IS NOT NULL) AS with_concept_doi FROM datasets GROUP BY prefix -c wrangler-sccn.toml[39m
+
+[
+  {
+    "results": [
+      {
+        "prefix": "nm",
+        "datasets": 876,
+        "with_concept_doi": 329
+      },
+      {
+        "prefix": "on",
+        "datasets": 627,
+        "with_concept_doi": 590
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "WNAM",
+      "served_by_colo": "DFW",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 7.5105
+      },
+      "duration": 7.5105,
+      "changes": 0,
+      "last_row_id": 47,
+      "changed_db": false,
+      "size_after": 38813696,
+      "rows_read": 3006,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+[32m[39m
+[32m✅ Command completed successfully[39m

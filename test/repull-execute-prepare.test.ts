@@ -424,7 +424,7 @@ describe.skipIf(!awsInstalled)("the reviewed plan, before anything is written", 
   test("a plan of the previous planner is refused as made under other rules", async () => {
     seedMirror(XX_A);
     const path = await makePlan(fx);
-    writeFileSync(path, readFileSync(path, "utf8").replace('"planner": 2', '"planner": 1'));
+    writeFileSync(path, readFileSync(path, "utf8").replace('"planner": 3', '"planner": 1'));
     const err = await refusal(execute(fx, path));
     expect(err.code).toBe("planner-version");
     expect(repullRows()).toEqual([]);
