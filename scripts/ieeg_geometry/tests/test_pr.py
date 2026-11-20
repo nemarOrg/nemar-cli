@@ -591,23 +591,117 @@ def test_without_the_flag_the_version_is_untouched_and_the_release_step_is_named
     assert "nemar dataset release on000001 --type patch" in _calls(log)[0]["body"]
 
 
-def test_bump_version_refuses_a_main_version_without_a_release_tag(env, tmp_path, capsys):
-    served, bare, log, work = env
-    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.2"}\n'})
-    assert _pr(served, work, "--bump-version") == 1
-    assert "has no release tag" in capsys.readouterr().err
-    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+def _integration_branch(bare: Path, tmp: Path, name: str, files: dict[str, str]) -> str:
+    """A collaborator's branch on the remote: one foreign commit on top of main; returns its tip."""
+    work = tmp / f"integ-{name}"
+    _git(tmp, "clone", "-q", str(bare), str(work))
+    _git(work, "checkout", "-q", "-b", name)
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    _git(work, "add", "--", *files)
+    _git(
+        work, "commit", "-q", "--author", "Collab Person <collab@example.org>", "-m", "Fix a thing"
+    )
+    _git(work, "push", "-q", "origin", name)
+    return _git(work, "rev-parse", "HEAD").strip()
 
 
-def test_bump_version_refuses_a_changes_file_ahead_of_the_version(env, tmp_path, capsys):
+def _create_call(log: Path) -> dict:
+    return next(c for c in _calls(log) if c["args"][:2] == ["pr", "create"])
+
+
+def test_from_ref_keeps_a_collaborators_version_and_puts_the_geometry_on_top(env, tmp_path):
     served, bare, log, work = env
-    _advance(
+    foreign = _integration_branch(
         bare,
         tmp_path,
-        {"dataset_description.json": '{"Version": "1.0.0"}\n', "CHANGES": "1.0.3 2024\n - x\n"},
+        "integ",
+        {"dataset_description.json": '{"Name": "x", "Version": "1.0.4"}\n', "CHANGES": "1.0.3\n"},
     )
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    # one geometry commit on top of the foreign tip, pushed to the same branch; nothing else pushed
+    assert _git(bare, "rev-parse", "integ~1").strip() == foreign
+    assert _git(bare, "rev-list", "--count", f"{foreign}..integ").strip() == "1"
+    assert _refs(bare) == ["refs/heads/integ", "refs/heads/main"]
+    assert _git(bare, "rev-parse", "main").strip() == served.commit
+    names = _git(bare, "diff", "--name-only", foreign, "integ").split()
+    assert sorted(names) == _expected_changes(served, tmp_path)  # no description change
+    assert _blob(bare, "integ:dataset_description.json") == _blob(
+        bare, f"{foreign}:dataset_description.json"
+    )
+    # the pull request is opened from the branch into main, and the body explains
+    call = _create_call(log)
+    assert call["args"][call["args"].index("--head") + 1] == "integ"
+    assert call["args"][call["args"].index("--base") + 1] == "main"
+    body = call["body"]
+    assert "Integration branch `integ`: 1 commit(s) not on `main`" in body
+    assert f"`{foreign[:7]}` Collab Person: Fix a thing" in body
+    assert "is already `1.0.4`" in body and "tags `v1.0.4`" in body
+    assert "CHANGES lists" not in body  # 1.0.3 is not ahead of 1.0.4
+
+
+def test_from_ref_updates_an_open_pull_request_instead_of_opening_another(
+    env, tmp_path, monkeypatch
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    monkeypatch.setenv("STANDIN_OPEN_PRS", '[{"number": 5, "url": "https://example.org/pull/5"}]')
+    assert _pr(served, work, "--from-ref", "integ") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "edit"] in verbs and ["pr", "create"] not in verbs
+    edit = next(c for c in _calls(log) if c["args"][:2] == ["pr", "edit"])
+    assert edit["args"][2] == "5" and "Integration branch `integ`" in edit["body"]
+
+
+def test_from_ref_refuses_when_the_branch_moved_during_the_run(env, tmp_path, monkeypatch, capsys):
+    served, bare, log, work = env
+    foreign = _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    real = pipeline.run_dataset
+
+    def run_then_someone_pushes(*args, **kwargs):
+        got = real(*args, **kwargs)
+        _integration_branch_more(bare, tmp_path)
+        return got
+
+    monkeypatch.setattr(pipeline, "run_dataset", run_then_someone_pushes)
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "moved on the remote" in capsys.readouterr().err
+    assert _git(bare, "rev-list", "--count", f"{foreign}..integ").strip() == "1"  # theirs only
+    assert not _calls(log)
+
+
+def _integration_branch_more(bare: Path, tmp: Path) -> None:
+    work = tmp / "integ-more"
+    _git(tmp, "clone", "-q", "--branch", "integ", str(bare), str(work))
+    (work / "CHANGES").write_text("1.0.0\nmore\n")
+    _git(work, "add", "CHANGES")
+    _git(work, "commit", "-q", "-m", "a later push")
+    _git(work, "push", "-q", "origin", "integ")
+
+
+def test_from_ref_bumps_a_version_equal_to_mains(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.0"}\n'})
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "2.0.0 upstream\n"})
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    assert b'"1.0.1"' in _blob(bare, "integ:dataset_description.json")
+    body = _create_call(log)["body"]
+    assert "goes from `1.0.0` to `1.0.1`" in body and "CHANGES lists 2.0.0" in body
+
+
+def test_bump_version_chooses_above_main_when_main_is_ahead_of_the_tags(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Name": "x", "Version": "1.0.2"}\n'})
+    assert _pr(served, work, "--bump-version") == 0
+    assert b'"1.0.3"' in _blob(bare, f"{BRANCH}:dataset_description.json")
+
+
+def test_bump_version_refuses_a_malformed_version(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"dataset_description.json": '{"Version": "1.0"}\n'})
     assert _pr(served, work, "--bump-version") == 1
-    assert "CHANGES lists 1.0.3" in capsys.readouterr().err
+    assert "not of the form" in capsys.readouterr().err
     assert not _calls(log)
 
 

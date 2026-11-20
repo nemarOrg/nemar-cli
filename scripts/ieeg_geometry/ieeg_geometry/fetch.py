@@ -206,7 +206,9 @@ def _git(clone: Path | None, *args: str, stdin: bytes | None = None, attempts: i
     return done.stdout.decode("utf-8", errors="replace")
 
 
-def clone_tree(dataset_id: str, workdir: Path, repo_url: str = REPO_URL) -> Path:
+def clone_tree(
+    dataset_id: str, workdir: Path, repo_url: str = REPO_URL, ref: str | None = None
+) -> Path:
     """`<workdir>/<id>`: a blobless, not checked out clone (reused when it already exists)."""
     clone = Path(workdir) / dataset_id
     if (clone / ".git").exists():
@@ -220,6 +222,7 @@ def clone_tree(dataset_id: str, workdir: Path, repo_url: str = REPO_URL) -> Path
         "clone",
         "--no-checkout",
         "--filter=blob:none",
+        *(["--branch", ref] if ref else []),
         repo_url.format(id=dataset_id),
         str(clone),
         attempts=_ATTEMPTS,
@@ -296,10 +299,12 @@ def fetch_files(
     data_url: str = DATA_URL,
     api_url: str = API_URL,
     max_bytes: int = MAX_BYTES,
+    ref: str | None = None,
 ) -> FetchResult:
-    """Clone, check out the selected paths and download their annexed content."""
+    """Clone (at branch `ref`, default the remote's), check out the selected paths and download
+    their annexed content."""
     version = version or fetch_version(dataset_id, api_url)
-    clone = clone_tree(dataset_id, workdir, repo_url)
+    clone = clone_tree(dataset_id, workdir, repo_url, ref)
     entries = list_tree(clone)
     wanted = select_paths(entries)
     todo = [p for p in wanted if not os.path.lexists(clone / p)]

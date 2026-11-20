@@ -5,7 +5,7 @@
 [--surfaces-out DIR]` fetches what a dataset's geometry needs, runs every track and prints one
 JSON report; it writes into the work tree only with `--apply`.
 `python -m ieeg_geometry pr <dataset-id> --workdir DIR [--version V] [--bump-version]
-[--surfaces-out DIR]
+[--from-ref BRANCH] [--surfaces-out DIR]
 [--dry-run]` opens the dataset pull request (see `pr.py`); `python -m ieeg_geometry
 upload-surfaces <dataset-id> --surfaces DIR [--bucket B] [--profile P] [--dry-run]` puts the
 subject surfaces on the data plane (see `upload.py`).
@@ -177,6 +177,7 @@ def open_pr(args: argparse.Namespace, urls: dict[str, str] | None = None) -> int
             args.workdir,
             version=args.version,
             bump_version=args.bump_version,
+            from_ref=args.from_ref,
             dry_run=args.dry_run,
             surfaces_out=args.surfaces_out,
             urls=urls,
@@ -227,6 +228,11 @@ def main(argv: list[str] | None = None, urls: dict[str, str] | None = None) -> i
         "--bump-version",
         action="store_true",
         help="also set Version in dataset_description.json to the next patch (merging tags it)",
+    )
+    o.add_argument(
+        "--from-ref",
+        default=None,
+        help="an existing branch on the dataset remote to build on and push to (integration PR)",
     )
     o.add_argument("--dry-run", action="store_true", help="everything but the push and the PR")
     u = sub.add_parser("upload-surfaces", help="put the subject surfaces on the data plane")

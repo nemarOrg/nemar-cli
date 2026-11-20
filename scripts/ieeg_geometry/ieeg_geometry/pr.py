@@ -22,6 +22,7 @@ the files are computed from `main`.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -227,6 +228,36 @@ def _not_fetched(failed: dict[str, str]) -> list[str]:
     ]
 
 
+def _ref_lines(ref: tuple[str, list[str]] | None) -> list[str]:
+    if not ref:
+        return []
+    name, commits = ref
+    return [
+        f"- Integration branch `{name}`: {len(commits)} commit(s) not on `main`, kept as "
+        "they are (authorship included); the geometry is one commit on top:",
+        _bullets(commits),
+    ]
+
+
+def _version_lines(plan: versionbump.Plan | None) -> list[str]:
+    if not plan:
+        return []
+    if plan.kept:
+        line = (
+            f"- Version: `{DESCRIPTION}` `Version` is already `{plan.new}` on the branch (above "
+            f"`main` and every tag), so it is kept; merging this pull request tags `v{plan.new}`"
+        )
+    else:
+        line = (
+            f"- Version: `{DESCRIPTION}` `Version` goes from `{plan.current}` to `{plan.new}` "
+            f"in this pull request, so the version check passes and merging it tags `v{plan.new}`"
+        )
+    return [
+        line,
+        *([f"  - {plan.changes_note} (normal for a mirror)"] if plan.changes_note else []),
+    ]
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
@@ -234,7 +265,8 @@ def build_body(
     n_surface_sets: int,
     release_note: str | None = None,
     fetch_failed: dict[str, str] | None = None,
-    version_bump: tuple[str, str] | None = None,
+    version_bump: versionbump.Plan | None = None,
+    ref: tuple[str, list[str]] | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -250,15 +282,8 @@ def build_body(
         f"source commit `{report['source_commit']}`",
         *([f"- Source: {release_note}"] if release_note else []),
         *_not_fetched(fetch_failed or {}),
-        *(
-            [
-                f"- Version: `{DESCRIPTION}` `Version` goes from `{version_bump[0]}` to "
-                f"`{version_bump[1]}` in this pull request, so the version check passes and "
-                f"merging it tags `v{version_bump[1]}`"
-            ]
-            if version_bump
-            else []
-        ),
+        *_ref_lines(ref),
+        *_version_lines(version_bump),
         f"- Pipeline: `{report['pipeline_version']}`",
         f"- Files: {len(added)} added, {len(changed)} changed, {len(removed)} removed",
         f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
@@ -286,7 +311,7 @@ def build_body(
     if _is_mirror(report["dataset"]) and version_bump:
         lines += [
             "",
-            f"Merging this pull request cuts `v{version_bump[1]}` (the release workflow tags the "
+            f"Merging this pull request cuts `v{version_bump.new}` (the release workflow tags the "
             "Version on `main`); do not also run `nemar dataset release`, which would cut a "
             "further patch.",
         ]
@@ -334,7 +359,7 @@ def _path_list(paths: list[str]) -> str:
 
 
 def release_status(
-    clone: Path, version: str, failed: dict[str, str] | None = None
+    clone: Path, version: str, failed: dict[str, str] | None = None, label: str = BASE
 ) -> tuple[str, bool]:
     """(note for the body or the refusal, whether a real run may proceed).
 
@@ -349,12 +374,12 @@ def release_status(
         tag = _git(clone, "rev-parse", "--verify", "-q", f"refs/tags/{version}^{{commit}}").strip()
     except PrRefusal:
         return (
-            f"no tag {version} exists, so `main` ({head[:12]}) cannot be compared to the release "
-            "that serves the annexed inputs; a real run needs the release tag",
+            f"no tag {version} exists, so `{label}` ({head[:12]}) cannot be compared to the "
+            "release that serves the annexed inputs; a real run needs the release tag",
             False,
         )
     if tag == head:
-        return f"`main` is the release {version} ({head[:12]})", True
+        return f"`{label}` is the release {version} ({head[:12]})", True
     moved = _paths(clone, "diff", "--name-only", "--no-renames", tag, head)
     stale = sorted(set(failed) & moved)
     if stale:
@@ -368,16 +393,16 @@ def release_status(
     other = sorted(p for p in moved if not (p.startswith(UNRELEASED_DIRS) or p in UNRELEASED_FILES))
     if other:
         return (
-            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}). "
-            "The geometry files in this pull request were computed from `main`, which the patch "
-            "release will publish together with these changes (annexed inputs are unchanged "
+            f"`{label}` ({head[:12]}) is ahead of release {version} ({tag[:12]}). "
+            f"The geometry files in this pull request were computed from `{label}`, which the "
+            "patch release will publish together with these changes (annexed inputs are unchanged "
             f"since the release). {len(other)} path(s) outside `.nemar/`, `.github/` and "
             f"`.gitattributes` changed since the release; every changed path, sorted:\n"
             f"{_path_list(sorted(moved))}",
             True,
         )
     return (
-        f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
+        f"`{label}` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
         "`.nemar/`, `.github/` and `.gitattributes`",
         True,
     )
@@ -394,9 +419,9 @@ def _same_remote(a: str, b: str) -> bool:
     return a.removesuffix("/").removesuffix(".git") == b.removesuffix("/").removesuffix(".git")
 
 
-def _plan_bump(clone: Path) -> tuple[str, str]:
-    """(current, next) Version for `--bump-version`, from `main`'s description, the release tags
-    and `CHANGES`; a `PrRefusal` when no safe bump exists (see `versionbump`)."""
+def _plan_bump(clone: Path) -> versionbump.Plan:
+    """The Version the pull request carries (see `versionbump.plan`), from the branch's
+    description, `main`'s, the release tags and `CHANGES`; a `PrRefusal` when none can be chosen."""
     try:
         description = (clone / DESCRIPTION).read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -410,11 +435,19 @@ def _plan_bump(clone: Path) -> tuple[str, str]:
         ),
         None,
     )
+    main_description = _git(clone, "show", f"origin/{BASE}:{DESCRIPTION}", neutral=True)
     tags = _git(clone, "tag", "--list").split()
     try:
-        return versionbump.plan(description, tags, changes)
+        return versionbump.plan(description, main_description, tags, changes)
     except versionbump.BumpRefusal as exc:
         raise PrRefusal(f"--bump-version: {exc}") from exc
+
+
+def _ref_commits(clone: Path) -> list[str]:
+    """Commits on the branch that are not on `main`: short sha, author, subject."""
+    out = _git(clone, "log", "-z", "--format=%h%x1f%an%x1f%s", f"origin/{BASE}..HEAD", neutral=True)
+    rows = [r.split("\x1f") for r in out.split("\0") if r.strip()]
+    return [f"`{h}` {a}: {subj}" for h, a, subj in rows]
 
 
 def open_pr(
@@ -423,6 +456,7 @@ def open_pr(
     *,
     version: str | None = None,
     bump_version: bool = False,
+    from_ref: str | None = None,
     dry_run: bool = False,
     surfaces_out: Path | None = None,
     urls: dict[str, str] | None = None,
@@ -434,7 +468,13 @@ def open_pr(
     out = out or sys.stdout
     pipeline.check_dataset_id(dataset_id)
     pv = pipeline_version()
-    branch, ttl = branch_name(pv), title(pv)
+    ttl = title(pv)
+    branch = from_ref or branch_name(pv)
+    pr_title = (
+        f"Integrate collaborator changes and add NEMAR-computed iEEG geometry (pipeline {pv})"
+        if from_ref
+        else ttl
+    )
     workdir = Path(workdir)
     if (workdir / dataset_id).exists():
         raise PrRefusal(
@@ -461,16 +501,21 @@ def open_pr(
         repo_url=urls.get("repo_url") or fetch.REPO_URL,
         data_url=urls.get("data_url") or fetch.DATA_URL,
         api_url=urls.get("api_url") or fetch.API_URL,
+        ref=from_ref,
     )
     clone = got.clone
-    if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != BASE:
-        raise PrRefusal(f"the clone is not on {BASE}; the pull request is made against {BASE}")
-    release_note, release_ok = release_status(clone, got.version, got.failed)
+    on = from_ref or BASE
+    if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != on:
+        raise PrRefusal(f"the clone is not on {on}; the pull request is made against {BASE}")
+    release_note, release_ok = release_status(clone, got.version, got.failed, label=on)
     if not release_ok and not dry_run:
         raise PrRefusal(release_note)
     if not release_ok:
         out.write(f"warning: {release_note} (a real run refuses)\n")
-    if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
+    if (
+        not from_ref
+        and _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip()
+    ):
         raise PrRefusal(f"branch {branch} already exists on the remote; nothing was pushed")
     bump = _plan_bump(clone) if bump_version else None
     checked_out = _paths(clone, "ls-files")
@@ -501,9 +546,9 @@ def open_pr(
         raise PrRefusal(f"the work tree differs from main outside the reported changes: {shown}")
 
     to_stage = set(changes["add"]) | set(changes["change"])
-    if bump:
+    if bump and not bump.kept:
         target = clone / DESCRIPTION
-        text = versionbump.apply(target.read_bytes().decode("utf-8"), bump[1])
+        text = versionbump.apply(target.read_bytes().decode("utf-8"), bump.new)
         target.write_bytes(text.encode("utf-8"))  # only the version's characters differ
         to_stage.add(DESCRIPTION)
         expected = expected | {DESCRIPTION}
@@ -522,24 +567,50 @@ def open_pr(
         release_note=release_note,
         fetch_failed=got.failed,
         version_bump=bump,
+        ref=(from_ref, _ref_commits(clone)) if from_ref else None,
     )
     check_body_size(body)
-    _git(clone, "checkout", "-q", "-b", branch)
+    if not from_ref:
+        _git(clone, "checkout", "-q", "-b", branch)
     _git(clone, "commit", "-q", "-m", ttl, what="git commit", neutral=True)
     commit = _git(clone, "rev-parse", "HEAD").strip()
     if dry_run:
-        out.write(f"branch {branch}, commit {commit}\ntitle: {ttl}\n\n{body}")
-        return PrResult(branch, commit, ttl, body, None)
+        out.write(f"branch {branch}, commit {commit}\ntitle: {pr_title}\n\n{body}")
+        return PrResult(branch, commit, pr_title, body, None)
 
     body_file = workdir / f"{dataset_id}.pr-body.md"
     body_file.write_text(body, encoding="utf-8")
+    if from_ref:
+        now = _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[:1]
+        if now != [got.commit]:
+            raise PrRefusal(
+                f"branch {branch} moved on the remote since the clone ({got.commit[:12]} -> "
+                f"{(now or ['gone'])[0][:12]}); nothing was pushed, rerun"
+            )
     _git(clone, "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push")
+    if from_ref:
+        listed = _run(
+            ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,
+             "--state", "open", "--json", "number,url"],
+            clone, "gh pr list",
+        )  # fmt: skip
+        open_prs = json.loads(listed or "[]")
+        if open_prs:
+            edit = [
+                "gh", "pr", "edit", str(open_prs[0]["number"]),
+                "--repo", f"{ORG}/{dataset_id}",
+                "--title", pr_title,
+                "--body-file", str(body_file),
+            ]  # fmt: skip
+            _run(edit, clone, "gh pr edit")
+            out.write(open_prs[0]["url"] + "\n")
+            return PrResult(branch, commit, pr_title, body, open_prs[0]["url"])
     create = [
         "gh", "pr", "create",
         "--repo", f"{ORG}/{dataset_id}",
         "--base", BASE,
         "--head", branch,
-        "--title", ttl,
+        "--title", pr_title,
         "--body-file", str(body_file),
     ]  # fmt: skip
     try:
@@ -559,4 +630,4 @@ def open_pr(
             f"branch: git -C {clone} push origin --delete {branch}"
         )
     out.write(url + "\n")
-    return PrResult(branch, commit, ttl, body, url)
+    return PrResult(branch, commit, pr_title, body, url)
