@@ -17,12 +17,8 @@ earlier releases are described only by their generated notes.
 
 ### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
 
-- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
-  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
-  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
-  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
 - **The geometry package reads renamed channels files.**
-  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel) so contact types still come from `channels.tsv`.
+  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
   A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
 - **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
   They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
@@ -38,6 +34,24 @@ earlier releases are described only by their generated notes.
   `--bump-version` keeps a branch Version that is above `main`'s and every tag, otherwise sets the next patch above both (a byte-preserving edit of the `Version` value), so the central version check passes and merging tags the release without a separate `nemar dataset release`; a `CHANGES` entry ahead of it is reported, not refused.
 - **`pr` no longer sees CRLF blobs as modified.**
   The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
+- **Release order, for operators (replaces step (d) of 0.10.36).**
+  A mirror's N.0.1 is one integration pull request: a branch from `main` that merges any collaborator branch and NEMAR's BIDS fixes, with the geometry added on top by `pr --from-ref <branch> --bump-version`.
+  Merging it into `main` tags the version (the central `run-pr-merge.yml`), and the tag push dispatches `run-version-doi.yml`, which mints the DOI; so never merge a collaborator pull request that changes `Version` on its own, and do not run `nemar dataset release` afterwards.
+  `run-pr-merge.yml` skips silently when the tag already exists, so a merge that leaves `Version` unchanged makes no release.
+  Merge 0.1.1 integration pull requests only after 0.10.37 is published (step (c) of 0.10.36 still applies): a re-pull runs the pipeline pinned to the released CLI, and a 0.10.36 checkout would regenerate the files as 0.1.0.
+  The nine open pipeline-0.1.0 pull requests (branch `nemar/ieeg-geometry-0.1.0`) are superseded: close each when its mirror's integration pull request opens.
+  Release a dataset with renamed channels only after nemarOrg/website#574 (merged to `staging`) reaches production, so the Brain panel pairs its channels.
+- **Central BIDS validation reads annexed content (nemarDatasets/.github#157).**
+  The check fetches the `git-annex` branch so the validator resolves annexed files over public remotes, and filters only errors on files it could not read; real errors that the old location-only filter hid (for example a missing `TaskName` on `on002799`) now show.
+
+## 0.10.36 - 2026-11-20
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
+  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
+  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
+  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
   `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
