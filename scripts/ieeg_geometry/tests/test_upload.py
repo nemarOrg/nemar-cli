@@ -227,3 +227,54 @@ def test_plan_is_pure_and_confined(surfaces):
     assert p.removals == [PREFIX + "gone.bin"]
     assert all(k.startswith(PREFIX) for k in p.all_keys())
     assert p.index_key == PREFIX + "index.json"
+
+
+def _edit_index(surfaces, edit):
+    path = surfaces / "geometry" / "index.json"
+    index = json.loads(path.read_text())
+    edit(index)
+    path.write_text(json.dumps(index))
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (lambda i: i.update(entries="nope"), "no entries list"),
+        (lambda i: i.update(entries=["x"]), "no meshes object"),
+        (lambda i: i["entries"][0].update(meshes=[1]), "no meshes object"),
+        (lambda i: i["entries"][0].update(meshes={"lh": "path"}), "no path string"),
+        (lambda i: i["entries"][0].update(meshes={"lh": {"path": 7}}), "no path string"),
+        (lambda i: i["entries"][0].update(meshes={"lh": {}}), "no path string"),
+        (lambda i: i["entries"][0].update(meshes={"lh": {"path": "index.json"}}), "index.json"),
+    ],
+)
+def test_a_malformed_index_is_a_refusal_not_a_traceback(edit, message, surfaces, s3, capsys):
+    log, bucket = s3
+    _edit_index(surfaces, edit)
+    assert _upload(surfaces) == 1
+    assert message in capsys.readouterr().err
+    assert _writes(_calls(log)) == [] and _keys(bucket) == []
+
+
+def test_a_symlinked_mesh_is_refused(surfaces, s3, capsys, tmp_path):
+    log, bucket = s3
+    victim = next((surfaces / "geometry" / "meshes").iterdir())
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(victim.read_bytes())
+    victim.unlink()
+    victim.symlink_to(outside)
+    assert _upload(surfaces) == 1
+    assert "symbolic link" in capsys.readouterr().err
+    assert _writes(_calls(log)) == [] and _keys(bucket) == []
+
+
+def test_a_symlinked_index_is_refused(surfaces, s3, capsys, tmp_path):
+    log, bucket = s3
+    index = surfaces / "geometry" / "index.json"
+    real = tmp_path / "real-index.json"
+    real.write_bytes(index.read_bytes())
+    index.unlink()
+    index.symlink_to(real)
+    assert _upload(surfaces) == 1
+    assert "does not exist" in capsys.readouterr().err
+    assert _writes(_calls(log)) == []

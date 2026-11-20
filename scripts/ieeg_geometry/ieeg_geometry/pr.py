@@ -10,15 +10,20 @@ pushing and opening.
 
 Refusals (`PrRefusal`, a clear message, nothing pushed): a protected or malformed id, an
 existing work directory, no git identity, a clone not on `main`, a branch that already exists on
-the remote, an errored track, an apply that changed nothing, any difference outside `changes`.
+the remote, an errored track, an apply that changed nothing, any difference outside `changes`,
+a staged set that is not exactly `changes`, a staged blob that is not the work-tree bytes (a
+git-annex filter must never turn a sidecar into a pointer), and, for a real run only, a
+remote that is not `nemarDatasets/<id>` and a `main` that moved past the released version in
+anything but `.nemar/`, `.github/` and `.gitattributes` (the pipeline reads its large inputs
+at the release).
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,7 +35,19 @@ ORG = "nemarDatasets"
 BASE = "main"
 DOCS_URL = "https://docs.nemar.org/data/ieeg-geometry/"
 BODY_LIMIT = 60_000  # GitHub refuses a pull request body over 65,536 characters
+GITHUB_BODY_MAX = 65_536  # characters GitHub accepts in a pull request body
 _TIMEOUT_S = 900
+# `git add` and `git commit` must store the bytes in the work tree. A dataset repository's
+# attributes may name the git-annex filter and the owner's machine may have it configured;
+# these settings neutralize it (the filter becomes `cat`, nothing is annexed).
+NEUTRAL_GIT_CONFIG = (
+    "filter.annex.process=",
+    "filter.annex.clean=cat",
+    "filter.annex.smudge=cat",
+    "annex.largefiles=nothing",
+    "core.attributesFile=/dev/null",
+)
+UNRELEASED_OK = (".nemar/", ".github/", ".gitattributes")  # main may change these after a release
 
 
 class PrRefusal(Exception):
@@ -54,8 +71,10 @@ def title(version: str) -> str:
     return f"Add NEMAR-computed iEEG geometry (pipeline {version})"
 
 
-def _run(cmd: list[str], cwd: Path | None, what: str) -> str:
-    env = os.environ | {"GIT_TERMINAL_PROMPT": "0"}
+def _run(
+    cmd: list[str], cwd: Path | None, what: str, env_extra: dict[str, str] | None = None
+) -> str:
+    env = os.environ | {"GIT_TERMINAL_PROMPT": "0"} | (env_extra or {})
     try:
         done = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, check=True, timeout=_TIMEOUT_S, env=env
@@ -70,18 +89,56 @@ def _run(cmd: list[str], cwd: Path | None, what: str) -> str:
     return done.stdout
 
 
-def _git(clone: Path, *args: str, what: str | None = None) -> str:
-    cmd = ["git", "-C", str(clone), "--literal-pathspecs", *args]
-    return _run(cmd, None, what or f"git {args[0]}")
+def _git(clone: Path, *args: str, what: str | None = None, neutral: bool = False) -> str:
+    """`neutral` runs git with the git-annex filter and global attributes switched off."""
+    config = [x for c in NEUTRAL_GIT_CONFIG for x in ("-c", c)] if neutral else []
+    cmd = ["git", *config, "-C", str(clone), "--literal-pathspecs", *args]
+    return _run(
+        cmd, None, what or f"git {args[0]}", {"GIT_ATTR_NOSYSTEM": "1"} if neutral else None
+    )
 
 
-def _paths(clone: Path, *args: str) -> set[str]:
-    return {p for p in _git(clone, *args, "-z").split("\0") if p}
+def _paths(clone: Path, *args: str, neutral: bool = False) -> set[str]:
+    return {p for p in _git(clone, *args, "-z", neutral=neutral).split("\0") if p}
+
+
+def check_staged(staged: set[str], expected: set[str]) -> None:
+    """The staged set must be exactly the report's changes; the refusal names the difference."""
+    missing, extra = sorted(expected - staged), sorted(staged - expected)
+    if missing or extra:
+        raise PrRefusal(
+            "the staged paths are not exactly the reported changes: "
+            f"missing {missing[:10] or 'none'}, extra {extra[:10] or 'none'}"
+        )
+
+
+def verify_staged_bytes(clone: Path, paths: set[str]) -> None:
+    """Every staged file is a regular file holding the work-tree bytes, never an annex pointer."""
+    wanted = set(paths)
+    out = _git(clone, "ls-files", "-s", "-z", neutral=True)
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        mode, sha, _stage = meta.split(" ")
+        if path not in wanted:
+            continue
+        wanted.discard(path)
+        if mode != "100644":
+            raise PrRefusal(f"{path} is staged with mode {mode}; only regular files are proposed")
+        blob = _git(clone, "cat-file", "blob", sha, neutral=True)
+        if blob.startswith(("/annex/objects/", "version https://git-annex")):
+            raise PrRefusal(f"{path} would be committed as a git-annex pointer, not its bytes")
+        disk = _git(clone, "hash-object", "--no-filters", "--", path, neutral=True).strip()
+        if disk != sha:
+            raise PrRefusal(f"the staged blob of {path} is not the file in the work tree")
+    if wanted:
+        raise PrRefusal(f"not staged: {sorted(wanted)[:10]}")
 
 
 def _status_entries(clone: Path) -> list[tuple[str, str]]:
     """(two-letter status, path) for every difference between the work tree and the index."""
-    out = _git(clone, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    out = _git(clone, "status", "--porcelain=v1", "-z", "--untracked-files=all", neutral=True)
     return [(r[:2], r[3:]) for r in out.split("\0") if r]
 
 
@@ -110,13 +167,14 @@ def _evidence(entry: OwnedPath | None) -> str:
     return f"{v.grade} ({median} against {v.reference}, {v.n_used} of {v.n_total} contacts)"
 
 
-def _group_key(entry: OwnedPath | None) -> tuple[str, str, str]:
-    v = entry.verification if entry else None
-    return (
-        entry.method if entry else "ownership record",
-        v.grade if v else "not graded",
-        v.reference if v else "-",
-    )
+def _group_key(path: str, entry: OwnedPath | None) -> tuple[str, str, str]:
+    if entry is None:
+        method = (
+            "ownership record" if path == pipeline.OWNERSHIP_REL else "not in the ownership record"
+        )
+        return (method, "not graded", "-")
+    v = entry.verification
+    return (entry.method, v.grade if v else "not graded", v.reference if v else "-")
 
 
 def _section(
@@ -127,17 +185,15 @@ def _section(
     budget: int,
 ) -> list[str] | None:
     """One group per (method, grade, reference). `detail` True: a line with numbers per file;
-    False: paths only; None: counts only (the ownership record lists the files). None when
-    the text does not fit `budget` and a shorter form exists."""
+    False: paths only; None: counts only (the ownership record lists the added and changed
+    files). None when the text does not fit `budget` and a shorter form exists."""
     groups: dict[tuple[str, str, str], list[str]] = {}
     for path in paths:
-        groups.setdefault(_group_key(owned.get(path)), []).append(path)
+        groups.setdefault(_group_key(path, owned.get(path)), []).append(path)
     lines = [f"## {label} ({len(paths)})", ""]
     for (method, grade, reference), members in sorted(groups.items()):
         lines.append(f"### {method}, evidence {grade}, reference {reference} ({len(members)})")
         lines.append("")
-        if label == "Removed":
-            lines += ["No longer produced by the pipeline.", ""]
         if detail is None:
             lines += ["The files are listed in `.nemar/ieeg-geometry.json`.", ""]
             continue
@@ -150,11 +206,20 @@ def _section(
     return lines if fits or detail is None else None
 
 
+def _removed_section(paths: list[str]) -> list[str]:
+    """Removed files are always listed in short form: they are no longer in the ownership
+    record, so the record cannot stand in for the list."""
+    lines = [f"## Removed ({len(paths)}): no longer produced by the pipeline", ""]
+    lines += [f"- `{p}`" for p in paths]
+    return [*lines, ""]
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
     *,
     n_surface_sets: int,
+    release_note: str | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -168,6 +233,7 @@ def build_body(
         "",
         f"- Dataset: `{report['dataset']}`, version `{report['dataset_version']}`, "
         f"source commit `{report['source_commit']}`",
+        *([f"- Source: {release_note}"] if release_note else []),
         f"- Pipeline: `{report['pipeline_version']}`",
         f"- Files: {len(added)} added, {len(changed)} changed, {len(removed)} removed",
         f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
@@ -180,19 +246,70 @@ def build_body(
         '"Computed by NEMAR" and names its source file and method.',
         "",
     ]
-    for label, paths in (("Added", added), ("Changed", changed), ("Removed", removed)):
+    reserved = len("\n".join(_removed_section(removed))) if removed else 0
+    for label, paths in (("Added", added), ("Changed", changed)):
         if not paths:
             continue
-        used = len("\n".join(lines))
+        used = len("\n".join(lines)) + reserved
         for detail in (True, False, None):
             section = _section(label, paths, owned, detail, limit - used)
             if section is not None:
                 lines += section
                 break
+    if removed:
+        lines += _removed_section(removed)
     return "\n".join(lines).rstrip() + "\n"
 
 
+def check_body_size(body: str) -> None:
+    if len(body) > GITHUB_BODY_MAX:
+        raise PrRefusal(
+            f"the pull request body is {len(body)} characters; GitHub accepts {GITHUB_BODY_MAX}"
+        )
+
+
+# ---- the release ------------------------------------------------------------------------------
+
+
+def release_status(clone: Path, version: str) -> tuple[str, bool]:
+    """(note for the body, whether a real run may proceed). The pipeline reads small files
+    from `main` and large ones from the release `version`; they agree when `main` is the
+    release or moved only under `.nemar/`, `.github/` and `.gitattributes`."""
+    head = _git(clone, "rev-parse", "HEAD").strip()
+    try:
+        tag = _git(clone, "rev-parse", "--verify", "-q", f"refs/tags/{version}^{{commit}}").strip()
+    except PrRefusal:
+        return (
+            f"no tag {version} exists, so `main` ({head[:12]}) cannot be compared to the release",
+            False,
+        )
+    if tag == head:
+        return f"`main` is the release {version} ({head[:12]})", True
+    moved = _paths(clone, "diff", "--name-only", "--no-renames", tag, head)
+    other = sorted(p for p in moved if not p.startswith(UNRELEASED_OK))
+    if other:
+        return (
+            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) and changed "
+            f"{len(other)} path(s) outside `.nemar/`, `.github/` and `.gitattributes` "
+            f"(first: `{other[0]}`)",
+            False,
+        )
+    return (
+        f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
+        "`.nemar/`, `.github/` and `.gitattributes`",
+        True,
+    )
+
+
 # ---- the flow ---------------------------------------------------------------------------------
+
+
+def _default_remote(dataset_id: str) -> str:
+    return fetch.REPO_URL.format(id=dataset_id)
+
+
+def _same_remote(a: str, b: str) -> bool:
+    return a.removesuffix("/").removesuffix(".git") == b.removesuffix("/").removesuffix(".git")
 
 
 def open_pr(
@@ -203,8 +320,11 @@ def open_pr(
     dry_run: bool = False,
     surfaces_out: Path | None = None,
     urls: dict[str, str] | None = None,
+    expect_remote: str | None = None,
     out=None,
 ) -> PrResult:
+    """`expect_remote` is the repository URL a real run may push to (default: the dataset's
+    own `nemarDatasets/<id>`); the command line never changes it, tests do."""
     out = out or sys.stdout
     pipeline.check_dataset_id(dataset_id)
     pv = pipeline_version()
@@ -214,6 +334,13 @@ def open_pr(
         raise PrRefusal(
             f"{workdir / dataset_id} exists; the pull request starts from a fresh clone"
         )
+    urls = urls or {}
+    repo_url = (urls.get("repo_url") or fetch.REPO_URL).format(id=dataset_id)
+    allowed = (expect_remote or _default_remote(dataset_id)).format(id=dataset_id)
+    if not dry_run and not _same_remote(repo_url, allowed):
+        raise PrRefusal(
+            f"{repo_url} is not {allowed}; a real run pushes only to the dataset's own repository"
+        )
     workdir.mkdir(parents=True, exist_ok=True)
     try:
         _run(["git", "var", "GIT_AUTHOR_IDENT"], workdir, "git identity")
@@ -221,7 +348,6 @@ def open_pr(
         raise PrRefusal(
             "no git identity: set user.name and user.email (the commit is yours)"
         ) from exc
-    urls = urls or {}
     got = fetch.fetch_files(
         dataset_id,
         workdir,
@@ -233,6 +359,11 @@ def open_pr(
     clone = got.clone
     if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != BASE:
         raise PrRefusal(f"the clone is not on {BASE}; the pull request is made against {BASE}")
+    release_note, release_ok = release_status(clone, got.version)
+    if not release_ok and not dry_run:
+        raise PrRefusal(f"{release_note}; the pipeline's inputs may differ from the release")
+    if not release_ok:
+        out.write(f"warning: {release_note} (a real run refuses)\n")
     if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
         raise PrRefusal(f"branch {branch} already exists on the remote; nothing was pushed")
     checked_out = _paths(clone, "ls-files")
@@ -263,52 +394,53 @@ def open_pr(
         raise PrRefusal(f"the work tree differs from main outside the reported changes: {shown}")
 
     for rel in sorted(set(changes["add"]) | set(changes["change"])):
-        _git(clone, "add", "--", rel)
+        _git(clone, "add", "--", rel, neutral=True)
     for rel in sorted(changes["remove"]):
-        _git(clone, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel)
-    staged = _paths(clone, "diff", "--cached", "--name-only")
-    if not staged or not staged <= expected:
-        odd = ", ".join(sorted(staged - expected)[:10]) or "none staged"
-        raise PrRefusal(f"the staged paths do not match the reported changes ({odd})")
-    _git(clone, "checkout", "-q", "-b", branch)
-    _git(clone, "commit", "-q", "-m", ttl, what="git commit")
-    commit = _git(clone, "rev-parse", "HEAD").strip()
-
+        _git(clone, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel, neutral=True)
+    check_staged(_paths(clone, "diff", "--cached", "--name-only", "--no-renames"), expected)
+    verify_staged_bytes(clone, set(changes["add"]) | set(changes["change"]))
     ownership = read_ownership(clone)
     owned = {e.path: e for e in ownership.entries} if ownership else {}
-    body = build_body(report, owned, n_surface_sets=len(report.get("surface_entries", [])))
+    body = build_body(
+        report,
+        owned,
+        n_surface_sets=len(report.get("surface_entries", [])),
+        release_note=release_note,
+    )
+    check_body_size(body)
+    _git(clone, "checkout", "-q", "-b", branch)
+    _git(clone, "commit", "-q", "-m", ttl, what="git commit", neutral=True)
+    commit = _git(clone, "rev-parse", "HEAD").strip()
     if dry_run:
         out.write(f"branch {branch}, commit {commit}\ntitle: {ttl}\n\n{body}")
         return PrResult(branch, commit, ttl, body, None)
 
+    body_file = workdir / f"{dataset_id}.pr-body.md"
+    body_file.write_text(body, encoding="utf-8")
     _git(clone, "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push")
-    with tempfile.TemporaryDirectory(dir=workdir, prefix=".pr-body-") as tmp:
-        body_file = Path(tmp) / "body.md"
-        body_file.write_text(body, encoding="utf-8")
-        printed = _run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--repo",
-                f"{ORG}/{dataset_id}",
-                "--base",
-                BASE,
-                "--head",
-                branch,
-                "--title",
-                ttl,
-                "--body-file",
-                str(body_file),
-            ],  # fmt: skip
-            clone,
-            "gh pr create",
-        )
+    create = [
+        "gh", "pr", "create",
+        "--repo", f"{ORG}/{dataset_id}",
+        "--base", BASE,
+        "--head", branch,
+        "--title", ttl,
+        "--body-file", str(body_file),
+    ]  # fmt: skip
+    try:
+        printed = _run(create, clone, "gh pr create")
+    except PrRefusal as exc:
+        raise PrRefusal(
+            f"branch {branch} was pushed to origin but the pull request was not opened ({exc}). "
+            f"Either open it by hand: {shlex.join(create)} (run in {clone}); or delete the "
+            f"pushed branch: git -C {clone} push origin --delete {branch}"
+        ) from exc
     lines = [ln.strip() for ln in printed.splitlines() if ln.strip()]
     url = lines[-1] if lines and lines[-1].startswith("http") else None
     if url is None:
         raise PrRefusal(
-            f"branch {branch} was pushed but gh printed no pull request URL: {printed.strip()}"
+            f"branch {branch} was pushed but gh printed no pull request URL ({printed.strip()}). "
+            f"Open it by hand: {shlex.join(create)} (run in {clone}); or delete the pushed "
+            f"branch: git -C {clone} push origin --delete {branch}"
         )
     out.write(url + "\n")
     return PrResult(branch, commit, ttl, body, url)

@@ -178,6 +178,7 @@ def open_pr(args: argparse.Namespace, urls: dict[str, str] | None = None) -> int
             dry_run=args.dry_run,
             surfaces_out=args.surfaces_out,
             urls=urls,
+            expect_remote=(urls or {}).get("repo_url"),  # only tests pass urls
         )
     except (pr.PrRefusal, pipeline.RefusedDataset, fetch.FetchError, GeometryRefusal) as exc:
         print(f"refused: {exc}", file=sys.stderr)

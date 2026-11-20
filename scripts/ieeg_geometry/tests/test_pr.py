@@ -7,7 +7,6 @@ runs), `gh` is a local executable that records its arguments, and nothing reache
 import dataclasses
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,10 +24,34 @@ BRANCH = f"nemar/ieeg-geometry-{pipeline_version()}"
 TITLE = f"Add NEMAR-computed iEEG geometry (pipeline {pipeline_version()})"
 
 
+EXTRAS = {  # files the fetch never checks out: they must survive in the commit's tree
+    "participants.tsv": "participant_id\nsub-1\n",
+    "sub-1/ieeg/sub-1_task-rest_ieeg.edf": "not a recording\n",
+    "derivatives/other/result.bin": "bytes\n",
+}
+
+
+def remote_repo(remote: Remote) -> Path:
+    return Path(remote.repo_url.format(id=DATASET_ID).removeprefix("file://"))
+
+
+def _advance(bare: Path, tmp: Path, files: dict[str, str]) -> None:
+    """A commit on the hosted main after the release tag."""
+    work = tmp / "advance"
+    _git(tmp, "clone", "-q", str(bare), str(work))
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "after the release")
+    _git(work, "push", "-q", "origin", "main")
+
+
 def _bare(remote: Remote, root: Path) -> tuple[Remote, Path]:
     """Serve the dataset from a bare repository, as a hosting remote would."""
     bare = root / "bare" / DATASET_ID
     bare.parent.mkdir(parents=True)
+    _git(remote_repo(remote), "tag", VERSION)  # the release the data plane serves
     _git(
         root,
         "clone",
@@ -51,7 +74,12 @@ def owner_identity(monkeypatch):
 
 @pytest.fixture
 def env(source, tmp_path, monkeypatch):  # noqa: F811
-    remote = build_remote(source, tmp_path / "remote")
+    with_extras = tmp_path / "src"
+    shutil.copytree(source, with_extras)
+    for rel, text in EXTRAS.items():
+        (with_extras / rel).parent.mkdir(parents=True, exist_ok=True)
+        (with_extras / rel).write_text(text)
+    remote = build_remote(with_extras, tmp_path / "remote")
     served, bare = _bare(remote, tmp_path / "hosting")
     log, _ = standins.activate(monkeypatch, tmp_path / "standins")
     return served, bare, log, tmp_path / "w"
@@ -62,7 +90,7 @@ def _calls(log: Path) -> list[dict]:
 
 
 def _refs(bare: Path) -> list[str]:
-    out = _git(bare, "for-each-ref", "--format=%(refname)")
+    out = _git(bare, "for-each-ref", "--format=%(refname)", "refs/heads")
     return sorted(out.split())
 
 
@@ -94,6 +122,9 @@ def test_the_pull_request_has_one_commit_with_exactly_the_reported_paths(env, tm
     names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
     assert sorted(names) == expected
     assert _git(bare, "rev-parse", "main").strip() == served.commit
+    # files the fetch never checked out are still in the commit's tree
+    tree = set(_git(bare, "ls-tree", "-r", "--name-only", BRANCH).split("\n"))
+    assert set(EXTRAS) <= tree
     # only the one branch was pushed
     assert _refs(bare) == ["refs/heads/main", f"refs/heads/{BRANCH}"]
 
@@ -261,6 +292,12 @@ def test_a_gh_failure_is_reported_with_the_pushed_branch(env, monkeypatch, capsy
     err = capsys.readouterr().err
     assert "gh pr create failed" in err and "HTTP 403" in err
     assert f"refs/heads/{BRANCH}" in _refs(bare)  # the push happened before gh ran
+    # the message says how to proceed: by hand with the saved body, or delete the branch
+    body_file = work / f"{DATASET_ID}.pr-body.md"
+    assert body_file.read_text().startswith("This pull request adds")
+    assert f"gh pr create --repo nemarDatasets/{DATASET_ID} --base main --head {BRANCH}" in err
+    assert str(body_file) in err
+    assert f"push origin --delete {BRANCH}" in err
 
 
 def test_the_branch_is_named_for_the_pipeline_version():
@@ -268,7 +305,171 @@ def test_the_branch_is_named_for_the_pipeline_version():
     assert pr.title("1.2.3") == "Add NEMAR-computed iEEG geometry (pipeline 1.2.3)"
 
 
-def test_git_runs_with_the_standins_only_on_path(env):
-    # the stand-in gh is what the code finds, never a real GitHub client
-    assert "standins" in (shutil.which("gh") or "")
-    assert subprocess.run(["git", "--version"], capture_output=True).returncode == 0
+# ---- review round 1 ---------------------------------------------------------------------------
+
+
+def _annex_like_filter(monkeypatch, tmp_path):
+    """The owner's machine: a global filter that turns file content into a pointer."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    attributes = tmp_path / "attributes"
+    attributes.write_text("* filter=annex\n")
+    for i, (key, value) in enumerate(
+        [
+            ("filter.annex.smudge", "cat"),
+            ("filter.annex.clean", "sed 's|^|/annex/objects/POINTER |'"),
+            ("core.attributesFile", str(attributes)),
+        ]
+    ):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", value)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "3")
+
+
+def test_an_annex_filter_never_turns_a_sidecar_into_a_pointer(env, tmp_path, monkeypatch):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {".gitattributes": "* filter=annex\n"})
+    _git(bare, "tag", "-f", VERSION, "main")  # the attributes belong to the release
+    _annex_like_filter(monkeypatch, tmp_path / "owner")
+    assert _pr(served, work) == 0
+    clone = work / DATASET_ID
+    changed = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert changed
+    for rel in changed:
+        committed = _git(bare, "show", f"{BRANCH}:{rel}")
+        assert committed == (clone / rel).read_text(), rel
+        assert not committed.startswith("/annex/objects/")
+
+
+def test_check_staged_names_missing_and_extra_paths():
+    pr.check_staged({"a", "b"}, {"a", "b"})
+    with pytest.raises(pr.PrRefusal, match=r"missing \['b'\]"):
+        pr.check_staged({"a"}, {"a", "b"})
+    with pytest.raises(pr.PrRefusal, match=r"extra \['z'\]"):
+        pr.check_staged({"a", "b", "z"}, {"a", "b"})
+
+
+def test_a_staged_symlink_or_pointer_is_refused(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "target").write_text("x")
+    (repo / "link").symlink_to("target")
+    (repo / "pointer.json").write_text("/annex/objects/SHA256E-s1--abc\n")
+    (repo / "ok.json").write_text("{}\n")
+    _git(repo, "add", "-A")
+    pr.verify_staged_bytes(repo, {"ok.json"})
+    with pytest.raises(pr.PrRefusal, match="mode 120000"):
+        pr.verify_staged_bytes(repo, {"link"})
+    with pytest.raises(pr.PrRefusal, match="annex pointer"):
+        pr.verify_staged_bytes(repo, {"pointer.json"})
+    (repo / "ok.json").write_text("changed after staging\n")
+    with pytest.raises(pr.PrRefusal, match="not the file in the work tree"):
+        pr.verify_staged_bytes(repo, {"ok.json"})
+    with pytest.raises(pr.PrRefusal, match="not staged"):
+        pr.verify_staged_bytes(repo, {"nothing.json"})
+
+
+REPORT = {
+    "dataset": "on1",
+    "dataset_version": "v1",
+    "source_commit": "abc",
+    "pipeline_version": "1",
+    "changes": {
+        "add": [f"sub-{i}/f{i}.tsv" for i in range(300)],
+        "change": [],
+        "remove": ["sub-old/gone_electrodes.tsv", "sub-old/gone_coordsystem.json"],
+    },
+}
+
+
+def test_removed_paths_are_always_listed_in_short_form():
+    for limit in (10**6, 3000, 100):
+        body = pr.build_body(REPORT, {}, n_surface_sets=0, limit=limit)
+        assert "## Removed (2): no longer produced by the pipeline" in body
+        assert "- `sub-old/gone_electrodes.tsv`" in body
+        assert "- `sub-old/gone_coordsystem.json`" in body
+    counts_only = pr.build_body(REPORT, {}, n_surface_sets=0, limit=100)
+    added, _, removed = counts_only.partition("## Removed")
+    assert "listed in `.nemar/ieeg-geometry.json`" in added
+    assert "ownership" not in removed
+    assert "No longer" not in added and "sub-old" not in added
+
+
+def test_a_body_over_githubs_limit_is_refused_before_anything_is_pushed():
+    huge = dict(
+        REPORT,
+        changes={"add": [], "change": [], "remove": [f"p/{i:06d}" + "x" * 60 for i in range(2000)]},
+    )
+    body = pr.build_body(huge, {}, n_surface_sets=0)
+    assert len(body) > pr.GITHUB_BODY_MAX
+    with pytest.raises(pr.PrRefusal, match="GitHub accepts"):
+        pr.check_body_size(body)
+    pr.check_body_size("fits")
+
+
+def test_a_main_ahead_of_the_release_only_under_nemar_is_recorded_in_the_body(env, tmp_path):
+    served, bare, log, work = env
+    _advance(
+        bare,
+        tmp_path,
+        {
+            ".nemar/metadata.json": "{}\n",
+            ".github/workflows/x.yml": "x\n",
+            ".gitattributes": "* annex.backend=SHA256E\n",
+        },
+    )
+    assert _pr(served, work) == 0
+    body = _calls(log)[0]["body"]
+    assert (
+        "is ahead of release" in body
+        and "only under `.nemar/`, `.github/` and `.gitattributes`" in body
+    )
+
+
+def test_a_main_ahead_of_the_release_in_dataset_files_is_refused_for_a_real_run(
+    env, tmp_path, capsys
+):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"sub-1/ieeg/sub-1_new_electrodes.tsv": "name\tx\ty\tz\n"})
+    assert _pr(served, work) == 1
+    err = capsys.readouterr().err
+    assert "ahead of release" in err and "outside `.nemar/`, `.github/` and `.gitattributes`" in err
+    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+    # a dry run goes on, with a warning and the note in the printed body
+    assert _pr(served, tmp_path / "w2", dry=True) == 0
+    out = capsys.readouterr().out
+    assert "warning: `main`" in out and "(a real run refuses)" in out
+    assert "- Source: `main`" in out
+
+
+def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
+    served, bare, log, work = env
+    _git(bare, "tag", "-d", VERSION)
+    assert _pr(served, work) == 1
+    assert f"no tag {VERSION} exists" in capsys.readouterr().err
+    assert _refs(bare) == ["refs/heads/main"]
+
+
+def test_a_real_run_refuses_a_remote_that_is_not_the_datasets_own(env):
+    served, bare, log, work = env
+    with pytest.raises(pr.PrRefusal, match="pushes only to the dataset's own repository"):
+        pr.open_pr(DATASET_ID, work, version=VERSION, urls=served.urls())
+    assert not work.exists() and _refs(bare) == ["refs/heads/main"]
+    # a dry run may read any remote
+    pr.open_pr(
+        DATASET_ID,
+        work,
+        version=VERSION,
+        urls=served.urls(),
+        dry_run=True,
+        out=open("/dev/null", "w"),
+    )
+
+
+def test_a_clone_that_is_not_on_main_is_refused(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _git(bare, "branch", "other", "main")
+    _git(bare, "symbolic-ref", "HEAD", "refs/heads/other")
+    assert _pr(served, work) == 1
+    assert "not on main" in capsys.readouterr().err
+    assert not _calls(log)

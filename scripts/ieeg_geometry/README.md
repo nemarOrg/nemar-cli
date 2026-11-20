@@ -17,7 +17,10 @@ cd scripts/ieeg_geometry && uv run pytest -q
 `pr` and `upload-surfaces` are run by the owner, from their own machine, with their own `gh` login, git identity and AWS profile.
 `pr` clones the dataset's `main` into a fresh `DIR/<id>`, runs the pipeline with `--apply`, refuses when a track errored, when nothing changed, or when the work tree differs from `main` in anything but the report's `changes`, commits those paths once on `nemar/ieeg-geometry-<pipeline version>` with the title "Add NEMAR-computed iEEG geometry (pipeline <version>)", pushes only that branch and opens the pull request against `main` with `gh pr create`; it never merges and never force-pushes, and it refuses a branch that already exists on the remote.
 The body lists every file with its method and evidence grade (shortened in steps only when it would pass GitHub's size limit).
-`--dry-run` does everything but the push and the pull request, and prints the body.
+`git add` and `git commit` run with the git-annex filter neutralized, and every staged file must be a regular file whose blob is the work-tree bytes (never an annex pointer), with the staged set exactly the report's `changes`.
+A real run also refuses a remote that is not `nemarDatasets/<id>`, a missing release tag, and a `main` that moved past the release in anything but `.nemar/`, `.github/` and `.gitattributes` (the pipeline reads large inputs at the release); the body records where `main` stands against the release.
+If `gh pr create` fails after the push, the message gives the command to open the pull request by hand (the body is saved as `DIR/<id>.pr-body.md`) and the command to delete the pushed branch.
+`--dry-run` does everything but the push and the pull request, prints the body, and warns when a real run would refuse for the release reason.
 `upload-surfaces` uses the `aws` command line tool (as `scripts/zarr/generate_zarr.py` does, no boto3): it lists `s3://<bucket>/<id>/zarr/geometry/` (bucket `nemar` by default), uploads the meshes the new index references (a content-addressed mesh already there is skipped), then `index.json`, then removes keys under that prefix the index no longer references; no other key is listed, written or removed.
 Both refuse `nm000103` to `nm000107` and `nm099998`.
 `generate_zarr.py --wipe` leaves the `geometry/` prefix in place.
