@@ -88,6 +88,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T14:49-08:00 | Q15: N1 drafts targeted notes for all listed audiences (OME-Zarr/Zarr, hdmf-zarr/NWB, BEP 045 threads, MNE-Python 13429); the owner sends them | owner |  |
 | 2026-11-20T14:58-08:00 | Q31 (revises Q15): no notes in ome/ngff, zarr-specs, hdmf-zarr, BIDS GitHub threads or MNE issues; announcements go to biosignal community venues (EEGLAB and others the owner names) | owner |  |
 | 2026-11-20T14:59-08:00 | Q32: RFC-0001 community notes go to the EEGLAB mailing list, the MNE Forum and Neurostars (plus the email, LinkedIn and BIDS Google group) | owner |  |
+| 2026-11-20T15:09-08:00 | No lead session is running; the owner asks the manager to proceed: lead work (checkpoint cards, proposals P1-P3, S1 input) goes to a dispatched lead-tier agent (Opus xhigh) | owner |  |
 
 ## Log
 
@@ -166,3 +167,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:01-08:00 | proposal P3 opened: Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) |
 | 2026-11-20T15:01-08:00 | N1 merged (0585cc96); stale card text proposed to the lead as P3 |
 | 2026-11-20T15:01-08:00 | Pause: nothing dispatchable. Waits on the lead: S1 scan results, B5 card (C1), R3 card (C1a), P1 runbook rule, P2 Store Contract card, P3 card N1 text. Waits on owner: O5 (after B5, S1, mail epic #2260 P1-P3); Q16 due 2027-01-15 |
+| 2026-11-20T15:09-08:00 | Resumed on owner instruction; lead-C1 (Opus xhigh) dispatched for C1 (B5), C1a (R3), P1, P2 (SC1 card), P3, S1 input; Agents today 38/40 |
+| 2026-11-20T15:11-08:00 | Owner: EDF+D gap session remi:18769 is nearly stalled; manager asked it for output path, summary, method; lead-C1 told |
