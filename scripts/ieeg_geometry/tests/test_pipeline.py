@@ -797,7 +797,11 @@ def test_a_rerun_on_an_applied_tree_gives_a_byte_identical_surface_index(remote,
 
 def test_a_registration_refusal_record_carries_the_measurement():
     reg = freesurfer.RegistrationCheck(
-        side_fraction=0.9, centroid_mm=6.25, extent_error=0.2, affine_residual_mm=20.0
+        n_sampled=2000,
+        side_fraction=0.9,
+        centroid_mm=6.25,
+        extent_error=0.2,
+        affine_residual_mm=20.0,
     )
     assert pipeline._registration_numbers(reg) == {
         "registration_side_fraction": 0.9,
