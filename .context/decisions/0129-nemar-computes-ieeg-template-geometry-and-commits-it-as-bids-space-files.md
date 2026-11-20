@@ -47,7 +47,7 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
 - A one-time N.0.1 per mirror that gains geometry mints one version DOI each; re-pulls regenerate the files instead of conflicting with them.
 - Positions from an affine transform (`talairach.xfm`) and SPM spaces are approximate by a few millimeters; their sidecars say so, and the website labels them approximate as ADR 0033 already does for template variants.
 - sEEG depth contacts discriminate frames poorly; the thresholds are read against the dry-run report over all 167 datasets before any dataset pull request is opened.
-- The pipeline now owns paths inside datasets, so a hand edit to one of them is overwritten at the next regeneration; the method page says so.
+- The pipeline now owns paths inside datasets. Each owned file's hash is recorded, so a hand edit is detected: the edited file (with its pair) is kept and reported, never overwritten or deleted, and it is no longer regenerated; the method page says so.
 
 ## Alternatives considered
 
