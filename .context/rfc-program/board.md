@@ -66,7 +66,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - |  | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | blocked | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | local 9ada28f0 (ADR 0131); push after dev merge and A1 merged (0130 gap) |
-| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | blocked | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | waits on dev merge push (retry running); then impl-A1 pushes 9321a78b (ADR 0130) and opens PR |
+| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | active | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | impl-A1 merging base 068c1306, gates, push, open PR |
 | S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | - |  | 2026-11-20T12:57-08:00 | 2d | impl-R1 running |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - |  | - | - | owner step after R1 merges |
@@ -123,9 +123,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|---|---|
 | impl-V1 | implementer | claude-sonnet | Sonnet | V1 | 2026-11-20T13:10-08:00 | done |
 | impl-A2 | implementer | claude-opus | Opus xhigh | A2 | 2026-11-20T12:57-08:00 | done |
-| impl-A1 | implementer | claude-sonnet | Sonnet high | A1 | 2026-11-20T12:57-08:00 | done |
+| impl-A1 | implementer | claude-sonnet | Sonnet high | A1 | 2026-11-20T12:57-08:00 | running |
 | impl-R1 | implementer | claude-sonnet | Sonnet xhigh | R1 | 2026-11-20T12:57-08:00 | running |
 | rev-V1-code | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
 | rev-V1-tests | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
-| lead-devmerge | lead | claude-opus | Opus xhigh | - | 2026-11-20T13:10-08:00 | running |
+| lead-devmerge | lead | claude-opus | Opus xhigh | - | 2026-11-20T13:10-08:00 | done |
 | rev-V1-delta | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:18-08:00 | done |
