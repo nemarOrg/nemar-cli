@@ -475,3 +475,15 @@ def test_a_clone_that_is_not_on_main_is_refused(env, tmp_path, capsys):
     assert "not on main" in capsys.readouterr().err
     assert not _calls(log)
 
+
+def test_an_oversized_body_is_refused_before_any_branch_commit_or_push(env, monkeypatch, capsys):
+    served, bare, log, work = env
+    monkeypatch.setattr(pr, "GITHUB_BODY_MAX", 10)
+    assert _pr(served, work) == 1
+    assert "GitHub accepts 10" in capsys.readouterr().err
+    clone = work / DATASET_ID
+    assert _git(clone, "branch", "--list", BRANCH).strip() == ""
+    assert _git(clone, "rev-list", "--count", "main..HEAD").strip() == "0"
+    assert _refs(bare) == ["refs/heads/main"]
+    assert not _calls(log)
+
