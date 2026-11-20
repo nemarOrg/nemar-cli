@@ -275,8 +275,31 @@ describe("the ownership record", () => {
         ".nemar/corrections.jsonl": {},
       }),
     );
-    expect(owned).toMatchObject({ status: "ok", paths: [SIDECAR, OUT].sort(), ignored: 5 });
-    expect(owned.hashes.get(OUT)).toBeNull();
+    expect(owned).toEqual({
+      status: "ok",
+      paths: [SIDECAR, OUT].sort(),
+      ignored: 5,
+      hashes: new Map([
+        [OUT, null],
+        [SIDECAR, null],
+      ]),
+    });
+  });
+
+  test("reads the hash the record holds for each path, null where it holds none or a malformed one", () => {
+    const good = "a".repeat(64);
+    const owned = readPipelineOwned(
+      record({ [OUT]: { output_sha256: good }, [SIDECAR]: { output_sha256: "not-a-hash" } }),
+    );
+    expect(owned).toEqual({
+      status: "ok",
+      paths: [SIDECAR, OUT].sort(),
+      ignored: 0,
+      hashes: new Map([
+        [OUT, good],
+        [SIDECAR, null],
+      ]),
+    });
   });
 
   test("a file that does not parse, or is not the record, is unreadable, never none", () => {
@@ -289,7 +312,12 @@ describe("the ownership record", () => {
     ]) {
       expect(readPipelineOwned(bytes).status).toBe("unreadable");
     }
-    expect(readPipelineOwned(null)).toMatchObject({ status: "absent", paths: [], ignored: 0 });
+    expect(readPipelineOwned(null)).toEqual({
+      status: "absent",
+      paths: [],
+      ignored: 0,
+      hashes: new Map(),
+    });
   });
 
   test("dropping a path leaves the rest, sorted; dropping none leaves the bytes", () => {

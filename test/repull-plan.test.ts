@@ -1245,6 +1245,8 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
       status: string;
       ignored: number;
       paths: Array<{ path: string; upstream_wins: boolean }>;
+      edited: string[];
+      unowned: string[];
     };
 
   describe("NEMAR's main holds the pipeline's outputs and nothing else is NEMAR's", () => {
@@ -1283,9 +1285,11 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
     });
 
     test("they are listed in their own section, and the ownership record is never a path", () => {
-      expect(pipeline(body)).toMatchObject({
+      expect(pipeline(body)).toEqual({
         status: "ok",
         ignored: 0,
+        edited: [],
+        unowned: [],
         paths: OWNED.map((path) => ({ path, upstream_wins: false })).sort((a, b) =>
           a.path < b.path ? -1 : 1,
         ),
@@ -1366,7 +1370,13 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
           subtype: "nemar-modified",
         });
         expect(counts(body)).toMatchObject({ corrections: 1, pipeline_owned: 0 });
-        expect(pipeline(body)).toMatchObject({ status: "ok", ignored: 1, paths: [] });
+        expect(pipeline(body)).toEqual({
+          status: "ok",
+          ignored: 1,
+          paths: [],
+          edited: [],
+          unowned: [PATHS.ieegInput],
+        });
         expect(automaticPlanRefusal(PLANNER_VERSION, counts(body))).not.toBeNull();
       } finally {
         fx.cleanup();
@@ -1454,7 +1464,13 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
     const fx = await buildRepullFixture({ noContributorEdits: true });
     try {
       const body = (await plan(fx)).body as Body;
-      expect(pipeline(body)).toMatchObject({ status: "absent", ignored: 0, paths: [] });
+      expect(pipeline(body)).toEqual({
+        status: "absent",
+        ignored: 0,
+        paths: [],
+        edited: [],
+        unowned: [],
+      });
       expect(counts(body)).toMatchObject({ pipeline_owned: 0, doi_count: 1 });
       expect((body.versions as { n1: string | null }).n1).toBeNull();
     } finally {
