@@ -20,3 +20,12 @@ A manual major bump on an `on` dataset is refused by the CLI, in `nemar dataset 
 The refusal is the CLI's only; the dataset repositories' `version-check` workflow does not read it (ADR 0020).
 
 The runbooks are gated: [freshness](https://docs.nemar.org/admin/operations/upstream-freshness/), [manual re-pull](https://docs.nemar.org/admin/operations/upstream-repull/) and [automatic re-pull](https://docs.nemar.org/admin/operations/upstream-repull-automatic/).
+
+## [STRICT] iEEG geometry release order
+
+The iEEG geometry pipeline (`scripts/ieeg_geometry`, ADR 0129, planner version 3) has to ship in this order:
+
+1. Deploy the backend before publishing the CLI: the Worker refuses a plan made by another planner version.
+2. Apply `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch` to `nemarDatasets/.github` (safe before or after the release: the step skips, logging `ieeg-geometry: not in this CLI release`, for a tag that lacks the package).
+3. Merge geometry pull requests only after the CLI release carrying `scripts/ieeg_geometry` is published and that patch is live.
+4. A mirror's N.0.1 is two steps: merge the pull request that `python -m ieeg_geometry pr` opened, then run `nemar dataset release <id> --type patch`.

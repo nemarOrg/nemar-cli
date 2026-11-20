@@ -1,0 +1,6 @@
+{
+    "iEEGCoordinateSystem": "ACPC",
+    "iEEGCoordinateSystemDescription": "The origin of the coordinate system is at the Anterior Commissure and the negative y-axis is passing through the Posterior Commissure. The positive z-axis is passing through a mid-hemispheric point in the superior direction.",
+    "iEEGCoordinateUnits": "m",
+    "IntendedFor": "derivatives/freesurfer-7.3.2/sub-1/mri/T1.mgz"
+}

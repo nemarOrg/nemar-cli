@@ -35,7 +35,7 @@ const OID = (n: number) => String(n).repeat(40).slice(0, 40);
 
 function body(): PlanBody {
   return {
-    planner: 2,
+    planner: 3,
     dataset: "xx099999",
     upstream: { ds: "ds099999", from_tag: "1.0.0", to_tag: "1.1.0", to_commit: OID(1) },
     nemar: { main_commit: OID(2), annex_commit: OID(15) },

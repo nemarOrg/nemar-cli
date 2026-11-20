@@ -770,6 +770,115 @@ describe("the backstop reports a run that did not", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
+// The iEEG geometry pipeline step
+// ---------------------------------------------------------------------------------------------
+
+describe("the iEEG geometry pipeline step", () => {
+  const GEOMETRY = "Install the iEEG geometry pipeline at the release";
+  // `git clone` is replaced by a copy of the tree $FIXTURE_TREE (what the tag holds); `curl` writes a
+  // tarball whose `uv` records its arguments; the checksum is accepted.
+  const fakes = (): Fakes => ({
+    git: 'dest="${@: -1}"; mkdir -p "$dest"; cp -R "$FIXTURE_TREE"/. "$dest"/',
+    curl: `out=""; while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+t="$(mktemp -d)"; mkdir "$t/uv-pkg"
+printf '#!/usr/bin/env bash\necho "uv $*" >> "$UV_LOG"\n' > "$t/uv-pkg/uv"; chmod +x "$t/uv-pkg/uv"
+tar -czf "$out" -C "$t" uv-pkg`,
+    sha256sum: "cat > /dev/null",
+  });
+  const tree = (files: Record<string, string>): string => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-repull-tag-"));
+    temps.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), content);
+    }
+    return dir;
+  };
+  const run = (fixture: string) => {
+    const logDir = mkdtempSync(join(tmpdir(), "nemar-repull-uvlog-"));
+    temps.push(logDir);
+    const uvLog = join(logDir, "uv.log");
+    return {
+      uvLog,
+      promise: runStep(GEOMETRY, {
+        fakes: fakes(),
+        env: { FIXTURE_TREE: fixture, UV_LOG: uvLog, GITHUB_PATH: "/dev/null" },
+      }),
+    };
+  };
+  const PIN = 'export const IEEG_GEOMETRY_PIPELINE_VERSION = "1.2.3";\n';
+
+  test("a tag that predates the package skips the step whole and sets nothing", async () => {
+    const { uvLog, promise } = run(tree({ "src/lib/repull/pipeline-owned.ts": "export {};\n" }));
+    const r = await promise;
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("ieeg-geometry: not in this CLI release");
+    expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+    expect(r.log).toBe("");
+    expect(existsSync(uvLog)).toBe(false);
+    expect(existsSync(join(r.dir, "runner", "uv-bin"))).toBe(false);
+  });
+
+  test("a tag with the package at the pinned version syncs it and names it", async () => {
+    const { uvLog, promise } = run(
+      tree({
+        "src/lib/repull/pipeline-owned.ts": PIN,
+        "scripts/ieeg_geometry/pyproject.toml": 'version = "1.2.3"\n',
+      }),
+    );
+    const r = await promise;
+    expect(r.status).toBe(0);
+    expect(r.envFile).toContain(
+      `NEMAR_IEEG_GEOMETRY_DIR=${join(r.dir, "runner", "nemar-cli", "scripts", "ieeg_geometry")}`,
+    );
+    expect(readFileSync(uvLog, "utf8")).toContain("sync --frozen --no-dev --project");
+    expect(r.log).toBe("");
+  });
+
+  test("a tag whose package is not the pinned version refuses with auto-cli-version", async () => {
+    const { uvLog, promise } = run(
+      tree({
+        "src/lib/repull/pipeline-owned.ts": PIN,
+        "scripts/ieeg_geometry/pyproject.toml": 'version = "9.9.9"\n',
+      }),
+    );
+    const r = await promise;
+    expect(r.status).toBe(1);
+    expect(r.log).toContain("code=auto-cli-version");
+    expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+    expect(existsSync(uvLog)).toBe(false);
+  });
+
+  test("a package directory without the pin refuses with auto-cli-version, not a skip", async () => {
+    for (const files of [
+      {
+        "src/lib/repull/pipeline-owned.ts": "export {};\n",
+        "scripts/ieeg_geometry/pyproject.toml": 'version = "1.2.3"\n',
+      },
+      { "scripts/ieeg_geometry/pyproject.toml": 'version = "1.2.3"\n' },
+    ]) {
+      const { uvLog, promise } = run(tree(files));
+      const r = await promise;
+      expect(r.status).toBe(1);
+      expect(r.log).toContain("code=auto-cli-version");
+      expect(r.stdout).toContain("::error::");
+      expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+      expect(existsSync(uvLog)).toBe(false);
+    }
+  });
+
+  test("a pin without the package directory refuses with auto-cli-version, not a skip", async () => {
+    const { uvLog, promise } = run(tree({ "src/lib/repull/pipeline-owned.ts": PIN }));
+    const r = await promise;
+    expect(r.status).toBe(1);
+    expect(r.log).toContain("code=auto-cli-version");
+    expect(r.stdout).toContain("::error::");
+    expect(r.envFile).not.toContain("NEMAR_IEEG_GEOMETRY_DIR");
+    expect(existsSync(uvLog)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
 // Drift against the deployed copy
 // ---------------------------------------------------------------------------------------------
 
