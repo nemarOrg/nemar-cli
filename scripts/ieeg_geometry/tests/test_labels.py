@@ -10,8 +10,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ieeg_geometry import labels, load_reference, read_ownership
-from ieeg_geometry.bids import GeometryRefusal
+from ieeg_geometry import labels, load_reference, read_ownership, verify
+from ieeg_geometry.bids import GeometryRefusal, discover, read_electrode_set
+from ieeg_geometry.verify import (
+    ECOG_MEDIAN_MM,
+    RULE_DEPTH,
+    RULE_ECOG,
+    RULE_ON_VERTEX,
+)
 
 FIX = Path(__file__).parent / "fixtures" / "labels"
 HEADER = "name\tx\ty\tz\tsize\n"
@@ -941,3 +947,35 @@ def test_inspect_reports_a_missing_package_version_once(tmp_path, monkeypatch):
         out.count("label proposals unavailable") == 1 and "frame" not in out.split("unavailable")[0]
     )
     assert "contacts" in out or "refused" in out  # the rest of the report still runs
+
+
+def test_blind_label_reports_the_shift_control_value_it_was_judged_by(no_sidecar):
+    prop = _only(labels.plan_dataset(no_sidecar))
+    attempt = prop.attempts[-1]
+    assert attempt.fit is not None and attempt.fit.rule_id == RULE_ON_VERTEX
+    pts = labels._finite_pts(read_electrode_set(discover(no_sidecar)[0], assume_units="mm"))
+    tree = labels._tree("fsaverage")
+    six = [
+        float(np.median(tree.query(pts + sign * verify.SHIFT_CONTROL_MM * np.eye(3)[axis])[0]))
+        for axis in range(3)
+        for sign in (-1.0, 1.0)
+    ]
+    assert prop.rule == RULE_ON_VERTEX == "on-vertex-1.0mm"
+    assert prop.shift_control_min_mm == round(min(six), 3)
+    assert attempt.fit.shift_control_median_mm == min(six)
+
+
+def test_depth_plausible_label_has_its_rule_id_and_no_shift_control(tmp_path):
+    elec = _points_file(tmp_path, _mni_points(scale=0.9))
+    _sidecar(elec, "MNI152NLin2009cAsym ")
+    prop = _only(labels.plan_dataset(tmp_path))
+    assert prop.status == labels.ACCEPTED
+    assert prop.rule == RULE_DEPTH and prop.shift_control_min_mm is None
+
+
+def test_rule_ids_come_from_the_limits_and_match_the_index_schema():
+    schema = json.loads(
+        (Path(__file__).parents[1] / "schema" / "geometry-index.v1.json").read_text()
+    )
+    assert RULE_ECOG == f"ecog-{ECOG_MEDIAN_MM:.1f}mm"
+    assert schema["$defs"]["entry"]["properties"]["fit_rule"]["enum"] == [RULE_ECOG, "depth"]

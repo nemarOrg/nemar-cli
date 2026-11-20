@@ -285,7 +285,26 @@ def test_a_damaged_sphere_reg_is_refused(ds, damage):
     assert res.outputs == []
     assert res.refusals[0].reason == "registration-check-failed"
     assert "centroid" in res.refusals[0].message
+    reg = res.refusals[0].registration  # the measurement the refusal was judged by
+    assert reg is not None and f"{reg.centroid_mm:.2f} mm from fsaverage6 pial" in (
+        res.refusals[0].message
+    )
+    assert fsm.failed_conditions(reg)
     assert res.left_out[fsm.LEFT_REGISTRATION] == 94
+    # the pipeline's decision record for that refusal carries the measurement the check judged
+    from ieeg_geometry import pipeline
+
+    analysis = pipeline.Analysis(ds, "on000001", "v1.0.0", "abc", "test")
+    analysis.fs_results = [res]
+    decision = pipeline._fs_decisions(analysis, {})[res.source.relative_to(ds).as_posix()]
+    assert decision["status"] == "refused"
+    reg = res.refusals[0].registration
+    assert reg is not None
+    nums = decision["numbers"]
+    assert nums["registration_side_fraction"] == round(reg.side_fraction, 3)
+    assert nums["registration_centroid_mm"] == round(reg.centroid_mm, 3)
+    assert nums["registration_extent_error"] == round(reg.extent_error, 3)
+    assert nums["registration_affine_residual_mm"] == round(reg.affine_residual_mm, 3)
 
 
 def test_a_sphere_reg_with_the_wrong_vertex_count_is_refused(ds):

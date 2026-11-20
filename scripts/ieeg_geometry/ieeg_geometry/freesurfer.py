@@ -47,11 +47,11 @@ from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_elec
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
-from .verify import Fit, OffsetFit, fit_with_offset
+from .verify import MIN_ECOG_CONTACTS, Fit, OffsetFit, fit_with_offset
 from .version import pipeline_version
 
 SURFACE_MAX_MM = 3.0
-MIN_CONTACTS = 3
+MIN_CONTACTS = MIN_ECOG_CONTACTS
 REG_SAMPLES = 2000
 REG_SIDE_FRACTION = 0.95
 REG_CENTROID_MM = 5.0
@@ -277,6 +277,8 @@ class Refusal:
     scope: str
     reason: str
     message: str
+    # the registration measurement, when the check ran before the refusal
+    registration: RegistrationCheck | None = None
 
 
 @dataclass
@@ -373,6 +375,14 @@ class RegistrationCheck:
         )
 
 
+class RegistrationRefusal(GeometryRefusal):
+    """`registration-check-failed` that keeps the measurement it judged."""
+
+    def __init__(self, check: RegistrationCheck) -> None:
+        super().__init__("registration-check-failed", check.describe())
+        self.check = check
+
+
 def check_registration(
     surfaces: dict[str, Surface], spheres: dict[str, np.ndarray]
 ) -> RegistrationCheck:
@@ -389,7 +399,7 @@ def check_registration(
     """
     check = measure_registration(surfaces, spheres)
     if failed_conditions(check):
-        raise GeometryRefusal("registration-check-failed", check.describe())
+        raise RegistrationRefusal(check)
     return check
 
 
@@ -596,10 +606,12 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
         LEFT_DEPTH: int((finite & ~cortical).sum()),
     }
 
-    def refuse(reason: str, message: str, left_reason: str) -> SubjectResult:
+    def refuse(
+        reason: str, message: str, left_reason: str, check: RegistrationCheck | None = None
+    ) -> SubjectResult:
         left[left_reason] = int(cortical.sum())
         result.left_out = {k: v for k, v in left.items() if v}
-        result.refusals.append(Refusal(LABEL, reason, message))
+        result.refusals.append(Refusal(LABEL, reason, message, check))
         return result
 
     try:
@@ -611,7 +623,7 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
         try:
             registration = check_registration(surfaces, spheres)
         except GeometryRefusal as exc:
-            return refuse(exc.reason, exc.message, LEFT_REGISTRATION)
+            return refuse(exc.reason, exc.message, LEFT_REGISTRATION, getattr(exc, "check", None))
     positions = np.full_like(xyz, np.nan)
     pial_dist = np.full(len(xyz), np.nan)
     mapped = np.zeros(len(xyz), dtype=bool)
@@ -624,7 +636,12 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
     idx = np.flatnonzero(mapped)
     if not len(idx) or registration is None:
         result.refusals.append(
-            Refusal(LABEL, "no-contacts-placed", f"left out: {left_out_text(result.left_out)}")
+            Refusal(
+                LABEL,
+                "no-contacts-placed",
+                f"left out: {left_out_text(result.left_out)}",
+                registration,
+            )
         )
         return result
     chosen = decision.fit.with_c_ras if decision.choice == "c_ras" else decision.fit.as_declared

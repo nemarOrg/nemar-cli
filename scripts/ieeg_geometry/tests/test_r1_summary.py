@@ -116,3 +116,24 @@ def test_oversized_member_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyP
         tar.add(f, arcname=f.name)
     with pytest.raises(ValueError, match="over"):
         r1.load_reports(tgz)
+
+
+def test_new_report_numbers_are_judged_and_rules_listed(tmp_path: Path, census: Path) -> None:
+    d = tmp_path / "reports"
+    d.mkdir()
+    spm_numbers = {"field_check_centroid_mm": 8.7, "field_check_extent_deviation": 0.087}
+    rep = report(
+        "on000001",
+        decision(
+            "written",
+            "x",
+            "specific",
+            {"label": "fsaverage", "median_mm": 0.5, "label_rule": "on-vertex-1.0mm"},
+        ),
+    )
+    rep["files"][0]["decisions"]["spm"] = decision("written", "p", "plausible", spm_numbers)
+    (d / "on000001.json").write_text(json.dumps(rep))
+    out = run(d, census)
+    assert "| spm | field_check_centroid_mm | 8.7 | 10.0 | 13.0% |" in out
+    assert "| spm | field_check_extent_deviation | 0.087 | 0.1 | 13.0% |" in out
+    assert "| labels label_rule | on-vertex-1.0mm | 1 |" in out

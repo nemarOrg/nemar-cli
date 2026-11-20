@@ -98,7 +98,14 @@
             "ecog",
             "seeg"
           ],
-          "description": "Which contacts were fitted: ECoG contacts when the file has any, else all contacts under the depth (sEEG) rule."
+          "description": "The type of the contacts that were fitted: ecog only when every fitted contact is ECoG, seeg otherwise. A file with fewer than 3 ECoG contacts is fitted over all contacts with coordinates, so a mix of types is seeg. The rule applied is fit_rule."
+        },
+        "fit_rule": {
+          "enum": [
+            "ecog-2.0mm",
+            "depth"
+          ],
+          "description": "Optional. The rule the fit was judged by: ecog-2.0mm (median at most 2.0 mm, used when the file has at least 3 ECoG contacts, the same minimum the FreeSurfer track uses) or depth (the sEEG rule over all contacts with coordinates). Absent in indexes written before the field existed."
         },
         "frame_choice": {
           "enum": [

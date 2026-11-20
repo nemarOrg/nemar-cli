@@ -297,6 +297,10 @@ def _labels_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dic
             v = p.files[0].verification
             evidence = v.grade
             numbers |= {"median_mm": v.median_mm, "p90_mm": v.p90_mm, "n_used": v.n_used}
+            if p.rule is not None:
+                numbers["label_rule"] = p.rule
+            if p.shift_control_min_mm is not None:
+                numbers["shift_control_min_median_mm"] = p.shift_control_min_mm
         status = {
             labels.ACCEPTED: "written",
             labels.REJECTED: "refused",
@@ -315,6 +319,17 @@ def _labels_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dic
             status, p.reason, evidence=evidence, numbers=numbers, outputs=outputs
         )
     return out
+
+
+def _registration_numbers(reg: freesurfer.RegistrationCheck | None) -> dict:
+    if reg is None:
+        return {}
+    return {
+        "registration_side_fraction": _num(reg.side_fraction),
+        "registration_centroid_mm": _num(reg.centroid_mm),
+        "registration_extent_error": _num(reg.extent_error),
+        "registration_affine_residual_mm": _num(reg.affine_residual_mm),
+    }
 
 
 def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
@@ -340,10 +355,8 @@ def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
                 "n_placed": res.n_surface,
                 "left_out": dict(sorted(res.left_out.items())),
                 "pial_distance_median_mm": _num(res.outputs[0].pial_distance_median_mm),
-                "registration_affine_residual_mm": _num(
-                    res.outputs[0].registration.affine_residual_mm
-                ),
-            }
+                "fit_rule": f.rule_id,
+            } | _registration_numbers(res.outputs[0].registration)
             reasons = [f"{o.label}: {o.method}" for o in res.outputs]
             out[rel] = _decision(
                 status,
@@ -357,7 +370,8 @@ def _fs_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
             out[rel] = _decision(
                 "refused",
                 f"{r.reason}: {r.message}",
-                numbers={"left_out": dict(sorted(res.left_out.items()))},
+                numbers={"left_out": dict(sorted(res.left_out.items()))}
+                | _registration_numbers(r.registration),
             )
         elif res.skipped:
             r = res.skipped[0]
@@ -394,7 +408,11 @@ def _spm_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
                 "inversion_residual_median_mm": _num(inv.median_residual) if inv else None,
                 "field_check_median_mm": _num(check.median_mm) if check else None,
                 "field_check_p10_mm": _num(check.p10_mm) if check else None,
+                "field_check_centroid_mm": _num(check.centroid_mm) if check else None,
+                "field_check_extent_deviation": _num(check.extent_deviation) if check else None,
                 "inside_fraction": _num(head.inside_fraction) if head else None,
+                # reported, not judged: the shell has no sulci (ruling 8)
+                "depth_contact_median_mm": _num(head.median_mm) if head else None,
             }
             out[rel] = _decision(
                 _unit_status(changes),
@@ -409,7 +427,18 @@ def _spm_decisions(a: Analysis, owned: dict[str, OwnedPath]) -> dict[str, dict]:
         )
         if (plan.subject, plan.session) in a.spm_notes:
             status = "skipped"
-        out[rel] = _decision(status, plan.reason)
+        check = plan.field_check
+        numbers = (
+            {
+                "field_check_median_mm": _num(check.median_mm),
+                "field_check_p10_mm": _num(check.p10_mm),
+                "field_check_centroid_mm": _num(check.centroid_mm),
+                "field_check_extent_deviation": _num(check.extent_deviation),
+            }
+            if check is not None
+            else {}
+        )
+        out[rel] = _decision(status, plan.reason, numbers=numbers)
     return out
 
 
@@ -425,6 +454,7 @@ def _surface_decisions(a: Analysis) -> dict[str, dict]:
                 "median_mm": fit["median_mm"],
                 "frame_choice": e["frame_choice"],
                 "contact_type": e["contact_type"],
+                "fit_rule": e["fit_rule"],
             },
             outputs=[m["path"] for m in e["meshes"].values()],
         )

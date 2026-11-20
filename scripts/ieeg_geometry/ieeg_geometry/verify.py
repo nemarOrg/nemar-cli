@@ -3,7 +3,11 @@
 Grades (lead rulings of 2026-11-19, plan.md):
 - `specific`: surface-projected electrocorticography (ECoG) contacts with a median
   nearest-vertex distance of at most 2.0 mm, or other contacts sitting on template vertices
-  (median at most 1.0 mm) where the same contacts shifted 10 mm in x fail that bound.
+  (median at most 1.0 mm) where the shift control (ruling 16, ADR 0129) holds: the same contacts
+  shifted 10 mm along each of the three axes in both directions (six shifts) each have a median
+  above 1.0 mm and at least 1.5 times the unshifted median. Contacts on vertices that fail any
+  shift are graded by the depth rule. `Fit.shift_control_median_mm` is the smallest of the six
+  medians, set whenever the control ran.
 - `plausible`: stereo-electroencephalography (sEEG), deep brain stimulation (DBS) and unknown
   contacts with a median of at most 6.0 mm and at least 90 percent of contacts inside the
   reference surface or within 5.0 mm of it. Depth contacts in the right frame measure only
@@ -48,11 +52,20 @@ from scipy.spatial import KDTree  # the cKDTree implementation since scipy 1.6
 from .surfaces import Surface
 
 ECOG_MEDIAN_MM = 2.0
+# One minimum for fitting cortical contacts with the ECoG rule, shared by the FreeSurfer track
+# and the subject-surface builder (fewer contacts go under the depth rule or are not placed).
+MIN_ECOG_CONTACTS = 3
+# Rule ids: the explicit name of the rule that graded a fit, derived from the limits above so no
+# call site spells a limit as a literal.
+RULE_ECOG = f"ecog-{ECOG_MEDIAN_MM:.1f}mm"
+RULE_DEPTH = "depth-plausible"
 SEEG_MEDIAN_MM = 6.0
 SEEG_NEAR_MM = 5.0
 SEEG_PLAUSIBLE_FRACTION = 0.90
 TEMPLATE_VERTEX_MM = 1.0
+RULE_ON_VERTEX = f"on-vertex-{TEMPLATE_VERTEX_MM:.1f}mm"
 SHIFT_CONTROL_MM = 10.0
+SHIFT_RATIO = 1.5  # a shifted median must also be at least this multiple of the unshifted one
 INSIDE_MIN_FRACTION = 0.95
 INSIDE_MAX_OUTSIDE_MM = 10.0
 MEDIAN_RULE = "median"
@@ -89,6 +102,10 @@ class Fit:
     reason: str | None = None
     offset_applied: tuple[float, float, float] | None = None
     max_outside_mm: float | None = None
+    # which rule graded this fit (RULE_*), and for the on-vertex rule the median distance under
+    # the shift control that the decision used; neither is part of the frozen index field set
+    rule_id: str = ""
+    shift_control_median_mm: float | None = None
 
     @property
     def passed(self) -> bool:
@@ -97,7 +114,8 @@ class Fit:
     def as_dict(self) -> dict:
         """The frozen v1 field set (geometry-index schema); `max_outside_mm` is left out of it."""
         out = asdict(self) | {"passed": self.passed}
-        out.pop("max_outside_mm")
+        for extra in ("max_outside_mm", "rule_id", "shift_control_median_mm"):
+            out.pop(extra)
         return out
 
 
@@ -299,7 +317,11 @@ def fit(
         n_left_out = int((~keep).sum())
         pts = pts[keep]
     base: dict[str, Any] = dict(
-        n_total=n_total, rule=rule, n_left_out=n_left_out, offset_applied=offset_applied
+        n_total=n_total,
+        rule=rule,
+        rule_id=RULE_DEPTH if seeg_rule else RULE_ECOG,
+        n_left_out=n_left_out,
+        offset_applied=offset_applied,
     )
     if not len(pts) or not surfaces:
         return Fit(math.nan, math.nan, math.nan, len(pts), grade=FAIL, **base)
@@ -314,13 +336,31 @@ def fit(
     )
     if not seeg_rule:
         return Fit(grade=SPECIFIC if median <= ECOG_MEDIAN_MM else FAIL, **stats, **base)
+    shift_min: float | None = None
     if median <= TEMPLATE_VERTEX_MM:
-        shifted, _ = tree.query(pts + np.array([SHIFT_CONTROL_MM, 0.0, 0.0]))
-        if float(np.median(shifted)) > TEMPLATE_VERTEX_MM:
-            return Fit(grade=SPECIFIC, **stats, **base)
+        # ruling 16: the contacts shifted along each axis, both ways, must stop fitting
+        shifted = [
+            float(np.median(tree.query(pts + sign * SHIFT_CONTROL_MM * np.eye(3)[axis])[0]))
+            for axis in range(3)
+            for sign in (-1.0, 1.0)
+        ]
+        shift_min = min(shifted)
+        if all(m > TEMPLATE_VERTEX_MM and m >= SHIFT_RATIO * median for m in shifted):
+            return Fit(
+                grade=SPECIFIC,
+                shift_control_median_mm=shift_min,
+                **stats,
+                **(base | {"rule_id": RULE_ON_VERTEX}),
+            )
     result = points_inside(pts, surfaces)
     if result is None:
-        return Fit(grade=FAIL, reason="inside-unevaluable", **stats, **base)
+        return Fit(
+            grade=FAIL,
+            reason="inside-unevaluable",
+            shift_control_median_mm=shift_min,
+            **stats,
+            **base,
+        )
     inside, n_amb = result
     near = inside | (dist <= SEEG_NEAR_MM)
     inside_fraction = float(inside.mean())
@@ -338,6 +378,7 @@ def fit(
         inside_evaluated=True,
         max_outside_mm=farthest,
         n_ambiguous=n_amb,
+        shift_control_median_mm=shift_min,
         **stats,
         **base,
     )
