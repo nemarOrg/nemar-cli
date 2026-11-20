@@ -42,6 +42,7 @@ _TIMEOUT_S = 900
 # these settings neutralize it (the filter becomes `cat`, nothing is annexed).
 NEUTRAL_GIT_CONFIG = (
     "filter.annex.process=",
+    "filter.annex.required=false",  # git-annex sets it true; a failing neutral clean must not abort
     "filter.annex.clean=cat",
     "filter.annex.smudge=cat",
     "annex.largefiles=nothing",
@@ -286,7 +287,7 @@ def release_status(clone: Path, version: str) -> tuple[str, bool]:
     if tag == head:
         return f"`main` is the release {version} ({head[:12]})", True
     moved = _paths(clone, "diff", "--name-only", "--no-renames", tag, head)
-    other = sorted(p for p in moved if not p.startswith(UNRELEASED_OK))
+    other = sorted(p for p in moved if not (p.startswith(UNRELEASED_DIRS) or p in UNRELEASED_FILES))
     if other:
         return (
             f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) and changed "

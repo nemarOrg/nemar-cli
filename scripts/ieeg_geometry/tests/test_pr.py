@@ -317,12 +317,13 @@ def _annex_like_filter(monkeypatch, tmp_path):
         [
             ("filter.annex.smudge", "cat"),
             ("filter.annex.clean", "sed 's|^|/annex/objects/POINTER |'"),
+            ("filter.annex.required", "true"),  # what `git annex init` sets
             ("core.attributesFile", str(attributes)),
         ]
     ):
         monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", key)
         monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", value)
-    monkeypatch.setenv("GIT_CONFIG_COUNT", "3")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "4")
 
 
 def test_an_annex_filter_never_turns_a_sidecar_into_a_pointer(env, tmp_path, monkeypatch):
@@ -473,3 +474,4 @@ def test_a_clone_that_is_not_on_main_is_refused(env, tmp_path, capsys):
     assert _pr(served, work) == 1
     assert "not on main" in capsys.readouterr().err
     assert not _calls(log)
+
