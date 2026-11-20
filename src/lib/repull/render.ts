@@ -83,6 +83,11 @@ export function summaryLines(file: PlanFile, path: string | null): string[] {
     `  upstream-changed ${c.upstream_changed}, unexplained ${c.unexplained}`,
     `  conflicts ${c.conflicts}${subtypes(c.conflicts_by_subtype)}`,
     `  corrections ${c.corrections}${subtypes(c.corrections_by_subtype)}`,
+    ...(c.pipeline_owned
+      ? [
+          `  pipeline-owned ${c.pipeline_owned} (regenerated in N.0.1; upstream wins on ${c.pipeline_upstream_wins})`,
+        ]
+      : []),
     `  unchecked ${c.unchecked} (bytes a check needed could not be read)`,
     `  description keys: ${c.description_conflicts} conflict(s), ${c.description_corrections} correction(s)`,
     "Data:",
@@ -129,6 +134,7 @@ export function countsMarkdown(file: PlanFile): string {
     row("unexplained", c.unexplained),
     row("conflicts", `${c.conflicts}${subtypes(c.conflicts_by_subtype)}`),
     row("corrections", `${c.corrections}${subtypes(c.corrections_by_subtype)}`),
+    ...(c.pipeline_owned ? [row("pipeline-owned", c.pipeline_owned)] : []),
     row("unchecked", c.unchecked),
     row(
       "copy keys / bytes",

@@ -19125,6 +19125,73 @@ def mutating_aws_calls(calls: list[str]) -> list[str]:
     return out
 
 
+# An `aws` stand-in over a directory tree: keys are real nested paths under the root, and it
+# answers the calls a `--wipe` makes (probe, delimited listing, recursive removal with
+# `--exclude`) and the reads and writes around it. Every invocation is logged.
+STUB_AWS_TREE = r"""#!/usr/bin/env python3
+import fnmatch
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_S3_ROOT"]
+args = [a for a in sys.argv[1:] if not a.startswith("--cli-") and a != "--only-show-errors"]
+with open(os.environ["ZARR_TEST_S3_LOG"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def keys():
+    for base, _dirs, files in os.walk(ROOT):
+        for name in files:
+            yield os.path.relpath(os.path.join(base, name), ROOT)
+
+
+if args[:2] == ["s3api", "list-objects-v2"]:
+    prefix = opt("--prefix") or ""
+    found = sorted(k for k in keys() if k.startswith(prefix))
+    if opt("--delimiter"):
+        children = sorted({prefix + k[len(prefix):].split("/")[0] + "/"
+                           for k in found if "/" in k[len(prefix):]})
+        print("\t".join(children) if children else "None")
+    else:
+        print(found[0] if found else "None")
+    sys.exit(0)
+if args[:2] == ["s3", "rm"]:
+    url = args[2]
+    prefix = url.split("/", 3)[3]
+    excludes = [args[i + 1] for i, a in enumerate(args) if a == "--exclude"]
+    for k in list(keys()):
+        rel = k[len(prefix):]
+        if k.startswith(prefix) and not any(fnmatch.fnmatch(rel, e) for e in excludes):
+            os.remove(os.path.join(ROOT, k))
+    sys.exit(0)
+if args[:2] == ["s3", "cp"]:
+    src, dst = args[2], args[3]
+    if src.startswith("s3://"):
+        path = os.path.join(ROOT, src.split("/", 3)[3])
+        if not os.path.exists(path):
+            sys.stderr.write("NoSuchKey\n")
+            sys.exit(1)
+        if dst == "-":
+            sys.stdout.buffer.write(open(path, "rb").read())
+        else:
+            shutil.copyfile(path, dst)
+    else:
+        target = os.path.join(ROOT, dst.split("/", 3)[3])
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(src, target)
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\n")
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
 class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
     """`main` against a stand-in biosigIO, as a separate process so that
     `import biosigio` really resolves to it (PYTHONPATH, ahead of any installed
@@ -19318,6 +19385,72 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertEqual(body["pending_count"], 1)
         self.assertFalse(body["deterministic"])
         self.assertIs(body["provenance_fetch_failed"], True)
+
+    def _seed_tree(self) -> dict[str, bytes]:
+        """A serving prefix with stores, a loose key and the geometry/ prefix."""
+        keep = {
+            "on008083/zarr/geometry/index.json": b"{}",
+            "on008083/zarr/geometry/meshes/abc.mesh.bin": b"mesh",
+        }
+        gone = {
+            "on008083/zarr/loose.txt": b"x",
+            "on008083/zarr/sub-01/eeg/a.zarr/zarr.json": b"{}",
+            "on008083/zarr/sub-01/eeg/a.zarr/c/0": b"0",
+            "on008083/zarr/sub-02/eeg/b.zarr/zarr.json": b"{}",
+        }
+        # geometry-like names that are NOT the geometry/ prefix are wiped
+        gone["on008083/zarr/sub-01/geometry/lookalike.bin"] = b"x"
+        gone["on008083/zarr/geometry.txt"] = b"x"
+        for key, data in {**keep, **gone}.items():
+            target = os.path.join(self.s3, key)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(data)
+        self._gone = sorted(gone)
+        with open(os.path.join(self.dir, "bin", "aws"), "w") as fh:
+            fh.write(STUB_AWS_TREE)
+        return keep
+
+    def _remaining(self) -> list[str]:
+        return sorted(
+            os.path.relpath(os.path.join(base, name), self.s3)
+            for base, _dirs, files in os.walk(self.s3)
+            for name in files
+        )
+
+    def test_wipe_erases_the_serving_prefix_but_keeps_geometry(self):
+        self.commit(with_recording=True)
+        keep = self._seed_tree()
+        rc, log = self.run_main(self.standin(), "--wipe")
+        self.assertEqual(rc, 1, log)  # the stand-in cannot convert; the wipe came first
+        self.assertIn("--wipe: erasing s3://nemar-test/on008083/zarr/", log)
+        self.assertEqual(self._remaining(), sorted(keep))
+        for key, data in keep.items():
+            with open(os.path.join(self.s3, key), "rb") as fh:
+                self.assertEqual(fh.read(), data)
+
+    def test_rm_recursive_without_keep_still_erases_everything(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; g._rm_recursive('s3://nemar-test/on008083/zarr/')"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), [])
+        self.assertTrue(keep)
+
+    def test_rm_recursive_keep_skips_the_shard_and_excludes_it_from_the_sweep(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; "
+            "g._rm_recursive('s3://nemar-test/on008083/zarr/', keep=g.WIPE_KEEP)"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), sorted(keep))
+        rms = [c for c in self.aws_calls() if c.startswith("s3 rm")]
+        self.assertFalse(any(c.split()[2].endswith("/geometry/") for c in rms), rms)
+        self.assertIn("--exclude geometry/*", rms[-1])
 
     def test_a_run_whose_workers_refuse_every_store_exits_78(self):
         # Past the startup check: the writers name the option, but the store

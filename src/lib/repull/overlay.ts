@@ -17,6 +17,11 @@
  * | yes              | no        | conflict    | T(theirs)                                    |
  * | no               | no        | correction  | T(theirs), and N.0.1 replays ours            |
  *
+ * A path NEMAR's iEEG geometry pipeline owns (`pipeline-owned.ts`, listed in `.nemar/ieeg-geometry.json`)
+ * is none of these: it is `pipeline-owned`, never a correction or an unexplained path. N.0.0 takes
+ * T(theirs), which is absent unless upstream holds a file there (upstream wins), and N.0.1
+ * regenerates the pipeline's files from the new snapshot (`pipeline-run.ts`).
+ *
  * The root README family and `dataset_description.json` are compared as units: the family as a
  * set of files the import's rename and the publish step's badge act on together, and the
  * description key by key (`description.ts`).
@@ -68,7 +73,13 @@ export function isNemarOwnedPath(path: string): boolean {
  * plan could not read (refused by the fetch bound, or not delivered). An unchecked path is never
  * guessed to be a conflict or a correction, and its plan refuses (`fetch-bound`).
  */
-export type PathClass = "keep-ours" | "take-theirs" | "conflict" | "correction" | "unchecked";
+export type PathClass =
+  | "keep-ours"
+  | "take-theirs"
+  | "conflict"
+  | "correction"
+  | "unchecked"
+  | "pipeline-owned";
 
 export interface PathDecision {
   path: string;
@@ -110,6 +121,8 @@ export interface OverlayInput {
   conceptDoi: string | null;
   /** Records the bytes of every computed target by blob id, for execution (`edits.ts`). */
   collect?: ComputedBytes;
+  /** The paths NEMAR's iEEG geometry pipeline owns at ours (`pipeline-owned.ts`). */
+  pipelineOwned?: ReadonlySet<string>;
 }
 
 export interface OverlayResult {
@@ -629,8 +642,13 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
     const unread = [s.base, s.theirs, s.ours].some(
       (x) => x.kind === "git" && refusedOids.has(x.oid),
     );
-    const cls: PathClass = !explained && unread ? "unchecked" : classify(changed, explained);
-    const keep = cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null);
+    const owned = input.pipelineOwned?.has(p) ?? false;
+    const cls: PathClass = owned
+      ? "pipeline-owned"
+      : !explained && unread
+        ? "unchecked"
+        : classify(changed, explained);
+    const keep = !owned && (cls === "keep-ours" || (cls === "take-theirs" && eTheirs !== null));
     const target: Target | { kind: "ours" } = keep
       ? { kind: "ours" }
       : targetOf(p, s.theirs, {
@@ -649,16 +667,22 @@ export async function overlay(input: OverlayInput): Promise<OverlayResult> {
       theirs: identity(s.theirs),
       ours: identity(s.ours),
       upstreamChanged: changed,
-      explainedBy: { base: eBase, theirs: eTheirs },
+      explainedBy: owned
+        ? { base: "pipeline-owned", theirs: "pipeline-owned" }
+        : { base: eBase, theirs: eTheirs },
       class: cls,
       subtype:
-        cls === "conflict"
-          ? conflictSubtype(s.base, s.theirs, s.ours)
-          : cls === "correction"
-            ? correctionSubtype(s.base, s.ours)
-            : cls === "unchecked"
-              ? "fetch-bound"
-              : null,
+        cls === "pipeline-owned"
+          ? s.theirs.kind === "absent"
+            ? "regenerated"
+            : "upstream-wins"
+          : cls === "conflict"
+            ? conflictSubtype(s.base, s.theirs, s.ours)
+            : cls === "correction"
+              ? correctionSubtype(s.base, s.ours)
+              : cls === "unchecked"
+                ? "fetch-bound"
+                : null,
       decision: keep || sameAsOurs ? "ours" : "theirs",
       target: sameAsOurs ? { kind: "ours" } : target,
       delta,
