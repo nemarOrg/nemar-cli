@@ -22,9 +22,13 @@ A real run also refuses a remote that is not `nemarDatasets/<id>`, a missing rel
 Inputs that could not be fetched for another reason are listed in the body under "Not fetched".
 A `main` ahead of the release is not refused: the outputs are computed from the fresh clone of `main`, which the mirror's patch release will publish, so the body's "Source:" section states that `main` is ahead, lists every path changed since the release (sorted; at most 50 and 8,000 characters, then a count) and says the files were computed from `main`.
 
-`--bump-version` also sets `Version` in `dataset_description.json` to the next patch of the Version `main` holds (a byte-preserving edit of that one value), in the same commit and listed in the body.
-The central release workflow tags `v<Version>` from `main` when a pull request merges and the central `version-check` needs the Version to differ from `main`'s, so merging this pull request cuts the release and `nemar dataset release` is not run afterwards.
-It refuses when `main`'s Version has no release tag, when a tag or a `CHANGES` entry is ahead of that Version, or when the Version is not `X.Y.Z`; `CHANGES` is the authors' and is never edited.
+`--from-ref BRANCH` builds an integration pull request: the fresh clone is of that existing branch (a collaborator's branch merged with NEMAR's BIDS fixes) instead of `main`, the pipeline runs on its tree, the geometry is one commit on top, pushed to the same branch (fast-forward only; refused when the branch moved since the clone), and the pull request into `main` is opened or, when one from that branch is open, its title and body are updated.
+The body lists the commits on the branch that are not on `main`, and the unexpected-change checks apply only to the pipeline's own diff on top of the branch.
+
+`--bump-version` also makes the Version right for the release: the central release workflow tags `v<Version>` from `main` when a pull request merges and the central `version-check` needs the Version to differ from `main`'s, so merging cuts the release and `nemar dataset release` is not run afterwards.
+A branch Version that differs from `main`'s, is `X.Y.Z` and is above every tag is kept (said in the body); otherwise `Version` in `dataset_description.json` is set to the next patch above `main`'s Version and the newest tag, a byte-preserving edit of that one value in the same commit.
+It refuses a Version that is not `X.Y.Z` or a target that is already a tag; a `CHANGES` entry above the Version (normal for a mirror) is reported in the body.
+`CHANGES` is the authors' and is never edited.
 
 `--dry-run` does everything but the push and the pull request, prints the body, and warns when a real run would refuse because the release tag is missing.
 `upload-surfaces` uses the `aws` command line tool (as `scripts/zarr/generate_zarr.py` does, no boto3): it lists `s3://<bucket>/<id>/zarr/geometry/` (bucket `nemar` by default), uploads the meshes the new index references (a content-addressed mesh already there is skipped), then `index.json`, then removes keys under that prefix the index no longer references; no other key is listed, written or removed.

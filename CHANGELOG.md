@@ -24,8 +24,9 @@ earlier releases are described only by their generated notes.
 - **`pr` computes from `main` when it is ahead of the release and records the paths.**
   A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
   A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
-- **`pr --bump-version` sets the dataset version in the geometry pull request.**
-  It edits only the `Version` value in `dataset_description.json` to the next patch of `main`'s Version (refusing an untagged Version, or a tag or `CHANGES` entry ahead of it), so the central version check passes and merging the pull request tags the release without a separate `nemar dataset release`.
+- **`pr --from-ref <branch>` opens one integration pull request, and `--bump-version` sets the release version.**
+  The clone is of an existing branch (collaborator changes plus NEMAR's BIDS fixes), the geometry is one commit on top pushed to that branch (fast-forward only), and the pull request into `main` is opened or updated; the body lists the commits not on `main`.
+  `--bump-version` keeps a branch Version that is above `main`'s and every tag, otherwise sets the next patch above both (a byte-preserving edit of the `Version` value), so the central version check passes and merging tags the release without a separate `nemar dataset release`; a `CHANGES` entry ahead of it is reported, not refused.
 - **`pr` no longer sees CRLF blobs as modified.**
   The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
 - **Re-pull planner version 2 to 3.**
