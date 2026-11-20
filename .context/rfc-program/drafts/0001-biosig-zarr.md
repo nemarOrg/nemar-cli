@@ -22,46 +22,45 @@ spec_proposed: 3.0.0-draft.1
 ## 1. Summary
 
 The Neuroelectromagnetic Data Archive and Tools Resource (NEMAR) serves every raw recording it holds a second time, as a Zarr version 3 store shaped for fast partial reads over a network.
-That store layout has been in production since mid 2026 and is now being written down as its own specification, `biosig-zarr`, so that tools other than NEMAR's can read and write it.
+We have served stores in this layout since mid 2026.
+We are now writing the layout down as its own specification, `biosig-zarr`, for tools other than ours to read and write.
 
-The format already carries real traffic.
 As of 2026-11-20, NEMAR serves 231,259 stores, 98.4% of the 235,038 recordings in its 910 public datasets (about 116,000 hours of recordings), and the count grows as datasets arrive.
-The remaining 3,779 recordings are ones whose source data is not available to convert.
-These stores are what NEMAR's data viewer reads to show any recording in a browser without a download,
-and what NEMAR's Model Context Protocol (MCP) server reads so that research agents can query and analyze signals directly.
-Writing the format down lets other archives, viewers and analysis tools use the same stores, and lets the community shape the format before it is frozen.
-A store can also be packed into one file with the suffix `.bzx`, so that it can stand in for a data file on a researcher's disk.
+The other 3,779 recordings have no source data available to convert.
+Our data viewer reads these stores to show any recording in a browser without a download,
+and our Model Context Protocol (MCP) server reads them to let research agents query and analyze signals directly.
+With a written specification, other archives, viewers and analysis tools can use the same stores.
+A store can also be packed into one file with the suffix `.bzx`, which can then stand in for a data file on a researcher's disk.
 
-This RFC asks the whole biosignal community to comment on the format before it is frozen:
-anyone who records, shares, analyzes or builds tools for electroencephalography (EEG), magnetoencephalography (MEG), intracranial EEG (iEEG), electromyography (EMG), electrocardiography (ECG), other physiological recordings, motion and wearable sensors, and any other biosignal,
-as well as the people who build Zarr tools.
-It also proposes `format_version` 3, which fixes two things version 2 cannot express:
+We ask for comments on the format before it is frozen,
+from anyone who records, shares, analyzes or builds tools for electroencephalography (EEG), magnetoencephalography (MEG), intracranial EEG (iEEG), electromyography (EMG), electrocardiography (ECG), other physiological recordings, motion and wearable sensors, and any other biosignal,
+and from the people who build Zarr tools.
+The RFC also proposes `format_version` 3, to fix two things version 2 cannot express.
+First, a version 2 store has one uniform time axis and cannot say that a recording paused, that a stream was sampled irregularly, or that a signal is sparse.
+Second, a version 2 store records how samples are stored, but not the resolution of the source recording they came from.
 
-1. **Time.**
-   A version 2 store has one uniform time axis and cannot say that a recording paused, that a stream was sampled irregularly, or that a signal is sparse.
-2. **Resolution.**
-   A version 2 store records how samples are stored, and not the resolution of the source recording they came from.
-
-Version 2 is the format as NEMAR serves it today, tagged `2.0.0`.
+Version 2, tagged `2.0.0`, is the format NEMAR serves today.
 The text this RFC proposes is tagged `3.0.0-draft.1` when the RFC opens, and becomes `3.0.0` only if the RFC is accepted.
 
 ## 2. Who should read this
 
-- **People who record, share or analyze biosignals of any kind**: EEG, MEG, iEEG, EMG, ECG, physiology, motion, wearables and more.
-  Sections 3, 5, 6 and 13 are for you: does the time model fit your recordings, and does the store say enough about what was done to your samples?
-- **People who build Zarr readers, writers and viewers.**
-  Sections 4, 7 and 8 are for you: is the layout readable with your tool, and are the packing rules ones you can implement?
-- **People who maintain neighboring standards**, such as the Brain Imaging Data Structure (BIDS), Neurodata Without Borders (NWB) and OME-Zarr from the Open Microscopy Environment (OME).
-  Sections 8 to 10 state how this format relates to yours, and where it deliberately does not follow.
+If you record, share or analyze biosignals of any kind (EEG, MEG, iEEG, EMG, ECG, physiology, motion, wearables and more), read sections 3, 5, 6 and 13.
+Tell us whether the time model fits your recordings, and whether a store says enough about what was done to your samples.
+
+If you build Zarr readers, writers or viewers, read sections 4, 7 and 8.
+Tell us whether your tool can read the layout, and whether you can implement the packing rules.
+
+If you maintain a neighboring standard, such as the Brain Imaging Data Structure (BIDS), Neurodata Without Borders (NWB) or OME-Zarr from the Open Microscopy Environment (OME),
+sections 8 to 10 describe how this format relates to yours, and where it deliberately departs from it.
 
 ## 3. The problem
 
 ### 3.1 A store needs a contract that outlives one implementation
 
-NEMAR's stores are written by one library, [biosigIO](https://github.com/neuromechanist/biosigio), and until 2026-11-18 the layout was defined by what that library wrote.
+One library, [biosigIO](https://github.com/neuromechanist/biosigio), writes our stores, and until 2026-11-18 the layout was whatever that library wrote.
 A format defined by its only implementation cannot be implemented a second time with confidence, and it changes whenever the library does.
-The pre-beta specification at <https://docs.nemar.org/formats/biosig-zarr/> reverses that:
-the specification defines the format, and biosigIO is one exemplar implementation.
+The pre-beta specification at <https://docs.nemar.org/formats/biosig-zarr/> reverses that relation.
+The specification defines the format, and biosigIO is one exemplar implementation.
 This RFC is the first public review of that specification.
 
 ### 3.2 Version 2 cannot represent time that is not one uniform, continuous axis
@@ -76,25 +75,25 @@ Its open question 9, in the section "Open questions", states the consequence:
 > A recording that is not continuous has no representation.
 > There is one uniform time axis per group, and no per-sample timestamps.
 
-This matters for three kinds of data.
+Three kinds of data run into this limit.
 
-- **Recordings with gaps.**
-  The recorder paused and resumed.
-  The European Data Format (EDF) in its original form cannot represent this at all: its data records are contiguous.
-  Its successor EDF Plus (EDF+) has a discontinuous variant (EDF+D) in which each data record carries its own start time.
-  The BioSemi Data Format (BDF) has the same variant, BrainVision files mark each restart with a "New Segment" marker,
-  and the Functional Image File Format (FIF) used for MEG and the Multiscale Electrophysiology Format version 3 (MEF3) record skips between data blocks.
-- **Jittered streams.**
-  A stream has a nominal rate, but each sample carries its own measured timestamp.
-  The Extensible Data Format (XDF) written by the Lab Streaming Layer (LSL) works this way, and so do motion capture systems.
-- **Sparse and irregular signals.**
-  A cuff blood pressure every few minutes, a temperature probe, a value that arrives when it arrives.
-  Neither EDF nor EDF+ has a real representation for these, and neither does the current draft.
+The first is a recording with gaps, where the recorder paused and resumed.
+The European Data Format (EDF) in its original form cannot represent a gap, because its data records are contiguous.
+Its successor EDF Plus (EDF+) has a discontinuous variant (EDF+D) in which each data record carries its own start time.
+The BioSemi Data Format (BDF) has the same variant, BrainVision files mark each restart with a "New Segment" marker,
+and the Functional Image File Format (FIF) used for MEG and the Multiscale Electrophysiology Format version 3 (MEF3) record skips between data blocks.
 
-**This is a present-day failure, not a hypothetical.**
-A reproduction made for this RFC on 2026-11-20 wrote a small synthetic EDF+D file whose four one-second data records start at 0, 1, 10 and 11 seconds.
-MNE-Python 1.12.1 and 1.13.2 both read it as 4 seconds of continuous signal:
-the sample recorded at 10.0 seconds is placed at 2.0 seconds, an error of 8 seconds, and the annotation after the gap is dropped.
+The second is a jittered stream, which has a nominal rate but carries a measured timestamp for each sample.
+The Extensible Data Format (XDF) written by the Lab Streaming Layer (LSL) works this way, and so do motion capture systems.
+
+The third is a sparse or irregular signal,
+such as a cuff blood pressure every few minutes, a temperature probe, or a value that arrives when it arrives.
+Neither EDF nor EDF+ has a real representation for these, and neither does the current draft.
+
+Existing tools already get the gap case wrong.
+For this RFC, on 2026-11-20, we wrote a small synthetic EDF+D file whose four one-second data records start at 0, 1, 10 and 11 seconds.
+MNE-Python 1.12.1 and 1.13.2 both read it as 4 seconds of continuous signal.
+Both versions place the sample recorded at 10.0 seconds at 2.0 seconds, an error of 8 seconds, and drop the annotation after the gap.
 biosigIO 1.2.13 falls back to that reader for discontinuous files, so the store it writes carries the same shifted samples and no sign that anything was removed.
 In a second file with a 1-second gap, the event that survives marks a sample recorded one second later than the event.
 A BrainVision file with a second "New Segment" marker five seconds after the first segment ended shows the same shift.
@@ -102,10 +101,10 @@ The reports are [neuromechanist/biosigio#180](https://github.com/neuromechanist/
 and [mne-tools/mne-python#13429](https://github.com/mne-tools/mne-python/issues/13429) (opened 2025-09-25, still open on 2026-11-20).
 
 The reproduction used synthetic files.
-**Unverified:** how many recordings NEMAR already holds are affected has not been measured; a header scan that reads no samples will answer it.
+**Unverified:** we have not measured how many recordings NEMAR already holds are affected; a header scan that reads no samples will answer that.
 
 A version 2 store cannot show the problem even when the writer knows about it, because it has no field that claims continuity.
-The same limit has been raised in BIDS (all links checked 2026-11-20):
+BIDS contributors have raised the same limit (all links checked 2026-11-20):
 
 - [bids-specification#1771](https://github.com/bids-standard/bids-specification/issues/1771), the origin issue of BIDS Extension Proposal (BEP) 047 for audio and video:
   on 2024-04-22 a commenter asked whether a recording that stopped and resumed is one file or several, quoting the EDF+ discontinuous mode.
@@ -121,8 +120,7 @@ The same limit has been raised in BIDS (all links checked 2026-11-20):
 The "Root attributes" table defines `dtype` as "`"int16"` or `"float32"`: the data type of every level-0 and view array in the store."
 The "Dequantization" section defines `physical = digital * scale + offset` with a `scale` and `offset` per channel.
 
-Together they say how a stored sample becomes a physical value.
-They do not say what the source was.
+Together they say how a stored sample becomes a physical value, but not what the source was.
 A 24-bit amplifier recorded into a BDF file and requantized into a 16-bit store looks the same as a recording that was 16-bit to begin with.
 A reader cannot tell how much precision was given up, and an exporter cannot restore the source's own digital and physical ranges.
 
@@ -133,21 +131,24 @@ So a not-a-number (NaN) value in the source becomes a plausible zero that no rea
 
 Four requirements shaped the proposal.
 
-1. **Every biosignal gets a home.**
-   Nothing is postponed to a later version to protect today's readers; the format is not final.
-2. **A reader never silently misreads.**
-   A reader that does not understand a feature refuses, with an error that names it.
-3. **Measured and derived are distinguishable.**
-   A store says which samples and times are the source's own and which were computed.
-4. **The common case stays cheap.**
-   A continuous, uniformly sampled recording costs nothing extra to store and one small attribute to describe.
+First, every biosignal gets a home.
+Nothing is postponed to a later version to protect today's readers; the format is not final.
+
+Second, a reader never silently misreads.
+A reader that does not understand a feature refuses, with an error that names the feature.
+
+Third, measured and derived values can be told apart.
+A store says which samples and times are the source's own and which were computed.
+
+Fourth, the common case stays cheap.
+A continuous, uniformly sampled recording costs nothing extra to store and one small attribute to describe.
 
 ## 4. The format in one page
 
-This section describes what exists today, version 2.
+This section describes version 2, the format as it exists today.
 The full text is at <https://docs.nemar.org/formats/biosig-zarr/> (Markdown mirror: <https://docs.nemar.org/formats/biosig-zarr.md>).
 
-A store holds **one recording** as a Zarr version 3 hierarchy:
+A store holds one recording as a Zarr version 3 hierarchy:
 
 ```
 <name>.zarr/                  root group
@@ -161,43 +162,49 @@ A store holds **one recording** as a Zarr version 3 hierarchy:
     onset/, duration/, code/  present when the recording has events
 ```
 
-- **Derived.**
-  A store is made from a source recording, and the source stays the record of what was acquired.
-- **Lossy by default.**
-  Signals above a rate cap per modality are resampled down to it (NEMAR uses 250 Hz for EEG and MEG, and 1000 Hz for iEEG and EMG), through an anti-alias filter, and never upsampled.
-  Samples are stored as 16-bit integers with a `scale` and `offset` per channel.
-- **Channels first.**
-  Level 0 has shape `[n_channels, n_samples]`, and every chunk spans every channel, so one request returns a time window of the whole montage.
-- **Navigable without listing.**
-  Every path can be derived from attributes, because a store served over the Hypertext Transfer Protocol (HTTP) usually cannot be listed.
-- **Light events.**
-  The `events` group holds onset, duration, a code and a label per code, like a data file's own annotations.
-  Full event tables, with Hierarchical Event Descriptors (HED), stay in the dataset.
-- **No subject information.**
-  A distributed store holds no identity or phenotype fields.
-- **Profiles.**
-  A publisher documents its own restrictions and additions as a profile.
-  NEMAR's is the only one today: 16-bit always, fixed rate caps, a `nemar` provenance block.
+A store is derived from a source recording, and the source stays the record of what was acquired.
+
+A store is lossy by default.
+Signals above a rate cap per modality are resampled down to the cap through an anti-alias filter, and never upsampled;
+we use 250 Hz for EEG and MEG, and 1000 Hz for iEEG and EMG.
+Samples are stored as 16-bit integers with a `scale` and `offset` per channel.
+
+Level 0 is channels first.
+It has shape `[n_channels, n_samples]`, and every chunk spans every channel, so one request returns a time window of the whole montage.
+
+A reader can find every path from the attributes, without listing the store,
+because a store served over the Hypertext Transfer Protocol (HTTP) usually cannot be listed.
+
+The `events` group is light.
+It holds onset, duration, a code and a label per code, like a data file's own annotations.
+Full event tables, with Hierarchical Event Descriptors (HED), stay in the dataset.
+
+A distributed store holds no subject information, meaning no identity or phenotype fields.
+
+A publisher documents its own restrictions and additions as a profile.
+NEMAR's is the only profile today, with 16-bit storage always, fixed rate caps and a `nemar` provenance block.
 
 The whole version 2 text is open for comment, including its 33 open questions.
 Section 13 points at the ones where outside experience would help most.
 
 ## 5. Proposal, part A: the time model (`format_version` 3)
 
-Everything in sections 5 and 6 is a **proposal for comment**.
-The owner has ruled on each item as the position NEMAR brings to the RFC (rulings D1 to D12 of 2026-11-20, noted in brackets), and comments can change any of them.
+Everything in sections 5 and 6 is proposed for comment.
+The owner has ruled on each item, and the rulings (D1 to D12 of 2026-11-20, noted in brackets) are the position NEMAR brings to the RFC.
+Comments can change any of them.
 
-Version 3 is not only forward-looking.
-Gaps (EDF+D, FIF skips, BrainVision segments) and source resolution apply to data NEMAR already holds.
-The `timestamped` group kind, in contrast, gives a home to data that BIDS does not carry yet.
+Version 3 is not only for future data.
+Gaps (EDF+D, FIF skips, BrainVision segments) and source resolution affect data NEMAR already holds,
+while the `timestamped` group kind gives a home to data that BIDS does not carry yet.
 
 ### 5.1 One timeline per store
 
 - A store has one **recording timeline**, in seconds, as 64-bit floating point.
   Time 0 is the instant the source file's own clock calls its start.
-- `events/onset` values are on this timeline.
-  Gaps count: an event after a 30-second pause has an onset 30 seconds later than its position in the concatenated samples.
-- An optional root attribute `origin_source_time` holds the value of the source's own clock at time 0, for sources that have one, so source timestamps can be restored exactly.
+- `events/onset` values are on this timeline, and gaps count.
+  An event after a 30-second pause has an onset 30 seconds later than its position in the concatenated samples.
+- An optional root attribute `origin_source_time` holds the value of the source's own clock at time 0, for sources that have one.
+  With it, a reader can restore source timestamps exactly.
 - The absolute date and time of the origin stays open (version 2 open question 10).
   It is a privacy question more than a timing one.
 
@@ -227,18 +234,19 @@ A `uniform` group is the version 2 channel group plus these required attributes:
 Each interval has `start` (first sample index), `stop` (one past the last), and `source_time` (the time of its first sample as the source states it, or `null`).
 
 - A continuous recording has exactly one interval.
-  **Continuity becomes an explicit claim, not an absence.**
+  A store therefore states continuity, instead of implying it by saying nothing.
 - A sample outside every interval was never acquired, and a reader must not return it as data.
 - Chunks that lie wholly inside a gap are never written.
   Zarr reads an absent chunk as the fill value, so a gap of any length costs no storage.
-- `source_time: null` means the order is known and the elapsed time is not:
-  a BrainVision "New Segment" marker with no date, an EEGLAB `boundary` event, concatenated runs.
-  The interval is placed directly after the previous one, and grid times from there on are a convention, which a reader must say when it reports them.
+- `source_time: null` means the order is known and the elapsed time is not,
+  as with a BrainVision "New Segment" marker with no date, an EEGLAB `boundary` event, or concatenated runs.
+  The interval is placed directly after the previous one.
+  Grid times from there on are a convention, and a reader that reports them must say so.
 - A reader must not filter, resample, epoch or interpolate across an interval boundary.
   A writer resamples each interval on its own.
 - A writer should not write more than 65,536 intervals in a group; a signal more fragmented than that is a `timestamped` signal.
 
-The EDF+D file of section 3.2, as 19 channels at 250 Hz with a pause from 60 to 90 seconds (illustrative numbers; attributes not shown are unchanged from version 2):
+An EDF+D recording like the one in section 3.2, with 19 channels at 250 Hz and a pause from 60 to 90 seconds, has these group attributes (illustrative numbers; attributes not shown are unchanged from version 2):
 
 ```json
 {
@@ -272,26 +280,23 @@ Every signal array carries a required attribute `missing_value`: the stored valu
 - When `missing_value` is not `null`, the array's Zarr `fill_value` must equal it, so an absent chunk decodes to missing.
 - A reader returns a missing sample as missing (NaN, a mask, or a range list), never as `missing_value * scale + offset`.
 - Non-finite source samples in an integer store become the missing value.
-  This replaces the version 2 behavior and closes its open question 6: replaced samples are now located.
-- The two mechanisms have separate jobs.
-  `valid_intervals` is about the acquisition (the recorder was off).
-  `missing_value` is about one channel at one sample (a sensor off, a dropped packet).
+  This replaces the version 2 behavior and closes its open question 6, because the replaced samples can be located.
+- `valid_intervals` describes the acquisition (the recorder was off),
+  and `missing_value` describes one channel at one sample (a sensor off, a dropped packet).
 - NEMAR's profile always reserves the code.
 
 ### 5.5 Jittered streams: kept as measured by default [D5]
 
-A stream with a nominal rate and a timestamp per sample has two honest homes, and the format permits both:
-
-1. **As measured**, in a `timestamped` group with `nominal_rate` set.
-   Nothing about timing is lost.
-2. **Regularized**, in a `uniform` group whose `time_regularization` records the method (`index_order` or `interpolated`), the nominal and effective rates, and the largest and root mean square timing error in seconds.
-   When values were interpolated, every channel says so (6.4).
+The format permits two homes for a stream with a nominal rate and a timestamp per sample.
+The first keeps the stream as measured, in a `timestamped` group with `nominal_rate` set, and loses nothing about timing.
+The second regularizes it, in a `uniform` group whose `time_regularization` records the method (`index_order` or `interpolated`), the nominal and effective rates, and the largest and root mean square timing error in seconds.
+When values were interpolated, every channel says so (6.4).
 
 NEMAR's profile keeps such streams as measured by default, and regularizes only on request with the error recorded.
 
 ### 5.6 The `timestamped` kind
 
-For irregular signals, sparse signals with a value, and jittered streams kept as measured.
+A `timestamped` group holds an irregular signal, a sparse signal with a value, or a jittered stream kept as measured.
 
 ```
 <name>/                 group, kind "timestamped"
@@ -308,7 +313,7 @@ For irregular signals, sparse signals with a value, and jittered streams kept as
 - `continuity` is `"continuous"`, `"step"`, `"instantaneous"` or `"unknown"` (the names follow NWB), and a reader must not interpolate a group that is not `"continuous"` without saying so.
 - The `time` array carries its own `derivation` list: `clock_synchronized`, `dejittered`, `deduced`, `sorted`, or empty when the values are the source's own timestamps shifted to the origin.
 - A window read fetches `time_index` (one request), searches it, and fetches the matching `time` and `values` chunks.
-- Cost: 8 bytes per sample before compression.
+- The `time` array costs 8 bytes per sample before compression.
   For a 64-channel 16-bit stream that is about 6% on top of the values; for a 4-channel stream it is 100% (arithmetic; compression not measured).
 - A point process with no value, such as a marker, is an event and goes in `events`.
 
@@ -334,21 +339,23 @@ The root then lists `"channel_groups": ["eeg_250hz"]` and `"timestamped_groups":
 
 No single omission should let a reader misread.
 
-1. **Version.**
-   A writer that implements this proposal writes `format_version` 3 for every store, including a plain continuous recording.
-   A reader must refuse a version above the highest it implements; biosigIO 1.2.13 and earlier refuse 3 (verified in its source by the design research, 2026-11-20).
-2. **Kind.**
-   A reader reads `kind` before any array, refuses a kind it does not implement, and never infers a kind from a name or from which children exist.
-   A new kind requires a new `format_version`.
-3. **Structure.**
-   A `timestamped` group is not in `channel_groups` and has no `0` array and no `rate`.
-   A reader that skips both checks above gets a missing-node error, not wrong times.
-4. **Refusal inside a uniform group.**
-   A reader that does not implement `start_time`, `valid_intervals` or `missing_value` must refuse a group where one is in effect
-   (a nonzero start, more than one interval or a `null` `source_time`, a declared missing value), with an error that names it.
-   The conformance suite tests each refusal.
+The first layer is the version.
+A writer that implements this proposal writes `format_version` 3 for every store, including a plain continuous recording.
+A reader must refuse a version above the highest it implements; biosigIO 1.2.13 and earlier refuse 3 (verified in its source by the design research, 2026-11-20).
 
-The third layer exists because some deployed readers check neither the format name nor the version; NEMAR's own server-side read path is one.
+The second layer is the kind.
+A reader reads `kind` before any array, refuses a kind it does not implement, and never infers a kind from a name or from which children exist.
+A new kind requires a new `format_version`.
+
+The third layer is structure.
+A `timestamped` group is not in `channel_groups` and has no `0` array and no `rate`,
+so a reader that skips both checks above gets a missing-node error instead of wrong times.
+This layer exists because some deployed readers check neither the format name nor the version; our own server-side read path is one.
+
+The fourth layer is refusal inside a uniform group.
+A reader that does not implement `start_time`, `valid_intervals` or `missing_value` must refuse a group where one is in effect
+(a nonzero start, more than one interval or a `null` `source_time`, a declared missing value), with an error that names the feature.
+The conformance suite tests each refusal.
 
 ### 5.8 Events and the onset-to-sample rule [D10]
 
@@ -359,7 +366,7 @@ The third layer exists because some deployed readers check neither the format na
   `"timeline"` (the source gave onsets on the recording timeline, as EDF+ annotations do),
   `"concatenated"` (the source counted onsets in gap-free samples and the writer mapped them through `valid_intervals`),
   or `"unknown"`.
-  With more than one interval, this is the difference between right and wrong event alignment.
+  With more than one interval, a reader needs this attribute to align events correctly.
 
 ### 5.9 How source features map
 
@@ -391,29 +398,30 @@ NEMAR's profile refuses epoched sources for now, and question 21 asks whether th
 
 - Version 2 stores stay readable, as version 2.
   A reader treats a version 2 group as `uniform`, starting at 0, with one interval and no declared missing value, and should surface "continuity not recorded".
-- Old stores are re-converted from their sources by the normal conversion queue, recordings whose source can be discontinuous first.
-- **A version 2 store is never upgraded by editing its metadata.**
-  That would assert one valid interval without having checked the source, which is the opposite of the goal.
-- The planned rename of the format tag from `biosigio-zarr` to `biosig-zarr` (nemar-cli issue 2217) is to be reconciled with the rule that embedded metadata is never patched after it is written;
-  folding the rename into the version 3 writer is the candidate.
+- We re-convert old stores from their sources through the normal conversion queue, starting with recordings whose source can be discontinuous.
+- A version 2 store is never upgraded by editing its metadata, because that would assert one valid interval without checking the source.
+- The planned rename of the format tag from `biosigio-zarr` to `biosig-zarr` (nemar-cli issue 2217) still has to be reconciled with the rule that embedded metadata is never patched after it is written.
+  The candidate is to fold the rename into the version 3 writer.
 
 ## 6. Proposal, part B: sample resolution
 
-### 6.1 The store side: what exists, stated plainly [D6]
+### 6.1 The store side: what the existing fields mean [D6]
 
-No new store-side field is needed.
-The text states what the existing ones mean:
+No new store-side field is needed; the text defines what the existing ones mean.
 
-- **Root `dtype` is the storage type.**
-  Its name gives the width in bits and whether the type is integer or floating point.
-  It is the store default; a group may carry its own `dtype`, and an array's Zarr `data_type` must equal the resolved value.
-- **The closed list becomes `int16`, `int32`, `float32`, `float64`.**
-  `int32` gives 24-bit sources a home without requantization, and `float64` does the same for double-precision sources.
-  Zarr version 3 has no 24-bit integer type.
-  A signal reader may refuse a type it does not support, with a clear error.
-  NEMAR's profile stays `int16`.
-- **For an integer type, `scale[c]` is the store's quantization step** for channel `c`: one digital step in the channel's unit, with a maximum error of half a step on a requantized sample.
-- `physical = digital * scale + offset` is unchanged.
+Root `dtype` is the storage type.
+Its name gives the width in bits and whether the type is integer or floating point.
+It is the store default; a group may carry its own `dtype`, and an array's Zarr `data_type` must equal the resolved value.
+
+The closed list of storage types becomes `int16`, `int32`, `float32`, `float64`.
+`int32` gives 24-bit sources a home without requantization, and `float64` does the same for double-precision sources.
+Zarr version 3 has no 24-bit integer type.
+A signal reader may refuse a type it does not support, with a clear error.
+NEMAR's profile stays `int16`.
+
+For an integer type, `scale[c]` is the store's quantization step for channel `c`,
+one digital step in the channel's unit, with a maximum error of half a step on a requantized sample.
+`physical = digital * scale + offset` is unchanged.
 
 ### 6.2 The source side: five new fields [D9]
 
@@ -427,10 +435,10 @@ The text states what the existing ones mean:
 
 - The first two are required at the root, where `"n/a"` and `null` are allowed.
   A channel's own value, when present, overrides the root's.
-  It is an override and not a product: these are facts, not gain factors.
+  The channel value replaces the root value instead of multiplying it, because these fields are facts, not gain factors.
 - The other three are required per channel, where `null` is allowed.
 - The source's physical range is not stored, because it follows from the three per-channel fields.
-- The storage width and the converter depth are kept apart on purpose: a 16-bit converter can sit in a 24-bit file.
+- The storage width and the converter depth are separate fields because a 16-bit converter can sit in a 24-bit file.
 
 A BDF channel recorded at 1024 Hz, capped to 250 Hz and requantized into a 16-bit store (illustrative; unchanged members omitted):
 
@@ -460,7 +468,7 @@ An EDF file at or below the rate cap can then be reproduced bit for bit.
 If the source uses the type's most negative code as data, the array declares `missing_value: null`.
 
 The format allows this.
-Whether NEMAR's writer does it is decided after measuring how many recordings qualify.
+We will decide whether NEMAR's writer does it after measuring how many recordings qualify.
 
 ### 6.4 Every lossy step is recorded: `derivation` [D8]
 
@@ -478,15 +486,15 @@ Each channel carries a required list `derivation`, in the order the steps were a
 | `nonfinite_zeroed` | Non-finite samples stored as physical zero. Version 2 stores only. |
 | `gap_filled` | Samples at times the source did not record are stored as data. Only for sources whose reader fills silently. |
 
-- **An empty list means the stored codes are the source's codes.**
+- An empty list means the stored codes are the source's codes.
 - A profile may add tokens that contain a colon, such as `nemar:sss`; a reader treats an unknown token as "derived, in a way I do not know".
 
 ### 6.5 The content digest [D11]
 
 NEMAR keys derived results on a digest of a store's level-0 values (the proposed NEMAR Architecture Decision Record (ADR) on a keyed derivative store, digest `nemar.store-content.v1`).
 That digest has no notion of a missing sample, an interval or a time array.
-A second definition is written before any derivative is keyed on a version 3 store.
-This is NEMAR's own machinery and not part of the format; it is listed so readers know the dependency exists.
+We will write a second definition before keying any derivative on a version 3 store.
+The digest is NEMAR's own machinery and not part of the format, but readers need to know the dependency exists.
 
 ## 7. The single-file form, `.bzx`
 
@@ -503,49 +511,49 @@ The packaged form holds the same store in one file.
 - A `.bzx` file holds no other `.bzx` file and no other zipped Zarr hierarchy.
 - A `.bzx` file is written once; a changed store is packed again.
 
-**Version 3 changes no packing rule.**
-`time`, `values` and `time_index` are ordinary arrays.
-A never-written chunk has no entry: a packer must not create one, and an unpacker must not treat its absence as damage.
+Version 3 changes no packing rule, because `time`, `values` and `time_index` are ordinary arrays.
+A never-written chunk has no entry.
+A packer must not create one, and an unpacker must not treat its absence as damage.
 
-**No tool writes or reads `.bzx` today.**
-This RFC is published before the first implementation so the rules can still change cheaply.
+No tool writes or reads `.bzx` today.
+We are publishing this RFC before the first implementation, while the rules are still cheap to change.
 
 ### 7.1 Why the format and the package have separate names
 
-There are two layers, and they can change separately.
-
-- **`biosig-zarr` is the store:** what the groups, arrays and attributes mean.
-  It is the same whether the store is a directory, an object-storage prefix, or the inside of an archive.
-- **`.bzx` is the packing of one store into one file:** entry order, no compression, the archive comment.
-  It says nothing about what a sample means.
+The store and its package are two layers that can change separately.
+`biosig-zarr` names the store and defines what its groups, arrays and attributes mean,
+whether the store is a directory, an object-storage prefix, or the inside of an archive.
+`.bzx` names the packing of one store into one file (entry order, no compression, the archive comment), and says nothing about what a sample means.
 
 The package-specific items are up for comment for four reasons.
 
-1. **The commenters differ.**
-   People who record and use biosignals of any kind care what a store says about a recording.
-   People who build Zarr tools care whether the archive can be read in place.
-   Separate names let each group find its part.
-2. **The names themselves.**
-   One file-extension listing ties `.bzx` to other software (**Unverified:** known from a search result; the listing was not opened).
-   BioSig is a long-standing biomedical signal library, so `biosig-zarr` could be read as its Zarr backend, which it is not.
-3. **What a `.bzx` snapshot of a BIDS dataset changes around the package.**
-   NEMAR's planned download command writes a copy of the BIDS tree with each data file swapped for a `.bzx`.
-   Sidecar fields that depend on the rate are rewritten mechanically to match the store.
-   NEMAR's dataset-level events table, `events.parquet`, is never packed.
-   The events group inside the package stays light, and the full events stay in `events.tsv`.
-   For a discontinuous or timestamped recording, what `SamplingFrequency`, `RecordingType` and `RecordingDuration` should then say is question 17.
-4. **Versioning.**
-   Should a fix to the packing rules raise `format_version`?
-   **Recommendation: one `format_version` covers both**, because the archive comment already carries it and a reader should have one number to check.
+First, the commenters differ.
+People who record and use biosignals of any kind care what a store says about a recording,
+and people who build Zarr tools care whether the archive can be read in place.
+Separate names let each group find its part.
+
+Second, the names themselves can mislead.
+One file-extension listing ties `.bzx` to other software (**Unverified:** known from a search result; the listing was not opened).
+BioSig is a long-standing biomedical signal library, so `biosig-zarr` could be read as its Zarr backend, which it is not.
+
+Third, a `.bzx` snapshot of a BIDS dataset changes the files around the package.
+NEMAR's planned download command writes a copy of the BIDS tree with each data file swapped for a `.bzx`,
+and rewrites sidecar fields that depend on the rate mechanically to match the store.
+NEMAR's dataset-level events table, `events.parquet`, is never packed.
+The events group inside the package stays light, and the full events stay in `events.tsv`.
+Question 17 asks what `SamplingFrequency`, `RecordingType` and `RecordingDuration` should then say for a discontinuous or timestamped recording.
+
+Fourth, the two layers need a versioning rule.
+Should a fix to the packing rules raise `format_version`?
+We recommend that one `format_version` cover both, because the archive comment already carries it and a reader should have one number to check.
 
 ## 8. Relation to OME-Zarr RFC-9
 
 [OME-Zarr RFC-9](https://ngff.openmicroscopy.org/rfc/9/) proposes a zipped form of OME-Zarr with the suffix `.ozx`.
-It is **prior art** for `.bzx`, and it is credited as such.
-It is not a dependency.
+We credit it as prior art for `.bzx`, not as a dependency.
 
-NEMAR's packing rules are its own text, and they do not follow later changes to RFC-9.
-We present that independence as an advantage:
+Our packing rules are our own text, and they do not follow later changes to RFC-9.
+We see that independence as an advantage.
 RFC-9 was at stage R4 ("authors reply to reviews"), not accepted, when checked on 2026-11-20, and it phrases most of its rules as recommendations.
 A format that people archive data in needs fixed rules on a known date, and requirements a validator can test.
 If RFC-9 changes, a `.bzx` file written today stays valid.
@@ -567,7 +575,7 @@ If RFC-9 changes, a `.bzx` file written today stays valid.
 | (none) | | Added: every entry byte-identical to the directory form. |
 | (none) | | Added: written once, never modified in place. |
 
-**Unverified for this draft:** the RFC-9 column is taken from the program's research notes of 2026-11-20, which read the RFC source; it was not re-read line by line here.
+**Unverified for this draft:** the RFC-9 column is taken from the program's research notes of 2026-11-20, which read the RFC source; we did not re-read it line by line for this draft.
 
 ## 9. Why not NWB on Zarr
 
@@ -624,7 +632,7 @@ We ask for comment on whether its reasoning is fair and current, and on what an 
 ## 10. Alternatives considered
 
 The design research lists twenty rejected alternatives.
-The ones a commenter is most likely to propose:
+The table gives the ones a commenter is most likely to propose.
 
 | Alternative | Why it was not chosen |
 | --- | --- |
@@ -648,7 +656,7 @@ The ones a commenter is most likely to propose:
 
 ## 11. Decided, and out of scope for comment
 
-Each item is closed, with its record, so a commenter can see why.
+Each item below is closed, and the table names the record that closed it.
 Arguments that one of these was decided wrongly are still welcome as issues; they will not change the outcome of this RFC.
 
 | Decided | Record |
@@ -662,8 +670,7 @@ Arguments that one of these was decided wrongly are still welcome as issues; the
 
 ## 12. What NEMAR's profile will do
 
-The format permits more than NEMAR will use.
-So that commenters can tell the two apart:
+The format permits more than NEMAR will use, and the table separates the two.
 
 | Choice | Format | NEMAR's profile |
 | --- | --- | --- |
@@ -734,28 +741,25 @@ A short answer with a real file behind it is worth more than a long one without.
 
 ## 14. How the decision will be made
 
-These criteria are written before comments open, so that they cannot be fitted to the comments.
+We write these criteria before comments open, so they cannot be fitted to the comments.
 
-- **Who decides.**
-  The shepherd, who is the owner of the NEMAR platform, decides, and records the decision and its reasons in the RFC.
-- **The window.**
-  21 calendar days from the day the RFC is opened.
-  One extension of at most 14 days is possible, granted before the close with a stated reason.
-- **Every comment gets a written response** before the decision: accepted, rejected with a reason, or moved to a named follow-up.
-- **Outcomes.**
-  Accepted (the text becomes `3.0.0`), accepted with listed changes, or withdrawn.
+The shepherd, who is the owner of the NEMAR platform, decides, and records the decision and its reasons in the RFC.
+The comment window is 21 calendar days from the day the RFC is opened.
+One extension of at most 14 days is possible, granted before the close with a stated reason.
+Every comment gets a written response before the decision: accepted, rejected with a reason, or moved to a named follow-up.
+The RFC ends accepted (the text becomes `3.0.0`), accepted with listed changes, or withdrawn.
 
 The proposal is accepted if all of these hold at the close:
 
-1. **No silent misread stands.**
+1. No silent misread stands.
    Nobody has shown a class of real recording that a conforming version 3 reader would return with wrong times or wrong values without an error.
-2. **Every real recording offered has a home.**
+2. Every real recording offered has a home.
    Each recording a commenter brings is either expressible in version 3 or named in the text as refused, with the reason.
-3. **The refusals are testable.**
+3. The refusals are testable.
    Each of the four reader-safety layers has a conformance case that fails when the check is removed.
-4. **The package can be implemented from the text alone.**
+4. The package can be implemented from the text alone.
    Someone who did not write the text has confirmed that, or the gaps they found are closed.
-5. **No decided item was reopened by accident.**
+5. No decided item was reopened by accident.
    Changes stay within what section 11 leaves open.
 
 **Draft note for the owner:** whether acceptance also needs a working implementation, or two that share no code, is not settled.
@@ -772,8 +776,8 @@ None of that work is part of this RFC, and none of it starts before the decision
 
 ## History of the format
 
-Version 3 is a maturing of a format NEMAR has served for months, now becoming its own specification.
-Dates are from the Git history of biosigIO and from NEMAR's decision records, not estimated.
+Version 3 builds on a format NEMAR has served for months, which is now becoming its own specification.
+The dates come from the Git history of biosigIO and from NEMAR's decision records, not from estimates.
 
 | `format_version` | Started | What it changed | Records |
 | --- | --- | --- | --- |
@@ -790,21 +794,21 @@ bounded streaming is the default conversion path (2026-08-22);
 the conversion queue stamps the engine version that made each dataset's stores (2026-09-01).
 
 **Current scale, measured 2026-11-20 at 18:23 Coordinated Universal Time (UTC).**
-NEMAR serves **231,259 stores** across **836 datasets**, out of 910 public datasets.
-The measurement was read-only, from the public catalog:
+NEMAR serves 231,259 stores across 836 datasets, out of 910 public datasets.
+We measured this read-only, from the public catalog:
 
 ```
 curl -A "<a named client>" "https://api.nemar.org/datasets?limit=100&offset=N"    # N = 0, 100, ..., 900
 ```
 
 summing `zarr_store_count` over the 910 rows returned, and counting the rows where it is above zero.
-The catalog field is the store count of each dataset's published index; the indexes themselves were not re-counted.
+The catalog field is the store count of each dataset's published index; we did not re-count the indexes themselves.
 
 **Not measured:** how many stores are at each `format_version`.
-The catalog does not carry it, and reading it would mean opening each store.
-By inference every served store is version 2:
-biosigIO has written version 2 since release 0.6.0 on 2026-05-31, and the earliest conversion timestamp in the catalog today is 2026-06-12.
-NEMAR's own repository history before 2026-09-10 was not available to this draft (a shallow checkout), so the date NEMAR first served a store is not stated here.
+The catalog does not carry the version, and reading it would mean opening each store.
+We infer that every served store is version 2,
+because biosigIO has written version 2 since release 0.6.0 on 2026-05-31, and the earliest conversion timestamp in the catalog today is 2026-06-12.
+NEMAR's own repository history before 2026-09-10 was not available to this draft (a shallow checkout), so this draft does not state the date NEMAR first served a store.
 
 ## 16. Verified, and not
 
@@ -822,7 +826,7 @@ NEMAR's own repository history before 2026-09-10 was not available to this draft
 - RFC-9's rules and its R4 status (section 8).
 - The behavior of biosigIO's and NEMAR's readers described in 5.7.
 - The format survey behind 5.9, including GDF, WFDB and SNIRF.
-- The BIDS links and their dates (the links were not opened for this draft).
+- What each BIDS thread says (the six issues and pull requests were confirmed to exist with matching titles on 2026-11-20; their content is summarized from earlier research, not re-read).
 
 **Unverified or illustrative:**
 
