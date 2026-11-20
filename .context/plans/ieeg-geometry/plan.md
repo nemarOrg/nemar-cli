@@ -154,3 +154,9 @@ The field check (ruling 9) proves a field's direction, not which subject or whic
 ### 2026-11-19, after B2 applied ruling 19 (PR #2226)
 
 25. **Ruling 19 against the MNI shell compares cerebrum with cerebrum.** The shell includes the cerebellum and brainstem, which a pial surface lacks, and SPM's IXI549 space sits a steady 4 to 6 mm from MNI152NLin2009cAsym. For an SPM field check the shell is cut to z at least -40 mm before the extent and centroid are computed; the extent limit stays 10 percent and the centroid limit is 10.0 mm (a 40 mm translation still fails). The FreeSurfer registration check (rulings 19 and 24, against fsaverage6 pial) is unchanged.
+
+### Owner decisions, 2026-11-20, after the R1 dry run (PR #2229)
+
+- No minimum number of placed contacts: any verified computed electrodes file is written, however few contacts it places (on002799's 3 to 13 contact files included).
+- Both kinds of fsaverage labels are committed: README-backed (6 datasets, 1,551 files) and geometry-only blind trials (3 datasets, 224 files), since both rest on specific on-vertex evidence with the shift control.
+- The 13 mirror N.0.1 pull requests are opened all at once for the owner to merge (not trickled behind the re-pull caps).
