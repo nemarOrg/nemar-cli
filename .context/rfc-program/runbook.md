@@ -52,7 +52,7 @@ Answers become live facts on the card at dispatch: paste them under a heading "O
 
 ## Owner steps
 
-Steps with tier `owner` (O0, O1, O1b, O2, O4, O4b, O5, O6) are never dispatched, and neither are the lead's checkpoint steps C3 and C4 or the lead's step E0, which run in the owner's session.
+Steps with tier `owner` (O0, O1, O1b, O2, O4, O4b, O4c, O4d, O5, O6) are never dispatched, and neither are the lead's checkpoint steps C3 and C4 or the lead's step E0, which run in the owner's session.
 Steps in state `owner`, and C3 and C4, are exempt from the timebox, silent-worker and twice-the-timebox handlers; they are asked about, never escalated.
 When an owner step's dependencies are `done`, set it `owner`, and ask the owner once, with the exact commands from `plan.md` section 5, to run it and say when it is done.
 Verify by observation before setting it `done`:
@@ -66,15 +66,20 @@ Verify by observation before setting it `done`:
 | E0 | `gh issue list -R nemarOrg/nemar-cli --search "RFC program in:title" --state open` lists the epic issue |
 | O4 | `gh release view 2.0.0 -R nemarOrg/biosig-zarr --json isPrerelease -q .isPrerelease` prints `false` |
 | O4b | `gh release view 3.0.0-draft.1 -R nemarOrg/biosig-zarr --json isPrerelease -q .isPrerelease` prints `true` |
-| R2, B3 (owner-merged) | `gh pr view N -R nemarOrg/docs --json mergedAt -q .mergedAt` prints a time; then set the step `done` |
+| O4d | `gh release view 2.0.1 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `false` and B5a's merge commit |
+| O4c | `gh release view 3.0.0-draft.2 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `true` and B5's merge commit |
+| R2, B3, SC1 (owner-merged, or manager-merged on the owner's authorization) | `gh pr view N -R nemarOrg/docs --json mergedAt -q .mergedAt` prints a time; then set the step `done` |
 | C3, C4 | the lead's checkpoint PR into `feature/rfc-program` is merged and the owner's decision is recorded in the RFC file on `main` of nemarOrg/rfcs |
 | O5, O6 | the RFC PR is merged, and `gh api repos/nemarOrg/rfcs/contents/README.md` lists the RFC as `open` |
 
 ## Event handlers specific to this program
 
-- **A PR to nemarOrg/docs passes its merge gate** (R2, B3): set the step `owner`, and ask the owner to review and merge it; the manager never merges in nemarOrg/docs.
-- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
-- **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; S1 needs the lead's earlier EDF scan results; N1 needs Q15): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
+- **A PR to nemarOrg/docs passes its merge gate** (R2, B3, SC1): set the step `owner`, and ask the owner to review and merge it, or to authorize the manager to merge that PR (see "Never").
+- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, B4b, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
+- **A3's draft PR is held on its ADR number**: it stays a draft until 0132 (mail PR 2270) is on `origin/dev`; then merge `origin/dev` into `feature/rfc-program` (a merge, never a rebase, as for Q20), tell the A3 worker to merge the base in, recheck the open ADR numbers and rerun its gate, and only then let it mark the PR ready.
+- **B5a's PR passes its merge gate**: merge it into `main` with a merge commit (it keeps the Developer Certificate of Origin sign-offs); then set O4d `owner` and run it on the owner's say-so (Q33), recorded with `decide` first.
+- **B5's PR passes its merge gate**: merge it into `draft/3.0.0` with a merge commit, never into `main`; then set O4c `owner` and run it on the owner's say-so (Q36), recorded with `decide` first.
+- **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; B5 needs B5a's report; B4b needs B5's report; S1 takes any newer output path or summary that the scan session remi:18769 relays, otherwise its card names the scan directory; N1 needed Q15, Q31 and Q32): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
 - **An RFC closes** (its close instant passes): set C3 (or C4) `todo` and notify the owner and the lead that the checkpoint is due.
 - **A worker reports that a needed read was refused** (for example a production query in V1): do not retry and do not work around it; set the step `owner` and hand the owner the exact command from the worker's report.
 - **A reviewer argues against an owner decision in `plan.md` section 2**: give the finding the outcome "rejected: owner decision of 2026-11-20", citing the item.
@@ -83,8 +88,15 @@ Verify by observation before setting it `done`:
 
 ## Never, in addition to the skill's list
 
-- Create, rename or delete a repository; change a repository or organization setting; create a Discussion, category, label set, tag or release.
-- Merge in nemarOrg/docs, merge an RFC text PR, or merge `feature/rfc-program` into `dev`.
+- Create, rename or delete a repository, a Discussion or a Discussion category; these stay the owner's, always.
+- Apply a repository or organization setting, a ruleset, a label set, a tag or a release, unless all three hold:
+  a merged, reviewed file (for example `ops/ruleset-main.json`) or the exact command in `plan.md` section 5 specifies it;
+  the owner has said, for that step, that the manager runs it;
+  and the manager has recorded that instruction with `decide "<step>: owner asked the manager to run it" --by owner` before acting.
+  Then run exactly what the file or the command says, nothing else, and verify with the step's observation in "Owner steps" before setting the step `done`.
+  The owner did this on 2026-11-20 for O1b (the ruleset), O4 (release `2.0.0`) and O4b (pre-release `3.0.0-draft.1`).
+- Merge a PR in nemarOrg/docs, unless the owner has authorized the manager for that PR, recorded the same way with `decide` (as for B3, docs#128, on 2026-11-20); the authorization covers that PR only.
+- Merge an RFC text PR, or merge `feature/rfc-program` into `dev`.
 - Comment on an issue or PR in another repository (biosigio#179 is the owner's).
 - Send mail, post news or a command-line interface (CLI) notice, or announce anything.
 - Touch a live dataset, a re-pull switch, or production data; V1 is read-only.
