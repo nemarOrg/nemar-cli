@@ -34,7 +34,7 @@ ADR 0063 records the same denial for the content-recovery copy.*
 
 *Annotated 2026-11-09: and by the amendment of that date: the acceptance also takes a merge commit of two parents, when it is GitHub's plain merge of the re-pull's own pull request.*
 
-*Annotated 2026-11-19 (proposed, with ADR 0129): a path listed in `.nemar/ieeg-geometry.json` is regenerated in N.0.1, not replayed; see the amendment of that date.*
+*Annotated 2026-11-19 (accepted 2026-11-20, with ADR 0129): a path listed in `.nemar/ieeg-geometry.json` is regenerated in N.0.1, not replayed; see the amendment of that date.*
 *The first parent must be the record's base, or a commit enrichment moved it to, as for a squash.*
 *The second parent must be the head GitHub reports for the merged pull request, which the record's gated head, or an enrichment-shaped descendant of it, already has to be.*
 *The merge's tree must be the re-pull's commit outside `.nemar/**` and `.github/**`, and its effect on the privacy ledger must be nothing or a scrub's appended lines, both unchanged.*
@@ -2512,7 +2512,7 @@ The suites drive the real `resume` against a bare origin and a GitHub stand-in w
 GitHub's own merge is a three-way merge onto `main`, which is the head's tree only while `main` is the pull request's base; the suites that move `main` read the parent and the tree, not what GitHub would merge.
 The first production use is on000117.
 
-## Amendment 2026-11-19 (proposed): pipeline-owned paths are regenerated, not replayed
+## Amendment 2026-11-19 (accepted 2026-11-20): pipeline-owned paths are regenerated, not replayed
 
 ADR 0129 lets NEMAR's iEEG geometry pipeline commit computed `space-<label>` electrode and coordinate-system files, and list them in `.nemar/ieeg-geometry.json` with the inputs they were computed from.
 Under decision "corrections replay as N.0.1", such a path, added by NEMAR and unchanged upstream, would be a correction and would be copied forward unchanged, even when the upstream files it was computed from changed.
@@ -2523,7 +2523,7 @@ Under decision "corrections replay as N.0.1", such a path, added by NEMAR and un
 3. The ownership file itself is regenerated with the paths, never replayed; the privacy ledger rules of decision "a ledger change is never reverted" are unchanged, and the pipeline never writes the ledger.
 4. A regeneration that fails leaves the previous pipeline files out of N.0.1, with the failure in the re-pull record; the snapshot's own files are never held back by it.
 
-### Implementation of this amendment (proposed)
+### Implementation of this amendment (accepted)
 
 5. A listed path is pipeline-owned only if it is shaped like what the pipeline adds, a `space-<label>` electrodes table or coordinate-system sidecar or the `<stem>_coordsystem.json` the label track adds for an electrodes file that had none (whose same-stem electrodes table is on NEMAR's `main`), and it is absent at upstream's base, because the pipeline's files are NEMAR's additions.
    A listed file is owned only while its bytes are the ones the pipeline wrote (the record's `output_sha256`): a file whose bytes differ, or whose record holds no hash, is hand edited, follows the ordinary rules (a correction N.0.1 replays), is handed to the pipeline as it is so it is kept, and leaves the ownership record.

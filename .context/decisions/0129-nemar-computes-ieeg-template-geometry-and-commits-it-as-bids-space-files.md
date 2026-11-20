@@ -1,6 +1,6 @@
 # ADR 0129: NEMAR computes iEEG template geometry, verifies it, and commits it as BIDS `space-` files
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-19
 **Owner:** Seyed Yahya Shirazi
 
@@ -35,10 +35,12 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
    A pipeline-owned path that upstream later adds becomes upstream's, and the pipeline drops it from its ownership list.
 5. **Mirrors.** The files land in the mirror's N.0.1.
    A mirror with no pending re-pull gets one N.0.1 for its geometry, after the owner has reviewed the dry-run report for it.
+   It takes two steps: the owner merges the pull request that `pr` opens, then cuts the patch with `nemar dataset release <id> --type patch` (its own bump pull request, then the tag and the version DOI).
    A path listed in `.nemar/ieeg-geometry.json` is regenerated from the new snapshot in each later N.0.1, not replayed (the ADR 0111 amendment of 2026-11-19).
 6. **Datasets pushed to NEMAR.** The same files are offered as a pull request to the dataset; nothing is committed without its owner's merge.
 7. **Subject surfaces are display data.** A subject surface that fits its contacts (decision 2's rule, as declared or with FreeSurfer's c_ras offset) is converted to the website's `brain-mesh v1` format in the contacts' frame and written beside the Zarr copy under `<id>/zarr/geometry/`, indexed by `geometry/index.json`; it is never committed to the dataset.
 8. **Where it runs.** The code is `scripts/ieeg_geometry/` in this repository (Python, uv); `nemarDatasets/.github` runs it through one thin workflow, dispatched by the Worker, that installs a released nemar-cli as the re-pull workflow does.
+   The central workflow (P3b) is deferred out of the first epic to its own issue, #2235 (ruling 29).
    Reference surfaces (fsaverage6, MNI152NLin2009cAsym) are vendored with their licenses.
 
 ## Consequences
@@ -46,7 +48,7 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
 - The largest share of the gap (the nine fsaverage datasets) closes with labels alone, with no numeric transformation of anyone's data.
 - Every computed file is checkable: its sidecar says how it was made and how well it fit, and the ownership file says which inputs it came from.
 - A one-time N.0.1 per mirror that gains geometry mints one version DOI each; re-pulls regenerate the files instead of conflicting with them.
-- Positions from an affine transform (`talairach.xfm`) and SPM spaces are approximate by a few millimeters; their sidecars say so, and the website labels them approximate as ADR 0033 already does for template variants.
+- Positions from SPM spaces are approximate by a few millimeters; their sidecars say so (affine depth positions from `talairach.xfm` are never written, ruling 20), and the website labels them approximate as ADR 0033 already does for template variants.
 - sEEG depth contacts discriminate frames poorly; the thresholds are read against the dry-run report over all 167 datasets before any dataset pull request is opened.
 - The pipeline now owns paths inside datasets. Each owned file's hash is recorded, so a hand edit is detected: the edited file (with its pair) is kept and reported, never overwritten or deleted, and it is no longer regenerated; the method page says so.
 
