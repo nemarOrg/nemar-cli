@@ -23,6 +23,13 @@ spec_proposed: 3.0.0-draft.1
 
 The Neuroelectromagnetic Data Archive and Tools Resource (NEMAR) serves every raw recording it holds a second time, as a Zarr version 3 store shaped for fast partial reads over a network.
 That store layout has been in production since mid 2026 and is now being written down as its own specification, `biosig-zarr`, so that tools other than NEMAR's can read and write it.
+
+The format already carries real traffic.
+As of 2026-11-20, NEMAR serves 231,259 stores, 98.4% of the 235,038 recordings in its 910 public datasets (about 116,000 hours of recordings), and the count grows as datasets arrive.
+The remaining 3,779 recordings are ones whose source data is not available to convert.
+These stores are what NEMAR's data viewer reads to show any recording in a browser without a download,
+and what NEMAR's Model Context Protocol (MCP) server reads so that research agents can query and analyze signals directly.
+Writing the format down lets other archives, viewers and analysis tools use the same stores, and lets the community shape the format before it is frozen.
 A store can also be packed into one file with the suffix `.bzx`, so that it can stand in for a data file on a researcher's disk.
 
 This RFC asks the whole biosignal community to comment on the format before it is frozen:
