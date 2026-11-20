@@ -181,6 +181,29 @@ def test_fetch_checks_out_electrodes_sidecars_at_every_level(tmp_path):
     assert (got.clone / "sub-1/ieeg/sub-1_electrodes.json").is_file()
 
 
+def test_a_dirty_source_gives_a_cleaning_entry_and_a_valid_report(source, tmp_path):
+    dirty = tmp_path / "src"
+    shutil.copytree(source, dirty)
+    table = dirty / P02
+    lines = table.read_text().splitlines()
+    cols = lines[0].split("\t")
+    size = cols.index("size")
+    body = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        cells[size] = "NaN"
+        body.append("\t".join(cells))
+    table.write_text("\n".join(body) + "\n")
+    remote = build_remote(dirty, tmp_path / "remote")
+    analysis, written = _run(remote, tmp_path / "w")
+    assert written == []
+    report = analysis.report
+    assert not list(Draft202012Validator(SCHEMA).iter_errors(report))
+    (entry,) = [e for e in report["electrodes_cleaning"] if "sub-p02" in e["path"]]
+    assert entry["path"].endswith("_electrodes.tsv") and "_space-" in entry["path"]
+    assert entry["coerced_cells"]["size"] == len(lines) - 1
+
+
 def test_fetch_resolves_the_version_from_the_api(remote, tmp_path):
     got = fetch.fetch_files(DATASET_ID, tmp_path / "w", **remote.urls())
     assert got.version == VERSION
