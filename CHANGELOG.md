@@ -24,6 +24,8 @@ earlier releases are described only by their generated notes.
 - **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
   They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
   Every written electrodes table now uses `n/a` for any missing value, puts `name`, `x`, `y`, `z`, `size` first, and keeps a column BIDS does not define only when the dataset's own `*_electrodes.json` defines it; other columns stay in the authors' file only.
+  The fetch now also checks out `*_electrodes.json` sidecars at every level; a row with a missing or repeated `name`, or a short or long row, is refused with a named reason (`electrodes-names`, `electrodes-rows`, `electrodes-columns`), and the report gains an optional `electrodes_cleaning` list of what each written table dropped, added or coerced.
+  The package version is 0.1.1.
   Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
 - **Re-pull planner version 2 to 3.**
   A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
