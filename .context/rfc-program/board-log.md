@@ -176,3 +176,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:12-08:00 | remi:18769 replied: edfd-scan partial (headers 134,664 read; EDF+D 1,728 files in 11 datasets; gap pass not started); relayed to lead-C1 for card S1 |
 | 2026-11-20T15:26-08:00 | Lead PR 2276 (602683eb): B5, R3, SC1, S1 dispatchable, new O4c and B4b, P1 runbook rule; review dispatched (Agents today 39/40); Q33-Q36 asked |
 | 2026-11-20T15:29-08:00 | Lead PR 2276 r1: 0 crit, 4 imp, 5 sugg; sent back with Q33 (v2 on main as 2.0.1) and Q34 (ADR 0124 amendment now) |
+| 2026-11-20T15:36-08:00 | Lead PR 2276 r1 fixes a3e4a41c (B5a, O4d, A3 added; all 8 findings fixed); r2 delta dispatched; Agents today 40/40 (limit reached) |
+| 2026-11-20T15:37-08:00 | Lead PR 2276 r2: 2 important (A3 number/base, layer field B5a vs B5), 2 sugg; lead fixes, manager verifies (no third round) |
+| 2026-11-20T15:39-08:00 | Lead PR 2276 merged (f72fb4a1); r2 fixes verified by manager; board gains A3, B5a, O4d, O4c, B4b, SC1; R3 todo; C1 and C1a done |
+| 2026-11-20T15:39-08:00 | Budget: Agents today 40/40; R3, A3, B5a, SC1 ready but held for the daily reset |
