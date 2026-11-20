@@ -125,7 +125,33 @@ function runnerOf(env: Env): string[] {
       "The iEEG geometry package is not in this checkout (scripts/ieeg_geometry); a run needs a nemar-cli checkout at the CLI's release.",
     );
   }
-  return ["uv", "run", "--frozen", "--project", project, "python", "-m", "ieeg_geometry"];
+  return [
+    "uv",
+    "run",
+    "--frozen",
+    "--no-dev",
+    "--project",
+    project,
+    "python",
+    "-m",
+    "ieeg_geometry",
+  ];
+}
+
+/**
+ * The environment the child may inherit: the search path, the home and cache directories, the
+ * language runtime's and `uv`'s own variables, and the locale and TLS settings it needs to run and
+ * to read the data plane. Never a credential: no `AWS_*`, `GH_TOKEN`, `NEMAR_API_KEY` or any other
+ * token reaches it, because it runs code from a checkout, not the CLI. A test's stand-in also gets
+ * the `STANDIN_*` variables that steer it (beside the test remote base only).
+ */
+const CHILD_ENV =
+  /^(?:PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TEMP|TMP|LANG|LC_[A-Z]+|TZ|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|XDG_(?:CACHE|DATA|CONFIG)_HOME|UV_[A-Z_]+|PYTHON[A-Z_]*|VIRTUAL_ENV|NEMAR_IEEG_GEOMETRY_DIR)$/;
+
+function childMayHave(name: string, env: Env): boolean {
+  if (/(?:TOKEN|SECRET|KEY|PASSWORD)/i.test(name) && !/^UV_[A-Z_]*CACHE/.test(name)) return false;
+  if (CHILD_ENV.test(name)) return true;
+  return name.startsWith("STANDIN_") && !!env.NEMAR_REPULL_ORIGIN_BASE;
 }
 
 interface Report {
@@ -232,7 +258,12 @@ async function run(root: string, args: RegenerateArgs): Promise<PipelineFiles> {
   try {
     result = await runCommand(
       [...runner, "run", args.datasetId, "--workdir", root, "--version", args.version, "--apply"],
-      { cwd: root, env: { ...ISOLATED_GIT_ENV }, timeout: RUN_TIMEOUT_MS },
+      {
+        cwd: root,
+        env: { ...ISOLATED_GIT_ENV },
+        unsetEnv: Object.keys(process.env).filter((k) => !childMayHave(k, args.env)),
+        timeout: RUN_TIMEOUT_MS,
+      },
     );
   } catch {
     throw new Failure("pipeline-unavailable", "The pipeline could not be started.");
@@ -245,7 +276,7 @@ async function run(root: string, args: RegenerateArgs): Promise<PipelineFiles> {
   if (report.pipeline_version !== IEEG_GEOMETRY_PIPELINE_VERSION) {
     throw new Failure(
       "pipeline-version",
-      `The pipeline is version ${report.pipeline_version.slice(0, 40)}, and this release of the CLI runs ${IEEG_GEOMETRY_PIPELINE_VERSION}; the outputs are only the same for the same version.`,
+      `The pipeline is not the version this release of the CLI runs (${IEEG_GEOMETRY_PIPELINE_VERSION}); the outputs are only the same for the same version.`,
     );
   }
   if (

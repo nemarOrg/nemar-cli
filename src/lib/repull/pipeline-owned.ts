@@ -21,7 +21,7 @@ export const OWNERSHIP_PATH = ".nemar/ieeg-geometry.json";
 /**
  * The version of the Python package `scripts/ieeg_geometry` this release of the CLI runs. The
  * pipeline's outputs are a function of the snapshot and this version, so a re-pull asserts the
- * report names it (`test/repull-pipeline-owned.unit.test.ts` keeps it equal to the package's
+ * report names it (`test/repull-pipeline-run.test.ts` keeps it equal to the package's
  * `pyproject.toml`). A release that moves the package moves this value in the same change.
  */
 export const IEEG_GEOMETRY_PIPELINE_VERSION = "0.1.0";
@@ -37,6 +37,29 @@ export function isPipelineOutputPath(path: string): boolean {
   const segments = path.split("/");
   if (segments.some((s) => s === "" || s === "." || s === "..")) return false;
   return (segments[0] as string).startsWith("sub-") && OUTPUT_NAME.test(segments.at(-1) as string);
+}
+
+const SPACE_OUTPUT = /_space-[A-Za-z0-9]+_(?:electrodes\.tsv|coordsystem\.json)$/;
+
+/**
+ * Whether a listed path may be classified pipeline-owned, given the trees. It must be shaped like
+ * what the pipeline adds, and absent at upstream's base (the pipeline's files are NEMAR's
+ * additions, so a listing of a path upstream holds is never believed): a `space-<label>` electrodes
+ * table or coordinate-system sidecar, or the `<stem>_coordsystem.json` the label track adds for an
+ * electrodes file that had no sidecar, which needs the same-stem electrodes table on NEMAR's main.
+ * Everything else follows the ordinary rules, so an ownership record cannot hide a correction.
+ */
+export function isPipelineOwnedPath(
+  path: string,
+  inBase: (p: string) => boolean,
+  inOurs: (p: string) => boolean,
+): boolean {
+  if (!isPipelineOutputPath(path) || inBase(path)) return false;
+  if (SPACE_OUTPUT.test(path)) return true;
+  return (
+    path.endsWith("_coordsystem.json") &&
+    inOurs(`${path.slice(0, -"_coordsystem.json".length)}_electrodes.tsv`)
+  );
 }
 
 export interface PipelineOwned {

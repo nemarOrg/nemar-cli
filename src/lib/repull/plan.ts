@@ -58,7 +58,12 @@ import {
 } from "./edits.js";
 import { type FromTagSource, bareVersion, resolveFromTag } from "./from-tag.js";
 import { type PathDecision, overlay } from "./overlay.js";
-import { OWNERSHIP_PATH, type PipelineOwned, readPipelineOwned } from "./pipeline-owned.js";
+import {
+  OWNERSHIP_PATH,
+  type PipelineOwned,
+  isPipelineOwnedPath,
+  readPipelineOwned,
+} from "./pipeline-owned.js";
 import {
   type Check,
   type ReleaseFacts,
@@ -379,7 +384,19 @@ export async function planRepull(opts: PlanOptions): Promise<PlanOutcome> {
       fresh.forEach((k, i) => logs.set(k, texts[i] ?? ""));
     };
     // The paths NEMAR's iEEG geometry pipeline owns: never corrections (`pipeline-owned.ts`).
-    const pipeline = await readPipelineOwnedAt(oursTree, nemarStore);
+    const listed = await readPipelineOwnedAt(oursTree, nemarStore);
+    const accepted = listed.paths.filter((p) =>
+      isPipelineOwnedPath(
+        p,
+        (q) => baseTree.has(q),
+        (q) => oursTree.has(q),
+      ),
+    );
+    const pipeline: PipelineOwned = {
+      ...listed,
+      paths: accepted,
+      ignored: listed.ignored + listed.paths.length - accepted.length,
+    };
     if (pipeline.status === "unreadable") {
       refusals.push({
         code: "pipeline-ownership-unreadable",
