@@ -9,8 +9,18 @@ Plan: `.context/plans/ieeg-geometry/plan.md`.
 ```bash
 uv run --project scripts/ieeg_geometry python -m ieeg_geometry inspect <dataset-dir>   # read-only report
 uv run --project scripts/ieeg_geometry python -m ieeg_geometry run <dataset-id> --workdir DIR [--version V] [--apply] [--surfaces-out DIR]
+uv run --project scripts/ieeg_geometry python -m ieeg_geometry pr <dataset-id> --workdir DIR [--version V] [--surfaces-out DIR] [--dry-run]
+uv run --project scripts/ieeg_geometry python -m ieeg_geometry upload-surfaces <dataset-id> --surfaces DIR [--bucket B] [--profile P] [--dry-run]
 cd scripts/ieeg_geometry && uv run pytest -q
 ```
+
+`pr` and `upload-surfaces` are run by the owner, from their own machine, with their own `gh` login, git identity and AWS profile.
+`pr` clones the dataset's `main` into a fresh `DIR/<id>`, runs the pipeline with `--apply`, refuses when a track errored, when nothing changed, or when the work tree differs from `main` in anything but the report's `changes`, commits those paths once on `nemar/ieeg-geometry-<pipeline version>` with the title "Add NEMAR-computed iEEG geometry (pipeline <version>)", pushes only that branch and opens the pull request against `main` with `gh pr create`; it never merges and never force-pushes, and it refuses a branch that already exists on the remote.
+The body lists every file with its method and evidence grade (shortened in steps only when it would pass GitHub's size limit).
+`--dry-run` does everything but the push and the pull request, and prints the body.
+`upload-surfaces` uses the `aws` command line tool (as `scripts/zarr/generate_zarr.py` does, no boto3): it lists `s3://<bucket>/<id>/zarr/geometry/` (bucket `nemar` by default), uploads the meshes the new index references (a content-addressed mesh already there is skipped), then `index.json`, then removes keys under that prefix the index no longer references; no other key is listed, written or removed.
+Both refuse `nm000103` to `nm000107` and `nm099998`.
+`generate_zarr.py --wipe` leaves the `geometry/` prefix in place.
 
 `run` fetches exactly the files a dataset's geometry needs, runs the four tracks in order (labels, FreeSurfer, SPM, subject surfaces) and prints one JSON report (`schema/geometry-report.v1.json`).
 It writes nothing unless `--apply` is given; `--apply` writes into the git work tree `DIR/<dataset-id>` and the surfaces into `--surfaces-out`, and never commits, pushes, opens a pull request or uploads.
