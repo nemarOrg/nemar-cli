@@ -94,7 +94,7 @@ def plan(description: str, main_description: str, tags: list[str], changes: str 
     """
     cur_text = current_version(description)
     cur = parse(cur_text)
-    if cur is None:
+    if cur is None or cur_text != _fmt(cur):
         raise BumpRefusal(f"Version {cur_text!r} is not of the form X.Y.Z; bump it by hand")
     try:
         main_text = current_version(main_description)

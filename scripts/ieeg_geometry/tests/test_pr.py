@@ -636,7 +636,7 @@ def test_from_ref_keeps_a_collaborators_version_and_puts_the_geometry_on_top(env
     assert call["args"][call["args"].index("--base") + 1] == "main"
     body = call["body"]
     assert "Integration branch `integ`: 1 commit(s) not on `main`" in body
-    assert f"`{foreign[:7]}` Collab Person: Fix a thing" in body
+    assert f"`{foreign[:7]}` `Collab Person: Fix a thing`" in body
     assert "is already `1.0.4`" in body and "tags `v1.0.4`" in body
     assert "CHANGES lists" not in body  # 1.0.3 is not ahead of 1.0.4
 
@@ -646,7 +646,11 @@ def test_from_ref_updates_an_open_pull_request_instead_of_opening_another(
 ):
     served, bare, log, work = env
     _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
-    monkeypatch.setenv("STANDIN_OPEN_PRS", '[{"number": 5, "url": "https://example.org/pull/5"}]')
+    monkeypatch.setenv(
+        "STANDIN_OPEN_PRS",
+        '[{"number": 5, "url": "https://example.org/pull/5", '
+        '"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}]',
+    )
     assert _pr(served, work, "--from-ref", "integ") == 0
     verbs = [c["args"][:2] for c in _calls(log)]
     assert ["pr", "edit"] in verbs and ["pr", "create"] not in verbs
@@ -669,6 +673,64 @@ def test_from_ref_refuses_when_the_branch_moved_during_the_run(env, tmp_path, mo
     assert "moved on the remote" in capsys.readouterr().err
     assert _git(bare, "rev-list", "--count", f"{foreign}..integ").strip() == "1"  # theirs only
     assert not _calls(log)
+
+
+@pytest.mark.parametrize(
+    "name", ["main", "refs/heads/main", "-f", "--delete", "a..b", "x.lock", "/x"]
+)
+def test_from_ref_refuses_main_and_anything_but_a_plain_branch_name(env, capsys, name):
+    served, bare, log, work = env
+    assert _pr(served, work, f"--from-ref={name}") == 1
+    assert "plain branch name" in capsys.readouterr().err
+    assert _git(bare, "rev-parse", "main").strip() == served.commit and not _calls(log)
+
+
+_MINE = {"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}
+
+
+def test_from_ref_ignores_a_fork_pull_request_with_the_same_branch_name(env, tmp_path, monkeypatch):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    fork = {"number": 8, "url": "u8", "headRepositoryOwner": {"login": "x"}, "baseRefName": "main"}
+    monkeypatch.setenv("STANDIN_OPEN_PRS", json.dumps([fork]))
+    assert _pr(served, work, "--from-ref", "integ") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "create"] in verbs and ["pr", "edit"] not in verbs
+
+
+def test_from_ref_refuses_when_more_than_one_pull_request_remains(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    rows = [{"number": 5, "url": "u5", **_MINE}, {"number": 6, "url": "u6", **_MINE}]
+    monkeypatch.setenv("STANDIN_OPEN_PRS", json.dumps(rows))
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "2 open pull requests" in capsys.readouterr().err
+    assert not [c for c in _calls(log) if c["args"][:2] in (["pr", "edit"], ["pr", "create"])]
+
+
+@pytest.mark.parametrize("how", ["rewound", "deleted"])
+def test_from_ref_push_is_atomic_against_a_branch_rewound_or_deleted_at_the_last_moment(
+    env, tmp_path, monkeypatch, capsys, how
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    real = pr._git
+
+    def git(clone, *a, **k):
+        if a and a[0] == "push":  # after the ls-remote check, before the push
+            if how == "rewound":
+                _git(bare, "update-ref", "refs/heads/integ", served.commit)
+            else:
+                _git(bare, "update-ref", "-d", "refs/heads/integ")
+        return real(clone, *a, **k)
+
+    monkeypatch.setattr(pr, "_git", git)
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "git push failed" in capsys.readouterr().err
+    left = _git(bare, "rev-parse", "--verify", "-q", "integ").strip() if how == "rewound" else ""
+    assert left in ("", served.commit) and not _calls(log)
 
 
 def _integration_branch_more(bare: Path, tmp: Path) -> None:

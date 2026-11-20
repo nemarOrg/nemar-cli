@@ -56,3 +56,9 @@ def test_changes_ahead_is_reported_not_refused():
 def test_a_malformed_version_is_refused():
     with pytest.raises(vb.BumpRefusal, match="not of the form"):
         _plan("1.0", "1.0.0", ["v1.0.0"])
+
+
+@pytest.mark.parametrize("raw", ["v1.0.4", "1.04.0", " 1.0.4", "1.0.4 "])
+def test_a_non_canonical_branch_version_is_refused_not_kept(raw):
+    with pytest.raises(vb.BumpRefusal, match="not of the form"):
+        _plan(raw, "1.0.0", ["v1.0.0"])

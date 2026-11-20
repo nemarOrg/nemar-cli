@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -443,11 +444,30 @@ def _plan_bump(clone: Path) -> versionbump.Plan:
         raise PrRefusal(f"--bump-version: {exc}") from exc
 
 
+_PLAIN_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def check_from_ref(name: str) -> None:
+    """Only a plain branch name other than `main`: the push must never reach `main` or a ref."""
+    if (
+        name == BASE
+        or name.startswith("refs/")
+        or ".." in name
+        or name.endswith((".lock", "/", "."))
+        or not _PLAIN_BRANCH.match(name)
+    ):
+        raise PrRefusal(
+            f"--from-ref {name!r} must be a plain branch name other than {BASE!r} "
+            "(the geometry is pushed to that branch)"
+        )
+
+
 def _ref_commits(clone: Path) -> list[str]:
     """Commits on the branch that are not on `main`: short sha, author, subject."""
     out = _git(clone, "log", "-z", "--format=%h%x1f%an%x1f%s", f"origin/{BASE}..HEAD", neutral=True)
     rows = [r.split("\x1f") for r in out.split("\0") if r.strip()]
-    return [f"`{h}` {a}: {subj}" for h, a, subj in rows]
+    # code spans, so a collaborator's `@name` in a subject or author does not notify anyone
+    return [f"`{h}` `{(a + ': ' + subj).replace(chr(96), chr(39))}`" for h, a, subj in rows]
 
 
 def open_pr(
@@ -467,6 +487,8 @@ def open_pr(
     own `nemarDatasets/<id>`); the command line never changes it, tests do."""
     out = out or sys.stdout
     pipeline.check_dataset_id(dataset_id)
+    if from_ref is not None:
+        check_from_ref(from_ref)
     pv = pipeline_version()
     ttl = title(pv)
     branch = from_ref or branch_name(pv)
@@ -587,14 +609,27 @@ def open_pr(
                 f"branch {branch} moved on the remote since the clone ({got.commit[:12]} -> "
                 f"{(now or ['gone'])[0][:12]}); nothing was pushed, rerun"
             )
-    _git(clone, "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push")
+    lease = [f"--force-with-lease=refs/heads/{branch}:{got.commit}"] if from_ref else []
+    _git(
+        clone, "push", *lease, "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push"
+    )
     if from_ref:
         listed = _run(
             ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,
-             "--state", "open", "--json", "number,url"],
+             "--state", "open", "--json", "number,url,headRepositoryOwner,baseRefName"],
             clone, "gh pr list",
         )  # fmt: skip
-        open_prs = json.loads(listed or "[]")
+        open_prs = [  # a fork's PR with the same branch name is not this branch's PR
+            p
+            for p in json.loads(listed or "[]")
+            if (p.get("headRepositoryOwner") or {}).get("login") == ORG
+            and p.get("baseRefName") == BASE
+        ]
+        if len(open_prs) > 1:
+            raise PrRefusal(
+                f"branch {branch} has {len(open_prs)} open pull requests into {BASE}; "
+                "it was pushed, edit the right one by hand"
+            )
         if open_prs:
             edit = [
                 "gh", "pr", "edit", str(open_prs[0]["number"]),
