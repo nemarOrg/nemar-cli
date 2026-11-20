@@ -52,10 +52,20 @@ class Plan:
 
 
 def _referenced_meshes(index: dict) -> list[str]:
+    """Mesh paths the index names; a malformed index is a refusal, never a traceback."""
+    entries = index.get("entries")
+    if not isinstance(entries, list):
+        raise UploadRefusal("the index has no entries list")
     rels: set[str] = set()
-    for entry in index.get("entries", []):
-        for mesh in entry.get("meshes", {}).values():
-            rels.add(mesh["path"])
+    for n, entry in enumerate(entries):
+        meshes = entry.get("meshes") if isinstance(entry, dict) else None
+        if not isinstance(meshes, dict):
+            raise UploadRefusal(f"index entry {n} has no meshes object")
+        for name, mesh in meshes.items():
+            path = mesh.get("path") if isinstance(mesh, dict) else None
+            if not isinstance(path, str):
+                raise UploadRefusal(f"index entry {n}, mesh {name!r} has no path string")
+            rels.add(path)
     return sorted(rels)
 
 
@@ -63,6 +73,8 @@ def _safe_relative(rel: str) -> str:
     p = PurePosixPath(rel)
     if p.is_absolute() or ".." in p.parts or not p.parts or "" in rel.split("/"):
         raise UploadRefusal(f"the index names an unsafe mesh path {rel!r}")
+    if p.as_posix() == "index.json":
+        raise UploadRefusal("the index names index.json as a mesh")
     return p.as_posix()
 
 
@@ -71,7 +83,7 @@ def plan(dataset_id: str, surfaces: Path, existing: set[str]) -> Plan:
     pipeline.check_dataset_id(dataset_id)
     geometry = Path(surfaces) / "geometry"
     index_file = geometry / "index.json"
-    if not index_file.is_file():
+    if index_file.is_symlink() or not index_file.is_file():
         raise UploadRefusal(f"{index_file} does not exist; run the pipeline with --surfaces-out")
     try:
         index = json.loads(index_file.read_text(encoding="utf-8"))
@@ -85,6 +97,8 @@ def plan(dataset_id: str, surfaces: Path, existing: set[str]) -> Plan:
     for rel in _referenced_meshes(index):
         rel = _safe_relative(rel)
         local = geometry / rel
+        if local.is_symlink() or not local.resolve().is_relative_to(geometry.resolve()):
+            raise UploadRefusal(f"{rel} is a symbolic link or leaves {geometry}")
         if not local.is_file():
             raise UploadRefusal(f"the index names {rel}, which is not in {geometry}")
         key = prefix + rel
