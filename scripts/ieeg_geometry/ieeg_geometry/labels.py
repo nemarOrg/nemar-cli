@@ -61,6 +61,7 @@ from .bids import (
     Discovered,
     ElectrodeSet,
     GeometryRefusal,
+    check_source_table,
     discover,
     read_electrode_set,
 )
@@ -619,6 +620,7 @@ def propose(
 
     try:
         eset = read_electrode_set(item, assume_units="mm")
+        check_source_table(item.electrodes_path)  # table writer: refuse what it cannot copy
     except GeometryRefusal as exc:
         return done(SKIPPED, f"unreadable: {exc.reason}")
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, KeyError) as exc:

@@ -43,7 +43,14 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import KDTree
 
-from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .bids import (
+    Discovered,
+    ElectrodeSet,
+    GeometryRefusal,
+    check_source_table,
+    discover,
+    read_electrode_set,
+)
 from .bids_clean import Table, electrodes_tsv
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
@@ -568,6 +575,7 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
         return result
     try:
         eset = read_electrode_set(item)
+        check_source_table(item.electrodes_path)  # table writer: refuse what it cannot copy
     except GeometryRefusal as exc:
         result.refusals.append(Refusal("file", exc.reason, exc.message))
         return result

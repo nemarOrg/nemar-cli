@@ -205,6 +205,17 @@ def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[
         return list(reader.fieldnames or []), rows
 
 
+def check_source_table(path: Path) -> None:
+    """Refuse the source electrodes table at `path` unless the table writers can copy it.
+
+    Called by the three table writers (labels, FreeSurfer, SPM) when they plan, right after
+    `read_electrode_set`. `read_electrode_set` itself does not call it, so the surfaces track,
+    which reads only x, y and z, is not refused by a repeated name or a ragged row.
+    """
+    header, rows = _read_tsv(path)
+    check_table(header, rows, path.name)
+
+
 def check_table(header: list[str], rows: list[dict], name: str) -> None:
     """Refuse an electrodes table the writers could not copy faithfully.
 
@@ -307,7 +318,6 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
-    check_table(header, rows, item.electrodes_path.name)
     from_channels, warnings = _channel_types(item.channels_paths)
     contacts: list[Contact] = []
     for row in rows:

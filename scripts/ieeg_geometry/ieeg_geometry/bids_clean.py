@@ -19,7 +19,7 @@ the bytes, for all three tracks:
 Nothing changes silently: `electrodes_tsv` returns a `Cleaning` that names the dropped and
 added columns and counts the cells it rewrote, and the report carries it per output file.
 Source tables the writers could not copy faithfully are refused earlier, in
-`bids.check_table`.
+`bids.check_table`, which each table writer calls when it plans (not the surfaces track).
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ NUMERIC_COLUMNS = frozenset({"x", "y", "z", "size", "impedance"})
 NA = "n/a"
 _MISSING = frozenset({"", "n/a", "na", "nan"})
 _NUMBER = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?", re.ASCII)
-_INTEGER = re.compile(r"[+-]?[0-9]+", re.ASCII)
+_INDEX = re.compile(r"[0-9]+", re.ASCII)
 _HEMISPHERE = {"l": "L", "lh": "L", "left": "L", "r": "R", "rh": "R", "right": "R"}
 
 
@@ -100,11 +100,16 @@ def _entities(stem: str) -> dict[str, str]:
     return {k: v for k, _, v in (p.partition("-") for p in stem.split("_") if "-" in p)}
 
 
+class _Ambiguous(Exception):
+    """A folder holds several applicable sidecars and none is the exact match."""
+
+
 def _folder_candidate(folder: Path, stem: str) -> Path | None:
     """The one `*_electrodes.json` of a folder that applies to a file, as the BIDS validator
-    (3.0.2, `walkBack`) picks it: the only candidate, or the exact name match among several;
-    with several and no exact match none applies (the validator reports it as
-    `MULTIPLE_INHERITABLE_FILES`)."""
+    (3.0.2, `walkBack`) picks it: the only candidate, or the exact name match among several.
+    With several and no exact match the validator throws `MULTIPLE_INHERITABLE_FILES` and
+    `loadSidecar` merges nothing at all, so this raises `_Ambiguous` and the caller drops every
+    sidecar, not only that folder's."""
     wanted = _entities(stem)
     found: list[Path] = []
     for cand in sorted(folder.glob("*electrodes.json")):
@@ -116,7 +121,11 @@ def _folder_candidate(folder: Path, stem: str) -> Path | None:
     if len(found) == 1:
         return found[0]
     exact = [c for c in found if c.name == f"{stem}_electrodes.json"]
-    return exact[0] if exact else None
+    if exact:
+        return exact[0]
+    if found:
+        raise _Ambiguous
+    return None
 
 
 def sidecar_definitions(output: Path, root: Path | None = None) -> dict[str, object]:
@@ -124,14 +133,18 @@ def sidecar_definitions(output: Path, root: Path | None = None) -> dict[str, obj
 
     One sidecar per folder from the file's folder up to the dataset root (see
     `_folder_candidate`); a definition in a deeper folder overrides the same key above it.
-    An unreadable or non-object sidecar defines nothing.
+    An unreadable or non-object sidecar defines nothing. When any folder of the chain is
+    ambiguous the validator uses no sidecar for the file, so the result is empty.
     """
     root = dataset_root(output) if root is None else root
     stem = output.name[: -len("_electrodes.tsv")]
     chain: list[Path] = []
     folder = output.parent
     while True:
-        cand = _folder_candidate(folder, stem)
+        try:
+            cand = _folder_candidate(folder, stem)
+        except _Ambiguous:
+            return {}
         if cand is not None:
             chain.append(cand)
         if folder == root or folder.parent == folder:
@@ -161,13 +174,15 @@ def _passes(definition: object, cells: list[str]) -> bool:
     fmt = definition.get("Format")
     low, high = definition.get("Minimum"), definition.get("Maximum")
     bounded = isinstance(low, int | float) or isinstance(high, int | float)
-    numeric = "Units" in definition or fmt in ("number", "float", "integer", "index") or bounded
+    numeric = "Units" in definition or fmt == "number" or bounded
+    if fmt not in (None, "string", "number", "index"):
+        return False  # label, boolean, date, time, rrid, unknown: not checked here, so dropped
     for cell in cells:
         if cell == NA:
             continue
         if isinstance(levels, dict) and cell not in levels:
             return False
-        if fmt in ("integer", "index") and not _INTEGER.fullmatch(cell):
+        if fmt == "index" and not _INDEX.fullmatch(cell):
             return False
         if numeric:
             if not _NUMBER.fullmatch(cell):

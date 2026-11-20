@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ieeg_geometry.bids import GeometryRefusal
+from ieeg_geometry.bids import GeometryRefusal, check_source_table
 from ieeg_geometry.bids_clean import electrodes_tsv, sidecar_columns
 from ieeg_geometry.labels import _tsv_in_mm as _labels_table
 
@@ -157,12 +157,54 @@ def test_inheritance_takes_one_sidecar_per_folder_and_the_deepest_wins(tmp_path)
     _sidecar(root, "electrodes.json", {"a": {}, "b": {"Description": "root"}})
     _sidecar(folder, "sub-01_electrodes.json", {"b": {"Description": "folder"}, "c": {}})
     assert sidecar_columns(out) == {"a", "b", "c"}
-    # two candidates in one folder and none exact: none applies (the validator errors on it)
+    # two candidates in one folder and none exact: the validator (walkBack throws
+    # MULTIPLE_INHERITABLE_FILES, loadSidecar merges nothing) uses no sidecar at all, not even
+    # the root one
     _sidecar(folder, "sub-01_task-a_electrodes.json", {"d": {}})
-    assert sidecar_columns(out) == {"a", "b"}
+    assert sidecar_columns(out) == set()
     # an exact match among several wins
     _sidecar(folder, "sub-01_task-a_space-ACPC_electrodes.json", {"e": {}})
     assert sidecar_columns(out) == {"a", "b", "e"}
+
+
+def test_an_ambiguous_folder_does_not_keep_a_column_the_root_defines(tmp_path):
+    root, source = _dataset(tmp_path)
+    out = source.parent / "sub-01_space-ACPC_electrodes.tsv"
+    _sidecar(root, "electrodes.json", {"seizure_zone": {"Description": "z"}})
+    _sidecar(source.parent, "sub-01_electrodes.json", {})
+    _sidecar(source.parent, "space-ACPC_electrodes.json", {})
+    header = ["name", "x", "y", "z", "seizure_zone"]
+    table = electrodes_tsv(header, [{"name": "A", "seizure_zone": "yes"}], out)
+    assert "seizure_zone" not in _table(table.data)[0]
+    assert table.cleaning.dropped_columns == ("seizure_zone",)
+
+
+@pytest.mark.parametrize(
+    ("definition", "cell", "kept"),
+    [
+        ({"Format": "index"}, "3", True),
+        ({"Format": "index"}, "-1", False),
+        ({"Format": "string"}, "a b", True),
+        ({}, "a b", True),
+        ({"Format": "label"}, "a b", False),
+        ({"Format": "boolean"}, "yes", False),
+        ({"Format": "date"}, "x", False),
+        ({"Format": "float"}, "1.5", False),
+    ],
+)
+def test_a_format_that_is_not_checked_drops_the_column(tmp_path, definition, cell, kept):
+    root, source = _dataset(tmp_path)
+    _sidecar(root, "electrodes.json", {"extra": {"Description": "d", **definition}})
+    out = source.parent / "sub-01_space-ACPC_electrodes.tsv"
+    table = electrodes_tsv(["name", "x", "y", "z", "extra"], [{"name": "A", "extra": cell}], out)
+    assert ("extra" in _table(table.data)[0]) is kept
+
+
+def test_a_unicode_digit_in_a_numeric_column_becomes_na(tmp_path):
+    _, source = _dataset(tmp_path)
+    rows = [{"name": "A", "x": "\u0661", "y": "2", "z": "3", "size": "\u0663.5"}]
+    table = electrodes_tsv(["name", "x", "y", "z", "size"], rows, source)
+    assert _table(table.data)[1] == ["A", "n/a", "2", "3", "n/a"]
 
 
 def test_a_defined_column_is_kept_only_when_every_value_passes_its_definition(tmp_path):
@@ -202,17 +244,24 @@ def test_a_defined_column_is_kept_only_when_every_value_passes_its_definition(tm
         ("name\tx\tx\tz\nA\t1\t2\t3\n", "electrodes-columns"),
     ],
 )
-def test_a_table_the_writers_could_not_copy_is_refused_for_every_track(tmp_path, table, reason):
+def test_a_table_the_writers_could_not_copy_is_refused(tmp_path, table, reason):
+    root, source = _dataset(tmp_path, table)
+    with pytest.raises(GeometryRefusal) as exc:
+        check_source_table(source)
+    assert exc.value.reason == reason
+
+
+def test_the_surfaces_reader_is_not_refused_by_a_repeated_name(tmp_path):
     from ieeg_geometry.bids import discover, read_electrode_set
 
-    root, source = _dataset(tmp_path, table)
+    root, source = _dataset(tmp_path, "name\tx\ty\tz\nA\t1\t2\t3\nA\t4\t5\t6\n")
     (source.parent / "sub-01_coordsystem.json").write_text(
         json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm"})
     )
     (item,) = discover(root)
-    with pytest.raises(GeometryRefusal) as exc:
-        read_electrode_set(item)
-    assert exc.value.reason == reason
+    assert len(read_electrode_set(item).contacts) == 2  # the table writers refuse this file
+    with pytest.raises(GeometryRefusal, match="electrodes-names"):
+        check_source_table(source)
 
 
 def test_the_report_schema_accepts_a_cleaning_entry(tmp_path):

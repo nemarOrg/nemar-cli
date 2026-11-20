@@ -794,3 +794,13 @@ def test_a_dirty_source_gives_a_valid_table(synthetic_dataset):
     assert "nan" not in tsv.read_text().lower()
     (cleaning,) = plan.cleaning.values()
     assert cleaning.dropped_columns == ("note",) and cleaning.coerced_cells["size"] == 41
+
+
+def test_a_repeated_electrode_name_is_refused_by_the_spm_track(synthetic_dataset):
+    src = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
+    lines = src.read_text().splitlines()
+    lines[2] = "\t".join([lines[1].split("\t")[0], *lines[2].split("\t")[1:]])
+    src.write_text("\n".join(lines) + "\n")
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict != "write"
+    assert any("electrodes-names" in c.note for c in plan.candidates)

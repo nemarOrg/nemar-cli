@@ -53,7 +53,13 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import KDTree
 
-from .bids import ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .bids import (
+    ElectrodeSet,
+    GeometryRefusal,
+    check_source_table,
+    discover,
+    read_electrode_set,
+)
 from .bids_clean import Cleaning, Table, electrodes_tsv
 from .ownership import (
     OwnedPath,
@@ -813,7 +819,9 @@ def _plan_session(dataset, subject, session, items, fields, loaded, reference) -
         if item.space == LABEL:
             continue
         try:
-            sets.append(read_electrode_set(item))
+            eset = read_electrode_set(item)
+            check_source_table(item.electrodes_path)  # table writer: refuse what it cannot copy
+            sets.append(eset)
         except GeometryRefusal as exc:
             plan.candidates.append(
                 _refused_candidate(item.electrodes_path, item.space, f"refused {exc.reason}")

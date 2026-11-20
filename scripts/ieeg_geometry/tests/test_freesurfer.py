@@ -524,3 +524,12 @@ def test_a_dirty_source_gives_a_valid_table(ds):
     assert cleaning.dropped_columns == ("seizure_zone",)
     assert cleaning.coerced_cells["size"] == len(out_rows)
     assert cleaning.hemisphere_rewritten == len(out_rows)
+
+
+def test_a_repeated_electrode_name_is_refused_by_the_freesurfer_track(ds):
+    src = ds / (P02 + "_electrodes.tsv")
+    lines = src.read_text().splitlines()
+    lines[2] = "\t".join([lines[1].split("\t")[0], *lines[2].split("\t")[1:]])
+    src.write_text("\n".join(lines) + "\n")
+    res = _by_sub(fsm.plan_dataset(ds), "p02")
+    assert [r.reason for r in res.refusals] == ["electrodes-names"] and not res.outputs
