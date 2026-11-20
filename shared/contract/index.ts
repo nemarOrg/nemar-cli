@@ -21,6 +21,8 @@ export * from "./device-auth.js";
 // decides which fields are missing (#1268, ADR 0045).
 export * from "./account-copy.js";
 export * from "./profile-gaps.js";
+// The community mail categories and their audience rules, declared once (epic #2260, ADR 0132).
+export * from "./mail-categories.js";
 // Zarr serving index v3 reader and the MCP server's wire contract (issue
 // #1293, phase 1 of epic #1065; ADR 0049).
 export * from "./zarr-index.js";
