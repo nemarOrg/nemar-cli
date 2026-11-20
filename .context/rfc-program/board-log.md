@@ -50,6 +50,10 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T11:24-08:00 | Q7: | owner |  |
 | 2026-11-20T11:24-08:00 | Plan approved (owner: 'plan is good, move forward', 2026-11-20); lead pushes feature/rfc-program | owner |  |
 | 2026-11-20T11:35-08:00 | #2217: no in-place patch; the biosig-zarr tag rename lands with the version 3 writer via re-conversion; A2's ADR records it (owner confirmed, comment posted 2026-11-20) | owner |  |
+| 2026-11-20T12:18-08:00 | New repo nemarOrg/nemar-doi: the registry of every NEMAR DOI with a page at doi.nemar.org; it delegates the nm and on dataset DOIs to nemar-cli, which keeps its own registry; a Fable planner designs and initializes it (separate track, not an RFC program step) | owner |  |
+| 2026-11-20T12:18-08:00 | RFC-0002 scope: all nm datasets | owner |  |
+| 2026-11-20T12:18-08:00 | Open RFC-0001 as soon as possible: prioritize the B and R chains | owner |  |
+| 2026-11-20T12:18-08:00 | Rationale for the 21-day window: AI-assisted review by knowledgeable people is welcome, so RFCs are fast-paced; stated in the rfcs process doc, the A1 ADR and the docs page | owner |  |
 
 ## Log
 

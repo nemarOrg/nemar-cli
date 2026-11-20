@@ -117,7 +117,9 @@ The reproduction used synthetic files.
 A version 2 store cannot show the problem even when the writer knows about it, because it has no field that claims continuity.
 BIDS contributors have raised the same limit (all links checked 2026-11-20):
 
-- [bids-specification#1771](https://github.com/bids-standard/bids-specification/issues/1771), the origin issue of BIDS Extension Proposal (BEP) 047 for audio and video:
+- BIDS Extension Proposal (BEP) 045, "Peripheral" physiology ([proposal page](https://bids.neuroimaging.io/extensions/beps/bep_045.html), [bids-specification#2267](https://github.com/bids-standard/bids-specification/pull/2267), opened 2025-11-22 and still open on 2026-11-20):
+  the BIDS extension for raw physiological recordings, where irregular and sparse sampling is part of the discussion.
+- [bids-specification#1771](https://github.com/bids-standard/bids-specification/issues/1771), the origin issue of BEP 047 for audio and video:
   on 2024-04-22 a commenter asked whether a recording that stopped and resumed is one file or several, quoting the EDF+ discontinuous mode.
   The working answer was separate runs aligned through `scans.tsv`.
 - [bids-specification#1796](https://github.com/bids-standard/bids-specification/issues/1796), "allow timestamps for physio table" (2024-04-18):
