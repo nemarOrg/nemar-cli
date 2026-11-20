@@ -24,6 +24,8 @@ spec_proposed: 3.0.0-draft.1
 The Neuroelectromagnetic Data Archive and Tools Resource (NEMAR) serves every raw recording it holds a second time, as a Zarr version 3 store shaped for fast partial reads over a network.
 We have served stores in this layout since mid 2026.
 We are now writing the layout down as its own specification, `biosig-zarr`, for tools other than ours to read and write.
+In this RFC, "store" always means a biosig-zarr store: the Zarr version 3 store for one recording, laid out as this specification describes.
+Any other Zarr store is called a Zarr store.
 
 As of 2026-11-20, NEMAR serves 231,259 stores, 98.4% of the 235,038 recordings in its 910 public datasets (about 116,000 hours of recordings), and the count grows as datasets arrive.
 The other 3,779 recordings have no source data available to convert.
