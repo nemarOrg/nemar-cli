@@ -1,0 +1,85 @@
+dataset	version	initial	class	literal_B6_class	basis	tag_commit_prs	range_prs	range_class
+nm000146	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000146")	none		
+nm000146	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000146	1.0.2		source	source	pr-author (dataset owner)	#2:bruAristimunha		
+nm000146	1.0.3		source	source	pr-author (dataset owner)	#3:bruAristimunha		
+nm000169	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000169")	none		
+nm000169	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000169	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#2:bruAristimunha	source
+nm000169	1.0.3		source	source	pr-author (dataset owner)	#3:bruAristimunha		
+nm000191	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000191")	none		
+nm000191	1.0.1		unknown	unknown	no PR on tag commit (bruAristimunha; unsigned; "Merge pull request #1 from nemarDatasets")	none	none	unknown
+nm000191	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: enriche")	none	none	unknown
+nm000197	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000197")	none		
+nm000197	1.0.1		unknown	unknown	no PR on tag commit (bruAristimunha; unsigned; "Merge pull request #2 from nemarDatasets")	none	none	unknown
+nm000197	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	none	unknown
+nm000199	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000199")	none		
+nm000199	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000199	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#2:bruAristimunha	source
+nm000199	1.0.3		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: enriche")	none	#3:bruAristimunha	source
+nm000199	1.0.4		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#4:bruAristimunha	source
+nm000220	1.0.1	yes	source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000220	1.0.2		source	source	pr-author (dataset owner)	#2:bruAristimunha		
+nm000220	1.0.4		source	source	pr-author (dataset owner)	#3:bruAristimunha		
+nm000220	1.0.5		source	source	pr-author (dataset owner)	#4:bruAristimunha		
+nm000220	1.0.6		source	source	pr-author (dataset owner)	#5:bruAristimunha		
+nm000229	1.0.1	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README.txt (renamed to README")	none		
+nm000229	1.0.2		source	source	pr-author (dataset owner)	#2:bruAristimunha		
+nm000240	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000240")	none		
+nm000240	1.0.2		source	source	pr-author (dataset owner)	#2:bruAristimunha		
+nm000240	1.0.3		source	source	pr-author (dataset owner)	#3:bruAristimunha		
+nm000240	1.0.4		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: enriche")	none	#4:bruAristimunha	source
+nm000240	1.0.5		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#5:bruAristimunha	source
+nm000319	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000319	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000319	1.0.2		source	source	pr-author (dataset owner)	#2:bruAristimunha		
+nm000346	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000346	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000346	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: enriche")	none	#2:bruAristimunha	source
+nm000346	1.0.3		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#3:bruAristimunha	source
+nm000390	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.nm000390")	none		
+nm000390	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000390	1.0.2		nemar	nemar	pr-author (NEMAR admin)	#2:nemarAdmin		
+nm000446	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000446	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000446	1.0.2		nemar	nemar	pr-author (NEMAR admin)	#2:nemarAdmin		
+nm000446	1.0.3		community	community	pr-author (other authenticated user)	#3:julien-gadonneix		
+nm000465	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000465	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000465	1.0.2		nemar	nemar	pr-author (NEMAR admin)	#2:nemarAdmin		
+nm000472	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000472	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000476	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+nm000476	1.0.1		source	source	pr-author (dataset owner)	#1:bruAristimunha		
+nm000476	1.0.2		nemar	nemar	pr-author (NEMAR admin)	#2:nemarAdmin		
+on000117	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Set initial version to 1.0.0 for DOI pub")	none		
+on000117	2.0.0		source	source	repull-record (PR #3, no trailer)	#3:neuromechanist		
+on002578	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on002578	1.0.2		community	community	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on002778	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on002778	1.0.2		community	community	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on003061	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on003061")	none		
+on003061	2.0.0		source	source	repull-record (PR #1, Upstream-Snapshot trailer)	#1:neuromechanist		
+on003078	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on003078")	none		
+on003078	1.0.1		community	community	pr-author (other authenticated user)	#1:bruAristimunha		
+on003190	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on003190	1.0.2		community	community	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on003343	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on003343	1.0.2		unknown	unknown	no PR on tag commit (no linked account; unsigned; "Update NEMAR metadata (pipeline: validat")	none	#1:AmanJaiswal1503	community
+on003739	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on003739")	none		
+on003739	2.0.0		source	source	repull-record (PR #1, Upstream-Snapshot trailer)	#1:neuromechanist		
+on004362	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on004362	2.0.0		source	source	repull-record (PR #2, Upstream-Snapshot trailer)	#2:neuromechanist		
+on004850	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README (renamed to README.md)")	none		
+on004850	1.0.2		community	community	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on005262	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on005262")	none		
+on005262	1.0.2		community	community	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on005574	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on005574")	none		
+on005574	1.0.3		community	community	pr-author (other authenticated user)	#1:bruAristimunha		
+on007315	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Set initial version to 1.0.0 for DOI pub")	none		
+on007315	1.0.1		community	source	pr-author (other authenticated user)	#1:AmanJaiswal1503		
+on007327	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Remove old README.txt (renamed to README")	none		
+on007327	1.0.1		nemar	source	pr-author (NEMAR admin)	#1:nemarAdmin		
+on007327	1.0.3		nemar	source	pr-author (NEMAR admin)	#2:nemarAdmin		
+on007473	1.0.0	yes	unknown	unknown	no PR on tag commit (nemarAdmin; unsigned; "Add DOI badge: 10.82901/nemar.on007473")	none		
+on007473	1.0.1		community	community	pr-author (other authenticated user)	#1:bruAristimunha		
