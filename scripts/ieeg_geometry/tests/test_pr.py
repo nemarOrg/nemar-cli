@@ -525,3 +525,15 @@ def test_a_configured_but_missing_annex_filter_does_not_stop_a_dry_or_real_run(
     assert changed
     for rel in changed:
         assert _git(bare, "show", f"{BRANCH}:{rel}") == (clone / rel).read_text(), rel
+
+
+def test_a_mirror_body_ends_with_the_patch_release_step():
+    body = pr.build_body({**REPORT, "dataset": "on004457"}, {}, n_surface_sets=0)
+    assert body.rstrip().endswith(
+        "After this is merged, cut the patch: `nemar dataset release on004457 --type patch`."
+    )
+
+
+def test_an_nm_body_has_no_patch_release_step():
+    body = pr.build_body({**REPORT, "dataset": "nm000352"}, {}, n_surface_sets=0)
+    assert "nemar dataset release" not in body

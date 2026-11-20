@@ -137,3 +137,28 @@ def test_new_report_numbers_are_judged_and_rules_listed(tmp_path: Path, census: 
     assert "| spm | field_check_centroid_mm | 8.7 | 10.0 | 13.0% |" in out
     assert "| spm | field_check_extent_deviation | 0.087 | 0.1 | 13.0% |" in out
     assert "| labels label_rule | on-vertex-1.0mm | 1 |" in out
+
+
+def test_the_tool_limits_are_the_packages_constants():
+    from ieeg_geometry import freesurfer, spm, verify
+
+    expected = {
+        ("freesurfer", "frame_fit_median_mm"): verify.ECOG_MEDIAN_MM,
+        ("freesurfer", "registration_affine_residual_mm"): freesurfer.REG_AFFINE_RESIDUAL_MM,
+        ("freesurfer", "registration_side_fraction"): freesurfer.REG_SIDE_FRACTION,
+        ("freesurfer", "registration_centroid_mm"): freesurfer.REG_CENTROID_MM,
+        ("freesurfer", "registration_extent_error"): freesurfer.REG_EXTENT_FRACTION,
+        ("spm", "field_check_median_mm"): spm.FIELD_CHECK_MEDIAN_MM,
+        ("spm", "field_check_p10_mm"): spm.FIELD_CHECK_P10_MM,
+        ("spm", "field_check_centroid_mm"): spm.FIELD_CHECK_CENTROID_MM,
+        ("spm", "field_check_extent_deviation"): spm.FIELD_CHECK_EXTENT_FRACTION,
+        ("spm", "inside_fraction"): verify.INSIDE_MIN_FRACTION,
+    }
+    assert set(r1.LIMITS) == set(expected)
+    for key, value in expected.items():
+        assert r1.LIMITS[key][0] == value, key
+    assert r1.MEDIAN_LIMIT == {
+        "specific": verify.ECOG_MEDIAN_MM,
+        "plausible": verify.SEEG_MEDIAN_MM,
+    }
+    assert r1.LABEL_MEDIAN_LIMIT == verify.TEMPLATE_VERTEX_MM

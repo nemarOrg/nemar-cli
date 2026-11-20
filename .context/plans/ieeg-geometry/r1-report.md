@@ -90,7 +90,7 @@ Findings:
 - Add the registration and field-check numbers (centroid, extent difference, affine residual, side fraction) to the P1 report JSON, so a future summary needs no `inspect` run.
 - Record in each label decision which rule applied (the 1.0 mm on-vertex rule or the 2.0 mm ECoG rule).
 - Record the depth-contact median against the shell for SPM files, next to `inside_fraction`.
-- Resolve the `contact_type` label versus the contact count minimum (above).
+- Resolve the `contact_type` label versus the contact count minimum (above); resolved by #2232.
 
 ## Appendix: tool output
 

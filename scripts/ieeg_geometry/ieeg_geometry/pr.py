@@ -206,6 +206,11 @@ def _removed_section(paths: list[str]) -> list[str]:
     return [*lines, ""]
 
 
+def _is_mirror(dataset_id: str) -> bool:
+    """A mirror (`on` id) gets its geometry as version N.0.1 through a separate patch release."""
+    return dataset_id.startswith("on")
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
@@ -250,6 +255,12 @@ def build_body(
                 break
     if removed:
         lines += _removed_section(removed)
+    if _is_mirror(report["dataset"]):
+        lines += [
+            "",
+            "After this is merged, cut the patch: "
+            f"`nemar dataset release {report['dataset']} --type patch`.",
+        ]
     return "\n".join(lines).rstrip() + "\n"
 
 
