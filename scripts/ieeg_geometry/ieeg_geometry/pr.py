@@ -13,9 +13,11 @@ existing work directory, no git identity, a clone not on `main`, a branch that a
 the remote, an errored track, an apply that changed nothing, any difference outside `changes`,
 a staged set that is not exactly `changes`, a staged blob that is not the work-tree bytes (a
 git-annex filter must never turn a sidecar into a pointer), and, for a real run only, a
-remote that is not `nemarDatasets/<id>` and a missing release tag. A `main` ahead of the
-release is recorded in the body (every changed path, at most 50 listed), not refused: the
-files are computed from `main`.
+remote that is not `nemarDatasets/<id>`, a missing release tag, and an input that changed after
+the release and could not be fetched. Small files are read from the fresh clone of `main`;
+annexed files are downloaded from the data plane at the release version. A `main` ahead of the
+release is otherwise recorded in the body (every changed path, at most 50 listed), not refused:
+the files are computed from `main`.
 """
 
 from __future__ import annotations
@@ -211,12 +213,26 @@ def _is_mirror(dataset_id: str) -> bool:
     return dataset_id.startswith("on")
 
 
+def _not_fetched(failed: dict[str, str]) -> list[str]:
+    """Input files that could not be downloaded: the tracks that need one skip it, and the
+    reviewer must see which (the report keeps them as `not fetched:` warnings)."""
+    if not failed:
+        return []
+    items = [f"`{p}`: {r[:MAX_REASON_CHARS]}" for p, r in sorted(failed.items())]
+    return [
+        f"- Not fetched: {len(failed)} input file(s) could not be downloaded, so what depends "
+        "on them was skipped or left as it was:",
+        _bullets(items),
+    ]
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
     *,
     n_surface_sets: int,
     release_note: str | None = None,
+    fetch_failed: dict[str, str] | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -231,6 +247,7 @@ def build_body(
         f"- Dataset: `{report['dataset']}`, version `{report['dataset_version']}`, "
         f"source commit `{report['source_commit']}`",
         *([f"- Source: {release_note}"] if release_note else []),
+        *_not_fetched(fetch_failed or {}),
         f"- Pipeline: `{report['pipeline_version']}`",
         f"- Files: {len(added)} added, {len(changed)} changed, {len(removed)} removed",
         f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
@@ -276,47 +293,69 @@ def check_body_size(body: str) -> None:
 
 MAX_LISTED_PATHS = 50  # paths named in the Source section before a count stands for the rest
 MAX_LISTED_CHARS = 8_000  # and a character budget, so long names cannot crowd out the body
+MAX_REASON_CHARS = 100
 
 
-def _path_list(paths: list[str]) -> str:
-    """Sorted paths as sub-bullets: at most 50 and 8,000 characters, then a count of the rest."""
+def _bullets(items: list[str]) -> str:
+    """Sub-bullets: at most 50 and 8,000 characters, then a count of the rest."""
     shown: list[str] = []
     used = 0
-    for p in paths[:MAX_LISTED_PATHS]:
-        used += len(p) + 8
+    for item in items[:MAX_LISTED_PATHS]:
+        used += len(item) + 8
         if used > MAX_LISTED_CHARS:
             break
-        shown.append(f"  - `{p}`")
-    rest = len(paths) - len(shown)
+        shown.append(f"  - {item}")
+    rest = len(items) - len(shown)
     if rest:
         shown.append(f"  - and {rest} more")
     return "\n".join(shown)
 
 
-def release_status(clone: Path, version: str) -> tuple[str, bool]:
-    """(note for the body, whether a real run may proceed). A real run needs the release tag.
-    The pipeline computes from the fresh clone of `main`, which the mirror's patch release
-    will publish, so a `main` ahead of the release is recorded in the body, not refused."""
+def _path_list(paths: list[str]) -> str:
+    return _bullets([f"`{p}`" for p in paths])
+
+
+def release_status(
+    clone: Path, version: str, failed: dict[str, str] | None = None
+) -> tuple[str, bool]:
+    """(note for the body or the refusal, whether a real run may proceed).
+
+    Small files are read from the fresh clone of `main`; annexed files are downloaded from the
+    data plane at the release `version`. So a real run needs the release tag, and refuses when an
+    input that could not be fetched is one that changed after the release (its bytes are not at
+    the release). A `main` ahead of the release otherwise is recorded in the body, not refused:
+    the mirror's patch release publishes `main`."""
+    failed = failed or {}
     head = _git(clone, "rev-parse", "HEAD").strip()
     try:
         tag = _git(clone, "rev-parse", "--verify", "-q", f"refs/tags/{version}^{{commit}}").strip()
     except PrRefusal:
         return (
-            f"no tag {version} exists, so `main` ({head[:12]}) cannot be compared to the release",
+            f"no tag {version} exists, so `main` ({head[:12]}) cannot be compared to the release "
+            "that serves the annexed inputs; a real run needs the release tag",
             False,
         )
     if tag == head:
         return f"`main` is the release {version} ({head[:12]})", True
     moved = _paths(clone, "diff", "--name-only", "--no-renames", tag, head)
+    stale = sorted(set(failed) & moved)
+    if stale:
+        return (
+            f"{len(stale)} input file(s) changed after release {version} and could not be "
+            "fetched, because annexed bytes are downloaded at the release: "
+            + ", ".join(f"`{p}`" for p in stale[:10])
+            + (f" and {len(stale) - 10} more" if len(stale) > 10 else ""),
+            False,
+        )
     other = sorted(p for p in moved if not (p.startswith(UNRELEASED_DIRS) or p in UNRELEASED_FILES))
     if other:
         return (
-            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}); "
-            f"{len(other)} path(s) outside `.nemar/`, `.github/` and `.gitattributes` changed "
-            "since the release (every path changed, sorted):\n"
-            f"{_path_list(sorted(moved))}\n"
-            "  These files were computed from `main`, which the patch release will publish "
-            "together with these changes.",
+            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}). "
+            "The geometry files in this pull request were computed from `main`, which the patch "
+            "release will publish together with these changes (annexed inputs are unchanged "
+            f"since the release). {len(other)} path(s) outside `.nemar/`, `.github/` and "
+            f"`.gitattributes` changed since the release; every changed path, sorted:\n"
+            f"{_path_list(sorted(moved))}",
             True,
         )
     return (
@@ -384,9 +423,9 @@ def open_pr(
     clone = got.clone
     if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != BASE:
         raise PrRefusal(f"the clone is not on {BASE}; the pull request is made against {BASE}")
-    release_note, release_ok = release_status(clone, got.version)
+    release_note, release_ok = release_status(clone, got.version, got.failed)
     if not release_ok and not dry_run:
-        raise PrRefusal(f"{release_note}; the release is the pipeline's reference")
+        raise PrRefusal(release_note)
     if not release_ok:
         out.write(f"warning: {release_note} (a real run refuses)\n")
     if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
@@ -431,6 +470,7 @@ def open_pr(
         owned,
         n_surface_sets=len(report.get("surface_entries", [])),
         release_note=release_note,
+        fetch_failed=got.failed,
     )
     check_body_size(body)
     _git(clone, "checkout", "-q", "-b", branch)

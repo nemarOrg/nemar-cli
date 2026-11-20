@@ -6,6 +6,7 @@ runs), `gh` is a local executable that records its arguments, and nothing reache
 
 import dataclasses
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -44,6 +45,20 @@ def _advance(bare: Path, tmp: Path, files: dict[str, str]) -> None:
         (work / rel).write_text(text)
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "after the release")
+    _git(work, "push", "-q", "origin", "main")
+
+
+def _advance_annexed(bare: Path, tmp: Path, rel: str) -> None:
+    """After the release, main points `rel` at annexed bytes the release does not hold."""
+    work = tmp / "advance-annexed"
+    _git(tmp, "clone", "-q", str(bare), str(work))
+    link = work / rel
+    old = Path(os.readlink(link))
+    link.unlink()
+    key = "MD5E-s5--" + "0" * 32 + Path(rel).suffix
+    os.symlink(old.parent.parent / key / key, link)
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "annexed input changed after the release")
     _git(work, "push", "-q", "origin", "main")
 
 
@@ -457,6 +472,34 @@ def test_the_path_list_stays_inside_the_character_budget():
     long = [f"d/{i:03d}/" + "n" * 400 for i in range(50)]
     text = pr._path_list(long)
     assert len(text) < pr.MAX_LISTED_CHARS + 200 and "more" in text.splitlines()[-1]
+
+
+def test_an_annexed_input_changed_after_the_release_is_refused_for_a_real_run(
+    env, tmp_path, capsys
+):
+    served, bare, log, work = env
+    rel = next(p for p in served.annexed if p.endswith("pial"))
+    _advance_annexed(bare, tmp_path, rel)
+    assert _pr(served, work) == 1
+    err = capsys.readouterr().err
+    assert f"changed after release {VERSION}" in err and f"`{rel}`" in err
+    assert not _calls(log) and _refs(bare) == ["refs/heads/main"]
+    # a dry run goes on, with a warning
+    assert _pr(served, tmp_path / "w2", dry=True) == 0
+    assert "(a real run refuses)" in capsys.readouterr().out
+
+
+def test_an_input_that_could_not_be_fetched_is_listed_in_the_body(
+    tmp_path, source, monkeypatch, capsys
+):
+    probe = build_remote(source, tmp_path / "probe")
+    rel = next(p for p in probe.annexed if p.endswith("lh.sphere.reg"))
+    remote = build_remote(source, tmp_path / "remote", missing_data=(rel,))
+    served, _bare_repo = _bare(remote, tmp_path / "hosting")
+    standins.activate(monkeypatch, tmp_path / "standins")
+    assert _pr(served, tmp_path / "w", dry=True) == 0
+    out = capsys.readouterr().out
+    assert "- Not fetched: 1 input file(s)" in out and f"  - `{rel}`: " in out
 
 
 def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
