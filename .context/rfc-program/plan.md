@@ -202,7 +202,7 @@ gh issue comment 179 -R neuromechanist/biosigio \
 
 ```bash
 SHA=$(gh api repos/nemarOrg/biosig-zarr/commits/main -q .sha)
-gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" --prerelease \
+gh release create 2.0.0 -R nemarOrg/biosig-zarr --target "$SHA" \
   --title "2.0.0" --notes "Format version 2 as NEMAR serves it, moved from docs.nemar.org; no normative change."
 ```
 
