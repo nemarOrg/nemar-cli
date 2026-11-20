@@ -1388,6 +1388,38 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
       }
     });
 
+    test("a hand-edited pipeline file is a correction; an untouched one is still owned", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "hand-edited",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegOwned)).toMatchObject({
+          class: "correction",
+          subtype: "nemar-added",
+        });
+        expect(row(body, PATHS.ieegOwnedSidecar)).toMatchObject({ class: "pipeline-owned" });
+        expect(counts(body)).toMatchObject({ corrections: 1, pipeline_owned: 1 });
+        expect((pipeline(body) as unknown as { edited: string[] }).edited).toEqual([
+          PATHS.ieegOwned,
+        ]);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("a record with no hash for a file does not own it", async () => {
+      const fx = await buildRepullFixture({ ieegGeometry: "no-hash", noContributorEdits: true });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(counts(body)).toMatchObject({ corrections: 2, pipeline_owned: 0 });
+        expect(row(body, PATHS.ieegOwned).class).toBe("correction");
+      } finally {
+        fx.cleanup();
+      }
+    });
+
     test("the sidecar the label track adds for an electrodes file with none is pipeline-owned", async () => {
       const fx = await buildRepullFixture({
         ieegGeometry: "sidecarless",

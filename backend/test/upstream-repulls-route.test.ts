@@ -2202,7 +2202,7 @@ describe("create: the automatic path", () => {
     // ADR 0111, the amendment of 2026-11-19: `pipeline_owned` is neither a correction nor unexplained.
     seedMirror(AUTO);
     const c = await claim();
-    const counts = { ...CLEAN, pipeline_owned: 2, pipeline_failed: 1 };
+    const counts = { ...CLEAN, pipeline_owned: 2, pipeline_failed: 1, pipeline_attempts: 3 };
     const res = await call("POST", "/repulls", autoPlan(c, { counts }), prod());
     expect(res.status).toBe(201);
     expect(res.body.repull).toMatchObject({ counts });

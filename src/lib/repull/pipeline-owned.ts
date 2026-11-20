@@ -69,16 +69,18 @@ export interface PipelineOwned {
   paths: string[];
   /** The listed paths that are not, left to the ordinary rules. */
   ignored: number;
+  /** The `output_sha256` the record holds for each listed path, null where it holds none. */
+  hashes: Map<string, string | null>;
 }
 
 /** The ownership record's listed paths, from its bytes (null when the file is absent). */
 export function readPipelineOwned(bytes: Buffer | null): PipelineOwned {
-  if (bytes === null) return { status: "absent", paths: [], ignored: 0 };
+  if (bytes === null) return { status: "absent", paths: [], ignored: 0, hashes: new Map() };
   let doc: unknown;
   try {
     doc = JSON.parse(stripBom(bytes.toString("utf8")));
   } catch {
-    return { status: "unreadable", paths: [], ignored: 0 };
+    return { status: "unreadable", paths: [], ignored: 0, hashes: new Map() };
   }
   const record = doc as { schema?: unknown; paths?: unknown } | null;
   const listed = record?.paths;
@@ -90,11 +92,17 @@ export function readPipelineOwned(bytes: Buffer | null): PipelineOwned {
     typeof listed !== "object" ||
     Array.isArray(listed)
   ) {
-    return { status: "unreadable", paths: [], ignored: 0 };
+    return { status: "unreadable", paths: [], ignored: 0, hashes: new Map() };
   }
   const all = Object.keys(listed);
   const paths = all.filter(isPipelineOutputPath).sort();
-  return { status: "ok", paths, ignored: all.length - paths.length };
+  const hashes = new Map(
+    paths.map((p) => {
+      const h = (listed as Record<string, { output_sha256?: unknown } | null>)[p]?.output_sha256;
+      return [p, typeof h === "string" && /^[0-9a-f]{64}$/.test(h) ? h : null] as const;
+    }),
+  );
+  return { status: "ok", paths, ignored: all.length - paths.length, hashes };
 }
 
 /**

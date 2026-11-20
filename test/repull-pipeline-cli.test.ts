@@ -210,7 +210,7 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     const head = await rev("refs/heads/release/v2.0.1");
     expect(await tree(head)).not.toContain(OUT);
     expect(await show(head, PATHS.sidecar)).toContain("PowerLineFrequency");
-    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 2 });
+    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 3 });
   });
 
   test("a check the bridge applies to the result settles at once, whatever the class", async () => {

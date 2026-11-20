@@ -42,6 +42,7 @@ import {
   pushRelease,
   releaseRefOf,
 } from "./execute/pull-request.js";
+import { blobAt } from "./execute/resynthesize.js";
 import { ExecuteRefused, readReviewedPlan } from "./execute/verify-plan.js";
 import { git, hasCommit } from "./execute/workdir.js";
 import {
@@ -216,6 +217,8 @@ export async function patchTurn(ctx: ResumeContext, row: RepullRow): Promise<Tur
     return await makePatch(ctx, row, selection, version, {
       owned: pipelineOwnedPaths(body),
       upstreamWins: pipelineUpstreamWins(body),
+      unowned: pipelineStrings(body, "unowned"),
+      edited: pipelineStrings(body, "edited"),
     });
   } catch (err) {
     // A fact about the record or its plan is recorded on it; a problem of this run (the file it was
@@ -263,6 +266,19 @@ const pipelineUpstreamWins = (body: PlanBody) =>
       .map((r) => r.path),
   );
 
+/** A list of paths of the plan's pipeline-owned section (`unowned`, `edited`); none in an older plan. */
+function pipelineStrings(body: PlanBody, key: "unowned" | "edited"): Set<string> {
+  const v = (body as unknown as { pipeline_owned?: Record<string, unknown> }).pipeline_owned?.[key];
+  if (v === undefined) return new Set();
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+    throw new ExecuteRefused(
+      "plan-schema",
+      "The plan's pipeline-owned section does not have the planner's shape.",
+    );
+  }
+  return new Set(v as string[]);
+}
+
 /** Refusals that are about this run, not the record: nothing is recorded for them (exit 1). */
 const RUN_PROBLEMS = new Set([
   "pipeline-regeneration-failed",
@@ -305,6 +321,10 @@ async function patchHoldsPipelineFiles(
 interface PipelineArgs {
   owned: ReadonlySet<string>;
   upstreamWins: ReadonlySet<string>;
+  /** Listed paths that are not owned: the pipeline is handed a record without them. */
+  unowned: ReadonlySet<string>;
+  /** Hand-edited pipeline files N.0.1 replays: the pipeline finds them as NEMAR had them. */
+  edited: ReadonlySet<string>;
 }
 
 /** Run the pipeline on `parent`, the new `main`; a failure is a value, never a throw. */
@@ -321,7 +341,18 @@ async function regenerateOn(
       "The new main could not be fetched from NEMAR's repository.",
     );
   }
+  // The hand-edited files N.0.1 replays, as NEMAR's main held them at the base.
+  const preserve = new Map<string, string>();
+  if (args.edited.size > 0 && !(await hasCommit(scratch.dir, row.base_sha))) {
+    await fetchInto(scratch, row.base_sha, 1);
+  }
+  for (const path of args.edited) {
+    const text = await blobAt(scratch.dir, row.base_sha, path);
+    if (text !== null) preserve.set(path, text);
+  }
   return regenerate({
+    unowned: args.unowned,
+    preserve,
     datasetId: ctx.datasetId,
     version: row.to_version,
     commit: parent,
@@ -419,6 +450,14 @@ async function makePatch(
     const pushedHasFiles = await patchHoldsPipelineFiles(scratch.dir, found.commit, parent);
     if (pushedHasFiles) throw unavailableOnResume();
   }
+  // A failure that settles is counted, with the attempts that led to it when it was retried.
+  const settleCounts: Record<string, number> | undefined =
+    pipeline && !pipeline.ok
+      ? {
+          pipeline_failed: 1,
+          ...(RETRYABLE_FAILURES.has(pipeline.code) ? { pipeline_attempts: attempts } : {}),
+        }
+      : undefined;
   if (pipeline && !pipeline.ok) {
     await recordStepError(
       row,
@@ -440,7 +479,7 @@ async function makePatch(
       pipeline && !pipeline.ok
         ? ": nothing else is replayed, and the pipeline's files were not regenerated"
         : ": nothing is replayed, and the pipeline's files are as the new snapshot leaves them",
-      pipeline && !pipeline.ok ? { pipeline_failed: 1 } : undefined,
+      settleCounts,
     );
   }
   const made = await patchCommit({ scratch, row, selection, parent, pipeline: files });
@@ -513,7 +552,7 @@ async function makePatch(
         patch_base_sha: parent,
         counts: {
           resolutions: selection.resolutions,
-          ...(pipeline && !pipeline.ok ? { pipeline_failed: 1 } : {}),
+          ...(settleCounts ?? {}),
         },
       },
     });

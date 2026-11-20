@@ -341,9 +341,18 @@ export interface FixtureOptions {
    * with `unreadable` the ownership record does not parse; with `lists-upstream` NEMAR edited the
    * upstream electrodes table and the record lists it too (a listing that must not be believed);
    * with `sidecarless` the record lists only the sidecar the label track adds for an electrodes
-   * file that had none (`sub-01_coordsystem.json`, no `space-` entity).
+   * file that had none (`sub-01_coordsystem.json`, no `space-` entity); with `hand-edited` NEMAR
+   * edited the pipeline's electrodes table after the record hashed it; with `no-hash` the record
+   * holds no `output_sha256` for either output.
    */
-  ieegGeometry?: true | "upstream-wins" | "unreadable" | "lists-upstream" | "sidecarless";
+  ieegGeometry?:
+    | true
+    | "upstream-wins"
+    | "unreadable"
+    | "lists-upstream"
+    | "sidecarless"
+    | "hand-edited"
+    | "no-hash";
   /** Tag B adds a nested `.gitattributes` with an `annex.largefiles` rule the annex policy strips. */
   nestedGitattributesB?: boolean;
 }
@@ -836,6 +845,10 @@ async function build(
               [PATHS.ieegOwned]: `derived-from\told\t0.1.0\n${IEEG_TABLE_A}`,
               [PATHS.ieegOwnedSidecar]: sidecar,
             };
+    const recorded = { ...owned };
+    if (opts.ieegGeometry === "hand-edited") {
+      owned[PATHS.ieegOwned] = `${owned[PATHS.ieegOwned]}edited by hand\n`;
+    }
     for (const [path, content] of Object.entries(owned)) write(clone, path, content);
     write(
       clone,
@@ -845,13 +858,15 @@ async function build(
         : `${JSON.stringify(
             {
               paths: Object.fromEntries(
-                Object.entries(owned).map(([path, content]) => [
+                Object.entries(recorded).map(([path, content]) => [
                   path,
                   {
                     inputs: [{ blob: "0".repeat(40), path: PATHS.ieegInput }],
                     kind: "space-label",
                     method: "stand-in",
-                    output_sha256: createHash("sha256").update(content).digest("hex"),
+                    ...(opts.ieegGeometry === "no-hash"
+                      ? {}
+                      : { output_sha256: createHash("sha256").update(content).digest("hex") }),
                     verification: null,
                   },
                 ]),

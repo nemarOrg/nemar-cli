@@ -126,7 +126,7 @@ describe.skipIf(!awsInstalled)("N.0.1 with only the pipeline's files", () => {
     const last = await resume([], runner({ STANDIN_MODE: "fail" }));
     expect(last.exitCode, last.all).toBe(0);
     expect(w.row().status).toBe("complete");
-    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 2 });
+    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 3 });
   });
 
   test("a failure then a success makes N.0.1", async () => {

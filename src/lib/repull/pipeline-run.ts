@@ -29,7 +29,7 @@
 
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { shouldAnnex } from "../git-annex/policy.js";
 import { runCommand } from "../git-annex/run-command.js";
@@ -88,6 +88,13 @@ export interface RegenerateArgs {
   owned: ReadonlySet<string>;
   /** Owned paths upstream's new snapshot holds a file at: upstream wins, they leave ownership. */
   upstreamWins: ReadonlySet<string>;
+  /** Every listed path that is not owned (hand edited, or upstream's): never written or removed. */
+  unowned?: ReadonlySet<string>;
+  /**
+   * Hand-edited pipeline files N.0.1 replays, by path to text: put in the clone before the run, so
+   * the package finds them as they are and keeps them, and never regenerates over them.
+   */
+  preserve?: ReadonlyMap<string, string>;
   env: Env;
   /** Where the private clone goes; the system temp directory by default. */
   tempRoot?: string;
@@ -247,10 +254,15 @@ async function run(root: string, args: RegenerateArgs): Promise<PipelineFiles> {
     ok: true,
   });
   const ownershipAt = atCommit.exitCode === 0 ? atCommit.stdout : null;
-  if (ownershipAt !== null && args.upstreamWins.size > 0) {
+  const dropped = new Set([...args.upstreamWins, ...(args.unowned ?? [])]);
+  for (const [path, text] of args.preserve ?? []) {
+    mkdirSync(dirname(join(clone, path)), { recursive: true });
+    await Bun.write(join(clone, path), text);
+  }
+  if (ownershipAt !== null && dropped.size > 0) {
     // Upstream's file at an owned path wins: the path leaves the list before the run reads it.
     mkdirSync(join(clone, ".nemar"), { recursive: true });
-    const pruned = withoutOwnedPaths(Buffer.from(ownershipAt, "utf8"), args.upstreamWins);
+    const pruned = withoutOwnedPaths(Buffer.from(ownershipAt, "utf8"), dropped);
     await Bun.write(join(clone, OWNERSHIP_PATH), pruned);
   }
 
@@ -303,7 +315,7 @@ async function run(root: string, args: RegenerateArgs): Promise<PipelineFiles> {
       declared.add(p);
       if (p === OWNERSHIP_PATH) continue;
       if (!isPipelineOutputPath(p)) throw invalid("a path that is not one of its outputs");
-      if (args.upstreamWins.has(p)) throw invalid("a path upstream's snapshot holds a file at");
+      if (dropped.has(p)) throw invalid("a path that is not the pipeline's to write");
       if (kind === "add" && tree.has(p)) throw invalid("an added path the tree already holds");
       if (kind !== "add" && !args.owned.has(p)) throw invalid("a path the ownership record lacks");
     }
@@ -319,6 +331,7 @@ async function run(root: string, args: RegenerateArgs): Promise<PipelineFiles> {
   }
   // Everything the run changed in the clone is something it declared, and the ownership record.
   declared.add(OWNERSHIP_PATH);
+  for (const p of args.preserve?.keys() ?? []) declared.add(p);
   for (const p of await observedChanges(clone)) {
     if (!declared.has(p)) {
       throw new Failure(
