@@ -23,7 +23,8 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
 2. **Verification gates every write.** Each result is fitted to the reference surface of the claimed space and graded.
    Specific evidence: electrocorticography (ECoG) or surface contacts with a median nearest-vertex distance of at most 2.0 mm, or contacts on template vertices (median at most 1.0 mm against the vendored fsaverage6, while the same contacts shifted by 10 mm along each axis fail).
    Plausible evidence: depth (sEEG) contacts with a median of at most 6.0 mm and at least 90 percent inside or within 5.0 mm of the surface; a pial-surface fit cannot tell a depth implant's correct frame from one 10 to 20 mm off, so this is a plausibility check only.
-   A write needs specific evidence, or plausible evidence plus independent frame evidence: ECoG contacts of the same subject that give specific evidence, a transform or near-miss label in the dataset that already names the target space, or a template named in the dataset's own text.
+   A write needs specific evidence, or plausible evidence plus independent frame evidence: ECoG contacts of the same subject that give specific evidence, a near-miss label in the dataset's own sidecar that already names the target space, or a transform the dataset ships whose own check passed (an SPM field passing its field check).
+   A template named only in a README or description needs specific evidence; with plausible evidence alone it is left for a human.
    A label found without any textual evidence needs specific evidence.
    A reference surface whose inside cannot be evaluated fails closed.
    A frame declared `ACPC` or `ScanRAS`, or tied by `IntendedFor` to the subject's own scan, is never relabeled; it can only be transformed.
