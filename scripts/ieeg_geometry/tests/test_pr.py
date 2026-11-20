@@ -100,6 +100,14 @@ def owner_identity(monkeypatch):
         monkeypatch.setenv(f"GIT_{kind}_EMAIL", "owner@example.org")
 
 
+def _give_a_version(root: Path) -> None:
+    """A mirror's pull request carries a bumped Version, so the dataset must have one."""
+    description = root / "dataset_description.json"
+    meta = json.loads(description.read_text())
+    meta.setdefault("Version", "1.0.0")
+    description.write_text(json.dumps(meta, indent=2) + "\n")
+
+
 @pytest.fixture
 def env(source, tmp_path, monkeypatch):  # noqa: F811
     with_extras = tmp_path / "src"
@@ -107,6 +115,7 @@ def env(source, tmp_path, monkeypatch):  # noqa: F811
     for rel, text in EXTRAS.items():
         (with_extras / rel).parent.mkdir(parents=True, exist_ok=True)
         (with_extras / rel).write_text(text)
+    _give_a_version(with_extras)
     remote = build_remote(with_extras, tmp_path / "remote")
     served, bare = _bare(remote, tmp_path / "hosting")
     log, _ = standins.activate(monkeypatch, tmp_path / "standins")
@@ -125,11 +134,21 @@ def _refs(bare: Path) -> list[str]:
 def _expected_changes(remote: Remote, tmp_path: Path) -> list[str]:
     analysis, _ = _run(remote, tmp_path / "expect")
     c = analysis.report["changes"]
-    return sorted({*c["add"], *c["change"], *c["remove"]})
+    return sorted({*c["add"], *c["change"], *c["remove"], "dataset_description.json"})
 
 
-def _pr(served, work, *extra, dry=False):
-    argv = ["pr", DATASET_ID, "--workdir", str(work), "--version", VERSION, *extra]
+def test_the_report_lists_cleaning_only_for_files_it_writes(env, tmp_path):
+    served, _bare_repo, _log, _work = env
+    analysis, _ = _run(served, tmp_path / "rep")
+    report = analysis.report
+    written = {*report["changes"]["add"], *report["changes"]["change"]}
+    assert {e["path"] for e in report["electrodes_cleaning"]} <= written
+
+
+def _pr(served, work, *extra, dry=False, bump=True):
+    """A mirror's pull request needs `--bump-version`; `bump=False` leaves it off."""
+    flag = ["--bump-version"] if bump else []
+    argv = ["pr", DATASET_ID, "--workdir", str(work), "--version", VERSION, *flag, *extra]
     return main(argv + (["--dry-run"] if dry else []), urls=served.urls())
 
 
@@ -179,7 +198,9 @@ def test_the_body_lists_every_added_file_with_its_method_and_grade(env, tmp_path
     ownership = read_ownership(work / DATASET_ID)
     assert ownership is not None
     owned = {e.path: e for e in ownership.entries}
-    paths = [p for p in expected if p != ".nemar/ieeg-geometry.json"]
+    paths = [
+        p for p in expected if p not in (".nemar/ieeg-geometry.json", "dataset_description.json")
+    ]
     assert paths
     for path in paths:
         assert f"`{path}`" in body, path
@@ -190,7 +211,7 @@ def test_the_body_lists_every_added_file_with_its_method_and_grade(env, tmp_path
         assert v.reference in body
     assert "https://docs.nemar.org/data/ieeg-geometry/" in body
     assert f"`{pipeline_version()}`" in body and served.commit in body
-    assert f"{len(expected)} added, 0 changed, 0 removed" in body
+    assert f"{len(paths) + 1} added, 0 changed, 0 removed" in body  # and the record
     assert "Subject surface sets for the website's Brain panel: " in body
     assert "ownership record" in body  # the record itself is described, not graded
 
@@ -213,7 +234,9 @@ def test_the_body_is_shortened_in_steps_to_fit_the_size_limit():
     assert "listed in `.nemar/ieeg-geometry.json`" in counts_only
 
 
-def _cleaning_report(entries: list[dict], n_files: int = 2) -> dict:
+def _cleaning_report(
+    entries: list[dict], n_files: int = 2, *, unwritten: tuple[str, ...] = ()
+) -> dict:
     return {
         "dataset": "on1",
         "dataset_version": "v1",
@@ -221,7 +244,8 @@ def _cleaning_report(entries: list[dict], n_files: int = 2) -> dict:
         "pipeline_version": "1",
         "electrodes_cleaning": entries,
         "changes": {
-            "add": [f"sub-{i}/f{i}.tsv" for i in range(n_files)],
+            "add": [f"sub-{i}/f{i}.tsv" for i in range(n_files)]
+            + [e["path"] for e in entries if e["path"] not in unwritten],
             "change": [],
             "remove": [],
         },
@@ -256,6 +280,32 @@ def test_the_body_lists_the_table_cleaning_per_file():
     assert "hemisphere values rewritten: 5" in line
 
 
+def test_a_cleaning_entry_for_a_path_the_pull_request_does_not_write_is_not_listed():
+    report = _cleaning_report(
+        [
+            _entry("sub-0/f0.tsv", dropped_columns=["A"]),
+            _entry("sub-9/other.tsv", dropped_columns=["B"]),
+        ],
+        unwritten=("sub-9/other.tsv",),
+    )
+    body = pr.build_body(report, {}, n_surface_sets=0)
+    assert "## Table cleaning (1)" in body and "sub-0/f0.tsv`: dropped" in body
+    assert "other.tsv`: dropped" not in body
+    only_foreign = _cleaning_report(
+        [_entry("sub-9/other.tsv", dropped_columns=["B"])], unwritten=("sub-9/other.tsv",)
+    )
+    assert "Table cleaning" not in pr.build_body(only_foreign, {}, n_surface_sets=0)
+
+
+def test_a_very_long_cleaning_line_is_clipped_and_the_section_comes_before_the_file_lists():
+    entry = _entry("sub-0/f0.tsv", dropped_columns=[f"column_name_{i:03d}" for i in range(100)])
+    body = pr.build_body(_cleaning_report([entry]), {}, n_surface_sets=0)
+    line = next(ln for ln in body.splitlines() if ln.startswith("- `sub-0/f0.tsv`"))
+    assert len(line) <= pr.MAX_CLEANING_LINE + 3 and line.endswith("...")
+    assert body.index("## Table cleaning") < body.index("## Added")
+    assert "differ from the source tables" in body and "unchanged and keep" in body
+
+
 def test_no_table_cleaning_section_without_entries():
     for report in (_cleaning_report([]), _cleaning_report([_entry("a.tsv")])):
         assert "Table cleaning" not in pr.build_body(report, {}, n_surface_sets=0)
@@ -271,8 +321,11 @@ def test_a_long_table_cleaning_list_is_truncated_within_budget():
     ]
     body = pr.build_body(_cleaning_report(entries), {}, n_surface_sets=0)
     assert "## Table cleaning (300)" in body
-    assert "and " in body and " more" in body
-    assert "sub-299/ieeg" not in body
+    section = body[body.index("## Table cleaning") : body.index("## Added")]
+    shown = section.count("\n- `sub-")
+    assert 0 < shown < 300
+    assert f"\n- and {300 - shown} more\n" in section
+    assert "sub-299_electrodes.tsv`: dropped" not in body
     assert len(body) < pr.BODY_LIMIT
     pr.check_body_size(body)
 
@@ -589,6 +642,7 @@ def test_an_input_that_could_not_be_fetched_is_listed_in_the_body(
     monkeypatch,
     capsys,
 ):
+    _give_a_version(source)
     probe = build_remote(source, tmp_path / "probe")
     rel = next(p for p in probe.annexed if p.endswith("lh.sphere.reg"))
     remote = build_remote(source, tmp_path / "remote", missing_data=(rel,))
@@ -639,20 +693,30 @@ def test_bump_version_edits_only_the_version_and_tells_the_reviewer(env, tmp_pat
     new = _blob(bare, f"{BRANCH}:dataset_description.json")
     assert new == ODD_DESCRIPTION.replace('"1.0.0"', '"1.0.1"').encode()
     names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
-    assert sorted(names) == sorted(
-        [*_expected_changes(served, tmp_path), "dataset_description.json"]
-    )
+    assert sorted(names) == _expected_changes(served, tmp_path)
     body = _calls(log)[0]["body"]
     assert "from `1.0.0` to `1.0.1`" in body and "tags `v1.0.1`" in body
     assert "do not also run `nemar dataset release`" in body
     assert "cut the patch" not in body
 
 
-def test_without_the_flag_the_version_is_untouched_and_the_release_step_is_named(env):
+def test_a_mirror_without_the_bump_flag_is_refused_pointing_to_the_integration_flow(env, capsys):
     served, bare, log, work = env
-    assert _pr(served, work) == 0
-    assert "dataset_description.json" not in _git(bare, "diff", "--name-only", "main", BRANCH)
-    assert "nemar dataset release on000001 --type patch" in _calls(log)[0]["body"]
+    assert _pr(served, work, bump=False) != 0
+    err = capsys.readouterr().err
+    assert "--from-ref <branch> --bump-version" in err
+    assert not _calls(log) and not (work / DATASET_ID).exists()
+
+
+def test_a_non_mirror_needs_no_bump_flag_and_has_no_release_step(tmp_path):
+    report = {**REPORT, "dataset": "nm000352"}
+    body = pr.build_body(report, {}, n_surface_sets=0)
+    assert "nemar dataset release" not in body and "cut the patch" not in body
+    try:  # the refusal is for `on` ids only: an nm id gets past it (and fails later, no remote)
+        pr.open_pr("nm000352", tmp_path / "w", dry_run=True)
+    except Exception as exc:  # noqa: BLE001
+        assert "is a mirror" not in str(exc)
+    assert not pr._is_mirror("nm000352") and pr._is_mirror("on000001")
 
 
 def _integration_branch(bare: Path, tmp: Path, name: str, files: dict[str, str]) -> str:
@@ -690,7 +754,8 @@ def test_from_ref_keeps_a_collaborators_version_and_puts_the_geometry_on_top(env
     assert _refs(bare) == ["refs/heads/integ", "refs/heads/main"]
     assert _git(bare, "rev-parse", "main").strip() == served.commit
     names = _git(bare, "diff", "--name-only", foreign, "integ").split()
-    assert sorted(names) == _expected_changes(served, tmp_path)  # no description change
+    expected = [p for p in _expected_changes(served, tmp_path) if p != "dataset_description.json"]
+    assert sorted(names) == expected  # no description change
     assert _blob(bare, "integ:dataset_description.json") == _blob(
         bare, f"{foreign}:dataset_description.json"
     )
@@ -842,13 +907,14 @@ def test_a_missing_release_tag_is_refused_for_a_real_run(env, capsys):
 def test_a_real_run_refuses_a_remote_that_is_not_the_datasets_own(env):
     served, bare, log, work = env
     with pytest.raises(pr.PrRefusal, match="pushes only to the dataset's own repository"):
-        pr.open_pr(DATASET_ID, work, version=VERSION, urls=served.urls())
+        pr.open_pr(DATASET_ID, work, version=VERSION, bump_version=True, urls=served.urls())
     assert not work.exists() and _refs(bare) == ["refs/heads/main"]
     # a dry run may read any remote
     pr.open_pr(
         DATASET_ID,
         work,
         version=VERSION,
+        bump_version=True,
         urls=served.urls(),
         dry_run=True,
         out=open("/dev/null", "w"),
@@ -913,13 +979,6 @@ def test_a_configured_but_missing_annex_filter_does_not_stop_a_dry_or_real_run(
     assert changed
     for rel in changed:
         assert _git(bare, "show", f"{BRANCH}:{rel}") == (clone / rel).read_text(), rel
-
-
-def test_a_mirror_body_ends_with_the_patch_release_step():
-    body = pr.build_body({**REPORT, "dataset": "on004457"}, {}, n_surface_sets=0)
-    assert body.rstrip().endswith(
-        "After this is merged, cut the patch: `nemar dataset release on004457 --type patch`."
-    )
 
 
 def test_an_nm_body_has_no_patch_release_step():
