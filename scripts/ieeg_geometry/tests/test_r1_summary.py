@@ -142,10 +142,21 @@ def test_new_report_numbers_are_judged_and_rules_listed(tmp_path: Path, census: 
 def test_the_tool_limits_are_the_packages_constants():
     from ieeg_geometry import freesurfer, spm, verify
 
-    assert r1.LIMITS[("freesurfer", "frame_fit_median_mm")][0] == verify.ECOG_MEDIAN_MM
-    assert r1.LIMITS[("freesurfer", "registration_centroid_mm")][0] == freesurfer.REG_CENTROID_MM
-    assert r1.LIMITS[("spm", "field_check_median_mm")][0] == spm.FIELD_CHECK_MEDIAN_MM
-    assert r1.LIMITS[("spm", "inside_fraction")][0] == verify.INSIDE_MIN_FRACTION
+    expected = {
+        ("freesurfer", "frame_fit_median_mm"): verify.ECOG_MEDIAN_MM,
+        ("freesurfer", "registration_affine_residual_mm"): freesurfer.REG_AFFINE_RESIDUAL_MM,
+        ("freesurfer", "registration_side_fraction"): freesurfer.REG_SIDE_FRACTION,
+        ("freesurfer", "registration_centroid_mm"): freesurfer.REG_CENTROID_MM,
+        ("freesurfer", "registration_extent_error"): freesurfer.REG_EXTENT_FRACTION,
+        ("spm", "field_check_median_mm"): spm.FIELD_CHECK_MEDIAN_MM,
+        ("spm", "field_check_p10_mm"): spm.FIELD_CHECK_P10_MM,
+        ("spm", "field_check_centroid_mm"): spm.FIELD_CHECK_CENTROID_MM,
+        ("spm", "field_check_extent_deviation"): spm.FIELD_CHECK_EXTENT_FRACTION,
+        ("spm", "inside_fraction"): verify.INSIDE_MIN_FRACTION,
+    }
+    assert set(r1.LIMITS) == set(expected)
+    for key, value in expected.items():
+        assert r1.LIMITS[key][0] == value, key
     assert r1.MEDIAN_LIMIT == {
         "specific": verify.ECOG_MEDIAN_MM,
         "plausible": verify.SEEG_MEDIAN_MM,
