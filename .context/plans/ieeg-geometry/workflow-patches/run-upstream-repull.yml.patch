@@ -1,9 +1,11 @@
 --- a/.github/workflows/run-upstream-repull.yml
 +++ b/.github/workflows/run-upstream-repull.yml
-@@ -237,6 +237,32 @@
+@@ -235,8 +235,44 @@
+           if [[ ! "$installed" =~ $release_re ]] || [ "$installed" != "$CLI_VERSION" ]; then
+             echo "repull-auto: result phase=failed code=auto-cli-version" >> "$RUNNER_TEMP/repull-auto.log"
              echo "::error::The installed nemar CLI is not the release the dispatch names"
-             exit 1
-           fi
++            exit 1
++          fi
 +
 +      # The iEEG geometry pipeline (nemarOrg/nemar-cli ADR 0111, the amendment of 2026-11-19) makes
 +      # N.0.1 regenerate its files by running the Python package that ships in nemar-cli's own
@@ -28,6 +30,16 @@
 +          git clone --quiet --depth 1 --branch "v${CLI_VERSION}" \
 +            https://github.com/nemarOrg/nemar-cli.git "$RUNNER_TEMP/nemar-cli"
 +          project="$RUNNER_TEMP/nemar-cli/scripts/ieeg_geometry"
++          # The package is the version this release of the CLI pins (IEEG_GEOMETRY_PIPELINE_VERSION),
++          # or the run refuses before anything is installed.
++          pinned="$(grep -oE 'IEEG_GEOMETRY_PIPELINE_VERSION = "[^"]+"' \
++            "$RUNNER_TEMP/nemar-cli/src/lib/repull/pipeline-owned.ts" | cut -d'"' -f2)"
++          cloned="$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$project/pyproject.toml" | head -n 1)"
++          if [ -z "$pinned" ] || [ "$pinned" != "$cloned" ]; then
++            echo "repull-auto: result phase=failed code=auto-cli-version" >> "$RUNNER_TEMP/repull-auto.log"
++            echo "::error::The pipeline package is not the version this release pins"
+             exit 1
+           fi
 +          "$RUNNER_TEMP/uv-bin/uv" sync --frozen --no-dev --project "$project" > /dev/null
 +          echo "NEMAR_IEEG_GEOMETRY_DIR=$project" >> "$GITHUB_ENV"
  

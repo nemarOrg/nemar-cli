@@ -2525,8 +2525,8 @@ Under decision "corrections replay as N.0.1", such a path, added by NEMAR and un
 
 ### Implementation of this amendment (proposed)
 
-5. Only a path shaped like one of the pipeline's outputs (a subject's `_electrodes.tsv` or `_coordsystem.json`) is pipeline-owned.
-   A listed path of any other shape is ignored, so the ownership file, which is NEMAR's own, cannot take another path out of the corrections or the ledger's reach; an ownership file that does not parse refuses the plan (`pipeline-ownership-unreadable`).
+5. A listed path is pipeline-owned only if it is shaped like what the pipeline adds, a `space-<label>` electrodes table or coordinate-system sidecar or the `<stem>_coordsystem.json` the label track adds for an electrodes file that had none (whose same-stem electrodes table is on NEMAR's `main`), and it is absent at upstream's base, because the pipeline's files are NEMAR's additions.
+   Any other listed path, an upstream path included, follows the ordinary rules and counts as ignored, so the ownership file, which is NEMAR's own, cannot hide a correction, and a recorded ledger correction still refuses the plan; an ownership file that does not parse refuses it (`pipeline-ownership-unreadable`).
 6. The plan counts them (`pipeline_owned`, and `pipeline_upstream_wins` for those upstream holds a file at), keeps them out of `corrections` and `unexplained`, and so the automatic path is not refused for them.
    The record keeps `pipeline_owned`, and N.0.1 is made when it is above zero: from the pipeline's regenerated files and the replayed corrections, or from the files alone.
    When the run changes nothing and nothing else is replayed, no N.0.1 is made and the record completes.
@@ -2535,3 +2535,6 @@ Under decision "corrections replay as N.0.1", such a path, added by NEMAR and un
 8. A failed regeneration is recorded as the count `pipeline_failed`, in the step's error words and in N.0.1's pull request; N.0.1 then carries none of the previous pipeline files and everything else as it would have.
 9. N.0.1 is a patch release, so the automatic path's merge gate holds it for an administrator (`has-corrections`), as it holds any N.0.1.
    The central workflow needs the package and `uv` at the release it installs (`.context/plans/ieeg-geometry/workflow-patches/`).
+10. The planner version is 3 (the Worker's `CURRENT_PLANNER_VERSION` too): `verify-plan.ts` refuses a plan another planner made and asks to plan again, and the automatic path answers `auto-planner-version`.
+11. A regeneration that fails for any reason but a version or report that is not the pinned one leaves the record at `released` with a retryable refusal (`pipeline-regeneration-failed`), so the next run tries again; a pinned-version or report mismatch is the CLI's and the package's disagreement, so N.0.1 goes on without the previous pipeline files and the count `pipeline_failed` says so.
+    When N.0.1's branch already exists, a resume that does not reproduce its pipeline files refuses retryably (`pipeline-unavailable-on-resume`), never as a foreign branch; the pushed commit, recorded as `patch_head_sha`, is what it is compared with, so a resume must run where the pipeline reproduces the output (the workflow's pinned Linux environment).
