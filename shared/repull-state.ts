@@ -346,6 +346,8 @@ export const REPULL_COUNT_KEYS = [
   // listed, and 1 when N.0.1 was made without regenerating them because the run failed.
   "pipeline_owned",
   "pipeline_failed",
+  // How many times N.0.1 tried the pipeline and could not run it (at most three, then it settles).
+  "pipeline_attempts",
   "copied",
   "registered",
   "locked",

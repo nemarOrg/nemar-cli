@@ -175,14 +175,18 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     expect(w.row()).toMatchObject({ status: "patch_synthesized", patch_head_sha: pushed });
   });
 
-  test("a failing run is retried: nothing is pushed and the record stays released, then it succeeds", async () => {
+  test("a failure to run is retried: nothing is pushed and the record stays released, then it succeeds", async () => {
     await w.restore(released);
-    for (const env of [{ STANDIN_MODE: "fail" }, { NEMAR_IEEG_GEOMETRY_RUNNER: "relative/path" }]) {
+    for (const [n, env] of [
+      [1, { STANDIN_MODE: "fail" }],
+      [2, { NEMAR_IEEG_GEOMETRY_RUNNER: "relative/path" }],
+    ] as const) {
       const failed = await resume(["--keep-upstream"], runner(env));
       expect(failed.exitCode, failed.all).toBe(3);
       expect(failed.all).toContain("pipeline-regeneration-failed");
       expect(w.row().status).toBe("released");
       expect(String(w.row().last_error)).toContain("pipeline-regeneration-failed");
+      expect(counts().pipeline_attempts).toBe(n);
       expect(await rev("refs/heads/release/v2.0.1").catch(() => "none")).toBe("none");
     }
     // Failed, then succeeded.
@@ -191,6 +195,39 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     expect(w.row().status).toBe("patch_synthesized");
     expect(await tree(await rev("refs/heads/release/v2.0.1"))).toContain(OUT);
     expect(counts().pipeline_failed).toBeUndefined();
+  });
+
+  test("the third failed attempt settles: N.0.1 goes on without the pipeline's files and the failure is counted", async () => {
+    await w.restore(released);
+    for (const n of [1, 2]) {
+      const failed = await resume(["--keep-upstream"], runner({ STANDIN_MODE: "fail" }));
+      expect(failed.exitCode, failed.all).toBe(3);
+      expect(counts().pipeline_attempts).toBe(n);
+    }
+    const settled = await resume(["--keep-upstream"], runner({ STANDIN_MODE: "fail" }));
+    expect(settled.exitCode, settled.all).toBe(3);
+    expect(w.row().status).toBe("patch_synthesized");
+    const head = await rev("refs/heads/release/v2.0.1");
+    expect(await tree(head)).not.toContain(OUT);
+    expect(await show(head, PATHS.sidecar)).toContain("PowerLineFrequency");
+    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 2 });
+  });
+
+  test("a check the bridge applies to the result settles at once, whatever the class", async () => {
+    for (const [mode, code] of [
+      ["not-json", "pipeline-report"],
+      ["wrong-commit", "pipeline-report"],
+      ["undeclared", "pipeline-undeclared-write"],
+      ["big", "pipeline-output-invalid"],
+    ] as const) {
+      await w.restore(released);
+      const made = await resume(["--keep-upstream"], runner({ STANDIN_MODE: mode }));
+      expect([mode, made.exitCode, made.all.includes(code)]).toEqual([mode, 3, true]);
+      expect(w.row().status).toBe("patch_synthesized");
+      expect(await tree(await rev("refs/heads/release/v2.0.1"))).not.toContain(OUT);
+      expect(counts()).toMatchObject({ pipeline_failed: 1 });
+      expect(counts().pipeline_attempts).toBeUndefined();
+    }
   });
 
   test("a pipeline of another version leaves the previous files out, records it, and still replays the corrections", async () => {

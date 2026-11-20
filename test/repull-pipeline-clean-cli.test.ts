@@ -114,17 +114,36 @@ describe.skipIf(!awsInstalled)("N.0.1 with only the pipeline's files", () => {
     expect(counts().pipeline_failed).toBeUndefined();
   });
 
-  test("a pipeline that fails stays retryable: the record stays released and nothing is pushed", async () => {
-    const made = await resume([], runner({ STANDIN_MODE: "fail" }));
-    expect(made.exitCode, made.all).toBe(3);
-    expect(made.all).toContain("pipeline-regeneration-failed");
-    expect(w.row().status).toBe("released");
-    expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
-    expect(counts().pipeline_failed).toBeUndefined();
-    // The next run, where the pipeline works, makes N.0.1.
+  test("a failure to run stays retryable, three attempts at most, then the record completes with the failure counted", async () => {
+    for (const n of [1, 2]) {
+      const made = await resume([], runner({ STANDIN_MODE: "fail" }));
+      expect(made.exitCode, made.all).toBe(3);
+      expect(made.all).toContain("pipeline-regeneration-failed");
+      expect(w.row().status).toBe("released");
+      expect(counts().pipeline_attempts).toBe(n);
+      expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
+    }
+    const last = await resume([], runner({ STANDIN_MODE: "fail" }));
+    expect(last.exitCode, last.all).toBe(0);
+    expect(w.row().status).toBe("complete");
+    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_attempts: 2 });
+  });
+
+  test("a failure then a success makes N.0.1", async () => {
+    expect((await resume([], runner({ STANDIN_MODE: "fail" }))).exitCode).toBe(3);
     const again = await resume();
     expect(again.exitCode, again.all).toBe(3);
     expect(w.row().status).toBe("patch_synthesized");
+  });
+
+  test("a check on the result settles at once: the record completes with the failure counted", async () => {
+    for (const mode of ["not-json", "undeclared", "big"]) {
+      await w.restore(released);
+      const made = await resume([], runner({ STANDIN_MODE: mode }));
+      expect([mode, made.exitCode]).toEqual([mode, 0]);
+      expect(w.row().status).toBe("complete");
+      expect(counts()).toMatchObject({ pipeline_failed: 1 });
+    }
   });
 
   test("a pipeline of another version completes the record with the failure counted, visible in status", async () => {

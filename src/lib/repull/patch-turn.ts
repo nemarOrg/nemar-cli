@@ -265,6 +265,7 @@ const pipelineUpstreamWins = (body: PlanBody) =>
 
 /** Refusals that are about this run, not the record: nothing is recorded for them (exit 1). */
 const RUN_PROBLEMS = new Set([
+  "pipeline-regeneration-failed",
   "take-ours-invalid",
   "declined",
   "plan-unreadable",
@@ -276,8 +277,19 @@ const RUN_PROBLEMS = new Set([
   "plan-not-the-record",
 ]);
 
-/** Failures no retry mends: the CLI and the package disagree about the version or the report. */
-const SETTLED_FAILURES = new Set(["pipeline-version", "pipeline-report"]);
+/**
+ * A failure to run (the process could not start, timed out, or its clone or network failed) is
+ * retried, at most {@link PIPELINE_ATTEMPTS} times, counted on the record; every other failure is a
+ * check the bridge applied to what the run produced (version, report, outputs, undeclared writes),
+ * which no retry mends, so it settles at once. A failure settles the same way after its last
+ * attempt: N.0.1 goes on without the previous pipeline files and `pipeline_failed` is counted.
+ */
+const RETRYABLE_FAILURES = new Set([
+  "pipeline-run-failed",
+  "pipeline-unavailable",
+  "pipeline-snapshot",
+]);
+export const PIPELINE_ATTEMPTS = 3;
 
 /** Whether N.0.1's pushed commit changed a path of the pipeline's shape beside its parent. */
 async function patchHoldsPipelineFiles(
@@ -379,11 +391,27 @@ async function makePatch(
   // which no retry mends: N.0.1 goes on without the previous pipeline files, and the count says so.
   // Any other failure (the run, the clone, the network) may be only this machine: nothing is pushed
   // and the record stays `released`, so the next tick runs it again.
-  const settled = pipeline && !pipeline.ok && SETTLED_FAILURES.has(pipeline.code);
-  if (pipeline && !pipeline.ok && !settled) {
+  const attempts = (row.counts.pipeline_attempts ?? 0) + 1;
+  if (
+    pipeline &&
+    !pipeline.ok &&
+    RETRYABLE_FAILURES.has(pipeline.code) &&
+    attempts < PIPELINE_ATTEMPTS
+  ) {
+    const words = `[patch:pipeline-regeneration-failed] The iEEG geometry pipeline could not be run (${pipeline.code}), attempt ${attempts} of ${PIPELINE_ATTEMPTS}; N.0.1 is not made yet, resume again where the pipeline runs.`;
+    try {
+      await transitionRepull(row.id, {
+        from: "released",
+        to: "released",
+        fields: { counts: { pipeline_attempts: attempts } },
+        error: words,
+      });
+    } catch (err) {
+      throw apiRefused(err, "The pipeline attempt could not be recorded");
+    }
     throw refused(
       "pipeline-regeneration-failed",
-      `The iEEG geometry pipeline did not regenerate its files (${pipeline.code}), so N.0.1 is not made yet; resume again where the pipeline runs.`,
+      words.slice("[patch:pipeline-regeneration-failed] ".length),
     );
   }
   if (found && pipelineArgs.owned.size > 0 && (pipeline === null || !pipeline.ok || !files)) {
