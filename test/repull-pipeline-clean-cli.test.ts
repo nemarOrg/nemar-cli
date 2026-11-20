@@ -114,17 +114,20 @@ describe.skipIf(!awsInstalled)("N.0.1 with only the pipeline's files", () => {
     expect(counts().pipeline_failed).toBeUndefined();
   });
 
-  test("a pipeline that fails, with nothing else to replay, completes the record and keeps the failure on it", async () => {
+  test("a pipeline that fails stays retryable: the record stays released and nothing is pushed", async () => {
     const made = await resume([], runner({ STANDIN_MODE: "fail" }));
-    expect(made.exitCode, made.all).toBe(0);
-    expect(made.all).toContain("pipeline-run-failed");
-    expect(made.all).toContain("not regenerated");
-    expect(w.row().status).toBe("complete");
+    expect(made.exitCode, made.all).toBe(3);
+    expect(made.all).toContain("pipeline-regeneration-failed");
+    expect(w.row().status).toBe("released");
     expect(await hasRef("refs/heads/release/v2.0.1")).toBe(false);
-    expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_owned: 2 });
+    expect(counts().pipeline_failed).toBeUndefined();
+    // The next run, where the pipeline works, makes N.0.1.
+    const again = await resume();
+    expect(again.exitCode, again.all).toBe(3);
+    expect(w.row().status).toBe("patch_synthesized");
   });
 
-  test("a pipeline of another version fails the regeneration, and the record completes with the failure counted", async () => {
+  test("a pipeline of another version completes the record with the failure counted, visible in status", async () => {
     const wrong = await resume([], runner({ STANDIN_VERSION: "0.2.0" }));
     expect(wrong.exitCode, wrong.all).toBe(0);
     expect(wrong.all).toContain("pipeline-version");

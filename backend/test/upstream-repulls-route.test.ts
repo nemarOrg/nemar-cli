@@ -193,7 +193,7 @@ function plan(over: Record<string, unknown> = {}): Record<string, unknown> {
     from_version: "1.0.0",
     to_version: "2.0.0",
     plan_digest: DIGEST,
-    planner: 2,
+    planner: 3,
     base_sha: SHA,
     lineage_recordable: false,
     ...over,
@@ -402,7 +402,7 @@ describe("create", () => {
       status: "planned",
       origin: "administrator",
       actor_user_id: adminId,
-      planner: 2,
+      planner: 3,
       counts: { delta_paths: 4 },
       terminal_at: null,
     });
@@ -2198,6 +2198,16 @@ describe("create: the automatic path", () => {
     expect(dispatchOf(dispatchId)).toMatchObject({ repull_id: null, status: "dispatched" });
   }
 
+  test("the Worker accepts the pipeline counts, and the automatic create takes a plan that has pipeline-owned paths", async () => {
+    // ADR 0111, the amendment of 2026-11-19: `pipeline_owned` is neither a correction nor unexplained.
+    seedMirror(AUTO);
+    const c = await claim();
+    const counts = { ...CLEAN, pipeline_owned: 2, pipeline_failed: 1 };
+    const res = await call("POST", "/repulls", autoPlan(c, { counts }), prod());
+    expect(res.status).toBe(201);
+    expect(res.body.repull).toMatchObject({ counts });
+  });
+
   test("a live dispatch's create is automatic, linked to its dispatch, and audited as such", async () => {
     seedMirror(AUTO);
     const c = await claim();
@@ -2436,7 +2446,7 @@ describe("create: the automatic path", () => {
     const id = seedRow("planned", {
       dataset_id: AUTO,
       origin: "automatic",
-      planner: 2,
+      planner: 3,
       upstream_ds: "ds099999",
     });
     const end = () =>
@@ -2458,7 +2468,7 @@ describe("create: the automatic path", () => {
     const c = await claim();
     const cases: Array<[string, Record<string, unknown>, string]> = [
       ["planner 1", { planner: 1 }, "auto-planner-version"],
-      ["planner 3", { planner: 3 }, "auto-planner-version"],
+      ["planner 2", { planner: 2 }, "auto-planner-version"],
       ["one unexplained path", { counts: { ...CLEAN, unexplained: 1 } }, "auto-not-clean-plan"],
       ["one conflict", { counts: { ...CLEAN, conflicts: 1 } }, "auto-not-clean-plan"],
       ["one correction", { counts: { ...CLEAN, corrections: 1 } }, "auto-not-clean-plan"],
@@ -2543,7 +2553,7 @@ describe("create: the automatic path", () => {
     const id = seedRow("planned", {
       dataset_id: AUTO,
       origin: "automatic",
-      planner: 2,
+      planner: 3,
       upstream_ds: "ds099999",
     });
     const found = await call("POST", "/repulls", autoPlan(c), prod());
@@ -2566,7 +2576,7 @@ describe("create: the automatic path", () => {
     const next = seedRow("planned", {
       dataset_id: AUTO,
       origin: "automatic",
-      planner: 2,
+      planner: 3,
       upstream_ds: "ds099999",
       attempt: 2,
     });

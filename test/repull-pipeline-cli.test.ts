@@ -158,12 +158,16 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     w.setApiHook(null);
     w.setApiOverride(null);
 
-    // The pipeline's version moved under the pushed branch: the commit cannot be re-derived.
-    const moved = await resume(["--keep-upstream"], runner({ STANDIN_VERSION: "0.2.0" }));
-    expect(moved.exitCode, moved.all).toBe(3);
-    expect(moved.all).toContain("branch-foreign");
-    expect(w.row().status).toBe("released");
-    expect(await rev("refs/heads/release/v2.0.1")).toBe(pushed);
+    // Succeeded, then failed: the pushed commit holds files this run cannot reproduce, so it is
+    // not N.0.1's to judge foreign; the refusal is retryable and the record stays released.
+    for (const env of [{ STANDIN_MODE: "fail" }, { STANDIN_VERSION: "0.2.0" }]) {
+      const moved = await resume(["--keep-upstream"], runner(env));
+      expect(moved.exitCode, moved.all).toBe(3);
+      expect(moved.all).toMatch(/pipeline-unavailable-on-resume|pipeline-regeneration-failed/);
+      expect(moved.all).not.toContain("branch-foreign");
+      expect(w.row().status).toBe("released");
+      expect(await rev("refs/heads/release/v2.0.1")).toBe(pushed);
+    }
 
     const same = await resume(["--keep-upstream"]);
     expect(same.exitCode, same.all).toBe(3);
@@ -171,29 +175,36 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     expect(w.row()).toMatchObject({ status: "patch_synthesized", patch_head_sha: pushed });
   });
 
-  test("a failing run leaves the previous pipeline files out, records it, and still replays the corrections", async () => {
+  test("a failing run is retried: nothing is pushed and the record stays released, then it succeeds", async () => {
     await w.restore(released);
-    const made = await resume(["--keep-upstream"], runner({ STANDIN_MODE: "fail" }));
+    for (const env of [{ STANDIN_MODE: "fail" }, { NEMAR_IEEG_GEOMETRY_RUNNER: "relative/path" }]) {
+      const failed = await resume(["--keep-upstream"], runner(env));
+      expect(failed.exitCode, failed.all).toBe(3);
+      expect(failed.all).toContain("pipeline-regeneration-failed");
+      expect(w.row().status).toBe("released");
+      expect(String(w.row().last_error)).toContain("pipeline-regeneration-failed");
+      expect(await rev("refs/heads/release/v2.0.1").catch(() => "none")).toBe("none");
+    }
+    // Failed, then succeeded.
+    const made = await resume(["--keep-upstream"]);
     expect(made.exitCode, made.all).toBe(3);
-    expect(made.all).toContain("pipeline-run-failed");
-    expect(made.all).toContain("none of the previous ones");
+    expect(w.row().status).toBe("patch_synthesized");
+    expect(await tree(await rev("refs/heads/release/v2.0.1"))).toContain(OUT);
+    expect(counts().pipeline_failed).toBeUndefined();
+  });
+
+  test("a pipeline of another version leaves the previous files out, records it, and still replays the corrections", async () => {
+    await w.restore(released);
+    const made = await resume(["--keep-upstream"], runner({ STANDIN_VERSION: "0.2.0" }));
+    expect(made.exitCode, made.all).toBe(3);
+    expect(made.all).toContain("pipeline-version");
     expect(w.row().status).toBe("patch_synthesized");
     const head = await rev("refs/heads/release/v2.0.1");
     const files = await tree(head);
     for (const path of [OUT, ADDED_OUT, ADDED_SIDECAR]) expect(files).not.toContain(path);
-    // The corrections are there as ever, and the snapshot's own files are not held back.
     expect(await show(head, PATHS.sidecar)).toContain("PowerLineFrequency");
     expect(await show(head, PATHS.ieegInput)).toContain("1.5");
     expect(counts()).toMatchObject({ pipeline_failed: 1, pipeline_owned: 2 });
-    expect(patchBodyText()).toContain("the regeneration failed (pipeline-run-failed)");
-  });
-
-  test("a pipeline that cannot be started is a failure of the regeneration, not of the re-pull", async () => {
-    await w.restore(released);
-    const made = await resume(["--keep-upstream"], { NEMAR_IEEG_GEOMETRY_RUNNER: "relative/path" });
-    expect(made.exitCode, made.all).toBe(3);
-    expect(made.all).toContain("pipeline-unavailable");
-    expect(w.row().status).toBe("patch_synthesized");
-    expect(counts().pipeline_failed).toBe(1);
+    expect(patchBodyText()).toContain("the regeneration failed (pipeline-version)");
   });
 });

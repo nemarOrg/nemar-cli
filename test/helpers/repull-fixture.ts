@@ -132,6 +132,8 @@ export const PATHS = {
   /** With `ieegGeometry`: the pipeline's electrodes table and sidecar NEMAR's main holds. */
   ieegOwned: "sub-01/ieeg/sub-01_space-fsaverage_electrodes.tsv",
   ieegOwnedSidecar: "sub-01/ieeg/sub-01_space-fsaverage_coordsystem.json",
+  /** With `ieegGeometry: "sidecarless"`: the sidecar added for an electrodes file with none. */
+  ieegPlainSidecar: "sub-01/ieeg/sub-01_coordsystem.json",
   /** With `ieegGeometry`: the pipeline's ownership record. */
   ieegOwnership: ".nemar/ieeg-geometry.json",
   /** With `symlinkB`: a plain git symlink tag B adds (not an annexed file). */
@@ -336,9 +338,12 @@ export interface FixtureOptions {
    * 2026-11-19): upstream holds a subject's electrodes table, NEMAR's `main` holds the pipeline's
    * `space-fsaverage` outputs for it and the ownership record that lists them, and tag B changes
    * the table and adds a subject. With `upstream-wins` tag B also adds a file at an owned path;
-   * with `unreadable` the ownership record does not parse.
+   * with `unreadable` the ownership record does not parse; with `lists-upstream` NEMAR edited the
+   * upstream electrodes table and the record lists it too (a listing that must not be believed);
+   * with `sidecarless` the record lists only the sidecar the label track adds for an electrodes
+   * file that had none (`sub-01_coordsystem.json`, no `space-` entity).
    */
-  ieegGeometry?: true | "upstream-wins" | "unreadable";
+  ieegGeometry?: true | "upstream-wins" | "unreadable" | "lists-upstream" | "sidecarless";
   /** Tag B adds a nested `.gitattributes` with an `annex.largefiles` rule the annex policy strips. */
   nestedGitattributesB?: boolean;
 }
@@ -821,10 +826,16 @@ async function build(
   }
   if (opts.ieegGeometry) {
     // The pipeline's outputs as NEMAR committed them, and the record that lists them.
-    const owned = {
-      [PATHS.ieegOwned]: `derived-from\told\t0.1.0\n${IEEG_TABLE_A}`,
-      [PATHS.ieegOwnedSidecar]: `${JSON.stringify({ iEEGCoordinateSystem: "fsaverage", PipelineVersion: "0.1.0" }, null, 2)}\n`,
-    };
+    const sidecar = `${JSON.stringify({ iEEGCoordinateSystem: "fsaverage", PipelineVersion: "0.1.0" }, null, 2)}\n`;
+    const owned: Record<string, string> =
+      opts.ieegGeometry === "sidecarless"
+        ? { [PATHS.ieegPlainSidecar]: sidecar }
+        : opts.ieegGeometry === "lists-upstream"
+          ? { [PATHS.ieegInput]: `${IEEG_TABLE_A}NEMAR edited this table.\n` }
+          : {
+              [PATHS.ieegOwned]: `derived-from\told\t0.1.0\n${IEEG_TABLE_A}`,
+              [PATHS.ieegOwnedSidecar]: sidecar,
+            };
     for (const [path, content] of Object.entries(owned)) write(clone, path, content);
     write(
       clone,
@@ -988,7 +999,7 @@ async function build(
   }
   if (opts.deadKeys) changes[PATHS.copiedSet] = files[PATHS.set] as Uint8Array;
   if (opts.ieegGeometry) {
-    changes[PATHS.ieegInput] = IEEG_TABLE_B;
+    if (opts.ieegGeometry !== "lists-upstream") changes[PATHS.ieegInput] = IEEG_TABLE_B;
     changes[PATHS.ieegAddedInput] = IEEG_TABLE_B;
   }
   if (opts.ieegGeometry === "upstream-wins") {

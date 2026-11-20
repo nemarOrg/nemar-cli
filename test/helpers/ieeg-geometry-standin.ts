@@ -38,6 +38,16 @@ if (mode === "fail") {
   process.exit(1);
 }
 
+// The package is not given the CLI's credentials: a run that finds one fails loudly.
+if (
+  ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GH_TOKEN", "NEMAR_API_KEY"].some(
+    (k) => k in process.env,
+  )
+) {
+  console.error("stand-in: a credential reached the child");
+  process.exit(3);
+}
+
 const git = (args: string[], stdin?: string): string => {
   const r = Bun.spawnSync(["git", ...args], {
     cwd: clone,

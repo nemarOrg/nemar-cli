@@ -146,6 +146,25 @@ describe("the files come from the snapshot", () => {
   });
 });
 
+describe("the child's environment", () => {
+  test("no credential of the CLI's reaches it", async () => {
+    const secrets = {
+      AWS_ACCESS_KEY_ID: "AKIAFIXTUREFIXTURE",
+      AWS_SECRET_ACCESS_KEY: "fixture-secret-fixture-secret",
+      AWS_SESSION_TOKEN: "fixture-session-token",
+      GH_TOKEN: "ghs_fixturefixturefixture",
+      NEMAR_API_KEY: "nemar_fixture_key_fixture",
+    };
+    Object.assign(process.env, secrets);
+    try {
+      const r = await run(await snapshot({ [TABLE]: table(1) }));
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+    } finally {
+      for (const k of Object.keys(secrets)) Reflect.deleteProperty(process.env, k);
+    }
+  });
+});
+
 describe("owned files", () => {
   test("an owned file the run still makes is changed, with the new ownership record", async () => {
     const first = files(await run(await snapshot({ [TABLE]: table(1) })));

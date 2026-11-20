@@ -1353,6 +1353,56 @@ describe("pipeline-owned paths (ADR 0111, the amendment of 2026-11-19)", () => {
     }
   });
 
+  describe("a listing never takes an upstream path out of the ordinary rules", () => {
+    test("a listed path upstream holds stays a correction, and is ignored by the pipeline", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "lists-upstream",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegInput)).toMatchObject({
+          class: "correction",
+          subtype: "nemar-modified",
+        });
+        expect(counts(body)).toMatchObject({ corrections: 1, pipeline_owned: 0 });
+        expect(pipeline(body)).toMatchObject({ status: "ok", ignored: 1, paths: [] });
+        expect(automaticPlanRefusal(PLANNER_VERSION, counts(body))).not.toBeNull();
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("with a ledger correction recorded, that path still refuses the plan", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "lists-upstream",
+        noContributorEdits: true,
+        recordedCorrection: true,
+      });
+      try {
+        const file = await plan(fx);
+        expect(refusalCodes(file.body as Body)).toContain("ledger-correction-unexplained");
+        expect(file.executable).toBe(false);
+      } finally {
+        fx.cleanup();
+      }
+    });
+
+    test("the sidecar the label track adds for an electrodes file with none is pipeline-owned", async () => {
+      const fx = await buildRepullFixture({
+        ieegGeometry: "sidecarless",
+        noContributorEdits: true,
+      });
+      try {
+        const body = (await plan(fx)).body as Body;
+        expect(row(body, PATHS.ieegPlainSidecar)).toMatchObject({ class: "pipeline-owned" });
+        expect(counts(body)).toMatchObject({ corrections: 0, pipeline_owned: 1 });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  });
+
   test("an ownership record that does not parse refuses the plan, never reads as none", async () => {
     const fx = await buildRepullFixture({ ieegGeometry: "unreadable", noContributorEdits: true });
     try {
