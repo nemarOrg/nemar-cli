@@ -66,6 +66,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:49-08:00 | Q18 (O5): cite BEP 045 peripheral physiology (bids-specification#2267, bep_045 page), not BEP047 | owner |  |
 | 2026-11-20T12:49-08:00 | Q19: claude-opus Max 4; reviewer tier on claude-sonnet (owner applied both to Slots) | owner |  |
 | 2026-11-20T12:54-08:00 | Q20: the lead merges origin/dev into feature/rfc-program (merge, no rebase) so ADR 0129 is in the base; A1 keeps 0130, A2 0131 | owner |  |
+| 2026-11-20T12:56-08:00 | Mail epic #2260: its minimum slice (P1-P3 plus privacy-policy text) ships to production before RFC-0001 opens; O5 waits on it, and the RFC-0001 email goes out in the rfcs category | owner |  |
 
 ## Log
 

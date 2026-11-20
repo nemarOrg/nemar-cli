@@ -81,7 +81,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | - | blocked | R1, B2, A2 | - | - | 2d | after R1, B2, A2; starts from drafts/0001; PR stays open |
 | B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - | - | 2d | lead completes at C1 when B2 merges (Q9, Q10 answered) |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - | - | 4h | waits on B4 and Q15 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - | - | - | owner step after B4, B6, O4b, O1b, S1, N1 (Q10, Q18 answered) |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - | - | - | owner step after B4, B6, O4b, O1b, S1, N1 AND mail epic #2260 slice P1-P3 in production (owner decision 2026-11-20) |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - | - | 2d | lead completes at C2 (Q16) |
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - | - | - | one RFC open at a time |
