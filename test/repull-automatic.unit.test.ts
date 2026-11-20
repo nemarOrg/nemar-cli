@@ -53,6 +53,7 @@ import {
   DISPATCH_FINAL_CODES,
   DISPATCH_ID_MAX,
   automaticCopySeconds,
+  automaticPlanRefusal,
   opensTheSameUtcDay,
 } from "../shared/repull-state";
 import {
@@ -572,6 +573,20 @@ describe("the plan the automatic path takes", () => {
       expect(() => assertAutomaticPlan({ executable: true, body: body(c) })).not.toThrow();
     }
     expect(automaticCopySeconds({ bytes: budgetBytes, objects: 0 })).toBe(AUTO_COPY_BUDGET_SECONDS);
+  });
+
+  test("pipeline-owned paths alone do not refuse the plan: they are neither corrections nor unexplained", () => {
+    // The iEEG geometry pipeline's files are regenerated in N.0.1, not replayed (ADR 0111, the
+    // amendment of 2026-11-19); the plan counts them apart from `corrections` and `unexplained`.
+    const owned = { ...clean, pipeline_owned: 4, pipeline_upstream_wins: 1 };
+    expect(() => assertAutomaticPlan({ executable: true, body: body(owned) })).not.toThrow();
+    expect(automaticPlanRefusal(CURRENT_PLANNER_VERSION, owned)).toBeNull();
+    // A correction beside them is still a correction.
+    expect(
+      refusalOf(() =>
+        assertAutomaticPlan({ executable: true, body: body({ ...owned, corrections: 1 }) }),
+      ).code,
+    ).toBe("auto-not-clean-plan");
   });
 
   test("a copy the estimate puts past the App token's hour is refused, the uploads included", () => {

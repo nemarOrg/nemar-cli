@@ -2522,3 +2522,23 @@ Under decision "corrections replay as N.0.1", such a path, added by NEMAR and un
 2. If upstream adds a file at a pipeline-owned path, upstream's file wins, the path leaves the ownership list, and it is never regenerated again.
 3. The ownership file itself is regenerated with the paths, never replayed; the privacy ledger rules of decision "a ledger change is never reverted" are unchanged, and the pipeline never writes the ledger.
 4. A regeneration that fails leaves the previous pipeline files out of N.0.1, with the failure in the re-pull record; the snapshot's own files are never held back by it.
+
+### Implementation of this amendment (proposed)
+
+5. A listed path is pipeline-owned only if it is shaped like what the pipeline adds, a `space-<label>` electrodes table or coordinate-system sidecar or the `<stem>_coordsystem.json` the label track adds for an electrodes file that had none (whose same-stem electrodes table is on NEMAR's `main`), and it is absent at upstream's base, because the pipeline's files are NEMAR's additions.
+   A listed file is owned only while its bytes are the ones the pipeline wrote (the record's `output_sha256`): a file whose bytes differ, or whose record holds no hash, is hand edited, follows the ordinary rules (a correction N.0.1 replays), is handed to the pipeline as it is so it is kept, and leaves the ownership record.
+   The ledger names no path, and a pipeline file is a NEMAR addition absent at base, so no recorded scrub reaches one.
+   Any other listed path, an upstream path included, follows the ordinary rules and counts as ignored, so the ownership file, which is NEMAR's own, cannot hide a correction, and a recorded ledger correction still refuses the plan; an ownership file that does not parse refuses it (`pipeline-ownership-unreadable`).
+6. The plan counts them (`pipeline_owned`, and `pipeline_upstream_wins` for those upstream holds a file at), keeps them out of `corrections` and `unexplained`, and so the automatic path is not refused for them.
+   The record keeps `pipeline_owned`, and N.0.1 is made when it is above zero: from the pipeline's regenerated files and the replayed corrections, or from the files alone.
+   When the run changes nothing and nothing else is replayed, no N.0.1 is made and the record completes.
+7. The run is the Python package at the CLI's own release, on a private clone of the new `main`, and N.0.1 takes exactly what the package's report names as changed, plus the ownership record when its bytes differ.
+   The report must name the pinned package version and the commit the clone was made at, the files must be small files git holds, and a file the run changed without reporting it fails the regeneration, so the same inputs make the same commit and resume can derive it again.
+8. A failed regeneration is recorded as the count `pipeline_failed`, in the step's error words and in N.0.1's pull request; N.0.1 then carries none of the previous pipeline files and everything else as it would have.
+9. N.0.1 is a patch release, so the automatic path's merge gate holds it for an administrator (`has-corrections`), as it holds any N.0.1.
+   The central workflow needs the package and `uv` at the release it installs (`.context/plans/ieeg-geometry/workflow-patches/`).
+10. The planner version is 3 (the Worker's `CURRENT_PLANNER_VERSION` too): `verify-plan.ts` refuses a plan another planner made and asks to plan again, and the automatic path answers `auto-planner-version`.
+11. A failure to run (the process could not start, timed out, or its clone or network failed) leaves the record at `released` with a retryable refusal (`pipeline-regeneration-failed`), at most three attempts, counted on the record (`pipeline_attempts`); after the last it settles, and a settled record reads `pipeline_attempts` 3 beside `pipeline_failed` 1 (a failure that settles at once records no attempts).
+    Every other failure is a check the bridge applied to the result (the version, the report, the outputs, a write it did not declare), which no retry mends, so it settles at once.
+    Settling means N.0.1 goes on without the previous pipeline files, or the record completes when nothing else is replayed, and `pipeline_failed` says so (shown by `repull status`).
+    When N.0.1's branch already exists, a resume that does not reproduce its pipeline files refuses retryably (`pipeline-unavailable-on-resume`), never as a foreign branch; the pushed commit, recorded as `patch_head_sha`, is what it is compared with, so a resume must run where the pipeline reproduces the output (the workflow's pinned Linux environment).
