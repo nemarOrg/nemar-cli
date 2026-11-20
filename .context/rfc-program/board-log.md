@@ -48,6 +48,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T11:24-08:00 | Q5: | owner |  |
 | 2026-11-20T11:24-08:00 | Q6: | owner |  |
 | 2026-11-20T11:24-08:00 | Q7: | owner |  |
+| 2026-11-20T11:24-08:00 | Plan approved (owner: 'plan is good, move forward', 2026-11-20); lead pushes feature/rfc-program | owner |  |
 
 ## Log
 

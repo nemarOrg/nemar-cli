@@ -60,7 +60,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Started | Timebox | Next |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | owner | - | - | - | - | ask the owner; C0 done 2026-11-20 |
+| O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | done | - | - | - | - | approved 2026-11-20 |
 | V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | active | - | - | 2026-11-20T11:12-08:00 | 4h | dispatched from origin/dev before O0 by the lead; PR into feature/rfc-program after O0 |
 | E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | blocked | O0 | - | - | - | lead, in the owner's session, after O0 |
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | owner | - | - | - | - | repo, Discussions, README done; owner: RFCs Announcement category, org Discussions source |
