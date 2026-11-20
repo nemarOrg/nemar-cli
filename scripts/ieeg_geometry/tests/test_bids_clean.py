@@ -11,8 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from ieeg_geometry.bids import GeometryRefusal
 from ieeg_geometry.bids_clean import electrodes_tsv, sidecar_columns
-from ieeg_geometry.labels import _tsv_in_mm
+from ieeg_geometry.labels import _tsv_in_mm as _labels_table
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE = (
@@ -34,6 +35,10 @@ def _dataset(tmp_path: Path, tsv: str = SOURCE) -> tuple[Path, Path]:
     source = folder / "sub-01_electrodes.tsv"
     source.write_text(tsv)
     return root, source
+
+
+def _tsv_in_mm(path: Path, scale: float, output: Path) -> bytes:
+    return _labels_table(path, scale, output).data
 
 
 def _table(data: bytes) -> list[list[str]]:
@@ -86,7 +91,7 @@ def test_required_columns_come_first_and_size_is_added(tmp_path):
 
 def test_non_numeric_numbers_and_bad_hemispheres_become_na(tmp_path):
     root, source = _dataset(tmp_path)
-    data = electrodes_tsv(
+    table = electrodes_tsv(
         ["name", "x", "y", "z", "size", "impedance", "hemisphere"],
         [
             {
@@ -101,7 +106,8 @@ def test_non_numeric_numbers_and_bad_hemispheres_become_na(tmp_path):
         ],
         source.with_name("sub-01_space-ACPC_electrodes.tsv"),
     )
-    assert _table(data)[1] == ["A", "1", "n/a", "n/a", "n/a", "5", "n/a"]
+    assert _table(table.data)[1] == ["A", "1", "n/a", "n/a", "n/a", "5", "n/a"]
+    assert table.cleaning.coerced_cells == {"y": 1, "z": 1, "size": 1, "hemisphere": 1}
 
 
 def test_scaled_coordinates_keep_missing_as_na(tmp_path):
@@ -116,6 +122,117 @@ def test_output_is_deterministic(tmp_path):
     root, source = _dataset(tmp_path)
     out = source.with_name("sub-01_space-ACPC_electrodes.tsv")
     assert _tsv_in_mm(source, 1.0, out) == _tsv_in_mm(source, 1.0, out)
+
+
+def test_cleaning_names_every_change(tmp_path):
+    root, source = _dataset(tmp_path)
+    out = source.with_name("sub-01_space-ACPC_electrodes.tsv")
+    cleaning = _labels_table(source, 1.0, out).cleaning
+    assert cleaning.dropped_columns == EXTRA
+    assert cleaning.coerced_cells == {"z": 1, "size": 3}
+    assert cleaning.hemisphere_rewritten == 1  # `r` -> `R`
+    assert cleaning.as_json("p")["path"] == "p"
+
+
+def test_hemisphere_words_are_mapped_before_anything_is_blanked(tmp_path):
+    root, source = _dataset(tmp_path)
+    rows = [
+        {"name": n, "x": "1", "y": "2", "z": "3", "hemisphere": h}
+        for n, h in (("A", "lh"), ("B", "Right"), ("C", "RH"), ("D", "middle"))
+    ]
+    table = electrodes_tsv(["name", "x", "y", "z", "hemisphere"], rows, source)
+    assert [r[5] for r in _table(table.data)[1:]] == ["L", "R", "R", "n/a"]
+    assert table.cleaning.hemisphere_rewritten == 3
+    assert table.cleaning.coerced_cells == {"hemisphere": 1}
+
+
+def _sidecar(folder: Path, name: str, doc: dict) -> None:
+    (folder / name).write_text(json.dumps(doc))
+
+
+def test_inheritance_takes_one_sidecar_per_folder_and_the_deepest_wins(tmp_path):
+    root, source = _dataset(tmp_path)
+    folder = source.parent
+    out = folder / "sub-01_task-a_space-ACPC_electrodes.tsv"
+    _sidecar(root, "electrodes.json", {"a": {}, "b": {"Description": "root"}})
+    _sidecar(folder, "sub-01_electrodes.json", {"b": {"Description": "folder"}, "c": {}})
+    assert sidecar_columns(out) == {"a", "b", "c"}
+    # two candidates in one folder and none exact: none applies (the validator errors on it)
+    _sidecar(folder, "sub-01_task-a_electrodes.json", {"d": {}})
+    assert sidecar_columns(out) == {"a", "b"}
+    # an exact match among several wins
+    _sidecar(folder, "sub-01_task-a_space-ACPC_electrodes.json", {"e": {}})
+    assert sidecar_columns(out) == {"a", "b", "e"}
+
+
+def test_a_defined_column_is_kept_only_when_every_value_passes_its_definition(tmp_path):
+    root, source = _dataset(tmp_path)
+    _sidecar(
+        root,
+        "electrodes.json",
+        {
+            "zone": {"Levels": {"yes": "x", "no": "y"}},
+            "depth": {"Units": "mm", "Minimum": 0},
+            "label": {"Description": "free text"},
+        },
+    )
+    header = ["name", "x", "y", "z", "size", "zone", "depth", "label"]
+    good = [
+        {"name": "A", "zone": "yes", "depth": "3.5", "label": "q"},
+        {"name": "B", "zone": "NaN", "depth": "", "label": "r"},
+    ]
+    out = source.with_name("sub-01_space-ACPC_electrodes.tsv")
+    table = electrodes_tsv(header, good, out)
+    assert _table(table.data)[0][5:] == ["zone", "depth", "label"]
+    assert _table(table.data)[2][5:] == ["n/a", "n/a", "r"]
+    bad = [{"name": "A", "zone": "maybe", "depth": "-1", "label": "q"}]
+    table = electrodes_tsv(header, bad, out)
+    assert _table(table.data)[0][5:] == ["label"]
+    assert table.cleaning.dropped_columns == ("zone", "depth")
+    assert "zone" not in table.cleaning.coerced_cells
+
+
+@pytest.mark.parametrize(
+    ("table", "reason"),
+    [
+        ("name\tx\ty\tz\nA\t1\t2\t3\nA\t1\t2\t3\n", "electrodes-names"),
+        ("name\tx\ty\tz\n\t1\t2\t3\n", "electrodes-names"),
+        ("name\tx\ty\tz\nA\t1\t2\n", "electrodes-rows"),
+        ("name\tx\ty\tz\nA\t1\t2\t3\t4\n", "electrodes-rows"),
+        ("name\tx\tx\tz\nA\t1\t2\t3\n", "electrodes-columns"),
+    ],
+)
+def test_a_table_the_writers_could_not_copy_is_refused_for_every_track(tmp_path, table, reason):
+    from ieeg_geometry.bids import discover, read_electrode_set
+
+    root, source = _dataset(tmp_path, table)
+    (source.parent / "sub-01_coordsystem.json").write_text(
+        json.dumps({"iEEGCoordinateSystem": "Other", "iEEGCoordinateUnits": "mm"})
+    )
+    (item,) = discover(root)
+    with pytest.raises(GeometryRefusal) as exc:
+        read_electrode_set(item)
+    assert exc.value.reason == reason
+
+
+def test_the_report_schema_accepts_a_cleaning_entry(tmp_path):
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (REPO_ROOT / "scripts/ieeg_geometry/schema/geometry-report.v1.json").read_text()
+    )
+    root, source = _dataset(tmp_path)
+    entry = _labels_table(source, 1.0, source.with_name("sub-01_space-ACPC_electrodes.tsv"))
+    sub = schema["properties"]["electrodes_cleaning"]
+    sub = {**sub, "$defs": schema.get("$defs", {})}
+    assert not list(Draft202012Validator(sub).iter_errors([entry.cleaning.as_json("p")]))
+
+
+def test_the_writer_refuses_repeated_names_itself(tmp_path):
+    root, source = _dataset(tmp_path)
+    rows = [{"name": "A", "x": "1", "y": "2", "z": "3"}] * 2
+    with pytest.raises(GeometryRefusal, match="electrodes-names"):
+        electrodes_tsv(["name", "x", "y", "z"], rows, source)
 
 
 @pytest.mark.network
@@ -134,6 +251,10 @@ def test_the_pinned_validator_finds_no_error_in_the_written_file(tmp_path):
         )
     )
     written = folder / "sub-01_space-ACPC_electrodes.tsv"
+    # the dataset defines `seizure_zone`: kept in the output, and the validator accepts it
+    (root / "electrodes.json").write_text(
+        json.dumps({"seizure_zone": {"Description": "authors", "Levels": {"yes": "y", "n/a": "-"}}})
+    )
 
     def errors(tsv: Path) -> list[str]:
         shutil.copy(tsv, written)
@@ -166,3 +287,5 @@ def test_the_pinned_validator_finds_no_error_in_the_written_file(tmp_path):
     assert "TSV_VALUE_INCORRECT_TYPE" in before
     assert "TSV_ADDITIONAL_COLUMNS_MUST_DEFINE" in before
     assert after == []
+    assert "seizure_zone" in clean.read_text().splitlines()[0]
+    assert "Destrieux_label" not in clean.read_text().splitlines()[0]

@@ -731,7 +731,7 @@ def test_a_malformed_row_is_skipped_with_a_reason(tmp_path):
     )
     elec.write_text(elec.read_text() + "C99\t1.0\n")  # a truncated row
     prop = _only(labels.plan_dataset(tmp_path))
-    assert prop.status == labels.SKIPPED and "cannot copy positions" in prop.reason
+    assert prop.status == labels.SKIPPED and "electrodes-rows" in prop.reason
     elec.write_text(elec.read_text().replace("C99\t1.0\n", "C99\tx\ty\tz\t0\n"))
     assert _only(labels.plan_dataset(tmp_path)).status == labels.SKIPPED
 
