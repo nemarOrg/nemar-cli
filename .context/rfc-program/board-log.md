@@ -54,6 +54,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:18-08:00 | RFC-0002 scope: all nm datasets | owner |  |
 | 2026-11-20T12:18-08:00 | Open RFC-0001 as soon as possible: prioritize the B and R chains | owner |  |
 | 2026-11-20T12:18-08:00 | Rationale for the 21-day window: AI-assisted review by knowledgeable people is welcome, so RFCs are fast-paced; stated in the rfcs process doc, the A1 ADR and the docs page | owner |  |
+| 2026-11-20T12:27-08:00 | Opening an RFC sends a community email to NEMAR account holders (rfcs category, unsubscribe footer); the owner also posts on LinkedIn and the BIDS Google group; N1 drafts all three | owner |  |
+| 2026-11-20T12:27-08:00 | New nemar-cli feature (separate epic): mail categories news, rfcs, maintenance, recalls; recalls are mandatory and cannot be unsubscribed; one-click unsubscribe web page plus a section under the website's user settings page | owner |  |
 
 ## Log
 
