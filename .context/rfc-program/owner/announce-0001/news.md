@@ -61,6 +61,12 @@ The proposed specification is the comparison [2.0.0...3.0.0-draft.1](https://git
 Order at O5, after the thread exists and the RFC pull request is merged:
 the Discussion itself, then this post, the command-line notice, the docs banner, the mail, the community notes in `notes.md`, then LinkedIn and the BIDS Google group.
 
+Checklist before sending anything:
+
+- [ ] Verify the text link resolves after merging the RFC pull request: `curl -sI https://github.com/nemarOrg/rfcs/blob/main/text/0001-biosig-zarr.md | head -1` must print a 200 status.
+  The link returns 404 until the merge; the pull request, https://github.com/nemarOrg/rfcs/pull/2, shows the text before then.
+- [ ] The Discussion exists and `{{THREAD_URL}}` is its address.
+
 Fill the tokens into a scratch copy, never into the committed drafts.
 `CLOSE` is `opened_at` plus 21 days (plus any extension), in UTC, to the minute, as the opening post prints it.
 
