@@ -18,7 +18,7 @@ earlier releases are described only by their generated notes.
 ### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
 
 - **The geometry package reads renamed channels files.**
-  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel) so contact types still come from `channels.tsv`.
+  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
   A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
 - **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
   They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
@@ -36,11 +36,13 @@ earlier releases are described only by their generated notes.
   The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
 - **Release order, for operators (replaces step (d) of 0.10.36).**
   A mirror's N.0.1 is one integration pull request: a branch from `main` that merges any collaborator branch and NEMAR's BIDS fixes, with the geometry added on top by `pr --from-ref <branch> --bump-version`.
-  Merging it into `main` tags the version and mints its DOI (the central `run-pr-merge.yml`), so never merge a collaborator pull request that changes `Version` on its own, and do not run `nemar dataset release` afterwards.
-  The website Brain panel must pair renamed channels too (nemarOrg/website#574) before a dataset with renamed channels is released.
-  Outputs written by pipeline 0.1.0 are regenerated as 0.1.1 by the next re-pull or `pr` run.
+  Merging it into `main` tags the version (the central `run-pr-merge.yml`), and the tag push dispatches `run-version-doi.yml`, which mints the DOI; so never merge a collaborator pull request that changes `Version` on its own, and do not run `nemar dataset release` afterwards.
+  `run-pr-merge.yml` skips silently when the tag already exists, so a merge that leaves `Version` unchanged makes no release.
+  Merge 0.1.1 integration pull requests only after 0.10.37 is published (step (c) of 0.10.36 still applies): a re-pull runs the pipeline pinned to the released CLI, and a 0.10.36 checkout would regenerate the files as 0.1.0.
+  The nine open pipeline-0.1.0 pull requests (branch `nemar/ieeg-geometry-0.1.0`) are superseded: close each when its mirror's integration pull request opens.
+  Release a dataset with renamed channels only after nemarOrg/website#574 (merged to `staging`) reaches production, so the Brain panel pairs its channels.
 - **Central BIDS validation reads annexed content (nemarDatasets/.github#157).**
-  The check fetches the `git-annex` branch so the validator resolves annexed files over public remotes, and filters only errors on files it could not read; real errors that the old location-only filter hid (for example a missing `TaskName` on on002799) now show.
+  The check fetches the `git-annex` branch so the validator resolves annexed files over public remotes, and filters only errors on files it could not read; real errors that the old location-only filter hid (for example a missing `TaskName` on `on002799`) now show.
 
 ## 0.10.36 - 2026-11-20
 
