@@ -259,6 +259,47 @@ def _version_lines(plan: versionbump.Plan | None) -> list[str]:
     ]
 
 
+MAX_CLEANING_LINE = 400  # characters per file in the Table cleaning section
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_CLEANING_LINE else text[: MAX_CLEANING_LINE - 3] + "..."
+
+
+def _cleaning_item(entry: dict) -> str:
+    parts = []
+    if entry.get("dropped_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["dropped_columns"])
+        parts.append(f"dropped columns: {names}")
+    if entry.get("added_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["added_columns"])
+        parts.append(f"added column: {names}")
+    if entry.get("coerced_cells"):
+        cells = ", ".join(f"`{c}` ({n})" for c, n in sorted(entry["coerced_cells"].items()))
+        parts.append(f"cells set to n/a: {cells}")
+    if entry.get("hemisphere_rewritten"):
+        parts.append(f"hemisphere values rewritten: {entry['hemisphere_rewritten']}")
+    return _clip(f"`{entry['path']}`: " + "; ".join(parts))
+
+
+def _cleaning_section(entries: list[dict]) -> list[str]:
+    """What NEMAR changed in each written electrodes table besides the coordinates, so the
+    reviewer sees what was not carried over from the authors' files. Empty when nothing was
+    cleaned; long lists are cut by `_bullets` (50 entries, 8,000 characters, then a count)."""
+    entries = [e for e in entries if _cleaning_item(e).partition(": ")[2]]
+    if not entries:
+        return []
+    return [
+        f"## Table cleaning ({len(entries)})",
+        "",
+        "The electrodes tables below were rewritten beyond their coordinates; the authors' "
+        "originals stay in the history:",
+        "",
+        _bullets([_cleaning_item(e) for e in entries]).replace("  - ", "- "),
+        "",
+    ]
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
@@ -297,6 +338,7 @@ def build_body(
         '"Computed by NEMAR" and names its source file and method.',
         "",
     ]
+    lines += _cleaning_section(report.get("electrodes_cleaning") or [])
     reserved = len("\n".join(_removed_section(removed))) if removed else 0
     for label, paths in (("Added", added), ("Changed", changed)):
         if not paths:

@@ -213,6 +213,70 @@ def test_the_body_is_shortened_in_steps_to_fit_the_size_limit():
     assert "listed in `.nemar/ieeg-geometry.json`" in counts_only
 
 
+def _cleaning_report(entries: list[dict], n_files: int = 2) -> dict:
+    return {
+        "dataset": "on1",
+        "dataset_version": "v1",
+        "source_commit": "abc",
+        "pipeline_version": "1",
+        "electrodes_cleaning": entries,
+        "changes": {
+            "add": [f"sub-{i}/f{i}.tsv" for i in range(n_files)],
+            "change": [],
+            "remove": [],
+        },
+    }
+
+
+def _entry(path: str, **kw) -> dict:
+    base = {
+        "path": path,
+        "dropped_columns": [],
+        "added_columns": [],
+        "coerced_cells": {},
+        "hemisphere_rewritten": 0,
+    }
+    return base | kw
+
+
+def test_the_body_lists_the_table_cleaning_per_file():
+    entry = _entry(
+        "sub-01/ieeg/sub-01_electrodes.tsv",
+        dropped_columns=["Notes", "Grid"],
+        added_columns=["size"],
+        coerced_cells={"x": 3, "impedance": 12},
+        hemisphere_rewritten=5,
+    )
+    body = pr.build_body(_cleaning_report([entry]), {}, n_surface_sets=0)
+    assert "## Table cleaning (1)" in body
+    line = next(ln for ln in body.splitlines() if ln.startswith("- `sub-01/ieeg/"))
+    assert "dropped columns: `Notes`, `Grid`" in line
+    assert "added column: `size`" in line
+    assert "`impedance` (12)" in line and "`x` (3)" in line
+    assert "hemisphere values rewritten: 5" in line
+
+
+def test_no_table_cleaning_section_without_entries():
+    for report in (_cleaning_report([]), _cleaning_report([_entry("a.tsv")])):
+        assert "Table cleaning" not in pr.build_body(report, {}, n_surface_sets=0)
+    bare = _cleaning_report([])
+    del bare["electrodes_cleaning"]
+    assert "Table cleaning" not in pr.build_body(bare, {}, n_surface_sets=0)
+
+
+def test_a_long_table_cleaning_list_is_truncated_within_budget():
+    entries = [
+        _entry(f"sub-{i:03d}/ieeg/sub-{i:03d}_electrodes.tsv", dropped_columns=["Notes"] * 20)
+        for i in range(300)
+    ]
+    body = pr.build_body(_cleaning_report(entries), {}, n_surface_sets=0)
+    assert "## Table cleaning (300)" in body
+    assert "and " in body and " more" in body
+    assert "sub-299/ieeg" not in body
+    assert len(body) < pr.BODY_LIMIT
+    pr.check_body_size(body)
+
+
 def test_a_dry_run_commits_locally_but_pushes_and_opens_nothing(env, capsys):
     served, bare, log, work = env
     assert _pr(served, work, dry=True) == 0
