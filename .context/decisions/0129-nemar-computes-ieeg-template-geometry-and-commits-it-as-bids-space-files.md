@@ -4,6 +4,8 @@
 **Date:** 2026-11-19
 **Owner:** Seyed Yahya Shirazi
 
+*Annotated 2026-11-20: decision 5's two steps are superseded by the amendment of that date (one integration pull request).*
+
 ## Context
 
 The website's Brain panel draws intracranial EEG (iEEG) contacts on a template brain only when a dataset declares a standard template frame (website ADR 0033).
