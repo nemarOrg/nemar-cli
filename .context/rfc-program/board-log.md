@@ -85,3 +85,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:55-08:00 | Dispatched lead-devmerge (Opus) for Q20 and impl-V1 round 2 (9 items); Agents today 8/40 |
 | 2026-11-20T12:59-08:00 | V1 r2 fix head 0f08eb74 verified (Command 35, Raw output 64, no empty, scope clean); new script merge-message-pr-check.ts reproduces q4d byte-identical per worker; delta review dispatched |
 | 2026-11-20T13:00-08:00 | V1 merged: PR 2238 squash 2d98bd9b into feature/rfc-program (gate: review converged r2 clean, no CI checks on [skip ci] head, mergeable clean) |
+| 2026-11-20T13:01-08:00 | lead-devmerge: merge da3d5838 passed gates but push hit SSL timeout; remote moved to 2d98bd9b; resumed once to redo on current tip. Leftover worktree rfc-devmerge + branch rfc-devmerge-tmp: removal blocked by guard hook, left for owner |
