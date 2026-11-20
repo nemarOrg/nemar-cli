@@ -83,3 +83,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T12:54-08:00 | A2 stop: same gap (0129, 0130); local 9ada28f0 ADR 0131; README 0128-line note deviation accepted (follows 0080/0107 convention); its refused test edit not retried |
 | 2026-11-20T12:54-08:00 | V1 r1 review in: code lens clean of critical/important, 6 suggestions; tests lens 4 important, 2 suggestions; all accepted, sent back |
 | 2026-11-20T12:55-08:00 | Dispatched lead-devmerge (Opus) for Q20 and impl-V1 round 2 (9 items); Agents today 8/40 |
+| 2026-11-20T12:59-08:00 | V1 r2 fix head 0f08eb74 verified (Command 35, Raw output 64, no empty, scope clean); new script merge-message-pr-check.ts reproduces q4d byte-identical per worker; delta review dispatched |
+| 2026-11-20T13:00-08:00 | V1 merged: PR 2238 squash 2d98bd9b into feature/rfc-program (gate: review converged r2 clean, no CI checks on [skip ci] head, mergeable clean) |

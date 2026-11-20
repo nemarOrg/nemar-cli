@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 40 | 8 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 40 | 9 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 0 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -58,34 +58,34 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 ## Steps
 
-| ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Started | Timebox | Next |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | done | - | - | - | - | approved 2026-11-20 |
-| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | active | - | 2238 | 2026-11-20T11:12-08:00 | 4h | r1 review: 0 critical, 4 important, 7 suggestions; all sent back for fix; then delta review r2 |
-| E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
-| O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
-| O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
-| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | blocked | O0 | - | 2026-11-20T12:57-08:00 | 4h | local 9ada28f0 (ADR 0131); push after dev merge and A1 merged (0130 gap) |
-| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | blocked | O0 | - | 2026-11-20T12:57-08:00 | 4h | waits on lead's dev merge into epic; then impl-A1 pushes 9321a78b (ADR 0130) and opens PR |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
-| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | - | 2026-11-20T12:57-08:00 | 2d | impl-R1 running |
-| O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - | - | - | owner step after R1 merges |
-| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - | - | 4h | lead completes at C1a (R1 merged) |
-| B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | A2 | - | - | 1d | waits on A2 merged (Q8 answered) |
-| B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | - | blocked | B1 | - | - | 1d | waits on B1 merged (Q11 answered) |
-| R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | - | blocked | A1, R1 | - | - | 1d | waits on A1 and R1 merged (Q17 answered); owner merges |
-| O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | blocked | B2 | - | - | - | owner step after B2 merges; Q13, Q14 recorded only |
-| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | - | blocked | O4 | - | - | 4h | after O4; owner merges |
-| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | - | blocked | O4, A2 | - | - | 2d | after O4 and A2; PR stays open |
-| O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - | - | - | owner step after B6 passes its gate |
-| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | - | blocked | R1, B2, A2 | - | - | 2d | after R1, B2, A2; starts from drafts/0001; PR stays open |
-| B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - | - | 2d | lead completes at C1 when B2 merges (Q9, Q10 answered) |
-| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - | - | 4h | waits on B4 and Q15 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - | - | - | owner step after B4, B6, O4b, O1b, S1, N1 AND mail epic #2260 slice P1-P3 in production (owner decision 2026-11-20) |
-| C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - | - | - | when RFC-0001's close instant passes |
-| V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - | - | 2d | lead completes at C2 (Q16) |
-| O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - | - | - | one RFC open at a time |
-| C4 | Checkpoint: RFC-0002 closed, decision draft, process ADR review | - | lead | - | - | blocked | O6 | - | - | - | when RFC-0002's close instant passes |
+| ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Review | Started | Timebox | Next |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| O0 | Owner approves the plan; lead pushes feature/rfc-program | - | owner | - | - | done | - | - |  | - | - | approved 2026-11-20 |
+| V1 | [Measure what RFC-0002 needs](cards/V1.md) | - | worker | - | claude-sonnet | done | - | 2238 | r1 code+comments, tests (2 Sonnet): 0 crit, 4 imp, 7 sugg, all fixed; r2 delta clean | 2026-11-20T11:12-08:00 | 4h | merged 2d98bd9b; feeds C2 (V2 card) |
+| E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - |  | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
+| O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - |  | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
+| O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
+| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | blocked | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | local 9ada28f0 (ADR 0131); push after dev merge and A1 merged (0130 gap) |
+| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | blocked | O0 | - |  | 2026-11-20T12:57-08:00 | 4h | waits on lead's dev merge into epic; then impl-A1 pushes 9321a78b (ADR 0130) and opens PR |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - |  | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
+| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | active | O0, O1 | - |  | 2026-11-20T12:57-08:00 | 2d | impl-R1 running |
+| O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - |  | - | - | owner step after R1 merges |
+| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - |  | - | 4h | lead completes at C1a (R1 merged) |
+| B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | A2 | - |  | - | 1d | waits on A2 merged (Q8 answered) |
+| B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | - | blocked | B1 | - |  | - | 1d | waits on B1 merged (Q11 answered) |
+| R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | - | blocked | A1, R1 | - |  | - | 1d | waits on A1 and R1 merged (Q17 answered); owner merges |
+| O4 | Owner releases 2.0.0 from B2's merge commit | - | owner | - | - | blocked | B2 | - |  | - | - | owner step after B2 merges; Q13, Q14 recorded only |
+| B3 | [docs format page becomes a pointer](cards/B3.md) | - | worker | - | - | blocked | O4 | - |  | - | 4h | after O4; owner merges |
+| B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | - | blocked | O4, A2 | - |  | - | 2d | after O4 and A2; PR stays open |
+| O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | blocked | B6 | - |  | - | - | owner step after B6 passes its gate |
+| B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | - | blocked | R1, B2, A2 | - |  | - | 2d | after R1, B2, A2; starts from drafts/0001; PR stays open |
+| B5 | [Schemas and first vectors](cards/B5.md) | - | worker-hard | - | - | outline | B2 | - |  | - | 2d | lead completes at C1 when B2 merges (Q9, Q10 answered) |
+| N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | - | blocked | B4 | - |  | - | 4h | waits on B4 and Q15 |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1 | - |  | - | - | owner step after B4, B6, O4b, O1b, S1, N1 AND mail epic #2260 slice P1-P3 in production (owner decision 2026-11-20) |
+| C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
+| V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
+| O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
+| C4 | Checkpoint: RFC-0002 closed, decision draft, process ADR review | - | lead | - | - | blocked | O6 | - |  | - | - | when RFC-0002's close instant passes |
 
 ## Questions
 
@@ -121,10 +121,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Agent | Role | Slot | Model | Step | Started | State |
 |---|---|---|---|---|---|---|
-| impl-V1 | implementer | claude-sonnet | Sonnet | V1 | 2026-11-20T13:10-08:00 | running |
+| impl-V1 | implementer | claude-sonnet | Sonnet | V1 | 2026-11-20T13:10-08:00 | done |
 | impl-A2 | implementer | claude-opus | Opus xhigh | A2 | 2026-11-20T12:57-08:00 | done |
 | impl-A1 | implementer | claude-sonnet | Sonnet high | A1 | 2026-11-20T12:57-08:00 | done |
 | impl-R1 | implementer | claude-sonnet | Sonnet xhigh | R1 | 2026-11-20T12:57-08:00 | running |
 | rev-V1-code | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
 | rev-V1-tests | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:00-08:00 | done |
 | lead-devmerge | lead | claude-opus | Opus xhigh | - | 2026-11-20T13:10-08:00 | running |
+| rev-V1-delta | reviewer | claude-sonnet | Sonnet high | V1 | 2026-11-20T13:18-08:00 | done |
