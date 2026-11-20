@@ -65,10 +65,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | E0 | Lead creates the epic issue with /project:epic-dev | - | lead | - | - | done | O0 | - | - | - | epic #2239; sub-issues 2240-2254 (map in board-log) |
 | O1 | Owner finishes nemarOrg/rfcs Discussions setup | - | owner | - | - | done | - | - | - | - | rfcs Discussions, org Discussions and RFCs category verified 2026-11-20 |
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
-| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | - | blocked | O0 | - | - | 4h | after O0 |
-| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | - | blocked | O0 | - | - | 4h | after O0; Q1 to Q7 answered |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - | - | 1d | after O0; paste the lead's EDF scan results |
-| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | - | blocked | O0, O1 | - | - | 2d | after O0 and O1 |
+| A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | - | todo | O0 | - | - | 4h | ready: dispatch |
+| A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | - | todo | O0 | - | - | 4h | ready: dispatch |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | - | blocked | O0 | - | - | 1d | waits for the lead's EDF+D scan results (running in the lead session) |
+| R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | - | todo | O0, O1 | - | - | 2d | ready: dispatch |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | blocked | R1 | - | - | - | owner step after R1 merges |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker | - | - | outline | R1 | - | - | 4h | lead completes at C1a (R1 merged) |
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | - | blocked | A2 | - | - | 1d | waits on A2 and Q8 |
