@@ -33,7 +33,13 @@
  * message is never sent without the link that lets its reader stop receiving it, and never with a link the
  * routes could not honor.
  *
- * Nothing here logs a token or an address.
+ * WHAT IS AND IS NOT KEPT OUT OF LOGS. Nothing here logs a token or an address, and the Worker's own logs
+ * (`middleware/access-log.ts`, the rate limiter's lines) replace the token segment of the URL. That is the
+ * whole claim: Cloudflare's own invocation logs (`wrangler-sccn.toml` observability, 100% sampling) record
+ * the full request URL, token included, and this code cannot change that. App logs are redacted;
+ * Cloudflare invocation logs keep the URL; a leaked token can only turn one category off (or, from the
+ * page's second button, the three community categories) for one person, who can turn it back on in
+ * settings. A recall has no link, so nothing in a log can silence one.
  */
 
 import {
@@ -94,6 +100,47 @@ export function mailLinkSecrets(
   return previous && previous !== current ? [current, previous] : [current];
 }
 
+/** Log a configuration problem at most once per hour per isolate and kind. No secret material. */
+const REPORT_WINDOW_MS = 60 * 60 * 1000;
+const lastReported = new Map<string, number>();
+
+function reportOnce(kind: string, message: string): void {
+  const now = Date.now();
+  const last = lastReported.get(kind);
+  if (last !== undefined && now - last < REPORT_WINDOW_MS) return;
+  lastReported.set(kind, now);
+  console.error(message);
+}
+
+/** Forget what was reported, for tests. */
+export function __resetMailLinkReportsForTests(): void {
+  lastReported.clear();
+}
+
+/**
+ * Say, in the Worker's log, what a person would otherwise only find out from a 503: the current secret is
+ * unset or too short (every unsubscribe route refuses and no categorized send can go out), or the
+ * previous secret is set but unusable (old links silently stop working). The message names the binding and
+ * the rule, never a value or its length. Called by the routes and by every sender before it queues.
+ */
+export function reportMailLinkConfiguration(
+  env: Pick<Bindings, "MAIL_LINK_SECRET" | "MAIL_LINK_SECRET_PREVIOUS">,
+): void {
+  if (!usable(env.MAIL_LINK_SECRET)) {
+    reportOnce(
+      "current",
+      `[mail-links] MAIL_LINK_SECRET is unset or shorter than ${MIN_MAIL_LINK_SECRET_LENGTH} characters: unsubscribe links answer 503 and community mail cannot be sent`,
+    );
+  }
+  const previous = (env.MAIL_LINK_SECRET_PREVIOUS ?? "").trim();
+  if (previous !== "" && !usable(env.MAIL_LINK_SECRET_PREVIOUS)) {
+    reportOnce(
+      "previous",
+      `[mail-links] MAIL_LINK_SECRET_PREVIOUS is set but shorter than ${MIN_MAIL_LINK_SECRET_LENGTH} characters and is ignored: links signed under it no longer verify`,
+    );
+  }
+}
+
 /**
  * The secret a link is SIGNED under, or a refusal. Called by every sender of community mail before it
  * queues a message (a later phase of the epic); the public routes answer 503 for the same condition.
@@ -101,6 +148,7 @@ export function mailLinkSecrets(
 export function requireMailLinkSecret(
   env: Pick<Bindings, "MAIL_LINK_SECRET" | "MAIL_LINK_SECRET_PREVIOUS">,
 ): string {
+  reportMailLinkConfiguration(env);
   const [current] = mailLinkSecrets(env);
   if (!current) throw new MailLinkSecretUnsetError();
   return current;
@@ -247,6 +295,7 @@ export async function resolveMailLink(
   env: Pick<Bindings, "MAIL_LINK_SECRET" | "MAIL_LINK_SECRET_PREVIOUS">,
   token: string,
 ): Promise<MailLinkResolution> {
+  reportMailLinkConfiguration(env);
   const secrets = mailLinkSecrets(env);
   if (secrets.length === 0) return { status: "unconfigured" };
   const parsed = parseMailLinkToken(token);

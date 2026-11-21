@@ -24,8 +24,12 @@
  * `mail_links_unconfigured`, because it is the server's fault and not the link's. A rate-limit refusal
  * (429) is the limiter's own body, never this one's.
  *
- * Nothing here logs a token or an address; `middleware/access-log.ts` redacts the token segment from
- * the access log.
+ * Maintenance mode never blocks these routes (`middleware/maintenance.ts`, exact shapes, both mounts).
+ *
+ * LOGS. Nothing here logs a token or an address, and the Worker's own logs (the access log and the rate
+ * limiter's lines) redact the token segment. App logs are redacted; Cloudflare invocation logs keep the
+ * URL (observability samples every request and records it whole, and this code cannot change that); a
+ * leaked token can only turn one category off for one person, who can turn it back on in settings.
  */
 
 import { Hono } from "hono";
@@ -158,38 +162,70 @@ mailRoutes.get("/unsubscribe/:token/info", async (c) => {
 
 type ParsedBody = { fields: URLSearchParams } | { status: 400 | 413 | 415; error: string };
 
-/** The two bodies RFC 8058 allows, read with a size cap and no cookie or header beyond the type. */
+/**
+ * Read at most {@link MAX_BODY_BYTES} bytes of the request body, counting what actually arrives: the
+ * declared Content-Length is a hint a client may lie about or omit (chunked), so it is never trusted.
+ * Null when the body is larger, whatever its framing; the stream is cancelled at the first byte over.
+ */
+async function readBounded(request: Request): Promise<Uint8Array | null> {
+  const stream = request.body;
+  if (!stream) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+/**
+ * The two bodies RFC 8058 allows. The content type is checked first, then the size through a bounded
+ * read, all before anything touches the database or computes an HMAC, so a refused body costs nothing.
+ */
 async function readBody(c: MailContext): Promise<ParsedBody> {
-  const type = (c.req.header("content-type") ?? "").toLowerCase();
+  // The type as sent: a multipart boundary is case-sensitive. Only the media type is compared in lowercase.
+  const type = c.req.header("content-type") ?? "";
+  const urlencoded = type.toLowerCase().startsWith("application/x-www-form-urlencoded");
+  const multipart = type.toLowerCase().startsWith("multipart/form-data");
+  if (!urlencoded && !multipart) return { status: 415, error: "unsupported_media_type" };
+  // A declared length over the cap is refused without reading; an absent or understated one is caught
+  // by the bounded read below.
   const declared = Number(c.req.header("content-length") ?? "0");
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     return { status: 413, error: "body_too_large" };
   }
+  const bytes = await readBounded(c.req.raw).catch(() => undefined);
+  if (bytes === undefined) return { status: 400, error: "bad_request" };
+  if (bytes === null) return { status: 413, error: "body_too_large" };
   try {
-    if (type.startsWith("application/x-www-form-urlencoded")) {
-      const text = await c.req.text();
-      if (text.length > MAX_BODY_BYTES) return { status: 413, error: "body_too_large" };
-      return { fields: new URLSearchParams(text) };
+    if (urlencoded) return { fields: new URLSearchParams(new TextDecoder().decode(bytes)) };
+    const form = await new Response(bytes, { headers: { "content-type": type } }).formData();
+    const fields = new URLSearchParams();
+    for (const [key, value] of form.entries()) {
+      if (typeof value === "string") fields.append(key, value);
     }
-    if (type.startsWith("multipart/form-data")) {
-      const form = await c.req.formData();
-      const fields = new URLSearchParams();
-      for (const [key, value] of form.entries()) {
-        if (typeof value === "string") fields.append(key, value);
-      }
-      return { fields };
-    }
+    return { fields };
   } catch {
     return { status: 400, error: "bad_request" };
   }
-  return { status: 415, error: "unsupported_media_type" };
 }
 
 mailRoutes.post("/unsubscribe/:token", async (c) => {
-  const resolved = await resolve(c);
-  if ("refusal" in resolved) return resolved.refusal;
-  const { link } = resolved;
-
+  // Content type, size and shape first: a refused body costs no D1 read and no HMAC.
   const body = await readBody(c);
   if ("status" in body) return c.json({ error: body.error }, body.status, NO_LEAK_HEADERS);
   const { fields } = body;
@@ -205,6 +241,10 @@ mailRoutes.post("/unsubscribe/:token", async (c) => {
   if (scope !== "category" && scope !== "all") {
     return c.json({ error: "bad_request", message: "Unknown scope." }, 400, NO_LEAK_HEADERS);
   }
+
+  const resolved = await resolve(c);
+  if ("refusal" in resolved) return resolved.refusal;
+  const { link } = resolved;
 
   const category: CommunityMailCategory = link.claims.category;
   const changes =

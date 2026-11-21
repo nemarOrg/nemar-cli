@@ -20,7 +20,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { tombstoneUserCascade } from "../src/db/user-tombstone";
 import worker from "../src/index";
-import { signMailLinkToken } from "../src/services/mail-links";
+import { __resetMailLinkReportsForTests, signMailLinkToken } from "../src/services/mail-links";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { logged } from "./helpers/logs";
@@ -78,6 +78,7 @@ function env(overrides: Partial<Bindings> = {}): Bindings {
 }
 
 beforeEach(() => {
+  __resetMailLinkReportsForTests();
   db = freshDb();
   userId = seedUser("reader", EMAIL);
   otherId = seedUser("bystander", "bystander@links.test");
@@ -497,5 +498,256 @@ describe("logs", () => {
     expect(text).not.toContain(token.split(".").at(-1) as string);
     expect(text).not.toContain(EMAIL);
     expect(text).not.toContain("links.test");
+  });
+});
+
+describe("maintenance mode never blocks an opt-out", () => {
+  const modes = ["read-only", "full"] as const;
+
+  for (const mode of modes) {
+    for (const mount of MOUNTS) {
+      test(`${mode} at ${mount || "/"}: the page, /info and the one-click POST all work, and the POST writes`, async () => {
+        const bindings = env({ MAINTENANCE_MODE: mode });
+        const token = await tokenFor();
+        // Control: maintenance really is on, so a route outside the allowance is refused.
+        const control = await worker.fetch(
+          new Request(`https://api.nemar.org${mount}/datasets`, { method: "POST" }),
+          bindings,
+          ctx,
+        );
+        expect(control.status).toBe(503);
+
+        expect((await call(mount, "GET", token, { env: bindings })).status).toBe(200);
+        expect((await call(mount, "GET", token, { suffix: "/info", env: bindings })).status).toBe(
+          200,
+        );
+        expect(stored(userId)).toBeNull();
+        const res = await call(mount, "POST", token, {
+          body: ONE_CLICK,
+          headers: FORM,
+          env: bindings,
+        });
+        expect(res.status).toBe(200);
+        expect(res.headers.get("location")).toBeNull();
+        expect(prefsOf(userId)).toEqual({ news: false });
+        expect(audits().map((a) => JSON.parse(a.details).via)).toEqual(["one_click"]);
+      });
+
+      test(`${mode} at ${mount || "/"}: only those exact shapes are open`, async () => {
+        const bindings = env({ MAINTENANCE_MODE: mode });
+        const token = await tokenFor();
+        const before = snapshot();
+        const refused: Array<[string, string]> = [
+          ["POST", `${mount}/mail/unsubscribe/${token}/info`],
+          ["PUT", `${mount}/mail/unsubscribe/${token}`],
+          ["DELETE", `${mount}/mail/unsubscribe/${token}`],
+          ["POST", `${mount}/mail/unsubscribe/${token}/extra`],
+          ["POST", `${mount}/mail/unsubscribe/`],
+          ["POST", `${mount}/mail/unsubscribex/${token}`],
+          ["POST", `/x${mount}/mail/unsubscribe/${token}`],
+        ];
+        // The doubled prefix is a different path only where there is a prefix to double.
+        if (mount) refused.push(["POST", `${mount}${mount}/mail/unsubscribe/${token}`]);
+        for (const [method, path] of refused) {
+          const res = await worker.fetch(
+            new Request(`https://api.nemar.org${path}`, {
+              method,
+              body: method === "POST" || method === "PUT" ? ONE_CLICK : undefined,
+              headers: FORM,
+            }),
+            bindings,
+            ctx,
+          );
+          // `read-only` lets a GET through, but none of these is a GET; the middleware answers 503.
+          expect(res.status, `${method} ${path}`).toBe(503);
+          expect(((await res.json()) as { error: string }).error).toBe("Service Unavailable");
+        }
+        expect(snapshot()).toBe(before);
+      });
+    }
+  }
+});
+
+describe("the POST body is checked before the database or the HMAC", () => {
+  /** A D1 that records every statement prepared, passing each through unchanged. */
+  function recordingEnv() {
+    const inner = realD1(db);
+    const statements: string[] = [];
+    const recording = {
+      prepare(sql: string) {
+        statements.push(sql);
+        return inner.prepare(sql);
+      },
+      batch: inner.batch.bind(inner),
+    } as unknown as D1Database;
+    return { bindings: env({ DB: recording }), statements };
+  }
+
+  /** A request body that arrives in chunks, with no Content-Length, the way a chunked client sends it. */
+  function chunked(parts: string[], type = FORM["content-type"]) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const part of parts) controller.enqueue(encoder.encode(part));
+        controller.close();
+      },
+    });
+    return { body: stream, headers: { "content-type": type } };
+  }
+
+  async function postChunked(
+    mount: string,
+    token: string,
+    parts: string[],
+    bindings: Bindings,
+    type?: string,
+  ) {
+    const { body, headers } = chunked(parts, type);
+    return worker.fetch(
+      new Request(`https://api.nemar.org${mount}/mail/unsubscribe/${token}`, {
+        method: "POST",
+        body,
+        headers,
+        // biome-ignore lint/suspicious/noExplicitAny: Bun's Request takes `duplex` for a stream body
+        ...({ duplex: "half" } as any),
+      }),
+      bindings,
+      ctx,
+    );
+  }
+
+  for (const mount of MOUNTS) {
+    test(`at ${mount || "/"}: an oversized chunked body (no Content-Length) is 413, no D1 read, no write`, async () => {
+      const { bindings, statements } = recordingEnv();
+      const token = await tokenFor();
+      const before = snapshot();
+      const chunk = "x".repeat(1024);
+      const res = await postChunked(
+        mount,
+        token,
+        [`${ONE_CLICK}&pad=`, chunk, chunk, chunk, chunk, chunk],
+        bindings,
+      );
+      expect(res.status).toBe(413);
+      expect(statements).toEqual([]);
+      expect(snapshot()).toBe(before);
+    });
+  }
+
+  test("an oversized multipart body, chunked, is 413 too", async () => {
+    const { bindings, statements } = recordingEnv();
+    const boundary = "----b0und";
+    const part = (name: string, value: string) =>
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`;
+    const res = await postChunked(
+      "",
+      await tokenFor(),
+      [part("List-Unsubscribe", "One-Click"), part("pad", "y".repeat(6000)), `--${boundary}--\r\n`],
+      bindings,
+      `multipart/form-data; boundary=${boundary}`,
+    );
+    expect(res.status).toBe(413);
+    expect(statements).toEqual([]);
+    expect(stored(userId)).toBeNull();
+  });
+
+  test("a Content-Length that understates the body does not get it past the cap", async () => {
+    const { bindings, statements } = recordingEnv();
+    const { body, headers } = chunked([`${ONE_CLICK}&pad=`, "z".repeat(5000)]);
+    const res = await worker.fetch(
+      new Request(`https://api.nemar.org/mail/unsubscribe/${await tokenFor()}`, {
+        method: "POST",
+        body,
+        headers: { ...headers, "content-length": "27" },
+        // biome-ignore lint/suspicious/noExplicitAny: Bun's Request takes `duplex` for a stream body
+        ...({ duplex: "half" } as any),
+      }),
+      bindings,
+      ctx,
+    );
+    expect(res.status).toBe(413);
+    expect(statements).toEqual([]);
+    expect(stored(userId)).toBeNull();
+  });
+
+  test("a body within the cap, sent in chunks, still works", async () => {
+    const { bindings } = recordingEnv();
+    const res = await postChunked(
+      "",
+      await tokenFor(),
+      ["List-Unsub", "scribe=One-", "Click"],
+      bindings,
+    );
+    expect(res.status).toBe(200);
+    expect(prefsOf(userId)).toEqual({ news: false });
+  });
+
+  test("an unsupported content type or a missing one-click field is refused before any D1 read", async () => {
+    const { bindings, statements } = recordingEnv();
+    const token = await tokenFor();
+    const wrongType = await call("", "POST", token, {
+      body: "{}",
+      headers: { "content-type": "application/json" },
+      env: bindings,
+    });
+    expect(wrongType.status).toBe(415);
+    const noField = await call("", "POST", token, {
+      body: "scope=all",
+      headers: FORM,
+      env: bindings,
+    });
+    expect(noField.status).toBe(400);
+    expect(statements).toEqual([]);
+    expect(stored(userId)).toBeNull();
+  });
+});
+
+describe("a misconfigured secret is said aloud, once, without the value", () => {
+  const LEAKY_SHORT = "short-secret-VALUE-1234";
+
+  test("unset or short MAIL_LINK_SECRET: one error line per window, naming the binding and no value", async () => {
+    const token = await tokenFor();
+    const lines = await logged(async () => {
+      await call("", "GET", token, { env: env({ MAIL_LINK_SECRET: undefined }) });
+      await call("", "POST", token, {
+        body: ONE_CLICK,
+        headers: FORM,
+        env: env({ MAIL_LINK_SECRET: LEAKY_SHORT }),
+      });
+      await call("/nemar", "GET", token, { env: env({ MAIL_LINK_SECRET: undefined }) });
+    });
+    const ours = lines.filter((l) => l.includes("[mail-links]"));
+    expect(ours).toHaveLength(1);
+    expect(ours[0]).toContain("MAIL_LINK_SECRET is unset or shorter than 32 characters");
+    expect(lines.join("\n")).not.toContain(LEAKY_SHORT);
+  });
+
+  test("a configured secret says nothing", async () => {
+    const lines = await logged(async () => {
+      await call("", "GET", await tokenFor());
+    });
+    expect(lines.filter((l) => l.includes("[mail-links]"))).toEqual([]);
+  });
+
+  test("MAIL_LINK_SECRET_PREVIOUS set but too short: reported, and ignored, without its value", async () => {
+    const token = await tokenFor({}, EMAIL, OLD_SECRET);
+    const bindings = env({ MAIL_LINK_SECRET_PREVIOUS: LEAKY_SHORT });
+    let status = 0;
+    const lines = await logged(async () => {
+      status = (await call("", "GET", token, { env: bindings })).status;
+      await call("", "GET", token, { env: bindings });
+    });
+    expect(status).toBe(410);
+    const ours = lines.filter((l) => l.includes("[mail-links]"));
+    expect(ours).toHaveLength(1);
+    expect(ours[0]).toContain("MAIL_LINK_SECRET_PREVIOUS is set but shorter than 32 characters");
+    expect(lines.join("\n")).not.toContain(LEAKY_SHORT);
+  });
+
+  test("an unset previous secret is not a problem", async () => {
+    const lines = await logged(async () => {
+      await call("", "GET", await tokenFor(), { env: env({ MAIL_LINK_SECRET_PREVIOUS: "" }) });
+    });
+    expect(lines.filter((l) => l.includes("[mail-links]"))).toEqual([]);
   });
 });
