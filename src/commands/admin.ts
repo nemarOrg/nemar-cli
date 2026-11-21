@@ -8884,6 +8884,13 @@ export function recallNoticeLines(result: BroadcastResponse): string[] {
       ),
     ];
   }
+  if (result.notice_skipped === "nothing_queued") {
+    return [
+      chalk.yellow(
+        "  No site notice was published because nothing was queued. Run the recall again; it publishes the notice once it goes out.",
+      ),
+    ];
+  }
   return [
     chalk.yellow.bold(
       "  OWNER STEP: a recall also needs a public site notice, and none was published.",

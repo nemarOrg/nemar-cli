@@ -275,23 +275,45 @@ export async function handleCategorizedNotify(
 
   const answer: Record<string, unknown> = { ...result, category };
   if (isRecall && result.broadcast_id > 0) {
-    try {
-      const notice = await createNotice(
-        db,
-        {
-          message: recallNoticeMessage(subject, reference ?? ""),
-          level: "critical",
-          scope: "all",
-        },
-        actor.id,
-      );
-      answer.notice_id = notice.id;
-    } catch (error) {
-      console.error(
-        "[notify] the recall was queued but its site notice could not be created:",
-        error instanceof Error ? error.message : String(error),
-      );
-      answer.notice_error = "notice_failed";
+    if (result.recipient_count === 0) {
+      // The enqueue failed completely: nothing is out, so there is nothing to announce, and the
+      // retry (which the repeat guard allows) publishes the notice once it does go out.
+      answer.notice_skipped = "nothing_queued";
+    } else {
+      try {
+        // One notice per reference inside the repeat window: a canary to admins followed by the
+        // send to all, or a deliberate --allow-repeat, must not stack a second banner.
+        const marker = `(reference: ${reference ?? ""})`;
+        const existing = await db
+          .prepare(
+            `SELECT id FROM notices
+              WHERE level = 'critical' AND instr(message, ?) > 0
+                AND created_at > datetime('now', '-${DUPLICATE_SEND_WINDOW_HOURS} hours')
+              ORDER BY id DESC LIMIT 1`,
+          )
+          .bind(marker)
+          .first<{ id: number }>();
+        if (existing) {
+          answer.notice_id = existing.id;
+        } else {
+          const notice = await createNotice(
+            db,
+            {
+              message: recallNoticeMessage(subject, reference ?? ""),
+              level: "critical",
+              scope: "all",
+            },
+            actor.id,
+          );
+          answer.notice_id = notice.id;
+        }
+      } catch (error) {
+        console.error(
+          "[notify] the recall was queued but its site notice could not be created:",
+          error instanceof Error ? error.message : String(error),
+        );
+        answer.notice_error = "notice_failed";
+      }
     }
   }
   return { status: 200, body: answer };

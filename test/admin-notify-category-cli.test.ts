@@ -343,6 +343,28 @@ describe("a recall", () => {
     }
   });
 
+  test("a recall that queued nothing says so instead of claiming the owner step", async () => {
+    const server = startServer({
+      "POST /admin/notify": {
+        ...QUEUED,
+        recipient_count: 0,
+        category: "recall",
+        notice_skipped: "nothing_queued",
+        error: "queue_enqueue_failed",
+      },
+    });
+    try {
+      const r = await runCli(
+        [...RECALL, "--confirm-recall", "nm000104@v1.0.0", "--yes"],
+        server.url,
+      );
+      expect(r.stdout).toContain("No site notice was published because nothing was queued");
+      expect(r.stdout).not.toContain("OWNER STEP");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a recall's dry run needs no confirmation", async () => {
     const server = startServer({
       "POST /admin/notify": {

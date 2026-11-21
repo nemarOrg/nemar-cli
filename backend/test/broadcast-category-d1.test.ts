@@ -659,6 +659,51 @@ describe("recalls", () => {
     expect(await res.json()).toMatchObject({ error: "recall_fields_not_allowed" });
   });
 
+  test("a recall whose enqueue failed completely publishes no notice, and the retry publishes exactly one", async () => {
+    seedDataset("nm000104");
+    const broken = harness({ EMAIL_OUTBOX: recordingQueue({ failBatchAt: 0 }).queue });
+    const failed = await post(OWNER_KEY, RECALL, broken);
+    expect(await failed.json()).toMatchObject({
+      error: "queue_enqueue_failed",
+      recipient_count: 0,
+      notice_skipped: "nothing_queued",
+    });
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 0 });
+
+    const retry = harness();
+    const ok = (await (await post(OWNER_KEY, RECALL, retry)).json()) as { notice_id: number };
+    expect(typeof ok.notice_id).toBe("number");
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 1 });
+  });
+
+  test("a second send of the same recall inside the window reuses the notice instead of stacking another", async () => {
+    seedDataset("nm000104");
+    const first = (await (
+      await post(OWNER_KEY, { ...RECALL, to: "admins" }, harness())
+    ).json()) as {
+      notice_id: number;
+    };
+    const second = (await (await post(OWNER_KEY, RECALL, harness())).json()) as {
+      notice_id: number;
+    };
+    const again = (await (
+      await post(OWNER_KEY, { ...RECALL, allow_repeat: true }, harness())
+    ).json()) as { notice_id: number };
+    expect(second.notice_id).toBe(first.notice_id);
+    expect(again.notice_id).toBe(first.notice_id);
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 1 });
+    // A different recall is a different notice.
+    seedDataset("nm000105");
+    const other = (await (
+      await post(
+        OWNER_KEY,
+        { ...RECALL, recall_reference: "nm000105", confirm_recall: "nm000105", subject: "Another" },
+        harness(),
+      )
+    ).json()) as { notice_id: number };
+    expect(other.notice_id).not.toBe(first.notice_id);
+  });
+
   test("a recall's dry run needs no confirmation and queues nothing", async () => {
     seedDataset("nm000104");
     const h = harness();
@@ -782,6 +827,30 @@ describe("what a group send must name", () => {
     expect((await post(ADMIN_KEY, { ...NEWS, allow_repeat: true }, h)).status).toBe(200);
     // Another category with the same subject is another message.
     expect((await post(ADMIN_KEY, { ...NEWS, category: "rfcs" }, h)).status).toBe(200);
+  });
+
+  test("a whitespace or case variant of the subject is the same subject; the stored subject stays as sent", async () => {
+    const h = harness();
+    const first = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
+    for (const variant of ["  Monthly news ", "monthly   NEWS", "MONTHLY\tnews"]) {
+      const res = await post(ADMIN_KEY, { ...NEWS, subject: variant }, h);
+      expect({ variant, status: res.status }).toEqual({ variant, status: 409 });
+    }
+    expect(noRows()).toBe(1);
+    expect(rowOf(first.broadcast_id)?.subject).toBe("Monthly news");
+    // The dry run applies the same key.
+    const dry = (await (
+      await post(ADMIN_KEY, { ...NEWS, subject: "monthly  news", dry_run: true }, h)
+    ).json()) as Record<string, unknown>;
+    expect(dry).toMatchObject({ would_refuse: "duplicate_send" });
+
+    // A variant sent under allow_repeat keeps ITS own spelling.
+    const repeat = (await (
+      await post(ADMIN_KEY, { ...NEWS, subject: "  MONTHLY news", allow_repeat: true }, h)
+    ).json()) as { broadcast_id: number };
+    expect(rowOf(repeat.broadcast_id)?.subject).toBe("  MONTHLY news");
+    // A different word is a different subject.
+    expect((await post(ADMIN_KEY, { ...NEWS, subject: "Monthly newsletter" }, h)).status).toBe(200);
   });
 
   test("two identical requests at once: exactly one goes out (the guard is the insert, not a check before it)", async () => {

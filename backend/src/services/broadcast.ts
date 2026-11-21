@@ -145,8 +145,16 @@ export const DUPLICATE_SEND_WINDOW_HOURS = 24;
  * is rewritten to the number actually queued, so 0), so a send that never went out never blocks the
  * retry. The group is in the key so a canary to `admins` does not block the real send to `all`.
  */
-const DUPLICATE_PREDICATE = `category = ? AND subject = ? AND recipient_group = ?
+const DUPLICATE_PREDICATE = `category = ? AND subject_key = ? AND recipient_group = ?
   AND recipient_count > 0 AND sent_at > datetime('now', '-${DUPLICATE_SEND_WINDOW_HOURS} hours')`;
+
+/**
+ * The key the repeat guard compares subjects by: NFKC, trimmed, internal whitespace collapsed to one
+ * space, lowercased. The stored subject is untouched; only this copy is normalized.
+ */
+export function subjectKey(subject: string): string {
+  return subject.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+}
 
 /** The id of a recent send this one would repeat, or null. Read-only: the dry run reports it. */
 export async function findRecentDuplicate(
@@ -159,7 +167,7 @@ export async function findRecentDuplicate(
     .prepare(
       `SELECT id FROM broadcast_emails WHERE ${DUPLICATE_PREDICATE} ORDER BY id DESC LIMIT 1`,
     )
-    .bind(category, subject, group)
+    .bind(category, subjectKey(subject), group)
     .first<{ id: number }>();
   return row?.id ?? null;
 }
@@ -416,8 +424,8 @@ async function enqueueBroadcast(
     .prepare(
       `INSERT INTO broadcast_emails
          (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count,
-          failed_recipients, status, queued_count, category, recall_reference)
-       SELECT ?, ?, ?, ?, ?, 0, '[]', 'queued', ?, ?, ?
+          failed_recipients, status, queued_count, category, recall_reference, subject_key)
+       SELECT ?, ?, ?, ?, ?, 0, '[]', 'queued', ?, ?, ?, ?
         WHERE ${guard ? `NOT EXISTS (SELECT 1 FROM broadcast_emails WHERE ${DUPLICATE_PREDICATE})` : "1"}
        RETURNING id`,
     )
@@ -430,7 +438,8 @@ async function enqueueBroadcast(
       allowedRecipients.length,
       params.category ?? null,
       params.recallReference ?? null,
-      ...(guard ? [params.category, params.subject, params.group] : []),
+      params.category ? subjectKey(params.subject) : null,
+      ...(guard ? [params.category, subjectKey(params.subject), params.group] : []),
     )
     .first<{ id: number }>();
   if (!audit?.id && guard && params.category) {
