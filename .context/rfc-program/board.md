@@ -210,4 +210,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B4b | reviewer | claude-sonnet | Sonnet high | B4b | 2026-11-20T20:20-08:00 | done |
 | lead-indep | lead | claude-opus | Opus xhigh | - | 2026-11-20T20:35-08:00 | running |
 | rev-2288 | reviewer | claude-sonnet | Sonnet high | - | 2026-11-20T21:10-08:00 | done |
-| ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | running |
+| ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | done |
