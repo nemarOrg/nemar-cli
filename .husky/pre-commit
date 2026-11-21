@@ -1,6 +1,6 @@
 # --no-stash: lint-staged otherwise creates and drops a git stash on every commit, and the
 # stash is shared by every worktree of this repository, so concurrent commits in parallel
-# worktrees can pop each other's work (see .memory on git stash being shared across worktrees).
+# worktrees can pop each other's work.
 bunx lint-staged --no-stash
 bun run typecheck
 cd backend && bun run typecheck
