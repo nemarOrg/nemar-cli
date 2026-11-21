@@ -1,0 +1,12 @@
+tree targets: ['nm000629/v1.0.0', 'nm000453/v1.0.2', 'on007353/v1.0.0', 'nm000281/v1.0.5', 'on005810/v1.0.0', 'on005811/v1.0.0', 'on004624/v1.0.0', 'on002814/v1.0.0', 'on006110/v1.0.0', 'on004395/v1.0.0']
+nm000629/v1.0.0 github-tree True 71044 0 48 
+nm000453/v1.0.2 github-tree True 47541 0 1 
+on007353/v1.0.0 github-tree True 48647 0 1 
+nm000281/v1.0.5 None False None 0 None tree RuntimeError: gh:Get "https://api.github.com/repos/nemarDatasets/nm000281/git/trees/4d1140672179eb117e8d7031236870fe7e3de5f1?recursive=1": net/http: TLS handshake t
+on005810/v1.0.0 github-tree True 82323 0 38 
+on005811/v1.0.0 github-tree True 83372 0 26 
+on004624/v1.0.0 github-tree True 66429 0 395 
+on002814/v1.0.0 github-tree True 45427 0 1 
+on006110/v1.0.0 github-tree True 79513 0 79 
+on004395/v1.0.0 github-tree True 62645 6483 370 
+requests 0 stat {'429': 0, '5xx': 0, 'other_fail': 0}

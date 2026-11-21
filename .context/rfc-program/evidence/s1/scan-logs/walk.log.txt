@@ -1,0 +1,12 @@
+walk targets: ['nm000629/v1.0.0', 'nm000453/v1.0.2', 'on007353/v1.0.0', 'nm000281/v1.0.5', 'on005810/v1.0.0', 'on005811/v1.0.0', 'on004624/v1.0.0', 'on002814/v1.0.0', 'on006110/v1.0.0', 'on004395/v1.0.0']
+  walk nm000629 dirs=500 files=56614
+  walk nm000629 dirs=1000 files=60365
+  walk nm000629 dirs=1500 files=60865
+  walk nm000629 dirs=2000 files=61365
+  walk nm000629 dirs=2500 files=62048
+  walk nm000629 dirs=3000 files=62817
+  walk nm000629 dirs=3500 files=63578
+  walk nm000629 dirs=4000 files=64349
+  walk nm000629 dirs=4500 files=65115
+  walk nm000629 dirs=5000 files=65870
+  walk nm000629 dirs=5500 files=66630

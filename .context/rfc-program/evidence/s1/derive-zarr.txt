@@ -1,0 +1,75 @@
+{"affected_datasets": 68, "missing": ["nm000411"]}
+{
+ "nm000456": {
+  "recordings": 102,
+  "with_store": 2,
+  "failed": 49,
+  "pending": 0,
+  "not_in_index": 51,
+  "index_store_count": 17,
+  "index_discovered": 69,
+  "index_errors": 52
+ }
+}
+{
+ "gapped_files_in_dataset": 102,
+ "gapped_raw_tree_files": 51,
+ "gapped_sourcedata_files": 51,
+ "index_discovered": 69,
+ "index_store_count": 17,
+ "index_failures": 52,
+ "failure_codes": {
+  "retry_exhausted": 52
+ },
+ "failure_detail_kinds": {
+  "MemoryError": 49,
+  "RuntimeError": 3
+ },
+ "stores_with_gapped_source": [
+  {
+   "path": "sub-PennEPI02152/eeg/sub-PennEPI02152_task-monitoring_run-07_eeg.edf",
+   "gap_count": 1,
+   "gap_total_s": 33.902343,
+   "first_gaps": [
+    [
+     4180,
+     8360.542969,
+     8396.445312,
+     33.902343
+    ]
+   ],
+   "store_duration_s": 9884.0,
+   "store_updated_utc": "2026-10-16T19:47:22Z"
+  },
+  {
+   "path": "sub-PennEPI02201/eeg/sub-PennEPI02201_task-monitoring_run-05_eeg.edf",
+   "gap_count": 1,
+   "gap_total_s": 358.121094,
+   "first_gaps": [
+    [
+     634,
+     1268.578125,
+     1628.699219,
+     358.121094
+    ]
+   ],
+   "store_duration_s": 12622.0,
+   "store_updated_utc": "2026-10-16T19:47:22Z"
+  }
+ ],
+ "stores_without_gap": 15,
+ "failed_paths_that_are_gapped": 49,
+ "index_source_commit": "7c754f7c78a751100c505b86ba8350e84e8b88a0",
+ "index_updated_utc": "2026-10-17T17:04:51Z"
+}
+bv_gap_negative_total {'recordings': 36, 'with_store': 19, 'failed': 0, 'pending': 0, 'not_in_index': 17} datasets 4
+bv_gap_positive_total {'recordings': 873, 'with_store': 777, 'failed': 0, 'pending': 0, 'not_in_index': 96} datasets 28
+bv_multi_dated-contiguous {'recordings': 3, 'with_store': 3, 'failed': 0, 'pending': 0, 'not_in_index': 0} datasets 2
+bv_multi_dated-with-gap {'recordings': 909, 'with_store': 796, 'failed': 0, 'pending': 0, 'not_in_index': 113} datasets 29
+bv_multi_epoched-markerbased {'recordings': 86, 'with_store': 86, 'failed': 0, 'pending': 0, 'not_in_index': 0} datasets 1
+bv_multi_partly-dated {'recordings': 1, 'with_store': 0, 'failed': 0, 'pending': 0, 'not_in_index': 1} datasets 1
+bv_multi_segment {'recordings': 1527, 'with_store': 1413, 'failed': 0, 'pending': 0, 'not_in_index': 114} datasets 50
+bv_multi_undated {'recordings': 528, 'with_store': 528, 'failed': 0, 'pending': 0, 'not_in_index': 0} datasets 19
+edfd_header {'recordings': 1728, 'with_store': 1605, 'failed': 58, 'pending': 0, 'not_in_index': 51} datasets 11
+edfd_real_gap {'recordings': 102, 'with_store': 2, 'failed': 49, 'pending': 0, 'not_in_index': 51} datasets 1
+fif_skip {'recordings': 254, 'with_store': 199, 'failed': 55, 'pending': 0, 'not_in_index': 0} datasets 7
