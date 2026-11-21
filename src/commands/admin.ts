@@ -9873,6 +9873,28 @@ importWeeklyCommand
         ),
       );
     }
+    // RFC program card R3: the RFC clock, as the report states it. Absent or null is unknown; the
+    // reasons to look arrive below with the rest, from the shared rule.
+    if (f.rfcs == null) {
+      console.log(chalk.cyan(`rfcs=${chalk.yellow("unknown")}`));
+    } else {
+      const r = f.rfcs;
+      const unknown = chalk.yellow("unknown");
+      const workflow = r.workflow == null ? unknown : r.workflow.state;
+      const lastRun =
+        r.run == null
+          ? unknown
+          : r.run.latest === null
+            ? chalk.red("never")
+            : `${r.run.latest.createdAt.slice(0, 16)}Z ${r.run.latest.conclusion ?? "not ended"}`;
+      console.log(
+        chalk.cyan(
+          `rfcs: listed=${r.index == null ? unknown : r.index.listed.length} ` +
+            `closed_awaiting_decision=${r.index == null ? unknown : r.index.listed.filter((x) => x.phase === "closed").length} ` +
+            `clock=${workflow} last_run=${lastRun}`,
+        ),
+      );
+    }
 
     if (f.failuresByCause !== null) {
       const nonZero = Object.entries(f.failuresByCause).filter(([, n]) => n > 0);

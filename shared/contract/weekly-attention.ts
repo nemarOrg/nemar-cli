@@ -57,6 +57,57 @@ export interface NeurobagelWeekly {
   };
 }
 
+// The RFC clock's week (RFC program card R3). Declared here, with no imports, because the Worker
+// writes it and `nemar admin import-weekly` reads it.
+
+/** A listed RFC: opened and not decided. */
+export interface RfcListed {
+  /** Four digits, as the index prints it. */
+  number: string;
+  /** Sanitized for a public report. */
+  title: string;
+  /** `open` while the close is ahead of the report's instant, `closed` once it has passed. */
+  phase: "open" | "closed";
+  /** The close instant, UTC, to the minute. */
+  closesAt: string;
+  /** The close plus 14 days, UTC, to the minute: the decision is due by then. */
+  dueBy: string;
+  /** The decision is due by an instant the report's instant has passed. */
+  overdue: boolean;
+}
+
+/** What the index says, as of the report's instant. */
+export interface RfcIndexReading {
+  listed: RfcListed[];
+  /** Records with no `opened_at` yet. */
+  drafts: number;
+  /** Records decided (accepted or rejected) or withdrawn. */
+  decided: number;
+}
+
+export interface RfcClockRun {
+  /** ISO 8601, as GitHub wrote it. */
+  createdAt: string;
+  /** `success`, `failure`, ... or `null` while the run has not ended. */
+  conclusion: string | null;
+  /** A link into the repository's runs, or `null` when GitHub gave none of that shape. */
+  url: string | null;
+}
+
+/**
+ * The RFC clock's week. Each part is `null` when its read failed (unknown, never zero), and
+ * `attention` holds one phrase per reason a person should look, decided here at the report's
+ * instant, so that the headline and `nemar admin import-weekly` repeat them and cannot disagree.
+ */
+export interface RfcWeekFacts {
+  index: RfcIndexReading | null;
+  /** The workflow's `state`, or `null` when it could not be read. */
+  workflow: { state: string } | null;
+  /** `latest` is `null` when the workflow has never run; the whole value is `null` when unread. */
+  run: { latest: RfcClockRun | null } | null;
+  attention: string[];
+}
+
 /** The facts the verdict reads. Every field a consumer may lack is allowed to be absent or null. */
 export interface WeeklyAttentionFacts {
   week: string;
@@ -91,6 +142,17 @@ export interface WeeklyAttentionFacts {
    * on, a fault the path saw) and a run's refusal raise none (ADR 0053).
    */
   repulls?: { attention: readonly string[] } | null;
+  /**
+   * The RFC clock's week (RFC program card R3, risk K1): null when it could not be read, absent
+   * when the consumer predates it, which is also unknown. `attention` holds the phrases the Worker
+   * decided, one per reason a person should look: a list of RFCs, a workflow state or a last run
+   * that could not be read, a workflow GitHub no longer has enabled (it switches a scheduled
+   * workflow off after 60 days without repository activity), a clock whose newest run is older
+   * than 48 hours or absent, a newest run that failed, and an RFC past its decision due date.
+   * A quiet week, with nothing open, an active workflow and a recent run that did not fail, raises
+   * none.
+   */
+  rfcs?: { attention: readonly string[] } | null;
   errors: { stage: string; error: string }[];
 }
 
@@ -164,6 +226,13 @@ export function weeklyAttention(f: WeeklyAttentionFacts): WeeklyAttention {
     problems.push("upstream re-pull activity could not be determined");
   } else {
     problems.push(...f.repulls.attention);
+  }
+  // The RFC clock decides its own reasons (they need the report's instant and GitHub's answers);
+  // an unknown clock is a reason of its own, as every other unknown is (ADR 0054).
+  if (f.rfcs === null || f.rfcs === undefined) {
+    problems.push("the RFC clock could not be determined");
+  } else {
+    problems.push(...f.rfcs.attention);
   }
   if (f.errors.length > 0) problems.push(`${f.errors.length} part(s) of this report failed`);
   return { attention: problems.length > 0, problems, notChecked };

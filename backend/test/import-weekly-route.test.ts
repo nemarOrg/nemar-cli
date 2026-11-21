@@ -16,7 +16,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminMiddleware, authMiddleware } from "../src/middleware/auth";
 import { registerImportWeeklyRoutes } from "../src/routes/admin/import-weekly";
@@ -135,6 +135,17 @@ function post(app: App, path: string, key = ADMIN_KEY, environment?: string): Pr
     env(environment),
   );
 }
+
+// The summary is injected into every route here, so no report is gathered and nothing is read from
+// GitHub. The report's RFC reads would go to GITHUB_API(); pointing it at a closed local port keeps
+// this file off api.github.com even if a test ever runs the real report.
+const priorGithubApi = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+beforeAll(() => {
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = "http://127.0.0.1:9";
+});
+afterAll(() => {
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = priorGithubApi;
+});
 
 beforeEach(async () => {
   db = freshDb();

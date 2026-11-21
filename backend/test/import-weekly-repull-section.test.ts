@@ -87,6 +87,12 @@ let mailDone: Promise<void> | null = null;
 
 beforeAll(() => {
   gh = startRepullGitHub({ defaultHead: HEAD });
+  // The report's RFC reads go to GITHUB_API() too. This file does not test them: the stand-in
+  // above installs itself as NEMAR_GITHUB_API_URL and answers their paths with a 404 (a failed
+  // `rfcs` part nothing here counts). Pin that, so these tests cannot reach api.github.com.
+  expect((globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL).toMatch(
+    /^http:\/\/127\.0\.0\.1:\d+$/,
+  );
 });
 afterAll(() => {
   openneuro.stop();
