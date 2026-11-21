@@ -122,6 +122,40 @@ export const RECALL_PREFERENCE = { on: true, locked: true } as const;
  */
 export type CommunityMailPreferences = { [K in CommunityMailCategory]: boolean };
 
+/**
+ * What `GET`/`PUT /users/me/email-preferences` answer with (epic #2260 phase 4), and the community
+ * half of the admin route's answer: the three switchable categories and the locked recall.
+ */
+export type CommunityMailPreferencesView = CommunityMailPreferences & {
+  recall: typeof RECALL_PREFERENCE;
+};
+
+/** The community view of a parsed preference set: the three categories, then the locked recall. */
+export function communityPreferencesView(
+  prefs: CommunityMailPreferences,
+): CommunityMailPreferencesView {
+  const view = Object.fromEntries(
+    COMMUNITY_MAIL_CATEGORIES.map((category) => [category, prefs[category]]),
+  ) as CommunityMailPreferences;
+  return { ...view, recall: RECALL_PREFERENCE };
+}
+
+/**
+ * The refusal codes of `PUT /users/me/email-preferences`, each with the field it names in `field`
+ * and the sentence in `message`. Declared here so the CLI's client knows `message` is the sentence.
+ *
+ *   recall_cannot_be_turned_off    the body named `recall` (the admin route answers the same code)
+ *   admin_alert_not_self_service   the body named an admin alert, which the admin route sets
+ *   unknown_mail_preference        the body named a key that is no preference at all
+ *   invalid_mail_preference        a category's value is not a boolean, or the body is not an object
+ */
+export const SELF_MAIL_PREFERENCE_ERROR_CODES: readonly string[] = [
+  "recall_cannot_be_turned_off",
+  "admin_alert_not_self_service",
+  "unknown_mail_preference",
+  "invalid_mail_preference",
+];
+
 /** A category's label, from the account-copy table (the typed key fails to compile if one is absent). */
 export function mailCategoryLabel(id: MailCategory): string {
   return ACCOUNT_COPY[`mail.category.${id}.label`];

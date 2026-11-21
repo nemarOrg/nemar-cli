@@ -13,13 +13,13 @@
  */
 
 import { COMMUNITY_MAIL_CATEGORIES } from "../../../shared/contract/mail-categories.js";
-import type { EmailPreferences } from "./email";
+import { type EmailPreferences, parseEmailPreferences } from "./email";
 
 /**
  * Where a change came from, recorded as `via` in the audit row. `self` is an account changing its
- * own preferences through the admin route (the route does not know which client sent it);
- * `cli` and `settings` are for the self-service route's own clients, and `admin` is an owner or
- * admin acting for another account.
+ * own preferences, through the admin route or through `PUT /users/me/email-preferences`
+ * (phase 4), whichever credential it used; `admin` is an owner or admin acting for another
+ * account. `cli` and `settings` are declared but no route writes them yet.
  */
 export type MailChangeVia =
   | "self"
@@ -30,6 +30,22 @@ export type MailChangeVia =
   | "link_all"
   | "admin"
   | "migration";
+
+/**
+ * The account's parsed preferences, or null when no row has that id. THE read every preference
+ * route answers with after a write, so the answer is what is stored now (a concurrent write
+ * included), not a guess built from the request.
+ */
+export async function loadEmailPreferences(
+  db: D1Database,
+  userId: number,
+): Promise<EmailPreferences | null> {
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ email_preferences: string | null }>();
+  return row ? parseEmailPreferences(row.email_preferences) : null;
+}
 
 export interface SavePreferencesInput {
   /** The account whose preferences change. */
