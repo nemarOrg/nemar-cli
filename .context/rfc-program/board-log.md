@@ -99,6 +99,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:29-08:00 | Advisor ruling (B5 layer): top-level layer is the reader-safety layer under the vector's own format_version text, or null; all v2 entries null (v2-version-3 stays null as released in 2.0.1); a reader's refusal layer lives only in expect[N].refusal. Lead updates cards B5 and B5a | advisor |  |
 | 2026-11-20T18:38-08:00 | O4c: owner said yes; manager tags pre-release 3.0.0-draft.2 on B5's merge commit | owner |  |
 | 2026-11-20T18:54-08:00 | Q37/Q38: biosig-zarr is independent of NEMAR. Copyright holder 'the biosig-zarr contributors'. Reword LICENSE, GOVERNANCE, README, CONTRIBUTING, CITATION so NEMAR is the first implementer and the text's origin, not decider or owner; release 2.0.2 and tag 3.0.0-draft.3; RFC-0001 points at draft.3 with the new notice. Published tags are immutable and stay | owner |  |
+| 2026-11-20T18:58-08:00 | Owner raised today's 'Agents today' limit from 60 to 80 (owner instruction; manager applied the edit) | owner |  |
 
 ## Log
 
