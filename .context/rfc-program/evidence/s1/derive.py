@@ -4,6 +4,9 @@ Run: uv run --no-project python -I derive.py STAGE [--work DIR]
   scan     tallies, failures and the +D deep results, from cache.json (written by scan.py)
   zarr     join the +D deep results (and the other classes) with the zarr store indexes
   classes  the per-class table: recordings, stores, datasets, licenses
+  bvstats  BrainVision gap statistics (percentiles by linear interpolation), signed and absolute sums
+  fifstats FIF coverage: pool, sample, datasets, edge cases (reads fif.jsonl in the work directory)
+  extras   largest EDF+D file, the .vmrk-missing cases (reads files-index.json in the work directory)
 """
 
 import json
@@ -178,6 +181,9 @@ def class_members():
             if r.get("n_segments", 0) > 1:
                 out["bv_multi_segment"][r["ds"]].append(r["vhdr"])
                 out["bv_multi_" + r["class"]][r["ds"]].append(r["vhdr"])
+                if r["class"] == "dated-with-gap":
+                    sign = "positive_total" if r["gap_total_s"] > 0 else "negative_total"
+                    out["bv_gap_" + sign][r["ds"]].append(r["vhdr"])
     ff = HERE / "fif-recordings.json"
     if ff.exists():
         for r in jload(ff).values():
@@ -278,7 +284,140 @@ def stage_classes():
     print(totals)
 
 
-STAGES = {"scan": stage_scan, "zarr": stage_zarr, "classes": stage_classes}
+def pct(vals, p):
+    """Percentile by linear interpolation between order statistics (the numpy default)."""
+    s = sorted(vals)
+    k = (len(s) - 1) * p / 100
+    lo, hi = int(k), min(int(k) + 1, len(s) - 1)
+    return round(s[lo] + (s[hi] - s[lo]) * (k - lo), 3)
+
+
+def stage_bvstats():
+    recs = jload(HERE / "brainvision-recordings.json")
+    g = [v for v in recs.values() if v.get("class") == "dated-with-gap"]
+    tol = lambda v: max(v["sampling_interval_us"] / 1e6, 1e-3)  # noqa: E731
+    pos = [v for v in g if v["gap_total_s"] > 0]
+    neg = [v for v in g if v["gap_total_s"] <= 0]
+
+    def block(rows):
+        t = [v["gap_total_s"] for v in rows]
+        return {"recordings": len(rows), "median_s": pct(t, 50), "p90_s": pct(t, 90),
+                "max_s": max(t), "min_s": min(t),
+                "over_0.1s": sum(1 for x in t if x > 0.1), "over_1s": sum(1 for x in t if x > 1),
+                "over_60s": sum(1 for x in t if x > 60),
+                "at_most_0.1s_incl_negative": sum(1 for x in t if x <= 0.1),
+                "abs_total_below_0.1s": sum(1 for x in t if abs(x) < 0.1),
+                "net_signed_sum_s": round(sum(t), 3)}
+
+    def real(v):
+        return [x for x in v["gap_s"] if abs(x) > tol(v)]
+
+    truncated = [v for v in g if v["real_gaps"] > len(v["gap_s"]) and len(v["gap_s"]) >= 50]
+    with_neg = [v for v in g if any(x < -tol(v) for x in real(v))]
+    small = [v for v in g if real(v) and all(abs(x) < 1 for x in real(v))]
+
+    def frac(x, si):
+        return abs(x / (si / 1e6) - round(x / (si / 1e6))) < 1e-6
+
+    off_grid = [v for v in small if not all(frac(x, v["sampling_interval_us"]) for x in real(v))]
+    on_grid = [v for v in small if v not in off_grid]
+    out = {
+        "method": "percentiles by linear interpolation between order statistics; gap_total_s is the "
+                  "signed sum of the real gaps (|gap| above max(one sampling interval, 1 ms)) over "
+                  "ALL segment pairs; the absolute sum and the negative-gap test use gap_s, which "
+                  "holds the first 50 gaps only",
+        "dated_with_gap_all": block(g),
+        "positive_total": block(pos),
+        "negative_total": block(neg),
+        "negative_total_by_dataset": dict(Counter(v["ds"] for v in neg)),
+        "recordings_with_at_least_one_negative_gap_first50": len(with_neg),
+        "abs_gap_sum_s_first50": round(sum(abs(x) for v in g for x in real(v)), 3),
+        "net_gap_sum_s_all": round(sum(v["gap_total_s"] for v in g), 3),
+        "recordings_with_more_than_50_gaps_abs_sum_is_lower_bound": len(truncated),
+        "recordings_with_all_gaps_under_1s": len(small),
+        "of_those_with_a_gap_that_is_not_a_multiple_of_the_sampling_interval": len(off_grid),
+        "of_those_all_gaps_multiples_of_the_sampling_interval": len(on_grid),
+        "on_grid_detail": [{"ds": v["ds"], "vhdr": v["vhdr"], "sampling_interval_us": v["sampling_interval_us"],
+                            "gap_s": v["gap_s"]} for v in on_grid],
+        "second_resolution_note": "a date written to whole seconds would give a gap equal to a whole "
+                                  "number of seconds minus the sample span; a gap that is not a multiple "
+                                  "of the sampling interval therefore shows dates finer than a second, "
+                                  "and the others cannot be told from millisecond dates",
+    }
+    jdump(out, HERE / "bv-gap-stats.json")
+    print(json.dumps({k: v for k, v in out.items() if k != "on_grid_detail"}, indent=1))
+
+
+def stage_fifstats():
+    rs = {}
+    for line in (WORK / "fif.jsonl").read_text().splitlines():
+        d = json.loads(line)
+        rs[d["k"]] = d["r"]
+    ds_of = lambda r: r["ds"]  # noqa: E731
+    pool = [r for r in rs.values() if r["status"] in ("ok-walk", "walk-capped", "no-directory",
+                                                       "no-directory-unmeasured", "directory-beyond-end",
+                                                       "directory-beyond-end-unmeasured")]
+    walked = [r for r in rs.values() if r["status"] in ("ok-walk", "walk-capped")]
+    bad_skip = [k for k, r in rs.items() if any(s is None or s <= 0 for s in r.get("skip_values", []))]
+    with_skip = [r for r in rs.values() if r.get("skips_nonzero")]  # directory method only
+    out = {
+        "files": len(rs),
+        "status": dict(Counter(r["status"] for r in rs.values())),
+        "no_directory_pointer_minus_1": sum(1 for r in pool if r.get("directory_status", r["status"]).startswith("no-directory")),
+        "directory_beyond_end": sum(1 for r in pool if r.get("directory_status", r["status"]).startswith("directory-beyond-end")),
+        "pool_without_usable_directory": len(pool),
+        "pool_datasets": len({ds_of(r) for r in pool}),
+        "walked_sample": len(walked), "walked_sample_datasets": len({ds_of(r) for r in walked}),
+        "walked_by_dataset": dict(Counter(ds_of(r) for r in walked)),
+        "walked_with_skip": sum(1 for r in walked if r.get("skips_nonzero")),
+        "pool_files_in_datasets_that_have_a_measured_skip": sum(
+            1 for r in pool if ds_of(r) in {ds_of(x) for x in with_skip}),
+        "sample_datasets_that_have_a_measured_skip": len(
+            {ds_of(r) for r in walked} & {ds_of(x) for x in with_skip}),
+        "walk_capped": sum(1 for r in rs.values() if r["status"] == "walk-capped"),
+        "walk_reads_total": sum(r.get("reads", 0) for r in walked),
+        "unmeasured": sum(1 for r in pool if r["status"].endswith("-unmeasured") or r["status"] in ("no-directory", "directory-beyond-end")),
+        "measured_total": sum(1 for r in rs.values() if r["status"] in ("ok", "ok-walk")),
+        "failed": sum(1 for r in rs.values() if r["status"].startswith("FAILED")),
+        "directory_files_with_skip": len(with_skip),
+        "datasets_with_skip": len({ds_of(r) for r in with_skip}),
+        "files_with_a_nonpositive_or_unreadable_skip_value": len(bad_skip),
+        "files_with_more_than_one_skip_tag": sum(1 for r in rs.values() if r.get("skip_tags", 0) > 1),
+    }
+    jdump(out, HERE / "fif-coverage.json")
+    print(json.dumps(out, indent=1))
+
+
+def stage_extras():
+    d = jload(HERE / "deep-edfd-files.json")
+    top = sorted((f for f in d if f["gap_count"]), key=lambda f: -f["gap_total_s"])[:4]
+    idx = jload(WORK / "files-index.json")
+    miss = []
+    for ds, v in idx.items():
+        paths = {e["path"] for e in v["entries"]}
+        lowdirs = defaultdict(set)
+        for p in paths:
+            if p.lower().endswith(".vmrk"):
+                lowdirs[p.rsplit("/", 1)[0] if "/" in p else ""].add(p)
+        for p in paths:
+            if p.endswith(".vhdr") and p[:-5] + ".vmrk" not in paths:
+                dr = p.rsplit("/", 1)[0] if "/" in p else ""
+                miss.append({"ds": ds, "vhdr": p, "case_insensitive_name_match": (p[:-5] + ".vmrk").lower() in {x.lower() for x in paths},
+                             "any_vmrk_in_same_directory": bool(lowdirs.get(dr))})
+    out = {"largest_gapped_edfd_files": [{"path": f["path"], "gap_count": f["gap_count"],
+                                          "gap_total_s": f["gap_total_s"]} for f in top],
+           "vhdr_without_matching_vmrk_in_listing": len(miss),
+           "by_dataset": dict(Counter(m["ds"] for m in miss)),
+           "with_case_insensitive_name_match": sum(1 for m in miss if m["case_insensitive_name_match"]),
+           "with_any_vmrk_in_same_directory": sum(1 for m in miss if m["any_vmrk_in_same_directory"]),
+           "note": "the MarkerFile= line of each .vhdr was not read (needs a network read), so a marker "
+                   "file kept in another directory cannot be excluded"}
+    jdump(out, HERE / "extras.json")
+    print(json.dumps(out, indent=1))
+
+
+STAGES = {"scan": stage_scan, "zarr": stage_zarr, "classes": stage_classes, "bvstats": stage_bvstats,
+          "fifstats": stage_fifstats, "extras": stage_extras}
 
 if __name__ == "__main__":
     if "--work" in sys.argv:

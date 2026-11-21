@@ -549,8 +549,13 @@ async def fif_one(rd, ds, ver, e):
         b = await rd.read(ds, ver, e, p + 16, p + 19)
         nskips.append(be32(b, 0) if len(b) == 4 else None)
     rec["skip_values"] = nskips[:20]
-    rec["skips_nonzero"] = sum(1 for n in nskips if n)
-    rec["skipped_buffers"] = sum(n for n in nskips if n)
+    # r1 review (code-only, no effect on the committed data: no skip value was <= 0 or None):
+    # count only positive skip values, as MNE does (`if nskip > 0`), and record unreadable ones.
+    rec["skips_nonzero"] = sum(1 for n in nskips if n is not None and n > 0)
+    rec["skipped_buffers"] = sum(n for n in nskips if n is not None and n > 0)
+    rec["skip_read_none"] = sum(1 for n in nskips if n is None)
+    if rec["skip_read_none"]:
+        print("  WARNING: unreadable FIFF_DATA_SKIP value", ds, e["path"], flush=True)
     rec["first_tag_is_skip"] = bool(ents and ents[0][0] == 301)
     rec["status"] = "ok"
     return rec
@@ -587,8 +592,10 @@ async def fif_walk(rd, ds, ver, e):
             break
         pos = pos + 16 + tsize if nxt == 0 else nxt
     rec.update({"reads": reads, "n_buffers": buffers, "skip_tags": len(skips),
-                "skip_values": skips[:20], "skips_nonzero": sum(1 for n in skips if n),
-                "skipped_buffers": sum(n for n in skips if n),
+                "skip_values": skips[:20],
+                "skips_nonzero": sum(1 for n in skips if n is not None and n > 0),
+                "skipped_buffers": sum(n for n in skips if n is not None and n > 0),
+                "skip_read_none": sum(1 for n in skips if n is None),
                 "status": "ok-walk" if reads < WALK_MAX_READS else "walk-capped"})
     return rec
 
@@ -674,6 +681,7 @@ async def stage_fif(client, net):
             per[r["ds"]][r["status"].split(":")[0]] += 1
     summ = {"files": len(out),
             "status": dict(Counter(r["status"].split(":")[0] for r in out.values())),
+            "walk_capped": sum(1 for r in out.values() if r["status"] == "walk-capped"),
             "files_with_skip": sum(1 for r in out.values() if r.get("skips_nonzero")),
             "skipped_buffers_total": sum(r.get("skipped_buffers", 0) for r in out.values()),
             "by_dataset": {k: dict(v) for k, v in sorted(per.items())},
@@ -693,46 +701,65 @@ def pct(vals, p):
 
 
 def stage_throughput():
+    """Stores per day from the catalog's `zarr_converted_at` (read from api-catalog.json, no network).
+    `zarr_converted_at` strings carry no zone and are read as UTC.  The window is the 30 complete UTC
+    days before the fetch date, selected by calendar date (r1 review: the earlier version selected by
+    elapsed time, which made 2026-10-22 a partial day and counted the partial fetch day)."""
     api = load_json(OUT / "api-catalog.json")
     now = datetime.fromisoformat(api["fetched_utc"].replace("Z", "+00:00"))
+    fetch_day = now.date()
+    window = [str(fetch_day - timedelta(days=i)) for i in range(1, 31)]  # 30 complete UTC days
+    wset = set(window)
     total_stores = sum(d["zarr_store_count"] or 0 for d in api["datasets"])
     undated = sum(d["zarr_store_count"] or 0 for d in api["datasets"] if not d["zarr_converted_at"])
     per_day, per_day_ds, all_days = Counter(), Counter(), Counter()
+    on_fetch_day = 0
     for d in api["datasets"]:
         if not d["zarr_converted_at"] or not d["zarr_store_count"]:
             continue
         t = datetime.strptime(d["zarr_converted_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         all_days[str(t.date())] += d["zarr_store_count"]
-        if timedelta(0) <= now - t <= timedelta(days=30):
+        if str(t.date()) in wset:
             per_day[str(t.date())] += d["zarr_store_count"]
             per_day_ds[str(t.date())] += 1
-    window = [str((now - timedelta(days=i)).date()) for i in range(1, 31)]  # 30 complete days
+        if t.date() == fetch_day:
+            on_fetch_day += d["zarr_store_count"]
     w_vals = [per_day.get(k, 0) for k in window]
     active = [v for v in w_vals if v]
     in30 = sum(per_day.values())
+    earliest = min(all_days)
+    span = (fetch_day - timedelta(days=1) - datetime.fromisoformat(earliest).date()).days + 1
     summ = {
         "fetched_utc": api["fetched_utc"],
-        "window_complete_days": [window[-1], window[0]],
+        "definition": "stores per day = the zarr_store_count of every dataset whose zarr_converted_at "
+                      "(its LAST conversion, read as UTC) falls on that calendar day, summed",
+        "window_complete_days_utc": [window[-1], window[0]],
+        "stores_credited_to_the_partial_fetch_day_excluded": on_fetch_day,
         "total_stores_all_datasets": total_stores,
-        "stores_whose_dataset_last_converted_in_last_30_days": in30,
-        "stores_whose_dataset_last_converted_earlier": total_stores - in30 - undated,
+        "stores_whose_dataset_last_converted_in_window": in30,
+        "stores_whose_dataset_last_converted_earlier": total_stores - in30 - on_fetch_day - undated,
         "stores_without_zarr_converted_at": undated,
         "stores_per_day_over_30_complete_days": {
-            "median": statistics.median(w_vals), "p90": pct(w_vals, 90),
+            "median": statistics.median(w_vals), "p90_linear": pct(w_vals, 90),
             "mean": round(statistics.mean(w_vals), 1), "max": max(w_vals),
             "days_with_conversions": len(active)},
         "stores_per_day_on_days_with_conversions": {
-            "median": statistics.median(active) if active else None, "p90": pct(active, 90)},
-        "per_day_stores_last_30_days": {k: per_day[k] for k in sorted(per_day)},
-        "per_day_datasets_last_30_days": {k: per_day_ds[k] for k in sorted(per_day_ds)},
+            "median": statistics.median(active) if active else None, "p90_linear": pct(active, 90)},
+        "earliest_last_conversion_day": earliest,
+        "days_from_earliest_to_last_complete_day_inclusive": span,
+        "mean_stores_per_day_over_that_span": round(total_stores / span, 1),
+        "per_day_stores_window": {k: per_day[k] for k in sorted(per_day)},
+        "per_day_datasets_window": {k: per_day_ds[k] for k in sorted(per_day_ds)},
         "per_day_stores_all_time": dict(sorted(all_days.items())),
         "caveat": "zarr_converted_at is the LAST conversion of a dataset: earlier conversions of a "
-                  "re-converted dataset are not visible, and every store of a dataset is dated by "
-                  "its dataset's last conversion",
+                  "re-converted dataset are not visible, every store of a dataset is dated by its "
+                  "dataset's last conversion (which inflates bursts and hides earlier days), and the "
+                  "series mixes first conversions with re-conversions; version 3 re-conversion "
+                  "throughput was not measured",
     }
     jdump(summ, OUT / "throughput.json")
     print(json.dumps({k: v for k, v in summ.items() if not k.startswith("per_day")}, indent=1))
-    print("per_day_stores_last_30_days:", dict(sorted(per_day.items())))
+    print("per_day_stores_window:", dict(sorted(per_day.items())))
     print("per_day_stores_all_time:", dict(sorted(all_days.items())))
 
 
