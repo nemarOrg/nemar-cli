@@ -107,6 +107,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:25-08:00 | B7b gate names the conformance workflow, which did not run on biosig-zarr#8: its path filter (Q27) covers schemas, conformance, tools, package.json, bun.lock, and acceptance line 5 shows none changed vs 3.0.0-draft.2; implementer ran its commands locally (pass). Accepted as not applicable, not as a pass | manager |  |
 | 2026-11-21T10:32-08:00 | Q44: tag 3.0.0-draft.3 (pre-release) on B7b's merge commit c0cb7e49 with plan section 5's notes (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:36-08:00 | Version 3 tags while RFC-0001 is open: 3.0.0-draft.N pre-releases are fine and expected; no 3.0.x release (3.0.0, 3.0.1, ...) is cut until the RFC closes. 3.0.0-draft.3 stands and B4c pins it (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:38-08:00 | Agents today limit raised to 150 for 2026-11-21 to reach RFC-0001 quickly; solid, working draft without overthinking (owner) | owner |  |
+| 2026-11-21T10:39-08:00 | P4 accepted: a lead agent answers S1's 3 questions, picks the figures RFC-0001 cites, and writes a card to add them on rfcs#2 (owner, 2026-11-21) | owner |  |
 
 ## Log
 
@@ -249,3 +251,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:27-08:00 | S1 r2 fixes verified at c6d4b48c (one file, onsets checked against deep-edfd-files.json); merged #2289 squash c48405fe; lead proposal recorded for S1 questions and RFC-0001 figures |
 | 2026-11-21T10:28-08:00 | B7b r1 fix verified at 498bd9bb (version-history only, signed off, checks green); merged biosig-zarr#8 merge commit c0cb7e49; O4f asked as Q44 |
 | 2026-11-21T10:32-08:00 | Q44 answered: owner says tag now; pre-release 3.0.0-draft.3 on c0cb7e49 (verified); B4c dispatched (Opus xhigh) |
+| 2026-11-21T10:39-08:00 | B4c verified at 0e4947c7 (all acceptance greps pass, rfc-check pass, draft); r1 clean, 1 sugg routed to lead (card text); P4 accepted by owner, lead-s1 dispatched (Opus xhigh) |

@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 7 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 150 | 9 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -96,7 +96,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7 | - |  |  | - | release 2.0.2 on 509b68976144561050606d11ac71f623b51f0a97, not prerelease (verified) |
 | B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | done | B7, O4e | biosig-zarr#8 | r1 comments+seam (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history verbatim); fix verified by manager | 2026-11-21T10:50-08:00 | 3h | merged into draft/3.0.0 (c0cb7e49e301feb8cebd57208edee8feb9fdb533) |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7b | - |  |  | - | pre-release 3.0.0-draft.3 on c0cb7e49e301feb8cebd57208edee8feb9fdb533 (verified) |
-| B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | claude-opus | active | B4b, O4e, O4f | - |  | 2026-11-21T11:25-08:00 | 2h | impl-B4c out (Opus xhigh); commit on rfcs#2, stays draft |
+| B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | claude-opus | done | B4b, O4e, O4f | - | r1 comments+seam (1 Sonnet): clean; 1 sugg (history row 2.0.2 date) is card-given text, routed to the lead's S1 card | 2026-11-21T11:25-08:00 | 2h | rfcs#2 head 0e4947c7f6f3b6bbf8f6a5aaf054b2357cc0ad0e, still draft; acceptance verified by manager |
 
 ## Questions
 
@@ -153,7 +153,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | P1 | 2026-11-20T13:29-08:00 | Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) | owner, 2026-11-20T15:00: 'That is wrong rule, ask an owner to update the rules clearly' | accepted |
 | P2 | 2026-11-20T14:40-08:00 | Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges | owner answer Q29 'Both now' | accepted |
 | P3 | 2026-11-20T15:01-08:00 | Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) | N1 r2 review: card text predates Q31/Q32 | accepted |
-| P4 | 2026-11-21T10:27-08:00 | Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 | S1 gives both figures; no card yet carries them into RFC-0001; B4c is fixed | open |
+| P4 | 2026-11-21T10:27-08:00 | Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 | S1 gives both figures; no card yet carries them into RFC-0001; B4c is fixed | accepted |
 
 ## Agents
 
@@ -226,4 +226,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | done |
 | ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | done |
 | ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | done |
-| a8692c4a | implementer | claude-opus | Opus xhigh | B4c | 2026-11-21T11:25-08:00 | running |
+| a8692c4a | implementer | claude-opus | Opus xhigh | B4c | 2026-11-21T11:25-08:00 | done |
