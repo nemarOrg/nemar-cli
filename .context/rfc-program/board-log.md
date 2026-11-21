@@ -187,3 +187,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T16:45-08:00 | SC1 docs#129 head 25798002 reported; review dispatched (Agents today 46/60) |
 | 2026-11-20T16:46-08:00 | SC1 r1 review clean; set owner for docs#129 merge |
 | 2026-11-20T17:18-08:00 | SC1 merged by manager (owner auth). A3 draft PR 2277 held (ADR 0133). R3 PR 2278 and B5a biosig-zarr#5 verified (CI green), review panels dispatched; Agents today 50/60 |
+| 2026-11-20T17:19-08:00 | R3 code lens: 0 crit, 1 imp (non-failure bad conclusions not flagged), 3 sugg; held to batch with tests lens |
+| 2026-11-20T17:20-08:00 | B5a tools lens: 0 crit, 2 imp (class vs outcome check; created_utc rebuild note), 4 sugg; held to batch with spec lens |
+| 2026-11-20T17:20-08:00 | B5a spec lens: schemas faithful, 1 imp (class definition), 5 sugg; both lenses sent back as one round; worker questions answered (const 2 stays, v2-unknown-attribute stays) |
+| 2026-11-20T17:20-08:00 | R3 tests lens clean (6 mutations caught, offline); R3 r1 findings sent back |

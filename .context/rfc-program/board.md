@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T16:42-08:00 |
-| Next tick | 2026-11-20T17:12-08:00 |
+| Last tick | 2026-11-20T17:18-08:00 |
+| Next tick | 2026-11-20T17:48-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -70,7 +70,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | active | O0 | - |  | 2026-11-20T16:45-08:00 | 1d | impl-S1 running |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
-| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | review | R1 | 2278 |  | 2026-11-20T16:45-08:00 | 1d | r1 review panel (2 Sonnet) on head 5656f1fd |
+| R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | active | R1 | 2278 |  | 2026-11-20T16:45-08:00 | 1d | r1 fixes: 1 imp (run conclusions), 4 sugg; then r2 delta |
 | B1 | [biosig-zarr initialized](cards/B1.md) | - | worker-hard | - | claude-sonnet | done | A2 | biosig-zarr#1 | r1 code/errors + comments (2 Sonnet): 2 imp, 5 sugg fixed, 3 rejected with reason; fix diff verified by manager | 2026-11-20T14:25-08:00 | 1d | merged 5794535df619f7daef8d91d79928c7a803a99e8b (merge commit, keeps DCO sign-offs) |
 | B2 | [Spec text moves into biosig-zarr](cards/B2.md) | - | worker | - | claude-sonnet | done | B1 | biosig-zarr#2 | r1 code/errors/tests + comments (2 Sonnet): 0 crit/imp; 2 sugg fixed (link-target check), 1 no change; fix diff verified by manager | 2026-11-20T15:30-08:00 | 1d | merged 36112961471b46de1a96e5cb67f9581772d9146e |
 | R2 | [docs page /policies/rfcs/](cards/R2.md) | - | worker | - | claude-sonnet | done | A1, R1 | docs#127 | r1 code+comments (1 Sonnet, docs): 2 sugg fixed; fix diff verified by manager | 2026-11-20T14:50-08:00 | 1d | owner merged docs#127 (2026-11-20T22:15:20Z ee23bf7f) |
@@ -87,7 +87,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
 | C4 | Checkpoint: RFC-0002 closed, decision draft, process ADR review | - | lead | - | - | blocked | O6 | - |  | - | - | when RFC-0002's close instant passes |
 | A3 | [ADR amends 0124: vectors canonical in biosig-zarr](cards/A3.md) | - | lead | - | claude-opus | blocked | - | 2277 |  | 2026-11-20T16:45-08:00 | 4h | draft PR 2277 (ADR 0133) held until 0132 on dev, then dev merged into epic; review then |
-| B5a | [Version 2 schemas and vectors on main](cards/B5a.md) | - | lead | - | claude-opus | review | B2, O4 | biosig-zarr#5 |  | 2026-11-20T16:45-08:00 | 2d | r1 review panel (2 Sonnet) on head 90b00f04; CI green |
+| B5a | [Version 2 schemas and vectors on main](cards/B5a.md) | - | lead | - | claude-opus | active | B2, O4 | biosig-zarr#5 |  | 2026-11-20T16:45-08:00 | 2d | r1 fixes: 3 imp (class definition + checker, rebuild note), ~8 sugg; then r2 delta |
 | O4d | Manager releases 2.0.1 on owner say-so | - | owner | - | - | blocked | B5a | - |  | - | - | after B5a merges |
 | O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | blocked | B5 | - |  | - | - | after B5 merges |
 | B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | - | blocked | O4c | - |  | - | 2h | after O4c |
@@ -185,12 +185,12 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
 | rev-C1-r2 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:40-08:00 | done |
 | impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | running |
-| impl-R3 | implementer | claude-sonnet | Sonnet xhigh | R3 | 2026-11-20T16:45-08:00 | done |
+| impl-R3 | implementer | claude-sonnet | Sonnet xhigh | R3 | 2026-11-20T16:45-08:00 | running |
 | impl-A3 | implementer | claude-opus | Opus xhigh | A3 | 2026-11-20T16:45-08:00 | done |
-| impl-B5a | implementer | claude-opus | Opus xhigh | B5a | 2026-11-20T16:45-08:00 | done |
+| impl-B5a | implementer | claude-opus | Opus xhigh | B5a | 2026-11-20T16:45-08:00 | running |
 | impl-SC1 | implementer | claude-opus | Opus xhigh | SC1 | 2026-11-20T16:45-08:00 | done |
 | rev-SC1 | reviewer | claude-sonnet | Sonnet high | SC1 | 2026-11-20T17:05-08:00 | done |
-| rev-R3-code | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | running |
-| rev-R3-tests | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | running |
-| rev-B5a-spec | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | running |
-| rev-B5a-tools | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | running |
+| rev-R3-code | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | done |
+| rev-R3-tests | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T17:30-08:00 | done |
+| rev-B5a-spec | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | done |
+| rev-B5a-tools | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | done |
