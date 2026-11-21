@@ -96,6 +96,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T16:42-08:00 | Owner raised today's 'Agents today' limit from 40 to 60 (owner instruction; manager applied the edit) | owner |  |
 | 2026-11-20T17:17-08:00 | SC1: owner authorized the manager to merge docs#129 | owner |  |
 | 2026-11-20T17:57-08:00 | O4d: owner said yes; manager releases 2.0.1 on B5a merge commit 3bd184a9 | owner |  |
+| 2026-11-20T18:29-08:00 | Advisor ruling (B5 layer): top-level layer is the reader-safety layer under the vector's own format_version text, or null; all v2 entries null (v2-version-3 stays null as released in 2.0.1); a reader's refusal layer lives only in expect[N].refusal. Lead updates cards B5 and B5a | advisor |  |
 
 ## Log
 
@@ -201,3 +202,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:26-08:00 | B5 tools lens clean (all mutations caught; v3 rebuild byte-identical); 2 sugg (README wording, optional $comment unit test); waiting on spec lens |
 | 2026-11-20T18:28-08:00 | B5 spec lens: 0 crit, 3 imp, 3 sugg; judgment calls 1-8 accepted (4,7,8 verdict accept). Finding 2 contests card B5's layer rule: escalated to advisor (Advisor consults 1/3); Agents today 56/60 |
 | 2026-11-20T18:28-08:00 | A3 hold check: PR 2270 merged into feature/issue-2260-epic-mail-categories, not dev; 0132 not on origin/dev; no dev merge |
+| 2026-11-20T18:29-08:00 | Advisor ruled (B) on B5 layer; lead-C1 resumed for card edits; impl-B5 resumed for r1 fixes |
