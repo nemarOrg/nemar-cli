@@ -3,6 +3,7 @@
 **Status:** proposed
 **Date:** 2026-11-14
 **Owner:** Seyed Yahya Shirazi
+**Superseded in part by:** ADR 0133 (decision 3)
 
 Epic #2145.
 This Architecture Decision Record (ADR) records how NEMAR keeps its Zarr readers equal to one another, and how a reader is meant to read private data.
