@@ -352,6 +352,29 @@ describe("the preference is re-read immediately before each send", () => {
     expect(rowOf(result.broadcast_id)).toMatchObject({ status: "done", skipped_count: 1 });
   });
 
+  test("an account revoked after queueing is skipped, and so is one whose inbox stopped being verified", async () => {
+    const h = harness();
+    const result = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
+    db.query("UPDATE users SET status = 'revoked' WHERE id = ?").run(bob);
+    db.query("UPDATE users SET email_verified = 0 WHERE id = ?").run(alice);
+    await consume(h);
+    expect(h.sent.map((m) => m.to).sort()).toEqual(["cataadmin@nemar.test", "catowner@nemar.test"]);
+    expect(rowOf(result.broadcast_id)).toMatchObject({
+      status: "done",
+      skipped_count: 2,
+      delivered_count: 2,
+    });
+  });
+
+  test("an account whose kind changed to one the category does not reach is skipped too", async () => {
+    const h = harness();
+    const result = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
+    db.query("UPDATE users SET account_kind = 'service' WHERE id = ?").run(bob);
+    await consume(h);
+    expect(h.sent.map((m) => m.to)).not.toContain("bob@nemar.test");
+    expect(rowOf(result.broadcast_id)?.skipped_count).toBe(1);
+  });
+
   test("a redelivered skipped message is acked without a second count", async () => {
     const h = harness();
     const result = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
@@ -420,6 +443,9 @@ describe("recalls", () => {
       `INSERT INTO datasets (dataset_id, name, description, authors, owner_user_id, status, visibility, is_sandbox)
        VALUES (?, 'A study', 'd', 'a', ?, 'active', 'public', 0)`,
     ).run(id, ownerId);
+    db.query(
+      "INSERT INTO dataset_versions (dataset_id, version, doi) VALUES (?, 'v1.0.0', '10.5072/seed')",
+    ).run(id);
   }
 
   test("an admin who is not an owner is refused, and nothing is written or queued", async () => {
@@ -468,6 +494,31 @@ describe("recalls", () => {
     expect(await res.json()).toMatchObject({ error: code });
     expect(noRows()).toBe(0);
     expect(h.queue.bodies).toEqual([]);
+  });
+
+  test("a version in the reference must exist for that dataset, in either spelling; no version needs none", async () => {
+    seedDataset("nm000104");
+    db.query(
+      "INSERT INTO dataset_versions (dataset_id, version, doi) VALUES ('nm000104', '2.0.0', '10.5072/y')",
+    ).run();
+    for (const ref of ["nm000104@v1.0.0", "nm000104@1.0.0", "nm000104@v2.0.0", "nm000104"]) {
+      const h = harness();
+      const res = await post(
+        OWNER_KEY,
+        { ...RECALL, subject: `Problem ${ref}`, recall_reference: ref, confirm_recall: ref },
+        h,
+      );
+      expect({ ref, status: res.status }).toEqual({ ref, status: 200 });
+    }
+    const missing = harness();
+    const refused = await post(
+      OWNER_KEY,
+      { ...RECALL, recall_reference: "nm000104@v9.9.9", confirm_recall: "nm000104@v9.9.9" },
+      missing,
+    );
+    expect(refused.status).toBe(404);
+    expect(await refused.json()).toMatchObject({ error: "recall_version_not_found" });
+    expect(missing.queue.bodies).toEqual([]);
   });
 
   test("a GitHub issue or advisory URL is an accepted reference, and a dataset need not exist for it", async () => {
@@ -556,6 +607,20 @@ describe("recalls", () => {
     expect(to).toContain("bob@nemar.test");
     expect(to).not.toContain("alice@nemar.test");
     expect(rowOf(result.broadcast_id)).toMatchObject({ skipped_count: 1, delivered_count: 3 });
+  });
+
+  test("a recall keeps its own audience: a revoked account queued for it still receives it, one whose inbox is not verified does not", async () => {
+    seedDataset("nm000104");
+    const carol = seedUser("carol", { status: "approved" });
+    const h = harness();
+    const result = (await (await post(OWNER_KEY, RECALL, h)).json()) as { broadcast_id: number };
+    db.query("UPDATE users SET status = 'revoked' WHERE id = ?").run(carol);
+    db.query("UPDATE users SET email_verified = 0 WHERE id = ?").run(alice);
+    await consume(h);
+    const to = h.sent.map((m) => m.to);
+    expect(to).toContain("carol@nemar.test");
+    expect(to).not.toContain("alice@nemar.test");
+    expect(rowOf(result.broadcast_id)?.skipped_count).toBe(1);
   });
 
   test("an unusable link secret does not hold back a recall: it carries no link", async () => {

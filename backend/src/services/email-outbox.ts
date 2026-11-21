@@ -30,6 +30,7 @@
  */
 
 import {
+  MAIL_CATEGORY_TABLE,
   type MailCategory,
   RECALL_CATEGORY,
   isCommunityMailCategory,
@@ -100,7 +101,10 @@ interface BroadcastRow {
 /** What a categorized message is sent as, or why it is not sent. */
 type PreparedMessage =
   | { send: true; html: string; headers: Record<string, string> | undefined }
-  | { send: false; reason: "account_gone" | "address_changed" | "category_off" };
+  | {
+      send: false;
+      reason: "account_gone" | "address_changed" | "no_longer_in_audience" | "category_off";
+    };
 
 const sameAddress = (a: string, b: string): boolean =>
   a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -109,8 +113,10 @@ const sameAddress = (a: string, b: string): boolean =>
  * Re-read the recipient and build the message of one categorized send. Throws when the database or
  * the link secret is unavailable (nothing was sent, so the caller retries); returns `send: false`
  * when the person must not receive it any more: the account was deleted, its address is no longer
- * the one the message was queued for, or the category is now off. A recall skips only for the first
- * two, because a deleted account or an address nobody holds any more has no one to tell.
+ * the one the message was queued for, the account is no longer in the category's audience (inbox not
+ * verified, or a status or kind the category's table row does not include, such as a revoked account
+ * for anything but a recall), or the category is now off. A recall never skips for the last reason: it
+ * ignores preferences.
  */
 async function prepareCategorizedMessage(
   env: OutboxEnv,
@@ -121,13 +127,31 @@ async function prepareCategorizedMessage(
   to: string,
 ): Promise<PreparedMessage> {
   const user = await env.DB.prepare(
-    "SELECT email, email_preferences FROM users WHERE id = ? AND deleted_at IS NULL",
+    `SELECT email, email_preferences, status, email_verified, account_kind
+       FROM users WHERE id = ? AND deleted_at IS NULL`,
   )
     .bind(userId)
-    .first<{ email: string | null; email_preferences: string | null }>();
+    .first<{
+      email: string | null;
+      email_preferences: string | null;
+      status: string;
+      email_verified: number;
+      account_kind: string;
+    }>();
   if (!user) return { send: false, reason: "account_gone" };
   if (!user.email || !sameAddress(user.email, to)) {
     return { send: false, reason: "address_changed" };
+  }
+  // The audience is re-checked too, by the same table that chose it: an account revoked (or, for a
+  // category that excludes them, demoted), whose inbox is no longer proved, or whose kind changed
+  // after queueing no longer receives it. A recall keeps ITS rules: revoked accounts still get one.
+  const audience = MAIL_CATEGORY_TABLE[category];
+  if (
+    user.email_verified !== 1 ||
+    !(audience.statuses as readonly string[]).includes(user.status) ||
+    !(audience.accountKinds as readonly string[]).includes(user.account_kind)
+  ) {
+    return { send: false, reason: "no_longer_in_audience" };
   }
   const bodyHtml = markdownToEmailHtml(row.body_markdown);
   if (category === RECALL_CATEGORY) {

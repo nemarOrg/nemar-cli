@@ -146,6 +146,22 @@ export async function handleCategorizedNotify(
       if (!exists) {
         return refuse(404, "recall_dataset_not_found", `No dataset ${parsed.datasetId} exists.`);
       }
+      if (parsed.version !== null) {
+        // Rows hold the version with or without the `v`; accept either spelling of the one version.
+        const version = await db
+          .prepare(
+            "SELECT 1 AS found FROM dataset_versions WHERE dataset_id = ? AND version IN (?, ?)",
+          )
+          .bind(parsed.datasetId, parsed.version, `v${parsed.version}`)
+          .first<DatasetRow>();
+        if (!version) {
+          return refuse(
+            404,
+            "recall_version_not_found",
+            `Dataset ${parsed.datasetId} has no version ${parsed.version}.`,
+          );
+        }
+      }
     }
     const missing = missingRecallHeadings(input.body);
     if (missing.length > 0) {
