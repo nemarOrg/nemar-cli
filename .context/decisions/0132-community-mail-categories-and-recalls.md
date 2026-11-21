@@ -46,17 +46,17 @@ Every non-recall message carries a visible unsubscribe link and the RFC 8058 hea
 It is not a credential: it opens no session, so it is not added to the revocation callers of `docs-auth.ts` and `private-auth.ts`.
 The footer carries the postal address the owner supplied (D7).
 Phase P3 builds it (`services/mail-footer.ts`, `services/email-outbox.ts`): each recipient's footer names the category, says why they receive it, carries the visible unsubscribe link, a link to manage preferences and the address, and the message carries `List-Unsubscribe` (the same HTTPS URL) and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`; those two are the only additions to the `sendEmail` header allowlist, each with a value rule, and no `mailto:` form is sent.
-The outbox consumer re-reads the account and the preference immediately before each send and records `skipped` for a deleted account, a changed address or a category switched off after queueing; a categorized message is never sent without those checks.
+The outbox consumer re-reads the account and the preference immediately before each send and records `skipped` for a deleted account, a changed address, an account that left the category's audience (revoked, inbox no longer verified, another kind; a recall keeps its own audience) or a category switched off after queueing; a categorized message is never sent without those checks.
 The owner declined a legal review of the defaults and the policy text (D11); the plan records the reasoning and the ordering of the phases.
 
 **8. Sending rules (P3).**
 A group send must name a category and goes only through the outbox, never inline (`outbox_required`); the owner-only table entry is enforced at the route.
 A send that carries a link is refused before anything is written or queued when `MAIL_LINK_SECRET` is unusable or `API_BASE_URL` is not https.
 A recall carries no link, so those two conditions do not hold one back: a safety notice is never blocked by a configuration of the unsubscribe path, which is a deliberate narrowing of "every categorized send".
-The same category and subject within 24 hours is refused unless `--allow-repeat` is given.
+The same category, subject and group within 24 hours is refused unless `--allow-repeat` is given; the refusal is made by the audit-row insert itself, so two requests at once cannot both pass, a send whose enqueue failed completely does not count, and the dry run reports it.
 A dry run answers counts per group and a redacted sample; outside production it never returns addresses.
-A recall publishes a `critical` site notice through the existing notices table, so the record is public; the notice names the reference and the subject, never the body, and the owner clears it with `nemar admin notice clear` when the recall is resolved.
-A recall reference is a dataset id with an optional version (the dataset must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL; the plan's "ledger entry id" form is not accepted, because no recall ledger exists to resolve it against.
+A categorized send whose every recipient is fenced (a dev worker) is reported as fenced: no row, no site notice. A recall publishes a `critical` site notice through the existing notices table, so the record is public; the notice names the reference and the subject, never the body, and the owner clears it with `nemar admin notice clear` when the recall is resolved.
+A recall reference is a dataset id with an optional version (the dataset, and a version if one is named, must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL; the plan's "ledger entry id" form is not accepted, because no recall ledger exists to resolve it against.
 No `List-Id` header is sent: the owner limited the allowlist extension to the two RFC 8058 headers.
 
 ## Consequences
