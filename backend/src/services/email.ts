@@ -693,12 +693,29 @@ export class MailHeaderError extends Error {
 }
 
 /**
- * The only extra headers a caller may set: the threading pair. Names compare case-insensitively.
+ * The only extra headers a caller may set: the threading pair, and the RFC 8058 one-click pair that
+ * community mail carries (epic #2260 phase 3). Names compare case-insensitively.
  * `Message-ID` is deliberately absent: the Cloudflare Email Service controls it and refuses the
  * whole send for it (`E_HEADER_NOT_ALLOWED`); the id a send went out under is read back from
- * {@link SendResult} instead.
+ * {@link SendResult} instead. The two `List-Unsubscribe` headers have value rules of their own
+ * (see {@link validateMailHeaders}); no other `List-*` header is allowed.
  */
-export const ALLOWED_MAIL_HEADERS: readonly string[] = ["In-Reply-To", "References"];
+export const ALLOWED_MAIL_HEADERS: readonly string[] = [
+  "In-Reply-To",
+  "References",
+  "List-Unsubscribe",
+  "List-Unsubscribe-Post",
+];
+
+/** The one value `List-Unsubscribe-Post` may have (RFC 8058, section 3.1). */
+export const LIST_UNSUBSCRIBE_POST_VALUE = "List-Unsubscribe=One-Click";
+
+/**
+ * `List-Unsubscribe` is exactly one angle-bracketed HTTPS URI on this API's unsubscribe path: no
+ * `mailto:`, no list of URIs, no plain HTTP (RFC 8058 requires HTTPS, and Cloudflare refuses HTTP).
+ * The mailbox provider POSTs to it, so it must be the route of `routes/mail.ts` and nothing else.
+ */
+const LIST_UNSUBSCRIBE_RE = /^<https:\/\/[^\s<>,/]+\/mail\/unsubscribe\/[A-Za-z0-9._-]+>$/;
 
 /**
  * The headers the Cloudflare Email Service accepts from a sender
@@ -776,7 +793,21 @@ export function validateMailHeaders(
         `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
       );
     }
+    if (canonical === "List-Unsubscribe" && !LIST_UNSUBSCRIBE_RE.test(value)) {
+      throw new MailHeaderError(
+        "mail header List-Unsubscribe must be exactly one <https://...> URI on the unsubscribe path",
+      );
+    }
+    if (canonical === "List-Unsubscribe-Post" && value !== LIST_UNSUBSCRIBE_POST_VALUE) {
+      throw new MailHeaderError(
+        `mail header List-Unsubscribe-Post must be exactly ${LIST_UNSUBSCRIBE_POST_VALUE}`,
+      );
+    }
     out[canonical] = value;
+  }
+  // RFC 8058: the Post header means nothing without the URI it applies to.
+  if (out["List-Unsubscribe-Post"] && !out["List-Unsubscribe"]) {
+    throw new MailHeaderError("mail header List-Unsubscribe-Post requires List-Unsubscribe");
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
