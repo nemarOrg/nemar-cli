@@ -151,6 +151,19 @@ describe("nemar auth mail", () => {
     });
   }
 
+  test("a mistyped subcommand is refused, not run as show", async () => {
+    seedAuthenticatedConfig();
+    const standIn = startStandIn();
+    try {
+      const result = await runCli(["auth", "mail", "bogus"], standIn.url);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("too many arguments");
+      expect(standIn.requests).toEqual([]);
+    } finally {
+      standIn.stop();
+    }
+  });
+
   test("not signed in: sends nothing and exits 1", async () => {
     const standIn = startStandIn();
     try {

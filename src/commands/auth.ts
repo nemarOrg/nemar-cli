@@ -2031,6 +2031,8 @@ export async function mailSetAction(target: MailSetTarget, on: boolean): Promise
 const mailCmd = authCommand
   .command("mail")
   .description("Show or change which mail NEMAR sends you")
+  // `nemar auth mail bogus` is a mistyped subcommand, not a request to show.
+  .allowExcessArguments(false)
   .action(mailShowAction);
 
 mailCmd
