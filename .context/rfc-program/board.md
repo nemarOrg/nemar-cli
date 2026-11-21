@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 150 | 9 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 150 | 10 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -227,4 +227,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | done |
 | ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | done |
 | a8692c4a | implementer | claude-opus | Opus xhigh | B4c | 2026-11-21T11:25-08:00 | done |
-| a21b313b | lead | claude-opus | Opus xhigh | P4 | 2026-11-21T11:45-08:00 | running |
+| a21b313b | lead | claude-opus | Opus xhigh | B4d-card | 2026-11-21T11:45-08:00 | running |

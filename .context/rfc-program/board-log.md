@@ -109,6 +109,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:36-08:00 | Version 3 tags while RFC-0001 is open: 3.0.0-draft.N pre-releases are fine and expected; no 3.0.x release (3.0.0, 3.0.1, ...) is cut until the RFC closes. 3.0.0-draft.3 stands and B4c pins it (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:38-08:00 | Agents today limit raised to 150 for 2026-11-21 to reach RFC-0001 quickly; solid, working draft without overthinking (owner) | owner |  |
 | 2026-11-21T10:39-08:00 | P4 accepted: a lead agent answers S1's 3 questions, picks the figures RFC-0001 cites, and writes a card to add them on rfcs#2 (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:52-08:00 | Evidence link: tag rfc-0001-evidence on nemar-cli c48405fe so RFC-0001's S1 link survives the branch (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:52-08:00 | nm000411 (zarr_status failed, no stores): manager files one nemar-cli issue with S1's facts, no cause examined (owner, 2026-11-21) | owner |  |
 
 ## Log
 
@@ -252,3 +254,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:28-08:00 | B7b r1 fix verified at 498bd9bb (version-history only, signed off, checks green); merged biosig-zarr#8 merge commit c0cb7e49; O4f asked as Q44 |
 | 2026-11-21T10:32-08:00 | Q44 answered: owner says tag now; pre-release 3.0.0-draft.3 on c0cb7e49 (verified); B4c dispatched (Opus xhigh) |
 | 2026-11-21T10:39-08:00 | B4c verified at 0e4947c7 (all acceptance greps pass, rfc-check pass, draft); r1 clean, 1 sugg routed to lead (card text); P4 accepted by owner, lead-s1 dispatched (Opus xhigh) |
+| 2026-11-21T10:53-08:00 | Card PR 2291 (B4d) r1 (1 Sonnet): 1 crit (question 18 count 2->1), 2 sugg; sent to lead. Tag rfc-0001-evidence created on c48405fe (link 200). Issue #2292 filed for nm000411 |
