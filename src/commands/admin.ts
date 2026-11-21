@@ -8754,7 +8754,7 @@ noticeCommand
     }
 
     const confirmed = await confirm(`Delete notice #${id}?`, options, false);
-    if (!confirmed) return;
+    if (confirmed !== "confirmed") return;
 
     const spinner = ora("Deleting notice...").start();
     try {
