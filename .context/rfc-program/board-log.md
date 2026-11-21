@@ -197,3 +197,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T17:23-08:00 | B5a merged (3bd184a9c85a3a9cc646dce94b98520021231650); O4d set owner |
 | 2026-11-20T17:57-08:00 | O4d done (2.0.1 on 3bd184a9). R3 merged (14d49c8e). B5 ready |
 | 2026-11-20T17:57-08:00 | B5 dispatched (claude-opus); Agents today 53/60 |
+| 2026-11-20T18:24-08:00 | B5 biosig-zarr#6 head 0d749222 (9 v3 schemas, 19 vectors, CI green); review panel dispatched; Agents today 55/60 |
+| 2026-11-20T18:26-08:00 | B5 tools lens clean (all mutations caught; v3 rebuild byte-identical); 2 sugg (README wording, optional $comment unit test); waiting on spec lens |
+| 2026-11-20T18:28-08:00 | B5 spec lens: 0 crit, 3 imp, 3 sugg; judgment calls 1-8 accepted (4,7,8 verdict accept). Finding 2 contests card B5's layer rule: escalated to advisor (Advisor consults 1/3); Agents today 56/60 |
