@@ -217,8 +217,16 @@
 # ZARR_ENGINE_VERSION is NOT bumped here either (ADR 0033): a bump re-queues the
 # whole archive for one dataset's sake. Stores already published for nm000456
 # keep their shifted time axis until that dataset is requeued by itself
-# (`zarr_queue.py requeue --status done --dataset nm000456 --execute`), when each gapped recording turns
-# into a typed failure in the index instead.
+# (`zarr_queue.py requeue --status done --dataset nm000456 --execute`). The
+# rebuild then publishes each gapped recording as a typed failure in place of its
+# store, as long as at least one recording of the dataset converts (nm000456 has
+# 69 recordings, 51 of them gapped). A dataset whose every attempted recording is
+# gapped takes the "all N conversion(s) failed; index left untouched" exit
+# instead, and keeps serving its old stores.
+# Deploying this pin: the first Hallu tick after the merge runs the OLD
+# hallu-zarr.sh body, which installs 1.2.14 from this file and then refuses it at
+# its old `<1.2.14` cap (setup exits 1, no queue row is touched). The tick after
+# that runs the new body and converts.
 # <1.2.15 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains or which recordings convert
 # six times in a row (1.2.9 through 1.2.14), so the next one is read before the
