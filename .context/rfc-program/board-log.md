@@ -94,6 +94,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:29-08:00 | Q35: let the remi:18769 EDF+D header scan finish; S1 dispatches after it stops writing its cache | owner |  |
 | 2026-11-20T15:29-08:00 | Q36: the manager runs O4c (tag 3.0.0-draft.2) on the owner's say-so under the P1 rule | owner |  |
 | 2026-11-20T16:42-08:00 | Owner raised today's 'Agents today' limit from 40 to 60 (owner instruction; manager applied the edit) | owner |  |
+| 2026-11-20T17:17-08:00 | SC1: owner authorized the manager to merge docs#129 | owner |  |
 
 ## Log
 
@@ -183,3 +184,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:39-08:00 | Budget: Agents today 40/40; R3, A3, B5a, SC1 ready but held for the daily reset |
 | 2026-11-20T16:42-08:00 | remi:18769 final EDF+D scan: 141,747 files, 0 failures; 1,728 EDF+D; real gaps only in 102 files = 51 recordings x2 in nm000456 v1.0.2; S1 unblocked |
 | 2026-11-20T16:43-08:00 | Dispatched S1, R3 (claude-sonnet), A3, B5a, SC1 (claude-opus); Agents today 45/60 |
+| 2026-11-20T16:45-08:00 | SC1 docs#129 head 25798002 reported; review dispatched (Agents today 46/60) |
+| 2026-11-20T16:46-08:00 | SC1 r1 review clean; set owner for docs#129 merge |
+| 2026-11-20T17:18-08:00 | SC1 merged by manager (owner auth). A3 draft PR 2277 held (ADR 0133). R3 PR 2278 and B5a biosig-zarr#5 verified (CI green), review panels dispatched; Agents today 50/60 |
