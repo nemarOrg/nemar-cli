@@ -13,7 +13,7 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.38 - 2026-11-21
 
 ### Community mail (epic #2260, ADR 0132)
 
@@ -56,6 +56,7 @@ earlier releases are described only by their generated notes.
 - **Docs (nemarOrg/docs#130).**
   New pages `policies/community-mail` (what each category is, the defaults and how to opt out) and `admin/operations/community-mail-sends` (the categorized-send and recall runbook), and the privacy policy describes the categories and the unsubscribe path.
 - **Not in this release:** the website's preferences and unsubscribe pages, the `nemar auth mail` docs page, and the monthly newsletter (#2267).
+- **Before the first categorized send after this release:** confirm the production API reports 0.10.38 (an older Worker drops `--category` and would send a plain announcement), and release the website (its Settings email card is what the footer's "Manage your email preferences" link opens).
 
 ### Zarr conversion
 
@@ -69,13 +70,18 @@ earlier releases are described only by their generated notes.
 
 ### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
 
-- **The geometry pull request body shows the table cleaning.**
-  A `Table cleaning` section lists, per written electrodes file, the columns dropped, the column added, the cells set to n/a per column and the hemisphere values rewritten, so the owner merging the pull request (which mints a version DOI) sees what was not carried over from the authors' files; it is omitted when nothing was cleaned and cut with a count when long.
-  `pr` now refuses a mirror (`on` id) without `--bump-version`, pointing to the integration flow (`--from-ref <branch> --bump-version`), because the old "run `nemar dataset release`" step contradicts it.
 - **`pr --from-ref` opens the integration pull request when the geometry adds nothing.**
   When the collaborator's branch already holds the files the label track would write, and the other tracks skip, the apply used to be refused as "nothing to propose".
   Now no geometry commit is made and no ownership file is written; `--bump-version` still applies (a "Set Version to X.Y.Z" commit only when the Version changes), the branch is pushed only if there is a new commit, and the pull request is opened or updated with a body that says the geometry adds no files and lists what each track decided.
   A plain `pr` from `main` with nothing to add, and any errored track, still refuse.
+
+## 0.10.37 - 2026-11-21
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **The geometry pull request body shows the table cleaning.**
+  A `Table cleaning` section lists, per written electrodes file, the columns dropped, the column added, the cells set to n/a per column and the hemisphere values rewritten, so the owner merging the pull request (which mints a version DOI) sees what was not carried over from the authors' files; it is omitted when nothing was cleaned and cut with a count when long.
+  `pr` now refuses a mirror (`on` id) without `--bump-version`, pointing to the integration flow (`--from-ref <branch> --bump-version`), because the old "run `nemar dataset release`" step contradicts it.
 - **The geometry package reads renamed channels files.**
   Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
   A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
