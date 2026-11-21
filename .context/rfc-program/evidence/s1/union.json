@@ -1,0 +1,61 @@
+{
+ "can_be_discontinuous": {
+  "classes": {
+   "bv_multi_segment": {
+    "datasets": 50,
+    "recordings": 1527,
+    "stores_in_serving_index": 1413
+   },
+   "edfd_header": {
+    "datasets": 11,
+    "recordings": 1728,
+    "stores_in_serving_index": 1605
+   },
+   "fif_skip": {
+    "datasets": 7,
+    "recordings": 254,
+    "stores_in_serving_index": 199
+   }
+  },
+  "dataset_stores_total": 6929,
+  "datasets": 68,
+  "licenses": {
+   "CC-BY-4.0": 11,
+   "CC-BY-NC-4.0": 1,
+   "CC-BY-NC-SA-4.0": 1,
+   "CC-BY-SA-4.0": 1,
+   "CC0": 48,
+   "CC0-1.0": 6
+  },
+  "recordings": 3509,
+  "stores_in_serving_index": 3217
+ },
+ "real_discontinuity": {
+  "classes": {
+   "bv_multi_dated-with-gap": {
+    "datasets": 29,
+    "recordings": 909,
+    "stores_in_serving_index": 796
+   },
+   "edfd_real_gap": {
+    "datasets": 1,
+    "recordings": 102,
+    "stores_in_serving_index": 2
+   },
+   "fif_skip": {
+    "datasets": 7,
+    "recordings": 254,
+    "stores_in_serving_index": 199
+   }
+  },
+  "dataset_stores_total": 4286,
+  "datasets": 37,
+  "licenses": {
+   "CC-BY-4.0": 4,
+   "CC-BY-NC-SA-4.0": 1,
+   "CC0": 32
+  },
+  "recordings": 1265,
+  "stores_in_serving_index": 997
+ }
+}

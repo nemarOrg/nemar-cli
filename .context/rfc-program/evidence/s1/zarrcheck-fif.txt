@@ -1,0 +1,8 @@
+on003645 stores 222 discovered 224 errors 2 failure_count 2 format_version 3 engine 3
+on002712 stores 50 discovered 82 errors 32 failure_count 32 format_version 3 engine 3
+on003483 stores 40 discovered 41 errors 1 failure_count 1 format_version 3 engine 3
+on004837 stores 59 discovered 106 errors 47 failure_count 47 format_version 3 engine 3
+on004738 stores 20 discovered 25 errors 5 failure_count 5 format_version 3 engine 3
+on002885 stores 4 discovered 7 errors 3 failure_count 3 format_version 3 engine 3
+on006334 stores 120 discovered 128 errors 8 failure_count 8 format_version 3 engine 3
+requests 7 {'429': 0, '5xx': 0, 'other_fail': 0}

@@ -1,0 +1,351 @@
+fif files: 12164 datasets: 66
+already done from an earlier run: 12127
+no usable directory: 11225 walking a sample of 50
+{
+ "files": 12164,
+ "status": {
+  "no-directory-unmeasured": 11174,
+  "ok": 902,
+  "directory-beyond-end-unmeasured": 1,
+  "ok-walk": 50,
+  "FAILED RuntimeError": 37
+ },
+ "files_with_skip": 254,
+ "skipped_buffers_total": 19536,
+ "by_dataset": {
+  "nm000123": {
+   "files": 30,
+   "no-directory-unmeasured": 30
+  },
+  "nm000133": {
+   "files": 12,
+   "no-directory-unmeasured": 12
+  },
+  "nm000138": {
+   "files": 8,
+   "no-directory-unmeasured": 8
+  },
+  "on000117": {
+   "files": 119,
+   "no-directory-unmeasured": 103,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on000248": {
+   "files": 14,
+   "no-directory-unmeasured": 13,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on002312": {
+   "files": 23,
+   "no-directory-unmeasured": 23
+  },
+  "on002712": {
+   "files": 82,
+   "with_skip": 50,
+   "skip_tag_zero_only": 0
+  },
+  "on002885": {
+   "files": 3,
+   "directory-beyond-end-unmeasured": 1,
+   "with_skip": 2,
+   "skip_tag_zero_only": 0
+  },
+  "on003104": {
+   "files": 6,
+   "no-directory-unmeasured": 6
+  },
+  "on003352": {
+   "files": 138,
+   "no-directory-unmeasured": 137,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on003392": {
+   "files": 33,
+   "no-directory-unmeasured": 22,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on003483": {
+   "files": 41,
+   "with_skip": 41,
+   "skip_tag_zero_only": 0
+  },
+  "on003505": {
+   "files": 18,
+   "no-directory-unmeasured": 18
+  },
+  "on003626": {
+   "files": 90,
+   "no-directory-unmeasured": 90
+  },
+  "on003633": {
+   "files": 158,
+   "no-directory-unmeasured": 158
+  },
+  "on003645": {
+   "files": 116,
+   "with_skip": 116,
+   "skip_tag_zero_only": 0
+  },
+  "on003682": {
+   "files": 402,
+   "no-directory-unmeasured": 399,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on003694": {
+   "files": 132,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on003703": {
+   "files": 204,
+   "no-directory-unmeasured": 204
+  },
+  "on003922": {
+   "files": 164,
+   "no-directory-unmeasured": 151,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004012": {
+   "files": 294,
+   "no-directory-unmeasured": 293,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004078": {
+   "files": 1440,
+   "no-directory-unmeasured": 1434,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004107": {
+   "files": 89,
+   "no-directory-unmeasured": 89
+  },
+  "on004229": {
+   "files": 3,
+   "no-directory-unmeasured": 2,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004276": {
+   "files": 19,
+   "no-directory-unmeasured": 19
+  },
+  "on004306": {
+   "files": 26,
+   "no-directory-unmeasured": 26
+  },
+  "on004346": {
+   "files": 18,
+   "no-directory-unmeasured": 17,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004473": {
+   "files": 54,
+   "no-directory-unmeasured": 54
+  },
+  "on004483": {
+   "files": 282,
+   "no-directory-unmeasured": 261,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on004603": {
+   "files": 61,
+   "no-directory-unmeasured": 61
+  },
+  "on004738": {
+   "files": 13,
+   "with_skip": 13,
+   "skip_tag_zero_only": 0
+  },
+  "on004837": {
+   "files": 106,
+   "with_skip": 31,
+   "skip_tag_zero_only": 0,
+   "no-directory-unmeasured": 53
+  },
+  "on004993": {
+   "files": 3,
+   "no-directory-unmeasured": 3
+  },
+  "on004998": {
+   "files": 145,
+   "no-directory-unmeasured": 144,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005107": {
+   "files": 350,
+   "no-directory-unmeasured": 349,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005170": {
+   "files": 448,
+   "no-directory-unmeasured": 448
+  },
+  "on005241": {
+   "files": 117,
+   "no-directory-unmeasured": 117
+  },
+  "on005261": {
+   "files": 318,
+   "no-directory-unmeasured": 314,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005307": {
+   "files": 14,
+   "no-directory-unmeasured": 14
+  },
+  "on005345": {
+   "files": 104,
+   "no-directory-unmeasured": 102,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005346": {
+   "files": 180,
+   "no-directory-unmeasured": 180
+  },
+  "on005356": {
+   "files": 117,
+   "no-directory-unmeasured": 114,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005415": {
+   "files": 15,
+   "no-directory-unmeasured": 15
+  },
+  "on005574": {
+   "files": 18,
+   "no-directory-unmeasured": 18
+  },
+  "on005810": {
+   "files": 905,
+   "no-directory-unmeasured": 896,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on005811": {
+   "files": 931,
+   "no-directory-unmeasured": 925,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on006012": {
+   "files": 193,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0,
+   "no-directory-unmeasured": 173
+  },
+  "on006035": {
+   "files": 15,
+   "no-directory-unmeasured": 15
+  },
+  "on006159": {
+   "files": 57,
+   "no-directory-unmeasured": 20,
+   "FAILED RuntimeError": 37
+  },
+  "on006334": {
+   "files": 131,
+   "with_skip": 1,
+   "skip_tag_zero_only": 0
+  },
+  "on006374": {
+   "files": 144,
+   "no-directory-unmeasured": 143,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on006434": {
+   "files": 52,
+   "no-directory-unmeasured": 52
+  },
+  "on006468": {
+   "files": 378,
+   "no-directory-unmeasured": 353,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on006629": {
+   "files": 38,
+   "no-directory-unmeasured": 38
+  },
+  "on006720": {
+   "files": 246,
+   "no-directory-unmeasured": 223,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on006768": {
+   "files": 25,
+   "no-directory-unmeasured": 25
+  },
+  "on006817": {
+   "files": 32,
+   "no-directory-unmeasured": 32
+  },
+  "on007353": {
+   "files": 1235,
+   "no-directory-unmeasured": 1226,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on007427": {
+   "files": 176,
+   "no-directory-unmeasured": 176
+  },
+  "on007523": {
+   "files": 579,
+   "no-directory-unmeasured": 520,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on007524": {
+   "files": 500,
+   "no-directory-unmeasured": 449,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0
+  },
+  "on007640": {
+   "files": 94,
+   "with_skip": 0,
+   "skip_tag_zero_only": 0,
+   "no-directory-unmeasured": 1
+  },
+  "on007663": {
+   "files": 59,
+   "no-directory-unmeasured": 59
+  },
+  "on007753": {
+   "files": 168,
+   "no-directory-unmeasured": 168
+  },
+  "on007763": {
+   "files": 111,
+   "no-directory-unmeasured": 111
+  },
+  "on007870": {
+   "files": 68,
+   "no-directory-unmeasured": 68
+  }
+ },
+ "requests": 111,
+ "stat": {
+  "429": 0,
+  "5xx": 74,
+  "other_fail": 0
+ }
+}
+requests 111 {'429': 0, '5xx': 74, 'other_fail': 0}
