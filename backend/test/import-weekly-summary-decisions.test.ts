@@ -17,6 +17,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type NeurobagelWeekly,
+  type RfcWeekFacts,
   type VerdictDays,
   weeklyAttention,
 } from "../../shared/contract/weekly-attention";
@@ -102,6 +103,23 @@ function upstreamPass(over: Partial<UpstreamFleetSummary> = {}): UpstreamFleetSu
   };
 }
 
+/** A quiet RFC week: nothing open, the clock active and recently run. */
+function rfcWeek(over: Partial<RfcWeekFacts> = {}): RfcWeekFacts {
+  return {
+    index: { listed: [], drafts: 0, decided: 0 },
+    workflow: { state: "active" },
+    run: {
+      latest: {
+        createdAt: "2026-09-08T14:00:00.000Z",
+        conclusion: "success",
+        url: "https://github.com/nemarOrg/rfcs/actions/runs/1",
+      },
+    },
+    attention: [],
+    ...over,
+  };
+}
+
 /** A healthy week with everything known. Overridden per test. */
 function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
   return {
@@ -127,6 +145,7 @@ function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
     neurobagelFindings: 0,
     upstream: upstreamPass(),
     repulls: repullWeekFacts(),
+    rfcs: rfcWeek(),
     errors: [],
     ...over,
   };

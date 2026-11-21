@@ -31,6 +31,7 @@
 import {
   NEUROBAGEL_EXPECTED_DAILY_RUNS,
   type NeurobagelWeekly,
+  type RfcWeekFacts,
   WEEKLY_NEUROBAGEL_CHECKS,
   weeklyAttention,
 } from "../../../shared/contract/weekly-attention.js";
@@ -252,6 +253,14 @@ export interface WeeklySummaryFacts {
    */
   repulls: RepullWeekFacts | null;
 
+  /**
+   * The RFC clock (RFC program card R3, risk K1): the RFCs open or closed awaiting a decision, and
+   * when `rfc-clock` last ran and whether GitHub still has it enabled. RFC numbers and titles, which
+   * are public records in a public repository, and counts. Each part is `null` when its read failed:
+   * unknown, not zero, and a failed part is listed. `null` throughout when the gather itself threw.
+   */
+  rfcs: RfcWeekFacts | null;
+
   /** Anything that went wrong producing this report. Listed, never swallowed. */
   errors: { stage: string; error: string }[];
 }
@@ -339,6 +348,10 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
     "## Upstream re-pulls",
     "",
     ...repullSection(f.repulls),
+    "",
+    "## RFC clock",
+    "",
+    ...rfcSection(f.rfcs),
     "",
     "## Dispatch liveness",
     "",
@@ -568,6 +581,66 @@ function repullSection(r: RepullWeekFacts | null): string[] {
 }
 
 /**
+ * The RFC clock's section (RFC program card R3, risk K1): present every week, with nothing open too
+ * (ADR 0054). Every count goes through {@link count}; a part that could not be read says unknown.
+ * What raises attention is decided by `rfcAttention` and reaches the headline through the shared
+ * rule, not here.
+ */
+function rfcSection(r: RfcWeekFacts | null): string[] {
+  if (r == null) {
+    return [
+      "The RFC clock could not be read, so none of its numbers are available. This is **unknown**, not zero.",
+    ];
+  }
+  const list: string[] =
+    r.index == null
+      ? [
+          "The list of RFCs could not be read, so the RFCs open or awaiting a decision are **unknown**, not zero.",
+        ]
+      : [
+          `RFCs open or closed and awaiting a decision: ${count(r.index.listed.length)}.`,
+          ...(r.index.listed.length === 0
+            ? []
+            : [
+                "",
+                "| RFC | title | state |",
+                "|---|---|---|",
+                ...r.index.listed.map(
+                  (x) =>
+                    `| ${x.number} | ${x.title} | ${
+                      x.phase === "open"
+                        ? `open, closes ${x.closesAt}`
+                        : `closed ${x.closesAt}, decision due by ${x.dueBy}`
+                    } |`,
+                ),
+              ]),
+          "",
+          `Not listed: ${count(r.index.drafts)} draft(s) and ${count(r.index.decided)} decided or withdrawn.`,
+        ];
+  const workflow =
+    r.workflow == null
+      ? "The state of the `rfc-clock` workflow could not be read, so whether GitHub still has it enabled is **unknown**."
+      : r.workflow.state === "active"
+        ? "The `rfc-clock` workflow is `active`."
+        : `The \`rfc-clock\` workflow is **\`${r.workflow.state}\`**, not active: its daily runs have stopped.`;
+  const run =
+    r.run == null
+      ? "When `rfc-clock` last ran could not be read: **unknown**."
+      : r.run.latest === null
+        ? "`rfc-clock` has **no recorded run**."
+        : `Newest \`rfc-clock\` run: ${r.run.latest.createdAt.slice(0, 16)} UTC, ${
+            r.run.latest.conclusion === null ? "not ended" : `**${r.run.latest.conclusion}**`
+          }${r.run.latest.url === null ? "" : ` ([run](${r.run.latest.url}))`}.`;
+  return [
+    ...list,
+    "",
+    `${workflow} ${run}`,
+    "",
+    "GitHub switches a scheduled workflow off after sixty days without repository activity, and a stopped clock is silent; this section is how it shows. The decision on a closed RFC is due within two weeks of the close. Names and decisions: https://github.com/nemarOrg/rfcs.",
+  ];
+}
+
+/**
  * The Neurobagel section. Counts and verdicts, and each check's own one-sentence reason (which
  * the sweep writes generically, with counts and public upstream tags only). `unchecked` is
  * printed as "unchecked": a check that is not configured here is neither good news nor zero.
@@ -641,6 +714,8 @@ export function weeklySummaryLogLine(f: WeeklySummaryFacts, issue: number | null
     `repull_dispatched=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.sent)} ` +
     `repull_merged_worker=${f.repulls == null ? "unknown" : count(f.repulls.merged.worker)} ` +
     `repull_unreported=${f.repulls == null ? "unknown" : count(f.repulls.dispatches.by_status.unreported)} ` +
+    `rfc_listed=${f.rfcs?.index == null ? "unknown" : count(f.rfcs.index.listed.length)} ` +
+    `rfc_clock=${f.rfcs?.workflow == null ? "unknown" : f.rfcs.workflow.state} ` +
     `issue=${issue === null ? "none" : `#${issue}`} errors=${f.errors.length}`
   );
 }
