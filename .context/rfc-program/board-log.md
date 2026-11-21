@@ -93,6 +93,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:29-08:00 | Q34: the ADR 0124 amendment (vectors canonical in biosig-zarr, vendored by digest) is written now as a lead step | owner |  |
 | 2026-11-20T15:29-08:00 | Q35: let the remi:18769 EDF+D header scan finish; S1 dispatches after it stops writing its cache | owner |  |
 | 2026-11-20T15:29-08:00 | Q36: the manager runs O4c (tag 3.0.0-draft.2) on the owner's say-so under the P1 rule | owner |  |
+| 2026-11-20T16:42-08:00 | Owner raised today's 'Agents today' limit from 40 to 60 (owner instruction; manager applied the edit) | owner |  |
 
 ## Log
 
@@ -180,3 +181,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:37-08:00 | Lead PR 2276 r2: 2 important (A3 number/base, layer field B5a vs B5), 2 sugg; lead fixes, manager verifies (no third round) |
 | 2026-11-20T15:39-08:00 | Lead PR 2276 merged (f72fb4a1); r2 fixes verified by manager; board gains A3, B5a, O4d, O4c, B4b, SC1; R3 todo; C1 and C1a done |
 | 2026-11-20T15:39-08:00 | Budget: Agents today 40/40; R3, A3, B5a, SC1 ready but held for the daily reset |
+| 2026-11-20T16:42-08:00 | remi:18769 final EDF+D scan: 141,747 files, 0 failures; 1,728 EDF+D; real gaps only in 102 files = 51 recordings x2 in nm000456 v1.0.2; S1 unblocked |
+| 2026-11-20T16:43-08:00 | Dispatched S1, R3 (claude-sonnet), A3, B5a, SC1 (claude-opus); Agents today 45/60 |
