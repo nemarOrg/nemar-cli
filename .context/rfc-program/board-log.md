@@ -242,3 +242,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:25-08:00 | S1 r1 fixes at fab22ba6: acceptance pass; real discontinuity 1,265/37/997 (1,229/36/978 without 36 negative-total); can-be 3,509/68/3,217 (1,794/56/1,525 without known non-gaps); r2 delta review out |
 | 2026-11-21T10:26-08:00 | B7b report: biosig-zarr#8 head 10670779 (merge af84a9b2 of 2.0.2); manager ran acceptance, all pass; checks green (conformance not triggered, path filter); r1 review out |
 | 2026-11-21T10:26-08:00 | S1 r2 delta (1 Sonnet): all r1 outcomes real, every new figure recomputed and matching; 3 wording suggestions sent to impl-S1 |
+| 2026-11-21T10:26-08:00 | B7b r1 (1 Sonnet, comments+seam): merge resolutions verified verbatim, spec lines exact; sugg 1 sent to fix, sugg 2 rejected (published entries verbatim) |
