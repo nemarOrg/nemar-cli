@@ -35,10 +35,10 @@
  * **Unknown is never green** (ADR 0053, ADR 0054, ADR 0086). Anything that is not a clear pass maps to a
  * conclusion that does not satisfy a required check: `neutral` and `skipped` DO satisfy one on
  * GitHub, which is why `neutral` appears nowhere in {@link conclusionOf}, and `skipped` for exactly
- * two outcomes, `exempt` and `waived`: a pull request opened by a NEMAR owner or administrator is
- * not reviewed at all, so there is no unknown in it to hide (ADR 0107), and neither is an upstream
+ * two outcomes, `exempt` and `waived`: an explicit naming override can publish a skipped check
+ * without running a review (ADR 0107), as can an upstream
  * re-pull's pull request at the head NEMAR's record holds (ADR 0117), whose content is upstream's.
- * The naming rule still applies to an owner's pull request: a title or a dataset name that breaks
+ * The naming rule still applies to an explicit override: a title or a dataset name that breaks
  * the rule is a `naming` outcome, which fails.
  *
  * The parser throws a fixed-word {@link PrReviewReportError}; it never quotes its input.
@@ -1081,15 +1081,15 @@ export type ReviewOutcome =
   | { kind: "error"; error: RunError }
   | { kind: "unreported" }
   /**
-   * Not reviewed, by design: the author is a NEMAR owner or administrator (ADR 0107), and the
+   * Explicit naming-override result (ADR 0107), not an automatic role exemption: the
    * naming rule found nothing, or an administrator waived it for this commit (`waived`). It is only
    * ever published, never stored, so no row has this outcome and nothing reads it back:
    * {@link StoredOutcome} is the type of everything that is stored or read back.
    */
   | { kind: "exempt"; waived?: boolean }
   /**
-   * An owner's or administrator's pull request that the naming rule refuses, or could not check:
-   * the review does not run for them, and the rule runs first. Published, never stored.
+   * An explicit naming-override request that the naming rule refuses, or could not check.
+   * Published, never stored; ordinary deliveries still receive review regardless of role.
    */
   | { kind: "naming"; facts: NamingFacts }
   /**
@@ -1216,16 +1216,14 @@ function capitalized(s: string): string {
 }
 
 /**
- * What a pull request opened by an owner or administrator is told (ADR 0107). It says the review is
- * not required, and that skipped is not a pass: nobody reading the check should mistake "this does
- * not apply" for "this was reviewed and is fine". The naming rule is said to have run, because it
- * did, and a waiver is said to be one.
+ * What the explicit naming-override operation reports (ADR 0107). Skipped is not a review pass.
+ * Role alone does not exempt ordinary deliveries from review (ADR 0127).
  */
 const EXEMPT_COPY = {
-  title: "Not required: opened by a NEMAR owner or administrator",
+  title: "Explicit override: no naming violation",
   summary:
-    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed, and may merge without it. The title and the dataset name were checked against the naming rule, and nothing was found.",
-  text: "Skipped is not a pass. It says the review is not required here, not that this change was reviewed. A pull request opened by anyone else is reviewed.",
+    "This explicit administrative naming-override operation did not run an automated review. The title and the dataset name were checked against the naming rule, and nothing was found.",
+  text: "Skipped is not a pass: this operation did not review the change. Ordinary review deliveries and starts apply regardless of author role.",
 } as const;
 
 /**
@@ -1257,10 +1255,10 @@ const RECOMMENDATIONS_FOOT =
   "Each line is something to consider raising with the upstream dataset's authors, or correcting in NEMAR's own patch release; none of them holds this pull request, and nothing was filed.";
 
 const WAIVED_COPY = {
-  title: "Not required: opened by a NEMAR owner or administrator (naming rule waived)",
+  title: "Explicit override: naming rule waived",
   summary:
-    "The automated review did not run on this pull request. NEMAR owners and administrators are not reviewed. The title or the dataset name breaks the naming rule, and a NEMAR administrator waived the rule for this commit with an explicit override, which is recorded.",
-  text: "Skipped is not a pass. A new commit is checked against the naming rule again, and the waiver does not carry over to it.",
+    "This explicit administrative override did not run an automated review. The title or the dataset name breaks the naming rule, and a NEMAR administrator waived the rule for this commit with an explicit override, which is recorded.",
+  text: "Skipped is not a pass. The waiver applies only to this commit and does not suppress ordinary review deliveries or starts.",
 } as const;
 
 /**
@@ -1626,7 +1624,7 @@ function renderNaming(facts: NamingFacts): RenderedCheck {
     return {
       title: "Needs changes: the naming rule",
       summary: [
-        "The automated review does not run for NEMAR owners and administrators, but the naming rule applies to every pull request, and it found a problem.",
+        "The naming rule found a problem while evaluating the explicit administrative override. This operation did not run an automated review.",
         "",
         ...lines.map((l) => `- ${l}`),
       ].join("\n"),

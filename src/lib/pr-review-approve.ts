@@ -523,7 +523,7 @@ export function approvalGate(input: {
       // said, as for a review of another commit, because that change is still in this one.
       return {
         kind: "confirm",
-        warning: `The automated review did not run on this commit: a NEMAR owner or administrator opened this pull request, and they are not reviewed.${
+        warning: `A legacy API reported an exemption for this commit, not a review pass. Current policy reviews owners and administrators too.${
           input.staleVerdict === null
             ? ""
             : ` An earlier commit of it was reviewed and read ${input.staleVerdict}.`

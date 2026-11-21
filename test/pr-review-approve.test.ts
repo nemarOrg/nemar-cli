@@ -242,8 +242,8 @@ describe("what the review's verdict allows", () => {
     const gate = approvalGate({ verdict: "exempt", staleVerdict: null });
     expect(gate.kind).toBe("confirm");
     if (gate.kind === "confirm") {
-      expect(gate.warning).toContain("did not run");
-      expect(gate.warning).toContain("owner or administrator");
+      expect(gate.warning).toContain("legacy API reported an exemption");
+      expect(gate.warning).toContain("Current policy reviews owners and administrators too");
     }
     // An unreadable answer still beats it: nothing is assumed about a review that cannot be read.
     expect(approvalGate({ verdict: "exempt", staleVerdict: null, unread: "down" }).kind).toBe(
@@ -274,7 +274,7 @@ describe("what the review's verdict allows", () => {
     const gate = approvalGate({ verdict: "exempt", staleVerdict: "fail" });
     expect(gate.kind).toBe("confirm");
     if (gate.kind === "confirm") {
-      expect(gate.warning).toContain("did not run on this commit");
+      expect(gate.warning).toContain("not a review pass");
       expect(gate.warning).toContain("An earlier commit of it was reviewed and read fail");
     }
     const none = approvalGate({ verdict: "exempt", staleVerdict: null });

@@ -2,8 +2,8 @@
  * An administrator's explicit override of the naming rule, for one commit of one pull request
  * opened by a NEMAR owner or administrator (ADR 0107).
  *
- * Owners and administrators are exempt from the automated review, and not from the naming rule:
- * a title that has an author and a year, or a DOI, anywhere in it, or a change of the dataset's
+ * Ordinary deliveries review owners and administrators too (ADR 0127). This separate operation
+ * evaluates the naming rule: a title that has an author and a year, or a DOI, anywhere in it, or a change of the dataset's
  * name to such a name, fails their pull request's check like anyone's. The one way past it without
  * a change is this override, asked for by name with
  * `nemar admin pr-reviews allow <dataset> <pr> --admin --reason <why>`:
@@ -15,7 +15,7 @@
  *     on from it, nothing is recorded or posted and the answer is `head_moved` (409). Without a
  *     commit the current one is waived, and the answer names it.
  *  2. Its current commit must not have been reviewed (a review of it stands, whoever acts next),
- *     and its author must be exempt: the override replaces the exemption for this rule, so it is
+ *     and its author must qualify for the explicit override (owner/admin), so it is
  *     never a way past a contributor's review. When GitHub does not answer whether the author holds
  *     the repository's admin role, nothing is waived and the answer is an error, not "not exempt".
  *  3. The rule runs again on that commit. When it finds nothing there is nothing to waive, and the
@@ -23,9 +23,9 @@
  *     definite to waive yet, and nothing is: a waiver covers only what the rule found.
  *  4. Otherwise the waiver is recorded first (`pr_review_naming_waived` in the audit log: who, the
  *     commit, what the rule found as closed words, and the reason given), and then a `skipped`
- *     check that says the rule was waived is posted on the commit. The exempt path reads the same
- *     row, so a later delivery of that commit keeps the waiver for what it recorded; a problem the
- *     rule finds there later that the waiver did not record, and a new commit, are checked again.
+ *     check that says the rule was waived is posted on the commit. Repeating this explicit operation
+ *     reads the same record. Ordinary deliveries and starts still run review, and the waiver
+ *     does not carry to a new commit or cover a naming problem it did not record.
  *
  * The reason is required, because it is what the record keeps: a request without one, or with one
  * that has no plain words left once links, mentions and markup are removed (a letter or a digit
@@ -141,7 +141,7 @@ export async function waiveNamingRule(
     );
   }
 
-  // A commit a review has touched keeps what its review said: the waiver is for the exempt path.
+  // A commit a review has touched keeps what its review said: the waiver is for the separate explicit override.
   const reviewed = await env.DB.prepare(
     "SELECT 1 AS reviewed FROM pr_reviews WHERE dataset_id = ? AND pr_number = ? AND head_sha = ?",
   )

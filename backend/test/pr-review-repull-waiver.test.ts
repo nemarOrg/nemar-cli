@@ -380,18 +380,18 @@ const WAIVED_TITLE = "Waived: upstream re-pull";
 
 // ----------------------------------------------------------------------------
 
-describe("why the owner and administrator exemption did not catch it", () => {
-  test("the administrator's own push is exempt, and enrichment's push of the same pull request is reviewed", async () => {
-    // No record names the pull request: the exemption alone decides, as before this change.
+describe("author role does not waive review outside a recorded re-pull", () => {
+  test("an administrator's own push is reviewed when no matching re-pull record exists", async () => {
+    // No record names this pull request, so the automatic re-pull waiver does not apply.
     db.run("DELETE FROM upstream_repulls");
     const opened = await deliver("opened", pull({ sha: SYNTH }), { login: ADMIN_GH, type: "User" });
-    expect(opened).toMatchObject({ dispatched: false, reason: "exempt_author" });
-    // Enrichment commits back as the NEMAR App, whose login is not a person's: no usable sender,
-    // so the delivery is not exempt, and the review runs on the upstream delta.
-    const enriched = await deliver("synchronize", pull({ sha: HEAD }));
-    expect(enriched).toMatchObject({ dispatched: true });
+    expect(opened).toMatchObject({ dispatched: true, reason: "dispatched" });
     expect(reviews()).toEqual([
-      expect.objectContaining({ head_sha: HEAD, author_login: ADMIN_GH, state: "dispatched" }),
+      expect.objectContaining({ head_sha: SYNTH, author_login: ADMIN_GH, state: "dispatched" }),
+    ]);
+    expect(dispatches()).toHaveLength(1);
+    expect(checkOutcomes()).toEqual([
+      { method: "POST", path: "/check-runs", conclusion: null, title: "Review in progress" },
     ]);
   });
 });

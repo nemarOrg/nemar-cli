@@ -16,6 +16,10 @@ They are the exemption with the `exempt` queue verdict and its CLI wording (#181
 The required check is not switched on: the switch that lets the automatic paths add it, `PR_REVIEW_AUTO_REQUIRE`, is absent from the Worker's configuration file, and decision 6 says what has to be done before it is.
 The removal of the counts is released only together with the stage-1 screen, so that spend is never left without a bound.
 
+## Amendment (2026-11-18)
+
+[ADR 0127](0127-reviewable-pull-requests-are-reviewed-regardless-of-owner-role.md) supersedes only the automatic owner/administrator exemption and its inferred queue verdict. The privacy and contributor-block gates, exact upstream re-pull waiver, explicit naming override and required-check rollout remain separate.
+
 ## Context
 
 The automated review of ADR 0092 was built to be advisory, and it is about to become a required check.
