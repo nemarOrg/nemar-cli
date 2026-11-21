@@ -12,7 +12,7 @@ Plan: /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/rfc-program/.context/
 ## Goal
 
 The RFC-0001 draft (nemarOrg/rfcs#2) replaces its promise to count the affected recordings with the counts S1 measured,
-labels the one inferred finding as inferred, links the evidence at a commit-pinned public URL,
+labels the one inferred finding as inferred, links the evidence through a public tag (`rfc-0001-evidence`, at commit c48405fe),
 shows what the interim EDF+D refusal (neuromechanist/biosigio#180, step 1) concerns in the catalog,
 and dates the `2.0.2` release correctly in "History of the format",
 so the owner opens RFC-0001 with the measured impact on the back catalog stated, not promised.
@@ -34,11 +34,12 @@ The lead (2026-11-21, owner's P4) decided which figures the RFC cites:
    1,525 is 978 plus 528 plus 19 (arithmetic).
 3. **`nm000411` does not matter for the RFC.**
    Its 14 EDF+D files are measured contiguous, so it is in no cited figure, and the catalog counts no stores for it.
-   It is an owner note, not an RFC item (see "Owner answers").
+   The owner is filing a nemar-cli issue for it (see "Owner answers"); this card does nothing about it.
 4. **What the RFC cites, and where:** one sentence in "Summary", a paragraph replacing line 150 in "Problem", one sentence each on the re-conversion and the interim refusal bullets of "Rollout and cost", one reference line, and one change log line.
    Every figure is measured in S1, except the 0.42% (arithmetic on two measured numbers) and the two dropped gaps in `nm000456` (inferred from the index's `duration_s`, and labeled so).
    Not cited: the throughput and coexistence projections (computed from version 2 last-conversion dates, which S1 calls neither a floor nor a ceiling; version 3 throughput was not measured), gap-size statistics, licenses, and the 997, 1,265, 3,217 and 3,509 figures.
-   The evidence link is public: on 2026-11-21 the blob and raw URLs at c48405fe answered HTTP 200 without authentication, and the raw file's SHA-256 matched the committed file (`78619e8e...44080ea`).
+   The evidence link goes through the tag `rfc-0001-evidence` in nemarOrg/nemar-cli, which points at c48405fe (owner, 2026-11-21), so it stays alive whatever happens to `feature/rfc-program`; the References line also names the commit.
+   On 2026-11-21 the blob and raw URLs through the tag answered HTTP 200 without authentication, and the raw file's SHA-256 matched the committed file (`78619e8e...44080ea`).
 5. **B4c's review item is taken**: the "2, independent" row keeps 2026-11-20 in its date column, and its text takes the reviewer's wording verbatim after the cell's first sentence, "No change to stores or to the text.", which stays because `2.0.2` leaves `spec/index.md` unchanged (text line 106) and matches the "2, moved" row.
    Release `2.0.2` was published 2026-11-21T18:18:19Z (`gh release view 2.0.2 -R nemarOrg/biosig-zarr`).
 
@@ -62,9 +63,9 @@ Settled (text line numbers at head 0e4947c7; edit from the bottom up, or find ea
 - **Problem, line 150** ("We have not yet counted how many recordings NEMAR holds are affected; ..."), replaced by these eight lines; line 149 ("The reproduction used synthetic files.") stays:
 
   ```text
-  We then scanned the source files of NEMAR's public datasets for gaps, read-only, on 2026-11-20 and 2026-11-21 ([the count, with its method and raw outputs](https://github.com/nemarOrg/nemar-cli/blob/c48405fe0ad8e4a005dea123a0fa668b40af6ab1/.context/rfc-program/evidence/s1-catalog.md)).
+  We then scanned the source files of NEMAR's public datasets for gaps, read-only, on 2026-11-20 and 2026-11-21 ([the count, with its method and raw outputs](https://github.com/nemarOrg/nemar-cli/blob/rfc-0001-evidence/.context/rfc-program/evidence/s1-catalog.md)).
   36 datasets hold sources with a measured gap, and 978 of the 231,259 stores (0.42%) were converted from those sources:
-  777 from BrainVision recordings whose dated "New Segment" markers lie further apart than the samples between them, 199 from FIF files with acquisition skips, and 2 from EDF+D files with gaps.
+  777 from BrainVision recordings whose dated "New Segment" markers lie further apart than the samples between them (a few, with gaps under 0.1 s, are weak evidence), 199 from FIF files with acquisition skips, and 2 from EDF+D files with gaps.
   547 more stores come from sources that can be discontinuous where the markers do not settle it:
   528 from BrainVision recordings with several undated segments (question 21), and 19 from BrainVision recordings whose segment dates overlap or run backward (question 18).
   We did not test which of these stores keep the gap.
@@ -82,7 +83,7 @@ Settled (text line numbers at head 0e4947c7; edit from the bottom up, or find ea
 - **Rollout and cost, a new line after line 964** (the biosigio#180 bullet), indented two spaces as part of that bullet:
 
   ```text
-    In the catalog counted under "Problem", that refusal concerns one dataset: 102 of the 1,728 EDF+D files have gaps, all in `nm000456` (51 recordings, each stored twice), the other 1,626 are labeled discontinuous but have none, and none of the 66,340 BDF files is BDF+D.
+    In the catalog counted under "Problem", that refusal concerns one dataset: 102 of the 1,728 EDF+D files have gaps, all in `nm000456` (51 recordings, each present twice in the dataset), the other 1,626 are labeled discontinuous but have none, and none of the 66,340 BDF files is BDF+D.
   ```
 
 - **History of the format, line 981**, becomes exactly:
@@ -94,7 +95,7 @@ Settled (text line numbers at head 0e4947c7; edit from the bottom up, or find ea
 - **References, a new line after line 1015** (the gap defect):
 
   ```text
-  - The count of the back catalog's discontinuous sources: <https://github.com/nemarOrg/nemar-cli/blob/c48405fe0ad8e4a005dea123a0fa668b40af6ab1/.context/rfc-program/evidence/s1-catalog.md>
+  - The count of the back catalog's discontinuous sources: <https://github.com/nemarOrg/nemar-cli/blob/rfc-0001-evidence/.context/rfc-program/evidence/s1-catalog.md> (tag `rfc-0001-evidence`, commit `c48405fe`)
   ```
 
 - **Change log, a new line after line 1025**:
@@ -118,10 +119,11 @@ On the branch, in `/Users/yahya/Documents/git/nemar/rfcs`, with `F=text/0001-bio
 `grep -c "At least 978 of the stores NEMAR serves were converted from a source with a measured gap" $F` prints 1.
 `grep -c "978 of the 231,259 stores (0.42%)" $F` prints 1, `grep -c "547 more stores" $F` prints 1, and `grep -c "at least 1,525 stores, whose sources are in 56 datasets" $F` prints 1.
 `grep -c "inferred from the index" $F` prints 1, and `grep -c "only 952 of the 12,164 FIF files were measured" $F` prints 1.
-`grep -c "102 of the 1,728 EDF+D files have gaps" $F` prints 1.
-`grep -c "blob/c48405fe0ad8e4a005dea123a0fa668b40af6ab1/.context/rfc-program/evidence/s1-catalog.md" $F` prints 2.
+`grep -c "102 of the 1,728 EDF+D files have gaps" $F` prints 1, `grep -c "each present twice in the dataset" $F` prints 1, and `grep -c "stored twice" $F` prints 0.
+`grep -c "(a few, with gaps under 0.1 s, are weak evidence)" $F` prints 1.
+`grep -c "blob/rfc-0001-evidence/.context/rfc-program/evidence/s1-catalog.md" $F` prints 2, and `grep -c "c48405fe" $F` prints 1 (the References line).
 `grep -c -E "997|1,265|3,217|3,509|0\.43%" $F` prints 0.
-`grep -c "(question 18)" $F` prints 2, and `grep -c "(question 21)" $F` prints 1.
+`grep -c "(question 18)" $F` prints 2 (line 504 at 0e4947c7 already has one, and the Problem block adds one), and `grep -c "(question 21)" $F` prints 1.
 `grep "GDF" $F | head -1 | grep -c "(GDF)"` prints 1 (no use before the definition).
 `grep -c "| 2, independent | 2026-11-20 | No change to stores or to the text. The specification became independent of NEMAR on this date, with" $F` prints 1,
 `grep -c "holder; released as .2.0.2. on 2026-11-21\. | biosig-zarr ADR 0005" $F` prints 1, and `grep -c "and was released as .2.0.2." $F` prints 0.
@@ -137,7 +139,7 @@ On the branch, in `/Users/yahya/Documents/git/nemar/rfcs`, with `F=text/0001-bio
 ## Stop conditions
 
 The branch head is not 0e4947c7 or a descendant of it with only reviewed commits;
-`curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/nemarOrg/nemar-cli/c48405fe0ad8e4a005dea123a0fa668b40af6ab1/.context/rfc-program/evidence/s1-catalog.md` does not print 200;
+`git ls-remote https://github.com/nemarOrg/nemar-cli.git refs/tags/rfc-0001-evidence` does not print `c48405fe0ad8e4a005dea123a0fa668b40af6ab1`, or `curl -s -o /dev/null -w "%{http_code}" https://raw.githubusercontent.com/nemarOrg/nemar-cli/rfc-0001-evidence/.context/rfc-program/evidence/s1-catalog.md` does not print 200;
 the file at that URL does not hold both rows `| Real discontinuity, without the 36 negative-total recordings | 1,229 | 36 | 978 |` and `| Can be discontinuous, without the known non-gaps (note 2) | 1,794 | 56 | 1,525 |` (check with `curl -s` of that URL piped to `grep -c -F`, each printing 1);
 an anchor line above does not hold the text this card quotes for it;
 a change seems to weaken an owner decision in `plan.md` section 2, or to need a change beyond Scope.
@@ -151,11 +153,6 @@ Your final message is the report, at most 25 lines: PR number and the new head c
 Recorded 2026-11-21 (owner, `board-log.md` Decisions): P4 accepted, a lead agent answers S1's questions, picks the figures RFC-0001 cites, and writes this card;
 RFC-0001 is to be a solid, working draft, opened quickly, without overthinking.
 
-Notes for the owner from the lead, neither blocking this card:
-
-- The evidence link is pinned to c48405fe, which today is reachable only from `feature/rfc-program`.
-  If that branch reaches `dev` by a squash and is then deleted, no branch holds the commit and the link can stop resolving.
-  Question: merge `feature/rfc-program` into `dev` with a merge commit (as the compute program does), or tag c48405fe, so the RFC's evidence link stays stable?
-- `nm000411` (public, iEEG, CC-BY-4.0) serves no stores: the public catalog shows `zarr_status` failed, `zarr_failure_count` 8, `zarr_errors` 15, `zarr_failed_at` 2026-10-18 and no `zarr_requeue_at`, and its index answers HTTP 404.
-  It looks like a platform defect, a conversion that has failed since 2026-10-18 with no retry scheduled; its EDF+D files are contiguous, so gaps do not explain it, and the cause was not examined.
-  Nothing was filed.
+Answered 2026-11-21 (owner, relayed by the coordinator) on the lead's two notes:
+the owner tagged c48405fe as `rfc-0001-evidence` in nemarOrg/nemar-cli, and the RFC links the evidence through that tag;
+the owner is filing a nemar-cli issue for `nm000411`, which serves no stores (`zarr_status` failed since 2026-10-18), so this card does nothing about it.
