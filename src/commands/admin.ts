@@ -46,6 +46,15 @@ import {
   mailRecallWhy,
 } from "../../shared/contract/index.js";
 import {
+  MAIL_CATEGORIES,
+  RECALL_CATEGORY,
+  RECALL_REFERENCE_REFUSAL,
+  RECALL_REQUIRED_HEADINGS,
+  isMailCategory,
+  missingRecallHeadings,
+  parseRecallReference,
+} from "../../shared/contract/mail-categories.js";
+import {
   NEUROBAGEL_CHECKS,
   NEUROBAGEL_REGENERATE_MAX,
   neurobagelVerdictExitCode,
@@ -87,6 +96,8 @@ import {
   type AvailabilityReportSweepBatchResponse,
   type BackfillNamesResponse,
   type BackfillUsernamesResponse,
+  type BroadcastDryRunResponse,
+  type BroadcastResponse,
   type BroadcastStatusResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
@@ -8766,8 +8777,10 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
     `${chalk.bold(`Announcement ${s.id}`)} ${chalk.cyan(s.status)}`,
     `  Subject: ${s.subject}`,
     `  To: ${s.recipient_group}`,
-    `  Sent at: ${s.sent_at}`,
   ];
+  if (s.category) lines.push(`  Category: ${s.category}`);
+  if (s.recall_reference) lines.push(`  Recall reference: ${s.recall_reference}`);
+  lines.push(`  Sent at: ${s.sent_at}`);
   if (s.status === "sent") {
     lines.push(`  Delivered: ${s.queued_count > 0 ? s.delivered_count : "n/a (sent inline)"}`);
     lines.push(`  Failed: ${s.failure_count}`);
@@ -8793,11 +8806,108 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
   return lines;
 }
 
+/**
+ * The lines a dry run prints after its headline. A categorized dry run in production lists the
+ * addresses, as the old one did; anywhere else it prints counts and a redacted sample only, because
+ * a non-production database holds real people's addresses (epic #2260, ADR 0132).
+ */
+export function formatBroadcastDryRun(r: BroadcastDryRunResponse): string[] {
+  const lines: string[] = [];
+  if (r.counts) {
+    lines.push(
+      `  Audience by group: ${Object.entries(r.counts)
+        .map(([group, n]) => `${group} ${n}`)
+        .join(", ")}`,
+    );
+  }
+  if (r.deliverable_count !== undefined && r.deliverable_count !== r.recipient_count) {
+    lines.push(
+      chalk.yellow(
+        `  ${r.deliverable_count} of ${r.recipient_count} would be delivered; the rest are withheld by the non-production delivery fence`,
+      ),
+    );
+  }
+  for (const blocker of r.blockers ?? []) {
+    lines.push(chalk.red(`  A real send would be refused now: ${blocker}`));
+  }
+  if (r.recipients) {
+    lines.push("");
+    for (const email of r.recipients) lines.push(`  ${email}`);
+  } else if (r.sample && r.sample.length > 0) {
+    lines.push(`  Sample (redacted): ${r.sample.join(", ")}`);
+    lines.push("  Addresses are listed in production only.");
+  }
+  return lines;
+}
+
+/**
+ * The typed confirmation of a recall: the reference typed back exactly. `provided` is
+ * `--confirm-recall`; without it an interactive terminal asks, and a script must pass the flag.
+ * Undefined means the confirmation was missing or wrong. `--yes` never stands in for it.
+ */
+async function typedRecallConfirmation(
+  reference: string,
+  provided: string | undefined,
+): Promise<string | undefined> {
+  if (provided !== undefined) return provided.trim() === reference ? reference : undefined;
+  if (!process.stdin.isTTY) return undefined;
+  try {
+    const { typed } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "typed",
+        message: `A recall reaches every account and cannot be undone. Type the reference (${reference}) to send it:`,
+      },
+    ]);
+    return typeof typed === "string" && typed.trim() === reference ? reference : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What the CLI says about a recall's site notice. The backend publishes one (a critical notice, so
+ * the record is public); if it could not, or an older backend did not, creating it is the owner's step.
+ */
+export function recallNoticeLines(result: BroadcastResponse): string[] {
+  if (result.notice_id !== undefined) {
+    return [
+      chalk.green(
+        `  Site notice #${result.notice_id} published. Clear it when the recall is resolved: nemar admin notice clear ${result.notice_id}`,
+      ),
+    ];
+  }
+  return [
+    chalk.yellow.bold(
+      "  OWNER STEP: a recall also needs a public site notice, and none was published.",
+    ),
+    chalk.yellow(
+      '  Publish one now: nemar admin notice set --level critical --message "NEMAR recall: <subject> (reference: <reference>). Check your email for what to do."',
+    ),
+  ];
+}
+
 adminCommand
   .command("notify")
-  .description("Send an email to a group or a single user")
+  .description("Send a categorized email to a group, or an email to a single user")
   .option("--to <group>", "Recipient group: all, admins, members")
-  .option("--user <username>", "Send to a single user by username")
+  .option(
+    "--category <category>",
+    `Category of a group send (required with --to): ${MAIL_CATEGORIES.join(", ")}. Recipients who turned it off are skipped; a recall (owner only) ignores that`,
+  )
+  .option(
+    "--recall-ref <reference>",
+    "What a recall is about: a dataset id with optional version (nm000104@v1.2.0) or a nemarOrg issue, pull request or security advisory URL",
+  )
+  .option(
+    "--confirm-recall <reference>",
+    "Type the recall reference again to confirm sending a recall (--yes does not replace it)",
+  )
+  .option(
+    "--allow-repeat",
+    "Send even if the same category and subject went out in the last 24 hours",
+  )
+  .option("--user <username>", "Send to a single user by username (direct contact, no category)")
   .option("--subject <text>", "Email subject line")
   .option("--body <text>", "Email body (markdown)")
   .option("--body-file <path>", "Read email body from file (markdown)")
@@ -8810,6 +8920,10 @@ adminCommand
     async (options: {
       to?: string;
       user?: string;
+      category?: string;
+      recallRef?: string;
+      confirmRecall?: string;
+      allowRepeat?: boolean;
       subject?: string;
       status?: string;
       json?: boolean;
@@ -8866,6 +8980,45 @@ adminCommand
         process.exit(1);
       }
 
+      // Category rules (epic #2260 phase 3). The server enforces every one of them; checking here
+      // spares a round trip and says which flag to add.
+      if (options.user) {
+        if (options.category || options.recallRef || options.confirmRecall || options.allowRepeat) {
+          console.error(
+            chalk.red(
+              "--user is direct contact and takes no --category, --recall-ref, --confirm-recall or --allow-repeat.",
+            ),
+          );
+          process.exit(1);
+        }
+      } else if (!options.category) {
+        console.error(
+          chalk.red(
+            `A group send needs --category <${MAIL_CATEGORIES.join("|")}>. Use --user for direct contact.`,
+          ),
+        );
+        process.exit(1);
+      } else if (!isMailCategory(options.category)) {
+        console.error(
+          chalk.red(`Invalid category: ${options.category}. Use ${MAIL_CATEGORIES.join(", ")}.`),
+        );
+        process.exit(1);
+      }
+      const isRecall = options.category === RECALL_CATEGORY;
+      if (!isRecall && (options.recallRef || options.confirmRecall)) {
+        console.error(
+          chalk.red("--recall-ref and --confirm-recall belong to --category recall only."),
+        );
+        process.exit(1);
+      }
+      const recallRef = options.recallRef?.trim();
+      if (isRecall) {
+        if (!recallRef || !parseRecallReference(recallRef)) {
+          console.error(chalk.red(`--recall-ref is required. ${RECALL_REFERENCE_REFUSAL}`));
+          process.exit(1);
+        }
+      }
+
       // Resolve body content
       let body: string;
       if (options.bodyFile) {
@@ -8881,10 +9034,31 @@ adminCommand
         process.exit(1);
       }
 
-      const target = options.user ? `user:${options.user}` : (options.to as string);
+      if (isRecall) {
+        const missing = missingRecallHeadings(body);
+        if (missing.length > 0) {
+          console.error(
+            chalk.red(
+              `A recall body needs the headings ${RECALL_REQUIRED_HEADINGS.map((h) => `"${h}"`).join(" and ")} (markdown, for example "## What is affected"). Missing: ${missing.join(", ")}.`,
+            ),
+          );
+          process.exit(1);
+        }
+      }
+
+      const target = options.user
+        ? `user:${options.user}`
+        : `${options.to as string} (${options.category})`;
       const requestPayload = options.user
         ? { user: options.user, subject, body }
-        : { to: options.to as string, subject, body };
+        : {
+            to: options.to as string,
+            category: options.category,
+            ...(isRecall ? { recall_reference: recallRef } : {}),
+            ...(options.allowRepeat ? { allow_repeat: true } : {}),
+            subject,
+            body,
+          };
 
       if (options.dryRun) {
         const spinner = ora("Checking recipients...").start();
@@ -8892,12 +9066,9 @@ adminCommand
           const result = await sendBroadcast({ ...requestPayload, dry_run: true });
           if ("dry_run" in result) {
             spinner.succeed(
-              `Dry run: ${result.recipient_count} recipient(s) for "${result.recipient_group}"`,
+              `Dry run: ${result.recipient_count} recipient(s) for "${result.recipient_group}"${result.category ? ` (${result.category})` : ""}`,
             );
-            console.log();
-            for (const email of result.recipients) {
-              console.log(`  ${email}`);
-            }
+            for (const line of formatBroadcastDryRun(result)) console.log(line);
           }
         } catch (err) {
           handleCommandError(err, spinner, "Failed to check recipients");
@@ -8908,6 +9079,14 @@ adminCommand
       // Preview and confirm
       console.log(chalk.bold("Email preview:"));
       console.log(`  To: ${chalk.cyan(target)}`);
+      if (isRecall) {
+        console.log(
+          chalk.red.bold(
+            "  RECALL: reaches every account, ignores email preferences, cannot be unsubscribed from.",
+          ),
+        );
+        console.log(`  Reference: ${recallRef}`);
+      }
       console.log(`  Subject: ${subject}`);
       console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
       console.log();
@@ -8916,13 +9095,31 @@ adminCommand
         ? `Send this email to ${options.user}?`
         : "Send this broadcast email?";
       const confirmed = await confirm(confirmPrompt, options, false);
-      if (!confirmed) return;
+      if (confirmed !== "confirmed") return;
+
+      // A recall needs a typed confirmation in addition to the usual one, and --yes never supplies
+      // it. The flag form is for a script that has decided; interactively the owner types it.
+      let confirmRecall: string | undefined;
+      if (isRecall) {
+        confirmRecall = await typedRecallConfirmation(recallRef as string, options.confirmRecall);
+        if (confirmRecall === undefined) {
+          console.error(
+            chalk.red(
+              `Recall not sent: the confirmation must be the reference exactly as given (${recallRef}).`,
+            ),
+          );
+          process.exit(1);
+        }
+      }
 
       const spinner = ora(
         options.user ? `Sending to ${options.user}...` : "Sending broadcast...",
       ).start();
       try {
-        const result = await sendBroadcast(requestPayload);
+        const result = await sendBroadcast({
+          ...requestPayload,
+          ...(confirmRecall === undefined ? {} : { confirm_recall: confirmRecall }),
+        });
 
         if ("broadcast_id" in result) {
           if (result.error === "queue_enqueue_failed") {
@@ -8953,6 +9150,7 @@ adminCommand
               ),
             );
           }
+          if (isRecall) for (const line of recallNoticeLines(result)) console.log(line);
         }
       } catch (err) {
         handleCommandError(err, spinner, "Failed to send email");

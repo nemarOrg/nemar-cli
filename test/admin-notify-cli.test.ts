@@ -96,7 +96,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -122,7 +134,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.stderr).toContain("Broadcast sent to 2 recipient(s) (ID: 8)");
@@ -146,7 +170,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -216,7 +252,7 @@ describe("nemar admin notify", () => {
     const server = startServer({});
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--body", "B", "--yes"],
+        ["admin", "notify", "--to", "all", "--category", "news", "--body", "B", "--yes"],
         server.url,
       );
       expect(r.exitCode).toBe(1);
