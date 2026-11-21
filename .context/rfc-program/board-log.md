@@ -238,3 +238,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:12-08:00 | B7 r1 fixes verified at 8ea1137a (acceptance re-run all pass, checks green); merged biosig-zarr#7 with merge commit 509b6897; O4e asked as Q43 |
 | 2026-11-21T10:19-08:00 | Q43 answered: owner says release now; 2.0.2 created on 509b6897 (verified tag, not prerelease); B7b dispatched (Opus xhigh) |
 | 2026-11-21T10:19-08:00 | S1 r1 panel: A (claims) 1 crit (inferred gap drop stated as fact), 8 imp, 8 sugg; B (code) 0 crit, 2 imp (FIF lower bound, fif.gz uncounted), 5 sugg; scripts read-only, no secrets, no miscount; all sent back to impl-S1 |
+| 2026-11-21T10:25-08:00 | S1 r1 fixes at fab22ba6: acceptance pass; real discontinuity 1,265/37/997 (1,229/36/978 without 36 negative-total); can-be 3,509/68/3,217 (1,794/56/1,525 without known non-gaps); r2 delta review out |
