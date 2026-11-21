@@ -52,7 +52,7 @@ Answers become live facts on the card at dispatch: paste them under a heading "O
 
 ## Owner steps
 
-Steps with tier `owner` (O0, O1, O1b, O2, O4, O4b, O4c, O4d, O5, O6) are never dispatched, and neither are the lead's checkpoint steps C3 and C4 or the lead's step E0, which run in the owner's session.
+Steps with tier `owner` (O0, O1, O1b, O2, O4, O4b, O4c, O4d, O4e, O4f, O5, O6) are never dispatched, and neither are the lead's checkpoint steps C3 and C4 or the lead's step E0, which run in the owner's session.
 Steps in state `owner`, and C3 and C4, are exempt from the timebox, silent-worker and twice-the-timebox handlers; they are asked about, never escalated.
 When an owner step's dependencies are `done`, set it `owner`, and ask the owner once, with the exact commands from `plan.md` section 5, to run it and say when it is done.
 Verify by observation before setting it `done`:
@@ -68,6 +68,8 @@ Verify by observation before setting it `done`:
 | O4b | `gh release view 3.0.0-draft.1 -R nemarOrg/biosig-zarr --json isPrerelease -q .isPrerelease` prints `true` |
 | O4d | `gh release view 2.0.1 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `false` and B5a's merge commit |
 | O4c | `gh release view 3.0.0-draft.2 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `true` and B5's merge commit |
+| O4e | `gh release view 2.0.2 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `false` and B7's merge commit |
+| O4f | `gh release view 3.0.0-draft.3 -R nemarOrg/biosig-zarr --json isPrerelease,targetCommitish -q '[.isPrerelease,.targetCommitish]'` prints `true` and B7b's merge commit |
 | R2, B3, SC1 (owner-merged, or manager-merged on the owner's authorization) | `gh pr view N -R nemarOrg/docs --json mergedAt -q .mergedAt` prints a time; then set the step `done` |
 | C3, C4 | the lead's checkpoint PR into `feature/rfc-program` is merged and the owner's decision is recorded in the RFC file on `main` of nemarOrg/rfcs |
 | O5, O6 | the RFC PR is merged, and `gh api repos/nemarOrg/rfcs/contents/README.md` lists the RFC as `open` |
@@ -75,11 +77,13 @@ Verify by observation before setting it `done`:
 ## Event handlers specific to this program
 
 - **A PR to nemarOrg/docs passes its merge gate** (R2, B3, SC1): set the step `owner`, and ask the owner to review and merge it, or to authorize the manager to merge that PR (see "Never").
-- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, B4b, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
+- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, B4b, B4c, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
 - **A3's draft PR is held on its ADR number**: it stays a draft until 0132 (mail PR 2270) is on `origin/dev`; then merge `origin/dev` into `feature/rfc-program` (a merge, never a rebase, as for Q20), tell the A3 worker to merge the base in, recheck the open ADR numbers and rerun its gate, and only then let it mark the PR ready.
 - **B5a's PR passes its merge gate**: merge it into `main` with a merge commit (it keeps the Developer Certificate of Origin sign-offs); then set O4d `owner` and run it on the owner's say-so (Q33), recorded with `decide` first.
 - **B5's PR passes its merge gate**: merge it into `draft/3.0.0` with a merge commit, never into `main`; then set O4c `owner` and run it on the owner's say-so (Q36), recorded with `decide` first.
-- **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; B5 needs B5a's report; B4b needs B5's report; S1 takes any newer output path or summary that the scan session remi:18769 relays, otherwise its card names the scan directory; N1 needed Q15, Q31 and Q32): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
+- **B7's PR passes its merge gate**: merge it into `main` with a merge commit; then set O4e `owner` and run it on the owner's say-so (Q37/Q38), recorded with `decide` first.
+- **B7b's PR passes its merge gate**: merge it into `draft/3.0.0` with a merge commit, never into `main`; then set O4f `owner` and run it on the owner's say-so (Q37/Q38), recorded with `decide` first.
+- **Dispatching a card whose inputs are another step's report** (B4 needs B2's report; B5 needs B5a's report; B4b needs B5's report; B7b needs B7's report; B4c needs B7's and B7b's reports; B7, B7b and B4c need the answers to Q39 to Q42 and the Q37/Q38 decision; S1 takes any newer output path or summary that the scan session remi:18769 relays, otherwise its card names the scan directory; N1 needed Q15, Q31 and Q32): paste them under "Reports from dependencies" after the card, with the owner answers and the later owner decisions from `board-log.md` Decisions that the card names under "Owner answers".
 - **An RFC closes** (its close instant passes): set C3 (or C4) `todo` and notify the owner and the lead that the checkpoint is due.
 - **A worker reports that a needed read was refused** (for example a production query in V1): do not retry and do not work around it; set the step `owner` and hand the owner the exact command from the worker's report.
 - **A reviewer argues against an owner decision in `plan.md` section 2**: give the finding the outcome "rejected: owner decision of 2026-11-20", citing the item.
