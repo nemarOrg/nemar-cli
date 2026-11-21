@@ -228,3 +228,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:19-08:00 | PR 2288 r1 fixes at ebc7d6f3 verified (card check passes B7 B7b B4c; Zenodo only in a count-0 gate; stewardship section; K15 resolved); r2 delta review out (1 Sonnet) |
 | 2026-11-20T19:21-08:00 | PR 2288 r2: 3 Important (B7b grep -i hits nemarOrg; B4c nemar-doi count 2; B7 Hosting lines redefine NEMAR/DOI/RFC) + 1 Suggestion (ADR 0005 phrasing); sent to lead-indep; manager verifies fixes, no r3 |
 | 2026-11-20T19:24-08:00 | PR 2288 r2 fixes verified at 9865d78c (card check passes; B7b grep case-sensitive; B4c nemar-doi 1; Hosting lines short forms); merged 92e78f59; steps B7 O4e B7b O4f B4c added, O5 now depends on B4c; B7 dispatched (Opus xhigh) |
+| 2026-11-21T10:06-08:00 | budget reset (daily): Agents today was 63 |
+| 2026-11-21T10:06-08:00 | B7 and S1 agents stopped on the weekly usage limit (429) around 19:45 on 11-20; owner says the limit reset; both resumed at 10:07 on 11-21. B7 timebox breach is wall-clock during the limit, not work, so no advisor escalation (manager) |
