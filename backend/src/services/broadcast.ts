@@ -19,6 +19,7 @@ import { recordBroadcastOutcome } from "./broadcast-outcomes";
 import {
   BROADCAST_SEND_TIMEOUT_MS,
   type EmailDeliveryEnv,
+  MailHeaderError,
   type ResolvedEmailProvider,
   applyDevWrap,
   isEmailDeliveryAllowed,
@@ -26,8 +27,10 @@ import {
   redactRecipient,
   resolveEmailProvider,
   sendEmail,
+  validateMailHeaders,
 } from "./email";
-import { MailLinkSecretUnsetError, requireMailLinkSecret } from "./mail-links";
+import { categoryMailHeaders } from "./mail-footer";
+import { MailLinkSecretUnsetError, mailUnsubscribeUrl, requireMailLinkSecret } from "./mail-links";
 
 export type RecipientGroup = "all" | "admins" | "members";
 
@@ -167,7 +170,14 @@ export function categorizedSendBlockers(
       if (!(error instanceof MailLinkSecretUnsetError)) throw error;
       blockers.push("mail_link_secret_unset");
     }
-    if (!(env?.API_BASE_URL ?? "").trim().startsWith("https://")) {
+    // Build a sample link the way the consumer will and run it through the header validator the
+    // sender will use, so a bad API_BASE_URL (http, a path, a query) is refused here, before the
+    // row is written, and not as one failed send per recipient.
+    try {
+      const sample = mailUnsubscribeUrl(env?.API_BASE_URL ?? "", `v1.1.news.1.${"A".repeat(43)}`);
+      validateMailHeaders(categoryMailHeaders("news", sample), env?.API_BASE_URL);
+    } catch (error) {
+      if (!(error instanceof MailHeaderError)) throw error;
       blockers.push("mail_link_base_unusable");
     }
   }

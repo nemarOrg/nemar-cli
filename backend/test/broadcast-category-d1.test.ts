@@ -24,7 +24,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import worker from "../src/index";
 import { adminRoutes } from "../src/routes/admin";
-import { MailHeaderError, validateMailHeaders } from "../src/services/email";
+import { MailHeaderError, sendEmail, validateMailHeaders } from "../src/services/email";
 import { type OutboxEnv, handleOutboxBatch } from "../src/services/email-outbox";
 import { __resetMailLinkReportsForTests } from "../src/services/mail-links";
 import { saveEmailPreferences } from "../src/services/mail-preferences";
@@ -611,12 +611,30 @@ describe("a send that cannot carry its link is refused before anything is writte
     expect(h.sent).toEqual([]);
   });
 
-  test("an API_BASE_URL that is not https", async () => {
-    const h = harness({ API_BASE_URL: "http://api.nemar.test" });
-    const res = await post(ADMIN_KEY, NEWS, h);
-    expect(res.status).toBe(503);
-    expect(await res.json()).toMatchObject({ error: "mail_link_base_unusable" });
-    expect(noRows()).toBe(0);
+  test.each([
+    ["not https", "http://api.nemar.test"],
+    ["with a path", "https://api.nemar.test/nemar"],
+    ["with a query", "https://api.nemar.test?x=1"],
+    ["with credentials", "https://user:pw@api.nemar.test"],
+    ["blank", ""],
+    ["not a URL", "api.nemar.test"],
+  ])(
+    "an API_BASE_URL %s is refused before queueing, not as a blast of failed sends",
+    async (_n, base) => {
+      const h = harness({ API_BASE_URL: base });
+      const res = await post(ADMIN_KEY, NEWS, h);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: "mail_link_base_unusable" });
+      expect(noRows()).toBe(0);
+      expect(h.queue.bodies).toEqual([]);
+    },
+  );
+
+  test("a trailing slash on API_BASE_URL is fine", async () => {
+    const h = harness({ API_BASE_URL: `${API}/` });
+    expect((await post(ADMIN_KEY, NEWS, h)).status).toBe(200);
+    await consume(h);
+    expect(h.sent.length).toBe(4);
   });
 
   test("no outbox: a categorized send is never run inline", async () => {
@@ -780,12 +798,16 @@ describe("the one-click header allowlist", () => {
   };
 
   test("the exact pair is accepted under canonical names, whatever the input case", () => {
-    expect(validateMailHeaders(good)).toEqual(good);
+    expect(validateMailHeaders(good, API)).toEqual(good);
+    expect(validateMailHeaders(good, `${API}/`)).toEqual(good);
     expect(
-      validateMailHeaders({
-        "list-unsubscribe": good["List-Unsubscribe"],
-        "LIST-UNSUBSCRIBE-POST": good["List-Unsubscribe-Post"],
-      }),
+      validateMailHeaders(
+        {
+          "list-unsubscribe": good["List-Unsubscribe"],
+          "LIST-UNSUBSCRIBE-POST": good["List-Unsubscribe-Post"],
+        },
+        API,
+      ),
     ).toEqual(good);
   });
 
@@ -795,15 +817,67 @@ describe("the one-click header allowlist", () => {
     ["two URIs", { ...good, "List-Unsubscribe": `<${url}>, <mailto:u@nemar.test>` }],
     ["no angle brackets", { ...good, "List-Unsubscribe": url }],
     ["a URI off the unsubscribe path", { ...good, "List-Unsubscribe": "<https://evil.test/x>" }],
+    [
+      "the right path on another host",
+      { ...good, "List-Unsubscribe": `<${url.replace("api-test.nemar.test", "evil.test")}>` },
+    ],
+    [
+      "the right host with credentials",
+      { ...good, "List-Unsubscribe": `<${url.replace("https://", "https://x@")}>` },
+    ],
+    [
+      "a token of the wrong shape",
+      { ...good, "List-Unsubscribe": `<${API}/mail/unsubscribe/abc>` },
+    ],
+    [
+      "the recall category (no link exists)",
+      { ...good, "List-Unsubscribe": `<${url.replace(".news.", ".recall.")}>` },
+    ],
     ["a different Post value", { ...good, "List-Unsubscribe-Post": "List-Unsubscribe=Yes" }],
     ["Post without the URI", { "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" }],
   ])("%s is refused", (_name, headers) => {
-    expect(() => validateMailHeaders(headers)).toThrow(MailHeaderError);
+    expect(() => validateMailHeaders(headers, API)).toThrow(MailHeaderError);
+  });
+
+  test.each([
+    ["no configured origin", undefined],
+    ["a configured origin with a path", `${API}/nemar`],
+    ["a configured origin with a query", `${API}?x=1`],
+    ["a configured plain-HTTP origin", API.replace("https", "http")],
+    ["a different configured origin", "https://api.nemar.org"],
+  ])("a correct header is refused with %s", (_name, base) => {
+    expect(() => validateMailHeaders(good, base)).toThrow(MailHeaderError);
   });
 
   test("no other List-* header is allowed", () => {
-    expect(() => validateMailHeaders({ "List-Id": "<news.mail.nemar.org>" })).toThrow(
+    expect(() => validateMailHeaders({ "List-Id": "<news.mail.nemar.org>" }, API)).toThrow(
       MailHeaderError,
     );
+  });
+
+  test("sendEmail refuses a link on another origin before any provider is called", async () => {
+    const { binding, sent } = recordingBinding();
+    const env = {
+      ENVIRONMENT: "development",
+      DEV_EMAIL_ALLOWLIST: "@nemar.test",
+      EMAIL_PROVIDER: "cloudflare",
+      EMAIL: binding,
+      API_BASE_URL: "https://api.nemar.org",
+    };
+    await expect(
+      sendEmail(
+        "a@nemar.test",
+        "s",
+        "<p>h</p>",
+        "",
+        "n@nemar.test",
+        undefined,
+        true,
+        env,
+        undefined,
+        good,
+      ),
+    ).rejects.toThrow(MailHeaderError);
+    expect(sent).toEqual([]);
   });
 });
