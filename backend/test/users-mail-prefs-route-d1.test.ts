@@ -7,10 +7,13 @@
  * What it holds: a new account reads every category on and a migrated account reads what it stored,
  * beside a locked recall; a PUT turns a category off and back on, and answers what is stored; a
  * recall, an admin alert, an unknown key or a non-boolean value is refused by name and writes
- * nothing; each actual change leaves one `mail_category_changed` row with `via: "self"`, and a PUT
- * that changes nothing leaves none; a cookie write without a NEMAR Origin is refused while a cookie
+ * nothing; each actual change leaves one `mail_category_changed` row, `via: "cli"` for a key and
+ * `via: "settings"` for a cookie, and a PUT that changes nothing (`{}` included) leaves none; a cookie write without a NEMAR Origin is refused while a cookie
  * read needs none; a key needs no Origin; a pending account's session may read and set (the router
- * is mounted above `/users`, whose authMiddleware would refuse it); no credential is a 401.
+ * is mounted above `/users`, whose authMiddleware would refuse it), while the rest of `/users` keeps
+ * its own rule; every credential that must not work (revoked, deleted, expired, docs-scoped, a
+ * pending or revoked account's key, a non-Bearer header, none) is refused and writes nothing; and
+ * every answer carries `Cache-Control: no-store`.
  */
 
 import type { Database } from "bun:sqlite";
@@ -40,7 +43,14 @@ let db: Database;
 
 async function seedUser(
   username: string,
-  opts: { status?: string; prefs?: string | null; key?: string; cookie?: string } = {},
+  opts: {
+    status?: string;
+    prefs?: string | null;
+    key?: string;
+    cookie?: string;
+    sessionExpires?: string;
+    scope?: "app" | "docs";
+  } = {},
 ): Promise<number> {
   db.query(
     `INSERT INTO users (username, email, password_hash, status, role, email_verified, service_access, email_preferences)
@@ -67,8 +77,13 @@ async function seedUser(
   if (opts.cookie) {
     db.query(
       `INSERT INTO web_sessions (user_id, cookie_id_hash, expires_at, scope)
-       VALUES (?, ?, datetime('now', '+1 day'), 'app')`,
-    ).run(id, await hashCookieId(opts.cookie));
+       VALUES (?, ?, datetime('now', ?), ?)`,
+    ).run(
+      id,
+      await hashCookieId(opts.cookie),
+      opts.sessionExpires ?? "+1 day",
+      opts.scope ?? "app",
+    );
   }
   return id;
 }
@@ -214,14 +229,14 @@ for (const mount of MOUNTS) {
         });
       });
 
-      test("each actual change writes one audit row with via self; a repeat writes none", async () => {
+      test("each actual change with a key writes one audit row with via cli; a repeat writes none", async () => {
         await call(mount, "PUT", { key: MEMBER_KEY }, { news: false, maintenance: true });
         // maintenance was already on: only news changed.
         expect(categoryAudits()).toEqual([
           {
             user_id: memberId,
             resource_id: String(memberId),
-            details: { category: "news", on: false, via: "self" },
+            details: { category: "news", on: false, via: "cli" },
           },
         ]);
 
@@ -231,8 +246,8 @@ for (const mount of MOUNTS) {
 
         await call(mount, "PUT", { key: MEMBER_KEY }, { news: true });
         expect(categoryAudits().map((row) => row.details)).toEqual([
-          { category: "news", on: false, via: "self" },
-          { category: "news", on: true, via: "self" },
+          { category: "news", on: false, via: "cli" },
+          { category: "news", on: true, via: "cli" },
         ]);
         // A self edit is not an edit of someone else's preferences.
         const crossAccount = db
@@ -306,7 +321,7 @@ for (const mount of MOUNTS) {
         expect(categoryAudits()).toHaveLength(0);
       });
 
-      test("a cookie write from a NEMAR page lands", async () => {
+      test("a cookie write from a NEMAR page lands, audited with via settings", async () => {
         const res = await call(
           mount,
           "PUT",
@@ -316,7 +331,7 @@ for (const mount of MOUNTS) {
         expect(res.status).toBe(200);
         expect((await res.json()).maintenance).toBe(false);
         expect(categoryAudits().map((row) => row.details)).toEqual([
-          { category: "maintenance", on: false, via: "self" },
+          { category: "maintenance", on: false, via: "settings" },
         ]);
       });
 
@@ -350,3 +365,171 @@ for (const mount of MOUNTS) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1: refused credentials, the rest of /users, edge bodies, Cache-Control
+// ---------------------------------------------------------------------------------------------
+
+const REVOKED_KEY = "self-prefs-revoked-key-0123456789abcdef01234567";
+const PENDING_KEY = "self-prefs-pending-key-0123456789abcdef01234567";
+const REVOKED_COOKIE = "self-prefs-revoked-cookie-0123456789abcdef0";
+const DELETED_COOKIE = "self-prefs-deleted-cookie-0123456789abcdef0";
+const EXPIRED_COOKIE = "self-prefs-expired-cookie-0123456789abcdef0";
+const DOCS_COOKIE = "self-prefs-docs-cookie-0123456789abcdef0123";
+
+function raw(
+  mount: string,
+  path: string,
+  method: "GET" | "PUT",
+  headers: Record<string, string>,
+  body?: unknown,
+): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://api.nemar.org${mount}${path}`, {
+      method,
+      headers: { "content-type": "application/json", ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+    env(),
+    ctx,
+  );
+}
+
+describe("refused credentials", () => {
+  const ids: Record<string, number> = {};
+
+  beforeEach(async () => {
+    ids.revoked = await seedUser("revokedone", {
+      status: "revoked",
+      key: REVOKED_KEY,
+      cookie: REVOKED_COOKIE,
+    });
+    ids.pendingKey = await seedUser("pendingkey", { status: "pending", key: PENDING_KEY });
+    ids.deleted = await seedUser("deletedone", { cookie: DELETED_COOKIE });
+    db.query("UPDATE users SET deleted_at = datetime('now') WHERE id = ?").run(ids.deleted);
+    ids.expired = await seedUser("expiredone", {
+      cookie: EXPIRED_COOKIE,
+      sessionExpires: "-1 hour",
+    });
+    ids.docs = await seedUser("docsone", { cookie: DOCS_COOKIE, scope: "docs" });
+  });
+
+  const cookieCases = [
+    ["a revoked account's session", REVOKED_COOKIE, "revoked"],
+    ["a soft-deleted account's session", DELETED_COOKIE, "deleted"],
+    ["an expired session", EXPIRED_COOKIE, "expired"],
+    ["a docs-scoped session", DOCS_COOKIE, "docs"],
+  ] as const;
+  const keyCases = [
+    ["a revoked account's key", REVOKED_KEY, "revoked"],
+    ["a pending account's key", PENDING_KEY, "pendingKey"],
+  ] as const;
+
+  for (const mount of MOUNTS) {
+    for (const [name, cookie, who] of cookieCases) {
+      test(`${mount || "/"}: ${name} is refused on GET and PUT and writes nothing`, async () => {
+        const read = await raw(mount, "/users/me/email-preferences", "GET", {
+          Cookie: `nemar_session=${cookie}`,
+        });
+        expect(read.status).toBe(401);
+        // With a NEMAR Origin, so the refusal is the session's and not the Origin rule's.
+        const write = await raw(
+          mount,
+          "/users/me/email-preferences",
+          "PUT",
+          { Cookie: `nemar_session=${cookie}`, Origin: NEMAR_ORIGIN },
+          { news: false },
+        );
+        expect(write.status).toBe(401);
+        expect(stored(ids[who] as number)).toBeNull();
+        expect(categoryAudits()).toHaveLength(0);
+      });
+    }
+
+    for (const [name, key, who] of keyCases) {
+      test(`${mount || "/"}: ${name} is a 403 on GET and PUT and writes nothing`, async () => {
+        const read = await raw(mount, "/users/me/email-preferences", "GET", {
+          Authorization: `Bearer ${key}`,
+        });
+        expect(read.status).toBe(403);
+        const write = await raw(
+          mount,
+          "/users/me/email-preferences",
+          "PUT",
+          { Authorization: `Bearer ${key}` },
+          { news: false },
+        );
+        expect(write.status).toBe(403);
+        expect(stored(ids[who] as number)).toBeNull();
+        expect(categoryAudits()).toHaveLength(0);
+      });
+    }
+
+    test(`${mount || "/"}: a non-Bearer Authorization header is a 401 and writes nothing`, async () => {
+      const header = { Authorization: `Basic ${btoa(`member:${MEMBER_KEY}`)}` };
+      expect((await raw(mount, "/users/me/email-preferences", "GET", header)).status).toBe(401);
+      const write = await raw(mount, "/users/me/email-preferences", "PUT", header, { news: false });
+      expect(write.status).toBe(401);
+      expect(stored(memberId)).toBeNull();
+    });
+  }
+});
+
+describe("the rest of /users is not shadowed", () => {
+  for (const mount of MOUNTS) {
+    test(`${mount || "/"}: /users/me and /users/me/datasets still answer a key`, async () => {
+      const auth = { Authorization: `Bearer ${MEMBER_KEY}` };
+      const me = await raw(mount, "/users/me", "GET", auth);
+      expect(me.status).toBe(200);
+      expect((await me.json()).user.username).toBe("member");
+      const datasets = await raw(mount, "/users/me/datasets", "GET", auth);
+      expect(datasets.status).toBe(200);
+    });
+
+    test(`${mount || "/"}: a pending session is still refused on /users/me`, async () => {
+      const res = await raw(mount, "/users/me", "GET", {
+        Cookie: `nemar_session=${PENDING_COOKIE}`,
+      });
+      expect(res.status).toBe(403);
+    });
+  }
+});
+
+describe("edge bodies", () => {
+  for (const mount of MOUNTS) {
+    test(`${mount || "/"}: {} answers the current view and writes nothing`, async () => {
+      const res = await call(mount, "PUT", { key: MIGRATED_KEY }, {});
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        news: false,
+        rfcs: false,
+        maintenance: true,
+        recall: LOCKED,
+      });
+      expect(categoryAudits()).toHaveLength(0);
+    });
+
+    test(`${mount || "/"}: a valid change followed by an unknown key is refused whole`, async () => {
+      const res = await call(mount, "PUT", { key: MEMBER_KEY }, { news: false, news2: true });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "unknown_mail_preference", field: "news2" });
+      expect(stored(memberId)).toBeNull();
+      expect(categoryAudits()).toHaveLength(0);
+    });
+  }
+});
+
+describe("Cache-Control", () => {
+  for (const mount of MOUNTS) {
+    test(`${mount || "/"}: every answer is no-store, refusals included`, async () => {
+      const answers = [
+        await call(mount, "GET", { key: MEMBER_KEY }),
+        await call(mount, "PUT", { key: MEMBER_KEY }, { news: false }),
+        await call(mount, "PUT", { key: MEMBER_KEY }, { recall: false }),
+        await call(mount, "GET", null),
+      ];
+      expect(answers.map((r) => r.status)).toEqual([200, 200, 400, 401]);
+      for (const res of answers) expect(res.headers.get("Cache-Control")).toBe("no-store");
+    });
+  }
+});

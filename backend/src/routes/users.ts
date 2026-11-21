@@ -72,6 +72,12 @@ export const userMailPreferenceRoutes = new Hono<{ Bindings: Bindings; Variables
 
 userMailPreferenceRoutes.use("*", webSessionMiddleware);
 
+// One account's preferences: no shared cache or browser may keep a copy, of an answer or a refusal.
+userMailPreferenceRoutes.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("Cache-Control", "no-store");
+});
+
 /** The account reading its preferences: a key, else a session cookie. No Origin rule (a read). */
 async function resolveMailPreferenceReader(
   c: Context<{ Bindings: Bindings; Variables: Variables }>,
@@ -172,11 +178,10 @@ userMailPreferenceRoutes.put("/", async (c) => {
   // `mail_category_changed` audit row per category whose stored value actually changes, in one batch.
   const applied = await saveEmailPreferences(db, {
     targetId: actorId,
-    // Read only for an edit of ANOTHER account's preferences, which this route never makes.
-    targetUsername: "",
     actorId,
     changes: checked.changes,
-    via: "self",
+    // The credential says which client made the change: a key is the CLI, a cookie is Settings.
+    via: resolved.actor.via === "token" ? "cli" : "settings",
   });
   if (!applied) return c.json({ error: "User not found" }, 404);
 
