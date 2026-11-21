@@ -97,6 +97,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T17:17-08:00 | SC1: owner authorized the manager to merge docs#129 | owner |  |
 | 2026-11-20T17:57-08:00 | O4d: owner said yes; manager releases 2.0.1 on B5a merge commit 3bd184a9 | owner |  |
 | 2026-11-20T18:29-08:00 | Advisor ruling (B5 layer): top-level layer is the reader-safety layer under the vector's own format_version text, or null; all v2 entries null (v2-version-3 stays null as released in 2.0.1); a reader's refusal layer lives only in expect[N].refusal. Lead updates cards B5 and B5a | advisor |  |
+| 2026-11-20T18:38-08:00 | O4c: owner said yes; manager tags pre-release 3.0.0-draft.2 on B5's merge commit | owner |  |
 
 ## Log
 
@@ -208,3 +209,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:31-08:00 | Card PR 2285 merged (OPEN ): advisor layer rule in B5 and B5a, v3-version-4 layer 1 asserted; review r1 clean, fix diff verified by manager |
 | 2026-11-20T18:32-08:00 | Correction: the previous PR 2285 log line was written before the merge; first attempt failed (short SHA). Merged now: MERGED 7396dbb0 |
 | 2026-11-20T18:35-08:00 | B5 r1 fixes bc618188 (layer ruling, v3-gap-exact-copy mask vector, ties, schema rules, spec 'has'); r2 delta dispatched; Agents today 58/60 |
+| 2026-11-20T18:36-08:00 | B5 r2 clean; 1 sugg (cite spec lines in 3 new $comments) sent back; manager verifies the one commit |
+| 2026-11-20T18:37-08:00 | B5 merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39); O4c set owner |
+| 2026-11-20T18:38-08:00 | O4c done: 3.0.0-draft.2 on ac6e3124; B4b ready |
+| 2026-11-20T18:38-08:00 | B4b dispatched to impl-B4 (resumed; same draft PR rfcs#2) |
