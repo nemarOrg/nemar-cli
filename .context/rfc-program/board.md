@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 60 | 57 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 60 | 58 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -79,7 +79,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B6 | [Version 3 text on draft/3.0.0](cards/B6.md) | - | lead | - | claude-opus | done | O4, A2 | biosig-zarr#4 | r1 decisions+technical (2 Sonnet): 7 imp, ~11 sugg fixed; r2 delta clean, 2 sugg fixed, verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: biosig-zarr#4 head 08a990b7 |
 | O4b | Owner tags 3.0.0-draft.1 | - | owner | - | - | done | B6 | - |  | - | - | pre-release 3.0.0-draft.1 on 08a990b7, isPrerelease true (verified); compare link 200 |
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
-| B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | claude-opus | active | B5a, O4d, B6 | biosig-zarr#6 |  | 2026-11-20T18:15-08:00 | 3d | r1 fixes incl. advisor layer ruling; lead updates cards B5/B5a in a small PR |
+| B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | claude-opus | review | B5a, O4d, B6 | biosig-zarr#6 |  | 2026-11-20T18:15-08:00 | 3d | r2 delta review on head bc618188 (CI green) |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | done | B4 | 2273 | r1 comments (1 Sonnet): 0 crit/imp, 4 sugg fixed or no change; r2 delta clean; 1 sugg (stale card N1 text) to the lead | 2026-11-20T18:45-08:00 | 4h | merged 0585cc96; drafts in owner/announce-0001 for O5 |
 | O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4b | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
@@ -196,8 +196,9 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B5a-tools | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:30-08:00 | done |
 | rev-B5a-r2 | reviewer | claude-sonnet | Sonnet high | B5a | 2026-11-20T17:50-08:00 | done |
 | rev-R3-r2 | reviewer | claude-sonnet | Sonnet high | R3 | 2026-11-20T18:00-08:00 | done |
-| impl-B5 | implementer | claude-opus | Opus xhigh | B5 | 2026-11-20T18:15-08:00 | running |
+| impl-B5 | implementer | claude-opus | Opus xhigh | B5 | 2026-11-20T18:15-08:00 | done |
 | rev-B5-spec | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
 | rev-B5-tools | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
 | adv-B5-layer | advisor | claude-opus | Opus xhigh | B5 | 2026-11-20T19:30-08:00 | done |
 | rev-2285 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:05-08:00 | done |
+| rev-B5-r2 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:40-08:00 | running |

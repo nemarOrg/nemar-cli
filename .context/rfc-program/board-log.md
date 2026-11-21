@@ -207,3 +207,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:31-08:00 | PR 2285 review clean; sugg 1 (assert v3-version-4 layer 1) sent to lead; sugg 2 rejected (README is on origin main, reviewer's local main stale) |
 | 2026-11-20T18:31-08:00 | Card PR 2285 merged (OPEN ): advisor layer rule in B5 and B5a, v3-version-4 layer 1 asserted; review r1 clean, fix diff verified by manager |
 | 2026-11-20T18:32-08:00 | Correction: the previous PR 2285 log line was written before the merge; first attempt failed (short SHA). Merged now: MERGED 7396dbb0 |
+| 2026-11-20T18:35-08:00 | B5 r1 fixes bc618188 (layer ruling, v3-gap-exact-copy mask vector, ties, schema rules, spec 'has'); r2 delta dispatched; Agents today 58/60 |
