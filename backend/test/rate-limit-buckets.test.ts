@@ -29,6 +29,7 @@ import {
   __selectBucket,
   rateLimiter,
 } from "../src/middleware/rateLimit";
+import { mailRoutes } from "../src/routes/mail";
 import { createMcpRoutes } from "../src/routes/mcp";
 import { neurobagelRoutes } from "../src/routes/neurobagel";
 import type { Bindings } from "../src/types/bindings";
@@ -687,6 +688,82 @@ describe("the runner routes are IP-keyed, except the secret exchange", () => {
     for (const route of ["/compute/runnersx/claim", "/compute/jobs", "/xcompute/runners/claim"]) {
       expect(__selectBucket(route, undefined, IP).keyKind).toBe("ip");
     }
+  });
+});
+
+describe("the unsubscribe routes have their own IP-keyed bucket (epic #2260 phase 2)", () => {
+  const IP = "203.0.113.99";
+  const MADE_UP = "Bearer made-up-0123456789abcdef0123456789abcdef";
+  const ROUTES = [
+    "/mail/unsubscribe/sometoken",
+    "/mail/unsubscribe/sometoken/info",
+    "/mail/unsubscribe",
+    "/nemar/mail/unsubscribe/sometoken",
+    "/nemar/mail/unsubscribe/sometoken/info",
+  ];
+
+  test("every spelling is IP-keyed whatever bearer it carries, at the route's own cap", () => {
+    for (const route of ROUTES) {
+      for (const auth of [undefined, `Bearer ${VALID_TOKEN}`, MADE_UP]) {
+        const sel = __selectBucket(route, auth, IP);
+        expect(sel.keyKind, route).toBe("mail-ip");
+        expect(sel.rawKey).toBe(IP);
+        expect(sel.maxRequests).toBe(__limits.MAIL_LINK_MAX_REQUESTS);
+      }
+    }
+  });
+
+  test("the cap is above one mailbox provider's burst, and a lookalike path is not the route", () => {
+    // One-click POSTs come from the provider's own egress pool, so a handful of addresses stand for
+    // every reader who presses Unsubscribe soon after a send. Never as tight as the strict bucket.
+    expect(__limits.MAIL_LINK_MAX_REQUESTS).toBeGreaterThan(__limits.AUTH_MAX_REQUESTS * 10);
+    expect(__limits.MAIL_LINK_MAX_REQUESTS).toBeLessThanOrEqual(__limits.MAX_REQUESTS);
+    for (const route of [
+      "/mail",
+      "/mailx/unsubscribe/t",
+      "/mail/unsubscribex/t",
+      "/x/mail/unsubscribe/t",
+    ]) {
+      expect(__selectBucket(route, undefined, IP).keyKind, route).toBe("ip");
+    }
+  });
+
+  test("the limiter's own log lines carry the route but never the token", async () => {
+    const app = new Hono<AppEnv>();
+    app.use("*", (c, next) => rateLimiter(c, next));
+    app.route("/mail", mailRoutes);
+    const env = { ...PROD_ENV, MAIL_LINK_SECRET: "f".repeat(64) } as Bindings;
+    const token = `v1.7.news.42.${"Q".repeat(43)}`;
+    // Through a service binding (no CF-Connecting-IP) the limiter logs the path it counted.
+    await hit(app, { "X-Forwarded-For": "198.51.100.7" }, `/mail/unsubscribe/${token}`, env);
+    const lines = [...h.log.mock.calls, ...h.warn.mock.calls, ...h.error.mock.calls]
+      .map((call: unknown[]) => JSON.stringify(call))
+      .join("\n");
+    expect(lines).toContain("[rate-limit]");
+    expect(lines).toContain("/mail/unsubscribe/[redacted]");
+    expect(lines).not.toContain(token);
+    expect(lines).not.toContain("QQQQQQQQ");
+  });
+
+  test("the cap holds through the real routes at both mounts, and the refusal is the limiter's, never link_invalid", async () => {
+    const app = new Hono<AppEnv>();
+    app.use("*", (c, next) => rateLimiter(c, next));
+    app.route("/mail", mailRoutes);
+    app.route("/nemar/mail", mailRoutes);
+    const env = { ...PROD_ENV, MAIL_LINK_SECRET: "f".repeat(64) } as Bindings;
+    const headers = edge("10.99.0.42");
+    const spell = (i: number) => `${i % 2 ? "/nemar" : ""}/mail/unsubscribe/not-a-token`;
+    for (let i = 0; i < __limits.MAIL_LINK_MAX_REQUESTS; i++) {
+      const res = await app.fetch(new Request(`http://localhost${spell(i)}`, { headers }), env);
+      expect(res.status).toBe(410);
+      expect(res.headers.get("X-RateLimit-Bucket")).toBe("mail-ip");
+    }
+    const over = await app.fetch(new Request(`http://localhost${spell(1)}`, { headers }), env);
+    expect(over.status).toBe(429);
+    expect(over.headers.get("X-RateLimit-Bucket")).toBe("mail-ip");
+    const body = await over.text();
+    expect(body).not.toContain("link_invalid");
+    expect(body).not.toContain("not valid");
   });
 });
 
