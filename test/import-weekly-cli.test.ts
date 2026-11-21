@@ -190,6 +190,40 @@ const HEALTHY = {
       open_automatic: { total: 5, held: 4, holds: { "screen-acknowledge": 4 } },
       merged: { worker: 7, administrator: 8, outside_tool: 9, unattributed: 10 },
     }),
+    // RFC program card R3: a quiet week of the RFC clock, one RFC open and nothing for a person.
+    rfcs: {
+      index: {
+        listed: [
+          {
+            number: "0001",
+            title: "Dataset versions",
+            phase: "open" as const,
+            closesAt: "2026-09-20T14:00:00Z",
+            dueBy: "2026-10-04T14:00:00Z",
+            overdue: false,
+          },
+          {
+            number: "0002",
+            title: "Citing datasets",
+            phase: "closed" as const,
+            closesAt: "2026-09-01T14:00:00Z",
+            dueBy: "2026-09-15T14:00:00Z",
+            overdue: false,
+          },
+        ],
+        drafts: 0,
+        decided: 0,
+      },
+      workflow: { state: "active" },
+      run: {
+        latest: {
+          createdAt: "2026-09-08T14:00:00.000Z",
+          conclusion: "success",
+          url: "https://github.com/nemarOrg/rfcs/actions/runs/1",
+        },
+      },
+      attention: [] as string[],
+    },
     errors: [],
   },
   issue: null,
@@ -388,6 +422,78 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       expect(result.stdout).not.toContain("repulls: switches=");
       expect(result.stdout).toContain("upstream re-pull activity could not be determined");
       expect(result.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the RFC clock line prints the list and the clock, and a routine week exits 0", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer(HEALTHY);
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain(
+        "rfcs: listed=2 closed_awaiting_decision=1 clock=active last_run=2026-09-08T14:00Z success",
+      );
+      expect(result.exitCode).toBe(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a clock GitHub switched off prints its state and exits 1 with the Worker's reason", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        rfcs: {
+          ...HEALTHY.facts.rfcs,
+          workflow: { state: "disabled_inactivity" },
+          attention: ["the RFC clock workflow is not active (disabled_inactivity)"],
+        },
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("clock=disabled_inactivity");
+      expect(result.stdout).toContain("the RFC clock workflow is not active (disabled_inactivity)");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an unread RFC clock prints unknown and exits 2, as the backend's errors entry says", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: {
+        ...HEALTHY.facts,
+        rfcs: null,
+        errors: [{ stage: "rfcs", error: "the RFC clock could not be read" }],
+      },
+    });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("rfcs=unknown");
+      expect(result.stdout).not.toContain("rfcs: listed=");
+      expect(result.stdout).toContain("the RFC clock could not be determined");
+      expect(result.exitCode).toBe(2);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a backend that predates the RFC field prints unknown and exits 1 (absent is unknown)", async () => {
+    seedAuthenticatedConfig();
+    const { rfcs: _omitted, ...withoutKey } = HEALTHY.facts;
+    const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
+    try {
+      const result = await runCli(["admin", "import-weekly"], server.url);
+      expect(result.stdout).toContain("rfcs=unknown");
+      expect(result.stdout).toContain("the RFC clock could not be determined");
+      expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
     }
