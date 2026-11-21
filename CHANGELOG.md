@@ -37,9 +37,9 @@ earlier releases are described only by their generated notes.
 - **A recall is owner only and needs `--recall-ref` and `--confirm-recall`.**
   `--recall-ref` names what is recalled: a dataset id with an optional version (`nm000104@v1.2.0`, which must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL.
   `--confirm-recall` must repeat the reference exactly (`--yes` does not replace it); the subject gets the `[NEMAR recall]` prefix and the body must have the headings "What is affected" and "What to do".
-  Sending a recall publishes a `critical` site notice naming the reference and subject; clear it with `nemar admin notice clear <id>` when the recall is resolved.
+  A recall sent with `--to all` that queued at least one email publishes a `critical` site notice naming the reference and subject, and a second send of the same reference within 24 hours reuses it; a send to `admins` or `members` (a canary) or one that queued nothing publishes none (`notice_skipped: canary` or `nothing_queued`). Clear the notice with `nemar admin notice clear <id>` when the recall is resolved.
 - **The same category, subject and group cannot go out twice within 24 hours unless `--allow-repeat` is given.**
-  Subjects match after trimming, collapsing spaces and ignoring case; `--dry-run` reports a send the guard would refuse, and a send that queued nothing does not count.
+  The guard keys on the recipient group too, so a canary to `admins` does not block the send to `all`; subjects match after Unicode NFKC folding, trimming, collapsing any run of whitespace to one space and ignoring case, and a recall's subject is compared with its `[NEMAR recall]` prefix; `--dry-run` reports a send the guard would refuse, and a send that queued nothing does not count.
 - **A declined confirmation no longer goes ahead in `nemar admin notify` or `nemar admin notice clear`.**
   The confirmation result was checked for truthiness, and a declined or cancelled answer is a non-empty string.
 - **`nemar admin email-preferences update` gains `--news`, `--rfcs` and `--maintenance`; `--announcements` is retired.**
@@ -47,7 +47,7 @@ earlier releases are described only by their generated notes.
   `--all` sets every switchable category and admin alert (recalls stay on).
   With `--user`, the owner and any admin can show or change another account's community categories; another account's admin alerts stay the owner's.
 - **Migrations.**
-  0146 copies each live account's `announcements` value into `news`, `rfcs` and `maintenance` and writes one summary audit row; it keeps the stored `announcements` key so the previous Worker still reads it during the deploy, and a migration in the following release drops it.
+  0146 copies each live account's `announcements` value into `news`, `rfcs` and `maintenance` and writes one summary audit row; it keeps the stored `announcements` key so the previous Worker still reads it during the deploy, and a migration in the following release drops it. Do not roll back to the previous Worker once this one has run: it reads only `announcements`, so anyone who turned a category off here would get group mail again.
   0147 adds `broadcast_emails.subject_key`, the normalized subject the 24-hour guard compares.
 - **New Worker secret `MAIL_LINK_SECRET`, required on dev and production before any categorized send.**
   It signs the unsubscribe links: 32 characters or more (`openssl rand -hex 32`), a different value on dev (`--env dev`) and production, never a `[vars]` entry.

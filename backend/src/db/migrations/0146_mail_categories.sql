@@ -7,7 +7,7 @@
 -- `announcements` is KEPT, unchanged, for now: migrations apply seconds before the new worker
 -- deploys, and the previous worker reads `announcements` (a missing key as ON). Removing it would
 -- let a notify in that window reach every account that had opted out. Nothing in the new code
--- reads or writes it; the phase that retires the old group send (phase 3) removes the key.
+-- reads or writes it; a migration in the release after this epic's drops the key.
 --
 -- Only strict JSON `false` counts as an opt-out, the way the parser reads every key
 -- (`!== false`): json_type() tells JSON `false` from `0` and from the string "false", where
