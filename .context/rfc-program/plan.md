@@ -53,6 +53,7 @@ The owner decisions of 2026-11-20 (section 2) are settled; a worker or reviewer 
 | B7's PR into `main` of nemarOrg/biosig-zarr (the independence wording, editorial by the editor's ruling under Q39) | the manager, after the merge gate, with a merge commit |
 | B7b's PR into `draft/3.0.0` of nemarOrg/biosig-zarr (not into `main`) | the manager, after the merge gate, with a merge commit |
 | B4c's commit on the open RFC-0001 draft PR | nobody merges; the PR stays a draft |
+| B4d's commit on the open RFC-0001 draft PR | nobody merges; the PR stays a draft |
 | RFC text PRs in nemarOrg/rfcs (B4, V2) | nobody until the owner opens the RFC: merging one with `opened_at` set is the act of opening it |
 | Any PR to nemarOrg/docs (R2, B3, SC1) | the owner, or the manager when the owner authorizes it for that PR (runbook, "Never"); a docs merge publishes |
 | `feature/rfc-program` into `dev` | the owner, through `/project:epic-dev --finalize`; never an admin merge |
@@ -200,9 +201,10 @@ Opening an RFC, deciding it, and announcing it are the owner's acts, outside the
 | B7b | `draft/3.0.0` takes `2.0.2` in and its draft-only text drops NEMAR as decider | lead | B7, O4e | the merge, three lines of `spec/index.md`, `CHANGELOG.md`, `spec/version-history.md` on `draft/3.0.0` | nemarOrg/biosig-zarr, `draft/3.0.0` (manager merges) |
 | O4f | The manager, on the owner's say-so, tags `3.0.0-draft.3` on B7b's merge commit | owner | B7b | one tag | nemarOrg/biosig-zarr |
 | B4c | RFC-0001 points at `3.0.0-draft.3`, carries the new notice, and calls nothing in biosig-zarr NEMAR's (plus B4b's two held suggestions) | lead | B4b, O4e, O4f | `text/0001-biosig-zarr.md` on the open draft PR | nemarOrg/rfcs, PR left open |
+| B4d | RFC-0001 cites the back catalog figures S1 measured (lead's picks, P4) and dates the `2.0.2` release in its history | worker | S1, B4c | `text/0001-biosig-zarr.md` and the PR body on the open draft PR | nemarOrg/rfcs, PR left open |
 | SC1 | The Store Contract states the version 3 NEMAR profile choices, as what NEMAR will do after RFC-0001 is accepted (Q29) | lead | B6, O4b | `src/content/docs/platform/zarr/store-contract.md` | nemarOrg/docs, `main` (owner merges, or authorizes the manager) |
 | N1 | The RFC-0001 announcements are drafted | worker | B4, Q15 answered (revised by Q31 and Q32) | `.context/rfc-program/owner/announce-0001/` | nemar-cli, `feature/rfc-program` |
-| O5 | The owner opens RFC-0001 | owner | B4, B6, O4b, O1b, S1, N1, B5a and O4d, B5 (Q26), O4c, B4c (which follows B4b, B7, O4e, B7b and O4f), the mail epic #2260's P1 to P3 plus the privacy-policy text in production (owner, 2026-11-20), Q10 and Q18 answered | the thread, the merge, announcements | nemarOrg/rfcs |
+| O5 | The owner opens RFC-0001 | owner | B4, B6, O4b, O1b, S1, N1, B5a and O4d, B5 (Q26), O4c, B4c (which follows B4b, B7, O4e, B7b and O4f), B4d, the mail epic #2260's P1 to P3 plus the privacy-policy text in production (owner, 2026-11-20), Q10 and Q18 answered | the thread, the merge, announcements | nemarOrg/rfcs |
 | C3 | Checkpoint: RFC-0001 has closed; the lead drafts the decision and outlines the follow-through epic | lead | O5 and the close | `checkpoints.md` row C3 | nemar-cli |
 | V2 | The RFC-0002 text is written and reviewed as a draft PR | outline | V1, O5 | written at checkpoint C2 | nemarOrg/rfcs, PR left open |
 | O6 | The owner opens RFC-0002 (only after RFC-0001 has closed) | owner | V2, C3 | the thread, the merge, announcements | nemarOrg/rfcs |

@@ -77,7 +77,7 @@ Verify by observation before setting it `done`:
 ## Event handlers specific to this program
 
 - **A PR to nemarOrg/docs passes its merge gate** (R2, B3, SC1): set the step `owner`, and ask the owner to review and merge it, or to authorize the manager to merge that PR (see "Never").
-- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, B4b, B4c, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
+- **An RFC text PR or the version 3 text PR passes its merge gate** (B4, B4b, B4c, B4d, V2, B6): set the step `done` with Next "draft waits for the owner", leave the PR open, and unblock the owner step.
 - **A3's draft PR is held on its ADR number**: it stays a draft until 0132 (mail PR 2270) is on `origin/dev`; then merge `origin/dev` into `feature/rfc-program` (a merge, never a rebase, as for Q20), tell the A3 worker to merge the base in, recheck the open ADR numbers and rerun its gate, and only then let it mark the PR ready.
 - **B5a's PR passes its merge gate**: merge it into `main` with a merge commit (it keeps the Developer Certificate of Origin sign-offs); then set O4d `owner` and run it on the owner's say-so (Q33), recorded with `decide` first.
 - **B5's PR passes its merge gate**: merge it into `draft/3.0.0` with a merge commit, never into `main`; then set O4c `owner` and run it on the owner's say-so (Q36), recorded with `decide` first.
