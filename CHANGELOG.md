@@ -15,6 +15,16 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Zarr conversion
+
+- **Zarr conversion pins biosigIO 1.2.14 (`>=1.2.14,<1.2.15`) and refuses a gapped EDF+D or BDF+D file.**
+  An EDF+D or BDF+D file whose data records have gaps used to convert with every sample after a gap placed too early on the time axis; biosigIO 1.2.14 refuses it (`discontinuous_recording`, biosigio#180) and the converter records it as a terminal data failure, with the gaps named in the failure's `detail`, never as a retry.
+  A +D file whose records are contiguous still converts and carries `edf_discontinuous_verified_contiguous` in the store's recording metadata.
+  A catalog scan found real gaps only in nm000456 v1.0.2 (102 files, 51 recordings).
+  `ZARR_ENGINE_VERSION` is not bumped (ADR 0033), so its published stores keep the shifted time axis until that dataset is requeued by itself.
+  The rebuild then publishes each gapped recording as a typed failure in place of its store, as long as at least one recording of the dataset converts, which holds for nm000456 (69 recordings, 51 gapped); a dataset whose every attempted recording is gapped keeps serving its old stores, because that run ends "all N conversion(s) failed; index left untouched".
+  Deploying the pin costs one skipped Hallu tick: the first tick after the merge still runs the old `hallu-zarr.sh`, which installs 1.2.14 and then refuses it at its old `<1.2.14` cap, and the next tick runs the new script; no queue row is touched.
+
 ### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
 
 - **The geometry pull request body shows the table cleaning.**
