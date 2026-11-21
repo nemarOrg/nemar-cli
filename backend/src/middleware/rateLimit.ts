@@ -883,8 +883,15 @@ const RUNNER_MAX_REQUESTS = 2000;
 // minute per address is far above one provider's burst for a community of this size while still bounding
 // a loop: each request costs two D1 reads and one HMAC. A refusal here is the limiter's own 429 body, never
 // `link_invalid`.
+//
+// TWO BUCKETS, by method. The cap above is for POST (the opt-out itself) and anything else that is not a
+// read. A GET or HEAD (the confirmation page and its /info twin) is counted in `mail-read-ip` at a higher
+// cap, because security scanners and link previews fetch every link of every delivered message from a few
+// shared addresses, right after a send, at the very moment real opt-outs arrive. Sharing one bucket would
+// let that volume refuse a person's POST. A scanner that exhausts the read bucket costs nobody an opt-out.
 const MAIL_LINK_PATH_RE = /^\/mail\/unsubscribe(\/|$)/;
 const MAIL_LINK_MAX_REQUESTS = 300;
+const MAIL_LINK_READ_MAX_REQUESTS = 3000;
 // The zarr serving gateway (#901), the highest-request-volume data-plane path,
 // which bypassed the middleware stack and went unthrottled. Two reachable path
 // shapes, because Hono's `app.route("/zarrproxy", zarrDataRoutes)` PREPENDS the
@@ -1110,7 +1117,8 @@ export interface __BucketSelection {
     | "neurobagel-ip"
     | "oauth-ip"
     | "runner-ip"
-    | "mail-ip";
+    | "mail-ip"
+    | "mail-read-ip";
   /** Pre-hash key material: the caller key (see {@link __CallerIdentity}), or the raw bearer token. */
   rawKey: string;
   maxRequests: number;
@@ -1361,6 +1369,7 @@ export function __selectBucket(
   authHeader: string | undefined,
   ip: string,
   source: __CallerSource = "edge",
+  method?: string,
 ): __BucketSelection {
   const path = __normalizeMountPath(rawPath);
   if (AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`))) {
@@ -1383,6 +1392,11 @@ export function __selectBucket(
   }
   // The unsubscribe routes: IP-keyed whatever they carry (see MAIL_LINK_PATH_RE).
   if (MAIL_LINK_PATH_RE.test(path)) {
+    // Reads (the page and /info) and the one-click POST are counted apart: link scanners fetch every link of
+    // every delivered message, and their volume must never be able to refuse a person's real opt-out.
+    if (method === "GET" || method === "HEAD") {
+      return { keyKind: "mail-read-ip", rawKey: ip, maxRequests: MAIL_LINK_READ_MAX_REQUESTS };
+    }
     return { keyKind: "mail-ip", rawKey: ip, maxRequests: MAIL_LINK_MAX_REQUESTS };
   }
   // The runner routes: IP-keyed whatever they carry (see RUNNER_PATH_RE).
@@ -1660,6 +1674,7 @@ export async function rateLimiter(
     options.anonymousSurface ? undefined : c.req.header("Authorization"),
     caller.key,
     caller.source,
+    c.req.method,
   );
   // A request this Worker built for itself is not a caller of the data plane: see
   // `__CallerSource`. It used to be bucketed by a random UUID, which is to say not at
@@ -2098,6 +2113,7 @@ export const __limits = {
   OAUTH_MAX_REQUESTS,
   RUNNER_MAX_REQUESTS,
   MAIL_LINK_MAX_REQUESTS,
+  MAIL_LINK_READ_MAX_REQUESTS,
   WINDOW_SIZE,
 };
 

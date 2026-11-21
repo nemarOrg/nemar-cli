@@ -702,29 +702,39 @@ describe("the unsubscribe routes have their own IP-keyed bucket (epic #2260 phas
     "/nemar/mail/unsubscribe/sometoken/info",
   ];
 
-  test("every spelling is IP-keyed whatever bearer it carries, at the route's own cap", () => {
+  test("every spelling is IP-keyed whatever bearer it carries; a read and a write are counted apart", () => {
     for (const route of ROUTES) {
       for (const auth of [undefined, `Bearer ${VALID_TOKEN}`, MADE_UP]) {
-        const sel = __selectBucket(route, auth, IP);
-        expect(sel.keyKind, route).toBe("mail-ip");
-        expect(sel.rawKey).toBe(IP);
-        expect(sel.maxRequests).toBe(__limits.MAIL_LINK_MAX_REQUESTS);
+        for (const method of ["GET", "HEAD"]) {
+          const sel = __selectBucket(route, auth, IP, "edge", method);
+          expect(sel.keyKind, `${method} ${route}`).toBe("mail-read-ip");
+          expect(sel.rawKey).toBe(IP);
+          expect(sel.maxRequests).toBe(__limits.MAIL_LINK_READ_MAX_REQUESTS);
+        }
+        for (const method of ["POST", "PUT", "OPTIONS", undefined]) {
+          const sel = __selectBucket(route, auth, IP, "edge", method);
+          expect(sel.keyKind, `${method} ${route}`).toBe("mail-ip");
+          expect(sel.rawKey).toBe(IP);
+          expect(sel.maxRequests).toBe(__limits.MAIL_LINK_MAX_REQUESTS);
+        }
       }
     }
   });
 
-  test("the cap is above one mailbox provider's burst, and a lookalike path is not the route", () => {
+  test("the caps: far above one provider's burst, and reads above writes so scanners cannot crowd out an opt-out", () => {
     // One-click POSTs come from the provider's own egress pool, so a handful of addresses stand for
     // every reader who presses Unsubscribe soon after a send. Never as tight as the strict bucket.
     expect(__limits.MAIL_LINK_MAX_REQUESTS).toBeGreaterThan(__limits.AUTH_MAX_REQUESTS * 10);
     expect(__limits.MAIL_LINK_MAX_REQUESTS).toBeLessThanOrEqual(__limits.MAX_REQUESTS);
+    expect(__limits.MAIL_LINK_READ_MAX_REQUESTS).toBeGreaterThan(__limits.MAIL_LINK_MAX_REQUESTS);
     for (const route of [
       "/mail",
       "/mailx/unsubscribe/t",
       "/mail/unsubscribex/t",
       "/x/mail/unsubscribe/t",
     ]) {
-      expect(__selectBucket(route, undefined, IP).keyKind, route).toBe("ip");
+      expect(__selectBucket(route, undefined, IP, "edge", "GET").keyKind, route).toBe("ip");
+      expect(__selectBucket(route, undefined, IP, "edge", "POST").keyKind, route).toBe("ip");
     }
   });
 
@@ -745,20 +755,43 @@ describe("the unsubscribe routes have their own IP-keyed bucket (epic #2260 phas
     expect(lines).not.toContain("QQQQQQQQ");
   });
 
-  test("the cap holds through the real routes at both mounts, and the refusal is the limiter's, never link_invalid", async () => {
+  test("scanners exhausting the read bucket cannot refuse an opt-out; each cap holds at both mounts and the refusal is the limiter's, never link_invalid", async () => {
     const app = new Hono<AppEnv>();
     app.use("*", (c, next) => rateLimiter(c, next));
     app.route("/mail", mailRoutes);
     app.route("/nemar/mail", mailRoutes);
     const env = { ...PROD_ENV, MAIL_LINK_SECRET: "f".repeat(64) } as Bindings;
     const headers = edge("10.99.0.42");
-    const spell = (i: number) => `${i % 2 ? "/nemar" : ""}/mail/unsubscribe/not-a-token`;
+    const path = (i: number) => `${i % 2 ? "/nemar" : ""}/mail/unsubscribe/not-a-token`;
+    const get = (i: number) =>
+      app.fetch(new Request(`http://localhost${path(i)}`, { headers }), env);
+    const postOneClick = (i: number) =>
+      app.fetch(
+        new Request(`http://localhost${path(i)}`, {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/x-www-form-urlencoded" },
+          body: "List-Unsubscribe=One-Click",
+        }),
+        env,
+      );
+
+    // Scanners: every GET up to the read cap passes, the next is refused.
+    for (let i = 0; i < __limits.MAIL_LINK_READ_MAX_REQUESTS; i++) {
+      const res = await get(i);
+      expect(res.status).toBe(410);
+      expect(res.headers.get("X-RateLimit-Bucket")).toBe("mail-read-ip");
+    }
+    const scanned = await get(1);
+    expect(scanned.status).toBe(429);
+    expect(scanned.headers.get("X-RateLimit-Bucket")).toBe("mail-read-ip");
+
+    // The same address's real opt-outs are untouched, up to the write cap.
     for (let i = 0; i < __limits.MAIL_LINK_MAX_REQUESTS; i++) {
-      const res = await app.fetch(new Request(`http://localhost${spell(i)}`, { headers }), env);
+      const res = await postOneClick(i);
       expect(res.status).toBe(410);
       expect(res.headers.get("X-RateLimit-Bucket")).toBe("mail-ip");
     }
-    const over = await app.fetch(new Request(`http://localhost${spell(1)}`, { headers }), env);
+    const over = await postOneClick(1);
     expect(over.status).toBe(429);
     expect(over.headers.get("X-RateLimit-Bucket")).toBe("mail-ip");
     const body = await over.text();
