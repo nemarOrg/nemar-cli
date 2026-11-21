@@ -545,6 +545,13 @@ describe("maintenance mode never blocks an opt-out", () => {
           ["POST", `${mount}/mail/unsubscribe/`],
           ["POST", `${mount}/mail/unsubscribex/${token}`],
           ["POST", `/x${mount}/mail/unsubscribe/${token}`],
+          // Spellings that are not the exact shape: a trailing slash, an empty segment before or
+          // inside the prefix, and another case.
+          ["POST", `${mount}/mail/unsubscribe/${token}/`],
+          ["POST", `/${mount}/mail/unsubscribe/${token}`],
+          ["POST", `${mount}//mail/unsubscribe/${token}`],
+          ["POST", `${mount}/MAIL/unsubscribe/${token}`],
+          ["POST", `${mount}/mail/UNSUBSCRIBE/${token}`],
         ];
         // The doubled prefix is a different path only where there is a prefix to double.
         if (mount) refused.push(["POST", `${mount}${mount}/mail/unsubscribe/${token}`]);
@@ -565,6 +572,28 @@ describe("maintenance mode never blocks an opt-out", () => {
         expect(snapshot()).toBe(before);
       });
     }
+
+    test(`${mode}: an encoded slash inside the token stays ONE segment, which is not a valid token: the middleware passes it, the route answers 410, nothing is written`, async () => {
+      // The middleware reads the path as sent, so `%2F` does not split the segment and the exact shape
+      // still holds; the router decodes it into a token that cannot parse. An opt-out is never blocked
+      // and this one never writes.
+      const bindings = env({ MAINTENANCE_MODE: mode });
+      const token = await tokenFor();
+      const before = snapshot();
+      for (const mount of MOUNTS) {
+        const res = await worker.fetch(
+          new Request(
+            `https://api.nemar.org${mount}/mail/unsubscribe/${token.slice(0, 10)}%2F${token.slice(10)}`,
+            { method: "POST", body: ONE_CLICK, headers: FORM },
+          ),
+          bindings,
+          ctx,
+        );
+        expect(res.status).toBe(410);
+        expect(((await res.json()) as { error: string }).error).toBe("link_invalid");
+      }
+      expect(snapshot()).toBe(before);
+    });
   }
 });
 
