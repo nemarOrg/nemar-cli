@@ -15,11 +15,20 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  type CommunityMailCategory,
+  communityPreferencesView,
+  isCommunityMailCategory,
+  mailRecallWhy,
+} from "../../../shared/contract/mail-categories.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { auditLogStatement } from "../db/audit-log";
 import { flag } from "../db/flag";
-import { authMiddleware } from "../middleware/auth";
+import { authMiddleware, resolveActingAccount, resolveBearerUser } from "../middleware/auth";
+import { webSessionMiddleware } from "../middleware/webSession";
 import {
+  ADMIN_ALERT_CATEGORIES,
   getAdminEmailsForCategory,
   isAdminNotificationAllowed,
   resolveEmailConfig,
@@ -27,6 +36,7 @@ import {
 } from "../services/email";
 import { validateGitHubUsername } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
+import { loadEmailPreferences, saveEmailPreferences } from "../services/mail-preferences";
 import { profileGapsForRow } from "../services/profile-gaps";
 import {
   ALREADY_APPROVED_REFUSAL,
@@ -38,6 +48,142 @@ import {
 import type { Bindings, Variables } from "../types/bindings";
 
 export const userRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// ============================================================================
+// Self-service mail preferences (epic #2260 phase 4, ADR 0132)
+// ============================================================================
+
+/**
+ * `GET`/`PUT /users/me/email-preferences`: an account reads and sets its own community mail
+ * categories (news, rfcs, maintenance), from the CLI with its key or from Settings with its
+ * session cookie. A recall is always on and cannot be set; the admin alerts stay on
+ * `/admin/email-preferences`.
+ *
+ * Its own router, mounted at `/users/me/email-preferences` BEFORE `userRoutes` (index.ts), for one
+ * reason: `userRoutes` runs `authMiddleware`, whose cookie path refuses a `pending` account, and a
+ * pending account may read and set its categories (the values apply once its inbox is verified and
+ * it enters an audience). So the credential rule here is `resolveActingAccount`'s, the one the
+ * other self-service edits use: a key admits an active account, a session cookie admits any live
+ * session (`pending` included, never revoked or deleted), and a cookie WRITE must come from a
+ * NEMAR page (`Origin`). A read passes without an Origin: a cross-site page can send one but cannot
+ * read the answer (CORS), the rule `cookieOriginGuard` applies to the admin router.
+ */
+export const userMailPreferenceRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+userMailPreferenceRoutes.use("*", webSessionMiddleware);
+
+/** The account reading its preferences: a key, else a session cookie. No Origin rule (a read). */
+async function resolveMailPreferenceReader(
+  c: Context<{ Bindings: Bindings; Variables: Variables }>,
+): Promise<{ ok: true; id: number } | { ok: false; response: Response }> {
+  const bearer = await resolveBearerUser(c);
+  if (bearer.kind === "refused") return { ok: false, response: bearer.response };
+  if (bearer.kind === "user") return { ok: true, id: bearer.user.id };
+  const webUser = c.var.webUser;
+  if (!webUser) {
+    return { ok: false, response: c.json({ error: "Authentication required" }, 401) };
+  }
+  return { ok: true, id: webUser.id };
+}
+
+userMailPreferenceRoutes.get("/", async (c) => {
+  const reader = await resolveMailPreferenceReader(c);
+  if (!reader.ok) return reader.response;
+  const prefs = await loadEmailPreferences(c.env.DB, reader.id);
+  if (!prefs) return c.json({ error: "User not found" }, 404);
+  return c.json(communityPreferencesView(prefs));
+});
+
+type MailPreferenceBodyCheck =
+  | { ok: true; changes: Partial<Record<CommunityMailCategory, boolean>> }
+  | { ok: false; error: string; field: string | null; message: string };
+
+/**
+ * The body, checked key by key so a refusal names the field: `recall` is refused with the sentence
+ * that says why, an admin alert is sent to the route that sets it, any other key is unknown, and a
+ * category's value must be a boolean. Strict: a key the three categories do not name never passes.
+ */
+function checkMailPreferenceBody(body: unknown): MailPreferenceBodyCheck {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return {
+      ok: false,
+      error: "invalid_mail_preference",
+      field: null,
+      message: 'The body must be a JSON object such as {"news": false}.',
+    };
+  }
+  const changes: Partial<Record<CommunityMailCategory, boolean>> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (key === "recall") {
+      return {
+        ok: false,
+        error: "recall_cannot_be_turned_off",
+        field: key,
+        message: mailRecallWhy(),
+      };
+    }
+    if ((ADMIN_ALERT_CATEGORIES as readonly string[]).includes(key)) {
+      return {
+        ok: false,
+        error: "admin_alert_not_self_service",
+        field: key,
+        message: `${key} is an admin alert, not a mail category. Admins change their alerts with nemar admin email-preferences.`,
+      };
+    }
+    if (!isCommunityMailCategory(key)) {
+      return {
+        ok: false,
+        error: "unknown_mail_preference",
+        field: key,
+        message: `${key} is not a mail category. The categories you can set are ${COMMUNITY_MAIL_CATEGORIES.join(", ")}.`,
+      };
+    }
+    if (typeof value !== "boolean") {
+      return {
+        ok: false,
+        error: "invalid_mail_preference",
+        field: key,
+        message: `${key} must be true or false.`,
+      };
+    }
+    changes[key] = value;
+  }
+  return { ok: true, changes };
+}
+
+userMailPreferenceRoutes.put("/", async (c) => {
+  const resolved = await resolveActingAccount(c);
+  if (!resolved.ok) return resolved.response;
+  const actorId = resolved.actor.id;
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    body = undefined;
+  }
+  const checked = checkMailPreferenceBody(body);
+  if (!checked.ok) {
+    return c.json({ error: checked.error, field: checked.field, message: checked.message }, 400);
+  }
+
+  const db = c.env.DB;
+  // The one writer (services/mail-preferences.ts): a per-key json_set and one
+  // `mail_category_changed` audit row per category whose stored value actually changes, in one batch.
+  const applied = await saveEmailPreferences(db, {
+    targetId: actorId,
+    // Read only for an edit of ANOTHER account's preferences, which this route never makes.
+    targetUsername: "",
+    actorId,
+    changes: checked.changes,
+    via: "self",
+  });
+  if (!applied) return c.json({ error: "User not found" }, 404);
+
+  const prefs = await loadEmailPreferences(db, actorId);
+  if (!prefs) return c.json({ error: "User not found" }, 404);
+  return c.json(communityPreferencesView(prefs));
+});
 
 // All user routes require authentication
 userRoutes.use("*", authMiddleware);
