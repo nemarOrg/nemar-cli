@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T18:38-08:00 |
-| Next tick | 2026-11-20T19:08-08:00 |
+| Last tick | 2026-11-20T18:55-08:00 |
+| Next tick | 2026-11-20T19:25-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 60 | 58 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 60 | 60 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -90,7 +90,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B5a | [Version 2 schemas and vectors on main](cards/B5a.md) | - | lead | - | claude-opus | done | B2, O4 | biosig-zarr#5 | r1 spec+tools (2 Sonnet): 3 imp, ~10 sugg fixed; r2 delta clean, 1 sugg rejected (docstring is fixed, cannot be empty) | 2026-11-20T16:45-08:00 | 2d | merged 3bd184a9c85a3a9cc646dce94b98520021231650 |
 | O4d | Manager releases 2.0.1 on owner say-so | - | owner | - | - | done | B5a | - |  | - | - | release 2.0.1 on 3bd184a9, isPrerelease false (verified) |
 | O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | done | B5 | - |  | - | - | pre-release 3.0.0-draft.2 on ac6e3124f44e3d7e940fe25430cee4296f755d39, isPrerelease true (verified) |
-| B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | active | O4c | rfcs#2 |  | 2026-11-20T19:55-08:00 | 2h | impl-B4 (resumed) updating rfcs#2 to 3.0.0-draft.2 |
+| B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | done | O4c | rfcs#2 | r1 comments+seam (1 Sonnet): clean; 2 sugg moved to B4c | 2026-11-20T19:55-08:00 | 2h | superseded by B4c (independence notice, draft.3) |
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
 
 ## Questions
@@ -133,6 +133,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q34 | - | ADR 0124 amendment (vectors canonical in biosig-zarr, vendored by digest): write at C3 or now after mail ADR 0132 merges? | At C3 (Recommended) / Now, as a lead step | none | 2026-11-22T17:00 | closed | Write the ADR 0124 amendment now, as a lead step (owner, 2026-11-20T20:20-08:00) |
 | Q35 | - | The EDF+D header scan (pid 99119, remi:18769) is still running. Let it finish, then dispatch S1, or stop it and dispatch S1 now? | Let it finish (Recommended) / Stop it now | none | 2026-11-22T17:00 | closed | Owner gave the counts so far; scan is actively progressing (13000/16883); let it finish, S1 after (owner, 2026-11-20T20:20-08:00) |
 | Q36 | - | O4c (tag 3.0.0-draft.2 after B5): owner runs it, or the manager runs it under the new P1 rule? | Manager runs it on owner say-so (Recommended) / Owner runs it | none | 2026-11-24T17:00 | closed | Manager runs O4c on the owner's say-so under the P1 rule (owner, 2026-11-20T20:20-08:00) |
+| Q37 | - | RFC-0001 quotes spec text with the notice 'Copyright (c) 2026 NEMAR contributors', W3C Software and Document License (from biosig-zarr LICENSE.md). Is that the notice you want? | Yes, as in LICENSE.md (Recommended) / A different holder | none | 2026-11-22T17:00 | closed | biosig-zarr is independent of NEMAR; holder 'the biosig-zarr contributors'; reword all, new 2.0.2 and 3.0.0-draft.3 (owner, 2026-11-20T20:35; detail in Decisions) |
 
 ## Proposals
 
@@ -167,7 +168,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | impl-B2 | implementer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:30-08:00 | done |
 | rev-B2-code | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
 | rev-B2-text | reviewer | claude-sonnet | Sonnet high | B2 | 2026-11-20T15:45-08:00 | done |
-| impl-B4 | implementer | claude-opus | Opus xhigh | B4b | 2026-11-20T19:55-08:00 | running |
+| impl-B4 | implementer | claude-opus | Opus xhigh | B4b | 2026-11-20T19:55-08:00 | done |
 | impl-B6 | implementer | claude-opus | Opus xhigh | B6 | 2026-11-20T16:05-08:00 | done |
 | impl-B3 | implementer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:05-08:00 | done |
 | rev-B3 | reviewer | claude-sonnet | Sonnet high | B3 | 2026-11-20T16:20-08:00 | done |
@@ -202,3 +203,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | adv-B5-layer | advisor | claude-opus | Opus xhigh | B5 | 2026-11-20T19:30-08:00 | done |
 | rev-2285 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:05-08:00 | done |
 | rev-B5-r2 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:40-08:00 | done |
+| rev-B4b | reviewer | claude-sonnet | Sonnet high | B4b | 2026-11-20T20:20-08:00 | done |
+| lead-indep | lead | claude-opus | Opus xhigh | - | 2026-11-20T20:35-08:00 | running |

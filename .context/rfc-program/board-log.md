@@ -98,6 +98,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T17:57-08:00 | O4d: owner said yes; manager releases 2.0.1 on B5a merge commit 3bd184a9 | owner |  |
 | 2026-11-20T18:29-08:00 | Advisor ruling (B5 layer): top-level layer is the reader-safety layer under the vector's own format_version text, or null; all v2 entries null (v2-version-3 stays null as released in 2.0.1); a reader's refusal layer lives only in expect[N].refusal. Lead updates cards B5 and B5a | advisor |  |
 | 2026-11-20T18:38-08:00 | O4c: owner said yes; manager tags pre-release 3.0.0-draft.2 on B5's merge commit | owner |  |
+| 2026-11-20T18:54-08:00 | Q37/Q38: biosig-zarr is independent of NEMAR. Copyright holder 'the biosig-zarr contributors'. Reword LICENSE, GOVERNANCE, README, CONTRIBUTING, CITATION so NEMAR is the first implementer and the text's origin, not decider or owner; release 2.0.2 and tag 3.0.0-draft.3; RFC-0001 points at draft.3 with the new notice. Published tags are immutable and stay | owner |  |
 
 ## Log
 
@@ -213,3 +214,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:37-08:00 | B5 merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39); O4c set owner |
 | 2026-11-20T18:38-08:00 | O4c done: 3.0.0-draft.2 on ac6e3124; B4b ready |
 | 2026-11-20T18:38-08:00 | B4b dispatched to impl-B4 (resumed; same draft PR rfcs#2) |
+| 2026-11-20T18:41-08:00 | B4b done on rfcs#2 (72098ada); review dispatched (Agents today 59/60); Q37 asked |
+| 2026-11-20T18:53-08:00 | Owner: biosig-zarr is independent of NEMAR. Q37 reopened; B4b wording fix held; asking scope (holder, LICENSE.md, README/GOVERNANCE/CITATION wording) |
+| 2026-11-20T18:54-08:00 | Owner decision: biosig-zarr independent of NEMAR; lead-indep (Opus) writes the cards; Agents today 60/60 (limit) |
