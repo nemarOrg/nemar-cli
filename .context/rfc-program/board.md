@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 1 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 80 | 3 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -67,7 +67,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | active | O0 | - |  | 2026-11-20T16:45-08:00 | 1d | impl-S1 running |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | review | O0 | #2289 |  | 2026-11-20T16:45-08:00 | 1d | verified da4ccd10 (acceptance pass: Command 10, Raw 11, 2728 KB, evidence-only); r1 panel of 2 out; 3 lead questions held for after review |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | done | R1 | 2278 | r1 code+tests (2 Sonnet): 1 imp, 4 sugg fixed; r2 delta clean, 2 sugg rejected (empty-title placeholder: rfc-check requires a title; port-9 test never reaches GitHub) | 2026-11-20T16:45-08:00 | 1d | merged 14d49c8e |
@@ -218,3 +218,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | done |
 | a8707231 | implementer | claude-opus | Opus xhigh | B7 | 2026-11-20T19:40-08:00 | done |
 | a535721e | reviewer | claude-sonnet | sonnet | B7 | 2026-11-21T10:20-08:00 | done |
+| a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | running |
+| a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | running |
