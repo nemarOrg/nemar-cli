@@ -10,7 +10,8 @@ pushing and opening.
 
 Refusals (`PrRefusal`, a clear message, nothing pushed): a protected or malformed id, an
 existing work directory, no git identity, a clone not on `main`, a branch that already exists on
-the remote, an errored track, an apply that changed nothing, any difference outside `changes`,
+the remote, an errored track, an apply that changed nothing (not for `--from-ref`, below), any
+difference outside `changes`,
 a staged set that is not exactly `changes`, a staged blob that is not the work-tree bytes (a
 git-annex filter must never turn a sidecar into a pointer), and, for a real run only, a
 remote that is not `nemarDatasets/<id>`, a missing release tag, and an input that changed after
@@ -18,6 +19,12 @@ the release and could not be fetched. Small files are read from the fresh clone 
 annexed files are downloaded from the data plane at the release version. A `main` ahead of the
 release is otherwise recorded in the body (every changed path, at most 50 listed), not refused:
 the files are computed from `main`.
+
+An integration run (`--from-ref`) whose apply changes nothing is not refused: the collaborator's
+branch may already hold what the pipeline would write. No geometry commit is made, no ownership
+file is written, `--bump-version` still applies (its own "Set Version to X" commit, only when the
+Version changes), and a branch with no new commit is not pushed. The pull request is opened or
+updated all the same, and its body says the geometry adds no files, with the reasons per track.
 """
 
 from __future__ import annotations
@@ -230,15 +237,39 @@ def _not_fetched(failed: dict[str, str]) -> list[str]:
     ]
 
 
-def _ref_lines(ref: tuple[str, list[str]] | None) -> list[str]:
+def _ref_lines(ref: tuple[str, list[str]] | None, *, geometry: bool = True) -> list[str]:
     if not ref:
         return []
     name, commits = ref
+    tail = "; the geometry is one commit on top:" if geometry else ":"
     return [
         f"- Integration branch `{name}`: {len(commits)} commit(s) not on `main`, kept as "
-        "they are (authorship included); the geometry is one commit on top:",
+        f"they are (authorship included){tail}",
         _bullets(commits),
     ]
+
+
+MAX_REASONS = 6  # distinct reasons listed per track before a count stands for the rest
+
+
+def _track_reasons(report: dict) -> list[str]:
+    """Why each track wrote nothing: per track, its distinct `status: reason` lines with the
+    number of electrodes files each covers, most common first, capped like other lists."""
+    lines = []
+    for track in pipeline.TRACKS:
+        tally: dict[str, int] = {}
+        for row in report["files"]:
+            d = row["decisions"].get(track) or {}
+            key = f"{d.get('status', 'skipped')}: {d.get('reason') or 'no reason given'}"
+            key = key[:MAX_REASON_CHARS]
+            tally[key] = tally.get(key, 0) + 1
+        ranked = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+        items = [f"{n} file(s), {k}" for k, n in ranked[:MAX_REASONS]]
+        if len(ranked) > MAX_REASONS:
+            more = sum(n for _, n in ranked[MAX_REASONS:])
+            items.append(f"and {more} more file(s) with other reasons")
+        lines.append(f"- {track}: " + ("no electrodes files" if not items else "; ".join(items)))
+    return lines
 
 
 def _version_lines(plan: versionbump.Plan | None) -> list[str]:
@@ -313,12 +344,23 @@ def build_body(
     fetch_failed: dict[str, str] | None = None,
     version_bump: versionbump.Plan | None = None,
     ref: tuple[str, list[str]] | None = None,
+    ownership_exists: bool = False,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
-    evidence grade, shortened in steps only when GitHub's size limit would refuse it."""
+    evidence grade, shortened in steps only when GitHub's size limit would refuse it. An
+    integration run with no files to add gets a short body with the reasons per track."""
     changes = report["changes"]
     added, changed, removed = changes["add"], changes["change"], changes["remove"]
+    if ref and not (added or changed or removed):
+        return _no_geometry_body(
+            report,
+            release_note=release_note,
+            fetch_failed=fetch_failed,
+            version_bump=version_bump,
+            ref=ref,
+            ownership_exists=ownership_exists,
+        )
     lines = [
         "This pull request adds electrode positions and coordinate system files that NEMAR "
         "computed from this dataset's own files, with the verification each one passed.",
@@ -358,6 +400,48 @@ def build_body(
     if _is_mirror(report["dataset"]) and version_bump:
         lines += [
             "",
+            f"Merging this pull request cuts `v{version_bump.new}` (the release workflow tags the "
+            "Version on `main`); do not also run `nemar dataset release`, which would cut a "
+            "further patch.",
+        ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _no_geometry_body(
+    report: dict,
+    *,
+    release_note: str | None,
+    fetch_failed: dict[str, str] | None,
+    version_bump: versionbump.Plan | None,
+    ref: tuple[str, list[str]],
+    ownership_exists: bool,
+) -> str:
+    lines = [
+        "This pull request integrates the collaborator changes on this branch into `main`.",
+        "NEMAR's geometry adds no files on this branch: the pipeline found nothing to write, "
+        "so there is no geometry commit.",
+        "",
+        f"- Dataset: `{report['dataset']}`, version `{report['dataset_version']}`, "
+        f"source commit `{report['source_commit']}`",
+        *([f"- Source: {release_note}"] if release_note else []),
+        *_not_fetched(fetch_failed or {}),
+        *_ref_lines(ref, geometry=False),
+        *_version_lines(version_bump),
+        f"- Pipeline: `{report['pipeline_version']}`",
+        *(
+            [f"- `{pipeline.OWNERSHIP_REL}` is already on the branch and is left exactly as it is"]
+            if ownership_exists
+            else []
+        ),
+        f"- Method, evidence grades and how to read them: {DOCS_URL}",
+        "",
+        "Why each track wrote nothing, as electrodes files per reason:",
+        "",
+        *_track_reasons(report),
+        "",
+    ]
+    if _is_mirror(report["dataset"]) and version_bump:
+        lines += [
             f"Merging this pull request cuts `v{version_bump.new}` (the release workflow tags the "
             "Version on `main`); do not also run `nemar dataset release`, which would cut a "
             "further patch.",
@@ -537,6 +621,9 @@ def open_pr(
         if from_ref
         else ttl
     )
+    no_geometry_title = (
+        f"Integrate collaborator changes (NEMAR geometry adds no files, pipeline {pv})"
+    )
     if _is_mirror(dataset_id) and not bump_version:
         raise PrRefusal(
             f"{dataset_id} is a mirror: its geometry goes in the one integration pull request "
@@ -607,8 +694,11 @@ def open_pr(
     report = analysis.report
     changes = report["changes"]
     expected = set(changes["add"]) | set(changes["change"]) | set(changes["remove"])
-    if not expected:
+    no_geometry = not expected
+    if no_geometry and not from_ref:
         raise PrRefusal("the apply produced no changes; there is nothing to propose")
+    if no_geometry:
+        pr_title = no_geometry_title
     bad = _unexpected(_status_entries(clone), expected, never_checked_out)
     if bad:
         shown = "; ".join(bad[:10]) + (f"; and {len(bad) - 10} more" if len(bad) > 10 else "")
@@ -627,7 +717,7 @@ def open_pr(
         _git(clone, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel, neutral=True)
     check_staged(_paths(clone, "diff", "--cached", "--name-only", "--no-renames"), expected)
     verify_staged_bytes(clone, to_stage)
-    ownership = read_ownership(clone)
+    ownership = read_ownership(clone)  # None when there is none
     owned = {e.path: e for e in ownership.entries} if ownership else {}
     body = build_body(
         report,
@@ -637,12 +727,17 @@ def open_pr(
         fetch_failed=got.failed,
         version_bump=bump,
         ref=(from_ref, _ref_commits(clone)) if from_ref else None,
+        ownership_exists=ownership is not None,
     )
     check_body_size(body)
     if not from_ref:
         _git(clone, "checkout", "-q", "-b", branch)
-    _git(clone, "commit", "-q", "-m", ttl, what="git commit", neutral=True)
+    staged_now = _paths(clone, "diff", "--cached", "--name-only", "--no-renames")
+    if staged_now:
+        message = f"Set Version to {bump.new}" if no_geometry and bump else ttl
+        _git(clone, "commit", "-q", "-m", message, what="git commit", neutral=True)
     commit = _git(clone, "rev-parse", "HEAD").strip()
+    new_commit = commit != got.commit
     if dry_run:
         out.write(f"branch {branch}, commit {commit}\ntitle: {pr_title}\n\n{body}")
         return PrResult(branch, commit, pr_title, body, None)
@@ -657,9 +752,15 @@ def open_pr(
                 f"{(now or ['gone'])[0][:12]}); nothing was pushed, rerun"
             )
     lease = [f"--force-with-lease=refs/heads/{branch}:{got.commit}"] if from_ref else []
-    _git(
-        clone, "push", *lease, "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push"
-    )
+    if new_commit:  # a branch with nothing new on it is not pushed
+        _git(
+            clone,
+            "push",
+            *lease,
+            "origin",
+            f"refs/heads/{branch}:refs/heads/{branch}",
+            what="git push",
+        )
     if from_ref:
         listed = _run(
             ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,

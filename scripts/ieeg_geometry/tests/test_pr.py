@@ -1010,3 +1010,110 @@ def test_a_configured_but_missing_annex_filter_does_not_stop_a_dry_or_real_run(
 def test_an_nm_body_has_no_patch_release_step():
     body = pr.build_body({**REPORT, "dataset": "nm000352"}, {}, n_surface_sets=0)
     assert "nemar dataset release" not in body
+
+
+# ---- an integration branch that already holds what the pipeline would write -----------------
+
+
+def _branch_with_outputs(env, tmp_path, name="integ", description: str | None = None) -> str:
+    """The collaborator's branch: main plus every file the pipeline writes (so it adds nothing)."""
+    served, bare, _log, _work = env
+    analysis, _ = _run(served, tmp_path / "first", apply=True)
+    clone = tmp_path / f"integ-{name}"
+    _git(tmp_path, "clone", "-q", str(bare), str(clone))
+    _git(clone, "checkout", "-q", "-b", name)
+    c = analysis.report["changes"]
+    for rel in [*c["add"], *c["change"]]:
+        (clone / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(tmp_path / "first" / DATASET_ID / rel, clone / rel)
+    if description is not None:
+        (clone / "dataset_description.json").write_text(description)
+    _git(clone, "add", "-A")
+    _git(clone, "commit", "-q", "--author", "Collab Person <collab@example.org>", "-m", "Outputs")
+    _git(clone, "push", "-q", "origin", name)
+    return _git(clone, "rev-parse", "HEAD").strip()
+
+
+def test_from_ref_with_nothing_to_add_opens_the_pull_request_without_a_geometry_commit(
+    env, tmp_path
+):
+    served, bare, log, work = env
+    tip = _branch_with_outputs(env, tmp_path, description='{"Name": "x", "Version": "1.0.4"}\n')
+    before = _git(bare, "rev-parse", "integ").strip()
+    assert before == tip
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    # nothing was pushed: the branch is the collaborator's tip, no commit on top
+    assert _git(bare, "rev-parse", "integ").strip() == tip
+    assert _git(bare, "rev-parse", "main").strip() == served.commit
+    assert _refs(bare) == ["refs/heads/integ", "refs/heads/main"]
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert verbs.count(["pr", "create"]) == 1
+    call = _create_call(log)
+    assert call["args"][call["args"].index("--head") + 1] == "integ"
+    assert call["args"][call["args"].index("--base") + 1] == "main"
+    assert "adds no files" in call["args"][call["args"].index("--title") + 1]
+    body = call["body"]
+    assert "NEMAR's geometry adds no files on this branch" in body
+    for track in pipeline.TRACKS:
+        assert f"- {track}: " in body
+    assert "Integration branch `integ`: 1 commit(s) not on `main`" in body
+    assert "is already `1.0.4`" in body
+    assert "left exactly as it is" in body
+    assert "Added (" not in body and "## Table cleaning" not in body
+
+
+def test_from_ref_with_nothing_to_add_and_a_version_equal_to_main_makes_one_version_commit(
+    env, tmp_path
+):
+    served, bare, log, work = env
+    main_description = _blob(bare, "main:dataset_description.json").decode()
+    tip = _branch_with_outputs(env, tmp_path, description=main_description)
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    assert _git(bare, "rev-list", "--count", f"{tip}..integ").strip() == "1"
+    assert _git(bare, "log", "-1", "--format=%s", "integ").strip() == "Set Version to 1.0.1"
+    assert _git(bare, "diff", "--name-only", tip, "integ").split() == ["dataset_description.json"]
+    assert b'"1.0.1"' in _blob(bare, "integ:dataset_description.json")
+    body = _create_call(log)["body"]
+    assert "NEMAR's geometry adds no files" in body and "goes from `1.0.0` to `1.0.1`" in body
+
+
+def test_from_ref_with_nothing_to_add_updates_an_open_pull_request(env, tmp_path, monkeypatch):
+    served, bare, log, work = env
+    _branch_with_outputs(env, tmp_path, description='{"Name": "x", "Version": "1.0.4"}\n')
+    monkeypatch.setenv(
+        "STANDIN_OPEN_PRS",
+        '[{"number": 5, "url": "https://example.org/pull/5", '
+        '"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}]',
+    )
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "edit"] in verbs and ["pr", "create"] not in verbs
+
+
+def test_a_plain_pr_with_nothing_to_add_still_refuses(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _run(served, tmp_path / "first2", apply=True)
+    applied = tmp_path / "applied2"
+    shutil.copytree(
+        tmp_path / "first2" / DATASET_ID, applied, ignore=shutil.ignore_patterns(".git")
+    )
+    done = build_remote(applied, tmp_path / "done2")
+    served2, bare2 = _bare(done, tmp_path / "hosting2")
+    assert _pr(served2, tmp_path / "w2") == 1
+    assert "nothing to propose" in capsys.readouterr().err
+    assert not _calls(log) and _refs(bare2) == ["refs/heads/main"]
+
+
+def test_from_ref_with_an_errored_track_still_refuses_even_with_nothing_to_add(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    tip = _branch_with_outputs(env, tmp_path)
+
+    def broken(_dataset):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr("ieeg_geometry.freesurfer.plan_dataset", broken)
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 1
+    assert "a track errored" in capsys.readouterr().err
+    assert not _calls(log) and _git(bare, "rev-parse", "integ").strip() == tip
