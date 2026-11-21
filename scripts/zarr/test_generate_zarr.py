@@ -18132,6 +18132,87 @@ class TestGappedEdfPlusDThroughConvertOne(ConvertOneKeepingStoreCase):
         )
 
 
+class TestMainOverAGappedAndAGoodEdfPlusD(unittest.TestCase):
+    """`main()` over a dataset with one gapped EDF+D and one good EDF+D, with the
+    real exporter, the `aws` stand-in over local files and a local catalog (the
+    harness of `TestMainRetryPendingRound`). The run converts the good recording
+    and exits 0; the gapped one is a typed `discontinuous_recording` failure in the
+    published index. The callback's `deterministic` is True (every failure is a data
+    failure), which `hallu-zarr.sh` reads only for a run that converted nothing; this
+    run exits 0 and the dataset is done whatever it says
+    (`dataset_failure_is_deterministic`)."""
+
+    GOOD = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    GAPPED = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    _serve_catalog = TestMainRetryPendingRound._serve_catalog
+    _restore_env = staticmethod(TestMainRetryPendingRound._restore_env)
+    run_main = TestMainRetryPendingRound.run_main
+    published_index = TestMainRetryPendingRound.published_index
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        for sub in ("sub-01", "sub-02"):
+            os.makedirs(os.path.join(self.repo, sub, "eeg"))
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "gap fixture", "BIDSVersion": "1.8.0"}, fh)
+        # Records at 0, 1, 2, 3 s (contiguous) and at 0, 1, 10, 11 s (an 8 s gap).
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GOOD), [0, 1, 2, 3])
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GAPPED), [0, 1, 10, 11])
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+
+        self.row = {"dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"}
+        self.api = self._serve_catalog()
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    def test_the_good_recording_converts_and_the_gapped_one_is_a_typed_failure(self):
+        rc, log, callback = self.run_main()
+        self.assertEqual(rc, 0, log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.GOOD])
+        self.assertEqual([f["path"] for f in index["failures"]], [self.GAPPED])
+        (failure,) = index["failures"]
+        self.assertEqual(failure["code"], "discontinuous_recording")
+        self.assertIn("8 s at 2 s", failure["detail"])
+        self.assertEqual(index.get("pending", []), [])
+        # A partially successful run: ready, one data failure counted.
+        self.assertEqual(callback["status"], "ready")
+        self.assertEqual(callback["failure_count"], 1)
+        self.assertEqual(callback["data_failures"][0]["code"], "discontinuous_recording")
+        self.assertIs(callback["deterministic"], True)
+
+
 class TestDiscontinuityDetail(unittest.TestCase):
     """`discontinuity_detail` and the `failure_verdict` rule that uses it, against
     the real exception class: a malformed `.gaps` must publish biosigIO's own text
