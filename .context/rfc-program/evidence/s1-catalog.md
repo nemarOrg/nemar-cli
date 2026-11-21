@@ -19,6 +19,7 @@ Application Programming Interface (API); megabyte (MB); gigabyte (GB).
 
 The scripts are in `evidence/s1/`: `scan.py` (the earlier scan, as run), `s1scan.py` (the new stages), `derive.py` and `union.py` (derived tables, no network).
 The working cache (about 56 MB, plus the intermediate listing and the per-recording tables) stays in `/Users/yahya/.cache/nemar-s1-scan/` and is not committed.
+`fif-coverage.json` and `extras.json` are derived from `fif.jsonl` and `files-index.json` in that uncommitted cache directory, so they cannot be regenerated from the committed files alone.
 
 **"Version 2 stores"** in this card means the serving stores of the public catalog, 231,259 in total (the sum of each dataset's `zarr_store_count`), taken to be written by the version 2 biosig-zarr writer as the program plan assumes.
 No store's own `format_version` was read.
@@ -121,6 +122,7 @@ The dataset's index records 52 failures, all `retry_exhausted`: 49 `MemoryError`
 The 15 other stores are of ungapped recordings (`stores_without_gap` 15).
 The index says the run 07 store lasts 9,884.0 s, which is exactly its 4,942 records times 2 s, while the file's last record starts at 9,916.4 s; for run 05 the store lasts 12,622.0 s against a last onset of 12,978.7 s.
 That is why the gap looks dropped, but it is an inference from the index's `duration_s`: the store bytes were not read, and a Zarr read of the store would settle it.
+The offsets implied by those figures (last onset plus one 2 s record, less the store duration: about 34.4 s and 358.7 s) differ from the recorded gaps (33.9 s and 358.1 s) by 0.5 to 0.6 s, and I did not reconcile that difference; a nonzero first onset would be consistent with it (the two files' first onsets, in `deep-edfd-files.json`, are 0.543 s and 0.578 s).
 
 ## 3. BrainVision recordings with more than one `New Segment` marker
 
@@ -160,7 +162,7 @@ Gap size, percentiles by linear interpolation between order statistics (the meth
 
 Small and signed totals: 42 recordings have a positive total of at most 0.1 s, and the 36 negative totals are at or below 0.1 s by definition, so 78 of the 909 have a total at or below 0.1 s; 61 have an absolute total under 0.1 s.
 The net (signed) sum of all gap totals is 168,448.0 s.
-The absolute sum of the individual gaps is 170,389.7 s, but it comes from the first 50 gaps of each recording, which is all of them except for 2 recordings with more than 50 gaps (a lower bound for those two); 48 recordings have at least one negative gap (tested on the same first 50).
+The absolute sum of the individual real gaps (above one sampling interval and 1 ms) is 170,389.7 s, but it comes from the first 50 gaps of each recording, which is all of them except for 2 recordings with more than 50 gaps (a lower bound for those two); 48 recordings have at least one negative gap (tested on the same first 50).
 Sub-second sanity check: 68 recordings have only gaps under 1 s.
 For 59 of them a gap is not a multiple of the sampling interval, so their dates are finer than a second.
 The other 9 (`on005286` and `on005291`, 1 ms sampling, gaps of 47 to 79 ms) cannot be told from millisecond dates: a date written to whole seconds would yield exactly such values when the sample span is fractional, so a gap of under 0.1 s there is weak evidence.
