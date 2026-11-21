@@ -22,7 +22,7 @@ earlier releases are described only by their generated notes.
   `pr` now refuses a mirror (`on` id) without `--bump-version`, pointing to the integration flow (`--from-ref <branch> --bump-version`), because the old "run `nemar dataset release`" step contradicts it.
 - **`pr --from-ref` opens the integration pull request when the geometry adds nothing.**
   When the collaborator's branch already holds the files the label track would write, and the other tracks skip, the apply used to be refused as "nothing to propose".
-  Now no geometry commit is made and no ownership file is written; `--bump-version` still applies (a "Set Version to X.Y.Z" commit only when the Version changes), the branch is pushed only if there is a new commit, and the pull request is opened or updated with a body that says the geometry adds no files and lists the reasons per track.
+  Now no geometry commit is made and no ownership file is written; `--bump-version` still applies (a "Set Version to X.Y.Z" commit only when the Version changes), the branch is pushed only if there is a new commit, and the pull request is opened or updated with a body that says the geometry adds no files and lists what each track decided.
   A plain `pr` from `main` with nothing to add, and any errored track, still refuse.
 - **The geometry package reads renamed channels files.**
   Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
