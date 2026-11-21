@@ -11,6 +11,8 @@ import {
   MAIL_CATEGORIES,
   type MailCategory,
   RECALL_CATEGORY,
+  emailHeadingBlock,
+  emailMarkdownBlocks,
 } from "../../../shared/contract/mail-categories.js";
 import { escapeHtml } from "../lib/escape";
 import { recordBroadcastOutcome } from "./broadcast-outcomes";
@@ -221,13 +223,12 @@ export async function getBroadcastRecipientByUsername(
  * horizontal rules, and paragraphs. Designed for admin-written announcements.
  */
 export function markdownToEmailHtml(markdown: string): string {
-  const blocks = markdown.trim().split(/\n{2,}/);
+  // The block rule is shared with the recall heading check (shared/contract/mail-categories.ts),
+  // so a heading that check accepts is a heading rendered here.
+  const blocks = emailMarkdownBlocks(markdown);
   const htmlBlocks: string[] = [];
 
-  for (const block of blocks) {
-    const trimmed = block.trim();
-    if (!trimmed) continue;
-
+  for (const trimmed of blocks) {
     // Horizontal rule
     if (/^---+$/.test(trimmed)) {
       htmlBlocks.push('<hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">');
@@ -235,11 +236,11 @@ export function markdownToEmailHtml(markdown: string): string {
     }
 
     // ATX headings
-    const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
+    const heading = emailHeadingBlock(trimmed);
+    if (heading) {
+      const { level } = heading;
       const sizes = ["24px", "20px", "18px"];
-      const text = inlineMarkdown(headingMatch[2]);
+      const text = inlineMarkdown(heading.text);
       htmlBlocks.push(
         `<h${level} style="color: #333; font-size: ${sizes[level - 1]}; margin: 24px 0 8px 0;">${text}</h${level}>`,
       );

@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { markdownToEmailHtml } from "../backend/src/services/broadcast";
 import {
   ADMIN_ALERT_CATEGORIES,
   DEFAULT_EMAIL_PREFERENCES,
@@ -151,15 +152,40 @@ describe("recall rules (epic #2260 phase 3)", () => {
 
   test("both headings are required, as headings, in any case and level", () => {
     expect(missingRecallHeadings("## What is affected\n\nx\n\n## What to do\n\ny")).toEqual([]);
-    expect(missingRecallHeadings("# what is AFFECTED\n### What to do ###")).toEqual([]);
+    expect(missingRecallHeadings("# what is AFFECTED\n\n### What to do")).toEqual([]);
     expect(missingRecallHeadings("## What is affected\n\nx")).toEqual(["What to do"]);
     expect(missingRecallHeadings("")).toEqual(["What is affected", "What to do"]);
   });
 
   test("a mention of the words in a paragraph, or a deeper heading, is not a heading", () => {
     expect(missingRecallHeadings("What is affected and What to do are below.")).toHaveLength(2);
-    expect(missingRecallHeadings("#### What is affected\n#### What to do")).toHaveLength(2);
-    expect(missingRecallHeadings("## What is affected today\n## What to do now")).toHaveLength(2);
+    expect(missingRecallHeadings("#### What is affected\n\n#### What to do")).toHaveLength(2);
+    expect(missingRecallHeadings("## What is affected today\n\n## What to do now")).toHaveLength(2);
+    expect(missingRecallHeadings("## What is affected ##\n\n## What to do ##")).toHaveLength(2);
+  });
+
+  test("a heading line fused to the text under it renders as a paragraph, so it does not count", () => {
+    const fused = "## What is affected\nnm000104 v1.0.0\n\n## What to do\nDelete your copy.";
+    expect(missingRecallHeadings(fused)).toEqual(["What is affected", "What to do"]);
+    expect(markdownToEmailHtml(fused)).not.toContain("<h2");
+  });
+
+  test("CRLF line endings split like LF: the validator and the renderer agree", () => {
+    const crlf = "## What is affected\r\n\r\nnm000104\r\n\r\n## What to do\r\n\r\nDelete it.";
+    expect(missingRecallHeadings(crlf)).toEqual([]);
+    const html = markdownToEmailHtml(crlf);
+    expect(html).toContain(">What is affected</h2>");
+    expect(html).toContain(">What to do</h2>");
+  });
+
+  test("a body the validator accepts renders both headings as <h2>", () => {
+    const body = "## What is affected\n\nnm000104 v1.0.0.\n\n## What to do\n\nDelete your copy.";
+    expect(missingRecallHeadings(body)).toEqual([]);
+    const html = markdownToEmailHtml(body);
+    expect([...html.matchAll(/<h2[^>]*>([^<]+)<\/h2>/g)].map((m) => m[1])).toEqual([
+      "What is affected",
+      "What to do",
+    ]);
   });
 
   test.each([

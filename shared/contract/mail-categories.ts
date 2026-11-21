@@ -164,15 +164,42 @@ export function recallSubject(subject: string): string {
 }
 
 /**
- * The required headings a recall body lacks. A heading is a markdown ATX heading line (one to three
- * `#`, which is what the mail renderer turns into a heading) whose text is exactly the required
- * words, compared without case; a mention of the words inside a paragraph is not a heading.
+ * The blocks the mail renderer sees: line endings normalized (CRLF and lone CR become LF, so a body
+ * typed on Windows splits like any other), the text trimmed, and split on blank lines. THE one block
+ * rule: `markdownToEmailHtml` renders these blocks and {@link missingRecallHeadings} validates them,
+ * so a heading the validator accepts is a heading the renderer produces.
+ */
+export function emailMarkdownBlocks(markdown: string): string[] {
+  return markdown
+    .replace(/\r\n?/g, "\n")
+    .trim()
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter((block) => block !== "");
+}
+
+/**
+ * The heading a block renders as, or null. The renderer turns a block into a heading only when the
+ * WHOLE block is one line of one to three `#`, a space and text; a heading line followed by text in
+ * the same block (no blank line between) is a paragraph, not a heading.
+ */
+export function emailHeadingBlock(block: string): { level: 1 | 2 | 3; text: string } | null {
+  const match = /^(#{1,3})\s+(.+)$/.exec(block);
+  if (!match) return null;
+  return { level: (match[1] as string).length as 1 | 2 | 3, text: match[2] as string };
+}
+
+/**
+ * The required headings a recall body lacks. A heading is a block (see {@link emailMarkdownBlocks})
+ * that the renderer turns into an `<h1>` to `<h3>` (see {@link emailHeadingBlock}) and whose text is
+ * exactly the required words, compared without case. A mention of the words inside a paragraph, a
+ * heading line fused to the text under it, and a heading with other words or closing `#` marks are
+ * not headings.
  */
 export function missingRecallHeadings(body: string): string[] {
   const headings = new Set(
-    body
-      .split(/\r?\n/)
-      .map((line) => /^#{1,3}\s+(.+?)\s*#*\s*$/.exec(line)?.[1]?.trim().toLowerCase())
+    emailMarkdownBlocks(body)
+      .map((block) => emailHeadingBlock(block)?.text.trim().toLowerCase())
       .filter((text): text is string => Boolean(text)),
   );
   return RECALL_REQUIRED_HEADINGS.filter((heading) => !headings.has(heading.toLowerCase()));
