@@ -203,3 +203,6 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:28-08:00 | B5 spec lens: 0 crit, 3 imp, 3 sugg; judgment calls 1-8 accepted (4,7,8 verdict accept). Finding 2 contests card B5's layer rule: escalated to advisor (Advisor consults 1/3); Agents today 56/60 |
 | 2026-11-20T18:28-08:00 | A3 hold check: PR 2270 merged into feature/issue-2260-epic-mail-categories, not dev; 0132 not on origin/dev; no dev merge |
 | 2026-11-20T18:29-08:00 | Advisor ruled (B) on B5 layer; lead-C1 resumed for card edits; impl-B5 resumed for r1 fixes |
+| 2026-11-20T18:30-08:00 | Lead card PR 2285 (layer rule, v3-version-4 example) head 2a5223a4; review dispatched; Agents today 57/60 |
+| 2026-11-20T18:31-08:00 | PR 2285 review clean; sugg 1 (assert v3-version-4 layer 1) sent to lead; sugg 2 rejected (README is on origin main, reviewer's local main stale) |
+| 2026-11-20T18:31-08:00 | Card PR 2285 merged (OPEN ): advisor layer rule in B5 and B5a, v3-version-4 layer 1 asserted; review r1 clean, fix diff verified by manager |

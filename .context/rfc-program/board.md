@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 60 | 56 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 60 | 57 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -181,7 +181,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | impl-N1 | implementer | claude-sonnet | Sonnet high | N1 | 2026-11-20T18:45-08:00 | done |
 | rev-N1 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:00-08:00 | done |
 | rev-N1-r2 | reviewer | claude-sonnet | Sonnet high | N1 | 2026-11-20T19:25-08:00 | done |
-| lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | running |
+| lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | done |
 | rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
 | rev-C1-r2 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:40-08:00 | done |
 | impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | running |
@@ -200,3 +200,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B5-spec | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
 | rev-B5-tools | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:00-08:00 | done |
 | adv-B5-layer | advisor | claude-opus | Opus xhigh | B5 | 2026-11-20T19:30-08:00 | done |
+| rev-2285 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:05-08:00 | done |
