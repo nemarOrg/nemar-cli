@@ -1637,6 +1637,13 @@ export interface BroadcastResponse {
   failed_recipients: string[];
   /** Recipients withheld by a non-production delivery fence. Older servers omit it. */
   suppressed_count?: number;
+  /** The category the send went out under (epic #2260). Older servers omit it. */
+  category?: string;
+  /** A recall also publishes a site notice: its id, or `notice_failed` when it could not be made. */
+  notice_id?: number;
+  notice_error?: string;
+  /** `nothing_queued`: the enqueue failed completely, so no notice was published (retry the recall). */
+  notice_skipped?: string;
   error?: string;
 }
 
@@ -1645,6 +1652,10 @@ export interface BroadcastStatusResponse {
   status: "sent" | "queued" | "done";
   subject: string;
   recipient_group: string;
+  /** `news`, `rfcs`, `maintenance` or `recall`; null for a send from before the categories. */
+  category?: string | null;
+  /** What a recall is about; null on every other row. */
+  recall_reference?: string | null;
   queued_count: number;
   delivered_count: number;
   failure_count: number;
@@ -1664,7 +1675,22 @@ export interface BroadcastDryRunResponse {
   dry_run: true;
   recipient_group: string;
   recipient_count: number;
-  recipients: string[];
+  /** Addresses. A categorized dry run outside production omits them (counts and a sample only). */
+  recipients?: string[];
+  category?: string;
+  /** What the delivery fence would let through. */
+  deliverable_count?: number;
+  /** The category's audience size for each group term. */
+  counts?: Record<string, number>;
+  /** Up to three redacted addresses. */
+  sample?: string[];
+  /** `duplicate_send` when a real run would be refused as a repeat of send `duplicate_of`. */
+  would_refuse?: string;
+  duplicate_of?: number;
+  message?: string;
+  /** Reasons a real send would be refused now (`outbox_required`, `mail_link_secret_unset`, ...). */
+  blockers?: string[];
+  subject?: string;
 }
 
 /**
@@ -1675,6 +1701,11 @@ export interface BroadcastDryRunResponse {
 export async function sendBroadcast(data: {
   to?: string;
   user?: string;
+  /** Required with `to` (epic #2260): news, rfcs, maintenance or recall. Refused with `user`. */
+  category?: string;
+  recall_reference?: string;
+  confirm_recall?: string;
+  allow_repeat?: boolean;
   subject: string;
   body: string;
   dry_run?: boolean;

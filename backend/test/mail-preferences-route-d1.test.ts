@@ -428,29 +428,61 @@ describe("saveEmailPreferences on an account that vanished mid-request", () => {
   });
 });
 
-describe("the uncategorized group send until phase 3 retires it", () => {
-  test("reaches only accounts that left all three categories on, and ignores the retired key", async () => {
-    // `announcements` no longer exists as a stored key (migration 0146), so the old filter would
-    // have mailed everyone. A row that still carries it (a restore) must not decide anything either.
-    await seed("allon", "member");
-    await seed("newsoff", "member", undefined, '{"news":false}');
-    await seed("rfcsoff", "member", undefined, '{"rfcs":false}');
-    await seed("legacykey", "member", undefined, '{"announcements":false}');
-    const res = await app.request(
+describe("the uncategorized group send is retired (phase 3)", () => {
+  const notify = (payload: Record<string, unknown>) =>
+    app.request(
       "/admin/notify",
       {
         method: "POST",
         headers: { Authorization: `Bearer ${ADMIN_KEY}`, "content-type": "application/json" },
-        body: JSON.stringify({ to: "all", subject: "Hello", body: "Body", dry_run: true }),
+        body: JSON.stringify(payload),
       },
       env,
     );
+
+  test("a group send without a category is refused", async () => {
+    const res = await notify({ to: "all", subject: "Hello", body: "Body", dry_run: true });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "category_required" });
+  });
+
+  test("the retired key decides nothing: only the category's own choice does", async () => {
+    // `announcements` no longer exists as a stored key (migration 0146). A row that still carries it
+    // (a restore, or the window before the follow-up migration drops it) must not decide anything.
+    await seed("allon", "member");
+    await seed("newsoff", "member", undefined, '{"news":false}');
+    await seed("rfcsoff", "member", undefined, '{"rfcs":false}');
+    await seed("legacykey", "member", undefined, '{"announcements":false}');
+    const res = await notify({
+      to: "all",
+      category: "news",
+      subject: "Hello",
+      body: "Body",
+      dry_run: true,
+    });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { recipients: string[] };
+    // The route's env is production-less, so the dry run answers counts; the audience is read from a
+    // production-environment dry run of the same request.
+    const prod = await app.request(
+      "/admin/notify",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          to: "all",
+          category: "news",
+          subject: "Hello",
+          body: "Body",
+          dry_run: true,
+        }),
+      },
+      { ...env, ENVIRONMENT: "production" },
+    );
+    const body = (await prod.json()) as { recipients: string[] };
     expect(body.recipients).toContain("allon@prefs.test");
     expect(body.recipients).toContain("legacykey@prefs.test");
+    expect(body.recipients).toContain("rfcsoff@prefs.test");
     expect(body.recipients).not.toContain("newsoff@prefs.test");
-    expect(body.recipients).not.toContain("rfcsoff@prefs.test");
     // "target" stored news:false in the seed.
     expect(body.recipients).not.toContain("target@prefs.test");
   });

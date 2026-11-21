@@ -130,6 +130,11 @@ export interface EmailDeliveryEnv {
   EMAIL_FALLBACK?: string;
   /** The Cloudflare Email Service `send_email` binding. */
   EMAIL?: CloudflareSendEmail;
+  /**
+   * This API's origin. A `List-Unsubscribe` header is accepted only on exactly this origin
+   * ({@link validateMailHeaders}), so a send can never carry an unsubscribe URL that points elsewhere.
+   */
+  API_BASE_URL?: string;
 }
 
 /** The provider a send goes through; the Cloudflare case carries its binding. */
@@ -599,7 +604,7 @@ export async function sendEmail(
   headers?: Record<string, string>,
 ): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
-  const extraHeaders = validateMailHeaders(headers);
+  const extraHeaders = validateMailHeaders(headers, deliveryEnv?.API_BASE_URL);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -693,12 +698,51 @@ export class MailHeaderError extends Error {
 }
 
 /**
- * The only extra headers a caller may set: the threading pair. Names compare case-insensitively.
+ * The only extra headers a caller may set: the threading pair, and the RFC 8058 one-click pair that
+ * community mail carries (epic #2260 phase 3). Names compare case-insensitively.
  * `Message-ID` is deliberately absent: the Cloudflare Email Service controls it and refuses the
  * whole send for it (`E_HEADER_NOT_ALLOWED`); the id a send went out under is read back from
- * {@link SendResult} instead.
+ * {@link SendResult} instead. The two `List-Unsubscribe` headers have value rules of their own
+ * (see {@link validateMailHeaders}); no other `List-*` header is allowed.
  */
-export const ALLOWED_MAIL_HEADERS: readonly string[] = ["In-Reply-To", "References"];
+export const ALLOWED_MAIL_HEADERS: readonly string[] = [
+  "In-Reply-To",
+  "References",
+  "List-Unsubscribe",
+  "List-Unsubscribe-Post",
+];
+
+/** The one value `List-Unsubscribe-Post` may have (RFC 8058, section 3.1). */
+export const LIST_UNSUBSCRIBE_POST_VALUE = "List-Unsubscribe=One-Click";
+
+/**
+ * `List-Unsubscribe` is exactly one angle-bracketed HTTPS URI on this API's unsubscribe path, with a
+ * token in the exact shape `services/mail-links.ts` mints: no `mailto:`, no list of URIs, no plain
+ * HTTP (RFC 8058 requires HTTPS, and Cloudflare refuses HTTP). The mailbox provider POSTs to it, so
+ * it must be the route of `routes/mail.ts` on the configured API origin and nothing else.
+ * Group 1 is the origin, compared with the configured one.
+ */
+const LIST_UNSUBSCRIBE_RE =
+  /^<(https:\/\/[^\s<>,/?#@]+)\/mail\/unsubscribe\/v1\.\d{1,12}\.(?:news|rfcs|maintenance)\.\d{1,12}\.[A-Za-z0-9_-]{43}>$/;
+
+/**
+ * The origin unsubscribe URLs are built on, or null when `API_BASE_URL` cannot carry one: it must
+ * be a bare https origin (a trailing slash is dropped), with no credentials, path, query or
+ * fragment, because the unsubscribe path is appended to it as given.
+ */
+export function unsubscribeOrigin(apiBaseUrl: string | undefined): string | null {
+  const raw = (apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!raw.startsWith("https://")) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return null;
+  if (/[?#]/.test(raw) || raw.slice("https://".length).includes("/")) return null;
+  return raw;
+}
 
 /**
  * The headers the Cloudflare Email Service accepts from a sender
@@ -756,11 +800,13 @@ const MAIL_HEADER_VALUE_MAX = 998;
 /**
  * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
  * their canonical names, or undefined when none. A name outside the list, a value with a control
- * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
- * provider is called.
+ * character (CR or LF would inject a header), an over-long value or a malformed one throws
+ * {@link MailHeaderError} before any provider is called. `apiBaseUrl` is this API's origin: a
+ * `List-Unsubscribe` URI is accepted only on it, so with none (or an unusable one) it is refused.
  */
 export function validateMailHeaders(
   headers: Record<string, string> | undefined,
+  apiBaseUrl?: string,
 ): Record<string, string> | undefined {
   if (!headers) return undefined;
   const out: Record<string, string> = {};
@@ -776,7 +822,29 @@ export function validateMailHeaders(
         `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
       );
     }
+    if (canonical === "List-Unsubscribe") {
+      const match = LIST_UNSUBSCRIBE_RE.exec(value);
+      const origin = unsubscribeOrigin(apiBaseUrl);
+      if (
+        !match ||
+        origin === null ||
+        (match[1] as string).toLowerCase() !== origin.toLowerCase()
+      ) {
+        throw new MailHeaderError(
+          "mail header List-Unsubscribe must be exactly one <https://...> unsubscribe URI on this API's origin",
+        );
+      }
+    }
+    if (canonical === "List-Unsubscribe-Post" && value !== LIST_UNSUBSCRIBE_POST_VALUE) {
+      throw new MailHeaderError(
+        `mail header List-Unsubscribe-Post must be exactly ${LIST_UNSUBSCRIBE_POST_VALUE}`,
+      );
+    }
     out[canonical] = value;
+  }
+  // RFC 8058: the Post header means nothing without the URI it applies to.
+  if (out["List-Unsubscribe-Post"] && !out["List-Unsubscribe"]) {
+    throw new MailHeaderError("mail header List-Unsubscribe-Post requires List-Unsubscribe");
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }

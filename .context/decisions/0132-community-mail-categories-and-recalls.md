@@ -21,7 +21,10 @@ Their audience, sender and defaults live in `MAIL_CATEGORY_TABLE` and nowhere el
 A recall has no stored key, no setter and no route: a preference response reports `recall: {on: true, locked: true}` as a constant, and any request that names `recall` is refused by name.
 
 **3. Storage stays in `users.email_preferences`; `announcements` is retired.**
-Migration 0146 carries each live account's `announcements` value into `news`, `rfcs` and `maintenance` explicitly (D2) and writes one summary audit row, and keeps the `announcements` key unchanged until phase P3 removes it, because migrations apply seconds before the worker deploys and the previous worker still reads it (deleting it would let a notify in that window reach every opted-out account); only strict JSON `false` counts as an opt-out, as the parser has always read every key.
+Migration 0146 carries each live account's `announcements` value into `news`, `rfcs` and `maintenance` explicitly (D2) and writes one summary audit row.
+It leaves the stored `announcements` key unchanged, because migrations apply seconds before the worker deploys and the previous worker still reads it (deleting it would let a notify in that window reach every opted-out account); only strict JSON `false` counts as an opt-out, as the parser has always read every key.
+Phase P3 removes the last code that read the key (`getBroadcastRecipients`, the uncategorized group send) and refuses a group send without a category (`category_required`), so after P3 nothing in the worker reads or writes `announcements`.
+The stored key itself stays until a follow-up migration drops it, shipped in the release AFTER the one that carries this epic: dropping it in the same release would reopen the window above.
 The admin alerts (`user_approval`, `publication_request`, `dataset_anonymity`, `identifier_sweep`, `support_tickets`) are a separate type, and `getAdminEmailsForCategory` accepts only those, so a community category can never reach its first-admin fallback.
 
 **4. Audiences (D3).**
@@ -42,7 +45,19 @@ The owner and any admin may turn a category on or off for another account (D8), 
 Every non-recall message carries a visible unsubscribe link and the RFC 8058 headers; the link is a signed, single-purpose token with no clock, valid while the account, its address and the broadcast row exist, and it can only turn its own category (or, from the page's second button, all three) off (D5, D6).
 It is not a credential: it opens no session, so it is not added to the revocation callers of `docs-auth.ts` and `private-auth.ts`.
 The footer carries the postal address the owner supplied (D7).
+Phase P3 builds it (`services/mail-footer.ts`, `services/email-outbox.ts`): each recipient's footer names the category, says why they receive it, carries the visible unsubscribe link, a link to manage preferences and the address, and the message carries `List-Unsubscribe` (the same HTTPS URL) and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`; those two are the only additions to the `sendEmail` header allowlist, each with a value rule, and no `mailto:` form is sent.
+The outbox consumer re-reads the account and the preference immediately before each send and records `skipped` for a deleted account, a changed address, an account that left the category's audience (revoked, inbox no longer verified, another kind; a recall keeps its own audience) or a category switched off after queueing; a categorized message is never sent without those checks.
 The owner declined a legal review of the defaults and the policy text (D11); the plan records the reasoning and the ordering of the phases.
+
+**8. Sending rules (P3).**
+A group send must name a category and goes only through the outbox, never inline (`outbox_required`); the owner-only table entry is enforced at the route.
+A send that carries a link is refused before anything is written or queued when `MAIL_LINK_SECRET` is unusable or `API_BASE_URL` is not https.
+A recall carries no link, so those two conditions do not hold one back: a safety notice is never blocked by a configuration of the unsubscribe path, which is a deliberate narrowing of "every categorized send".
+The same category, subject and group within 24 hours is refused unless `--allow-repeat` is given; the refusal is made by the audit-row insert itself, so two requests at once cannot both pass, a send whose enqueue failed completely does not count, and the dry run reports it.
+A dry run answers counts per group and a redacted sample; outside production it never returns addresses.
+A categorized send whose every recipient is fenced (a dev worker) is reported as fenced: no row, no site notice. A recall publishes a `critical` site notice through the existing notices table, so the record is public; the notice names the reference and the subject, never the body, and the owner clears it with `nemar admin notice clear` when the recall is resolved.
+A recall reference is a dataset id with an optional version (the dataset, and a version if one is named, must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL; the plan's "ledger entry id" form is not accepted, because no recall ledger exists to resolve it against.
+No `List-Id` header is sent: the owner limited the allowlist extension to the two RFC 8058 headers.
 
 ## Consequences
 
@@ -51,7 +66,7 @@ The owner declined a legal review of the defaults and the policy text (D11); the
 - Existing accounts keep what they had: nobody who opted out of announcements receives a category, and everyone else receives all three.
   `verified` accounts, who received no broadcast before, now receive community mail unless they turn it off; that is the widest change here and it is deliberate (D3).
 - An old CLI that sends `announcements` gets `announcements_retired` naming the three flags; admins are few, so there is no shim.
-- Until phase P3 an uncategorized group send reaches only accounts that left all three categories on.
+- There is no uncategorized group send any more: an old CLI that omits `--category` gets `category_required` and is told to upgrade.
 - A recall cannot reach an address Cloudflare suppressed after a bounce or complaint (ADR 0110); the recall's status view counts those failures so the owner knows.
 
 ## Alternatives considered

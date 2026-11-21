@@ -63,6 +63,8 @@ function env(queue: Queue, failure?: Parameters<typeof recordingBinding>[0]) {
     EMAIL: binding,
     EMAIL_OUTBOX: queue,
     FROM_EMAIL: "NEMAR Staging <noreply@staging.nemar.test>",
+    API_BASE_URL: "https://api-test.nemar.test",
+    MAIL_LINK_SECRET: "s".repeat(64),
   } as unknown as Bindings;
   return { e, sent };
 }
@@ -81,7 +83,12 @@ describe("announcements through the outbox", () => {
       {
         method: "POST",
         headers: { Authorization: `Bearer ${ADMIN_KEY}`, "content-type": "application/json" },
-        body: JSON.stringify({ to: "all", subject: "Hello", body: "Body text" }),
+        body: JSON.stringify({
+          to: "all",
+          category: "news",
+          subject: "Hello",
+          body: "Body text",
+        }),
       },
       e,
     );
@@ -118,6 +125,8 @@ describe("announcements through the outbox", () => {
       status: "done",
       subject: "Hello",
       recipient_group: "all",
+      category: "news",
+      recall_reference: null,
       queued_count: 2,
       delivered_count: 1,
       failure_count: 1,
@@ -135,7 +144,12 @@ describe("announcements through the outbox", () => {
       {
         method: "POST",
         headers: { Authorization: `Bearer ${ADMIN_KEY}`, "content-type": "application/json" },
-        body: JSON.stringify({ to: "all", subject: "Hello", body: "Body text" }),
+        body: JSON.stringify({
+          to: "all",
+          category: "news",
+          subject: "Hello",
+          body: "Body text",
+        }),
       },
       e,
     );
