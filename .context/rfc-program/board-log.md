@@ -257,3 +257,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:53-08:00 | Card PR 2291 (B4d) r1 (1 Sonnet): 1 crit (question 18 count 2->1), 2 sugg; sent to lead. Tag rfc-0001-evidence created on c48405fe (link 200). Issue #2292 filed for nm000411 |
 | 2026-11-21T10:55-08:00 | Card PR 2291 r1: crit rejected with evidence (0e4947c7 line 504 has '(question 18)', manager verified), 2 sugg fixed; merged 90ca0ee6; B4d dispatched (Sonnet high) |
 | 2026-11-21T10:56-08:00 | B4d report: rfcs#2 head b6bbb3cd; manager ran acceptance (all pass), rfc-check pass, still draft; r1 + seam review of whole RFC-0001 out before O5 |
+| 2026-11-21T10:57-08:00 | B4d r1 + seam review of whole RFC-0001 clean (links resolve at their tags, no stale refs, questions 1-40 once each, rfc-check ok); RFC-0001 text ready; O5 waits on mail epic #2260 in production and owner |
