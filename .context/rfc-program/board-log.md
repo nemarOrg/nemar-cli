@@ -243,3 +243,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:26-08:00 | B7b report: biosig-zarr#8 head 10670779 (merge af84a9b2 of 2.0.2); manager ran acceptance, all pass; checks green (conformance not triggered, path filter); r1 review out |
 | 2026-11-21T10:26-08:00 | S1 r2 delta (1 Sonnet): all r1 outcomes real, every new figure recomputed and matching; 3 wording suggestions sent to impl-S1 |
 | 2026-11-21T10:26-08:00 | B7b r1 (1 Sonnet, comments+seam): merge resolutions verified verbatim, spec lines exact; sugg 1 sent to fix, sugg 2 rejected (published entries verbatim) |
+| 2026-11-21T10:27-08:00 | proposal P4 opened: Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 |
+| 2026-11-21T10:27-08:00 | S1 r2 fixes verified at c6d4b48c (one file, onsets checked against deep-edfd-files.json); merged #2289 squash c48405fe; lead proposal recorded for S1 questions and RFC-0001 figures |

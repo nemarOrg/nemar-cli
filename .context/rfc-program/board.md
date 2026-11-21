@@ -67,7 +67,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | review | O0 | #2289 |  | 2026-11-20T16:45-08:00 | 1d | r2 delta clean (0 crit/imp), 3 wording sugg sent to impl-S1; manager verifies, then merge |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | done | O0 | #2289 | r1 claims+code (2 Sonnet): 1 crit, 10 imp, 15 sugg fixed; r2 delta clean, 3 sugg fixed, verified by manager | 2026-11-20T16:45-08:00 | 1d | merged #2289 (c48405fe0ad8e4a005dea123a0fa668b40af6ab1); 3 questions for the lead |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | done | R1 | 2278 | r1 code+tests (2 Sonnet): 1 imp, 4 sugg fixed; r2 delta clean, 2 sugg rejected (empty-title placeholder: rfc-check requires a title; port-9 test never reaches GitHub) | 2026-11-20T16:45-08:00 | 1d | merged 14d49c8e |
@@ -152,6 +152,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | P1 | 2026-11-20T13:29-08:00 | Owner says a rule is wrong and should be updated clearly; the lead rewrites it in runbook.md (manager cannot edit the runbook) | owner, 2026-11-20T15:00: 'That is wrong rule, ask an owner to update the rules clearly' | accepted |
 | P2 | 2026-11-20T14:40-08:00 | Lead writes a docs card: update /platform/zarr/store-contract/ with the v3 NEMAR profile choices (D5, D7, D11, D12, index.json rule), owner merges | owner answer Q29 'Both now' | accepted |
 | P3 | 2026-11-20T15:01-08:00 | Lead updates card N1 Scope text for notes.md to the Q31/Q32 venues (EEGLAB list, MNE Forum, Neurostars) | N1 r2 review: card text predates Q31/Q32 | accepted |
+| P4 | 2026-11-21T10:27-08:00 | Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 | S1 gives both figures; no card yet carries them into RFC-0001; B4c is fixed | open |
 
 ## Agents
 
@@ -195,7 +196,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | done |
 | rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
 | rev-C1-r2 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:40-08:00 | done |
-| impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | running |
+| impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | done |
 | impl-R3 | implementer | claude-sonnet | Sonnet xhigh | R3 | 2026-11-20T16:45-08:00 | done |
 | impl-A3 | implementer | claude-opus | Opus xhigh | A3 | 2026-11-20T16:45-08:00 | done |
 | impl-B5a | implementer | claude-opus | Opus xhigh | B5a | 2026-11-20T16:45-08:00 | done |
