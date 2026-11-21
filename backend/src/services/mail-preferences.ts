@@ -16,10 +16,16 @@ import { COMMUNITY_MAIL_CATEGORIES } from "../../../shared/contract/mail-categor
 import { type EmailPreferences, parseEmailPreferences } from "./email";
 
 /**
- * Where a change came from, recorded as `via` in the audit row. `self` is an account changing its
- * own preferences, through the admin route or through `PUT /users/me/email-preferences`
- * (phase 4), whichever credential it used; `admin` is an owner or admin acting for another
- * account. `cli` and `settings` are declared but no route writes them yet.
+ * Where a change came from, recorded as `via` in the audit row:
+ *
+ *   self       an account changing its own preferences through `PUT /admin/email-preferences`
+ *   cli        an account changing its own through `PUT /users/me/email-preferences` with an API key
+ *   settings   the same route with a session cookie (the website's Settings page)
+ *   one_click  an RFC 8058 one-click POST from a message's List-Unsubscribe header
+ *   link       the unsubscribe page's "this category" button
+ *   link_all   the unsubscribe page's "all non-recall mail" button
+ *   admin      an owner or admin acting for another account
+ *   migration  the summary row migration 0146 wrote
  */
 export type MailChangeVia =
   | "self"
@@ -50,7 +56,8 @@ export async function loadEmailPreferences(
 export interface SavePreferencesInput {
   /** The account whose preferences change. */
   targetId: number;
-  targetUsername: string;
+  /** Recorded in the cross-account audit row; required in practice when the actor is not the target. */
+  targetUsername?: string;
   /** Who made the change: the account itself, or an owner or admin acting for it. */
   actorId: number;
   /** ONLY the keys to set. Every other key in the stored blob is left exactly as it is. */
@@ -143,7 +150,10 @@ export async function saveEmailPreferences(
         .bind(
           actorId,
           String(targetId),
-          JSON.stringify({ target: targetUsername, updated: Object.fromEntries(entries) }),
+          JSON.stringify({
+            target: targetUsername ?? String(targetId),
+            updated: Object.fromEntries(entries),
+          }),
           targetId,
         ),
     );
