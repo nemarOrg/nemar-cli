@@ -73,7 +73,7 @@ And:
 `git merge-base --is-ancestor 2.0.2 HEAD` exits 0;
 `test "$(git show 3.0.0-draft.2:spec/index.md | wc -l)" = "$(wc -l < spec/index.md)"` exits 0;
 `git diff 3.0.0-draft.2 HEAD -- spec/index.md | grep -c '^[-+][^-+]'` prints 8 (four lines out, four in, at lines 4, 8, 51 and 1150);
-`grep -n "Neuroelectromagnetic Data Archive and Tools Resource (NEMAR)" spec/index.md | head -1 | cut -d: -f1` prints 8, and `grep -n -i nemar spec/index.md | head -1 | cut -d: -f1` prints 8;
+`grep -n "Neuroelectromagnetic Data Archive and Tools Resource (NEMAR)" spec/index.md | head -1 | cut -d: -f1` prints 8, and `grep -n NEMAR spec/index.md | head -1 | cut -d: -f1` prints 8 (case-sensitive, so `nemarOrg/rfcs` on line 4 does not count);
 `grep -c "^## Unreleased: 3.0.0-draft.3" CHANGELOG.md` prints 1;
 `grep -c "^Copyright (c) 2026 the biosig-zarr contributors\.$" LICENSE.md` prints 1.
 The PR's checks (`gh pr checks PR -R nemarOrg/biosig-zarr`, with the PR number) all pass, including `links` and the conformance workflow.
