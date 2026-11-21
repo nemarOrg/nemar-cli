@@ -269,6 +269,7 @@ So it is not added to the caller counts in `services/docs-auth.ts` or `services/
 A revoked account's links keep working for the same reason; revoked accounts receive only recalls (D3).
 
 **Leaks.** A token in a URL reaches Worker logs and could reach analytics, so: the website page loads no analytics and sends `Referrer-Policy: no-referrer` and `noindex`; the backend logs the route without the token segment.
+The limit, stated precisely: the Worker's own logs (access log, rate limiter) are redacted, but Cloudflare's invocation logs (observability, 100% sampling) record the full request URL, token included; a leaked token can only turn one category off for one person, who can turn it back on in settings.
 The worst a leaked link does is turn one category off for one person, who can turn it back on in settings.
 
 ### 4.6 Backend routes

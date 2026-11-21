@@ -333,6 +333,8 @@ describe("the caps", () => {
       OIDC_AUTHORIZE_MAX_REQUESTS: 30,
       OAUTH_MAX_REQUESTS: 2000,
       RUNNER_MAX_REQUESTS: 2000,
+      MAIL_LINK_MAX_REQUESTS: 300,
+      MAIL_LINK_READ_MAX_REQUESTS: 3000,
       WINDOW_SIZE: 60,
     });
   });
