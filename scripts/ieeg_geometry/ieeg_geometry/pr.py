@@ -250,18 +250,32 @@ def _ref_lines(ref: tuple[str, list[str]] | None, *, geometry: bool = True) -> l
 
 
 MAX_REASONS = 6  # distinct reasons listed per track before a count stands for the rest
+_ABS_PATH = re.compile(r"(?<![\w.~>])/(?:[\w.@+=-]+/)*[\w.@+=-]+")
 
 
-def _track_reasons(report: dict) -> list[str]:
-    """Why each track wrote nothing: per track, its distinct `status: reason` lines with the
-    number of electrodes files each covers, most common first, capped like other lists."""
+def redact_paths(text: str, roots: list[Path]) -> str:
+    """No absolute path of the owner's machine in a public body: the clone or work directory
+    becomes `<dataset>`, any other absolute path is cut to its basename."""
+    names = {str(r) for r in roots} | {str(r.resolve()) for r in roots}
+    for name in sorted(names, key=len, reverse=True):
+        text = text.replace(name, "<dataset>")
+    return _ABS_PATH.sub(lambda m: m.group(0).rsplit("/", 1)[1], text)
+
+
+def _cut(text: str) -> str:
+    return text if len(text) <= MAX_REASON_CHARS else text[: MAX_REASON_CHARS - 3] + "..."
+
+
+def _track_reasons(report: dict, roots: list[Path]) -> list[str]:
+    """What each track decided: per track, its distinct `status: reason` lines with the number
+    of electrodes files each covers, most common first, capped like other lists."""
     lines = []
     for track in pipeline.TRACKS:
         tally: dict[str, int] = {}
         for row in report["files"]:
             d = row["decisions"].get(track) or {}
             key = f"{d.get('status', 'skipped')}: {d.get('reason') or 'no reason given'}"
-            key = key[:MAX_REASON_CHARS]
+            key = _cut(redact_paths(key, roots))
             tally[key] = tally.get(key, 0) + 1
         ranked = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
         items = [f"{n} file(s), {k}" for k, n in ranked[:MAX_REASONS]]
@@ -270,6 +284,31 @@ def _track_reasons(report: dict) -> list[str]:
             items.append(f"and {more} more file(s) with other reasons")
         lines.append(f"- {track}: " + ("no electrodes files" if not items else "; ".join(items)))
     return lines
+
+
+def orphans(report: dict, ownership) -> list[str]:
+    """Paths the ownership record lists that no track reported this run: recorded, but not
+    produced by this run. An electrodes table is reported when a track named it (as its input or
+    an output); a coordsystem file also when a track decided on a table of the same subject and
+    session (a label kept or already present writes no file, so it lists none)."""
+    if ownership is None:
+        return []
+    reported = {p for k in ("add", "change", "remove", "kept") for p in report["changes"][k]}
+    scopes = set()
+    for row in report["files"]:
+        reported.add(row["electrodes"])
+        scopes.add((row["subject"], row["session"]))
+        for d in row["decisions"].values():
+            reported.update(d.get("outputs") or [])
+    missing = []
+    for e in ownership.entries:
+        if e.path in reported:
+            continue
+        scope = (pipeline._entity(e.path, "sub"), pipeline._entity(e.path, "ses"))
+        if e.path.endswith("_coordsystem.json") and scope in scopes:
+            continue
+        missing.append(e.path)
+    return sorted(missing)
 
 
 def _version_lines(plan: versionbump.Plan | None) -> list[str]:
@@ -345,6 +384,8 @@ def build_body(
     version_bump: versionbump.Plan | None = None,
     ref: tuple[str, list[str]] | None = None,
     ownership_exists: bool = False,
+    orphaned: list[str] | None = None,
+    roots: list[Path] | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -360,6 +401,9 @@ def build_body(
             version_bump=version_bump,
             ref=ref,
             ownership_exists=ownership_exists,
+            orphaned=orphaned or [],
+            roots=roots or [],
+            n_surface_sets=n_surface_sets,
         )
     lines = [
         "This pull request adds electrode positions and coordinate system files that NEMAR "
@@ -415,11 +459,23 @@ def _no_geometry_body(
     version_bump: versionbump.Plan | None,
     ref: tuple[str, list[str]],
     ownership_exists: bool,
+    orphaned: list[str],
+    roots: list[Path],
+    n_surface_sets: int,
 ) -> str:
     lines = [
         "This pull request integrates the collaborator changes on this branch into `main`.",
         "NEMAR's geometry adds no files on this branch: the pipeline found nothing to write, "
         "so there is no geometry commit.",
+        *(
+            [
+                "",
+                f"Warning: {len(orphaned)} path(s) in `{pipeline.OWNERSHIP_REL}` are recorded but "
+                "not produced by this run; they would block other tracks (listed below).",
+            ]
+            if orphaned
+            else []
+        ),
         "",
         f"- Dataset: `{report['dataset']}`, version `{report['dataset_version']}`, "
         f"source commit `{report['source_commit']}`",
@@ -428,6 +484,8 @@ def _no_geometry_body(
         *_ref_lines(ref, geometry=False),
         *_version_lines(version_bump),
         f"- Pipeline: `{report['pipeline_version']}`",
+        f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
+        "(display data, uploaded separately; not part of this pull request)",
         *(
             [f"- `{pipeline.OWNERSHIP_REL}` is already on the branch and is left exactly as it is"]
             if ownership_exists
@@ -435,10 +493,23 @@ def _no_geometry_body(
         ),
         f"- Method, evidence grades and how to read them: {DOCS_URL}",
         "",
-        "Why each track wrote nothing, as electrodes files per reason:",
+        "What each track decided, as electrodes files per decision (none of it adds a file "
+        "to this pull request):",
         "",
-        *_track_reasons(report),
+        *_track_reasons(report, roots),
         "",
+        *(
+            [
+                f"## Recorded but not produced by this run ({len(orphaned)})",
+                "",
+                f"These paths are in `{pipeline.OWNERSHIP_REL}` but no track reported them this "
+                "run, so they are recorded as NEMAR's and would block other tracks:",
+                _path_list(orphaned),
+                "",
+            ]
+            if orphaned
+            else []
+        ),
     ]
     if _is_mirror(report["dataset"]) and version_bump:
         lines += [
@@ -484,7 +555,11 @@ def _path_list(paths: list[str]) -> str:
 
 
 def release_status(
-    clone: Path, version: str, failed: dict[str, str] | None = None, label: str = BASE
+    clone: Path,
+    version: str,
+    failed: dict[str, str] | None = None,
+    label: str = BASE,
+    adds_files: bool = True,
 ) -> tuple[str, bool]:
     """(note for the body or the refusal, whether a real run may proceed).
 
@@ -519,9 +594,15 @@ def release_status(
     if other:
         return (
             f"`{label}` ({head[:12]}) is ahead of release {version} ({tag[:12]}). "
-            f"The geometry files in this pull request were computed from `{label}`, which the "
-            "patch release will publish together with these changes (annexed inputs are unchanged "
-            f"since the release). {len(other)} path(s) outside `.nemar/`, `.github/` and "
+            + (
+                f"The geometry files in this pull request were computed from `{label}`, which the "
+                "patch release will publish together with these changes"
+                if adds_files
+                else f"The pipeline ran on `{label}` and adds no files; the patch release will "
+                f"publish `{label}` as it is"
+            )
+            + f" (annexed inputs are unchanged since the release). {len(other)} path(s) outside "
+            "`.nemar/`, `.github/` and "
             f"`.gitattributes` changed since the release; every changed path, sorted:\n"
             f"{_path_list(sorted(moved))}",
             True,
@@ -699,6 +780,7 @@ def open_pr(
         raise PrRefusal("the apply produced no changes; there is nothing to propose")
     if no_geometry:
         pr_title = no_geometry_title
+        release_note, _ = release_status(clone, got.version, got.failed, label=on, adds_files=False)
     bad = _unexpected(_status_entries(clone), expected, never_checked_out)
     if bad:
         shown = "; ".join(bad[:10]) + (f"; and {len(bad) - 10} more" if len(bad) > 10 else "")
@@ -728,6 +810,8 @@ def open_pr(
         version_bump=bump,
         ref=(from_ref, _ref_commits(clone)) if from_ref else None,
         ownership_exists=ownership is not None,
+        orphaned=orphans(report, ownership) if no_geometry else [],
+        roots=[clone, workdir],
     )
     check_body_size(body)
     if not from_ref:
@@ -751,6 +835,11 @@ def open_pr(
                 f"branch {branch} moved on the remote since the clone ({got.commit[:12]} -> "
                 f"{(now or ['gone'])[0][:12]}); nothing was pushed, rerun"
             )
+    pushed_note = (
+        f"branch {branch} was pushed"
+        if new_commit or not from_ref
+        else f"nothing was pushed (branch {branch} already holds everything)"
+    )
     lease = [f"--force-with-lease=refs/heads/{branch}:{got.commit}"] if from_ref else []
     if new_commit:  # a branch with nothing new on it is not pushed
         _git(
@@ -762,11 +851,16 @@ def open_pr(
             what="git push",
         )
     if from_ref:
-        listed = _run(
-            ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,
-             "--state", "open", "--json", "number,url,headRepositoryOwner,baseRefName"],
-            clone, "gh pr list",
-        )  # fmt: skip
+        try:
+            listed = _run(
+                ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,
+                 "--state", "open", "--json", "number,url,headRepositoryOwner,baseRefName"],
+                clone, "gh pr list",
+            )  # fmt: skip
+        except PrRefusal as exc:
+            raise PrRefusal(
+                f"{exc}; {pushed_note}; rerun to open or update the pull request"
+            ) from exc
         open_prs = [  # a fork's PR with the same branch name is not this branch's PR
             p
             for p in json.loads(listed or "[]")
@@ -776,7 +870,7 @@ def open_pr(
         if len(open_prs) > 1:
             raise PrRefusal(
                 f"branch {branch} has {len(open_prs)} open pull requests into {BASE}; "
-                "it was pushed, edit the right one by hand"
+                f"{pushed_note}, edit the right one by hand"
             )
         if open_prs:
             edit = [
@@ -796,21 +890,25 @@ def open_pr(
         "--title", pr_title,
         "--body-file", str(body_file),
     ]  # fmt: skip
+    # an integration branch carries the collaborator's merge and fixes: never suggest deleting it
+    undo = (
+        f"; or delete the pushed branch: git -C {clone} push origin --delete {branch}"
+        if not from_ref
+        else ""
+    )
     try:
         printed = _run(create, clone, "gh pr create")
     except PrRefusal as exc:
         raise PrRefusal(
-            f"branch {branch} was pushed to origin but the pull request was not opened ({exc}). "
-            f"Either open it by hand: {shlex.join(create)} (run in {clone}); or delete the "
-            f"pushed branch: git -C {clone} push origin --delete {branch}"
+            f"{pushed_note}, but the pull request was not opened ({exc}). "
+            f"Open it by hand: {shlex.join(create)} (run in {clone}){undo}"
         ) from exc
     lines = [ln.strip() for ln in printed.splitlines() if ln.strip()]
     url = lines[-1] if lines and lines[-1].startswith("http") else None
     if url is None:
         raise PrRefusal(
-            f"branch {branch} was pushed but gh printed no pull request URL ({printed.strip()}). "
-            f"Open it by hand: {shlex.join(create)} (run in {clone}); or delete the pushed "
-            f"branch: git -C {clone} push origin --delete {branch}"
+            f"{pushed_note}, but gh printed no pull request URL ({printed.strip()}). "
+            f"Open it by hand: {shlex.join(create)} (run in {clone}){undo}"
         )
     out.write(url + "\n")
     return PrResult(branch, commit, pr_title, body, url)
