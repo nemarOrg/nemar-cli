@@ -11,8 +11,9 @@
  *     the typed confirmation: the reference typed back (the CLI asks for it; the server insists);
  *  3. the audience is `communityRecipients`, the only place a categorized send selects people;
  *  4. a dry run answers counts, never addresses outside production (dev D1 holds real addresses);
- *  5. the same category and subject within 24 hours is refused unless `allow_repeat` is set, so a
- *     re-run command cannot mail everyone twice;
+ *  5. the same category, subject and group within 24 hours is refused unless `allow_repeat` is set,
+ *     so a re-run command cannot mail everyone twice; the refusal is made by the insert itself
+ *     (`enqueueBroadcast`), atomically, and the dry run only reports it;
  *  6. the send itself refuses (nothing written, nothing queued) when the outbox or, for a non-recall,
  *     the link secret is unusable;
  *  7. a recall also publishes a site notice, so the record is public and misuse is visible (D4).
@@ -36,15 +37,14 @@ import {
 import {
   type BroadcastEnv,
   type BroadcastResult,
+  DUPLICATE_SEND_WINDOW_HOURS,
   categorizedSendBlockers,
+  findRecentDuplicate,
   sendBroadcast,
 } from "./broadcast";
 import { isEmailDeliveryAllowed, redactRecipient, resolveEmailConfig } from "./email";
 import { type MailRecipient, communityRecipients } from "./mail-recipients";
 import { createNotice } from "./notices";
-
-/** Hours within which the same category and subject is refused without `allow_repeat`. */
-export const DUPLICATE_SEND_WINDOW_HOURS = 24;
 
 export interface CategorizedNotifyInput {
   to: MailRecipientGroup;
@@ -89,6 +89,10 @@ const BLOCKER_MESSAGE = {
 } as const;
 
 /** The notice text of a recall: what it is about and where the detail is; never the body. */
+function duplicateMessage(category: MailCategory, id: number): string {
+  return `A ${category} message with this subject and group was already sent in the last ${DUPLICATE_SEND_WINDOW_HOURS} hours (ID ${id}). Use --allow-repeat to send it again.`;
+}
+
 function recallNoticeMessage(subject: string, reference: string): string {
   const text = `${subject} (reference: ${reference}). We emailed every account holder what is affected and what to do.`;
   return text.length <= 1000 ? text : `${text.slice(0, 997)}...`;
@@ -178,10 +182,21 @@ export async function handleCategorizedNotify(
     for (const group of MAIL_RECIPIENT_GROUPS) {
       counts[group] = (await communityRecipients(db, category, group)).length;
     }
+    const duplicate = input.allowRepeat
+      ? null
+      : await findRecentDuplicate(db, category, subject, input.to);
     return {
       status: 200,
       body: {
         dry_run: true,
+        // The id of the send a real run would be refused as a repeat of; absent when none.
+        ...(duplicate === null
+          ? {}
+          : {
+              would_refuse: "duplicate_send",
+              duplicate_of: duplicate,
+              message: duplicateMessage(category, duplicate),
+            }),
         category,
         recipient_group: input.to,
         recipient_count: recipients.length,
@@ -195,26 +210,6 @@ export async function handleCategorizedNotify(
         subject,
       },
     };
-  }
-
-  if (!input.allowRepeat) {
-    const earlier = await db
-      .prepare(
-        `SELECT id FROM broadcast_emails
-          WHERE category = ? AND subject = ?
-            AND sent_at > datetime('now', ?)
-          ORDER BY id DESC LIMIT 1`,
-      )
-      .bind(category, subject, `-${DUPLICATE_SEND_WINDOW_HOURS} hours`)
-      .first<{ id: number }>();
-    if (earlier) {
-      return refuse(
-        409,
-        "duplicate_send",
-        `A ${category} message with this subject was already sent in the last ${DUPLICATE_SEND_WINDOW_HOURS} hours (ID ${earlier.id}). Use --allow-repeat to send it again.`,
-        { broadcast_id: earlier.id },
-      );
-    }
   }
 
   const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
@@ -234,6 +229,7 @@ export async function handleCategorizedNotify(
       category,
       recallReference: reference,
       userIds,
+      allowRepeat: input.allowRepeat,
     },
     replyTo,
     isDev,
@@ -242,6 +238,19 @@ export async function handleCategorizedNotify(
 
   if (result.error === "email_service_unconfigured") {
     return refuse(500, "email_service_unconfigured", "The mail provider is not configured.");
+  }
+  if (result.error === "duplicate_send") {
+    return refuse(409, "duplicate_send", duplicateMessage(category, result.broadcast_id), {
+      broadcast_id: result.broadcast_id,
+    });
+  }
+  if (result.error === "all_recipients_fenced") {
+    return refuse(
+      409,
+      "all_recipients_fenced",
+      "Every recipient is withheld by the non-production delivery fence. Nothing was queued and nothing was recorded as sent.",
+      { suppressed_count: result.suppressed_count },
+    );
   }
   if (result.error && result.error in BLOCKER_MESSAGE) {
     const code = result.error as keyof typeof BLOCKER_MESSAGE;

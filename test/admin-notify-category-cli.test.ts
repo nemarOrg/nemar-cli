@@ -239,6 +239,26 @@ describe("a categorized send", () => {
     }
   });
 
+  test("a dry run says when a real send would be refused as a repeat", async () => {
+    const server = startServer({
+      "POST /admin/notify": {
+        dry_run: true,
+        category: "news",
+        recipient_group: "all",
+        recipient_count: 5,
+        would_refuse: "duplicate_send",
+        duplicate_of: 12,
+      },
+    });
+    try {
+      const r = await runCli([...NEWS, "--category", "news", "--dry-run"], server.url);
+      expect(r.stdout).toContain("refused as a repeat of announcement 12");
+      expect(r.stdout).toContain("--allow-repeat");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a production dry run still lists the addresses the server returns", async () => {
     const server = startServer({
       "POST /admin/notify": {

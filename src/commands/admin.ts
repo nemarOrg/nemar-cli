@@ -8827,6 +8827,13 @@ export function formatBroadcastDryRun(r: BroadcastDryRunResponse): string[] {
       ),
     );
   }
+  if (r.would_refuse === "duplicate_send") {
+    lines.push(
+      chalk.yellow(
+        `  A real send would be refused as a repeat of announcement ${r.duplicate_of} (use --allow-repeat to send anyway)`,
+      ),
+    );
+  }
   for (const blocker of r.blockers ?? []) {
     lines.push(chalk.red(`  A real send would be refused now: ${blocker}`));
   }

@@ -1682,6 +1682,10 @@ export interface BroadcastDryRunResponse {
   counts?: Record<string, number>;
   /** Up to three redacted addresses. */
   sample?: string[];
+  /** `duplicate_send` when a real run would be refused as a repeat of send `duplicate_of`. */
+  would_refuse?: string;
+  duplicate_of?: number;
+  message?: string;
   /** Reasons a real send would be refused now (`outbox_required`, `mail_link_secret_unset`, ...). */
   blockers?: string[];
   subject?: string;

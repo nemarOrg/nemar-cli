@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import worker from "../src/index";
 import { adminRoutes } from "../src/routes/admin";
+import { type BroadcastEnv, sendBroadcast } from "../src/services/broadcast";
 import { MailHeaderError, sendEmail, validateMailHeaders } from "../src/services/email";
 import { type OutboxEnv, handleOutboxBatch } from "../src/services/email-outbox";
 import { __resetMailLinkReportsForTests } from "../src/services/mail-links";
@@ -566,6 +567,17 @@ describe("recalls", () => {
     expect(h.sent.length).toBe(4);
   });
 
+  test("a recall with every recipient fenced is reported as fenced: no row, no site notice, nothing queued", async () => {
+    seedDataset("nm000104");
+    const h = harness({ DEV_EMAIL_ALLOWLIST: "nobody@other.test" });
+    const res = await post(OWNER_KEY, RECALL, h);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "all_recipients_fenced", suppressed_count: 4 });
+    expect(noRows()).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 0 });
+    expect(h.queue.bodies).toEqual([]);
+  });
+
   test("a recall still needs the outbox", async () => {
     seedDataset("nm000104");
     const h = harness({ EMAIL_OUTBOX: undefined });
@@ -689,7 +701,7 @@ describe("what a group send must name", () => {
     expect(h.sent[0]?.html).not.toContain(POSTAL);
   });
 
-  test("the same category and subject within 24 hours is refused unless allow_repeat is set", async () => {
+  test("the same category, subject and group within 24 hours is refused unless allow_repeat is set", async () => {
     const h = harness();
     const first = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
     const again = await post(ADMIN_KEY, NEWS, h);
@@ -699,11 +711,48 @@ describe("what a group send must name", () => {
       broadcast_id: first.broadcast_id,
     });
     expect(noRows()).toBe(1);
+    expect(h.queue.bodies.length).toBe(4); // the refused one queued nothing
 
     expect((await post(ADMIN_KEY, { ...NEWS, subject: "Different" }, h)).status).toBe(200);
     expect((await post(ADMIN_KEY, { ...NEWS, allow_repeat: true }, h)).status).toBe(200);
     // Another category with the same subject is another message.
     expect((await post(ADMIN_KEY, { ...NEWS, category: "rfcs" }, h)).status).toBe(200);
+  });
+
+  test("two identical requests at once: exactly one goes out (the guard is the insert, not a check before it)", async () => {
+    const h = harness();
+    const [a, b] = await Promise.all([post(ADMIN_KEY, NEWS, h), post(ADMIN_KEY, NEWS, h)]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(noRows()).toBe(1);
+    expect(h.queue.bodies.length).toBe(4);
+  });
+
+  test("a canary to admins does not block the real send to all, and a repeat of either does", async () => {
+    const h = harness();
+    expect((await post(ADMIN_KEY, { ...NEWS, to: "admins" }, h)).status).toBe(200);
+    expect((await post(ADMIN_KEY, NEWS, h)).status).toBe(200);
+    expect((await post(ADMIN_KEY, { ...NEWS, to: "admins" }, h)).status).toBe(409);
+    expect((await post(ADMIN_KEY, NEWS, h)).status).toBe(409);
+  });
+
+  test("a send whose enqueue failed completely does not block the retry", async () => {
+    const broken = harness({ EMAIL_OUTBOX: recordingQueue({ failBatchAt: 0 }).queue });
+    const failed = await post(ADMIN_KEY, NEWS, broken);
+    expect(await failed.json()).toMatchObject({
+      error: "queue_enqueue_failed",
+      recipient_count: 0,
+    });
+    const retry = harness();
+    const res = await post(ADMIN_KEY, NEWS, retry);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "queued", recipient_count: 4 });
+  });
+
+  test("a partly queued send still blocks the repeat", async () => {
+    const partial = harness({ EMAIL_OUTBOX: recordingQueue({ failBatchAt: 1 }).queue });
+    // Four recipients fit one chunk of 100, so the first sendBatch succeeds and nothing fails.
+    expect((await post(ADMIN_KEY, NEWS, partial)).status).toBe(200);
+    expect((await post(ADMIN_KEY, NEWS, partial)).status).toBe(409);
   });
 
   test("a send older than 24 hours no longer blocks", async () => {
@@ -713,6 +762,47 @@ describe("what a group send must name", () => {
       first.broadcast_id,
     );
     expect((await post(ADMIN_KEY, NEWS, h)).status).toBe(200);
+  });
+
+  test("the dry run says when a real send would be refused as a repeat", async () => {
+    const h = harness();
+    const first = (await (await post(ADMIN_KEY, NEWS, h)).json()) as { broadcast_id: number };
+    const dry = (await (await post(ADMIN_KEY, { ...NEWS, dry_run: true }, h)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(dry).toMatchObject({ would_refuse: "duplicate_send", duplicate_of: first.broadcast_id });
+    const lifted = (await (
+      await post(ADMIN_KEY, { ...NEWS, dry_run: true, allow_repeat: true }, h)
+    ).json()) as Record<string, unknown>;
+    expect("would_refuse" in lifted).toBe(false);
+    const other = (await (
+      await post(ADMIN_KEY, { ...NEWS, to: "admins", dry_run: true }, h)
+    ).json()) as Record<string, unknown>;
+    expect("would_refuse" in other).toBe(false);
+  });
+
+  test("sendBroadcast itself refuses a group send that names no category", async () => {
+    const h = harness();
+    await expect(
+      sendBroadcast(
+        realD1(db),
+        "",
+        "n@nemar.test",
+        {
+          sentById: ownerId,
+          group: "all",
+          subject: "x",
+          bodyMarkdown: "y",
+          recipients: ["alice@nemar.test"],
+        },
+        undefined,
+        true,
+        h.env as unknown as BroadcastEnv,
+      ),
+    ).rejects.toThrow("must name a category");
+    expect(noRows()).toBe(0);
+    expect(h.queue.bodies).toEqual([]);
   });
 });
 
@@ -725,6 +815,14 @@ describe("dev safety: the delivery fence and the dry run", () => {
     expect(JSON.stringify(h.queue.bodies)).not.toContain("outsider");
     await consume(h);
     expect(h.sent.map((m) => m.to)).not.toContain("outsider@example.org");
+  });
+
+  test("a news send with every recipient fenced writes no audit row as if it had gone out", async () => {
+    const h = harness({ DEV_EMAIL_ALLOWLIST: "nobody@other.test" });
+    const res = await post(ADMIN_KEY, NEWS, h);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "all_recipients_fenced" });
+    expect(noRows()).toBe(0);
   });
 
   test("the fence also holds at send time: a forged message for an off-list address is a failure, not a send", async () => {

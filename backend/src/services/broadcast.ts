@@ -136,6 +136,34 @@ interface SingleUserRow {
   email_preferences: string | null;
 }
 
+/** Hours within which the same category, subject and group is refused without `allow_repeat`. */
+export const DUPLICATE_SEND_WINDOW_HOURS = 24;
+
+/**
+ * The rows that block a repeat: the same category, subject and group, sent inside the window, that
+ * reached at least one recipient. `recipient_count > 0` is what a fully failed enqueue is not (it
+ * is rewritten to the number actually queued, so 0), so a send that never went out never blocks the
+ * retry. The group is in the key so a canary to `admins` does not block the real send to `all`.
+ */
+const DUPLICATE_PREDICATE = `category = ? AND subject = ? AND recipient_group = ?
+  AND recipient_count > 0 AND sent_at > datetime('now', '-${DUPLICATE_SEND_WINDOW_HOURS} hours')`;
+
+/** The id of a recent send this one would repeat, or null. Read-only: the dry run reports it. */
+export async function findRecentDuplicate(
+  db: D1Database,
+  category: MailCategory,
+  subject: string,
+  group: RecipientGroupOrUser,
+): Promise<number | null> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM broadcast_emails WHERE ${DUPLICATE_PREDICATE} ORDER BY id DESC LIMIT 1`,
+    )
+    .bind(category, subject, group)
+    .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
 /** What stops a categorized send before anything is written or queued; each is a refusal code. */
 export type CategorizedSendBlocker =
   | "outbox_required"
@@ -365,6 +393,7 @@ async function enqueueBroadcast(
     category?: MailCategory;
     recallReference?: string;
     userIds?: ReadonlyMap<string, number>;
+    allowRepeat?: boolean;
   },
   allRecipients: string[],
   suppressedCount: number,
@@ -379,12 +408,17 @@ async function enqueueBroadcast(
     seen.add(key);
     return true;
   });
+  // A categorized send is refused when the same category, subject and group went out inside the
+  // window unless `allowRepeat`. The check and the insert are ONE statement, so two requests that
+  // arrive together cannot both pass it: the second finds the first's row.
+  const guard = Boolean(params.category) && !params.allowRepeat;
   const audit = await db
     .prepare(
       `INSERT INTO broadcast_emails
          (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count,
           failed_recipients, status, queued_count, category, recall_reference)
-       VALUES (?, ?, ?, ?, ?, 0, '[]', 'queued', ?, ?, ?)
+       SELECT ?, ?, ?, ?, ?, 0, '[]', 'queued', ?, ?, ?
+        WHERE ${guard ? `NOT EXISTS (SELECT 1 FROM broadcast_emails WHERE ${DUPLICATE_PREDICATE})` : "1"}
        RETURNING id`,
     )
     .bind(
@@ -396,8 +430,23 @@ async function enqueueBroadcast(
       allowedRecipients.length,
       params.category ?? null,
       params.recallReference ?? null,
+      ...(guard ? [params.category, params.subject, params.group] : []),
     )
     .first<{ id: number }>();
+  if (!audit?.id && guard && params.category) {
+    const earlier = await findRecentDuplicate(db, params.category, params.subject, params.group);
+    if (earlier !== null) {
+      return {
+        broadcast_id: earlier,
+        status: "sent",
+        recipient_count: 0,
+        failure_count: 0,
+        failed_recipients: [],
+        suppressed_count: suppressedCount,
+        error: "duplicate_send",
+      };
+    }
+  }
   if (!audit?.id) {
     // Nothing was enqueued, so nothing can be reported against a row.
     console.error("[broadcast] Audit record not created; nothing was queued", {
@@ -519,12 +568,20 @@ export async function sendBroadcast(
     /** What a recall is about; stored on the audit row. */
     recallReference?: string;
     userIds?: ReadonlyMap<string, number>;
+    /** Lifts the duplicate guard (same category, subject and group within 24 hours). */
+    allowRepeat?: boolean;
   },
   replyTo?: string,
   isDev?: boolean,
   env?: BroadcastEnv,
   sendTimeoutMs: number = BROADCAST_SEND_TIMEOUT_MS,
 ): Promise<BroadcastResult> {
+  // Defense in depth: the route refuses a group send without a category, but this is the one send
+  // path, and an uncategorized group message would carry no footer, no unsubscribe link and no
+  // preference check. Only a per-user send (`user:<username>`) is direct contact without one.
+  if (!params.category && !params.group.startsWith("user:")) {
+    throw new Error(`sendBroadcast: a group send ("${params.group}") must name a category`);
+  }
   // Guard: the provider must be configured before iterating recipients. A missing or blank
   // Resend key, an unusable EMAIL_PROVIDER, or a Cloudflare provider with no binding would
   // silently record every recipient as a failure while returning 200 to the caller.
@@ -582,6 +639,21 @@ export async function sendBroadcast(
         `ENVIRONMENT=${env?.ENVIRONMENT ?? "unset"} is not production and they are not on ` +
         `DEV_EMAIL_ALLOWLIST. Sample: ${suppressedRecipients.slice(0, 3).map(redactRecipient).join(", ")}`,
     );
+  }
+
+  // A categorized send with every recipient fenced (a dev worker, nobody on the allow-list) is not
+  // a send: nothing is queued and no audit row is written as if it had been, and the caller must
+  // not publish a recall's site notice for it.
+  if (params.category && allowedRecipients.length === 0) {
+    return {
+      broadcast_id: 0,
+      status: "sent",
+      recipient_count: 0,
+      failure_count: 0,
+      failed_recipients: [],
+      suppressed_count: suppressedRecipients.length,
+      error: "all_recipients_fenced",
+    };
   }
 
   // With nothing allowed there is nothing to queue; the inline path records the empty send.
