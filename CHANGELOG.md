@@ -15,6 +15,48 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Community mail (epic #2260, ADR 0132)
+
+- **Group mail now has four categories: `news`, `rfcs`, `maintenance` and `recall`.**
+  `news`, `rfcs` and `maintenance` are on by default and any account can turn each off; a recall (something NEMAR distributed or issued must stop being used, for privacy, integrity or security) is always on and has no switch.
+  `news` and `rfcs` reach `person` accounts at `verified` or `approved`, `maintenance` also reaches `service` accounts, and a recall also reaches `revoked` accounts, because a person whose access ended may still hold the recalled data.
+  `verified` accounts, who received no group mail before, now receive community mail unless they turn it off; that is the widest change here and it is deliberate.
+  Existing accounts keep what they had: whoever turned `announcements` off has all three categories off, and everyone else has all three on.
+- **Every community message carries a one-click unsubscribe.**
+  Each recipient's footer names the category, says why they receive it, and carries an unsubscribe link, a link to manage preferences and NEMAR's postal address; the message also carries the RFC 8058 headers `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, so a mail client's Unsubscribe button works without opening anything.
+  The link turns off only that message's category; its confirmation page (`GET /mail/unsubscribe/<token>`, which never changes anything by itself) has a second button that turns off all three.
+  The new public routes are `GET` and `POST /mail/unsubscribe/<token>` and `GET /mail/unsubscribe/<token>/info` (JSON for the website page), also under `/nemar/mail`; they need no sign-in, stay open in every maintenance mode, and answer 410 `link_invalid` for any link that no longer works.
+  A recall carries no unsubscribe link.
+- **`nemar auth mail` shows and changes your own mail categories, for any account, not only admins.**
+  `nemar auth mail` (or `nemar auth mail show`) lists them, and `nemar auth mail set <news|rfcs|maintenance> <on|off>` or `nemar auth mail set all off` changes them; the API is `GET` and `PUT /users/me/email-preferences`, which a `pending` account may also use.
+  Every change, from the CLI, the link or an admin, is recorded in the audit log.
+- **`nemar admin notify --to <group>` now requires `--category <news|rfcs|maintenance|recall>`.**
+  Recipients who turned the category off are skipped, including those who turn it off after the send is queued; group sends always go through the outbox.
+  An older CLI that sends a group mail without a category gets `category_required` and is told to upgrade.
+  `--user <username>` (direct contact) takes no category.
+- **A recall is owner only and needs `--recall-ref` and `--confirm-recall`.**
+  `--recall-ref` names what is recalled: a dataset id with an optional version (`nm000104@v1.2.0`, which must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL.
+  `--confirm-recall` must repeat the reference exactly (`--yes` does not replace it); the subject gets the `[NEMAR recall]` prefix and the body must have the headings "What is affected" and "What to do".
+  A recall sent with `--to all` that queued at least one email publishes a `critical` site notice naming the reference and subject, and a second send of the same reference within 24 hours reuses it; a send to `admins` or `members` (a canary) or one that queued nothing publishes none (`notice_skipped: canary` or `nothing_queued`). Clear the notice with `nemar admin notice clear <id>` when the recall is resolved.
+- **The same category, subject and group cannot go out twice within 24 hours unless `--allow-repeat` is given.**
+  The guard keys on the recipient group too, so a canary to `admins` does not block the send to `all`; subjects match after Unicode NFKC folding, trimming, collapsing any run of whitespace to one space and ignoring case, and a recall's subject is compared with its `[NEMAR recall]` prefix; `--dry-run` reports a send the guard would refuse, and a send that queued nothing does not count.
+- **A declined confirmation no longer goes ahead in `nemar admin notify` or `nemar admin notice clear`.**
+  The confirmation result was checked for truthiness, and a declined or cancelled answer is a non-empty string.
+- **`nemar admin email-preferences update` gains `--news`, `--rfcs` and `--maintenance`; `--announcements` is retired.**
+  `--announcements` now fails with a message naming the three new flags, and the backend refuses an older CLI that sends it (`announcements_retired`).
+  `--all` sets every switchable category and admin alert (recalls stay on).
+  With `--user`, the owner and any admin can show or change another account's community categories; another account's admin alerts stay the owner's.
+- **Migrations.**
+  0146 copies each live account's `announcements` value into `news`, `rfcs` and `maintenance` and writes one summary audit row; it keeps the stored `announcements` key so the previous Worker still reads it during the deploy, and a migration in the following release drops it. Do not roll back to the previous Worker once this one has run: it reads only `announcements`, so anyone who turned a category off here would get group mail again.
+  0147 adds `broadcast_emails.subject_key`, the normalized subject the 24-hour guard compares.
+- **New Worker secret `MAIL_LINK_SECRET`, required on dev and production before any categorized send.**
+  It signs the unsubscribe links: 32 characters or more (`openssl rand -hex 32`), a different value on dev (`--env dev`) and production, never a `[vars]` entry.
+  Unset or too short, a categorized send is refused before anything is queued (`mail_link_secret_unset`) and the unsubscribe routes answer 503 (`mail_links_unconfigured`); a recall carries no link and is not held back.
+  `MAIL_LINK_SECRET_PREVIOUS` is optional, the rotation slot: copy the old value there before rotating, or every link already in a mailbox stops working.
+- **Docs (nemarOrg/docs#130).**
+  New pages `policies/community-mail` (what each category is, the defaults and how to opt out) and `admin/operations/community-mail-sends` (the categorized-send and recall runbook), and the privacy policy describes the categories and the unsubscribe path.
+- **Not in this release:** the website's preferences and unsubscribe pages, the `nemar auth mail` docs page, and the monthly newsletter (#2267).
+
 ### Zarr conversion
 
 - **Zarr conversion pins biosigIO 1.2.14 (`>=1.2.14,<1.2.15`) and refuses a gapped EDF+D or BDF+D file.**

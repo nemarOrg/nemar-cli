@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
@@ -38,10 +38,22 @@ import {
 } from "../../shared/contract/admin-user.js";
 import {
   ACCOUNT_KIND_VALUES,
+  COMMUNITY_MAIL_CATEGORIES,
   type DuplicateGroup,
   OPERATIONAL_ACCOUNT_KINDS,
   isAccountKind,
+  mailCategoryLabel,
+  mailRecallWhy,
 } from "../../shared/contract/index.js";
+import {
+  MAIL_CATEGORIES,
+  RECALL_CATEGORY,
+  RECALL_REFERENCE_REFUSAL,
+  RECALL_REQUIRED_HEADINGS,
+  isMailCategory,
+  missingRecallHeadings,
+  parseRecallReference,
+} from "../../shared/contract/mail-categories.js";
 import {
   NEUROBAGEL_CHECKS,
   NEUROBAGEL_REGENERATE_MAX,
@@ -77,12 +89,15 @@ import {
   userDetailLines,
 } from "../lib/admin-user-lookup.js";
 import {
+  type AdminAlertPreferences,
   type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
   type BackfillNamesResponse,
   type BackfillUsernamesResponse,
+  type BroadcastDryRunResponse,
+  type BroadcastResponse,
   type BroadcastStatusResponse,
   type DataIntegritySweepBatchResponse,
   type DatasetTransitionResponse,
@@ -8410,10 +8425,22 @@ const emailPrefsCommand = new Command("email-preferences").description(
   "Manage email notification preferences",
 );
 
+/** The admin alerts, with the label `show` and `update` print for each. */
+const ADMIN_ALERT_ROWS: Array<{ key: keyof AdminAlertPreferences; label: string }> = [
+  { key: "user_approval", label: "User approval notifications" },
+  { key: "publication_request", label: "Publication request notifications" },
+  { key: "dataset_anonymity", label: "Anonymity sweep findings" },
+  { key: "identifier_sweep", label: "Identifier sweep weekly report" },
+  { key: "support_tickets", label: "Support tickets assigned to you" },
+];
+
 emailPrefsCommand
   .command("show")
   .description("Show email notification preferences")
-  .option("--user <username>", "(owner only) show another user's preferences")
+  .option(
+    "--user <username>",
+    "(owner or admin) show another user's preferences; an admin sees the community categories only",
+  )
   .action(async (options: { user?: string }) => {
     if (!isAuthenticated()) {
       console.error(chalk.red("Not authenticated. Run: nemar auth login"));
@@ -8427,20 +8454,20 @@ emailPrefsCommand
       spinner.succeed(`${whose} email notification preferences:`);
       console.log();
 
-      const categories: Array<{ key: keyof EmailPreferences; label: string }> = [
-        { key: "user_approval", label: "User approval notifications" },
-        { key: "publication_request", label: "Publication request notifications" },
-        { key: "announcements", label: "Announcement emails" },
-        { key: "dataset_anonymity", label: "Anonymity sweep findings" },
-        { key: "identifier_sweep", label: "Identifier sweep weekly report" },
-        { key: "support_tickets", label: "Support tickets assigned to you" },
-      ];
+      const state = (enabled: boolean) =>
+        enabled ? chalk.green("enabled") : chalk.dim("disabled");
 
-      for (const cat of categories) {
-        const enabled = prefs[cat.key];
-        const status = enabled ? chalk.green("enabled") : chalk.dim("disabled");
-        console.log(`  ${cat.label.padEnd(40)} ${status}`);
+      // The admin alerts are absent when an admin reads another account's preferences.
+      for (const row of ADMIN_ALERT_ROWS) {
+        const enabled = prefs[row.key];
+        if (enabled === undefined) continue;
+        console.log(`  ${row.label.padEnd(40)} ${state(enabled)}`);
       }
+      for (const category of COMMUNITY_MAIL_CATEGORIES) {
+        console.log(`  ${mailCategoryLabel(category).padEnd(40)} ${state(prefs[category])}`);
+      }
+      console.log(`  ${mailCategoryLabel("recall").padEnd(40)} ${chalk.green("always on")}`);
+      console.log(chalk.dim(`  ${mailRecallWhy()}`));
 
       console.log();
       console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
@@ -8455,16 +8482,32 @@ emailPrefsCommand
   .description("Update email notification preferences")
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
-  .option("--announcements <bool>", "Enable/disable announcement emails")
+  .option("--news <bool>", "Enable/disable news emails")
+  .option("--rfcs <bool>", "Enable/disable requests-for-comments emails")
+  .option("--maintenance <bool>", "Enable/disable maintenance emails")
+  .addOption(
+    // Retired by ADR 0132. Registered, hidden, so an old script gets the replacement
+    // flags instead of commander's bare "unknown option".
+    new Option(
+      "--announcements <bool>",
+      "Retired: use --news, --rfcs and --maintenance",
+    ).hideHelp(),
+  )
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
-  .option("--all <bool>", "Enable/disable all notifications")
-  .option("--user <username>", "(owner only) update another user's preferences")
+  .option("--all <bool>", "Enable/disable all notifications (recalls are always on)")
+  .option(
+    "--user <username>",
+    "(owner or admin) update another user's preferences; an admin may change news, rfcs and maintenance only",
+  )
   .action(
     async (options: {
       userApproval?: string;
       publicationRequest?: string;
+      news?: string;
+      rfcs?: string;
+      maintenance?: string;
       announcements?: string;
       datasetAnonymity?: string;
       identifierSweep?: string;
@@ -8474,6 +8517,15 @@ emailPrefsCommand
     }) => {
       if (!isAuthenticated()) {
         console.error(chalk.red("Not authenticated. Run: nemar auth login"));
+        process.exit(1);
+      }
+
+      if (options.announcements !== undefined) {
+        console.error(
+          chalk.red(
+            "--announcements was split into three categories. Use --news, --rfcs and --maintenance instead.",
+          ),
+        );
         process.exit(1);
       }
 
@@ -8494,30 +8546,29 @@ emailPrefsCommand
         const val = parseBool(options.all);
         updates.user_approval = val;
         updates.publication_request = val;
-        updates.announcements = val;
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
         updates.support_tickets = val;
+        for (const category of COMMUNITY_MAIL_CATEGORIES) updates[category] = val;
       } else {
-        const ua = parseBool(options.userApproval);
-        const pr = parseBool(options.publicationRequest);
-        const ann = parseBool(options.announcements);
-        const anon = parseBool(options.datasetAnonymity);
-        const sweep = parseBool(options.identifierSweep);
-        const tickets = parseBool(options.supportTickets);
+        const chosen: Partial<EmailPreferences> = {
+          user_approval: parseBool(options.userApproval),
+          publication_request: parseBool(options.publicationRequest),
+          news: parseBool(options.news),
+          rfcs: parseBool(options.rfcs),
+          maintenance: parseBool(options.maintenance),
+          dataset_anonymity: parseBool(options.datasetAnonymity),
+          identifier_sweep: parseBool(options.identifierSweep),
+          support_tickets: parseBool(options.supportTickets),
+        };
 
-        if (
-          ua === undefined &&
-          pr === undefined &&
-          ann === undefined &&
-          anon === undefined &&
-          sweep === undefined &&
-          tickets === undefined
-        ) {
+        if (Object.values(chosen).every((value) => value === undefined)) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
-          console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --news <bool>                  News emails");
+          console.log("  --rfcs <bool>                  Requests-for-comments emails");
+          console.log("  --maintenance <bool>           Maintenance emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --support-tickets <bool>       Support ticket notifications");
@@ -8525,12 +8576,9 @@ emailPrefsCommand
           process.exit(1);
         }
 
-        if (ua !== undefined) updates.user_approval = ua;
-        if (pr !== undefined) updates.publication_request = pr;
-        if (ann !== undefined) updates.announcements = ann;
-        if (anon !== undefined) updates.dataset_anonymity = anon;
-        if (sweep !== undefined) updates.identifier_sweep = sweep;
-        if (tickets !== undefined) updates.support_tickets = tickets;
+        for (const [key, value] of Object.entries(chosen)) {
+          if (value !== undefined) updates[key as keyof EmailPreferences] = value;
+        }
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -8539,23 +8587,27 @@ emailPrefsCommand
         const whose = result.username ? `${result.username}'s` : "Your";
         spinner.succeed(`${whose} email preferences updated:`);
         console.log();
+        const state = (enabled: boolean) =>
+          enabled ? chalk.green("enabled") : chalk.dim("disabled");
+        const alertLabels: Record<keyof AdminAlertPreferences, string> = {
+          user_approval: "User approval:       ",
+          publication_request: "Publication request:  ",
+          dataset_anonymity: "Anonymity findings:   ",
+          identifier_sweep: "Identifier sweep:     ",
+          support_tickets: "Support tickets:      ",
+        };
+        for (const row of ADMIN_ALERT_ROWS) {
+          const enabled = result[row.key];
+          if (enabled === undefined) continue;
+          console.log(`  ${alertLabels[row.key]} ${state(enabled)}`);
+        }
+        for (const category of COMMUNITY_MAIL_CATEGORIES) {
+          console.log(
+            `  ${`${mailCategoryLabel(category)}:`.padEnd(22)} ${state(result[category])}`,
+          );
+        }
         console.log(
-          `  User approval:        ${result.user_approval ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Publication request:   ${result.publication_request ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Announcements:         ${result.announcements ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Anonymity findings:    ${result.dataset_anonymity ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
-        );
-        console.log(
-          `  Support tickets:       ${result.support_tickets ? chalk.green("enabled") : chalk.dim("disabled")}`,
+          `  ${`${mailCategoryLabel("recall")}:`.padEnd(22)} ${chalk.green("always on")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");
@@ -8702,7 +8754,7 @@ noticeCommand
     }
 
     const confirmed = await confirm(`Delete notice #${id}?`, options, false);
-    if (!confirmed) return;
+    if (confirmed !== "confirmed") return;
 
     const spinner = ora("Deleting notice...").start();
     try {
@@ -8725,8 +8777,10 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
     `${chalk.bold(`Announcement ${s.id}`)} ${chalk.cyan(s.status)}`,
     `  Subject: ${s.subject}`,
     `  To: ${s.recipient_group}`,
-    `  Sent at: ${s.sent_at}`,
   ];
+  if (s.category) lines.push(`  Category: ${s.category}`);
+  if (s.recall_reference) lines.push(`  Recall reference: ${s.recall_reference}`);
+  lines.push(`  Sent at: ${s.sent_at}`);
   if (s.status === "sent") {
     lines.push(`  Delivered: ${s.queued_count > 0 ? s.delivered_count : "n/a (sent inline)"}`);
     lines.push(`  Failed: ${s.failure_count}`);
@@ -8737,7 +8791,12 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
     lines.push(
       `  Unconfirmed: ${s.unknown_count} (not retried; the provider never confirmed them)`,
     );
-    const pending = s.queued_count - s.delivered_count - s.failure_count - s.unknown_count;
+    const skipped = s.skipped_count ?? 0;
+    if (skipped > 0) {
+      lines.push(`  Skipped: ${skipped} (opted out or account changed after the send was queued)`);
+    }
+    const pending =
+      s.queued_count - s.delivered_count - s.failure_count - s.unknown_count - skipped;
     if (pending > 0) lines.push(`  Pending: ${pending}`);
   }
   if (s.failed_recipients.length > 0) {
@@ -8747,11 +8806,129 @@ export function formatBroadcastStatus(s: BroadcastStatusResponse): string[] {
   return lines;
 }
 
+/**
+ * The lines a dry run prints after its headline. A categorized dry run in production lists the
+ * addresses, as the old one did; anywhere else it prints counts and a redacted sample only, because
+ * a non-production database holds real people's addresses (epic #2260, ADR 0132).
+ */
+export function formatBroadcastDryRun(r: BroadcastDryRunResponse): string[] {
+  const lines: string[] = [];
+  if (r.counts) {
+    lines.push(
+      `  Audience by group: ${Object.entries(r.counts)
+        .map(([group, n]) => `${group} ${n}`)
+        .join(", ")}`,
+    );
+  }
+  if (r.deliverable_count !== undefined && r.deliverable_count !== r.recipient_count) {
+    lines.push(
+      chalk.yellow(
+        `  ${r.deliverable_count} of ${r.recipient_count} would be delivered; the rest are withheld by the non-production delivery fence`,
+      ),
+    );
+  }
+  if (r.would_refuse === "duplicate_send") {
+    lines.push(
+      chalk.yellow(
+        `  A real send would be refused as a repeat of announcement ${r.duplicate_of} (use --allow-repeat to send anyway)`,
+      ),
+    );
+  }
+  for (const blocker of r.blockers ?? []) {
+    lines.push(chalk.red(`  A real send would be refused now: ${blocker}`));
+  }
+  if (r.recipients) {
+    lines.push("");
+    for (const email of r.recipients) lines.push(`  ${email}`);
+  } else if (r.sample && r.sample.length > 0) {
+    lines.push(`  Sample (redacted): ${r.sample.join(", ")}`);
+    lines.push("  Addresses are listed in production only.");
+  }
+  return lines;
+}
+
+/**
+ * The typed confirmation of a recall: the reference typed back exactly. `provided` is
+ * `--confirm-recall`; without it an interactive terminal asks, and a script must pass the flag.
+ * Undefined means the confirmation was missing or wrong. `--yes` never stands in for it.
+ */
+async function typedRecallConfirmation(
+  reference: string,
+  provided: string | undefined,
+): Promise<string | undefined> {
+  if (provided !== undefined) return provided.trim() === reference ? reference : undefined;
+  if (!process.stdin.isTTY) return undefined;
+  try {
+    const { typed } = await inquirer.prompt([
+      {
+        type: "input",
+        name: "typed",
+        message: `A recall reaches every account in the selected group, ignores email preferences and cannot be undone. Type the reference (${reference}) to send it:`,
+      },
+    ]);
+    return typeof typed === "string" && typed.trim() === reference ? reference : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What the CLI says about a recall's site notice. The backend publishes one (a critical notice, so
+ * the record is public); if it could not, or an older backend did not, creating it is the owner's step.
+ */
+export function recallNoticeLines(result: BroadcastResponse): string[] {
+  if (result.notice_id !== undefined) {
+    return [
+      chalk.green(
+        `  Site notice #${result.notice_id} published. Clear it when the recall is resolved: nemar admin notice clear ${result.notice_id}`,
+      ),
+    ];
+  }
+  if (result.notice_skipped === "canary") {
+    return [
+      chalk.yellow(
+        "  No site notice yet: this send went to part of the audience. The send to all publishes it.",
+      ),
+    ];
+  }
+  if (result.notice_skipped === "nothing_queued") {
+    return [
+      chalk.yellow(
+        "  No site notice was published because nothing was queued. Run the recall again; it publishes the notice once it goes out.",
+      ),
+    ];
+  }
+  return [
+    chalk.yellow.bold(
+      "  OWNER STEP: a recall also needs a public site notice, and none was published.",
+    ),
+    chalk.yellow(
+      '  Publish one now: nemar admin notice set --level critical --message "NEMAR recall: <subject> (reference: <reference>). Check your email for what to do."',
+    ),
+  ];
+}
+
 adminCommand
   .command("notify")
-  .description("Send an email to a group or a single user")
+  .description("Send a categorized email to a group, or an email to a single user")
   .option("--to <group>", "Recipient group: all, admins, members")
-  .option("--user <username>", "Send to a single user by username")
+  .option(
+    "--category <category>",
+    `Category of a group send (required with --to): ${MAIL_CATEGORIES.join(", ")}. Recipients who turned it off are skipped; a recall (owner only) ignores that`,
+  )
+  .option(
+    "--recall-ref <reference>",
+    "What a recall is about: a dataset id with optional version (nm000104@v1.2.0) or a nemarOrg issue, pull request or security advisory URL",
+  )
+  .option(
+    "--confirm-recall <reference>",
+    "Type the recall reference again to confirm sending a recall (--yes does not replace it)",
+  )
+  .option(
+    "--allow-repeat",
+    "Send even if the same category, subject and group went out in the last 24 hours",
+  )
+  .option("--user <username>", "Send to a single user by username (direct contact, no category)")
   .option("--subject <text>", "Email subject line")
   .option("--body <text>", "Email body (markdown)")
   .option("--body-file <path>", "Read email body from file (markdown)")
@@ -8764,6 +8941,10 @@ adminCommand
     async (options: {
       to?: string;
       user?: string;
+      category?: string;
+      recallRef?: string;
+      confirmRecall?: string;
+      allowRepeat?: boolean;
       subject?: string;
       status?: string;
       json?: boolean;
@@ -8820,6 +9001,45 @@ adminCommand
         process.exit(1);
       }
 
+      // Category rules (epic #2260 phase 3). The server enforces every one of them; checking here
+      // spares a round trip and says which flag to add.
+      if (options.user) {
+        if (options.category || options.recallRef || options.confirmRecall || options.allowRepeat) {
+          console.error(
+            chalk.red(
+              "--user is direct contact and takes no --category, --recall-ref, --confirm-recall or --allow-repeat.",
+            ),
+          );
+          process.exit(1);
+        }
+      } else if (!options.category) {
+        console.error(
+          chalk.red(
+            `A group send needs --category <${MAIL_CATEGORIES.join("|")}>. Use --user for direct contact.`,
+          ),
+        );
+        process.exit(1);
+      } else if (!isMailCategory(options.category)) {
+        console.error(
+          chalk.red(`Invalid category: ${options.category}. Use ${MAIL_CATEGORIES.join(", ")}.`),
+        );
+        process.exit(1);
+      }
+      const isRecall = options.category === RECALL_CATEGORY;
+      if (!isRecall && (options.recallRef || options.confirmRecall)) {
+        console.error(
+          chalk.red("--recall-ref and --confirm-recall belong to --category recall only."),
+        );
+        process.exit(1);
+      }
+      const recallRef = options.recallRef?.trim();
+      if (isRecall) {
+        if (!recallRef || !parseRecallReference(recallRef)) {
+          console.error(chalk.red(`--recall-ref is required. ${RECALL_REFERENCE_REFUSAL}`));
+          process.exit(1);
+        }
+      }
+
       // Resolve body content
       let body: string;
       if (options.bodyFile) {
@@ -8835,10 +9055,31 @@ adminCommand
         process.exit(1);
       }
 
-      const target = options.user ? `user:${options.user}` : (options.to as string);
+      if (isRecall) {
+        const missing = missingRecallHeadings(body);
+        if (missing.length > 0) {
+          console.error(
+            chalk.red(
+              `A recall body needs the headings ${RECALL_REQUIRED_HEADINGS.map((h) => `"${h}"`).join(" and ")} (markdown, for example "## What is affected"). Missing: ${missing.join(", ")}.`,
+            ),
+          );
+          process.exit(1);
+        }
+      }
+
+      const target = options.user
+        ? `user:${options.user}`
+        : `${options.to as string} (${options.category})`;
       const requestPayload = options.user
         ? { user: options.user, subject, body }
-        : { to: options.to as string, subject, body };
+        : {
+            to: options.to as string,
+            category: options.category,
+            ...(isRecall ? { recall_reference: recallRef } : {}),
+            ...(options.allowRepeat ? { allow_repeat: true } : {}),
+            subject,
+            body,
+          };
 
       if (options.dryRun) {
         const spinner = ora("Checking recipients...").start();
@@ -8846,12 +9087,9 @@ adminCommand
           const result = await sendBroadcast({ ...requestPayload, dry_run: true });
           if ("dry_run" in result) {
             spinner.succeed(
-              `Dry run: ${result.recipient_count} recipient(s) for "${result.recipient_group}"`,
+              `Dry run: ${result.recipient_count} recipient(s) for "${result.recipient_group}"${result.category ? ` (${result.category})` : ""}`,
             );
-            console.log();
-            for (const email of result.recipients) {
-              console.log(`  ${email}`);
-            }
+            for (const line of formatBroadcastDryRun(result)) console.log(line);
           }
         } catch (err) {
           handleCommandError(err, spinner, "Failed to check recipients");
@@ -8862,6 +9100,14 @@ adminCommand
       // Preview and confirm
       console.log(chalk.bold("Email preview:"));
       console.log(`  To: ${chalk.cyan(target)}`);
+      if (isRecall) {
+        console.log(
+          chalk.red.bold(
+            "  RECALL: reaches every account in this group, ignores email preferences, cannot be unsubscribed from.",
+          ),
+        );
+        console.log(`  Reference: ${recallRef}`);
+      }
       console.log(`  Subject: ${subject}`);
       console.log(`  Body: ${body.length > 100 ? `${body.substring(0, 100)}...` : body}`);
       console.log();
@@ -8870,13 +9116,31 @@ adminCommand
         ? `Send this email to ${options.user}?`
         : "Send this broadcast email?";
       const confirmed = await confirm(confirmPrompt, options, false);
-      if (!confirmed) return;
+      if (confirmed !== "confirmed") return;
+
+      // A recall needs a typed confirmation in addition to the usual one, and --yes never supplies
+      // it. The flag form is for a script that has decided; interactively the owner types it.
+      let confirmRecall: string | undefined;
+      if (isRecall) {
+        confirmRecall = await typedRecallConfirmation(recallRef as string, options.confirmRecall);
+        if (confirmRecall === undefined) {
+          console.error(
+            chalk.red(
+              `Recall not sent: the confirmation must be the reference exactly as given (${recallRef}).`,
+            ),
+          );
+          process.exit(1);
+        }
+      }
 
       const spinner = ora(
         options.user ? `Sending to ${options.user}...` : "Sending broadcast...",
       ).start();
       try {
-        const result = await sendBroadcast(requestPayload);
+        const result = await sendBroadcast({
+          ...requestPayload,
+          ...(confirmRecall === undefined ? {} : { confirm_recall: confirmRecall }),
+        });
 
         if ("broadcast_id" in result) {
           if (result.error === "queue_enqueue_failed") {
@@ -8907,6 +9171,7 @@ adminCommand
               ),
             );
           }
+          if (isRecall) for (const line of recallNoticeLines(result)) console.log(line);
         }
       } catch (err) {
         handleCommandError(err, spinner, "Failed to send email");

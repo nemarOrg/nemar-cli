@@ -18,6 +18,7 @@ import {
   deviceGrantErrorSchema,
 } from "../../../shared/contract/device-auth.js";
 import { IDENTITY_CONFLICT_CODES } from "../../../shared/contract/identity.js";
+import { SELF_MAIL_PREFERENCE_ERROR_CODES } from "../../../shared/contract/mail-categories.js";
 import {
   APPROVAL_REFUSAL_ERROR_CODES,
   IDENTIFIER_SCREEN_ERROR_CODES,
@@ -259,8 +260,13 @@ export async function request<T>(
     // no rule here: `error` already leads, and the word is in `rawBody.code` (`reviewErrorCode`).
     const isApprovalRefusalCode =
       typeof data.error === "string" && APPROVAL_REFUSAL_ERROR_CODES.includes(data.error);
+    // The self-service mail preference refusals (epic #2260 phase 4): a code in `error`, the field in
+    // `field`, the sentence in `message`.
+    const isMailPreferenceCode =
+      typeof data.error === "string" && SELF_MAIL_PREFERENCE_ERROR_CODES.includes(data.error);
     const prefersMessage =
       hasBlockReason ||
+      isMailPreferenceCode ||
       isPublicationRefusalCode ||
       isApprovalRefusalCode ||
       isProfileEditCode ||

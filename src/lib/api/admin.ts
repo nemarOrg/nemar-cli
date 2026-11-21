@@ -23,7 +23,9 @@ import {
   type BackfillUsernameOutcome,
   type BackfillVerifyOutcome,
   type ClearIdentityConflictResponse,
+  type CommunityMailPreferences,
   type DuplicateReport,
+  type RECALL_PREFERENCE,
   adminUsersListResponseSchema,
   apiKeyCreateResponseSchema,
   apiKeyListResponseSchema,
@@ -1568,10 +1570,10 @@ export async function revalidateDataset(
 // Email Preferences
 // ============================================================================
 
-export interface EmailPreferences {
+/** The alerts an admin receives about their own work. */
+export interface AdminAlertPreferences {
   user_approval: boolean;
   publication_request: boolean;
-  announcements: boolean;
   /** #1409: findings from the anonymity sweep on an anonymous deposit. */
   dataset_anonymity: boolean;
   /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
@@ -1580,16 +1582,30 @@ export interface EmailPreferences {
   support_tickets: boolean;
 }
 
-/** Preferences plus whose they are (the backend echoes the resolved username). */
-export type EmailPreferencesResult = EmailPreferences & { username?: string };
+/**
+ * Everything the backend stores: the alerts above plus the three community categories a person may
+ * turn off (epic #2260, ADR 0132). `announcements` is retired; a recall is not stored.
+ */
+export type EmailPreferences = AdminAlertPreferences & CommunityMailPreferences;
 
-/** `targetUser` (owner-only) reads another user's preferences; omit for self. */
+/**
+ * Preferences plus whose they are (the backend echoes the resolved username). `recall` is
+ * constant, not stored. The admin alerts are absent when an admin reads another account's
+ * preferences: those are the owner's to see and change.
+ */
+export type EmailPreferencesResult = Partial<AdminAlertPreferences> &
+  CommunityMailPreferences & {
+    recall: typeof RECALL_PREFERENCE;
+    username?: string;
+  };
+
+/** `targetUser` (owner or admin) reads another user's preferences; omit for self. */
 export async function getEmailPreferences(targetUser?: string): Promise<EmailPreferencesResult> {
   const qs = targetUser ? `?user=${encodeURIComponent(targetUser)}` : "";
   return request<EmailPreferencesResult>(`/admin/email-preferences${qs}`, {}, true);
 }
 
-/** `targetUser` (owner-only) updates another user's preferences; omit for self. */
+/** `targetUser` (owner or admin) updates another user's preferences; omit for self. */
 export async function updateEmailPreferences(
   prefs: Partial<EmailPreferences>,
   targetUser?: string,
@@ -1621,6 +1637,16 @@ export interface BroadcastResponse {
   failed_recipients: string[];
   /** Recipients withheld by a non-production delivery fence. Older servers omit it. */
   suppressed_count?: number;
+  /** The category the send went out under (epic #2260). Older servers omit it. */
+  category?: string;
+  /** A recall also publishes a site notice: its id, or `notice_failed` when it could not be made. */
+  notice_id?: number;
+  notice_error?: string;
+  /**
+   * Why a recall published no notice: `nothing_queued` (the enqueue failed completely; retry the
+   * recall) or `canary` (the send went to admins or members; the send to all publishes it).
+   */
+  notice_skipped?: string;
   error?: string;
 }
 
@@ -1629,11 +1655,20 @@ export interface BroadcastStatusResponse {
   status: "sent" | "queued" | "done";
   subject: string;
   recipient_group: string;
+  /** `news`, `rfcs`, `maintenance` or `recall`; null for a send from before the categories. */
+  category?: string | null;
+  /** What a recall is about; null on every other row. */
+  recall_reference?: string | null;
   queued_count: number;
   delivered_count: number;
   failure_count: number;
   /** Sends whose outcome the provider never confirmed; not retried, so none is delivered twice. */
   unknown_count: number;
+  /**
+   * Recipients left unsent on purpose (the account went away, its address changed or it switched
+   * the category off after the send was queued). Absent from a backend that predates epic #2260.
+   */
+  skipped_count?: number;
   /** Redacted addresses (first letter and domain only). */
   failed_recipients: string[];
   sent_at: string;
@@ -1643,7 +1678,22 @@ export interface BroadcastDryRunResponse {
   dry_run: true;
   recipient_group: string;
   recipient_count: number;
-  recipients: string[];
+  /** Addresses. A categorized dry run outside production omits them (counts and a sample only). */
+  recipients?: string[];
+  category?: string;
+  /** What the delivery fence would let through. */
+  deliverable_count?: number;
+  /** The category's audience size for each group term. */
+  counts?: Record<string, number>;
+  /** Up to three redacted addresses. */
+  sample?: string[];
+  /** `duplicate_send` when a real run would be refused as a repeat of send `duplicate_of`. */
+  would_refuse?: string;
+  duplicate_of?: number;
+  message?: string;
+  /** Reasons a real send would be refused now (`outbox_required`, `mail_link_secret_unset`, ...). */
+  blockers?: string[];
+  subject?: string;
 }
 
 /**
@@ -1654,6 +1704,11 @@ export interface BroadcastDryRunResponse {
 export async function sendBroadcast(data: {
   to?: string;
   user?: string;
+  /** Required with `to` (epic #2260): news, rfcs, maintenance or recall. Refused with `user`. */
+  category?: string;
+  recall_reference?: string;
+  confirm_recall?: string;
+  allow_repeat?: boolean;
   subject: string;
   body: string;
   dry_run?: boolean;

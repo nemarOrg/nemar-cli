@@ -24,13 +24,27 @@ import { COMPUTE_JOB_ID_RE } from "../../../shared/contract/compute.js";
 /** `/webhooks/tapis/` and everything up to the next whitespace: a path as a log line holds it. */
 const TAPIS_HOOK_RE = /\/webhooks\/tapis\/(\S*)/g;
 
-/** `line` with the Tapis webhook token (and any non-job-id first segment) replaced by `[redacted]`. */
+/**
+ * `/mail/unsubscribe/<token>` and its `/info` twin (epic #2260 phase 2). The token names an account and
+ * a message and carries a signature, so it is not logged; the `/info` suffix is kept because it says
+ * which of the two routes ran. Matched anywhere in a line, so the `/nemar` mount's prefix is kept too.
+ */
+const MAIL_UNSUBSCRIBE_RE = /(\/mail\/unsubscribe\/)[^\s/?#]*(\/info)?/g;
+
+/**
+ * `line` with the Tapis webhook token (and any non-job-id first segment) and the unsubscribe token
+ * replaced by `[redacted]`.
+ */
 export function redactSecretPaths(line: string): string {
-  return line.replace(TAPIS_HOOK_RE, (_match, rest: string) => {
-    const first = rest.split("/")[0] ?? "";
-    const id = COMPUTE_JOB_ID_RE.test(first) ? first : "[redacted]";
-    return `/webhooks/tapis/${id}/[redacted]`;
-  });
+  return line
+    .replace(TAPIS_HOOK_RE, (_match, rest: string) => {
+      const first = rest.split("/")[0] ?? "";
+      const id = COMPUTE_JOB_ID_RE.test(first) ? first : "[redacted]";
+      return `/webhooks/tapis/${id}/[redacted]`;
+    })
+    .replace(MAIL_UNSUBSCRIBE_RE, (_match, prefix: string, info?: string) => {
+      return `${prefix}[redacted]${info ?? ""}`;
+    });
 }
 
 /** Hono's logger with every line passed through `redactSecretPaths`. Mounted once, first, in `index.ts`. */
