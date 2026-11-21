@@ -26,7 +26,7 @@ A `main` ahead of the release is not refused: the outputs are computed from the 
 The body lists the commits on the branch that are not on `main`, and the unexpected-change checks apply only to the pipeline's own diff on top of the branch.
 
 `--bump-version` also makes the Version right for the release: the central release workflow tags `v<Version>` from `main` when a pull request merges and the central `version-check` needs the Version to differ from `main`'s, so merging cuts the release and `nemar dataset release` is not run afterwards.
-A branch Version that differs from `main`'s, is `X.Y.Z` and is above every tag is kept (said in the body); otherwise `Version` in `dataset_description.json` is set to the next patch above `main`'s Version and the newest tag, a byte-preserving edit of that one value in the same commit.
+A branch Version is kept (said in the body) only when it is `X.Y.Z` and above `main`'s Version and every tag (matching `versionbump.plan`); otherwise `Version` in `dataset_description.json` is set to the next patch above all of them, a byte-preserving edit of that one value in the same commit.
 It refuses a Version that is not `X.Y.Z` or a target that is already a tag; a `CHANGES` entry above the Version (normal for a mirror) is reported in the body.
 `CHANGES` is the authors' and is never edited.
 

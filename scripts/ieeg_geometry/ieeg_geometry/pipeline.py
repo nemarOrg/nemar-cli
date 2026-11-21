@@ -597,7 +597,7 @@ def build_report(a: Analysis) -> dict:
     changes = _changes(a, owned)
     counts["changes"] = {k: len(v) for k, v in changes.items()}
     return {
-        "electrodes_cleaning": _cleaning(a),
+        "electrodes_cleaning": _cleaning(a, changes),
         "schema": REPORT_SCHEMA,
         "version": REPORT_VERSION,
         "dataset": a.dataset_id,
@@ -615,8 +615,9 @@ def build_report(a: Analysis) -> dict:
     }
 
 
-def _cleaning(a: Analysis) -> list[dict]:
-    """Per written electrodes table, what the writer changed beyond the coordinates."""
+def _cleaning(a: Analysis, changes: dict[str, list[str]]) -> list[dict]:
+    """Per electrodes table this run adds or changes, what the writer changed beyond the
+    coordinates (a file left as it was, hand edited or blocked is not listed)."""
     found: dict[str, dict] = {}
     if a.label_plan is not None:
         for f in a.label_plan.files:
@@ -633,7 +634,8 @@ def _cleaning(a: Analysis) -> list[dict]:
             for rel, cleaning in plan.cleaning.items():
                 if cleaning.changed:
                     found[rel] = cleaning.as_json(rel)
-    return [found[k] for k in sorted(found)]
+    written = set(changes["add"]) | set(changes["change"])
+    return [found[k] for k in sorted(found) if k in written]
 
 
 def report_json(report: dict) -> str:

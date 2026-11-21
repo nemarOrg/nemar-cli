@@ -87,8 +87,9 @@ def plan(description: str, main_description: str, tags: list[str], changes: str 
     """The Version the pull request carries; raises `BumpRefusal` when none can be chosen.
 
     The version check passes only when the pull request's Version differs from `main`'s. A branch
-    Version that differs from `main`'s, is `X.Y.Z` and is above every tag is kept (a collaborator's
-    bump); otherwise it is the next patch above the larger of `main`'s Version and the newest tag.
+    Version is kept (a collaborator's bump) only when it is `X.Y.Z` and above `main`'s Version and
+    every tag; otherwise it is the next patch above all of them. A Version that is not `X.Y.Z` is
+    refused.
     A `CHANGES` entry above the result is reported, not refused: a mirror's CHANGES lists upstream
     versions.
     """

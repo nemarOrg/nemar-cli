@@ -212,7 +212,8 @@ def _removed_section(paths: list[str]) -> list[str]:
 
 
 def _is_mirror(dataset_id: str) -> bool:
-    """A mirror (`on` id) gets its geometry as version N.0.1 through a separate patch release."""
+    """A mirror (`on` id): its geometry is part of the N.0.1 integration pull request, which
+    must carry the final Version (`--bump-version`), because merging it tags the release."""
     return dataset_id.startswith("on")
 
 
@@ -259,6 +260,50 @@ def _version_lines(plan: versionbump.Plan | None) -> list[str]:
     ]
 
 
+MAX_CLEANING_LINE = 400  # characters per file in the Table cleaning section
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_CLEANING_LINE else text[: MAX_CLEANING_LINE - 3] + "..."
+
+
+def _cleaning_item(entry: dict) -> str:
+    parts = []
+    if entry.get("dropped_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["dropped_columns"])
+        parts.append(f"dropped columns: {names}")
+    if entry.get("added_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["added_columns"])
+        parts.append(f"added column: {names}")
+    if entry.get("coerced_cells"):
+        cells = ", ".join(f"`{c}` ({n})" for c, n in sorted(entry["coerced_cells"].items()))
+        parts.append(f"cells set to n/a: {cells}")
+    if entry.get("hemisphere_rewritten"):
+        parts.append(f"hemisphere values rewritten: {entry['hemisphere_rewritten']}")
+    return _clip(f"`{entry['path']}`: " + "; ".join(parts))
+
+
+def _cleaning_section(entries: list[dict], written: set[str]) -> list[str]:
+    """What NEMAR changed in each electrodes table this pull request writes besides the
+    coordinates, so the reviewer sees what was not carried over from the source tables. Only
+    paths in `written` (the added and changed paths) are listed; empty when nothing is left.
+    Long lists are cut by `_bullets` (50 entries, 8,000 characters, then a count)."""
+    entries = [
+        e for e in entries if e["path"] in written and _cleaning_item(e).partition(": ")[2]
+    ]  # something to say
+    if not entries:
+        return []
+    return [
+        f"## Table cleaning ({len(entries)})",
+        "",
+        "NEMAR's electrodes tables below differ from the source tables they were computed from "
+        "beyond the coordinates; the source tables are unchanged and keep everything listed.",
+        "",
+        _bullets([_cleaning_item(e) for e in entries]).replace("  - ", "- "),
+        "",
+    ]
+
+
 def build_body(
     report: dict,
     owned: dict[str, OwnedPath],
@@ -297,6 +342,7 @@ def build_body(
         '"Computed by NEMAR" and names its source file and method.',
         "",
     ]
+    lines += _cleaning_section(report.get("electrodes_cleaning") or [], {*added, *changed})
     reserved = len("\n".join(_removed_section(removed))) if removed else 0
     for label, paths in (("Added", added), ("Changed", changed)):
         if not paths:
@@ -315,12 +361,6 @@ def build_body(
             f"Merging this pull request cuts `v{version_bump.new}` (the release workflow tags the "
             "Version on `main`); do not also run `nemar dataset release`, which would cut a "
             "further patch.",
-        ]
-    elif _is_mirror(report["dataset"]):
-        lines += [
-            "",
-            "After this is merged, cut the patch: "
-            f"`nemar dataset release {report['dataset']} --type patch`.",
         ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -497,6 +537,13 @@ def open_pr(
         if from_ref
         else ttl
     )
+    if _is_mirror(dataset_id) and not bump_version:
+        raise PrRefusal(
+            f"{dataset_id} is a mirror: its geometry goes in the one integration pull request "
+            "that carries the final Version, because merging it tags the release and mints the "
+            "version DOI. Run `pr <id> --from-ref <branch> --bump-version` (see "
+            ".rules/release-and-repull.md)"
+        )
     workdir = Path(workdir)
     if (workdir / dataset_id).exists():
         raise PrRefusal(
