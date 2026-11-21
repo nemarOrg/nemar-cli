@@ -245,3 +245,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:26-08:00 | B7b r1 (1 Sonnet, comments+seam): merge resolutions verified verbatim, spec lines exact; sugg 1 sent to fix, sugg 2 rejected (published entries verbatim) |
 | 2026-11-21T10:27-08:00 | proposal P4 opened: Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 |
 | 2026-11-21T10:27-08:00 | S1 r2 fixes verified at c6d4b48c (one file, onsets checked against deep-edfd-files.json); merged #2289 squash c48405fe; lead proposal recorded for S1 questions and RFC-0001 figures |
+| 2026-11-21T10:28-08:00 | B7b r1 fix verified at 498bd9bb (version-history only, signed off, checks green); merged biosig-zarr#8 merge commit c0cb7e49; O4f asked as Q44 |

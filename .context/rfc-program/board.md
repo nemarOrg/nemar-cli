@@ -94,8 +94,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
 | B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | done | - | biosig-zarr#7 | r1 comments+code (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history); version-history NEMAR fixed; fixes verified by manager (small, no r2) | 2026-11-20T19:40-08:00 | 4h | merged into main (509b68976144561050606d11ac71f623b51f0a97) |
 | O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7 | - |  |  | - | release 2.0.2 on 509b68976144561050606d11ac71f623b51f0a97, not prerelease (verified) |
-| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | review | B7, O4e | biosig-zarr#8 |  | 2026-11-21T10:50-08:00 | 3h | r1 clean (0 crit/imp); sugg 1 (version-history RFC define once) sent to fix; sugg 2 rejected (CHANGELOG history verbatim) |
-| O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7b | - |  |  | - | - |
+| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | done | B7, O4e | biosig-zarr#8 | r1 comments+seam (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history verbatim); fix verified by manager | 2026-11-21T10:50-08:00 | 3h | merged into draft/3.0.0 (c0cb7e49e301feb8cebd57208edee8feb9fdb533) |
+| O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | owner | B7b | - |  |  | - | asked Q44 (owner say-so) |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | - | todo | B4b, O4e, O4f | - |  |  | 2h | - |
 
 ## Questions
@@ -144,6 +144,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q41 | - | Where does the biosig-zarr repository live? | Stay in nemarOrg as hosting only; move when a second institution co-maintains (Recommended) / Transfer to its own organization now | none | 2026-11-22T17:00 | closed | Stay in nemarOrg as hosting only; move when a second institution co-maintains (owner, 2026-11-20T21:25-08:00) |
 | Q42 | - | Release DOIs for biosig-zarr (Q14 planned NEMAR DOIs)? | Keep nemar-doi as a registration service / Zenodo (lead's pick; note AGENTS.md says EZID not Zenodo for NEMAR) / No DOI before beta | none | 2026-11-22T17:00 | closed | Keep nemar-doi, described as a registration service (owner, 2026-11-20T21:25-08:00) |
 | Q43 | - | O4e: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes? | Yes, release now (Recommended) / Hold | none | 2026-11-22T17:00 | closed | Yes, release now (owner, 2026-11-21) |
+| Q44 | - | O4f: tag 3.0.0-draft.3 (pre-release) on B7b's merge commit c0cb7e49 with plan section 5's notes? | Yes, tag now (Recommended) / Hold | none | 2026-11-22T17:00 | open |  |
 
 ## Proposals
 
@@ -222,6 +223,6 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | a535721e | reviewer | claude-sonnet | sonnet | B7 | 2026-11-21T10:20-08:00 | done |
 | a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
 | a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
-| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | running |
+| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | done |
 | ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | done |
 | ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | done |
