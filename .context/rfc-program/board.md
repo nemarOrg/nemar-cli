@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 5 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 80 | 6 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -94,7 +94,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
 | B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | done | - | biosig-zarr#7 | r1 comments+code (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history); version-history NEMAR fixed; fixes verified by manager (small, no r2) | 2026-11-20T19:40-08:00 | 4h | merged into main (509b68976144561050606d11ac71f623b51f0a97) |
 | O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7 | - |  |  | - | release 2.0.2 on 509b68976144561050606d11ac71f623b51f0a97, not prerelease (verified) |
-| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | active | B7, O4e | - |  | 2026-11-21T10:50-08:00 | 3h | impl-B7b out (Opus xhigh); PR into draft/3.0.0 |
+| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | review | B7, O4e | biosig-zarr#8 |  | 2026-11-21T10:50-08:00 | 3h | verified 10670779 (acceptance pass; conformance n/a by path filter, decided); r1 review out (1 Sonnet); B4c note: RFC lines 718, 809, 814 |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7b | - |  |  | - | - |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | - | todo | B4b, O4e, O4f | - |  |  | 2h | - |
 
@@ -221,5 +221,6 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | a535721e | reviewer | claude-sonnet | sonnet | B7 | 2026-11-21T10:20-08:00 | done |
 | a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
 | a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
-| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | running |
+| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | done |
 | ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | running |
+| ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | running |

@@ -104,6 +104,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:16-08:00 | K15: owner confirms they held the copyright of the docs.nemar.org spec text; the relicense stands; O4e (2.0.2) may proceed | owner |  |
 | 2026-11-20T19:17-08:00 | NEMAR's role in biosig-zarr (owner, as read by the manager): NEMAR hosts the repository and offers hosting and DOI registration as a capacity, not ownership; the spec is as independent as possible and NEMAR is ready to hand it off when it matures; until then NEMAR backstops it and guarantees its continuation | owner |  |
 | 2026-11-21T10:18-08:00 | Q43: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes (owner, 2026-11-21) | owner |  |
+| 2026-11-21T10:25-08:00 | B7b gate names the conformance workflow, which did not run on biosig-zarr#8: its path filter (Q27) covers schemas, conformance, tools, package.json, bun.lock, and acceptance line 5 shows none changed vs 3.0.0-draft.2; implementer ran its commands locally (pass). Accepted as not applicable, not as a pass | manager |  |
 
 ## Log
 
@@ -239,3 +240,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:19-08:00 | Q43 answered: owner says release now; 2.0.2 created on 509b6897 (verified tag, not prerelease); B7b dispatched (Opus xhigh) |
 | 2026-11-21T10:19-08:00 | S1 r1 panel: A (claims) 1 crit (inferred gap drop stated as fact), 8 imp, 8 sugg; B (code) 0 crit, 2 imp (FIF lower bound, fif.gz uncounted), 5 sugg; scripts read-only, no secrets, no miscount; all sent back to impl-S1 |
 | 2026-11-21T10:25-08:00 | S1 r1 fixes at fab22ba6: acceptance pass; real discontinuity 1,265/37/997 (1,229/36/978 without 36 negative-total); can-be 3,509/68/3,217 (1,794/56/1,525 without known non-gaps); r2 delta review out |
+| 2026-11-21T10:26-08:00 | B7b report: biosig-zarr#8 head 10670779 (merge af84a9b2 of 2.0.2); manager ran acceptance, all pass; checks green (conformance not triggered, path filter); r1 review out |
