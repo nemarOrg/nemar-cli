@@ -144,3 +144,65 @@ export function mailRecallWhy(): string {
  */
 export const COMMUNITY_ONLY_REFUSAL =
   "Only owners can change another account's admin alerts. As an admin you can change another account's mail categories only: use --news, --rfcs and --maintenance, not --all or the alert flags.";
+
+// ---------------------------------------------------------------------------
+// Recalls (epic #2260 phase 3, ADR 0132 decision 5)
+// ---------------------------------------------------------------------------
+
+/** What every recall subject starts with, so a recall is recognizable before it is opened. */
+export const RECALL_SUBJECT_PREFIX = "[NEMAR recall]";
+
+/** The two headings every recall body carries, in this order. A recall has no other required content. */
+export const RECALL_REQUIRED_HEADINGS = ["What is affected", "What to do"] as const;
+
+/** The subject a recall goes out under: the owner's words behind the fixed prefix, added once. */
+export function recallSubject(subject: string): string {
+  const trimmed = subject.trim();
+  return trimmed.startsWith(RECALL_SUBJECT_PREFIX)
+    ? trimmed
+    : `${RECALL_SUBJECT_PREFIX} ${trimmed}`;
+}
+
+/**
+ * The required headings a recall body lacks. A heading is a markdown ATX heading line (one to three
+ * `#`, which is what the mail renderer turns into a heading) whose text is exactly the required
+ * words, compared without case; a mention of the words inside a paragraph is not a heading.
+ */
+export function missingRecallHeadings(body: string): string[] {
+  const headings = new Set(
+    body
+      .split(/\r?\n/)
+      .map((line) => /^#{1,3}\s+(.+?)\s*#*\s*$/.exec(line)?.[1]?.trim().toLowerCase())
+      .filter((text): text is string => Boolean(text)),
+  );
+  return RECALL_REQUIRED_HEADINGS.filter((heading) => !headings.has(heading.toLowerCase()));
+}
+
+/** What a recall is about, parsed from `--recall-ref`. */
+export type RecallReference =
+  | { kind: "dataset"; datasetId: string; version: string | null; text: string }
+  | { kind: "github"; url: string; text: string };
+
+const RECALL_DATASET_RE = /^([a-z]{2}\d{6})(?:@v?(\d+\.\d+\.\d+))?$/;
+const RECALL_GITHUB_RE =
+  /^https:\/\/github\.com\/(?:nemarOrg|nemarDatasets)\/[A-Za-z0-9._-]+\/(?:(?:issues|pull)\/\d{1,9}|security\/advisories\/GHSA(?:-[a-z0-9]{4}){3})$/;
+
+/**
+ * Parse a recall reference, or null when it is not one of the two accepted shapes: a dataset id with
+ * an optional version (`nm000104`, `nm000104@v1.2.0`), or an issue, pull request or security
+ * advisory URL in `nemarOrg` or `nemarDatasets`. Shape only; the backend also checks that a dataset
+ * exists. Anything else, a free sentence included, is not a reference: a recall must point at something.
+ */
+export function parseRecallReference(raw: string): RecallReference | null {
+  const text = raw.trim();
+  const dataset = RECALL_DATASET_RE.exec(text);
+  if (dataset) {
+    return { kind: "dataset", datasetId: dataset[1] as string, version: dataset[2] ?? null, text };
+  }
+  if (RECALL_GITHUB_RE.test(text)) return { kind: "github", url: text, text };
+  return null;
+}
+
+/** The refusal a malformed `--recall-ref` gets, one sentence naming the accepted shapes. */
+export const RECALL_REFERENCE_REFUSAL =
+  "A recall needs a reference: a dataset id with an optional version (nm000104 or nm000104@v1.2.0), or a nemarOrg or nemarDatasets issue, pull request or security advisory URL.";

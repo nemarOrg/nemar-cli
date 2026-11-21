@@ -19,11 +19,15 @@ import {
   MAIL_CATEGORY_TABLE,
   RECALL_CATEGORY,
   RECALL_PREFERENCE,
+  RECALL_SUBJECT_PREFIX,
   isCommunityMailCategory,
   isMailCategory,
   mailCategoryDescription,
   mailCategoryLabel,
   mailRecallWhy,
+  missingRecallHeadings,
+  parseRecallReference,
+  recallSubject,
 } from "../shared/contract/mail-categories";
 
 describe("the table", () => {
@@ -133,5 +137,56 @@ describe("the words", () => {
     const mailKeys = Object.keys(ACCOUNT_COPY).filter((key) => key.startsWith("mail."));
     expect(mailKeys.length).toBe(MAIL_CATEGORIES.length * 2 + 1);
     for (const key of mailKeys) expect(key.startsWith("cli.")).toBe(false);
+  });
+});
+
+describe("recall rules (epic #2260 phase 3)", () => {
+  test("the subject carries the fixed prefix exactly once", () => {
+    expect(RECALL_SUBJECT_PREFIX).toBe("[NEMAR recall]");
+    expect(recallSubject("  A dataset has a problem ")).toBe(
+      "[NEMAR recall] A dataset has a problem",
+    );
+    expect(recallSubject("[NEMAR recall] Already")).toBe("[NEMAR recall] Already");
+  });
+
+  test("both headings are required, as headings, in any case and level", () => {
+    expect(missingRecallHeadings("## What is affected\n\nx\n\n## What to do\n\ny")).toEqual([]);
+    expect(missingRecallHeadings("# what is AFFECTED\n### What to do ###")).toEqual([]);
+    expect(missingRecallHeadings("## What is affected\n\nx")).toEqual(["What to do"]);
+    expect(missingRecallHeadings("")).toEqual(["What is affected", "What to do"]);
+  });
+
+  test("a mention of the words in a paragraph, or a deeper heading, is not a heading", () => {
+    expect(missingRecallHeadings("What is affected and What to do are below.")).toHaveLength(2);
+    expect(missingRecallHeadings("#### What is affected\n#### What to do")).toHaveLength(2);
+    expect(missingRecallHeadings("## What is affected today\n## What to do now")).toHaveLength(2);
+  });
+
+  test.each([
+    ["nm000104", { kind: "dataset", datasetId: "nm000104", version: null }],
+    ["nm000104@v1.2.0", { kind: "dataset", datasetId: "nm000104", version: "1.2.0" }],
+    ["  nm000104@1.2.0 ", { kind: "dataset", datasetId: "nm000104", version: "1.2.0" }],
+    ["https://github.com/nemarOrg/nemar-cli/issues/2260", { kind: "github" }],
+    ["https://github.com/nemarDatasets/nm000104/pull/3", { kind: "github" }],
+    [
+      "https://github.com/nemarOrg/nemar-cli/security/advisories/GHSA-abcd-ef12-3456",
+      { kind: "github" },
+    ],
+  ])("%s is a reference", (text, expected) => {
+    expect(parseRecallReference(text)).toMatchObject(expected);
+  });
+
+  test.each([
+    "",
+    "it is bad",
+    "nm00010",
+    "nm000104@v1.2",
+    "http://github.com/nemarOrg/nemar-cli/issues/1",
+    "https://github.com/someoneelse/repo/issues/1",
+    "https://github.com/nemarOrg/nemar-cli/issues/1/../../x",
+    "https://github.com/nemarOrg/nemar-cli/issues/1 and more",
+    "ledger:12",
+  ])("%j is not a reference", (text) => {
+    expect(parseRecallReference(text)).toBeNull();
   });
 });
