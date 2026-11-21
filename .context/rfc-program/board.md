@@ -17,10 +17,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Repo | nemarOrg/nemar-cli, nemarOrg/rfcs, nemarOrg/biosig-zarr, nemarOrg/docs |
 | Integration branch | feature/rfc-program (nemar-cli); main (rfcs, biosig-zarr; docs owner-merged) |
 | Manager id | mba-claude-sonnet |
-| State | running |
+| State | paused |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-21T10:57-08:00 |
-| Next tick | 2026-11-21T11:57-08:00 |
+| Last tick | 2026-11-21T11:14-08:00 |
+| Next tick | - |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 

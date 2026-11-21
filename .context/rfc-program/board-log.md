@@ -111,6 +111,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:39-08:00 | P4 accepted: a lead agent answers S1's 3 questions, picks the figures RFC-0001 cites, and writes a card to add them on rfcs#2 (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:52-08:00 | Evidence link: tag rfc-0001-evidence on nemar-cli c48405fe so RFC-0001's S1 link survives the branch (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:52-08:00 | nm000411 (zarr_status failed, no stores): manager files one nemar-cli issue with S1's facts, no cause examined (owner, 2026-11-21) | owner |  |
+| 2026-11-21T11:14-08:00 | Session wrapped: everything left waits on the owner (O5) and mail epic #2260 in production; the next session resumes from the nemarOrg/rfcs clone, not a worktree; handoff in rfcs .context/handoff.md (PR rfcs#3), memories in rfcs .memory/ (owner, 2026-11-21) | owner |  |
 
 ## Log
 
@@ -258,3 +259,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:55-08:00 | Card PR 2291 r1: crit rejected with evidence (0e4947c7 line 504 has '(question 18)', manager verified), 2 sugg fixed; merged 90ca0ee6; B4d dispatched (Sonnet high) |
 | 2026-11-21T10:56-08:00 | B4d report: rfcs#2 head b6bbb3cd; manager ran acceptance (all pass), rfc-check pass, still draft; r1 + seam review of whole RFC-0001 out before O5 |
 | 2026-11-21T10:57-08:00 | B4d r1 + seam review of whole RFC-0001 clean (links resolve at their tags, no stale refs, questions 1-40 once each, rfc-check ok); RFC-0001 text ready; O5 waits on mail epic #2260 in production and owner |
+| 2026-11-21T11:14-08:00 | Manager paused: handoff and memories written to nemarOrg/rfcs (PR #3); temp worktree tmp.Teu8fPYl0M removed; loop stopped |
