@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from ieeg_geometry import pipeline, pr
+from ieeg_geometry import labels, pipeline, pr
 from ieeg_geometry.__main__ import main
-from ieeg_geometry.ownership import read_ownership
+from ieeg_geometry.bids_clean import Cleaning
+from ieeg_geometry.ownership import Verification, read_ownership
 from ieeg_geometry.version import pipeline_version
 
 from . import standins
@@ -33,8 +34,8 @@ EXTRAS = {  # files the fetch never checks out: they must survive in the commit'
 }
 
 
-def remote_repo(remote: Remote) -> Path:
-    return Path(remote.repo_url.format(id=DATASET_ID).removeprefix("file://"))
+def remote_repo(remote: Remote, dataset_id: str = DATASET_ID) -> Path:
+    return Path(remote.repo_url.format(id=dataset_id).removeprefix("file://"))
 
 
 def _advance(
@@ -75,17 +76,17 @@ def _advance_annexed(bare: Path, tmp: Path, rel: str) -> None:
     _git(work, "push", "-q", "origin", "main")
 
 
-def _bare(remote: Remote, root: Path) -> tuple[Remote, Path]:
+def _bare(remote: Remote, root: Path, dataset_id: str = DATASET_ID) -> tuple[Remote, Path]:
     """Serve the dataset from a bare repository, as a hosting remote would."""
-    bare = root / "bare" / DATASET_ID
+    bare = root / "bare" / dataset_id
     bare.parent.mkdir(parents=True)
-    _git(remote_repo(remote), "tag", VERSION)  # the release the data plane serves
+    _git(remote_repo(remote, dataset_id), "tag", VERSION)  # the release the data plane serves
     _git(
         root,
         "clone",
         "-q",
         "--bare",
-        remote.repo_url.format(id=DATASET_ID).removeprefix("file://"),
+        remote.repo_url.format(id=dataset_id).removeprefix("file://"),
         str(bare),
     )
     _git(bare, "config", "uploadpack.allowFilter", "true")
@@ -137,18 +138,32 @@ def _expected_changes(remote: Remote, tmp_path: Path) -> list[str]:
     return sorted({*c["add"], *c["change"], *c["remove"], "dataset_description.json"})
 
 
-def test_the_report_lists_cleaning_only_for_files_it_writes(env, tmp_path):
-    served, _bare_repo, _log, _work = env
-    analysis, _ = _run(served, tmp_path / "rep")
-    report = analysis.report
-    written = {*report["changes"]["add"], *report["changes"]["change"]}
-    assert {e["path"] for e in report["electrodes_cleaning"]} <= written
+def _planned(path: str, cleaning: Cleaning) -> labels.PlannedFile:
+    verification = Verification("template", 1.0, 1.0, 1.0, 1, 1, True, "rule", "high")
+    return labels.PlannedFile(path, b"x", "electrodes", (), "method", verification, cleaning)
 
 
-def _pr(served, work, *extra, dry=False, bump=True):
+def _analysis_with_cleaned(paths: list[str], tmp_path: Path) -> pipeline.Analysis:
+    files = tuple(_planned(p, Cleaning(dropped_columns=("Notes",))) for p in paths)
+    proposal = labels.Proposal("e.tsv", "sub-1", None, None, "accepted", "ok", files=files)
+    analysis = pipeline.Analysis(tmp_path, "nm000001", "v1", "abc", "pv")
+    analysis.label_plan = labels.Plan("nm000001", "pv", (proposal,))
+    return analysis
+
+
+def test_cleaning_is_reported_only_for_files_the_run_adds_or_changes(tmp_path):
+    analysis = _analysis_with_cleaned(["sub-1/a.tsv", "sub-1/blocked.tsv"], tmp_path)
+    changes = {"add": ["sub-1/a.tsv"], "change": [], "remove": [], "kept": ["sub-1/blocked.tsv"]}
+    listed = pipeline._cleaning(analysis, changes)
+    assert [e["path"] for e in listed] == ["sub-1/a.tsv"]
+    changes = {"add": [], "change": ["sub-1/blocked.tsv"], "remove": [], "kept": []}
+    assert [e["path"] for e in pipeline._cleaning(analysis, changes)] == ["sub-1/blocked.tsv"]
+
+
+def _pr(served, work, *extra, dry=False, bump=True, dataset_id=DATASET_ID):
     """A mirror's pull request needs `--bump-version`; `bump=False` leaves it off."""
     flag = ["--bump-version"] if bump else []
-    argv = ["pr", DATASET_ID, "--workdir", str(work), "--version", VERSION, *flag, *extra]
+    argv = ["pr", dataset_id, "--workdir", str(work), "--version", VERSION, *flag, *extra]
     return main(argv + (["--dry-run"] if dry else []), urls=served.urls())
 
 
@@ -708,15 +723,26 @@ def test_a_mirror_without_the_bump_flag_is_refused_pointing_to_the_integration_f
     assert not _calls(log) and not (work / DATASET_ID).exists()
 
 
-def test_a_non_mirror_needs_no_bump_flag_and_has_no_release_step(tmp_path):
-    report = {**REPORT, "dataset": "nm000352"}
-    body = pr.build_body(report, {}, n_surface_sets=0)
+def test_a_non_mirror_pull_request_runs_without_the_bump_flag_and_leaves_the_version(
+    source,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+):
+    nm = "nm000352"
+    with_extras = tmp_path / "src"
+    shutil.copytree(source, with_extras)
+    _give_a_version(with_extras)
+    remote = build_remote(with_extras, tmp_path / "remote", dataset_id=nm)
+    served, bare = _bare(remote, tmp_path / "hosting", nm)
+    log, _ = standins.activate(monkeypatch, tmp_path / "standins")
+    assert _pr(served, tmp_path / "w", bump=False, dataset_id=nm) == 0
+    names = _git(bare, "diff", "--name-only", "main", BRANCH).split()
+    assert names and "dataset_description.json" not in names
+    before = _git(bare, "show", "main:dataset_description.json")
+    assert _git(bare, "show", f"{BRANCH}:dataset_description.json") == before
+    body = _calls(log)[0]["body"]
+    assert "Version:" not in body and "tags `v" not in body
     assert "nemar dataset release" not in body and "cut the patch" not in body
-    try:  # the refusal is for `on` ids only: an nm id gets past it (and fails later, no remote)
-        pr.open_pr("nm000352", tmp_path / "w", dry_run=True)
-    except Exception as exc:  # noqa: BLE001
-        assert "is a mirror" not in str(exc)
-    assert not pr._is_mirror("nm000352") and pr._is_mirror("on000001")
 
 
 def _integration_branch(bare: Path, tmp: Path, name: str, files: dict[str, str]) -> str:
