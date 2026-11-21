@@ -607,7 +607,7 @@ function rfcSection(r: RfcWeekFacts | null): string[] {
                 "|---|---|---|",
                 ...r.index.listed.map(
                   (x) =>
-                    `| ${x.number} | ${x.title} | ${
+                    `| ${x.number} | \`${x.title}\` | ${
                       x.phase === "open"
                         ? `open, closes ${x.closesAt}`
                         : `closed ${x.closesAt}, decision due by ${x.dueBy}`

@@ -261,7 +261,7 @@ describe("the RFCs open or awaiting a decision", () => {
     readme = text(readmeWith(table(openRfc(1))));
     const r = await report();
     const close = minute(NOW.getTime() + 16 * DAY);
-    expect(sectionOf(r.body)).toContain(`| 0001 | Dataset versions | open, closes ${close} |`);
+    expect(sectionOf(r.body)).toContain(`| 0001 | \`Dataset versions\` | open, closes ${close} |`);
     expect(sectionOf(r.body)).toContain("RFCs open or closed and awaiting a decision: 1.");
     expect(r.facts.rfcs?.attention).toEqual([]);
     expect(rfcProblems(r.facts)).toEqual([]);
@@ -274,7 +274,7 @@ describe("the RFCs open or awaiting a decision", () => {
     const close = minute(NOW.getTime() - 9 * DAY);
     const due = minute(NOW.getTime() + 5 * DAY);
     expect(sectionOf(r.body)).toContain(
-      `| 0002 | Citing datasets | closed ${close}, decision due by ${due} |`,
+      `| 0002 | \`Citing datasets\` | closed ${close}, decision due by ${due} |`,
     );
     // Before the due date a closed RFC is awaited, not late.
     expect(r.facts.rfcs?.attention).toEqual([]);
@@ -332,7 +332,7 @@ describe("the RFCs open or awaiting a decision", () => {
     );
     const r = await report();
     const section = sectionOf(r.body);
-    expect(section).toContain("| 0005 | Pending one |");
+    expect(section).toContain("| 0005 | `Pending one` |");
     for (const unlisted of ["Accepted one", "Rejected one", "Withdrawn one", "Draft one"]) {
       expect(section).not.toContain(unlisted);
     }
@@ -353,22 +353,25 @@ describe("the RFCs open or awaiting a decision", () => {
     expect(rfcErrors(r.facts)).toEqual([]);
   });
 
-  test("a title from the record cannot mention anyone, link an issue or break the table", async () => {
-    readme = text(
-      readmeWith(
-        table(openRfc(1, "Ask @nemarOrg/admins about #12 `now` \\| <b>x</b> [y](http://e.x)")),
-      ),
-    );
+  test("a title is printed inside a code span, with nothing in it that could break out", async () => {
+    const hostile =
+      "Ask @nemarOrg/admins about #12 `now` \\| <b>x</b> [y](http://e.x) https://evil.example www.evil.example *bold* _it_ ~~s~~ &amp; !img \\ back";
+    readme = text(readmeWith(table(openRfc(1, hostile))));
     const r = await report();
     const line = sectionOf(r.body)
       .split("\n")
       .find((l) => l.startsWith("| 0001 |"));
     expect(line).toBeDefined();
-    expect(line).not.toContain("@");
-    expect(line).not.toContain("`");
-    expect(line).not.toContain("<");
-    expect(line).not.toContain("#12");
-    expect(line?.split("|")).toHaveLength(5);
+    // Four cells, the title the second, wrapped in exactly one pair of backticks.
+    const cells = (line as string).split("|");
+    expect(cells).toHaveLength(5);
+    const title = (cells[2] as string).trim();
+    expect(title.startsWith("`")).toBe(true);
+    expect(title.endsWith("`")).toBe(true);
+    expect(title.slice(1, -1)).not.toContain("`");
+    expect(title).not.toContain("@");
+    expect(title).not.toContain("<");
+    expect(title).not.toContain("#12");
     expect(rfcReportTitle("a".repeat(300)).length).toBeLessThanOrEqual(123);
   });
 });
@@ -423,6 +426,56 @@ describe("the clock line", () => {
     const r = await report();
     expect(r.facts.rfcs?.attention).toEqual(["the last RFC clock run failed"]);
     expect(sectionOf(r.body)).toContain("**failure**");
+  });
+
+  test.each(["timed_out", "startup_failure", "cancelled", "action_required", "neutral", "stale"])(
+    "a newest run that ended %s needs attention",
+    async (conclusion) => {
+      runs = runAnswer(NOW, 13 * HOUR, conclusion);
+      const r = await report();
+      expect(r.facts.rfcs?.attention).toEqual([
+        `the last RFC clock run did not succeed (${conclusion})`,
+      ]);
+      expect(rfcProblems(r.facts)).toHaveLength(1);
+      expect(weeklyHeadline(r.facts).attention).toBe(true);
+    },
+  );
+
+  test("a conclusion of a shape this report does not know is not a success", async () => {
+    runs = runAnswer(NOW, 13 * HOUR, "Weird Value!");
+    const r = await report();
+    expect(r.facts.rfcs?.run?.latest?.conclusion).toBe("unreadable");
+    expect(r.facts.rfcs?.attention).toEqual([
+      "the last RFC clock run did not succeed (unreadable)",
+    ]);
+  });
+
+  test("a skipped run is not a failure", async () => {
+    runs = runAnswer(NOW, 13 * HOUR, "skipped");
+    expect((await report()).facts.rfcs?.attention).toEqual([]);
+  });
+
+  test("a run link that is not a run of nemarOrg/rfcs is not printed", async () => {
+    for (const bad of [
+      "https://evil.example/nemarOrg/rfcs/actions/runs/1",
+      "https://github.com/nemarOrg/rfcs/actions/runs/1/../../x",
+      "https://github.com/nemarOrg/rfcs/actions/runs/abc",
+      "https://github.com/nemarOrg/other/actions/runs/1",
+    ]) {
+      runs = json({
+        workflow_runs: [
+          {
+            created_at: new Date(NOW.getTime() - HOUR).toISOString(),
+            conclusion: "success",
+            html_url: bad,
+          },
+        ],
+      });
+      const r = await report();
+      expect(r.facts.rfcs?.run?.latest?.url).toBeNull();
+      expect(sectionOf(r.body)).not.toContain("evil.example");
+      expect(sectionOf(r.body)).not.toContain("([run]");
+    }
   });
 
   test("a run that has not ended is not a failure", async () => {
@@ -567,7 +620,7 @@ describe("the token", () => {
     const readmeCalls = calls.filter((c) => c.path === README_PATH);
     expect(readmeCalls.map((c) => c.authorization)).toEqual(["Bearer app-token", null]);
     expect(r.facts.rfcs?.index?.listed).toHaveLength(1);
-    expect(sectionOf(r.body)).toContain("| 0001 | Dataset versions | open, closes");
+    expect(sectionOf(r.body)).toContain("| 0001 | `Dataset versions` | open, closes");
     expect(rfcErrors(r.facts)).toEqual([]);
   });
 
@@ -596,6 +649,17 @@ describe("the token", () => {
     expect(calls.filter((c) => c.path === README_PATH)).toHaveLength(2);
     expect(r.facts.rfcs?.index).toBeNull();
     expect(rfcErrors(r.facts)[0]?.error).toContain("answered 403");
+  });
+
+  test("a refusal because the rate limit is spent says so", async () => {
+    readme = () =>
+      new Response("limit", { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+    const r = await report();
+    expect(rfcErrors(r.facts)[0]?.error).toContain("answered 403 (rate limited)");
+    // A 403 that is not a spent limit does not claim it.
+    readme = text("forbidden", 403);
+    const plain = await report();
+    expect(rfcErrors(plain.facts)[0]?.error).not.toContain("rate limited");
   });
 
   test("a 500 is not retried", async () => {

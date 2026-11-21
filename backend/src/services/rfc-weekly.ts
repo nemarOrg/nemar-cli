@@ -61,7 +61,7 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 const READ_TIMEOUT_MS = 15_000;
 const USER_AGENT = "nemar-weekly-report";
-const RUN_URL_PREFIX = `https://github.com/${RFC_REPO}/actions/runs/`;
+const RUN_URL_RE = /^https:\/\/github\.com\/nemarOrg\/rfcs\/actions\/runs\/\d+$/;
 
 /** The index header, as the generator writes it (`HEADER` in nemarOrg/rfcs `src/index-gen.ts`). */
 const INDEX_COLUMNS = [
@@ -93,8 +93,10 @@ function plainWord(value: unknown): string | null {
 }
 
 /**
- * An RFC title for a public report: one line, no markup that renders as something else, and no
- * `@` that GitHub would turn into a mention or `#` that would link an issue.
+ * An RFC title for a public report: one line, with no backtick (the report prints it INSIDE a code
+ * span, where emphasis, entities, autolinks, escapes and a leading `!` are all literal), no pipe
+ * (it is a table cell), and no `@` or `#N` that GitHub could turn into a mention or an issue link
+ * were the title ever printed outside a code span.
  */
 export function rfcReportTitle(raw: string): string {
   const text = Array.from(raw)
@@ -221,13 +223,15 @@ export function parseNewestRun(json: unknown): RfcClockRun | null {
     throw new Error("the newest workflow run has no readable time");
   }
   const url = run?.html_url;
+  const conclusion = run?.conclusion;
   return {
     createdAt: new Date(createdAt).toISOString(),
-    conclusion: plainWord(run?.conclusion),
-    url:
-      typeof url === "string" && url.startsWith(RUN_URL_PREFIX) && /^[\w./:-]+$/.test(url)
-        ? url
-        : null,
+    // A conclusion of a shape this report does not know is "unreadable", which is not a success.
+    conclusion:
+      conclusion === null || conclusion === undefined
+        ? null
+        : (plainWord(conclusion) ?? "unreadable"),
+    url: typeof url === "string" && RUN_URL_RE.test(url) ? url : null,
   };
 }
 
@@ -264,7 +268,15 @@ export function rfcAttention(
     if (age > RFC_CLOCK_STALE_HOURS * HOUR_MS) {
       out.push(`the RFC clock last ran more than ${RFC_CLOCK_STALE_HOURS} hours ago`);
     }
-    if (parts.run.latest.conclusion === "failure") out.push("the last RFC clock run failed");
+    // Only a run that is still going (null), succeeded or was skipped is not a problem: timed_out,
+    // startup_failure, cancelled, action_required, neutral, stale and the like each leave a day
+    // without a completed clock.
+    const c = parts.run.latest.conclusion;
+    if (c === "failure") {
+      out.push("the last RFC clock run failed");
+    } else if (c !== null && c !== "success" && c !== "skipped") {
+      out.push(`the last RFC clock run did not succeed (${c})`);
+    }
   }
   return out;
 }
@@ -297,7 +309,10 @@ async function readGitHub(path: string, accept: string, token: string | null): P
   }
   if (!res.ok) {
     await res.body?.cancel();
-    throw new Error(`GET ${path} answered ${res.status}`);
+    const limited =
+      (res.status === 403 || res.status === 429) &&
+      res.headers.get("x-ratelimit-remaining") === "0";
+    throw new Error(`GET ${path} answered ${res.status}${limited ? " (rate limited)" : ""}`);
   }
   return res;
 }
