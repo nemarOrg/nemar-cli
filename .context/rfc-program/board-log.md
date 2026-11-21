@@ -95,6 +95,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T15:29-08:00 | Q36: the manager runs O4c (tag 3.0.0-draft.2) on the owner's say-so under the P1 rule | owner |  |
 | 2026-11-20T16:42-08:00 | Owner raised today's 'Agents today' limit from 40 to 60 (owner instruction; manager applied the edit) | owner |  |
 | 2026-11-20T17:17-08:00 | SC1: owner authorized the manager to merge docs#129 | owner |  |
+| 2026-11-20T17:57-08:00 | O4d: owner said yes; manager releases 2.0.1 on B5a merge commit 3bd184a9 | owner |  |
 
 ## Log
 
@@ -191,3 +192,8 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T17:20-08:00 | B5a tools lens: 0 crit, 2 imp (class vs outcome check; created_utc rebuild note), 4 sugg; held to batch with spec lens |
 | 2026-11-20T17:20-08:00 | B5a spec lens: schemas faithful, 1 imp (class definition), 5 sugg; both lenses sent back as one round; worker questions answered (const 2 stays, v2-unknown-attribute stays) |
 | 2026-11-20T17:20-08:00 | R3 tests lens clean (6 mutations caught, offline); R3 r1 findings sent back |
+| 2026-11-20T17:22-08:00 | B5a r1 fixes ac76a32d (class check + tests, rebuild note, docs); r2 delta dispatched; Agents today 51/60 |
+| 2026-11-20T17:23-08:00 | R3 r1 fixes 9c12a664; r2 delta dispatched; Agents today 52/60 |
+| 2026-11-20T17:23-08:00 | B5a merged (3bd184a9c85a3a9cc646dce94b98520021231650); O4d set owner |
+| 2026-11-20T17:57-08:00 | O4d done (2.0.1 on 3bd184a9). R3 merged (14d49c8e). B5 ready |
+| 2026-11-20T17:57-08:00 | B5 dispatched (claude-opus); Agents today 53/60 |
