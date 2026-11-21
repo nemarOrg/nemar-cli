@@ -17952,6 +17952,245 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
         self.assert_refused(head_files, data, "so the file holds no whole frame")
 
 
+def write_edf_plus_with_onsets(
+    path: str, onsets: list[float], *, label: str = "D", bdf: bool = False
+) -> str:
+    """A tiny EDF+ (or BDF+) file whose data records start at `onsets` seconds,
+    laid out byte for byte from the EDF+ and BDF+ specifications (pyedflib will not
+    write EDF+D, and no writer spaces records out on purpose).
+
+    One 10 Hz channel, `EEG Ramp`, in 1 s records, plus the annotations signal
+    whose time-keeping annotation in every record gives that record's onset.
+    `label` is the byte after `EDF+` in the reserved field: `D` for discontinuous,
+    `C` for continuous, written as given, so a `D` file whose records happen to be
+    contiguous is a control. The ramp's value in microvolts is the TRUE time of the
+    sample, so a reader that closes a gap shows as a value that disagrees with its
+    position."""
+    rate, per_record, ann_samples = 10, 10, 40
+    width = 3 if bdf else 2
+    phys, dig = (("-1000", "1000"), ("-1000000", "1000000")) if bdf else (
+        ("-327.68", "327.67"), ("-32768", "32767")
+    )
+    scale = 1000 if bdf else 100
+
+    def field(text: str, size: int) -> bytes:
+        raw = text.encode("ascii")
+        assert len(raw) <= size, (text, size)
+        return raw.ljust(size, b" ")
+
+    n_signals, header_bytes = 2, 256 * 3
+    version = b"\xffBIOSEMI" if bdf else field("0", 8)
+    header = version + field("X X X X", 80) + field("Startdate 01-JAN-2020 X X X", 80)
+    header += field("01.01.20", 8) + field("12.00.00", 8) + field(str(header_bytes), 8)
+    header += field(("BDF+" if bdf else "EDF+") + label, 44) + field(str(len(onsets)), 8)
+    header += field("1", 8) + field(str(n_signals), 4)
+    signals = [
+        ("EEG Ramp", "", "uV", *phys, *dig, "", str(per_record), ""),
+        ("BDF Annotations" if bdf else "EDF Annotations", "", "", "-1", "1", *dig, "",
+         str(ann_samples), ""),
+    ]
+    for column, size in enumerate([16, 80, 8, 8, 8, 8, 8, 80, 8, 32]):
+        for sig in signals:
+            header += field(sig[column], size)
+    assert len(header) == header_bytes
+
+    body = b""
+    for onset in onsets:
+        digits = [round((onset + i / rate) * scale) for i in range(per_record)]
+        body += b"".join(d.to_bytes(width, "little", signed=True) for d in digits)
+        # The time-keeping TAL: `+<onset>` 0x14 0x14 0x00, padded with NULs.
+        tal = f"+{onset:g}".encode("ascii") + b"\x14\x14\x00"
+        body += tal.ljust(width * ann_samples, b"\x00")
+    with open(path, "wb") as fh:
+        fh.write(header + body)
+    return path
+
+
+class TestGappedEdfPlusDThroughConvertOne(ConvertOneKeepingStoreCase):
+    """An EDF+D or BDF+D file with a gap between its data records, through the
+    real `convert_one` on both exporters.
+
+    Before biosigIO 1.2.14 such a file converted, and every sample after a gap sat
+    earlier on the store's time axis than it was recorded while the annotations
+    kept their true times. 1.2.14 refuses it with `DiscontinuousRecordingError`
+    (`discontinuous_recording`, biosigio#180). The converter records that as a
+    terminal data failure, not an infrastructure failure to retry: the file's
+    bytes are what is wrong, and a retry reads the same bytes. The published
+    `detail` names the gaps. A +D file whose records are contiguous still
+    converts, and its store says it was verified (`edf_discontinuous_verified_
+    contiguous`).
+
+    The files are written by `write_edf_plus_with_onsets`, byte for byte, and read
+    by the real biosigIO. The streaming exporter is selected by lowering
+    `STREAM_EDF_MIN_BYTES`, which is path selection and not a substitute for any
+    logic."""
+
+    REQUIRES = ("zarr", "biosigio")
+    DIR = "sub-01/eeg"
+    VERIFIED = "edf_discontinuous_verified_contiguous"
+    PATHS: ClassVar[tuple[str, ...]] = ("in-memory", "streaming")
+
+    def write(self, onsets: list[float], *, label: str = "D", bdf: bool = False) -> tuple[str, set[str]]:
+        primary = f"{self.DIR}/sub-01_task-rest_eeg.{'bdf' if bdf else 'edf'}"
+        os.makedirs(os.path.join(self.repo, self.DIR), exist_ok=True)
+        write_edf_plus_with_onsets(os.path.join(self.repo, primary), onsets, label=label, bdf=bdf)
+        return primary, {primary}
+
+    def convert_on(self, path_name: str, primary: str, head_files: set[str]) -> dict:
+        """Convert the recording down one exporter, and check it was that one."""
+        StreamEdfThreshold.use(self, 1 if path_name == "streaming" else None)
+        shutil.rmtree(self.synced_dir, ignore_errors=True)
+        with StreamEdfThreshold.watching_writers() as writers:
+            result = self.convert(primary, head_files)
+        # A refusal in memory never reaches a writer; the streaming exporter is
+        # handed to `write_store` and refuses from inside it.
+        if path_name == "streaming":
+            self.assertEqual(writers, ["stream_to_zarr"], writers)
+        else:
+            self.assertNotIn("stream_to_zarr", writers)
+        return result
+
+    def test_a_gapped_edf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        # Records at 0, 1, 10, 11 s: one 8 s gap after the second record ends at 2 s.
+        primary, head_files = self.write([0, 1, 10, 11])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertNotIn("entry", result)
+                self.assertIn("1 gap or overlap", result["detail"])
+                self.assertIn("8 s at 2 s", result["detail"])
+                self.assertNotIn(self.repo, result["detail"])
+                self.assertFalse(result["subject_info_refused"])
+                # And no store reached the upload.
+                self.assertFalse(os.path.exists(self.synced_dir))
+
+    def test_a_gapped_bdf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        primary, head_files = self.write([0, 1, 10, 11], bdf=True)
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertIn("8 s at 2 s", result["detail"])
+
+    def test_the_gaps_are_published_while_they_fit_and_the_rest_are_counted(self):
+        # 31 records two seconds apart: thirty 1 s gaps, at 1 s, 3 s, ... 59 s.
+        primary, head_files = self.write([2.0 * i for i in range(31)])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                detail = result["detail"]
+                self.assertIn("30 gaps or overlaps", detail)
+                self.assertIn("1 s at 1 s, 1 s at 3 s", detail)
+                shown = detail.count(" s at ")
+                self.assertGreaterEqual(shown, 10)
+                self.assertTrue(detail.endswith(f", and {30 - shown} more"), detail)
+                self.assertLessEqual(len(detail), generate_zarr._DETAIL_MAX_CHARS)
+
+    def test_an_overlap_is_published_with_its_negative_length(self):
+        primary, head_files = self.write([0, 1, 1.5, 3])
+        result = self.convert_on("in-memory", primary, head_files)
+        self.assert_refused_as_data(result, "discontinuous_recording")
+        self.assertIn("2 gaps or overlaps", result["detail"])
+        self.assertIn("-0.5 s at 2 s", result["detail"])
+
+    def test_a_plus_d_file_with_contiguous_records_still_converts_and_says_it_was_verified(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="D")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                (group,) = result["entry"]["groups"]
+                self.assertEqual(group["n_samples"], 40)
+                self.assertIs(
+                    self.published_recording_metadata(result["entry"]).get(self.VERIFIED), True
+                )
+
+    def test_a_continuous_file_is_not_touched_by_the_rule(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="C")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertNotIn(
+                    self.VERIFIED, self.published_recording_metadata(result["entry"])
+                )
+
+    def test_a_run_of_only_gapped_recordings_is_deterministic(self):
+        # What `hallu-zarr.sh` turns into a terminal `data_failed`: no retry, no
+        # `retry_exhausted` after five rounds of reading the same bytes.
+        primary, head_files = self.write([0, 1, 10, 11])
+        result = self.convert_on("in-memory", primary, head_files)
+        entry = _failure_entry(result["primary"], result["code"], result["detail"])
+        self.assertEqual(entry["code"], "discontinuous_recording")
+        self.assertIn("gaps between its data records", entry["reason"])
+        self.assertNotIn(entry["code"], RETRYABLE_CODES)
+        self.assertNotIn(entry["code"], generate_zarr.STORAGE_STATE_CODES)
+        self.assertTrue(
+            generate_zarr.dataset_failure_is_deterministic([primary], [entry])
+        )
+
+
+class TestDiscontinuityDetail(unittest.TestCase):
+    """`discontinuity_detail` and the `failure_verdict` rule that uses it, against
+    the real exception class: a malformed `.gaps` must publish biosigIO's own text
+    instead of crashing the worker's `except` branch."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from biosigio import DiscontinuousRecordingError
+            from biosigio.exceptions import TimeGap
+        except ImportError as exc:
+            raise unittest.SkipTest(f"biosigIO 1.2.14 unavailable: {exc}") from exc
+        cls.error = DiscontinuousRecordingError
+        cls.gap = TimeGap
+
+    def test_the_verdict_keeps_biosigios_code_and_publishes_the_gap_list(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0), self.gap(12.0, 1.5)], 1.0)
+        code, named = generate_zarr.failure_verdict(exc, "sub-01/eeg/x.edf", frozenset())
+        self.assertEqual(code, "discontinuous_recording")
+        self.assertEqual(
+            named,
+            "2 gaps or overlaps between EDF+D/BDF+D data records (length at start, in "
+            "seconds): 8 s at 2 s, 1.5 s at 12 s",
+        )
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+
+    def test_a_long_list_of_long_numbers_is_cut_where_it_stops_fitting_and_counted(self):
+        gaps = [self.gap(12345.678 + 1000.25 * i, 123.456) for i in range(12)]
+        exc = self.error("/scratch/x.edf", gaps, 1.0)
+        # The premise: biosigIO's own message, through `failure_detail`, is cut
+        # before it reaches the end of its ten gaps.
+        self.assertNotIn("and 2 more", generate_zarr.failure_detail(exc))
+        named = generate_zarr.discontinuity_detail(exc)
+        self.assertLessEqual(len(named), generate_zarr._DETAIL_MAX_CHARS)
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+        self.assertTrue(named.startswith("12 gaps or overlaps between EDF+D/BDF+D data records"))
+        self.assertIn("123.456 s at 12345.7 s, 123.456 s at 13345.9 s", named)
+        shown = named.count(" s at ")
+        self.assertGreater(shown, 5)
+        self.assertTrue(named.endswith(f", and {12 - shown} more"), named)
+
+    def test_a_malformed_gap_list_falls_back_to_the_exceptions_own_text(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0)], 1.0)
+        for bad in (None, [], "oops", [("a", "b")], [(1.0,)], [object()], 5):
+            with self.subTest(bad=bad):
+                exc.gaps = bad
+                code, named = generate_zarr.failure_verdict(exc, "x.edf", frozenset())
+                self.assertEqual((code, named), ("discontinuous_recording", None))
+                self.assertIn("DiscontinuousRecordingError", generate_zarr.failure_detail(exc))
+
+    def test_the_fallback_reason_is_biosigios_own_text(self):
+        from biosigio.exceptions import REASONS
+
+        self.assertEqual(
+            generate_zarr._FALLBACK_REASONS["discontinuous_recording"],
+            REASONS["discontinuous_recording"],
+        )
+
+
 class TestStreamedTruncatedFifThroughConvertOne(ConvertOneLocalCase):
     """A FIF cut short in its data, converted down the STREAMING path.
 

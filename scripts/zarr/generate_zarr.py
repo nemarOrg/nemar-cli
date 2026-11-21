@@ -1780,6 +1780,11 @@ _FALLBACK_REASONS = {
         "This recording's data file appears truncated or corrupt, so the viewer "
         "could not be generated."
     ),
+    # biosigIO's own code (1.2.14, biosigio#180); the authoritative text is its REASONS.
+    "discontinuous_recording": (
+        "This recording has gaps between its data records (EDF+D/BDF+D), which "
+        "the viewer cannot represent yet."
+    ),
     "unsupported_format": "This file format is not yet supported by the viewer.",
     "empty_recording": "This recording contains no signal channels to display.",
     "file_read_error": "This recording could not be prepared for viewing.",
@@ -2031,6 +2036,56 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+# biosigIO's refusal of an EDF+D/BDF+D file whose data records are not contiguous
+# in time (1.2.14, biosigio#180): `DiscontinuousRecordingError`, a `FileReadError`
+# carrying `.gaps`, every discontinuity as `(start, length)` seconds. A property of
+# the file's bytes, so it is a terminal data failure like `corrupt_or_truncated`:
+# in neither `RETRYABLE_CODES` nor `STORAGE_STATE_CODES`, so a run that converts
+# nothing and fails only with this is `deterministic`.
+DISCONTINUOUS_RECORDING = "discontinuous_recording"
+# Room kept at the end of a gap list for ", and 99999 more".
+_DISCONTINUITY_TAIL_CHARS = 20
+
+
+def discontinuity_detail(exc: BaseException) -> str | None:
+    """The published `detail` for a `discontinuous_recording` refusal, built from
+    the exception's `.gaps` rather than its message: the message opens with the
+    scratch path and a paragraph of prose, and `failure_detail` keeps only the
+    first 300 characters of its first line, which cuts a long gap list off. Gaps
+    are named in file order for as long as they fit in `_DETAIL_MAX_CHARS`, and
+    the rest are counted. None when `.gaps` is not a non-empty list of `(start,
+    length)` pairs of numbers, so the exception's own text is published instead;
+    a malformed attribute must not turn a typed refusal into a crash inside
+    `convert_one`'s `except` branch.
+
+    A negative length is an overlap or a record that starts before the previous
+    one ended. The seconds are the file's own time axis."""
+    gaps = getattr(exc, "gaps", None)
+    if not isinstance(gaps, (list, tuple)) or not gaps:
+        return None
+    parts: list[str] = []
+    for gap in gaps:
+        try:
+            start, length = gap
+            parts.append(f"{float(length):g} s at {float(start):g} s")
+        except (TypeError, ValueError):
+            return None
+    noun = "gap or overlap" if len(parts) == 1 else "gaps or overlaps"
+    head = f"{len(parts)} {noun} between EDF+D/BDF+D data records (length at start, in seconds): "
+    budget = _DETAIL_MAX_CHARS - len(head) - _DISCONTINUITY_TAIL_CHARS
+    shown = [parts[0]]
+    used = len(parts[0])
+    for part in parts[1:]:
+        if used + 2 + len(part) > budget:
+            break
+        shown.append(part)
+        used += 2 + len(part)
+    text = head + ", ".join(shown)
+    if len(parts) > len(shown):
+        text += f", and {len(parts) - len(shown)} more"
+    return text
+
+
 def failure_verdict(
     exc: BaseException, primary: str, head_files: set[str] | frozenset[str]
 ) -> tuple[str | None, str | None]:
@@ -2058,6 +2113,10 @@ def failure_verdict(
        types the mismatch itself.
     4. Otherwise the exception's own code, which may be None.
 
+    `discontinuous_recording` (biosigIO 1.2.14) is already a statement of cause and
+    is never refined; only its `detail` is rebuilt, from the gap list
+    (`discontinuity_detail`).
+
     No rule types a bare `OSError` by its text. biosigIO types a streamed
     EDF/BDF refusal itself (`CorruptFileError`, since 1.2.12), and an `OSError`
     that carries an errno (EIO, ENOSPC, EACCES) or is a subclass
@@ -2072,6 +2131,8 @@ def failure_verdict(
     code = getattr(exc, "code", None)
     if not isinstance(code, str) or not code:
         code = None
+    if code == DISCONTINUOUS_RECORDING:
+        return code, discontinuity_detail(exc)
     if code not in _REFINABLE_CODES:
         return code, None
     chain = _exception_chain(exc)
