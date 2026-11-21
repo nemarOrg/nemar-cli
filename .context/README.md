@@ -90,6 +90,7 @@ Measurements and investigations. Accurate as of their date; re-verify before rel
 | [research-make-vs-take-audit.md](research-make-vs-take-audit.md) | 2026-09-03 audit of bespoke code an established library or platform feature already covers, with replace / wrap / keep verdicts (-> ADR 0037). | public |
 | [research-agent-findability.md](research-agent-findability.md) | 2026-09-03: how AI agents and crawlers actually find datasets (robots tokens, sitemaps, JSON-LD, registries, DataCite); evidence that llms.txt and markdown mirrors are not read; Zarr guidance for agents (-> OSCAR epic). | public |
 | [research-publication-review-calibration.md](research-publication-review-calibration.md) | How often the publication review's model is judged wrong on published datasets and how many seeded defects it catches, so the model for the soak can be chosen (-> ADR 0102, call 6). Method and empty results tables; **awaiting the operator's run**. | public |
+| [research-bids-quality-guidelines.md](research-bids-quality-guidelines.md) | 2026-11-19: what BIDS 1.11.2 requires per hosted modality, which RECOMMENDED or OPTIONAL items NEMAR should strongly recommend at submission, measured omission rates on a sample of public datasets, and where each could be enforced; items also in [research-bids-quality-guidelines.json](research-bids-quality-guidelines.json). No ADR yet. | public |
 
 ## Historical — completed work
 
