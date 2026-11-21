@@ -24,9 +24,9 @@ import { shouldAnnex } from "../git-annex/policy.js";
 import {
   type UploadProgress,
   clearStepCompleted,
-  clearUploadProgress,
   isStepCompleted,
   markStepCompleted,
+  retainTrackingAfterSuccess,
   writeUploadProgress,
 } from "../upload-progress.js";
 import { describeInactivityDuration, persistSpinnerWarning } from "./inactivity.js";
@@ -395,8 +395,10 @@ export function printUploadSuccess(
   // Protection is applied when creating a DOI (admin doi create) or making public.
 
   // Step 13: Success!
-  // Clear progress file and update last upload timestamp
-  clearUploadProgress(absolutePath);
+  // Local patch (#2141 i): keep the per-file records and the tracking stamp (every other
+  // step stamp is dropped), so a re-run with an unchanged file list does not re-track every
+  // data file; then update the last upload timestamp.
+  retainTrackingAfterSuccess(absolutePath);
   updateLastUpload(absolutePath);
 
   console.log();
