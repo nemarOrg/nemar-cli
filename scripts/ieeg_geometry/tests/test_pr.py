@@ -1010,3 +1010,249 @@ def test_a_configured_but_missing_annex_filter_does_not_stop_a_dry_or_real_run(
 def test_an_nm_body_has_no_patch_release_step():
     body = pr.build_body({**REPORT, "dataset": "nm000352"}, {}, n_surface_sets=0)
     assert "nemar dataset release" not in body
+
+
+# ---- an integration branch that already holds what the pipeline would write -----------------
+
+
+def _branch_with_outputs(
+    env, tmp_path, name="integ", description: str | None = None, ghost: str | None = None
+) -> str:
+    """The collaborator's branch: main plus every file the pipeline writes (so it adds nothing)."""
+    served, bare, _log, _work = env
+    analysis, _ = _run(served, tmp_path / "first", apply=True)
+    clone = tmp_path / f"integ-{name}"
+    _git(tmp_path, "clone", "-q", str(bare), str(clone))
+    _git(clone, "checkout", "-q", "-b", name)
+    c = analysis.report["changes"]
+    for rel in [*c["add"], *c["change"]]:
+        (clone / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(tmp_path / "first" / DATASET_ID / rel, clone / rel)
+    if description is not None:
+        (clone / "dataset_description.json").write_text(description)
+    if ghost:  # an ownership entry no track reports any more
+        record = clone / pipeline.OWNERSHIP_REL
+        doc = json.loads(record.read_text())
+        entry = next(v for v in doc["paths"].values() if v["method"].startswith("label-inference"))
+        doc["paths"][ghost] = entry
+        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+    _git(clone, "add", "-A")
+    _git(clone, "commit", "-q", "--author", "Collab Person <collab@example.org>", "-m", "Outputs")
+    _git(clone, "push", "-q", "origin", name)
+    return _git(clone, "rev-parse", "HEAD").strip()
+
+
+def test_from_ref_with_nothing_to_add_opens_the_pull_request_without_a_geometry_commit(
+    env, tmp_path
+):
+    served, bare, log, work = env
+    tip = _branch_with_outputs(env, tmp_path, description='{"Name": "x", "Version": "1.0.4"}\n')
+    before = _git(bare, "rev-parse", "integ").strip()
+    assert before == tip
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    # nothing was pushed: the branch is the collaborator's tip, no commit on top
+    assert _git(bare, "rev-parse", "integ").strip() == tip
+    assert _git(bare, "rev-parse", "main").strip() == served.commit
+    assert _refs(bare) == ["refs/heads/integ", "refs/heads/main"]
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert verbs.count(["pr", "create"]) == 1
+    call = _create_call(log)
+    assert call["args"][call["args"].index("--head") + 1] == "integ"
+    assert call["args"][call["args"].index("--base") + 1] == "main"
+    assert "adds no files" in call["args"][call["args"].index("--title") + 1]
+    body = call["body"]
+    assert "NEMAR's geometry adds no files on this branch" in body
+    for track in pipeline.TRACKS:
+        assert f"- {track}: " in body
+    assert "Integration branch `integ`: 1 commit(s) not on `main`" in body
+    assert "is already `1.0.4`" in body
+    assert "left exactly as it is" in body
+    assert "Added (" not in body and "## Table cleaning" not in body
+
+
+def test_from_ref_with_nothing_to_add_and_a_version_equal_to_main_makes_one_version_commit(
+    env, tmp_path
+):
+    served, bare, log, work = env
+    main_description = _blob(bare, "main:dataset_description.json").decode()
+    tip = _branch_with_outputs(env, tmp_path, description=main_description)
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    assert _git(bare, "rev-list", "--count", f"{tip}..integ").strip() == "1"
+    assert _git(bare, "log", "-1", "--format=%s", "integ").strip() == "Set Version to 1.0.1"
+    assert _git(bare, "diff", "--name-only", tip, "integ").split() == ["dataset_description.json"]
+    assert b'"1.0.1"' in _blob(bare, "integ:dataset_description.json")
+    body = _create_call(log)["body"]
+    assert "NEMAR's geometry adds no files" in body and "goes from `1.0.0` to `1.0.1`" in body
+
+
+def test_from_ref_with_nothing_to_add_updates_an_open_pull_request(env, tmp_path, monkeypatch):
+    served, bare, log, work = env
+    _branch_with_outputs(env, tmp_path, description='{"Name": "x", "Version": "1.0.4"}\n')
+    monkeypatch.setenv(
+        "STANDIN_OPEN_PRS",
+        '[{"number": 5, "url": "https://example.org/pull/5", '
+        '"headRepositoryOwner": {"login": "nemarDatasets"}, "baseRefName": "main"}]',
+    )
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 0
+    verbs = [c["args"][:2] for c in _calls(log)]
+    assert ["pr", "edit"] in verbs and ["pr", "create"] not in verbs
+
+
+def test_a_plain_pr_with_nothing_to_add_still_refuses(env, tmp_path, capsys):
+    served, bare, log, work = env
+    _run(served, tmp_path / "first2", apply=True)
+    applied = tmp_path / "applied2"
+    shutil.copytree(
+        tmp_path / "first2" / DATASET_ID, applied, ignore=shutil.ignore_patterns(".git")
+    )
+    done = build_remote(applied, tmp_path / "done2")
+    served2, bare2 = _bare(done, tmp_path / "hosting2")
+    assert _pr(served2, tmp_path / "w2") == 1
+    assert "nothing to propose" in capsys.readouterr().err
+    assert not _calls(log) and _refs(bare2) == ["refs/heads/main"]
+
+
+def test_from_ref_with_an_errored_track_still_refuses_even_with_nothing_to_add(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    tip = _branch_with_outputs(env, tmp_path)
+
+    def broken(_dataset):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr("ieeg_geometry.freesurfer.plan_dataset", broken)
+    assert _pr(served, work, "--from-ref", "integ", "--bump-version") == 1
+    assert "a track errored" in capsys.readouterr().err
+    assert not _calls(log) and _git(bare, "rev-parse", "integ").strip() == tip
+
+
+NO_GEOMETRY_ARGS = ("--from-ref", "integ", "--bump-version")
+VERSION_1_0_4 = '{"Name": "x", "Version": "1.0.4"}\n'
+
+
+def test_the_no_geometry_body_does_not_claim_geometry_files_when_main_is_ahead(env, tmp_path):
+    served, bare, log, work = env
+    _advance(bare, tmp_path, {"README": "later\n"})
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 0
+    body = _create_call(log)["body"]
+    assert "is ahead of release" in body
+    assert "The pipeline ran on `integ` and adds no files" in body
+    assert "geometry files in this pull request" not in body
+
+
+def test_the_no_geometry_body_says_what_each_track_decided_and_keeps_the_surface_line(
+    env, tmp_path
+):
+    served, bare, log, work = env
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 0
+    body = _create_call(log)["body"]
+    assert "What each track decided" in body and "wrote nothing" not in body
+    assert "Subject surface sets for the website's Brain panel:" in body
+    assert "not part of this pull request" in body
+    assert "Recorded but not produced" not in body, body.split("Recorded but not")[1][:300]
+    assert "Warning:" not in body
+
+
+def test_reasons_lose_absolute_paths_and_are_cut_with_an_ellipsis(tmp_path):
+    clone = tmp_path / "w" / "on000001"
+    reason = f"[Errno 13] Permission denied: '{clone}/sub-1/ieeg/e.tsv' via /etc/other/place/x.json"
+    report = {
+        "files": [
+            {"decisions": {"labels": {"status": "skipped", "reason": reason}}},
+            {"decisions": {"labels": {"status": "skipped", "reason": "z" * 300}}},
+        ]
+    }
+    text = "\n".join(pr._track_reasons(report, [clone, tmp_path / "w"]))
+    assert str(tmp_path) not in text and "/etc/other" not in text
+    assert "<dataset>/sub-1/ieeg/e.tsv" in text and "via x.json" in text
+    entry = next(e for e in text.replace("\n", "; ").split("; ") if "zzz" in e)
+    assert entry.endswith("...") and len(entry.split(", ", 1)[1]) <= pr.MAX_REASON_CHARS
+    assert pr.redact_paths("n/a and 1/2 and sub-1/x", []) == "n/a and 1/2 and sub-1/x"
+    url = "fetch failed: https://data.nemar.org/on1/1.0.0/sub-1/x.tsv: 404"
+    assert pr.redact_paths(url, []) == url
+    assert pr.redact_paths("err:/a/b and '/tmp/a/b'", []) == "err:b and 'b'"
+
+
+def test_a_create_failure_on_an_integration_branch_never_suggests_deleting_it(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    monkeypatch.setenv("GH_STANDIN_FAIL", "pr-create")
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    err = capsys.readouterr().err
+    assert "branch integ was pushed, but the pull request was not opened" in err
+    assert "--delete" not in err and "Open it by hand" in err
+
+
+def test_a_create_failure_with_nothing_pushed_says_so(env, tmp_path, monkeypatch, capsys):
+    served, bare, log, work = env
+    tip = _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4)
+    monkeypatch.setenv("GH_STANDIN_FAIL", "pr-create")
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 1
+    err = capsys.readouterr().err
+    assert "nothing was pushed" in err and "was pushed," not in err and "--delete" not in err
+    assert _git(bare, "rev-parse", "integ").strip() == tip
+
+
+def test_a_list_failure_after_a_push_names_the_push(env, tmp_path, monkeypatch, capsys):
+    served, bare, log, work = env
+    _integration_branch(bare, tmp_path, "integ", {"CHANGES": "1.0.0\n"})
+    monkeypatch.setenv("GH_STANDIN_FAIL", "pr-list")
+    assert _pr(served, work, "--from-ref", "integ") == 1
+    assert "branch integ was pushed" in capsys.readouterr().err
+
+
+def test_several_open_pull_requests_with_nothing_pushed_do_not_say_pushed(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4)
+    rows = [{"number": 5, "url": "u5", **_MINE}, {"number": 6, "url": "u6", **_MINE}]
+    monkeypatch.setenv("STANDIN_OPEN_PRS", json.dumps(rows))
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 1
+    err = capsys.readouterr().err
+    assert "2 open pull requests" in err and "nothing was pushed" in err
+
+
+def test_a_branch_that_moved_during_a_run_with_nothing_to_add_is_refused(
+    env, tmp_path, monkeypatch, capsys
+):
+    served, bare, log, work = env
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4)
+    real = pipeline.run_dataset
+
+    def run_then_someone_pushes(*args, **kwargs):
+        got = real(*args, **kwargs)
+        _integration_branch_more(bare, tmp_path)
+        return got
+
+    monkeypatch.setattr(pipeline, "run_dataset", run_then_someone_pushes)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 1
+    assert "moved on the remote" in capsys.readouterr().err
+    assert not _calls(log)
+
+
+def test_ownership_entries_no_track_reported_are_listed_and_warned_about(env, tmp_path):
+    served, bare, log, work = env
+    ghost = "sub-ghost/ieeg/sub-ghost_task-x_electrodes.tsv"
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4, ghost=ghost)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 0
+    body = _create_call(log)["body"]
+    assert "adds no files" in body
+    assert "## Recorded but not produced by this run (1)" in body and f"`{ghost}`" in body
+    assert "would block other tracks" in body
+    first = body.split("\n\n")[1]  # the warning sits right under the opening sentences
+    assert first.startswith("Warning: 1 path(s)")
+
+
+def test_an_orphaned_coordsystem_in_a_session_that_still_has_tables_is_listed(env, tmp_path):
+    served, bare, log, work = env
+    ghost = "sub-01/ses-01/ieeg/sub-01_ses-01_space-Ghost_coordsystem.json"
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4, ghost=ghost)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 0
+    body = _create_call(log)["body"]
+    assert "## Recorded but not produced by this run (1)" in body and f"`{ghost}`" in body
