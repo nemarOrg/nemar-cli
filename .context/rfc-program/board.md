@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 150 | 10 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 150 | 11 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -97,7 +97,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | done | B7, O4e | biosig-zarr#8 | r1 comments+seam (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history verbatim); fix verified by manager | 2026-11-21T10:50-08:00 | 3h | merged into draft/3.0.0 (c0cb7e49e301feb8cebd57208edee8feb9fdb533) |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7b | - |  |  | - | pre-release 3.0.0-draft.3 on c0cb7e49e301feb8cebd57208edee8feb9fdb533 (verified) |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | claude-opus | done | B4b, O4e, O4f | - | r1 comments+seam (1 Sonnet): clean; 1 sugg (history row 2.0.2 date) is card-given text, routed to the lead's S1 card | 2026-11-21T11:25-08:00 | 2h | rfcs#2 head 0e4947c7f6f3b6bbf8f6a5aaf054b2357cc0ad0e, still draft; acceptance verified by manager |
-| B4d | [RFC-0001 cites S1 figures](cards/B4d.md) | - | worker | - | - | todo | S1, B4c | - |  |  | 2h | waits on card PR 2291 (r1: 1 crit, 2 sugg; lead fixing) |
+| B4d | [RFC-0001 cites S1 figures](cards/B4d.md) | - | worker | - | claude-sonnet | active | S1, B4c | - |  | 2026-11-21T12:05-08:00 | 2h | impl-B4d out (Sonnet high); commit on rfcs#2, stays draft |
 
 ## Questions
 
@@ -228,4 +228,5 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | ad17a6a5 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T11:05-08:00 | done |
 | ac7d379d | reviewer | claude-sonnet | sonnet | B7b | 2026-11-21T11:15-08:00 | done |
 | a8692c4a | implementer | claude-opus | Opus xhigh | B4c | 2026-11-21T11:25-08:00 | done |
-| a21b313b | lead | claude-opus | Opus xhigh | B4d-card | 2026-11-21T11:45-08:00 | running |
+| a21b313b | lead | claude-opus | Opus xhigh | B4d-card | 2026-11-21T11:45-08:00 | done |
+| a5fb478c | implementer | claude-sonnet | Sonnet high | B4d | 2026-11-21T12:05-08:00 | running |

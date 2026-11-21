@@ -255,3 +255,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:32-08:00 | Q44 answered: owner says tag now; pre-release 3.0.0-draft.3 on c0cb7e49 (verified); B4c dispatched (Opus xhigh) |
 | 2026-11-21T10:39-08:00 | B4c verified at 0e4947c7 (all acceptance greps pass, rfc-check pass, draft); r1 clean, 1 sugg routed to lead (card text); P4 accepted by owner, lead-s1 dispatched (Opus xhigh) |
 | 2026-11-21T10:53-08:00 | Card PR 2291 (B4d) r1 (1 Sonnet): 1 crit (question 18 count 2->1), 2 sugg; sent to lead. Tag rfc-0001-evidence created on c48405fe (link 200). Issue #2292 filed for nm000411 |
+| 2026-11-21T10:55-08:00 | Card PR 2291 r1: crit rejected with evidence (0e4947c7 line 504 has '(question 18)', manager verified), 2 sugg fixed; merged 90ca0ee6; B4d dispatched (Sonnet high) |
