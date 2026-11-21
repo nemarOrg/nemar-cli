@@ -1,0 +1,10 @@
+{
+ "failed": [],
+ "headers_failed": 0,
+ "manifest_failures": {
+  "on005691/-": {
+   "ok": false,
+   "reason": "no latest_version"
+  }
+ }
+}

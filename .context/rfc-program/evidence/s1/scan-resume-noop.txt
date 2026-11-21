@@ -1,0 +1,7 @@
+heads: 0 to read
+tally: {('edf', 'plus-other'): 76, ('edf', 'EDF+C'): 53585, ('edf', 'plain'): 20017, ('edf', 'EDF+D'): 1728, ('bdf', 'plain'): 11325, ('bdf', 'BDF+C'): 55015, ('edf', 'too-small'): 1} failed: 0
+requests 0 stat {'429': 0, '5xx': 0, 'other_fail': 0}
+deep: 0 +D files to analyze
+deep done; requests 0
+requests 0 stat {'429': 0, '5xx': 0, 'other_fail': 0}
+tally: {('edf', 'plus-other'): 76, ('edf', 'EDF+C'): 53585, ('edf', 'plain'): 20017, ('edf', 'EDF+D'): 1728, ('bdf', 'plain'): 11325, ('bdf', 'BDF+C'): 55015, ('edf', 'too-small'): 1} failed: 0

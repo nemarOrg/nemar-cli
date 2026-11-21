@@ -1,0 +1,6 @@
+listed 910 (api total_count 910); public 910
+sum zarr_store_count (all listed): 231259
+zarr_status: {'ready': 877, 'failed': 27, 'pending': 6}
+converted_at present: 883
+licenses: {'CC0': 583, 'CC-BY-NC-4.0': 10, 'GPL-3.0': 5, 'CC-BY-4.0': 157, 'CC0-1.0': 38, 'CDLA-Sharing-1.0': 1, 'CC-BY-SA-4.0': 11, 'CC-BY-NC-SA-4.0': 10, 'MIT': 1, 'ODC-BY': 1, 'CC BY 4.0': 17, 'CC BY-SA 4.0': 2, 'CDLA-Permissive-2.0': 1, 'CC-BY-3.0': 1, 'other-open': 5, 'CC-BY-NC-ND-4.0': 23, 'PD': 1, 'Creative commons': 1, 'CC-BY-NC-SA-3.0': 1, 'n/a': 1, '': 1, 'CC BY-NC 4.0': 2, 'CC-BY-1.0': 1, 'Unknown': 2, 'CC-BY 4.0': 2, 'Open Data Commons Attribution License v1.0': 1, 'ODbL v1.0': 1, 'CC0 BY 4.0': 3, 'CC-BY-SA 4.0': 11, 'CC-BY-ND-4.0': 3, 'Non-commercial research use': 1, 'ODC-By-1.0': 6, 'Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0) for the EEG data. Stimuli can only be used for non-commercial purposes.': 1, 'CC0 1.0': 1, 'CC-BY-NC-SA 4.0': 1, 'CC-BY-NC 4.0': 3}
+requests 10 {'429': 0, '5xx': 0, 'other_fail': 0}
