@@ -7,6 +7,7 @@
  */
 
 import { z } from "zod";
+import { COMMUNITY_MAIL_CATEGORIES } from "../../../shared/contract/mail-categories.js";
 import { escapeHtml } from "../lib/escape";
 import { recordBroadcastOutcome } from "./broadcast-outcomes";
 import {
@@ -109,7 +110,14 @@ const RESEND_BATCH_URL = "https://api.resend.com/emails/batch";
 const BATCH_SIZE = 100;
 
 /**
- * Get recipient emails for a broadcast, filtered by group and announcement preference.
+ * Get recipient emails for an UNCATEGORIZED broadcast, filtered by group and preference.
+ *
+ * Transitional (epic #2260): the `announcements` key this used to read is retired (migration 0146
+ * carried it into `news`, `rfcs` and `maintenance`), and a group send does not name a category
+ * until phase 3 makes `category` required and replaces this function with `communityRecipients`.
+ * Until then an uncategorized message reaches only accounts that left all three categories on, so
+ * nobody who turned any one off receives mail that does not say which one it is. The audience
+ * is otherwise what it was: approved accounts, not deleted.
  */
 export async function getBroadcastRecipients(
   db: D1Database,
@@ -139,7 +147,7 @@ export async function getBroadcastRecipients(
   return result.results
     .filter((row) => {
       const prefs = parseEmailPreferences(row.email_preferences);
-      return prefs.announcements;
+      return COMMUNITY_MAIL_CATEGORIES.every((category) => prefs[category]);
     })
     .map((r) => r.email);
 }
@@ -150,7 +158,7 @@ export async function getBroadcastRecipients(
  * Returns either the resolved recipient (id, email, username) or a structured
  * error describing why the user can't receive a transactional email. Callers
  * map these errors to HTTP responses. Per-user transactional sends ignore the
- * `announcements` email preference (this is direct admin contact, not a broadcast).
+ * community mail preferences (this is direct admin contact, not a broadcast).
  */
 export async function getBroadcastRecipientByUsername(
   db: D1Database,

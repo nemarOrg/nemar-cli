@@ -21,7 +21,10 @@ const REPO_ROOT = join(import.meta.dir, "..");
 const PREFS = {
   user_approval: true,
   publication_request: true,
-  announcements: true,
+  news: true,
+  rfcs: true,
+  maintenance: true,
+  recall: { on: true, locked: true },
   dataset_anonymity: true,
   identifier_sweep: true,
   support_tickets: true,
@@ -109,7 +112,9 @@ describe("nemar admin email-preferences and the identifier sweep", () => {
         {
           user_approval: false,
           publication_request: false,
-          announcements: false,
+          news: false,
+          rfcs: false,
+          maintenance: false,
           dataset_anonymity: false,
           identifier_sweep: false,
           support_tickets: false,

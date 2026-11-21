@@ -9,6 +9,7 @@ import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
+import { recordBroadcastOutcome } from "../src/services/broadcast-outcomes";
 import { type OutboxEnv, handleOutboxBatch } from "../src/services/email-outbox";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -164,5 +165,25 @@ describe("GET /admin/notify/:id", () => {
     const { e } = env(recordingQueue().queue);
     const res = await get(1, ADMIN_KEY, e);
     expect(await res.json()).toMatchObject({ status: "sent", queued_count: 0, subject: "Old" });
+  });
+
+  test("reports skipped_count, and a queued row whose last recipient was skipped reads done", async () => {
+    const sender = db.query("SELECT id FROM users LIMIT 1").get() as { id: number };
+    const row = db
+      .query(
+        `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, status, queued_count)
+         VALUES (?, 'all', 'Skipping', 'x', 2, 'queued', 2) RETURNING id`,
+      )
+      .get(sender.id) as { id: number };
+    const { e } = env(recordingQueue().queue);
+    await recordBroadcastOutcome(realD1(db), row.id, "a@x.test", "delivered");
+    await recordBroadcastOutcome(realD1(db), row.id, "b@x.test", "skipped");
+    expect(await (await get(row.id, ADMIN_KEY, e)).json()).toMatchObject({
+      status: "done",
+      queued_count: 2,
+      delivered_count: 1,
+      skipped_count: 1,
+      failure_count: 0,
+    });
   });
 });

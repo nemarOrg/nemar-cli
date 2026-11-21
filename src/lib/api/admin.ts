@@ -23,7 +23,9 @@ import {
   type BackfillUsernameOutcome,
   type BackfillVerifyOutcome,
   type ClearIdentityConflictResponse,
+  type CommunityMailPreferences,
   type DuplicateReport,
+  type RECALL_PREFERENCE,
   adminUsersListResponseSchema,
   apiKeyCreateResponseSchema,
   apiKeyListResponseSchema,
@@ -1568,10 +1570,10 @@ export async function revalidateDataset(
 // Email Preferences
 // ============================================================================
 
-export interface EmailPreferences {
+/** The alerts an admin receives about their own work. */
+export interface AdminAlertPreferences {
   user_approval: boolean;
   publication_request: boolean;
-  announcements: boolean;
   /** #1409: findings from the anonymity sweep on an anonymous deposit. */
   dataset_anonymity: boolean;
   /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
@@ -1580,16 +1582,30 @@ export interface EmailPreferences {
   support_tickets: boolean;
 }
 
-/** Preferences plus whose they are (the backend echoes the resolved username). */
-export type EmailPreferencesResult = EmailPreferences & { username?: string };
+/**
+ * Everything the backend stores: the alerts above plus the three community categories a person may
+ * turn off (epic #2260, ADR 0132). `announcements` is retired; a recall is not stored.
+ */
+export type EmailPreferences = AdminAlertPreferences & CommunityMailPreferences;
 
-/** `targetUser` (owner-only) reads another user's preferences; omit for self. */
+/**
+ * Preferences plus whose they are (the backend echoes the resolved username). `recall` is
+ * constant, not stored. The admin alerts are absent when an admin reads another account's
+ * preferences: those are the owner's to see and change.
+ */
+export type EmailPreferencesResult = Partial<AdminAlertPreferences> &
+  CommunityMailPreferences & {
+    recall: typeof RECALL_PREFERENCE;
+    username?: string;
+  };
+
+/** `targetUser` (owner or admin) reads another user's preferences; omit for self. */
 export async function getEmailPreferences(targetUser?: string): Promise<EmailPreferencesResult> {
   const qs = targetUser ? `?user=${encodeURIComponent(targetUser)}` : "";
   return request<EmailPreferencesResult>(`/admin/email-preferences${qs}`, {}, true);
 }
 
-/** `targetUser` (owner-only) updates another user's preferences; omit for self. */
+/** `targetUser` (owner or admin) updates another user's preferences; omit for self. */
 export async function updateEmailPreferences(
   prefs: Partial<EmailPreferences>,
   targetUser?: string,
@@ -1634,6 +1650,11 @@ export interface BroadcastStatusResponse {
   failure_count: number;
   /** Sends whose outcome the provider never confirmed; not retried, so none is delivered twice. */
   unknown_count: number;
+  /**
+   * Recipients left unsent on purpose (the account went away, its address changed or it switched
+   * the category off after the send was queued). Absent from a backend that predates epic #2260.
+   */
+  skipped_count?: number;
   /** Redacted addresses (first letter and domain only). */
   failed_recipients: string[];
   sent_at: string;

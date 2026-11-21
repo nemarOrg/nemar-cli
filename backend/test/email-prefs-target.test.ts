@@ -26,8 +26,10 @@ function asD1(db: Database): D1Database {
   return { prepare } as unknown as D1Database;
 }
 
-// resolveEmailPrefsTarget gates owner-manages-others for email preferences (#808
-// follow-up). Real bun:sqlite, no mocks: the query and the role/owner logic are
+// resolveEmailPrefsTarget resolves whose email preferences a request targets (#808 follow-up).
+// Since epic #2260 (ADR 0132) an owner or an admin may act for another account; what an admin may
+// change there is the PUT handler's rule, proved through the real route in
+// mail-preferences-route-d1.test.ts. Real bun:sqlite, no mocks: the query and the role logic are
 // exercised exactly as production runs them.
 describe("resolveEmailPrefsTarget", () => {
   let db: D1Database;
@@ -49,6 +51,7 @@ describe("resolveEmailPrefsTarget", () => {
 
   const owner = { id: 2, username: "yahya", role: "owner" };
   const admin = { id: 7, username: "test-admin", role: "admin" };
+  const member = { id: 21, username: "plain-member", role: "member" };
 
   test("no target -> the caller (self)", async () => {
     expect(await resolveEmailPrefsTarget(db, admin, undefined)).toEqual({
@@ -57,7 +60,7 @@ describe("resolveEmailPrefsTarget", () => {
     });
   });
 
-  test("targeting own username -> self (no owner gate)", async () => {
+  test("targeting own username -> self (no role gate)", async () => {
     expect(await resolveEmailPrefsTarget(db, admin, "test-admin")).toEqual({
       id: 7,
       username: "test-admin",
@@ -71,10 +74,30 @@ describe("resolveEmailPrefsTarget", () => {
     });
   });
 
-  test("non-owner targeting another user -> 403", async () => {
+  test("an admin targeting another user -> that user (D8: owners and admins may act for others)", async () => {
     expect(await resolveEmailPrefsTarget(db, admin, "arnodelorme")).toEqual({
-      error: "Only owners can manage other users' email preferences",
+      id: 13,
+      username: "arnodelorme",
+    });
+  });
+
+  test("a requester who is neither owner nor admin targeting another user -> 403", async () => {
+    // The route sits behind adminMiddleware, so this is the helper's own guard: it must not
+    // become a way for a member to reach another account if it is ever mounted elsewhere.
+    expect(await resolveEmailPrefsTarget(db, member, "arnodelorme")).toEqual({
+      error: "Only owners and admins can manage other users' email preferences",
       status: 403,
+    });
+  });
+
+  test("an admin targeting a missing or soft-deleted user -> 404", async () => {
+    expect(await resolveEmailPrefsTarget(db, admin, "nobody")).toEqual({
+      error: "User not found: nobody",
+      status: 404,
+    });
+    expect(await resolveEmailPrefsTarget(db, admin, "gone")).toEqual({
+      error: "User not found: gone",
+      status: 404,
     });
   });
 

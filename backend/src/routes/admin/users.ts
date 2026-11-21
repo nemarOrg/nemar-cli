@@ -11,6 +11,13 @@
 import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  COMMUNITY_ONLY_REFUSAL,
+  type CommunityMailPreferences,
+  RECALL_PREFERENCE,
+  mailRecallWhy,
+} from "../../../../shared/contract/mail-categories.js";
 import { orcidIdSchema } from "../../../../shared/contract/publication.js";
 import {
   ACCOUNT_KIND_ERROR_MESSAGES,
@@ -37,6 +44,8 @@ import { computeReleaseStatements } from "../../services/compute-release";
 import { runnerEndStatements } from "../../services/compute-runners";
 import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-auth";
 import {
+  ADMIN_ALERT_CATEGORIES,
+  type EmailPreferences,
   parseEmailPreferences,
   resolveEmailConfig,
   sendRevocationEmail,
@@ -50,6 +59,7 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
+import { saveEmailPreferences } from "../../services/mail-preferences";
 import { oidcEndStatements } from "../../services/oidc-cascade";
 import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
 import { holderOfOidcSubject } from "../../services/oidc-subject";
@@ -771,8 +781,12 @@ async function finalizeRevocation(
 
 /**
  * Resolve whose email preferences a request targets. With no `?user=`, it's the
- * caller (any admin manages their own). With `?user=<username>` it's that user --
- * but only an OWNER may manage someone else's (admins manage only themselves).
+ * caller (any admin manages their own). With `?user=<username>` it's that user:
+ * an owner or an admin may act for another account (ADR 0132, owner decision of
+ * 2026-11-20), and what they may change there is the handlers' rule, not this
+ * function's -- an admin may set another account's community categories (news,
+ * RFCs, maintenance) on or off, while that account's admin alerts stay the
+ * owner's to change. Every such change is audited by `saveEmailPreferences`.
  * Pure resolution + a typed error result so the two handlers stay DRY.
  */
 export async function resolveEmailPrefsTarget(
@@ -783,8 +797,11 @@ export async function resolveEmailPrefsTarget(
   if (!requested || requested === requester.username) {
     return { id: requester.id, username: requester.username };
   }
-  if (requester.role !== "owner") {
-    return { error: "Only owners can manage other users' email preferences", status: 403 };
+  if (requester.role !== "owner" && requester.role !== "admin") {
+    return {
+      error: "Only owners and admins can manage other users' email preferences",
+      status: 403,
+    };
   }
   const target = await db
     .prepare("SELECT id, username FROM users WHERE username = ? AND deleted_at IS NULL")
@@ -1951,18 +1968,36 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   const emailPreferencesSchema = z.object({
     user_approval: z.boolean().optional(),
     publication_request: z.boolean().optional(),
-    announcements: z.boolean().optional(),
     /** #1409: findings from the anonymity sweep on an anonymous deposit. */
     dataset_anonymity: z.boolean().optional(),
     /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
     identifier_sweep: z.boolean().optional(),
     /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
     support_tickets: z.boolean().optional(),
+    /** Epic #2260 (ADR 0132): the community categories a person may turn off. */
+    news: z.boolean().optional(),
+    rfcs: z.boolean().optional(),
+    maintenance: z.boolean().optional(),
+    // Accepted by the schema ONLY so the handler can refuse them by name instead of silently
+    // dropping them: `announcements` was split into the three keys above (migration 0146), and a
+    // recall has no switch.
+    announcements: z.unknown().optional(),
+    recall: z.unknown().optional(),
   });
+
+  /** The preferences a caller may see for `target`: all of them, or the community ones only. */
+  function preferencesView(prefs: EmailPreferences, communityOnly: boolean) {
+    const community = Object.fromEntries(
+      COMMUNITY_MAIL_CATEGORIES.map((category) => [category, prefs[category]]),
+    ) as CommunityMailPreferences;
+    return { ...(communityOnly ? community : prefs), recall: RECALL_PREFERENCE };
+  }
 
   /**
    * GET /admin/email-preferences[?user=<username>] - Get email notification
-   * preferences for the caller, or (owner-only) for another user via `?user=`.
+   * preferences for the caller, or for another user via `?user=` (an owner sees
+   * every key; an admin sees another account's community categories only).
+   * `recall` is always `{on: true, locked: true}`: it is not stored.
    */
   admin.get("/email-preferences", async (c) => {
     const user = c.get("user");
@@ -1979,55 +2014,77 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: "User not found" }, 404);
     }
 
-    return c.json({ ...parseEmailPreferences(row.email_preferences), username: target.username });
+    const communityOnly = target.id !== user.id && user.role !== "owner";
+    return c.json({
+      ...preferencesView(parseEmailPreferences(row.email_preferences), communityOnly),
+      username: target.username,
+    });
   });
 
   /**
    * PUT /admin/email-preferences[?user=<username>] - Update email notification
-   * preferences for the caller, or (owner-only) for another user via `?user=`.
+   * preferences for the caller, or for another user via `?user=`.
+   *
+   * An owner or admin may turn a community category (news, rfcs, maintenance) on or off for
+   * another account (ADR 0132); another account's admin alerts are the owner's to change. A
+   * recall cannot be set, and `announcements` is retired: both are refused by name. Every change
+   * to a community category is audited (`mail_category_changed`), in the same batch as the write.
    */
   admin.put("/email-preferences", zValidator("json", emailPreferencesSchema), async (c) => {
     const user = c.get("user");
     const db = c.env.DB;
     const body = c.req.valid("json");
 
+    if (body.announcements !== undefined) {
+      return c.json(
+        {
+          error: "announcements_retired",
+          message:
+            "The announcements preference was split into news, rfcs and maintenance. Send those instead.",
+        },
+        400,
+      );
+    }
+    if (body.recall !== undefined) {
+      return c.json({ error: "recall_cannot_be_turned_off", message: mailRecallWhy() }, 400);
+    }
+
     const target = await resolveEmailPrefsTarget(db, user, c.req.query("user"));
     if ("error" in target) return c.json({ error: target.error }, target.status);
 
-    // Load existing preferences
+    const crossAccount = target.id !== user.id;
+    const communityOnly = crossAccount && user.role !== "owner";
+    if (communityOnly && ADMIN_ALERT_CATEGORIES.some((key) => body[key] !== undefined)) {
+      return c.json({ error: COMMUNITY_ONLY_REFUSAL }, 403);
+    }
+
+    // ONLY the keys the request names are written, as a per-key json_set evaluated when the
+    // statement runs (saveEmailPreferences): reading the blob here and writing all of it back
+    // would revert a concurrent write to any other key, and diff the audit against a stale copy.
+    const changes: Partial<EmailPreferences> = {};
+    for (const key of [...ADMIN_ALERT_CATEGORIES, ...COMMUNITY_MAIL_CATEGORIES]) {
+      const value = body[key];
+      if (value !== undefined) changes[key] = value;
+    }
+
+    const applied = await saveEmailPreferences(db, {
+      targetId: target.id,
+      targetUsername: target.username,
+      actorId: user.id,
+      changes,
+      via: crossAccount ? "admin" : "self",
+    });
+    if (!applied) return c.json({ error: "User not found" }, 404);
+
+    // Answer with what is stored now, which includes any concurrent write, not with a guess.
     const row = await db
       .prepare("SELECT email_preferences FROM users WHERE id = ?")
       .bind(target.id)
       .first<{ email_preferences: string | null }>();
-
-    const current = parseEmailPreferences(row?.email_preferences ?? null);
-
-    const updated = {
-      user_approval: body.user_approval ?? current.user_approval,
-      publication_request: body.publication_request ?? current.publication_request,
-      announcements: body.announcements ?? current.announcements,
-      dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
-      identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
-      support_tickets: body.support_tickets ?? current.support_tickets,
-    };
-
-    await db
-      .prepare("UPDATE users SET email_preferences = ? WHERE id = ?")
-      .bind(JSON.stringify(updated), target.id)
-      .run();
-
-    // Audit who changed whose prefs when an owner edits another user (#808 follow-up).
-    if (target.id !== user.id) {
-      await auditLogStatement(db, {
-        userId: user.id,
-        action: "email_preferences_updated",
-        resourceType: "user",
-        resourceId: String(target.id),
-        details: JSON.stringify({ target: target.username, updated }),
-      }).run();
-    }
-
-    return c.json({ ...updated, username: target.username });
+    return c.json({
+      ...preferencesView(parseEmailPreferences(row?.email_preferences ?? null), communityOnly),
+      username: target.username,
+    });
   });
 
   // ============================================================================
@@ -2041,7 +2098,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * Per-user send: { user: '<username>', ... }
    *
    * 'to' and 'user' are mutually exclusive. Per-user sends ignore the
-   * announcements email preference (these are direct admin transactional
+   * community mail preferences (these are direct admin transactional
    * messages, not broadcasts) but still require an approved account with an
    * email on file. Audit log records the recipient as `user:<username>` so the
    * group/transactional distinction is queryable post-hoc.
@@ -2149,7 +2206,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
    * A queued announcement (epic #1893 phase 2) finishes after the POST has answered: the
    * consumer writes one outcome per message to the audit row. `unknown_count` is sends whose
    * outcome the provider never confirmed (a timeout, an internal error); they are not retried
-   * because a retry could deliver twice. `failed_recipients` holds the redacted addresses the
+   * because a retry could deliver twice. `skipped_count` is recipients left unsent on purpose
+   * (the account went away, its address changed or it switched the category off after the
+   * announcement was queued); they are not failures, and they count toward `done`.
+   * `failed_recipients` holds the redacted addresses the
    * row stores, never full ones.
    */
   admin.get("/notify/:id", async (c) => {
@@ -2159,7 +2219,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     }
     const row = await c.env.DB.prepare(
       `SELECT id, status, subject, recipient_group, queued_count, delivered_count,
-              failure_count, unknown_count, failed_recipients, sent_at
+              failure_count, unknown_count, skipped_count, failed_recipients, sent_at
          FROM broadcast_emails WHERE id = ?`,
     )
       .bind(id)
@@ -2172,6 +2232,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         delivered_count: number;
         failure_count: number;
         unknown_count: number;
+        skipped_count: number;
         failed_recipients: string | null;
         sent_at: string;
       }>();
@@ -2192,6 +2253,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       delivered_count: row.delivered_count,
       failure_count: row.failure_count,
       unknown_count: row.unknown_count,
+      skipped_count: row.skipped_count,
       failed_recipients: Array.isArray(failed) ? failed : [],
       sent_at: row.sent_at,
     });
