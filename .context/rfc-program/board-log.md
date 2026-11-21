@@ -102,6 +102,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:58-08:00 | Owner raised today's 'Agents today' limit from 60 to 80 (owner instruction; manager applied the edit) | owner |  |
 | 2026-11-20T19:16-08:00 | Q39 editor: Seyed Yahya Shirazi in a personal capacity; rewording ruled editorial. Q40: RFCs stay in nemarOrg/rfcs, decided by the spec editor. Q41: repo stays in nemarOrg as hosting only. Q42: release DOIs via nemar-doi as a registration service | owner |  |
 | 2026-11-20T19:16-08:00 | K15: owner confirms they held the copyright of the docs.nemar.org spec text; the relicense stands; O4e (2.0.2) may proceed | owner |  |
+| 2026-11-20T19:17-08:00 | NEMAR's role in biosig-zarr (owner, as read by the manager): NEMAR hosts the repository and offers hosting and DOI registration as a capacity, not ownership; the spec is as independent as possible and NEMAR is ready to hand it off when it matures; until then NEMAR backstops it and guarantees its continuation | owner |  |
 
 ## Log
 
@@ -223,3 +224,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:08-08:00 | Lead PR 2288 (B7, B7b, B4c, O4e, O4f, K14, K15) head 9f7ca294; review dispatched (61/80); Q39-Q42 asked |
 | 2026-11-20T19:16-08:00 | PR 2288 r1: 0 crit, 4 imp, 4 sugg; sent to lead with Q39-Q42 answers |
 | 2026-11-20T19:16-08:00 | K15 resolved by owner; lead-indep revising PR 2288 |
+| 2026-11-20T19:17-08:00 | Owner clarified NEMAR's stewardship role; forwarded to lead-indep for B7 and B4c wording |
