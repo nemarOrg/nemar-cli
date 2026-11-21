@@ -81,7 +81,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
 | B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | claude-opus | done | B5a, O4d, B6 | biosig-zarr#6 | r1 spec+tools (2 Sonnet): 3 imp, 6 sugg fixed (layer per advisor); r2 delta clean; 1 sugg fixed, verified by manager | 2026-11-20T18:15-08:00 | 3d | merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39) |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | done | B4 | 2273 | r1 comments (1 Sonnet): 0 crit/imp, 4 sugg fixed or no change; r2 delta clean; 1 sugg (stale card N1 text) to the lead | 2026-11-20T18:45-08:00 | 4h | merged 0585cc96; drafts in owner/announce-0001 for O5 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4c | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4c, B4d | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
@@ -97,6 +97,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | done | B7, O4e | biosig-zarr#8 | r1 comments+seam (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history verbatim); fix verified by manager | 2026-11-21T10:50-08:00 | 3h | merged into draft/3.0.0 (c0cb7e49e301feb8cebd57208edee8feb9fdb533) |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7b | - |  |  | - | pre-release 3.0.0-draft.3 on c0cb7e49e301feb8cebd57208edee8feb9fdb533 (verified) |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | claude-opus | done | B4b, O4e, O4f | - | r1 comments+seam (1 Sonnet): clean; 1 sugg (history row 2.0.2 date) is card-given text, routed to the lead's S1 card | 2026-11-21T11:25-08:00 | 2h | rfcs#2 head 0e4947c7f6f3b6bbf8f6a5aaf054b2357cc0ad0e, still draft; acceptance verified by manager |
+| B4d | [RFC-0001 cites S1 figures](cards/B4d.md) | - | worker | - | - | todo | S1, B4c | - |  |  | 2h | waits on card PR 2291 (r1: 1 crit, 2 sugg; lead fixing) |
 
 ## Questions
 
