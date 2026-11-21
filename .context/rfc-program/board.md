@@ -92,8 +92,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | done | B5 | - |  | - | - | pre-release 3.0.0-draft.2 on ac6e3124f44e3d7e940fe25430cee4296f755d39, isPrerelease true (verified) |
 | B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | done | O4c | rfcs#2 | r1 comments+seam (1 Sonnet): clean; 2 sugg moved to B4c | 2026-11-20T19:55-08:00 | 2h | superseded by B4c (independence notice, draft.3) |
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
-| B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | review | - | biosig-zarr#7 |  | 2026-11-20T19:40-08:00 | 4h | r1 clean (0 crit/imp), 2 sugg + 1 deviation note; fixes sent to implementer: ADR 0005 context trim, version-history NEMAR definition; CHANGELOG redefinition rejected (history) |
-| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7 | - |  |  | - | - |
+| B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | done | - | biosig-zarr#7 | r1 comments+code (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history); version-history NEMAR fixed; fixes verified by manager (small, no r2) | 2026-11-20T19:40-08:00 | 4h | merged into main (509b68976144561050606d11ac71f623b51f0a97) |
+| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | owner | B7 | - |  |  | - | asked Q43 (owner say-so) |
 | B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | - | todo | B7, O4e | - |  |  | 3h | - |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7b | - |  |  | - | - |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | - | todo | B4b, O4e, O4f | - |  |  | 2h | - |
@@ -143,6 +143,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q40 | - | Where are biosig-zarr RFCs decided under independence? | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (Recommended) / biosig-zarr's own process (moves RFC-0001, delays O5) | none | 2026-11-22T17:00 | closed | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (owner, 2026-11-20T21:25-08:00) |
 | Q41 | - | Where does the biosig-zarr repository live? | Stay in nemarOrg as hosting only; move when a second institution co-maintains (Recommended) / Transfer to its own organization now | none | 2026-11-22T17:00 | closed | Stay in nemarOrg as hosting only; move when a second institution co-maintains (owner, 2026-11-20T21:25-08:00) |
 | Q42 | - | Release DOIs for biosig-zarr (Q14 planned NEMAR DOIs)? | Keep nemar-doi as a registration service / Zenodo (lead's pick; note AGENTS.md says EZID not Zenodo for NEMAR) / No DOI before beta | none | 2026-11-22T17:00 | closed | Keep nemar-doi, described as a registration service (owner, 2026-11-20T21:25-08:00) |
+| Q43 | - | O4e: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes? | Yes, release now (Recommended) / Hold | none | 2026-11-22T17:00 | open |  |
 
 ## Proposals
 
