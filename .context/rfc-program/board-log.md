@@ -103,6 +103,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:16-08:00 | Q39 editor: Seyed Yahya Shirazi in a personal capacity; rewording ruled editorial. Q40: RFCs stay in nemarOrg/rfcs, decided by the spec editor. Q41: repo stays in nemarOrg as hosting only. Q42: release DOIs via nemar-doi as a registration service | owner |  |
 | 2026-11-20T19:16-08:00 | K15: owner confirms they held the copyright of the docs.nemar.org spec text; the relicense stands; O4e (2.0.2) may proceed | owner |  |
 | 2026-11-20T19:17-08:00 | NEMAR's role in biosig-zarr (owner, as read by the manager): NEMAR hosts the repository and offers hosting and DOI registration as a capacity, not ownership; the spec is as independent as possible and NEMAR is ready to hand it off when it matures; until then NEMAR backstops it and guarantees its continuation | owner |  |
+| 2026-11-21T10:18-08:00 | Q43: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes (owner, 2026-11-21) | owner |  |
 
 ## Log
 
@@ -235,3 +236,5 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:11-08:00 | S1 report: PR 2289 head da4ccd10; manager ran acceptance (all pass); real discontinuity 1,265 recordings / 37 datasets / 997 stores; lead questions: 36 negative BV gaps, 528 undated as can-be-discontinuous, nm000411 no zarr index; r1 panel (claims, code) out |
 | 2026-11-21T10:11-08:00 | Owner cleanup: manager temp worktree at /private/var/folders/.../T/tmp.Teu8fPYl0M (detached da4ccd10) could not be removed (guard refused rm); run git worktree remove --force on it |
 | 2026-11-21T10:12-08:00 | B7 r1 fixes verified at 8ea1137a (acceptance re-run all pass, checks green); merged biosig-zarr#7 with merge commit 509b6897; O4e asked as Q43 |
+| 2026-11-21T10:19-08:00 | Q43 answered: owner says release now; 2.0.2 created on 509b6897 (verified tag, not prerelease); B7b dispatched (Opus xhigh) |
+| 2026-11-21T10:19-08:00 | S1 r1 panel: A (claims) 1 crit (inferred gap drop stated as fact), 8 imp, 8 sugg; B (code) 0 crit, 2 imp (FIF lower bound, fif.gz uncounted), 5 sugg; scripts read-only, no secrets, no miscount; all sent back to impl-S1 |

@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 3 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 80 | 4 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -67,7 +67,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O2 | Owner creates nemarOrg/biosig-zarr, comments on biosigio#179 | - | owner | - | - | done | - | - |  | - | - | repo, README and biosigio#179 comment done 2026-11-20 |
 | A2 | [ADR supersedes parts of ADR 0128](cards/A2.md) | - | lead | - | claude-opus | done | O0 | 2269 | r1 code+comments (1 Sonnet, docs-only): 2 sugg fixed + index sync; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged 0184cb051d77587144f501a327b3928c9da97033; ADR 0131; #2217 to be closed or rescoped by owner |
 | A1 | [ADR adopts the RFC process](cards/A1.md) | - | worker | - | claude-sonnet | done | O0 | 2268 | r1 code+comments (1 Sonnet, docs <50 lines): 3 sugg, 2 fixed, 1 no change; fix diff verified by manager | 2026-11-20T12:57-08:00 | 4h | merged b20b9e93 (ADR 0130) |
-| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | review | O0 | #2289 |  | 2026-11-20T16:45-08:00 | 1d | verified da4ccd10 (acceptance pass: Command 10, Raw 11, 2728 KB, evidence-only); r1 panel of 2 out; 3 lead questions held for after review |
+| S1 | [Back-catalog scan and throughput](cards/S1.md) | - | worker | - | claude-sonnet | review | O0 | #2289 |  | 2026-11-20T16:45-08:00 | 1d | r1 panel: 1 crit, 10 imp, 15 sugg (labeling/caveats, no miscount); all sent to impl-S1 to fix; r2 delta after |
 | R1 | [nemarOrg/rfcs process and checks](cards/R1.md) | - | worker-hard | - | claude-sonnet | done | O0, O1 | rfcs#1 | r1 code/errors/types/comments + tests (2 Sonnet): 5 imp, 9 sugg fixed; r2 delta clean, 2 sugg rejected (cosmetic) | 2026-11-20T12:57-08:00 | 2d | merged c3a3ccc6 into rfcs main |
 | O1b | Owner applies the main ruleset requiring rfc-check | - | owner | - | - | done | R1 | - |  | - | - | ruleset protect-main 27763743 active, verified (rfc-check required, admins bypass via PR) |
 | R3 | [Weekly report shows the RFC clock](cards/R3.md) | - | worker-hard | - | claude-sonnet | done | R1 | 2278 | r1 code+tests (2 Sonnet): 1 imp, 4 sugg fixed; r2 delta clean, 2 sugg rejected (empty-title placeholder: rfc-check requires a title; port-9 test never reaches GitHub) | 2026-11-20T16:45-08:00 | 1d | merged 14d49c8e |
@@ -93,8 +93,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | done | O4c | rfcs#2 | r1 comments+seam (1 Sonnet): clean; 2 sugg moved to B4c | 2026-11-20T19:55-08:00 | 2h | superseded by B4c (independence notice, draft.3) |
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
 | B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | done | - | biosig-zarr#7 | r1 comments+code (1 Sonnet): 0 crit/imp; 2 sugg: 1 fixed, 1 rejected (history); version-history NEMAR fixed; fixes verified by manager (small, no r2) | 2026-11-20T19:40-08:00 | 4h | merged into main (509b68976144561050606d11ac71f623b51f0a97) |
-| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | owner | B7 | - |  |  | - | asked Q43 (owner say-so) |
-| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | - | todo | B7, O4e | - |  |  | 3h | - |
+| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | done | B7 | - |  |  | - | release 2.0.2 on 509b68976144561050606d11ac71f623b51f0a97, not prerelease (verified) |
+| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | claude-opus | active | B7, O4e | - |  | 2026-11-21T10:50-08:00 | 3h | impl-B7b out (Opus xhigh); PR into draft/3.0.0 |
 | O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7b | - |  |  | - | - |
 | B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | - | todo | B4b, O4e, O4f | - |  |  | 2h | - |
 
@@ -143,7 +143,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q40 | - | Where are biosig-zarr RFCs decided under independence? | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (Recommended) / biosig-zarr's own process (moves RFC-0001, delays O5) | none | 2026-11-22T17:00 | closed | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (owner, 2026-11-20T21:25-08:00) |
 | Q41 | - | Where does the biosig-zarr repository live? | Stay in nemarOrg as hosting only; move when a second institution co-maintains (Recommended) / Transfer to its own organization now | none | 2026-11-22T17:00 | closed | Stay in nemarOrg as hosting only; move when a second institution co-maintains (owner, 2026-11-20T21:25-08:00) |
 | Q42 | - | Release DOIs for biosig-zarr (Q14 planned NEMAR DOIs)? | Keep nemar-doi as a registration service / Zenodo (lead's pick; note AGENTS.md says EZID not Zenodo for NEMAR) / No DOI before beta | none | 2026-11-22T17:00 | closed | Keep nemar-doi, described as a registration service (owner, 2026-11-20T21:25-08:00) |
-| Q43 | - | O4e: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes? | Yes, release now (Recommended) / Hold | none | 2026-11-22T17:00 | open |  |
+| Q43 | - | O4e: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes? | Yes, release now (Recommended) / Hold | none | 2026-11-22T17:00 | closed | Yes, release now (owner, 2026-11-21) |
 
 ## Proposals
 
@@ -195,7 +195,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | lead-C1 | lead | claude-opus | Opus xhigh | C1 | 2026-11-20T19:45-08:00 | done |
 | rev-C1 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:10-08:00 | done |
 | rev-C1-r2 | reviewer | claude-sonnet | Sonnet high | C1 | 2026-11-20T20:40-08:00 | done |
-| impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | done |
+| impl-S1 | implementer | claude-sonnet | Sonnet high | S1 | 2026-11-20T16:45-08:00 | running |
 | impl-R3 | implementer | claude-sonnet | Sonnet xhigh | R3 | 2026-11-20T16:45-08:00 | done |
 | impl-A3 | implementer | claude-opus | Opus xhigh | A3 | 2026-11-20T16:45-08:00 | done |
 | impl-B5a | implementer | claude-opus | Opus xhigh | B5a | 2026-11-20T16:45-08:00 | done |
@@ -219,5 +219,6 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | done |
 | a8707231 | implementer | claude-opus | Opus xhigh | B7 | 2026-11-20T19:40-08:00 | done |
 | a535721e | reviewer | claude-sonnet | sonnet | B7 | 2026-11-21T10:20-08:00 | done |
-| a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | running |
-| a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | running |
+| a768fe87 | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
+| a5f0463d | reviewer | claude-sonnet | sonnet | S1 | 2026-11-21T10:30-08:00 | done |
+| aa2406a9 | implementer | claude-opus | Opus xhigh | B7b | 2026-11-21T10:50-08:00 | running |
