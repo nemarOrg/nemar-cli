@@ -230,3 +230,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:24-08:00 | PR 2288 r2 fixes verified at 9865d78c (card check passes; B7b grep case-sensitive; B4c nemar-doi 1; Hosting lines short forms); merged 92e78f59; steps B7 O4e B7b O4f B4c added, O5 now depends on B4c; B7 dispatched (Opus xhigh) |
 | 2026-11-21T10:06-08:00 | budget reset (daily): Agents today was 63 |
 | 2026-11-21T10:06-08:00 | B7 and S1 agents stopped on the weekly usage limit (429) around 19:45 on 11-20; owner says the limit reset; both resumed at 10:07 on 11-21. B7 timebox breach is wall-clock during the limit, not work, so no advisor escalation (manager) |
+| 2026-11-21T10:09-08:00 | B7 report: biosig-zarr#7 head d366f5df; manager ran card acceptance (6 empty, counts right), checks green, 13 files in scope; deviations accepted: extra ADR index line, plan checkboxes and version-history NEMAR left out of scope; r1 review out |
