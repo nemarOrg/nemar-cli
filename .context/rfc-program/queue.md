@@ -25,6 +25,9 @@ The board's Steps table is in dispatch priority order, and Depends on the board 
 | claude-opus | B5 | B5a merged, O4d done, B6 done; card completed at C1, rescoped by Q33 |
 | claude-opus | SC1 | B6 and O4b done (Q29, proposal P2) |
 | claude-opus | B4b | B5 merged into `draft/3.0.0`, O4c and O4d done |
+| claude-opus | B7 | Q39 to Q42 answered (Q37/Q38 decided) |
+| claude-opus | B7b | B7 merged into `main`, O4e done |
+| claude-opus | B4c | B4b done, O4e and O4f done |
 | claude-opus | V2 | checkpoint C2 completed the card |
 
 ## Collisions
@@ -44,4 +47,8 @@ The board's Steps table is in dispatch priority order, and Depends on the board 
 | B5a, B5 | `conformance/`, `tools/`, `conformance.yml`, `CHANGELOG.md` | B5 after B5a merges and O4d; B5 merges `main` into its branch first |
 | A3, mail epic #2260 | `.context/decisions/` and the ADR index | A3 takes the next free number above the mail epic's 0132 and merges only after every lower number is on its base |
 | B4b, B4 | the open draft PR nemarOrg/rfcs#2 | B4b after B4 is done and O4c; it pushes one commit to that PR's branch |
+| B7, B7b | biosig-zarr governance files; B7b merges `2.0.2` into `draft/3.0.0` | B7b after B7 merges and O4e; B7b merges the tag `2.0.2` into its branch first |
+| B7, any other PR into biosig-zarr `main` | `LICENSE.md`, `GOVERNANCE.md`, `README.md`, `CHANGELOG.md` | no other PR lands on `main` while B7 is open; one that must lands first, and B7 takes `main` in and reruns its gate |
+| B7b, any other PR into `draft/3.0.0` | `spec/index.md`, `CHANGELOG.md` | no other change lands on `draft/3.0.0` while B7b is open |
+| B4c, B4b | the open draft PR nemarOrg/rfcs#2 | B4c after B4b is done, O4e and O4f; it pushes commits to that PR's branch |
 | R3, mail epic #2260 | `backend/src/services/` and `shared/contract/` in nemar-cli, different files | may run together; the second to merge takes the base in and reruns its gate |
