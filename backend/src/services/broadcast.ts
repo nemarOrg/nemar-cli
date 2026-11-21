@@ -7,7 +7,11 @@
  */
 
 import { z } from "zod";
-import { COMMUNITY_MAIL_CATEGORIES } from "../../../shared/contract/mail-categories.js";
+import {
+  MAIL_CATEGORIES,
+  type MailCategory,
+  RECALL_CATEGORY,
+} from "../../../shared/contract/mail-categories.js";
 import { escapeHtml } from "../lib/escape";
 import { recordBroadcastOutcome } from "./broadcast-outcomes";
 import {
@@ -16,12 +20,12 @@ import {
   type ResolvedEmailProvider,
   applyDevWrap,
   isEmailDeliveryAllowed,
-  parseEmailPreferences,
   redactAddressIn,
   redactRecipient,
   resolveEmailProvider,
   sendEmail,
 } from "./email";
+import { MailLinkSecretUnsetError, requireMailLinkSecret } from "./mail-links";
 
 export type RecipientGroup = "all" | "admins" | "members";
 
@@ -38,11 +42,20 @@ export type RecipientGroupOrUser = RecipientGroup | `user:${string}`;
  * must be present. Exposed from the service module so unit tests can
  * exercise the mutual-exclusion refinement directly without spinning up
  * a Hono test app.
+ *
+ * A group send also names a `category` (epic #2260 phase 3); the route, not this schema, refuses a
+ * group send without one and a per-user send with one, so each refusal carries its own code
+ * (`category_required`, `category_not_allowed`) that an old CLI can show. `recall_reference` and
+ * `confirm_recall` belong to a recall alone; `allow_repeat` lifts the same-subject guard.
  */
 export const broadcastRequestSchema = z
   .object({
     to: z.enum(["all", "admins", "members"]).optional(),
     user: z.string().min(3).max(30).optional(),
+    category: z.enum(MAIL_CATEGORIES).optional(),
+    recall_reference: z.string().min(1).max(300).optional(),
+    confirm_recall: z.string().max(300).optional(),
+    allow_repeat: z.boolean().optional().default(false),
     subject: z.string().min(1).max(200),
     body: z.string().min(1).max(10000),
     dry_run: z.boolean().optional().default(false),
@@ -58,10 +71,20 @@ export type SingleUserLookupResult =
   | { ok: true; email: string; user_id: number; username: string }
   | { ok: false; error: SingleUserLookupError; user_id?: number; username?: string };
 
-/** Env for a broadcast: the delivery fence's fields plus the optional announcement outbox. */
+/**
+ * Env for a broadcast: the delivery fence's fields plus the optional announcement outbox, and what a
+ * categorized send needs to mint each recipient's unsubscribe link (epic #2260 phase 3).
+ */
 export interface BroadcastEnv extends EmailDeliveryEnv {
   /** Queue the announcement consumer drains (epic #1893 phase 2). Unbound: sends run inline. */
   EMAIL_OUTBOX?: Queue;
+  /** HMAC key of the unsubscribe links (`services/mail-links.ts`). Unusable: no categorized send. */
+  MAIL_LINK_SECRET?: string;
+  MAIL_LINK_SECRET_PREVIOUS?: string;
+  /** Origin of the unsubscribe URLs. Must be https for a categorized send. */
+  API_BASE_URL?: string;
+  /** Origin of the website, for the footer's link to the preferences page. */
+  APP_BASE_URL?: string;
 }
 
 /**
@@ -73,6 +96,13 @@ export interface BroadcastOutboxMessage {
   kind: "broadcast";
   broadcast_id: number;
   to: string;
+  /**
+   * The account the message is for (epic #2260 phase 3). Present on a categorized message, so the
+   * consumer can re-read the account and its preference before sending and mint the link for it;
+   * absent on a message queued before this field existed and on a per-user send, both of which are
+   * sent as they always were.
+   */
+  user_id?: number;
 }
 
 export type BroadcastStatus = "sent" | "queued" | "done";
@@ -93,11 +123,6 @@ export interface BroadcastResult {
   error?: string;
 }
 
-interface UserRow {
-  email: string;
-  email_preferences: string | null;
-}
-
 interface SingleUserRow {
   id: number;
   username: string;
@@ -106,51 +131,49 @@ interface SingleUserRow {
   email_preferences: string | null;
 }
 
-const RESEND_BATCH_URL = "https://api.resend.com/emails/batch";
-const BATCH_SIZE = 100;
+/** What stops a categorized send before anything is written or queued; each is a refusal code. */
+export type CategorizedSendBlocker =
+  | "outbox_required"
+  | "mail_link_secret_unset"
+  | "mail_link_base_unusable";
 
 /**
- * Get recipient emails for an UNCATEGORIZED broadcast, filtered by group and preference.
- *
- * Transitional (epic #2260): the `announcements` key this used to read is retired (migration 0146
- * carried it into `news`, `rfcs` and `maintenance`), and a group send does not name a category
- * until phase 3 makes `category` required and replaces this function with `communityRecipients`.
- * Until then an uncategorized message reaches only accounts that left all three categories on, so
- * nobody who turned any one off receives mail that does not say which one it is. The audience
- * is otherwise what it was: approved accounts, not deleted.
+ * The reasons a categorized send cannot go out now, in the order they are reported (epic #2260
+ * phase 3). Empty means it can. A categorized message is never sent inline (one path is one thing
+ * to test, and only the outbox consumer re-checks each recipient's preference at send time), so
+ * the Cloudflare provider and the bound queue are required. Every message but a recall carries a
+ * link that lets its reader stop receiving it, so an unusable `MAIL_LINK_SECRET`, or an
+ * `API_BASE_URL` that is not https (RFC 8058 and the Cloudflare service both refuse plain HTTP),
+ * stops the send. A RECALL has no link, so neither condition can hold back a safety notice.
  */
-export async function getBroadcastRecipients(
-  db: D1Database,
-  group: RecipientGroup,
-): Promise<string[]> {
-  let roleFilter: string;
-  switch (group) {
-    case "admins":
-      roleFilter = "AND role IN ('owner', 'admin')";
-      break;
-    case "members":
-      roleFilter = "AND role = 'member'";
-      break;
-    default:
-      roleFilter = "";
+export function categorizedSendBlockers(
+  env: BroadcastEnv | undefined,
+  category: MailCategory,
+): CategorizedSendBlocker[] {
+  const blockers: CategorizedSendBlocker[] = [];
+  let provider: string | undefined;
+  try {
+    provider = resolveEmailProvider(env).provider;
+  } catch {
+    provider = undefined;
   }
-
-  const result = await db
-    .prepare(
-      `SELECT email, email_preferences FROM users
-       WHERE status = 'approved' AND deleted_at IS NULL ${roleFilter}`,
-    )
-    .all<UserRow>();
-
-  if (!result.results) return [];
-
-  return result.results
-    .filter((row) => {
-      const prefs = parseEmailPreferences(row.email_preferences);
-      return COMMUNITY_MAIL_CATEGORIES.every((category) => prefs[category]);
-    })
-    .map((r) => r.email);
+  if (provider !== "cloudflare" || !env?.EMAIL_OUTBOX) blockers.push("outbox_required");
+  if (category !== RECALL_CATEGORY) {
+    try {
+      requireMailLinkSecret(env ?? {});
+    } catch (error) {
+      if (!(error instanceof MailLinkSecretUnsetError)) throw error;
+      blockers.push("mail_link_secret_unset");
+    }
+    if (!(env?.API_BASE_URL ?? "").trim().startsWith("https://")) {
+      blockers.push("mail_link_base_unusable");
+    }
+  }
+  return blockers;
 }
+
+const RESEND_BATCH_URL = "https://api.resend.com/emails/batch";
+const BATCH_SIZE = 100;
 
 /**
  * Resolve a single user recipient by username.
@@ -268,7 +291,11 @@ function inlineMarkdown(text: string): string {
 /**
  * Wrap converted markdown HTML in the standard NEMAR email template.
  */
-export function buildBroadcastHtml(subject: string, bodyHtml: string): string {
+export function buildBroadcastHtml(
+  subject: string,
+  bodyHtml: string,
+  categoryFooterHtml = "",
+): string {
   return `
 <!DOCTYPE html>
 <html>
@@ -285,7 +312,7 @@ export function buildBroadcastHtml(subject: string, bodyHtml: string): string {
 
   <p style="color: #999; font-size: 12px; margin-top: 30px;">
     <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
-  </p>
+  </p>${categoryFooterHtml}
 </body>
 </html>
   `;
@@ -319,7 +346,15 @@ interface ResendBatchResponseItem {
 async function enqueueBroadcast(
   db: D1Database,
   queue: Queue,
-  params: { sentById: number; group: RecipientGroupOrUser; subject: string; bodyMarkdown: string },
+  params: {
+    sentById: number;
+    group: RecipientGroupOrUser;
+    subject: string;
+    bodyMarkdown: string;
+    category?: MailCategory;
+    recallReference?: string;
+    userIds?: ReadonlyMap<string, number>;
+  },
   allRecipients: string[],
   suppressedCount: number,
 ): Promise<BroadcastResult> {
@@ -337,8 +372,8 @@ async function enqueueBroadcast(
     .prepare(
       `INSERT INTO broadcast_emails
          (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count,
-          failed_recipients, status, queued_count)
-       VALUES (?, ?, ?, ?, ?, 0, '[]', 'queued', ?)
+          failed_recipients, status, queued_count, category, recall_reference)
+       VALUES (?, ?, ?, ?, ?, 0, '[]', 'queued', ?, ?, ?)
        RETURNING id`,
     )
     .bind(
@@ -348,6 +383,8 @@ async function enqueueBroadcast(
       params.bodyMarkdown,
       allowedRecipients.length,
       allowedRecipients.length,
+      params.category ?? null,
+      params.recallReference ?? null,
     )
     .first<{ id: number }>();
   if (!audit?.id) {
@@ -373,13 +410,17 @@ async function enqueueBroadcast(
     for (let i = 0; i < allowedRecipients.length; i += BATCH_SIZE) {
       const chunk = allowedRecipients.slice(i, i + BATCH_SIZE);
       await queue.sendBatch(
-        chunk.map((to) => ({
-          body: {
-            kind: "broadcast",
-            broadcast_id: broadcastId,
-            to,
-          } satisfies BroadcastOutboxMessage,
-        })),
+        chunk.map((to) => {
+          const userId = params.category ? params.userIds?.get(to.trim().toLowerCase()) : undefined;
+          return {
+            body: {
+              kind: "broadcast",
+              broadcast_id: broadcastId,
+              to,
+              ...(userId === undefined ? {} : { user_id: userId }),
+            } satisfies BroadcastOutboxMessage,
+          };
+        }),
       );
       queued += chunk.length;
     }
@@ -457,6 +498,16 @@ export async function sendBroadcast(
     subject: string;
     bodyMarkdown: string;
     recipients: string[];
+    /**
+     * The category of a group send (epic #2260 phase 3). Set, the send is categorized: it needs the
+     * outbox and, unless it is a recall, a usable link secret, and each message carries the account
+     * id from `userIds` (keyed by the trimmed, lowercased address) so the consumer can sign the link
+     * and re-check the preference. Unset, the send is a per-user message sent as it always was.
+     */
+    category?: MailCategory;
+    /** What a recall is about; stored on the audit row. */
+    recallReference?: string;
+    userIds?: ReadonlyMap<string, number>;
   },
   replyTo?: string,
   isDev?: boolean,
@@ -490,6 +541,25 @@ export async function sendBroadcast(
   }
   if (resolved.provider === "resend" && !resendApiKey?.trim()) {
     return unconfigured("RESEND_API_KEY is not configured");
+  }
+
+  if (params.category) {
+    const [blocker] = categorizedSendBlockers(env, params.category);
+    if (blocker) {
+      console.error(`[broadcast] categorized send refused: ${blocker}`, {
+        category: params.category,
+        group: params.group,
+      });
+      return {
+        broadcast_id: -1,
+        status: "sent",
+        recipient_count: 0,
+        failure_count: 0,
+        failed_recipients: [],
+        suppressed_count: 0,
+        error: blocker,
+      };
+    }
   }
 
   const allowedRecipients = params.recipients.filter((to) => isEmailDeliveryAllowed(to, env));
@@ -601,8 +671,8 @@ export async function sendBroadcast(
   // Record in audit table
   const auditResult = await db
     .prepare(
-      `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO broadcast_emails (sent_by, recipient_group, subject, body_markdown, recipient_count, failure_count, failed_recipients, category, recall_reference)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING id`,
     )
     .bind(
@@ -613,6 +683,8 @@ export async function sendBroadcast(
       totalSent,
       failedRecipients.length,
       JSON.stringify(failedRecipients),
+      params.category ?? null,
+      params.recallReference ?? null,
     )
     .first<{ id: number }>();
 

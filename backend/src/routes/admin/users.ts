@@ -28,18 +28,18 @@ import {
 import { isOidcSubject } from "../../../../shared/oidc-subject.js";
 import { ownerMiddleware } from "../../middleware/auth";
 
+import type { MailRecipientGroup } from "../../../../shared/contract/mail-categories.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { flag } from "../../db/flag";
 import { tombstoneUserCascade } from "../../db/user-tombstone";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import {
-  type RecipientGroup,
   type RecipientGroupOrUser,
   broadcastRequestSchema,
   getBroadcastRecipientByUsername,
-  getBroadcastRecipients,
   sendBroadcast,
 } from "../../services/broadcast";
+import { handleCategorizedNotify } from "../../services/category-broadcast";
 import { computeReleaseStatements } from "../../services/compute-release";
 import { runnerEndStatements } from "../../services/compute-runners";
 import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-auth";
@@ -2094,13 +2094,15 @@ export function registerUsersRoutes(admin: AdminRouter): void {
   /**
    * POST /admin/notify - Send broadcast email to a user group or single user.
    *
-   * Group send: { to: 'all'|'admins'|'members', ... }
+   * Group send: { to: 'all'|'admins'|'members', category: 'news'|'rfcs'|'maintenance'|'recall', ... }
    * Per-user send: { user: '<username>', ... }
    *
-   * 'to' and 'user' are mutually exclusive. Per-user sends ignore the
-   * community mail preferences (these are direct admin transactional
+   * 'to' and 'user' are mutually exclusive. A group send MUST name a category (epic #2260 phase 3:
+   * services/category-broadcast.ts holds the rules, including the owner-only recall); the old
+   * uncategorized group send, which keyed off the retired `announcements` preference, is gone.
+   * Per-user sends ignore the community mail preferences (these are direct admin transactional
    * messages, not broadcasts) but still require an approved account with an
-   * email on file. Audit log records the recipient as `user:<username>` so the
+   * email on file, and take no category. Audit log records the recipient as `user:<username>` so the
    * group/transactional distinction is queryable post-hoc.
    */
   admin.post("/notify", zValidator("json", broadcastRequestSchema), async (c) => {
@@ -2110,6 +2112,21 @@ export function registerUsersRoutes(admin: AdminRouter): void {
 
     // Per-user transactional path
     if (body.user) {
+      // Direct contact carries no category: no footer link, no one-click headers, no recall rules.
+      if (
+        body.category !== undefined ||
+        body.recall_reference !== undefined ||
+        body.confirm_recall !== undefined
+      ) {
+        return c.json(
+          {
+            error: "category_not_allowed",
+            message:
+              "A per-user send is direct contact and takes no category, recall reference or confirmation.",
+          },
+          400,
+        );
+      }
       const lookup = await getBroadcastRecipientByUsername(db, body.user);
       if (!lookup.ok) {
         switch (lookup.error) {
@@ -2160,44 +2177,18 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json(result);
     }
 
-    // Group broadcast path (existing behavior)
-    const group = body.to as RecipientGroup;
-    const recipients = await getBroadcastRecipients(db, group);
-
-    if (recipients.length === 0) {
-      return c.json({ error: "No recipients match the selected group" }, 404);
-    }
-
-    if (body.dry_run) {
-      return c.json({
-        dry_run: true,
-        recipient_group: group,
-        recipient_count: recipients.length,
-        recipients,
-      });
-    }
-
-    const { fromEmail, replyTo, isDev } = resolveEmailConfig(c.env);
-    const result = await sendBroadcast(
-      db,
-      c.env.RESEND_API_KEY,
-      fromEmail,
-      {
-        sentById: user.id,
-        group,
-        subject: body.subject,
-        bodyMarkdown: body.body,
-        recipients,
-      },
-      replyTo,
-      isDev,
-      c.env,
-    );
-
-    if (result.error === "email_service_unconfigured") {
-      return c.json({ error: "email_service_unconfigured" }, 500);
-    }
-    return c.json(result);
+    // Group broadcast path: a category decides the audience, the sender and the footer.
+    const answer = await handleCategorizedNotify(db, c.env, user, {
+      to: body.to as MailRecipientGroup,
+      category: body.category,
+      subject: body.subject,
+      body: body.body,
+      recallReference: body.recall_reference,
+      confirmRecall: body.confirm_recall,
+      allowRepeat: body.allow_repeat,
+      dryRun: body.dry_run,
+    });
+    return c.json(answer.body, answer.status);
   });
 
   /**
@@ -2218,8 +2209,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       return c.json({ error: "Invalid broadcast id" }, 400);
     }
     const row = await c.env.DB.prepare(
-      `SELECT id, status, subject, recipient_group, queued_count, delivered_count,
-              failure_count, unknown_count, skipped_count, failed_recipients, sent_at
+      `SELECT id, status, subject, recipient_group, category, recall_reference, queued_count,
+              delivered_count, failure_count, unknown_count, skipped_count, failed_recipients, sent_at
          FROM broadcast_emails WHERE id = ?`,
     )
       .bind(id)
@@ -2228,6 +2219,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
         status: string;
         subject: string;
         recipient_group: string;
+        category: string | null;
+        recall_reference: string | null;
         queued_count: number;
         delivered_count: number;
         failure_count: number;
@@ -2249,6 +2242,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       status: row.status,
       subject: row.subject,
       recipient_group: row.recipient_group,
+      // null: a send from before the categories (epic #2260); recall_reference only on a recall.
+      category: row.category,
+      recall_reference: row.recall_reference,
       queued_count: row.queued_count,
       delivered_count: row.delivered_count,
       failure_count: row.failure_count,

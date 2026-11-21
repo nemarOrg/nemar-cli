@@ -19,8 +19,22 @@
  *   outcome is already recorded is acked without a second send or count.
  * - Pacing: `max_concurrency = 1` only serialises BATCHES. Within a batch the sends run one at
  *   a time, and after the first limit refusal the rest of the batch is deferred unsent.
+ * - A CATEGORIZED message (epic #2260 phase 3: the row has a category and the message an account
+ *   id) is prepared per recipient immediately before it is sent. The account and its preference are
+ *   read AGAIN here, so an unsubscribe that lands after the message was queued is honored: the
+ *   message is recorded `skipped` and nothing is sent. The footer and the RFC 8058 headers are
+ *   built here too, with a link signed for this account, this category and this broadcast. A
+ *   recall ignores the preference (nothing can turn it off) and carries no link. A categorized
+ *   message is never sent without these checks: if they cannot run it is retried, and on the final
+ *   attempt it fails, never goes out unchecked.
  */
 
+import {
+  type MailCategory,
+  RECALL_CATEGORY,
+  isCommunityMailCategory,
+  isMailCategory,
+} from "../../../shared/contract/mail-categories.js";
 import type { BroadcastEnv, BroadcastOutboxMessage } from "./broadcast";
 import { buildBroadcastHtml, markdownToEmailHtml } from "./broadcast";
 import {
@@ -34,11 +48,14 @@ import {
   CLOUDFLARE_LIMIT_CODES,
   EmailRejectedError,
   isCertainNonDelivery,
+  parseEmailPreferences,
   redactAddressIn,
   redactRecipient,
   resolveEmailConfig,
   sendEmail,
 } from "./email";
+import { buildCategoryFooter, categoryMailHeaders } from "./mail-footer";
+import { mailUnsubscribeUrl, requireMailLinkSecret, signMailLinkToken } from "./mail-links";
 
 /** Must match `max_retries` for the outbox consumer in wrangler-sccn.toml (prod and dev). */
 export const OUTBOX_MAX_RETRIES = 10;
@@ -68,13 +85,83 @@ export function isBroadcastOutboxMessage(body: unknown): body is BroadcastOutbox
     typeof b.broadcast_id === "number" &&
     Number.isInteger(b.broadcast_id) &&
     typeof b.to === "string" &&
-    b.to !== ""
+    b.to !== "" &&
+    (b.user_id === undefined ||
+      (typeof b.user_id === "number" && Number.isInteger(b.user_id) && b.user_id > 0))
   );
 }
 
 interface BroadcastRow {
   subject: string;
   body_markdown: string;
+  category: string | null;
+}
+
+/** What a categorized message is sent as, or why it is not sent. */
+type PreparedMessage =
+  | { send: true; html: string; headers: Record<string, string> | undefined }
+  | { send: false; reason: "account_gone" | "address_changed" | "category_off" };
+
+const sameAddress = (a: string, b: string): boolean =>
+  a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * Re-read the recipient and build the message of one categorized send. Throws when the database or
+ * the link secret is unavailable (nothing was sent, so the caller retries); returns `send: false`
+ * when the person must not receive it any more: the account was deleted, its address is no longer
+ * the one the message was queued for, or the category is now off. A recall skips only for the first
+ * two, because a deleted account or an address nobody holds any more has no one to tell.
+ */
+async function prepareCategorizedMessage(
+  env: OutboxEnv,
+  row: BroadcastRow,
+  category: MailCategory,
+  broadcastId: number,
+  userId: number,
+  to: string,
+): Promise<PreparedMessage> {
+  const user = await env.DB.prepare(
+    "SELECT email, email_preferences FROM users WHERE id = ? AND deleted_at IS NULL",
+  )
+    .bind(userId)
+    .first<{ email: string | null; email_preferences: string | null }>();
+  if (!user) return { send: false, reason: "account_gone" };
+  if (!user.email || !sameAddress(user.email, to)) {
+    return { send: false, reason: "address_changed" };
+  }
+  const bodyHtml = markdownToEmailHtml(row.body_markdown);
+  if (category === RECALL_CATEGORY) {
+    return {
+      send: true,
+      html: buildBroadcastHtml(
+        row.subject,
+        bodyHtml,
+        buildCategoryFooter({ category, appBaseUrl: env.APP_BASE_URL }),
+      ),
+      headers: undefined,
+    };
+  }
+  if (
+    isCommunityMailCategory(category) &&
+    !parseEmailPreferences(user.email_preferences)[category]
+  ) {
+    return { send: false, reason: "category_off" };
+  }
+  const token = await signMailLinkToken(
+    { userId, category, broadcastId },
+    user.email,
+    requireMailLinkSecret(env),
+  );
+  const unsubscribeUrl = mailUnsubscribeUrl(env.API_BASE_URL ?? "", token);
+  return {
+    send: true,
+    html: buildBroadcastHtml(
+      row.subject,
+      bodyHtml,
+      buildCategoryFooter({ category, unsubscribeUrl, appBaseUrl: env.APP_BASE_URL }),
+    ),
+    headers: categoryMailHeaders(category, unsubscribeUrl),
+  };
 }
 
 /** What {@link handleOutboxBatch} needs of the Worker env: the bindings that send and the DB. */
@@ -135,7 +222,9 @@ export async function handleOutboxBatch(
     if (row === undefined) {
       try {
         row =
-          (await env.DB.prepare("SELECT subject, body_markdown FROM broadcast_emails WHERE id = ?")
+          (await env.DB.prepare(
+            "SELECT subject, body_markdown, category FROM broadcast_emails WHERE id = ?",
+          )
             .bind(id)
             .first<BroadcastRow>()) ?? null;
       } catch (error) {
@@ -173,7 +262,50 @@ export async function handleOutboxBatch(
       continue;
     }
 
-    const html = buildBroadcastHtml(row.subject, markdownToEmailHtml(row.body_markdown));
+    let html = buildBroadcastHtml(row.subject, markdownToEmailHtml(row.body_markdown));
+    let headers: Record<string, string> | undefined;
+    if (row.category !== null) {
+      const userId = message.body.user_id;
+      if (userId === undefined || !isMailCategory(row.category)) {
+        // A categorized row's message must name its account, or the preference cannot be
+        // re-checked and no link can be signed. Never send it unchecked.
+        console.error(
+          `[email-outbox] broadcast ${id} is categorized but cannot be checked for ${who}`,
+        );
+        await giveUp(message, "categorized message without an account");
+        continue;
+      }
+      let prepared: PreparedMessage;
+      try {
+        prepared = await prepareCategorizedMessage(env, row, row.category, id, userId, to);
+      } catch (error) {
+        // Nothing was sent, so a retry cannot duplicate; the check is the thing that failed.
+        console.error(
+          `[email-outbox] could not prepare broadcast ${id} (attempt ${message.attempts}):`,
+          error instanceof Error ? error.message : String(error),
+        );
+        if (message.attempts >= OUTBOX_FINAL_ATTEMPT) await giveUp(message, "check unavailable");
+        else message.retry({ delaySeconds: ROW_READ_RETRY_DELAY_SECONDS });
+        continue;
+      }
+      if (!prepared.send) {
+        try {
+          await recordBroadcastOutcome(env.DB, id, to, "skipped");
+          console.warn(`[email-outbox] broadcast ${id} to ${who} skipped: ${prepared.reason}`);
+          message.ack();
+        } catch (error) {
+          console.error(
+            `[email-outbox] could not record skipped for broadcast ${id}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+          // Not sent and not counted: try again rather than leave the row waiting forever.
+          message.retry({ delaySeconds: ROW_READ_RETRY_DELAY_SECONDS });
+        }
+        continue;
+      }
+      html = prepared.html;
+      headers = prepared.headers;
+    }
     let outcome: BroadcastOutcome;
     try {
       await sendEmail(
@@ -186,6 +318,7 @@ export async function handleOutboxBatch(
         isDev,
         env,
         BROADCAST_SEND_TIMEOUT_MS,
+        headers,
       );
       outcome = "delivered";
     } catch (error) {
