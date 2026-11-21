@@ -14,8 +14,8 @@ import { z } from "zod";
 import {
   COMMUNITY_MAIL_CATEGORIES,
   COMMUNITY_ONLY_REFUSAL,
-  type CommunityMailPreferences,
   RECALL_PREFERENCE,
+  communityPreferencesView,
   mailRecallWhy,
 } from "../../../../shared/contract/mail-categories.js";
 import { orcidIdSchema } from "../../../../shared/contract/publication.js";
@@ -46,7 +46,6 @@ import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../../services/docs-
 import {
   ADMIN_ALERT_CATEGORIES,
   type EmailPreferences,
-  parseEmailPreferences,
   resolveEmailConfig,
   sendRevocationEmail,
   sendUploadAccessGrantedEmail,
@@ -59,7 +58,7 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
-import { saveEmailPreferences } from "../../services/mail-preferences";
+import { loadEmailPreferences, saveEmailPreferences } from "../../services/mail-preferences";
 import { oidcEndStatements } from "../../services/oidc-cascade";
 import { backgroundOf, deferLogoutDelivery } from "../../services/oidc-logout";
 import { holderOfOidcSubject } from "../../services/oidc-subject";
@@ -1987,10 +1986,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
 
   /** The preferences a caller may see for `target`: all of them, or the community ones only. */
   function preferencesView(prefs: EmailPreferences, communityOnly: boolean) {
-    const community = Object.fromEntries(
-      COMMUNITY_MAIL_CATEGORIES.map((category) => [category, prefs[category]]),
-    ) as CommunityMailPreferences;
-    return { ...(communityOnly ? community : prefs), recall: RECALL_PREFERENCE };
+    return communityOnly
+      ? communityPreferencesView(prefs)
+      : { ...prefs, recall: RECALL_PREFERENCE };
   }
 
   /**
@@ -2005,18 +2003,14 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     const target = await resolveEmailPrefsTarget(db, user, c.req.query("user"));
     if ("error" in target) return c.json({ error: target.error }, target.status);
 
-    const row = await db
-      .prepare("SELECT email_preferences FROM users WHERE id = ?")
-      .bind(target.id)
-      .first<{ email_preferences: string | null }>();
-
-    if (!row) {
+    const prefs = await loadEmailPreferences(db, target.id);
+    if (!prefs) {
       return c.json({ error: "User not found" }, 404);
     }
 
     const communityOnly = target.id !== user.id && user.role !== "owner";
     return c.json({
-      ...preferencesView(parseEmailPreferences(row.email_preferences), communityOnly),
+      ...preferencesView(prefs, communityOnly),
       username: target.username,
     });
   });
@@ -2077,12 +2071,10 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     if (!applied) return c.json({ error: "User not found" }, 404);
 
     // Answer with what is stored now, which includes any concurrent write, not with a guess.
-    const row = await db
-      .prepare("SELECT email_preferences FROM users WHERE id = ?")
-      .bind(target.id)
-      .first<{ email_preferences: string | null }>();
+    const prefs = await loadEmailPreferences(db, target.id);
+    if (!prefs) return c.json({ error: "User not found" }, 404);
     return c.json({
-      ...preferencesView(parseEmailPreferences(row?.email_preferences ?? null), communityOnly),
+      ...preferencesView(prefs, communityOnly),
       username: target.username,
     });
   });

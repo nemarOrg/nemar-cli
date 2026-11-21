@@ -282,6 +282,7 @@ nemar auth switch              # Switch between accounts
 nemar auth logout              # Remove active account (--all for all)
 nemar auth setup-ssh           # Configure SSH for GitHub
 nemar auth keys                # List, create, or revoke this account's named API keys
+nemar auth mail                # Show or change which mail NEMAR sends you (set <category> <on|off>)
 ```
 
 ### Dataset Management

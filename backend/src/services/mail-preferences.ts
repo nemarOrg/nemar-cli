@@ -13,13 +13,19 @@
  */
 
 import { COMMUNITY_MAIL_CATEGORIES } from "../../../shared/contract/mail-categories.js";
-import type { EmailPreferences } from "./email";
+import { type EmailPreferences, parseEmailPreferences } from "./email";
 
 /**
- * Where a change came from, recorded as `via` in the audit row. `self` is an account changing its
- * own preferences through the admin route (the route does not know which client sent it);
- * `cli` and `settings` are for the self-service route's own clients, and `admin` is an owner or
- * admin acting for another account.
+ * Where a change came from, recorded as `via` in the audit row:
+ *
+ *   self       an account changing its own preferences through `PUT /admin/email-preferences`
+ *   cli        an account changing its own through `PUT /users/me/email-preferences` with an API key
+ *   settings   the same route with a session cookie (the website's Settings page)
+ *   one_click  an RFC 8058 one-click POST from a message's List-Unsubscribe header
+ *   link       the unsubscribe page's "this category" button
+ *   link_all   the unsubscribe page's "all non-recall mail" button
+ *   admin      an owner or admin acting for another account
+ *   migration  the summary row migration 0146 wrote
  */
 export type MailChangeVia =
   | "self"
@@ -31,10 +37,27 @@ export type MailChangeVia =
   | "admin"
   | "migration";
 
+/**
+ * The account's parsed preferences, or null when no row has that id. THE read every preference
+ * route answers with after a write, so the answer is what is stored now (a concurrent write
+ * included), not a guess built from the request.
+ */
+export async function loadEmailPreferences(
+  db: D1Database,
+  userId: number,
+): Promise<EmailPreferences | null> {
+  const row = await db
+    .prepare("SELECT email_preferences FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ email_preferences: string | null }>();
+  return row ? parseEmailPreferences(row.email_preferences) : null;
+}
+
 export interface SavePreferencesInput {
   /** The account whose preferences change. */
   targetId: number;
-  targetUsername: string;
+  /** Recorded in the cross-account audit row; required in practice when the actor is not the target. */
+  targetUsername?: string;
   /** Who made the change: the account itself, or an owner or admin acting for it. */
   actorId: number;
   /** ONLY the keys to set. Every other key in the stored blob is left exactly as it is. */
@@ -127,7 +150,10 @@ export async function saveEmailPreferences(
         .bind(
           actorId,
           String(targetId),
-          JSON.stringify({ target: targetUsername, updated: Object.fromEntries(entries) }),
+          JSON.stringify({
+            target: targetUsername ?? String(targetId),
+            updated: Object.fromEntries(entries),
+          }),
           targetId,
         ),
     );
