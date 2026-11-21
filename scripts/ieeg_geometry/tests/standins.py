@@ -23,9 +23,16 @@ if "--body-file" in args:
     body = open(args[args.index("--body-file") + 1], encoding="utf-8").read()
 with open(log, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({"tool": "gh", "args": args, "body": body}) + "\n")
-if os.environ.get("GH_STANDIN_FAIL"):
+fail = os.environ.get("GH_STANDIN_FAIL")
+if fail and (fail == "1" or fail == "-".join(args[:2])):  # "1": every call; "pr-create": that one
     sys.stderr.write("gh: HTTP 403\n")
     sys.exit(1)
+if args[:2] == ["pr", "list"]:
+    print(os.environ.get("STANDIN_OPEN_PRS", "[]"))
+    sys.exit(0)
+if args[:2] == ["pr", "edit"]:
+    print("https://github.com/nemarDatasets/standin/pull/9")
+    sys.exit(0)
 print("Creating pull request")
 print("https://github.com/nemarDatasets/standin/pull/7")
 """

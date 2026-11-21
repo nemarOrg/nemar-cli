@@ -43,7 +43,15 @@ import nibabel as nib
 import numpy as np
 from scipy.spatial import KDTree
 
-from .bids import Discovered, ElectrodeSet, GeometryRefusal, discover, read_electrode_set
+from .bids import (
+    Discovered,
+    ElectrodeSet,
+    GeometryRefusal,
+    check_source_table,
+    discover,
+    read_electrode_set,
+)
+from .bids_clean import Table, electrodes_tsv
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import DATA_DIR, _check_sums
 from .surfaces import Surface, read_freesurfer
@@ -567,6 +575,7 @@ def compute_subject(dataset: Path, item: Discovered, *, existing_labels: set[str
         return result
     try:
         eset = read_electrode_set(item)
+        check_source_table(item.electrodes_path)  # table writer: refuse what it cannot copy
     except GeometryRefusal as exc:
         result.refusals.append(Refusal("file", exc.reason, exc.message))
         return result
@@ -736,13 +745,17 @@ def _resolve_duplicates(results: list[SubjectResult]) -> list[SubjectResult]:
 # ---- writing ----------------------------------------------------------------------------------
 
 
-def _tsv_bytes(out: OutputFile) -> bytes:
-    lines = ["\t".join(out.header)]
+def _table(out: OutputFile) -> Table:
+    rows: list[dict[str, str | None]] = []
     for row, (x, y, z) in zip(out.rows, out.xyz, strict=True):
-        cells = dict(row)
+        cells: dict[str, str | None] = dict(row)
         cells.update({"x": f"{x:.3f}", "y": f"{y:.3f}", "z": f"{z:.3f}"})
-        lines.append("\t".join(cells.get(col, "n/a") or "n/a" for col in out.header))
-    return ("\n".join(lines) + "\n").encode("utf-8")
+        rows.append(cells)
+    return electrodes_tsv(out.header, rows, out.electrodes_path)
+
+
+def _tsv_bytes(out: OutputFile) -> bytes:
+    return _table(out).data
 
 
 def _json_bytes(out: OutputFile) -> bytes:

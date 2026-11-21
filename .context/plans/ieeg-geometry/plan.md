@@ -182,3 +182,8 @@ The survey found: no command opens a dataset pull request for geometry yet; the 
 - A mirror's geometry becomes its version N.0.1 in two steps: the owner merges the `pr` pull request, then cuts the patch with the existing `nemar dataset release <id> --type patch` (its own bump pull request, then the tag and the version DOI).
 - ADR 0129 and the ADR 0111 amendment of 2026-11-19 are accepted (flipped in the epic's final pull request, after ADR 0129's stale affine line is corrected).
 - P3b (ruling 29) is deferred out of this epic to its own tracked issue.
+- 2026-11-20, later, supersedes the two-step N.0.1 above: each mirror's N.0.1 is one integration pull request (the collaborator branch merged, NEMAR's BIDS fixes, and the geometry added by `pr --from-ref <branch> --bump-version`); merging it tags the release and mints the DOI.
+  There is no `nemar dataset release` afterwards.
+  Collaborator pull requests that change `Version` are never merged on their own.
+- 2026-11-20, later: the Wayne State group datasets (on004551, on005007, on005545, on005931, on006107, on006233, on006910, on006914, on007118, on007119, on007120) are declared `fsaverage`, the owner decided "fsaverage for all 11". A full vertex test on 2026-11-20 found every contact of all 11 deposits (about 225k contacts; all 17,812 of on006107) within 4e-13 mm of an fsaverage pial vertex, using the fsaverage lh/rh.pial surfaces, while MNI305 and MNI152 offsets put no contact on a vertex.
+  Renamed channels are kept, and NEMAR pairs the names.

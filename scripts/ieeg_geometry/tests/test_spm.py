@@ -770,3 +770,37 @@ def test_files_with_cortical_contacts_are_refused_with_their_own_reason(syntheti
     assert "FreeSurfer surface method" in plan.reason
     assert ("mixed contact types" in plan.reason) is mixed
     assert spm.write([plan], synthetic_dataset) == []
+
+
+def test_a_dirty_source_gives_a_valid_table(synthetic_dataset):
+    src = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
+    lines = src.read_text().splitlines()
+    dirty = ["name\tx\ty\tz\tsize\ttype\themisphere\tzone\tnote"]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        cells[4], cells[6] = "NaN", "right"
+        dirty.append("\t".join([*cells, "yes", ""]))
+    src.write_text("\n".join(dirty) + "\n")
+    (synthetic_dataset / "electrodes.json").write_text(
+        json.dumps({"zone": {"Levels": {"yes": "y", "no": "n"}}})
+    )
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict == "write", plan.reason
+    spm.write([plan], synthetic_dataset)
+    tsv = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_space-IXI549Space_electrodes.tsv"
+    rows = [ln.split("\t") for ln in tsv.read_text().splitlines()]
+    assert rows[0] == ["name", "x", "y", "z", "size", "type", "hemisphere", "zone"]
+    assert {r[4] for r in rows[1:]} == {"n/a"} and {r[6] for r in rows[1:]} == {"R"}
+    assert "nan" not in tsv.read_text().lower()
+    (cleaning,) = plan.cleaning.values()
+    assert cleaning.dropped_columns == ("note",) and cleaning.coerced_cells["size"] == 41
+
+
+def test_a_repeated_electrode_name_is_refused_by_the_spm_track(synthetic_dataset):
+    src = synthetic_dataset / "sub-9" / "ieeg" / "sub-9_electrodes.tsv"
+    lines = src.read_text().splitlines()
+    lines[2] = "\t".join([lines[1].split("\t")[0], *lines[2].split("\t")[1:]])
+    src.write_text("\n".join(lines) + "\n")
+    (plan,) = spm.plan_dataset(synthetic_dataset)
+    assert plan.verdict != "write"
+    assert any("electrodes-names" in c.note for c in plan.candidates)

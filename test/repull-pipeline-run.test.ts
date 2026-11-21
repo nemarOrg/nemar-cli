@@ -322,11 +322,11 @@ describe("the ownership record", () => {
 
   test("dropping a path leaves the rest, sorted; dropping none leaves the bytes", () => {
     const bytes = Buffer.from(
-      `${JSON.stringify({ paths: { [SIDECAR]: { a: 1 }, [OUT]: { b: 2 } }, pipeline_version: "0.1.0", schema: 1 }, null, 2)}\n`,
+      `${JSON.stringify({ paths: { [SIDECAR]: { a: 1 }, [OUT]: { b: 2 } }, pipeline_version: "0.1.1", schema: 1 }, null, 2)}\n`,
     );
     expect(withoutOwnedPaths(bytes, new Set())).toBe(bytes);
     const dropped = JSON.parse(withoutOwnedPaths(bytes, new Set([SIDECAR])).toString());
-    expect(dropped).toEqual({ paths: { [OUT]: { b: 2 } }, pipeline_version: "0.1.0", schema: 1 });
+    expect(dropped).toEqual({ paths: { [OUT]: { b: 2 } }, pipeline_version: "0.1.1", schema: 1 });
   });
 });
 

@@ -116,7 +116,7 @@ describe.skipIf(!awsInstalled)("N.0.1 and the pipeline's files", () => {
     ] as const) {
       const blob = await rev(`${mergeN0}:${input}`);
       expect(await show(head, out)).toBe(
-        `derived-from\t${blob}\t0.1.0\n${await show(mergeN0, input)}`,
+        `derived-from\t${blob}\t0.1.1\n${await show(mergeN0, input)}`,
       );
     }
     const record = JSON.parse(await show(head, PATHS.ieegOwnership));

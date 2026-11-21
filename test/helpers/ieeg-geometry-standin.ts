@@ -15,7 +15,7 @@
  *
  * `STANDIN_MODE`: `noop` reports no change and writes nothing; `fail` exits 1; `not-json` prints text; `undeclared` also writes a file it does not
  * report; `big` writes an output over 1 MiB; `wrong-commit` names another commit in the report.
- * `STANDIN_VERSION` is the pipeline version it reports (0.1.0 by default).
+ * `STANDIN_VERSION` is the pipeline version it reports (0.1.1 by default).
  */
 
 import { createHash } from "node:crypto";
@@ -27,7 +27,7 @@ const flag = (name: string) => argv[argv.indexOf(name) + 1] as string;
 const id = argv[1] as string;
 const clone = join(flag("--workdir"), id);
 const mode = process.env.STANDIN_MODE ?? "ok";
-const version = process.env.STANDIN_VERSION ?? "0.1.0";
+const version = process.env.STANDIN_VERSION ?? "0.1.1";
 
 if (argv[0] !== "run" || !argv.includes("--apply") || !flag("--version")) {
   console.error("stand-in: expected run <id> --workdir DIR --version V --apply");

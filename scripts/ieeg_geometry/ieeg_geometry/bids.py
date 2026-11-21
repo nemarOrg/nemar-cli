@@ -6,10 +6,13 @@ import csv
 import json
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from .names import join_channels
 
 _MISSING = {"", "n/a", "na", "nan"}
 _UNIT_TO_MM = {"m": 1000.0, "cm": 10.0, "mm": 1.0}
@@ -205,6 +208,40 @@ def _read_tsv(path: Path, errors: str = "strict") -> tuple[list[str], list[dict[
         return list(reader.fieldnames or []), rows
 
 
+def check_source_table(path: Path) -> None:
+    """Refuse the source electrodes table at `path` unless the table writers can copy it.
+
+    Called by the three table writers (labels, FreeSurfer, SPM) when they plan, right after
+    `read_electrode_set`. `read_electrode_set` itself does not call it, so the surfaces track,
+    which reads only x, y and z, is not refused by a repeated name or a ragged row.
+    """
+    header, rows = _read_tsv(path)
+    check_table(header, rows, path.name)
+
+
+def check_table(header: list[str], rows: list[dict], name: str) -> None:
+    """Refuse an electrodes table the writers could not copy faithfully.
+
+    One rule for every track: a repeated column name, a row with fewer or more cells than the
+    header, and an empty or repeated electrode name are refused with a named reason, never
+    padded, cut or dropped quietly.
+    """
+    if len(set(header)) != len(header):
+        raise GeometryRefusal("electrodes-columns", f"{name} repeats a column name")
+    for number, row in enumerate(rows, start=2):
+        if None in row or None in row.values():
+            raise GeometryRefusal(
+                "electrodes-rows", f"{name} line {number} does not have {len(header)} cells"
+            )
+    if "name" in header:
+        names = [(row.get("name") or "").strip() for row in rows]
+        if any(n.lower() in ("", "n/a") for n in names):
+            raise GeometryRefusal("electrodes-names", f"{name} has an empty electrode name")
+        if len(set(names)) != len(names):
+            dup = sorted({n for n in names if names.count(n) > 1})[0]
+            raise GeometryRefusal("electrodes-names", f"{name} repeats electrode name {dup!r}")
+
+
 def _normalize_type(token: str | None) -> ContactType | None:
     if token is None:
         return None
@@ -212,29 +249,65 @@ def _normalize_type(token: str | None) -> ContactType | None:
 
 
 def _channel_types(
-    paths: tuple[Path, ...],
+    paths: tuple[Path, ...], contact_names: Sequence[str] = ()
 ) -> tuple[dict[str, ContactType], tuple[str, ...]]:
     """Contact types from channels files, and a warning per file whose name or type cells
-    contained undecodable bytes (replaced by U+FFFD; those cells may not match)."""
-    types: dict[str, ContactType] = {}
+    contained undecodable bytes (replaced by U+FFFD; those cells may not match).
+
+    A channel named as the recording header names it (`POL A1-AV`, `EEG G_03-REF`) gives its type
+    to the contact `names.join_channels` pairs it with, so a channels file may be renamed while
+    electrodes.tsv keeps the contact names; a bipolar channel gives it to both contacts.
+
+    Every non-empty channel name of a file takes part in the join (a channel of another type, such
+    as `A1` typed MISC, still keeps its contact against a renamed `POL A1`); only channels whose
+    type is seeg, ecog or dbs give a type. Exact names from every file are applied first and are
+    the file's own word; a contact reached only by renamed channels takes their type. Where the
+    types that reach one contact disagree, the contact stays untyped and a warning says so."""
     warnings: list[str] = []
+    exact: dict[str, list[ContactType]] = {}
+    mapped: dict[str, list[ContactType]] = {}
+    own_contacts = set(contact_names)
     for path in paths:
         # A non-UTF-8 byte in another column (on006233's units) is not fatal.
         _, rows = _read_tsv(path, errors="replace")
         damaged = 0
+        named: list[tuple[str, ContactType | None]] = []
         for row in rows:
             name = (row.get("name") or "").strip()
             kind_text = row.get("type")
             if "\ufffd" in name or "\ufffd" in (kind_text or ""):
                 damaged += 1
-            kind = _normalize_type(kind_text)
-            if kind and name:
-                types.setdefault(name, kind)
+            if name:
+                named.append((name, _normalize_type(kind_text)))
+        for name, kind in named:
+            if kind and (not contact_names or name in own_contacts):
+                exact.setdefault(name, []).append(kind)
+        if contact_names:
+            joined = join_channels([name for name, _ in named], contact_names)
+            for name, kind in named:
+                contacts = joined.get(name, ())
+                if kind and contacts and contacts != (name,):
+                    for contact in contacts:
+                        mapped.setdefault(contact, []).append(kind)
         if damaged:
             warnings.append(
                 f"{path.name}: {damaged} name or type cell(s) had undecodable bytes "
                 "(replaced); contact types may be incomplete"
             )
+    types: dict[str, ContactType] = {}
+    conflicted: set[str] = set()
+    for source in (exact, mapped):
+        for contact, kinds in source.items():
+            if contact in types or contact in conflicted:
+                continue
+            if len(set(kinds)) > 1:
+                conflicted.add(contact)
+                warnings.append(
+                    f"contact {contact}: channels files give it more than one type "
+                    f"({', '.join(sorted(set(kinds)))}); left untyped"
+                )
+            else:
+                types[contact] = kinds[0]
     return types, tuple(warnings)
 
 
@@ -284,7 +357,9 @@ def read_electrode_set(item: Discovered, assume_units: str | None = None) -> Ele
             raise GeometryRefusal(
                 "electrodes-columns", f"{item.electrodes_path.name} has no {column!r} column"
             )
-    from_channels, warnings = _channel_types(item.channels_paths)
+    from_channels, warnings = _channel_types(
+        item.channels_paths, [(row.get("name") or "").strip() for row in rows]
+    )
     contacts: list[Contact] = []
     for row in rows:
         name = (row.get("name") or "").strip()
