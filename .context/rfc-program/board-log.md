@@ -105,6 +105,7 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:17-08:00 | NEMAR's role in biosig-zarr (owner, as read by the manager): NEMAR hosts the repository and offers hosting and DOI registration as a capacity, not ownership; the spec is as independent as possible and NEMAR is ready to hand it off when it matures; until then NEMAR backstops it and guarantees its continuation | owner |  |
 | 2026-11-21T10:18-08:00 | Q43: release biosig-zarr 2.0.2 on B7's merge commit 509b6897 with plan section 5's notes (owner, 2026-11-21) | owner |  |
 | 2026-11-21T10:25-08:00 | B7b gate names the conformance workflow, which did not run on biosig-zarr#8: its path filter (Q27) covers schemas, conformance, tools, package.json, bun.lock, and acceptance line 5 shows none changed vs 3.0.0-draft.2; implementer ran its commands locally (pass). Accepted as not applicable, not as a pass | manager |  |
+| 2026-11-21T10:32-08:00 | Q44: tag 3.0.0-draft.3 (pre-release) on B7b's merge commit c0cb7e49 with plan section 5's notes (owner, 2026-11-21) | owner |  |
 
 ## Log
 
@@ -246,3 +247,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:27-08:00 | proposal P4 opened: Lead: answer S1's 3 questions (36 negative-total BV, 528 undated as can-be, nm000411 no index) and say which figures RFC-0001 cites and by which card before O5 |
 | 2026-11-21T10:27-08:00 | S1 r2 fixes verified at c6d4b48c (one file, onsets checked against deep-edfd-files.json); merged #2289 squash c48405fe; lead proposal recorded for S1 questions and RFC-0001 figures |
 | 2026-11-21T10:28-08:00 | B7b r1 fix verified at 498bd9bb (version-history only, signed off, checks green); merged biosig-zarr#8 merge commit c0cb7e49; O4f asked as Q44 |
+| 2026-11-21T10:32-08:00 | Q44 answered: owner says tag now; pre-release 3.0.0-draft.3 on c0cb7e49 (verified); B4c dispatched (Opus xhigh) |
