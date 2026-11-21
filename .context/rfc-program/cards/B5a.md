@@ -83,7 +83,8 @@ Keep every vector small: a few channels and a few seconds; the whole of `conform
 | `v2-no-channel-groups` | the same without `channel_groups` | fails `schemas/v2/root` |
 
 **The manifest.**
-Settled: `conformance/manifest.json` is a JSON object whose top-level member `vectors` is an array; each element has `id`, `path`, `format_version`, `class` (`valid` or `invalid`), `layer` (the reader-safety layer, 1 to 4, that the vector tests for the newest reader the manifest has outcomes for, or null; at `2.0.1` the newest reader is version 2, which has no layers, so every entry here is null, and card B5 sets it for version 3, `v2-version-3` included), `rule` (the spec heading's anchor), `expect`, and `files` (the SHA-256 of every file in the vector).
+Settled: `conformance/manifest.json` is a JSON object whose top-level member `vectors` is an array; each element has `id`, `path`, `format_version`, `class` (`valid` or `invalid`), `layer` (the rule below), `rule` (the spec heading's anchor), `expect`, and `files` (the SHA-256 of every file in the vector).
+One rule for `layer`, the same in B5: `layer` is the reader-safety layer (1 to 4) the vector tests under the text of its own `format_version`, the same text its `class` and `rule` are judged against, or null; every version 2 entry is null, since the version 2 text has no layers; what a reader of any version does, including the layer it refuses at, is recorded only in `expect[N].refusal`.
 `expect` is an object keyed by the format version of the reader the outcome is for: this card writes key `"2"` only; card B5 adds key `"3"` to every entry, because a version 3 reader reads version 2 stores with defaults.
 The manifest is the contract that copies elsewhere pin by digest (Q9).
 
