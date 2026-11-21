@@ -8806,7 +8806,8 @@ def write_store(
     if not names_keyword(writer, SUBJECT_INFO_OPTION):
         raise SubjectInfoExclusionUnavailable(
             f"{name} does not take {SUBJECT_INFO_OPTION}: this process has a biosigIO "
-            f"older than {SUBJECT_INFO_FLOOR}, so no store was written"
+            f"without subject-information exclusion (added in 1.2.11; the converter "
+            f"requires {SUBJECT_INFO_FLOOR}), so no store was written"
         )
     written = writer(*args, **kwargs, **{SUBJECT_INFO_OPTION: True})
     if isinstance(written, os.PathLike):

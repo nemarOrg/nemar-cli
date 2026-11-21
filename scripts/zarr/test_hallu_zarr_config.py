@@ -1375,10 +1375,10 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     converter refuses every dataset (#1626). On 1.2.11 a streamed EDF/BDF
     refusal is a bare OSError the converter no longer types. On 1.2.12 a
     BrainVision data file cut short reads with its tail dropped. On 1.2.13 an
-    EDF+D file with a gap between its records reads with a shifted time axis. Both comparison
-    paths are driven: `packaging` when the venv has it, the numeric-tuple
-    fallback when it does not. "1.2.9" is the case a string comparison gets
-    wrong against the 1.2.14 floor: as strings it sorts above."""
+    EDF+D file with a gap between its records reads with a shifted time axis.
+    Both comparison paths are driven: `packaging` when the venv has it, the
+    numeric-tuple fallback when it does not. "1.2.9" is the case a string
+    comparison gets wrong against the 1.2.14 floor: as strings it sorts above."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
