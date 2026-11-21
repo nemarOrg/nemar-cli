@@ -19,8 +19,8 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Manager id | mba-claude-sonnet |
 | State | running |
 | Cadence | 30m with workers running, 60m waiting on people |
-| Last tick | 2026-11-20T18:55-08:00 |
-| Next tick | 2026-11-20T19:25-08:00 |
+| Last tick | 2026-11-20T19:16-08:00 |
+| Next tick | 2026-11-20T19:46-08:00 |
 | Stop when | every step done, or all remaining work waits on the owner |
 | Created | 2026-11-20T09:44-08:00 |
 
@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 60 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 80 | 61 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -134,6 +134,10 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | Q35 | - | The EDF+D header scan (pid 99119, remi:18769) is still running. Let it finish, then dispatch S1, or stop it and dispatch S1 now? | Let it finish (Recommended) / Stop it now | none | 2026-11-22T17:00 | closed | Owner gave the counts so far; scan is actively progressing (13000/16883); let it finish, S1 after (owner, 2026-11-20T20:20-08:00) |
 | Q36 | - | O4c (tag 3.0.0-draft.2 after B5): owner runs it, or the manager runs it under the new P1 rule? | Manager runs it on owner say-so (Recommended) / Owner runs it | none | 2026-11-24T17:00 | closed | Manager runs O4c on the owner's say-so under the P1 rule (owner, 2026-11-20T20:20-08:00) |
 | Q37 | - | RFC-0001 quotes spec text with the notice 'Copyright (c) 2026 NEMAR contributors', W3C Software and Document License (from biosig-zarr LICENSE.md). Is that the notice you want? | Yes, as in LICENSE.md (Recommended) / A different holder | none | 2026-11-22T17:00 | closed | biosig-zarr is independent of NEMAR; holder 'the biosig-zarr contributors'; reword all, new 2.0.2 and 3.0.0-draft.3 (owner, 2026-11-20T20:35; detail in Decisions) |
+| Q39 | - | Who is the biosig-zarr spec editor under independence? | Seyed Yahya Shirazi, personal capacity; rewording ruled editorial (Recommended) / A governance RFC after RFC-0001 / NEMAR's owner stays editor | none | 2026-11-22T17:00 | closed | Seyed Yahya Shirazi, personal capacity; rewording ruled editorial (owner, 2026-11-20T21:25-08:00) |
+| Q40 | - | Where are biosig-zarr RFCs decided under independence? | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (Recommended) / biosig-zarr's own process (moves RFC-0001, delays O5) | none | 2026-11-22T17:00 | closed | Keep nemarOrg/rfcs; the spec editor decides; RFC-0001 stays NEMAR RFC 0001 (owner, 2026-11-20T21:25-08:00) |
+| Q41 | - | Where does the biosig-zarr repository live? | Stay in nemarOrg as hosting only; move when a second institution co-maintains (Recommended) / Transfer to its own organization now | none | 2026-11-22T17:00 | closed | Stay in nemarOrg as hosting only; move when a second institution co-maintains (owner, 2026-11-20T21:25-08:00) |
+| Q42 | - | Release DOIs for biosig-zarr (Q14 planned NEMAR DOIs)? | Keep nemar-doi as a registration service / Zenodo (lead's pick; note AGENTS.md says EZID not Zenodo for NEMAR) / No DOI before beta | none | 2026-11-22T17:00 | closed | Keep nemar-doi, described as a registration service (owner, 2026-11-20T21:25-08:00) |
 
 ## Proposals
 
@@ -205,3 +209,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | rev-B5-r2 | reviewer | claude-sonnet | Sonnet high | B5 | 2026-11-20T19:40-08:00 | done |
 | rev-B4b | reviewer | claude-sonnet | Sonnet high | B4b | 2026-11-20T20:20-08:00 | done |
 | lead-indep | lead | claude-opus | Opus xhigh | - | 2026-11-20T20:35-08:00 | running |
+| rev-2288 | reviewer | claude-sonnet | Sonnet high | - | 2026-11-20T21:10-08:00 | done |
