@@ -200,15 +200,34 @@
 # the store (`brainvision_dropped_bytes`). Vectorized data with a partial frame is
 # still refused.
 # ZARR_ENGINE_VERSION is NOT bumped here either (ADR 0033).
-# <1.2.14 is a CAP, not a floor, raised deliberately per release: a biosigIO
+# >=1.2.14: an EDF+D or BDF+D file whose data records have gaps is refused, typed
+# `DiscontinuousRecordingError` (code `discontinuous_recording`, a `FileReadError`,
+# with `.gaps` as `(start, length)` seconds), on the in-memory and the streaming
+# path (biosigio#180). The format gives each record its own start time, and the
+# tolerant reader (MNE) concatenated the records, so every sample after a gap
+# landed earlier on the time axis than it was recorded while the annotations kept
+# their true times. A +D file whose records are contiguous still reads and carries
+# `edf_discontinuous_verified_contiguous: True` in the recording metadata. Our
+# catalog scan (2026-11-20) found real gaps only in nm000456 v1.0.2: 102 files, 51
+# recordings. The converter records the refusal as a terminal data failure, with
+# the gap list in its `detail` (`failure_verdict`), and not as an infrastructure
+# failure to retry. THIS IS A FLOOR the converter enforces itself
+# (`SUBJECT_INFO_FLOOR`): a run on 1.2.13 would publish a shifted time axis for a
+# gapped file without a word.
+# ZARR_ENGINE_VERSION is NOT bumped here either (ADR 0033): a bump re-queues the
+# whole archive for one dataset's sake. Stores already published for nm000456
+# keep their shifted time axis until that dataset is requeued by itself
+# (`zarr_queue.py requeue --status done --dataset nm000456 --execute`), when each gapped recording turns
+# into a typed failure in the index instead.
+# <1.2.15 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains or which recordings convert
-# five times in a row (1.2.9 through 1.2.13), so the next one is read before the
+# six times in a row (1.2.9 through 1.2.14), so the next one is read before the
 # converter takes it. Raise it everywhere at once: here,
 # `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP` in hallu-zarr.sh
 # (setup() refuses an installed biosigIO outside [floor, cap) after install,
 # and any pre-release), `SUBJECT_INFO_FLOOR` in generate_zarr.py when the floor
 # moves (it must equal `BIOSIGIO_FLOOR`), and test_hallu_zarr_config.py.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.13,<1.2.14
+biosigio[zarr,meg,mef3,hdf5]>=1.2.14,<1.2.15
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and
