@@ -200,3 +200,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T18:24-08:00 | B5 biosig-zarr#6 head 0d749222 (9 v3 schemas, 19 vectors, CI green); review panel dispatched; Agents today 55/60 |
 | 2026-11-20T18:26-08:00 | B5 tools lens clean (all mutations caught; v3 rebuild byte-identical); 2 sugg (README wording, optional $comment unit test); waiting on spec lens |
 | 2026-11-20T18:28-08:00 | B5 spec lens: 0 crit, 3 imp, 3 sugg; judgment calls 1-8 accepted (4,7,8 verdict accept). Finding 2 contests card B5's layer rule: escalated to advisor (Advisor consults 1/3); Agents today 56/60 |
+| 2026-11-20T18:28-08:00 | A3 hold check: PR 2270 merged into feature/issue-2260-epic-mail-categories, not dev; 0132 not on origin/dev; no dev merge |
