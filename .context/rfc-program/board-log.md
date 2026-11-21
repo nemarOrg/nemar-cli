@@ -227,3 +227,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-20T19:17-08:00 | Owner clarified NEMAR's stewardship role; forwarded to lead-indep for B7 and B4c wording |
 | 2026-11-20T19:19-08:00 | PR 2288 r1 fixes at ebc7d6f3 verified (card check passes B7 B7b B4c; Zenodo only in a count-0 gate; stewardship section; K15 resolved); r2 delta review out (1 Sonnet) |
 | 2026-11-20T19:21-08:00 | PR 2288 r2: 3 Important (B7b grep -i hits nemarOrg; B4c nemar-doi count 2; B7 Hosting lines redefine NEMAR/DOI/RFC) + 1 Suggestion (ADR 0005 phrasing); sent to lead-indep; manager verifies fixes, no r3 |
+| 2026-11-20T19:24-08:00 | PR 2288 r2 fixes verified at 9865d78c (card check passes; B7b grep case-sensitive; B4c nemar-doi 1; Hosting lines short forms); merged 92e78f59; steps B7 O4e B7b O4f B4c added, O5 now depends on B4c; B7 dispatched (Opus xhigh) |

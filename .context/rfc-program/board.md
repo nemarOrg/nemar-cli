@@ -47,7 +47,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | Item | Limit | Used | Resets | Notes |
 |---|---|---|---|---|
-| Agents today | 80 | 62 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
+| Agents today | 80 | 63 | daily | implementers, reviewers, advisors spawned; the plan approval covers this limit |
 | Agents this wave | 15 | 0 | wave | items x (1 + review panel + 1 delta + fix rounds) + 1 advisor |
 | Advisor consults | 3 | 1 | never | lead tier; frontier only when the owner or the plan says |
 
@@ -81,7 +81,7 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | B4 | [RFC-0001 text, draft PR](cards/B4.md) | - | lead | - | claude-opus | done | R1, B2, A2 | rfcs#2 | r1 decisions+technical (2 Sonnet): 6 imp, ~13 sugg fixed; r2 delta+seam: 1 imp fixed (aligned to spec), verified by manager | 2026-11-20T16:05-08:00 | 2d | draft waits for the owner: rfcs#2 head b49245f2 (Q36-Q40) |
 | B5 | [Version 3 schemas and vectors](cards/B5.md) | - | lead | - | claude-opus | done | B5a, O4d, B6 | biosig-zarr#6 | r1 spec+tools (2 Sonnet): 3 imp, 6 sugg fixed (layer per advisor); r2 delta clean; 1 sugg fixed, verified by manager | 2026-11-20T18:15-08:00 | 3d | merged into draft/3.0.0 (ac6e3124f44e3d7e940fe25430cee4296f755d39) |
 | N1 | [RFC-0001 announcement drafts](cards/N1.md) | - | worker | - | claude-sonnet | done | B4 | 2273 | r1 comments (1 Sonnet): 0 crit/imp, 4 sugg fixed or no change; r2 delta clean; 1 sugg (stale card N1 text) to the lead | 2026-11-20T18:45-08:00 | 4h | merged 0585cc96; drafts in owner/announce-0001 for O5 |
-| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4b | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
+| O5 | Owner opens RFC-0001 | - | owner | - | - | blocked | B4, B6, O4b, O1b, S1, N1, B5a, O4d, B5, O4c, B4c | - |  | - | - | owner step; also mail epic #2260 P1-P3 and privacy text in production |
 | C3 | Checkpoint: RFC-0001 closed, decision draft, follow-through outline | - | lead | - | - | blocked | O5 | - |  | - | - | when RFC-0001's close instant passes |
 | V2 | [RFC-0002 text, draft PR](cards/V2.md) | - | lead | - | - | outline | V1, O5 | - |  | - | 2d | lead completes at C2 (Q16) |
 | O6 | Owner opens RFC-0002 after RFC-0001 closes | - | owner | - | - | blocked | V2, C3 | - |  | - | - | one RFC open at a time |
@@ -92,6 +92,11 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | O4c | Manager tags 3.0.0-draft.2 on owner say-so (Q36) | - | owner | - | - | done | B5 | - |  | - | - | pre-release 3.0.0-draft.2 on ac6e3124f44e3d7e940fe25430cee4296f755d39, isPrerelease true (verified) |
 | B4b | [RFC-0001 points at 3.0.0-draft.2, license notice](cards/B4b.md) | - | lead | - | claude-opus | done | O4c | rfcs#2 | r1 comments+seam (1 Sonnet): clean; 2 sugg moved to B4c | 2026-11-20T19:55-08:00 | 2h | superseded by B4c (independence notice, draft.3) |
 | SC1 | [Store Contract states v3 NEMAR profile](cards/SC1.md) | - | lead | - | claude-opus | done | B6, O4b | docs#129 | r1 code+comments (1 Sonnet): clean, 1 sugg no change needed | 2026-11-20T16:45-08:00 | 4h | merged by manager on owner instruction (f6305f74) |
+| B7 | [biosig-zarr main: NEMAR as origin and implementer only](cards/B7.md) | - | lead | - | claude-opus | active | - | - |  | 2026-11-20T19:40-08:00 | 4h | impl-B7 out (Opus xhigh); PR into biosig-zarr main |
+| O4e | Manager releases 2.0.2 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7 | - |  |  | - | - |
+| B7b | [draft/3.0.0 takes 2.0.2, drops NEMAR as decider](cards/B7b.md) | - | lead | - | - | todo | B7, O4e | - |  |  | 3h | - |
+| O4f | Manager tags 3.0.0-draft.3 on owner say-so (Q37/Q38) | - | owner | - | - | todo | B7b | - |  |  | - | - |
+| B4c | [RFC-0001 on 3.0.0-draft.3, independence notice](cards/B4c.md) | - | lead | - | - | todo | B4b, O4e, O4f | - |  |  | 2h | - |
 
 ## Questions
 
@@ -211,3 +216,4 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 | lead-indep | lead | claude-opus | Opus xhigh | - | 2026-11-20T20:35-08:00 | running |
 | rev-2288 | reviewer | claude-sonnet | Sonnet high | - | 2026-11-20T21:10-08:00 | done |
 | ad09993a | reviewer | claude-sonnet | sonnet | PR 2288 r2 | 19:21 | done |
+| a8707231 | implementer | claude-opus | Opus xhigh | B7 | 2026-11-20T19:40-08:00 | running |
