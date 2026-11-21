@@ -36,6 +36,7 @@ import { computeRoutes } from "./routes/compute";
 import { computeRunnerRoutes } from "./routes/compute-runners";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { mailRoutes } from "./routes/mail";
 import { mcpRoutes } from "./routes/mcp";
 import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
@@ -236,6 +237,9 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 // posts' images from the NEWS_MEDIA bucket. Admin writes are in
 // routes/admin/news.ts.
 api.route("/news", newsRoutes);
+// Unsubscribe links in community mail (epic #2260 phase 2): public, no session, the signed token is the
+// whole authority. Mounted with the rest of `api`, so it is also at /nemar/mail.
+api.route("/mail", mailRoutes);
 
 // The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
 // and artifacts the node's loader pulls, behind one shared bearer secret, each answer
