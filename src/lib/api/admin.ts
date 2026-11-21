@@ -1642,7 +1642,10 @@ export interface BroadcastResponse {
   /** A recall also publishes a site notice: its id, or `notice_failed` when it could not be made. */
   notice_id?: number;
   notice_error?: string;
-  /** `nothing_queued`: the enqueue failed completely, so no notice was published (retry the recall). */
+  /**
+   * Why a recall published no notice: `nothing_queued` (the enqueue failed completely; retry the
+   * recall) or `canary` (the send went to admins or members; the send to all publishes it).
+   */
   notice_skipped?: string;
   error?: string;
 }

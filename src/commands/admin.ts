@@ -8863,7 +8863,7 @@ async function typedRecallConfirmation(
       {
         type: "input",
         name: "typed",
-        message: `A recall reaches every account and cannot be undone. Type the reference (${reference}) to send it:`,
+        message: `A recall reaches every account in the selected group, ignores email preferences and cannot be undone. Type the reference (${reference}) to send it:`,
       },
     ]);
     return typeof typed === "string" && typed.trim() === reference ? reference : undefined;
@@ -8881,6 +8881,13 @@ export function recallNoticeLines(result: BroadcastResponse): string[] {
     return [
       chalk.green(
         `  Site notice #${result.notice_id} published. Clear it when the recall is resolved: nemar admin notice clear ${result.notice_id}`,
+      ),
+    ];
+  }
+  if (result.notice_skipped === "canary") {
+    return [
+      chalk.yellow(
+        "  No site notice yet: this send went to part of the audience. The send to all publishes it.",
       ),
     ];
   }
@@ -8919,7 +8926,7 @@ adminCommand
   )
   .option(
     "--allow-repeat",
-    "Send even if the same category and subject went out in the last 24 hours",
+    "Send even if the same category, subject and group went out in the last 24 hours",
   )
   .option("--user <username>", "Send to a single user by username (direct contact, no category)")
   .option("--subject <text>", "Email subject line")
@@ -9096,7 +9103,7 @@ adminCommand
       if (isRecall) {
         console.log(
           chalk.red.bold(
-            "  RECALL: reaches every account, ignores email preferences, cannot be unsubscribed from.",
+            "  RECALL: reaches every account in this group, ignores email preferences, cannot be unsubscribed from.",
           ),
         );
         console.log(`  Reference: ${recallRef}`);

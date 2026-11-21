@@ -343,6 +343,22 @@ describe("a recall", () => {
     }
   });
 
+  test("a recall canary says the send to all publishes the notice, not that the owner must", async () => {
+    const server = startServer({
+      "POST /admin/notify": { ...QUEUED, category: "recall", notice_skipped: "canary" },
+    });
+    try {
+      const r = await runCli(
+        [...RECALL, "--confirm-recall", "nm000104@v1.0.0", "--yes"],
+        server.url,
+      );
+      expect(r.stdout).toContain("The send to all publishes it");
+      expect(r.stdout).not.toContain("OWNER STEP");
+    } finally {
+      server.stop();
+    }
+  });
+
   test("a recall that queued nothing says so instead of claiming the owner step", async () => {
     const server = startServer({
       "POST /admin/notify": {

@@ -279,6 +279,10 @@ export async function handleCategorizedNotify(
       // The enqueue failed completely: nothing is out, so there is nothing to announce, and the
       // retry (which the repeat guard allows) publishes the notice once it does go out.
       answer.notice_skipped = "nothing_queued";
+    } else if (input.to !== "all") {
+      // A canary to admins or members is a rehearsal: the public notice goes up with the send to
+      // the whole audience, not before it.
+      answer.notice_skipped = "canary";
     } else {
       try {
         // One notice per reference inside the repeat window: a canary to admins followed by the

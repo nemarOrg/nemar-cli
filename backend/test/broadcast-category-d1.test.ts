@@ -676,14 +676,29 @@ describe("recalls", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 1 });
   });
 
+  test("a recall canary to admins or members publishes no notice; the send to all does", async () => {
+    seedDataset("nm000104");
+    for (const to of ["admins", "members"]) {
+      const res = await post(OWNER_KEY, { ...RECALL, to, allow_repeat: true }, harness());
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.notice_skipped).toBe("canary");
+      expect(body.notice_id).toBeUndefined();
+    }
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 0 });
+    const all = (await (await post(OWNER_KEY, RECALL, harness())).json()) as { notice_id: number };
+    expect(typeof all.notice_id).toBe("number");
+    expect(db.query("SELECT COUNT(*) AS n FROM notices").get()).toEqual({ n: 1 });
+  });
+
   test("a second send of the same recall inside the window reuses the notice instead of stacking another", async () => {
     seedDataset("nm000104");
-    const first = (await (
-      await post(OWNER_KEY, { ...RECALL, to: "admins" }, harness())
-    ).json()) as {
+    const first = (await (await post(OWNER_KEY, RECALL, harness())).json()) as {
       notice_id: number;
     };
-    const second = (await (await post(OWNER_KEY, RECALL, harness())).json()) as {
+    const second = (await (
+      await post(OWNER_KEY, { ...RECALL, allow_repeat: true }, harness())
+    ).json()) as {
       notice_id: number;
     };
     const again = (await (
