@@ -32,5 +32,10 @@ The iEEG geometry pipeline (`scripts/ieeg_geometry`, ADR 0129, planner version 3
    Roll the Worker and the CLI back together, never the Worker alone.
 2. The central `nemarDatasets/.github` `run-upstream-repull.yml` carries the geometry step (applied 2026-11-20, nemarDatasets/.github#156; the patch file is `.context/plans/ieeg-geometry/workflow-patches/run-upstream-repull.yml.patch`).
    It skips, logging `ieeg-geometry: not in this CLI release`, for a tag that lacks the package.
-3. Merge geometry pull requests only after the CLI release carrying `scripts/ieeg_geometry` is published and that patch is live.
-4. A mirror's N.0.1 is two steps: merge the pull request that `python -m ieeg_geometry pr` opened, then run `nemar dataset release <id> --type patch`.
+3. Merge geometry or integration pull requests only after a CLI release whose `IEEG_GEOMETRY_PIPELINE_VERSION` equals the pipeline version that wrote the files is published, and that patch is live.
+   A re-pull runs the pipeline from the released CLI tag and ownership is hash-based, so an older CLI would silently regenerate the files with its older pipeline.
+4. A mirror's N.0.1 is one integration pull request, one merge and one tag.
+   The central release workflow tags `v<Version>` from `dataset_description.json` on `main` when any pull request merges, and the tag mints a version DOI, so every collaborator and fix commit must be in the pull request that carries the final Version.
+   Branch from `main`, merge the collaborator branch (a merge commit, authorship kept), commit the BIDS fixes, push that branch, then run `python -m ieeg_geometry pr <id> --from-ref <branch> --bump-version`: it clones the branch, computes the geometry on its tree, adds one commit on top, pushes the same branch (fast-forward only, refused if the branch moved) and opens the pull request into `main` (or updates the open one).
+   A branch Version is kept only when it is `X.Y.Z` and above `main`'s Version and every tag (matching `versionbump.plan`); otherwise the next patch above all of them is set (a Version that is not `X.Y.Z` is refused; the central `version-check` needs the Version to differ from `main`'s).
+   Merging cuts the release, so do not run `nemar dataset release` afterwards: it would cut a further patch. A `main` or branch ahead of the latest release does not stop `pr` (a missing release tag, or an input that changed after the release and could not be fetched, does).

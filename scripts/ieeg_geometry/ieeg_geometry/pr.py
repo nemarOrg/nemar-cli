@@ -13,21 +13,25 @@ existing work directory, no git identity, a clone not on `main`, a branch that a
 the remote, an errored track, an apply that changed nothing, any difference outside `changes`,
 a staged set that is not exactly `changes`, a staged blob that is not the work-tree bytes (a
 git-annex filter must never turn a sidecar into a pointer), and, for a real run only, a
-remote that is not `nemarDatasets/<id>` and a `main` that moved past the released version in
-anything but `.nemar/`, `.github/` and `.gitattributes` (the pipeline reads its large inputs
-at the release).
+remote that is not `nemarDatasets/<id>`, a missing release tag, and an input that changed after
+the release and could not be fetched. Small files are read from the fresh clone of `main`;
+annexed files are downloaded from the data plane at the release version. A `main` ahead of the
+release is otherwise recorded in the body (every changed path, at most 50 listed), not refused:
+the files are computed from `main`.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import fetch, pipeline
+from . import fetch, pipeline, versionbump
 from .ownership import OwnedPath, read_ownership
 from .version import pipeline_version
 
@@ -40,6 +44,7 @@ _TIMEOUT_S = 900
 NEUTRAL_GIT_CONFIG = fetch.NEUTRAL_GIT_CONFIG  # one definition; every git call here uses it
 UNRELEASED_DIRS = (".nemar/", ".github/")  # main may change these after a release
 UNRELEASED_FILES = (".gitattributes",)  # exact names, not prefixes
+DESCRIPTION = "dataset_description.json"
 
 
 class PrRefusal(Exception):
@@ -207,8 +212,96 @@ def _removed_section(paths: list[str]) -> list[str]:
 
 
 def _is_mirror(dataset_id: str) -> bool:
-    """A mirror (`on` id) gets its geometry as version N.0.1 through a separate patch release."""
+    """A mirror (`on` id): its geometry is part of the N.0.1 integration pull request, which
+    must carry the final Version (`--bump-version`), because merging it tags the release."""
     return dataset_id.startswith("on")
+
+
+def _not_fetched(failed: dict[str, str]) -> list[str]:
+    """Input files that could not be downloaded: the tracks that need one skip it, and the
+    reviewer must see which (the report keeps them as `not fetched:` warnings)."""
+    if not failed:
+        return []
+    items = [f"`{p}`: {r[:MAX_REASON_CHARS]}" for p, r in sorted(failed.items())]
+    return [
+        f"- Not fetched: {len(failed)} input file(s) could not be downloaded, so what depends "
+        "on them was skipped or left as it was:",
+        _bullets(items),
+    ]
+
+
+def _ref_lines(ref: tuple[str, list[str]] | None) -> list[str]:
+    if not ref:
+        return []
+    name, commits = ref
+    return [
+        f"- Integration branch `{name}`: {len(commits)} commit(s) not on `main`, kept as "
+        "they are (authorship included); the geometry is one commit on top:",
+        _bullets(commits),
+    ]
+
+
+def _version_lines(plan: versionbump.Plan | None) -> list[str]:
+    if not plan:
+        return []
+    if plan.kept:
+        line = (
+            f"- Version: `{DESCRIPTION}` `Version` is already `{plan.new}` on the branch (above "
+            f"`main` and every tag), so it is kept; merging this pull request tags `v{plan.new}`"
+        )
+    else:
+        line = (
+            f"- Version: `{DESCRIPTION}` `Version` goes from `{plan.current}` to `{plan.new}` "
+            f"in this pull request, so the version check passes and merging it tags `v{plan.new}`"
+        )
+    return [
+        line,
+        *([f"  - {plan.changes_note} (normal for a mirror)"] if plan.changes_note else []),
+    ]
+
+
+MAX_CLEANING_LINE = 400  # characters per file in the Table cleaning section
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_CLEANING_LINE else text[: MAX_CLEANING_LINE - 3] + "..."
+
+
+def _cleaning_item(entry: dict) -> str:
+    parts = []
+    if entry.get("dropped_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["dropped_columns"])
+        parts.append(f"dropped columns: {names}")
+    if entry.get("added_columns"):
+        names = ", ".join(f"`{c}`" for c in entry["added_columns"])
+        parts.append(f"added column: {names}")
+    if entry.get("coerced_cells"):
+        cells = ", ".join(f"`{c}` ({n})" for c, n in sorted(entry["coerced_cells"].items()))
+        parts.append(f"cells set to n/a: {cells}")
+    if entry.get("hemisphere_rewritten"):
+        parts.append(f"hemisphere values rewritten: {entry['hemisphere_rewritten']}")
+    return _clip(f"`{entry['path']}`: " + "; ".join(parts))
+
+
+def _cleaning_section(entries: list[dict], written: set[str]) -> list[str]:
+    """What NEMAR changed in each electrodes table this pull request writes besides the
+    coordinates, so the reviewer sees what was not carried over from the source tables. Only
+    paths in `written` (the added and changed paths) are listed; empty when nothing is left.
+    Long lists are cut by `_bullets` (50 entries, 8,000 characters, then a count)."""
+    entries = [
+        e for e in entries if e["path"] in written and _cleaning_item(e).partition(": ")[2]
+    ]  # something to say
+    if not entries:
+        return []
+    return [
+        f"## Table cleaning ({len(entries)})",
+        "",
+        "NEMAR's electrodes tables below differ from the source tables they were computed from "
+        "beyond the coordinates; the source tables are unchanged and keep everything listed.",
+        "",
+        _bullets([_cleaning_item(e) for e in entries]).replace("  - ", "- "),
+        "",
+    ]
 
 
 def build_body(
@@ -217,6 +310,9 @@ def build_body(
     *,
     n_surface_sets: int,
     release_note: str | None = None,
+    fetch_failed: dict[str, str] | None = None,
+    version_bump: versionbump.Plan | None = None,
+    ref: tuple[str, list[str]] | None = None,
     limit: int = BODY_LIMIT,
 ) -> str:
     """The pull request description: every added, changed or removed file with its method and
@@ -231,6 +327,9 @@ def build_body(
         f"- Dataset: `{report['dataset']}`, version `{report['dataset_version']}`, "
         f"source commit `{report['source_commit']}`",
         *([f"- Source: {release_note}"] if release_note else []),
+        *_not_fetched(fetch_failed or {}),
+        *_ref_lines(ref),
+        *_version_lines(version_bump),
         f"- Pipeline: `{report['pipeline_version']}`",
         f"- Files: {len(added)} added, {len(changed)} changed, {len(removed)} removed",
         f"- Subject surface sets for the website's Brain panel: {n_surface_sets} "
@@ -243,6 +342,7 @@ def build_body(
         '"Computed by NEMAR" and names its source file and method.',
         "",
     ]
+    lines += _cleaning_section(report.get("electrodes_cleaning") or [], {*added, *changed})
     reserved = len("\n".join(_removed_section(removed))) if removed else 0
     for label, paths in (("Added", added), ("Changed", changed)):
         if not paths:
@@ -255,11 +355,12 @@ def build_body(
                 break
     if removed:
         lines += _removed_section(removed)
-    if _is_mirror(report["dataset"]):
+    if _is_mirror(report["dataset"]) and version_bump:
         lines += [
             "",
-            "After this is merged, cut the patch: "
-            f"`nemar dataset release {report['dataset']} --type patch`.",
+            f"Merging this pull request cuts `v{version_bump.new}` (the release workflow tags the "
+            "Version on `main`); do not also run `nemar dataset release`, which would cut a "
+            "further patch.",
         ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -274,31 +375,75 @@ def check_body_size(body: str) -> None:
 # ---- the release ------------------------------------------------------------------------------
 
 
-def release_status(clone: Path, version: str) -> tuple[str, bool]:
-    """(note for the body, whether a real run may proceed). The pipeline reads small files
-    from `main` and large ones from the release `version`; they agree when `main` is the
-    release or moved only under `.nemar/`, `.github/` and `.gitattributes`."""
+MAX_LISTED_PATHS = 50  # paths named in the Source section before a count stands for the rest
+MAX_LISTED_CHARS = 8_000  # and a character budget, so long names cannot crowd out the body
+MAX_REASON_CHARS = 100
+
+
+def _bullets(items: list[str]) -> str:
+    """Sub-bullets: at most 50 and 8,000 characters, then a count of the rest."""
+    shown: list[str] = []
+    used = 0
+    for item in items[:MAX_LISTED_PATHS]:
+        used += len(item) + 8
+        if used > MAX_LISTED_CHARS:
+            break
+        shown.append(f"  - {item}")
+    rest = len(items) - len(shown)
+    if rest:
+        shown.append(f"  - and {rest} more")
+    return "\n".join(shown)
+
+
+def _path_list(paths: list[str]) -> str:
+    return _bullets([f"`{p}`" for p in paths])
+
+
+def release_status(
+    clone: Path, version: str, failed: dict[str, str] | None = None, label: str = BASE
+) -> tuple[str, bool]:
+    """(note for the body or the refusal, whether a real run may proceed).
+
+    Small files are read from the fresh clone of `main`; annexed files are downloaded from the
+    data plane at the release `version`. So a real run needs the release tag, and refuses when an
+    input that could not be fetched is one that changed after the release (its bytes are not at
+    the release). A `main` ahead of the release otherwise is recorded in the body, not refused:
+    the mirror's patch release publishes `main`."""
+    failed = failed or {}
     head = _git(clone, "rev-parse", "HEAD").strip()
     try:
         tag = _git(clone, "rev-parse", "--verify", "-q", f"refs/tags/{version}^{{commit}}").strip()
     except PrRefusal:
         return (
-            f"no tag {version} exists, so `main` ({head[:12]}) cannot be compared to the release",
+            f"no tag {version} exists, so `{label}` ({head[:12]}) cannot be compared to the "
+            "release that serves the annexed inputs; a real run needs the release tag",
             False,
         )
     if tag == head:
-        return f"`main` is the release {version} ({head[:12]})", True
+        return f"`{label}` is the release {version} ({head[:12]})", True
     moved = _paths(clone, "diff", "--name-only", "--no-renames", tag, head)
+    stale = sorted(set(failed) & moved)
+    if stale:
+        return (
+            f"{len(stale)} input file(s) changed after release {version} and could not be "
+            "fetched, because annexed bytes are downloaded at the release: "
+            + ", ".join(f"`{p}`" for p in stale[:10])
+            + (f" and {len(stale) - 10} more" if len(stale) > 10 else ""),
+            False,
+        )
     other = sorted(p for p in moved if not (p.startswith(UNRELEASED_DIRS) or p in UNRELEASED_FILES))
     if other:
         return (
-            f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) and changed "
-            f"{len(other)} path(s) outside `.nemar/`, `.github/` and `.gitattributes` "
-            f"(first: `{other[0]}`)",
-            False,
+            f"`{label}` ({head[:12]}) is ahead of release {version} ({tag[:12]}). "
+            f"The geometry files in this pull request were computed from `{label}`, which the "
+            "patch release will publish together with these changes (annexed inputs are unchanged "
+            f"since the release). {len(other)} path(s) outside `.nemar/`, `.github/` and "
+            f"`.gitattributes` changed since the release; every changed path, sorted:\n"
+            f"{_path_list(sorted(moved))}",
+            True,
         )
     return (
-        f"`main` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
+        f"`{label}` ({head[:12]}) is ahead of release {version} ({tag[:12]}) only under "
         "`.nemar/`, `.github/` and `.gitattributes`",
         True,
     )
@@ -315,11 +460,63 @@ def _same_remote(a: str, b: str) -> bool:
     return a.removesuffix("/").removesuffix(".git") == b.removesuffix("/").removesuffix(".git")
 
 
+def _plan_bump(clone: Path) -> versionbump.Plan:
+    """The Version the pull request carries (see `versionbump.plan`), from the branch's
+    description, `main`'s, the release tags and `CHANGES`; a `PrRefusal` when none can be chosen."""
+    try:
+        description = (clone / DESCRIPTION).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise PrRefusal(f"cannot read {DESCRIPTION} to bump the version: {exc}") from exc
+    names = set(_paths(clone, "ls-tree", "--name-only", "HEAD"))
+    changes = next(
+        (
+            _git(clone, "show", f"HEAD:{n}", neutral=True)
+            for n in versionbump.CHANGES_NAMES
+            if n in names
+        ),
+        None,
+    )
+    main_description = _git(clone, "show", f"origin/{BASE}:{DESCRIPTION}", neutral=True)
+    tags = _git(clone, "tag", "--list").split()
+    try:
+        return versionbump.plan(description, main_description, tags, changes)
+    except versionbump.BumpRefusal as exc:
+        raise PrRefusal(f"--bump-version: {exc}") from exc
+
+
+_PLAIN_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def check_from_ref(name: str) -> None:
+    """Only a plain branch name other than `main`: the push must never reach `main` or a ref."""
+    if (
+        name == BASE
+        or name.startswith("refs/")
+        or ".." in name
+        or name.endswith((".lock", "/", "."))
+        or not _PLAIN_BRANCH.match(name)
+    ):
+        raise PrRefusal(
+            f"--from-ref {name!r} must be a plain branch name other than {BASE!r} "
+            "(the geometry is pushed to that branch)"
+        )
+
+
+def _ref_commits(clone: Path) -> list[str]:
+    """Commits on the branch that are not on `main`: short sha, author, subject."""
+    out = _git(clone, "log", "-z", "--format=%h%x1f%an%x1f%s", f"origin/{BASE}..HEAD", neutral=True)
+    rows = [r.split("\x1f") for r in out.split("\0") if r.strip()]
+    # code spans, so a collaborator's `@name` in a subject or author does not notify anyone
+    return [f"`{h}` `{(a + ': ' + subj).replace(chr(96), chr(39))}`" for h, a, subj in rows]
+
+
 def open_pr(
     dataset_id: str,
     workdir: Path,
     *,
     version: str | None = None,
+    bump_version: bool = False,
+    from_ref: str | None = None,
     dry_run: bool = False,
     surfaces_out: Path | None = None,
     urls: dict[str, str] | None = None,
@@ -330,8 +527,23 @@ def open_pr(
     own `nemarDatasets/<id>`); the command line never changes it, tests do."""
     out = out or sys.stdout
     pipeline.check_dataset_id(dataset_id)
+    if from_ref is not None:
+        check_from_ref(from_ref)
     pv = pipeline_version()
-    branch, ttl = branch_name(pv), title(pv)
+    ttl = title(pv)
+    branch = from_ref or branch_name(pv)
+    pr_title = (
+        f"Integrate collaborator changes and add NEMAR-computed iEEG geometry (pipeline {pv})"
+        if from_ref
+        else ttl
+    )
+    if _is_mirror(dataset_id) and not bump_version:
+        raise PrRefusal(
+            f"{dataset_id} is a mirror: its geometry goes in the one integration pull request "
+            "that carries the final Version, because merging it tags the release and mints the "
+            "version DOI. Run `pr <id> --from-ref <branch> --bump-version` (see "
+            ".rules/release-and-repull.md)"
+        )
     workdir = Path(workdir)
     if (workdir / dataset_id).exists():
         raise PrRefusal(
@@ -358,17 +570,23 @@ def open_pr(
         repo_url=urls.get("repo_url") or fetch.REPO_URL,
         data_url=urls.get("data_url") or fetch.DATA_URL,
         api_url=urls.get("api_url") or fetch.API_URL,
+        ref=from_ref,
     )
     clone = got.clone
-    if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != BASE:
-        raise PrRefusal(f"the clone is not on {BASE}; the pull request is made against {BASE}")
-    release_note, release_ok = release_status(clone, got.version)
+    on = from_ref or BASE
+    if _git(clone, "symbolic-ref", "--short", "HEAD").strip() != on:
+        raise PrRefusal(f"the clone is not on {on}; the pull request is made against {BASE}")
+    release_note, release_ok = release_status(clone, got.version, got.failed, label=on)
     if not release_ok and not dry_run:
-        raise PrRefusal(f"{release_note}; the pipeline's inputs may differ from the release")
+        raise PrRefusal(release_note)
     if not release_ok:
         out.write(f"warning: {release_note} (a real run refuses)\n")
-    if _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip():
+    if (
+        not from_ref
+        and _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip()
+    ):
         raise PrRefusal(f"branch {branch} already exists on the remote; nothing was pushed")
+    bump = _plan_bump(clone) if bump_version else None
     checked_out = _paths(clone, "ls-files")
     _git(clone, "read-tree", "HEAD")  # the index is main's whole tree; only changes will differ
     never_checked_out = _paths(clone, "ls-files") - checked_out
@@ -396,12 +614,19 @@ def open_pr(
         shown = "; ".join(bad[:10]) + (f"; and {len(bad) - 10} more" if len(bad) > 10 else "")
         raise PrRefusal(f"the work tree differs from main outside the reported changes: {shown}")
 
-    for rel in sorted(set(changes["add"]) | set(changes["change"])):
+    to_stage = set(changes["add"]) | set(changes["change"])
+    if bump and not bump.kept:
+        target = clone / DESCRIPTION
+        text = versionbump.apply(target.read_bytes().decode("utf-8"), bump.new)
+        target.write_bytes(text.encode("utf-8"))  # only the version's characters differ
+        to_stage.add(DESCRIPTION)
+        expected = expected | {DESCRIPTION}
+    for rel in sorted(to_stage):
         _git(clone, "add", "--", rel, neutral=True)
     for rel in sorted(changes["remove"]):
         _git(clone, "rm", "-q", "--cached", "--ignore-unmatch", "--", rel, neutral=True)
     check_staged(_paths(clone, "diff", "--cached", "--name-only", "--no-renames"), expected)
-    verify_staged_bytes(clone, set(changes["add"]) | set(changes["change"]))
+    verify_staged_bytes(clone, to_stage)
     ownership = read_ownership(clone)
     owned = {e.path: e for e in ownership.entries} if ownership else {}
     body = build_body(
@@ -409,24 +634,65 @@ def open_pr(
         owned,
         n_surface_sets=len(report.get("surface_entries", [])),
         release_note=release_note,
+        fetch_failed=got.failed,
+        version_bump=bump,
+        ref=(from_ref, _ref_commits(clone)) if from_ref else None,
     )
     check_body_size(body)
-    _git(clone, "checkout", "-q", "-b", branch)
+    if not from_ref:
+        _git(clone, "checkout", "-q", "-b", branch)
     _git(clone, "commit", "-q", "-m", ttl, what="git commit", neutral=True)
     commit = _git(clone, "rev-parse", "HEAD").strip()
     if dry_run:
-        out.write(f"branch {branch}, commit {commit}\ntitle: {ttl}\n\n{body}")
-        return PrResult(branch, commit, ttl, body, None)
+        out.write(f"branch {branch}, commit {commit}\ntitle: {pr_title}\n\n{body}")
+        return PrResult(branch, commit, pr_title, body, None)
 
     body_file = workdir / f"{dataset_id}.pr-body.md"
     body_file.write_text(body, encoding="utf-8")
-    _git(clone, "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push")
+    if from_ref:
+        now = _git(clone, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").split()[:1]
+        if now != [got.commit]:
+            raise PrRefusal(
+                f"branch {branch} moved on the remote since the clone ({got.commit[:12]} -> "
+                f"{(now or ['gone'])[0][:12]}); nothing was pushed, rerun"
+            )
+    lease = [f"--force-with-lease=refs/heads/{branch}:{got.commit}"] if from_ref else []
+    _git(
+        clone, "push", *lease, "origin", f"refs/heads/{branch}:refs/heads/{branch}", what="git push"
+    )
+    if from_ref:
+        listed = _run(
+            ["gh", "pr", "list", "--repo", f"{ORG}/{dataset_id}", "--head", branch,
+             "--state", "open", "--json", "number,url,headRepositoryOwner,baseRefName"],
+            clone, "gh pr list",
+        )  # fmt: skip
+        open_prs = [  # a fork's PR with the same branch name is not this branch's PR
+            p
+            for p in json.loads(listed or "[]")
+            if (p.get("headRepositoryOwner") or {}).get("login") == ORG
+            and p.get("baseRefName") == BASE
+        ]
+        if len(open_prs) > 1:
+            raise PrRefusal(
+                f"branch {branch} has {len(open_prs)} open pull requests into {BASE}; "
+                "it was pushed, edit the right one by hand"
+            )
+        if open_prs:
+            edit = [
+                "gh", "pr", "edit", str(open_prs[0]["number"]),
+                "--repo", f"{ORG}/{dataset_id}",
+                "--title", pr_title,
+                "--body-file", str(body_file),
+            ]  # fmt: skip
+            _run(edit, clone, "gh pr edit")
+            out.write(open_prs[0]["url"] + "\n")
+            return PrResult(branch, commit, pr_title, body, open_prs[0]["url"])
     create = [
         "gh", "pr", "create",
         "--repo", f"{ORG}/{dataset_id}",
         "--base", BASE,
         "--head", branch,
-        "--title", ttl,
+        "--title", pr_title,
         "--body-file", str(body_file),
     ]  # fmt: skip
     try:
@@ -446,4 +712,4 @@ def open_pr(
             f"branch: git -C {clone} push origin --delete {branch}"
         )
     out.write(url + "\n")
-    return PrResult(branch, commit, ttl, body, url)
+    return PrResult(branch, commit, pr_title, body, url)

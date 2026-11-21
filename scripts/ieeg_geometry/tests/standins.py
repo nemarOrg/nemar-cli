@@ -26,6 +26,12 @@ with open(log, "a", encoding="utf-8") as fh:
 if os.environ.get("GH_STANDIN_FAIL"):
     sys.stderr.write("gh: HTTP 403\n")
     sys.exit(1)
+if args[:2] == ["pr", "list"]:
+    print(os.environ.get("STANDIN_OPEN_PRS", "[]"))
+    sys.exit(0)
+if args[:2] == ["pr", "edit"]:
+    print("https://github.com/nemarDatasets/standin/pull/9")
+    sys.exit(0)
 print("Creating pull request")
 print("https://github.com/nemarDatasets/standin/pull/7")
 """
