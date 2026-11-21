@@ -250,7 +250,7 @@ def _ref_lines(ref: tuple[str, list[str]] | None, *, geometry: bool = True) -> l
 
 
 MAX_REASONS = 6  # distinct reasons listed per track before a count stands for the rest
-_ABS_PATH = re.compile(r"(?<![\w.~>])/(?:[\w.@+=-]+/)*[\w.@+=-]+")
+_ABS_PATH = re.compile(r"(?<![\w.~>/])/(?!/)(?:[\w.@+=-]+/)*[\w.@+=-]+")
 
 
 def redact_paths(text: str, roots: list[Path]) -> str:
@@ -289,23 +289,22 @@ def _track_reasons(report: dict, roots: list[Path]) -> list[str]:
 def orphans(report: dict, ownership) -> list[str]:
     """Paths the ownership record lists that no track reported this run: recorded, but not
     produced by this run. An electrodes table is reported when a track named it (as its input or
-    an output); a coordsystem file also when a track decided on a table of the same subject and
-    session (a label kept or already present writes no file, so it lists none)."""
+    an output); a coordsystem file also when the electrodes table it sits beside
+    (`<prefix>_coordsystem.json` next to `<prefix>_electrodes.tsv`) was reported (a label kept or
+    already present writes no file, so it lists none)."""
     if ownership is None:
         return []
     reported = {p for k in ("add", "change", "remove", "kept") for p in report["changes"][k]}
-    scopes = set()
     for row in report["files"]:
         reported.add(row["electrodes"])
-        scopes.add((row["subject"], row["session"]))
         for d in row["decisions"].values():
             reported.update(d.get("outputs") or [])
     missing = []
     for e in ownership.entries:
         if e.path in reported:
             continue
-        scope = (pipeline._entity(e.path, "sub"), pipeline._entity(e.path, "ses"))
-        if e.path.endswith("_coordsystem.json") and scope in scopes:
+        coord = "_coordsystem.json"
+        if e.path.endswith(coord) and e.path[: -len(coord)] + "_electrodes.tsv" in reported:
             continue
         missing.append(e.path)
     return sorted(missing)

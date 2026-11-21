@@ -1171,6 +1171,9 @@ def test_reasons_lose_absolute_paths_and_are_cut_with_an_ellipsis(tmp_path):
     entry = next(e for e in text.replace("\n", "; ").split("; ") if "zzz" in e)
     assert entry.endswith("...") and len(entry.split(", ", 1)[1]) <= pr.MAX_REASON_CHARS
     assert pr.redact_paths("n/a and 1/2 and sub-1/x", []) == "n/a and 1/2 and sub-1/x"
+    url = "fetch failed: https://data.nemar.org/on1/1.0.0/sub-1/x.tsv: 404"
+    assert pr.redact_paths(url, []) == url
+    assert pr.redact_paths("err:/a/b and '/tmp/a/b'", []) == "err:b and 'b'"
 
 
 def test_a_create_failure_on_an_integration_branch_never_suggests_deleting_it(
@@ -1244,3 +1247,12 @@ def test_ownership_entries_no_track_reported_are_listed_and_warned_about(env, tm
     assert "would block other tracks" in body
     first = body.split("\n\n")[1]  # the warning sits right under the opening sentences
     assert first.startswith("Warning: 1 path(s)")
+
+
+def test_an_orphaned_coordsystem_in_a_session_that_still_has_tables_is_listed(env, tmp_path):
+    served, bare, log, work = env
+    ghost = "sub-01/ses-01/ieeg/sub-01_ses-01_space-Ghost_coordsystem.json"
+    _branch_with_outputs(env, tmp_path, description=VERSION_1_0_4, ghost=ghost)
+    assert _pr(served, work, *NO_GEOMETRY_ARGS) == 0
+    body = _create_call(log)["body"]
+    assert "## Recorded but not produced by this run (1)" in body and f"`{ghost}`" in body
