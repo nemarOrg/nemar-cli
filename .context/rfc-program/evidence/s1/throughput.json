@@ -1,7 +1,11 @@
 {
- "caveat": "zarr_converted_at is the LAST conversion of a dataset: earlier conversions of a re-converted dataset are not visible, and every store of a dataset is dated by its dataset's last conversion",
+ "caveat": "zarr_converted_at is the LAST conversion of a dataset: earlier conversions of a re-converted dataset are not visible, every store of a dataset is dated by its dataset's last conversion (which inflates bursts and hides earlier days), and the series mixes first conversions with re-conversions; version 3 re-conversion throughput was not measured",
+ "days_from_earliest_to_last_complete_day_inclusive": 109,
+ "definition": "stores per day = the zarr_store_count of every dataset whose zarr_converted_at (its LAST conversion, read as UTC) falls on that calendar day, summed",
+ "earliest_last_conversion_day": "2026-08-04",
  "fetched_utc": "2026-11-21T00:47:48Z",
- "per_day_datasets_last_30_days": {
+ "mean_stores_per_day_over_that_span": 2121.6,
+ "per_day_datasets_window": {
   "2026-10-23": 28,
   "2026-10-24": 61,
   "2026-10-25": 131,
@@ -68,7 +72,7 @@
   "2026-11-09": 262,
   "2026-11-13": 1
  },
- "per_day_stores_last_30_days": {
+ "per_day_stores_window": {
   "2026-10-23": 3768,
   "2026-10-24": 10592,
   "2026-10-25": 62337,
@@ -85,22 +89,23 @@
   "2026-11-09": 262,
   "2026-11-13": 1
  },
+ "stores_credited_to_the_partial_fetch_day_excluded": 0,
  "stores_per_day_on_days_with_conversions": {
   "median": 954,
-  "p90": 19770.6
+  "p90_linear": 19770.6
  },
  "stores_per_day_over_30_complete_days": {
   "days_with_conversions": 15,
   "max": 62337,
   "mean": 4209.6,
   "median": 0.5,
-  "p90": 10687.5
+  "p90_linear": 10687.5
  },
  "stores_whose_dataset_last_converted_earlier": 104971,
- "stores_whose_dataset_last_converted_in_last_30_days": 126288,
+ "stores_whose_dataset_last_converted_in_window": 126288,
  "stores_without_zarr_converted_at": 0,
  "total_stores_all_datasets": 231259,
- "window_complete_days": [
+ "window_complete_days_utc": [
   "2026-10-22",
   "2026-11-20"
  ]

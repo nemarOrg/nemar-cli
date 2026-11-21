@@ -1,5 +1,318 @@
 {
  "classes": {
+  "bv_gap_negative_total": {
+   "by_dataset": {
+    "on004587": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 15,
+     "with_store": 15,
+     "zarr_status": "ready",
+     "zarr_store_count": 114
+    },
+    "on005127": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 17,
+     "recordings": 19,
+     "with_store": 2,
+     "zarr_status": "ready",
+     "zarr_store_count": 234
+    },
+    "on005486": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 1,
+     "with_store": 1,
+     "zarr_status": "ready",
+     "zarr_store_count": 445
+    },
+    "on006801": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 1,
+     "with_store": 1,
+     "zarr_status": "ready",
+     "zarr_store_count": 42
+    }
+   },
+   "datasets": 4,
+   "licenses": {
+    "CC0": 4
+   },
+   "recordings": 36,
+   "recordings_failed_conversion": 0,
+   "recordings_not_in_index": 17,
+   "stores_in_serving_index": 19
+  },
+  "bv_gap_positive_total": {
+   "by_dataset": {
+    "nm000292": {
+     "failed": 0,
+     "license": "CC-BY-4.0",
+     "not_in_index": 6,
+     "recordings": 6,
+     "with_store": 0,
+     "zarr_status": "ready",
+     "zarr_store_count": 21
+    },
+    "nm000309": {
+     "failed": 0,
+     "license": "CC-BY-4.0",
+     "not_in_index": 23,
+     "recordings": 23,
+     "with_store": 0,
+     "zarr_status": "ready",
+     "zarr_store_count": 25
+    },
+    "nm000318": {
+     "failed": 0,
+     "license": "CC-BY-4.0",
+     "not_in_index": 13,
+     "recordings": 13,
+     "with_store": 0,
+     "zarr_status": "ready",
+     "zarr_store_count": 91
+    },
+    "nm000319": {
+     "failed": 0,
+     "license": "CC-BY-4.0",
+     "not_in_index": 49,
+     "recordings": 49,
+     "with_store": 0,
+     "zarr_status": "ready",
+     "zarr_store_count": 41
+    },
+    "on003702": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 20,
+     "with_store": 20,
+     "zarr_status": "ready",
+     "zarr_store_count": 47
+    },
+    "on003768": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 2,
+     "with_store": 2,
+     "zarr_status": "ready",
+     "zarr_store_count": 253
+    },
+    "on003825": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 2,
+     "with_store": 2,
+     "zarr_status": "ready",
+     "zarr_store_count": 50
+    },
+    "on004502": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 1,
+     "with_store": 1,
+     "zarr_status": "ready",
+     "zarr_store_count": 38
+    },
+    "on004587": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 15,
+     "with_store": 15,
+     "zarr_status": "ready",
+     "zarr_store_count": 114
+    },
+    "on004796": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 3,
+     "with_store": 3,
+     "zarr_status": "ready",
+     "zarr_store_count": 235
+    },
+    "on004917": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 16,
+     "with_store": 16,
+     "zarr_status": "ready",
+     "zarr_store_count": 24
+    },
+    "on005127": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 5,
+     "recordings": 26,
+     "with_store": 21,
+     "zarr_status": "ready",
+     "zarr_store_count": 234
+    },
+    "on005273": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 30,
+     "with_store": 30,
+     "zarr_status": "ready",
+     "zarr_store_count": 30
+    },
+    "on005280": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 492,
+     "with_store": 492,
+     "zarr_status": "ready",
+     "zarr_store_count": 669
+    },
+    "on005286": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 5,
+     "with_store": 5,
+     "zarr_status": "ready",
+     "zarr_store_count": 30
+    },
+    "on005289": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 6,
+     "with_store": 6,
+     "zarr_status": "ready",
+     "zarr_store_count": 195
+    },
+    "on005291": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 10,
+     "with_store": 10,
+     "zarr_status": "ready",
+     "zarr_store_count": 65
+    },
+    "on005486": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 1,
+     "with_store": 1,
+     "zarr_status": "ready",
+     "zarr_store_count": 445
+    },
+    "on005571": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 29,
+     "with_store": 29,
+     "zarr_status": "ready",
+     "zarr_store_count": 45
+    },
+    "on005586": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 17,
+     "with_store": 17,
+     "zarr_status": "ready",
+     "zarr_store_count": 23
+    },
+    "on005692": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 21,
+     "with_store": 21,
+     "zarr_status": "ready",
+     "zarr_store_count": 59
+    },
+    "on005863": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 4,
+     "with_store": 4,
+     "zarr_status": "ready",
+     "zarr_store_count": 292
+    },
+    "on006018": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 4,
+     "with_store": 4,
+     "zarr_status": "ready",
+     "zarr_store_count": 357
+    },
+    "on006110": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 5,
+     "with_store": 5,
+     "zarr_status": "ready",
+     "zarr_store_count": 124
+    },
+    "on006547": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 16,
+     "with_store": 16,
+     "zarr_status": "ready",
+     "zarr_store_count": 31
+    },
+    "on007162": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 5,
+     "with_store": 5,
+     "zarr_status": "ready",
+     "zarr_store_count": 69
+    },
+    "on007968": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 2,
+     "with_store": 2,
+     "zarr_status": "ready",
+     "zarr_store_count": 40
+    },
+    "on008065": {
+     "failed": 0,
+     "license": "CC0",
+     "not_in_index": 0,
+     "recordings": 50,
+     "with_store": 50,
+     "zarr_status": "ready",
+     "zarr_store_count": 65
+    }
+   },
+   "datasets": 28,
+   "licenses": {
+    "CC-BY-4.0": 4,
+    "CC0": 24
+   },
+   "recordings": 873,
+   "recordings_failed_conversion": 0,
+   "recordings_not_in_index": 96,
+   "stores_in_serving_index": 777
+  },
   "bv_multi_dated-contiguous": {
    "by_dataset": {
     "on005408": {

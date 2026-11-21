@@ -1,5 +1,329 @@
 {
  "by_class": {
+  "bv_gap_negative_total": {
+   "on004587": {
+    "failed": 0,
+    "index_discovered": 114,
+    "index_errors": 0,
+    "index_store_count": 114,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 15,
+    "with_store": 15
+   },
+   "on005127": {
+    "failed": 0,
+    "index_discovered": 234,
+    "index_errors": 0,
+    "index_store_count": 234,
+    "not_in_index": 17,
+    "pending": 0,
+    "recordings": 19,
+    "with_store": 2
+   },
+   "on005486": {
+    "failed": 0,
+    "index_discovered": 445,
+    "index_errors": 0,
+    "index_store_count": 445,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 1,
+    "with_store": 1
+   },
+   "on006801": {
+    "failed": 0,
+    "index_discovered": 42,
+    "index_errors": 0,
+    "index_store_count": 42,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 1,
+    "with_store": 1
+   }
+  },
+  "bv_gap_positive_total": {
+   "nm000292": {
+    "failed": 0,
+    "index_discovered": 26,
+    "index_errors": 5,
+    "index_store_count": 21,
+    "not_in_index": 6,
+    "pending": 0,
+    "recordings": 6,
+    "with_store": 0
+   },
+   "nm000309": {
+    "failed": 0,
+    "index_discovered": 27,
+    "index_errors": 2,
+    "index_store_count": 25,
+    "not_in_index": 23,
+    "pending": 0,
+    "recordings": 23,
+    "with_store": 0
+   },
+   "nm000318": {
+    "failed": 0,
+    "index_discovered": 99,
+    "index_errors": 8,
+    "index_store_count": 91,
+    "not_in_index": 13,
+    "pending": 0,
+    "recordings": 13,
+    "with_store": 0
+   },
+   "nm000319": {
+    "failed": 0,
+    "index_discovered": 49,
+    "index_errors": 8,
+    "index_store_count": 41,
+    "not_in_index": 49,
+    "pending": 0,
+    "recordings": 49,
+    "with_store": 0
+   },
+   "on003702": {
+    "failed": 0,
+    "index_discovered": 47,
+    "index_errors": 0,
+    "index_store_count": 47,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 20,
+    "with_store": 20
+   },
+   "on003768": {
+    "failed": 0,
+    "index_discovered": 255,
+    "index_errors": 2,
+    "index_store_count": 253,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 2,
+    "with_store": 2
+   },
+   "on003825": {
+    "failed": 0,
+    "index_discovered": 50,
+    "index_errors": 0,
+    "index_store_count": 50,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 2,
+    "with_store": 2
+   },
+   "on004502": {
+    "failed": 0,
+    "index_discovered": 48,
+    "index_errors": 10,
+    "index_store_count": 38,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 1,
+    "with_store": 1
+   },
+   "on004587": {
+    "failed": 0,
+    "index_discovered": 114,
+    "index_errors": 0,
+    "index_store_count": 114,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 15,
+    "with_store": 15
+   },
+   "on004796": {
+    "failed": 0,
+    "index_discovered": 235,
+    "index_errors": 0,
+    "index_store_count": 235,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 3,
+    "with_store": 3
+   },
+   "on004917": {
+    "failed": 0,
+    "index_discovered": 24,
+    "index_errors": 0,
+    "index_store_count": 24,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 16,
+    "with_store": 16
+   },
+   "on005127": {
+    "failed": 0,
+    "index_discovered": 234,
+    "index_errors": 0,
+    "index_store_count": 234,
+    "not_in_index": 5,
+    "pending": 0,
+    "recordings": 26,
+    "with_store": 21
+   },
+   "on005273": {
+    "failed": 0,
+    "index_discovered": 33,
+    "index_errors": 3,
+    "index_store_count": 30,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 30,
+    "with_store": 30
+   },
+   "on005280": {
+    "failed": 0,
+    "index_discovered": 669,
+    "index_errors": 0,
+    "index_store_count": 669,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 492,
+    "with_store": 492
+   },
+   "on005286": {
+    "failed": 0,
+    "index_discovered": 30,
+    "index_errors": 0,
+    "index_store_count": 30,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 5,
+    "with_store": 5
+   },
+   "on005289": {
+    "failed": 0,
+    "index_discovered": 195,
+    "index_errors": 0,
+    "index_store_count": 195,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 6,
+    "with_store": 6
+   },
+   "on005291": {
+    "failed": 0,
+    "index_discovered": 65,
+    "index_errors": 0,
+    "index_store_count": 65,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 10,
+    "with_store": 10
+   },
+   "on005486": {
+    "failed": 0,
+    "index_discovered": 445,
+    "index_errors": 0,
+    "index_store_count": 445,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 1,
+    "with_store": 1
+   },
+   "on005571": {
+    "failed": 0,
+    "index_discovered": 45,
+    "index_errors": 0,
+    "index_store_count": 45,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 29,
+    "with_store": 29
+   },
+   "on005586": {
+    "failed": 0,
+    "index_discovered": 23,
+    "index_errors": 0,
+    "index_store_count": 23,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 17,
+    "with_store": 17
+   },
+   "on005692": {
+    "failed": 0,
+    "index_discovered": 59,
+    "index_errors": 0,
+    "index_store_count": 59,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 21,
+    "with_store": 21
+   },
+   "on005863": {
+    "failed": 0,
+    "index_discovered": 357,
+    "index_errors": 65,
+    "index_store_count": 292,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 4,
+    "with_store": 4
+   },
+   "on006018": {
+    "failed": 0,
+    "index_discovered": 357,
+    "index_errors": 0,
+    "index_store_count": 357,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 4,
+    "with_store": 4
+   },
+   "on006110": {
+    "failed": 0,
+    "index_discovered": 124,
+    "index_errors": 0,
+    "index_store_count": 124,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 5,
+    "with_store": 5
+   },
+   "on006547": {
+    "failed": 0,
+    "index_discovered": 31,
+    "index_errors": 0,
+    "index_store_count": 31,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 16,
+    "with_store": 16
+   },
+   "on007162": {
+    "failed": 0,
+    "index_discovered": 69,
+    "index_errors": 0,
+    "index_store_count": 69,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 5,
+    "with_store": 5
+   },
+   "on007968": {
+    "failed": 0,
+    "index_discovered": 40,
+    "index_errors": 0,
+    "index_store_count": 40,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 2,
+    "with_store": 2
+   },
+   "on008065": {
+    "failed": 0,
+    "index_discovered": 65,
+    "index_errors": 0,
+    "index_store_count": 65,
+    "not_in_index": 0,
+    "pending": 0,
+    "recordings": 50,
+    "with_store": 50
+   }
+  },
   "bv_multi_dated-contiguous": {
    "on005408": {
     "failed": 0,

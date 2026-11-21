@@ -1,0 +1,3 @@
+deep: 1728 +D files to analyze
+deep done; requests 8391
+requests 8391 stat {'429': 0, '5xx': 0, 'other_fail': 0}

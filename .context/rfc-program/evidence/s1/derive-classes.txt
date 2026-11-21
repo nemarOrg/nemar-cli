@@ -1,3 +1,5 @@
+bv_gap_negative_total {'recordings': 36, 'datasets': 4, 'stores_in_serving_index': 19, 'recordings_failed_conversion': 0, 'recordings_not_in_index': 17, 'licenses': {'CC0': 4}}
+bv_gap_positive_total {'recordings': 873, 'datasets': 28, 'stores_in_serving_index': 777, 'recordings_failed_conversion': 0, 'recordings_not_in_index': 96, 'licenses': {'CC-BY-4.0': 4, 'CC0': 24}}
 bv_multi_dated-contiguous {'recordings': 3, 'datasets': 2, 'stores_in_serving_index': 3, 'recordings_failed_conversion': 0, 'recordings_not_in_index': 0, 'licenses': {'CC0': 2}}
 bv_multi_dated-with-gap {'recordings': 909, 'datasets': 29, 'stores_in_serving_index': 796, 'recordings_failed_conversion': 0, 'recordings_not_in_index': 113, 'licenses': {'CC-BY-4.0': 4, 'CC0': 25}}
 bv_multi_epoched-markerbased {'recordings': 86, 'datasets': 1, 'stores_in_serving_index': 86, 'recordings_failed_conversion': 0, 'recordings_not_in_index': 0, 'licenses': {'CC0': 1}}

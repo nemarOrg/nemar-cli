@@ -1,0 +1,56 @@
+{
+ "method": "percentiles by linear interpolation between order statistics; gap_total_s is the signed sum of the real gaps (|gap| above max(one sampling interval, 1 ms)) over ALL segment pairs; the absolute sum and the negative-gap test use gap_s, which holds the first 50 gaps only",
+ "dated_with_gap_all": {
+  "recordings": 909,
+  "median_s": 89.586,
+  "p90_s": 446.769,
+  "max_s": 2594.516484,
+  "min_s": -200.0,
+  "over_0.1s": 831,
+  "over_1s": 826,
+  "over_60s": 583,
+  "at_most_0.1s_incl_negative": 78,
+  "abs_total_below_0.1s": 61,
+  "net_signed_sum_s": 168447.972
+ },
+ "positive_total": {
+  "recordings": 873,
+  "median_s": 98.981,
+  "p90_s": 461.073,
+  "max_s": 2594.516484,
+  "min_s": 0.00114,
+  "over_0.1s": 831,
+  "over_1s": 826,
+  "over_60s": 583,
+  "at_most_0.1s_incl_negative": 42,
+  "abs_total_below_0.1s": 42,
+  "net_signed_sum_s": 169389.763
+ },
+ "negative_total": {
+  "recordings": 36,
+  "median_s": -0.016,
+  "p90_s": -0.004,
+  "max_s": -0.000228,
+  "min_s": -200.0,
+  "over_0.1s": 0,
+  "over_1s": 0,
+  "over_60s": 0,
+  "at_most_0.1s_incl_negative": 36,
+  "abs_total_below_0.1s": 19,
+  "net_signed_sum_s": -941.791
+ },
+ "negative_total_by_dataset": {
+  "on004587": 15,
+  "on005127": 19,
+  "on005486": 1,
+  "on006801": 1
+ },
+ "recordings_with_at_least_one_negative_gap_first50": 48,
+ "abs_gap_sum_s_first50": 170389.741,
+ "net_gap_sum_s_all": 168447.972,
+ "recordings_with_more_than_50_gaps_abs_sum_is_lower_bound": 2,
+ "recordings_with_all_gaps_under_1s": 68,
+ "of_those_with_a_gap_that_is_not_a_multiple_of_the_sampling_interval": 59,
+ "of_those_all_gaps_multiples_of_the_sampling_interval": 9,
+ "second_resolution_note": "a date written to whole seconds would give a gap equal to a whole number of seconds minus the sample span; a gap that is not a multiple of the sampling interval therefore shows dates finer than a second, and the others cannot be told from millisecond dates"
+}
