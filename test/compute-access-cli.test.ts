@@ -13,6 +13,8 @@
  *  - in the exact production environment the request exits 1 with the terms-unpublished sentence;
  *  - every decision works by username and by --id, prints the states and (for a grant) what the default
  *    allocation opened, and exits 1 on a refusal, a member's key, or arguments that are not valid;
+ *  - suspend and revoke require --notice (checked before anything is sent), deny takes one, grant has no
+ *    such option; the notice reaches the person's mail and the --reason does not;
  *  - EVERY command's `--json` keeps standard output pure JSON (a single document, nothing else) and puts
  *    sentences on standard error.
  *
@@ -46,6 +48,10 @@ const handle = makeComputeApp();
 const PERSON_KEY = "cmpcli-person-key-0123456789abcdef0123456789abcd";
 const PERSON_EMAIL = "cmpcli-person@nemar.test";
 const PURPOSE = "Run ICA decompositions on public EEG datasets for a methods comparison.";
+const NOTICE = "NOTICE-CLI-5521 your jobs exceeded the agreed allocation.";
+/** The --notice a decision needs when the test is not about the notice. */
+const noticeFor = (decision: string): string[] =>
+  decision === "suspend" || decision === "revoke" ? ["--notice", NOTICE] : [];
 
 let db: Database;
 let ids: Record<ComputeWho, number>;
@@ -394,7 +400,7 @@ describe("nemar admin compute access", () => {
     const asked = await seedPerson({ compute_access: "requested" });
     await withFakeResend(async () => {
       await admin("admin", ["grant", "--id", String(asked)]);
-      await admin("admin", ["suspend", "--id", String(asked)]);
+      await admin("admin", ["suspend", "--id", String(asked), ...noticeFor("suspend")]);
       const again = await admin("admin", ["grant", "--id", String(asked)]);
       expect(again.exitCode).toBe(0);
       expect(again.stdout).toContain("the default was opened by an earlier grant");
@@ -409,7 +415,9 @@ describe("nemar admin compute access", () => {
   ] as const) {
     test(`${decision} works by --id for an account with no username and by username, with --json pure`, async () => {
       const webOnly = await seedPerson({ compute_access: from, username: null });
-      const byId = await withFakeResend(() => admin("admin", [decision, "--id", String(webOnly)]));
+      const byId = await withFakeResend(() =>
+        admin("admin", [decision, "--id", String(webOnly), ...noticeFor(decision)]),
+      );
       expect(byId.exitCode).toBe(0);
       expect(byId.stdout).toContain(`${from} -> ${to}`);
       expect(byId.stdout).toContain(`(no username, id ${webOnly})`);
@@ -417,7 +425,9 @@ describe("nemar admin compute access", () => {
 
       const named = await seedPerson({ compute_access: from });
       const username = row(named).username as string;
-      const asJson = await withFakeResend(() => admin("admin", [decision, username, "--json"]));
+      const asJson = await withFakeResend(() =>
+        admin("admin", [decision, username, "--json", ...noticeFor(decision)]),
+      );
       expect(asJson.exitCode).toBe(0);
       expect(asJson.stderr.trim()).toBe("");
       expect(jsonOf(asJson)).toMatchObject({ decision, from, to });
@@ -430,7 +440,13 @@ describe("nemar admin compute access", () => {
     const human = await admin("admin", ["grant", "--id", String(none)]);
     expect(human.exitCode).toBe(1);
     expect(human.stdout + human.stderr).toContain("no open compute access request");
-    const asJson = await admin("admin", ["suspend", "--id", String(none), "--json"]);
+    const asJson = await admin("admin", [
+      "suspend",
+      "--id",
+      String(none),
+      "--json",
+      ...noticeFor("suspend"),
+    ]);
     expect(asJson.exitCode).toBe(1);
     expect(asJson.stdout.trim()).toBe("");
     expect(asJson.stderr).toContain("does not hold compute access");
@@ -440,8 +456,9 @@ describe("nemar admin compute access", () => {
   test("a member's key and no key exit 1 on every decision", async () => {
     const asked = await seedPerson({ compute_access: "requested" });
     for (const decision of ["grant", "deny", "suspend", "revoke"]) {
-      expect((await admin("member", [decision, "--id", String(asked)])).exitCode).toBe(1);
-      expect((await admin(null, [decision, "--id", String(asked)])).exitCode).toBe(1);
+      const args = [decision, "--id", String(asked), ...noticeFor(decision)];
+      expect((await admin("member", args)).exitCode).toBe(1);
+      expect((await admin(null, args)).exitCode).toBe(1);
     }
     expect(row(asked).compute_access).toBe("requested");
   });
@@ -459,6 +476,106 @@ describe("nemar admin compute access", () => {
       expect([args.join(" "), r.exitCode]).toEqual([args.join(" "), 1]);
     }
     expect(row(asked).compute_access).toBe("requested");
+  });
+});
+
+describe("the notice to the person", () => {
+  test("suspend and revoke without a usable --notice exit 1, naming it, and send nothing", async () => {
+    for (const decision of ["suspend", "revoke"]) {
+      for (const extra of [[], ["--notice", "   "], ["--notice", "n".repeat(1001)]]) {
+        const id = await seedPerson({ compute_access: "active" });
+        const calls = await withFakeResend(async (captured) => {
+          const r = await admin("admin", [decision, "--id", String(id), ...extra]);
+          expect([decision, extra.length, r.exitCode]).toEqual([decision, extra.length, 1]);
+          expect(r.stdout + r.stderr).toContain("--notice");
+          return captured;
+        });
+        expect(calls).toEqual([]);
+        expect(row(id).compute_access).toBe("active");
+      }
+      const id = await seedPerson({ compute_access: "active" });
+      const asJson = await admin("admin", [decision, "--id", String(id), "--json"]);
+      expect(asJson.exitCode).toBe(1);
+      expect(asJson.stdout.trim()).toBe("");
+      expect(asJson.stderr).toContain("--notice is required");
+    }
+  });
+
+  test("grant has no --notice: the option is refused and nothing is granted", async () => {
+    const asked = await seedPerson({ compute_access: "requested" });
+    const r = await admin("admin", ["grant", "--id", String(asked), "--notice", "hello"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("--notice");
+    expect(row(asked).compute_access).toBe("requested");
+  });
+
+  test("the notice reaches the person's mail and the reason does not; deny takes one or none", async () => {
+    for (const [decision, from] of [
+      ["suspend", "active"],
+      ["revoke", "active"],
+      ["deny", "requested"],
+    ] as const) {
+      const id = await seedPerson({ compute_access: from });
+      const email = row(id).email as string;
+      const calls = await withFakeResend(async (captured) => {
+        const r = await admin("admin", [
+          decision,
+          "--id",
+          String(id),
+          "--notice",
+          NOTICE,
+          "--reason",
+          "REASON-CLI-8812 for the record",
+        ]);
+        expect([decision, r.exitCode]).toEqual([decision, 0]);
+        return captured;
+      });
+      const html = sendsTo(calls, email)[0]?.html ?? "";
+      expect(html).toContain(NOTICE);
+      expect(html).toContain("support@nemar.org");
+      expect(html).not.toContain("REASON-CLI-8812");
+    }
+    const bare = await seedPerson({ compute_access: "requested" });
+    const r = await withFakeResend(() => admin("admin", ["deny", "--id", String(bare)]));
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a notice padded past the Worker's outer bound is sent trimmed and the decision stands", async () => {
+    // 1000 characters plus 3001 spaces: within the rule once trimmed, past the outer bound as typed.
+    const text = `${"p".repeat(999)}Z`;
+    const id = await seedPerson({ compute_access: "active" });
+    const email = row(id).email as string;
+    const calls = await withFakeResend(async (captured) => {
+      const r = await admin("admin", [
+        "suspend",
+        "--id",
+        String(id),
+        "--notice",
+        `${text}${" ".repeat(3001)}`,
+      ]);
+      expect(r.stderr).not.toContain("too_big");
+      expect(r.exitCode).toBe(0);
+      return captured;
+    });
+    expect(row(id).compute_access).toBe("suspended");
+    expect(sendsTo(calls, email)[0]?.html ?? "").toContain(text);
+  });
+
+  test("help names --notice as required for suspend and revoke, optional for deny, and absent for grant", async () => {
+    for (const decision of ["suspend", "revoke"]) {
+      const help = await runCli(null, ["admin", "compute", "access", decision, "--help"]);
+      expect(help.stdout).toContain("--notice <text>");
+      expect(help.stdout).toContain("Required.");
+    }
+    const deny = await runCli(null, ["admin", "compute", "access", "deny", "--help"]);
+    expect(deny.stdout).toContain("--notice <text>");
+    expect(deny.stdout).not.toContain("Required.");
+    const denyAll = await runCli(null, ["admin", "compute", "access", "deny", "--help-all"]);
+    expect(denyAll.stdout).toContain("--notice (optional");
+    const suspendAll = await runCli(null, ["admin", "compute", "access", "suspend", "--help-all"]);
+    expect(suspendAll.stdout).toContain("--notice (required");
+    const grant = await runCli(null, ["admin", "compute", "access", "grant", "--help"]);
+    expect(grant.stdout).not.toContain("--notice");
   });
 });
 

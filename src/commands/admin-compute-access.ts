@@ -4,14 +4,16 @@
  *
  *   nemar admin compute access list [--state <state>] [--limit <n>] [--after <id>] [--json]
  *   nemar admin compute access grant   <username> | --id <n>  [--reason <text>] [--json]
- *   nemar admin compute access deny    <username> | --id <n>  [--reason <text>] [--json]
- *   nemar admin compute access suspend <username> | --id <n>  [--reason <text>] [--json]
- *   nemar admin compute access revoke  <username> | --id <n>  [--reason <text>] [--json]
+ *   nemar admin compute access deny    <username> | --id <n>  [--reason <text>] [--notice <text>] [--json]
+ *   nemar admin compute access suspend <username> | --id <n>  --notice <text> [--reason <text>] [--json]
+ *   nemar admin compute access revoke  <username> | --id <n>  --notice <text> [--reason <text>] [--json]
  *
  * Compute access is its own grant and never touches upload access. A grant opens the owner's default
  * allocation once (a zero default opens nothing, and the answer says so); a suspension and a revocation
  * freeze the person's pools, cancel their jobs that never started and mark the rest for cancellation. The
- * reason is recorded on the audit row and is NOT sent to the person. A web account has no username, so
+ * reason is recorded on the audit row and is NOT sent to the person; the notice is what the person is
+ * told, in the decision mail (required for suspend and revoke, optional for deny, and grant has no
+ * `--notice`: `COMPUTE_ACCESS_NOTICE_RULE`). A web account has no username, so
  * every decision also takes `--id`. These work whether or not compute is switched on: they are
  * bookkeeping. Every command takes `--json` (standard output stays pure JSON) and exits 1 on any failure.
  */
@@ -23,10 +25,14 @@ import {
   type ComputeAccessDecision,
 } from "../../shared/compute-access-state.js";
 import {
+  COMPUTE_ACCESS_NOTICE_MAX_CHARS,
+  COMPUTE_ACCESS_NOTICE_RULE,
   COMPUTE_ACCESS_PAGE_MAX,
   COMPUTE_ACCESS_REASON_MAX_CHARS,
   type ComputeAccessAccount,
   type ComputeAccessDecisionResponse,
+  type ComputeAccessNoticeProblem,
+  computeAccessNoticeProblem,
 } from "../../shared/contract/compute-access.js";
 import { formatSu } from "../../shared/contract/compute.js";
 import { failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
@@ -137,14 +143,46 @@ const DECISION_ABOUT: Record<ComputeAccessDecision, string> = {
     "Ends an active or suspended grant, as a suspension does. The person cannot ask again; only an administrator's grant reopens it. The person is mailed.",
 };
 
+const NOTICE_HELP: Record<ComputeAccessDecision, string> = {
+  grant: "",
+  deny: `
+
+  --notice (optional, up to ${COMPUTE_ACCESS_NOTICE_MAX_CHARS} characters) is sent to the person in the decision mail,
+  under a fixed heading, with how to ask for a review. Write it for them.`,
+  suspend: `
+
+  --notice (required, up to ${COMPUTE_ACCESS_NOTICE_MAX_CHARS} characters) is sent to the person in the decision mail,
+  under a fixed heading, with how to ask for a review. Write it for them; it is not the --reason.`,
+  revoke: `
+
+  --notice (required, up to ${COMPUTE_ACCESS_NOTICE_MAX_CHARS} characters) is sent to the person in the decision mail,
+  under a fixed heading, with how to ask for a review. Write it for them; it is not the --reason.`,
+};
+
+const NOTICE_EXAMPLE: Record<ComputeAccessDecision, string> = {
+  grant: "",
+  deny: "",
+  suspend: ' --notice "Jobs exceeded the agreed allocation; we paused access while we review."',
+  revoke: ' --notice "Compute was used for work outside the purpose you stated."',
+};
+
+/** What the CLI says for a notice the shared rule refuses, before anything is sent. */
+const NOTICE_PROBLEM: Record<ComputeAccessNoticeProblem, string> = {
+  notice_required:
+    "--notice is required: say, for the person, why (it is mailed to them, with how to ask for a review).",
+  notice_refused: "--notice does not go with a grant.",
+  notice_too_long: `--notice is at most ${COMPUTE_ACCESS_NOTICE_MAX_CHARS} characters.`,
+  notice_control_char: "--notice may not contain control characters other than newline and tab.",
+};
+
 function decisionHelp(decision: ComputeAccessDecision): string {
   return `
 Description:
   ${DECISION_ABOUT[decision]}
 
   Name the account by username, or with --id for an account that has none (a web sign-up). --reason
-  (up to ${COMPUTE_ACCESS_REASON_MAX_CHARS} characters) is recorded on the audit row and is NOT sent to the person. This
-  does not need compute to be switched on.
+  (up to ${COMPUTE_ACCESS_REASON_MAX_CHARS} characters) is recorded on the audit row and is NOT sent to the person.${NOTICE_HELP[decision]}
+  This does not need compute to be switched on.
 
 Exit codes:
   0  decided.
@@ -152,8 +190,8 @@ Exit codes:
      can start from), the arguments were not valid, or the request failed.
 
 Examples:
-  $ nemar admin compute access ${decision} alovelace
-  $ nemar admin compute access ${decision} --id 42 --reason "reviewed against the export-control list"`;
+  $ nemar admin compute access ${decision} alovelace${NOTICE_EXAMPLE[decision]}
+  $ nemar admin compute access ${decision} --id 42 --reason "reviewed against the export-control list"${NOTICE_EXAMPLE[decision]}`;
 }
 
 const PAST: Record<ComputeAccessDecision, string> = {
@@ -186,18 +224,30 @@ function printDecision(res: ComputeAccessDecisionResponse): void {
 }
 
 function decisionCommand(decision: ComputeAccessDecision): Command {
-  return new Command(decision)
+  const command = new Command(decision)
     .description(DECISION_ABOUT[decision].split(". ")[0] ?? decision)
     .argument("[username]", "The account's username (omit it with --id)")
     .option("--id <n>", "The account's id, for an account with no username")
     .option(
       "--reason <text>",
-      `Why (up to ${COMPUTE_ACCESS_REASON_MAX_CHARS} characters; recorded, not mailed)`,
-    )
+      `Why, for the record (up to ${COMPUTE_ACCESS_REASON_MAX_CHARS} characters; recorded, not mailed)`,
+    );
+  const rule = COMPUTE_ACCESS_NOTICE_RULE[decision];
+  // A grant has no --notice at all; the rule is still checked in the action, so --help and the rule agree.
+  if (rule !== "refused") {
+    command.option(
+      "--notice <text>",
+      `${rule === "required" ? "Required. " : ""}Why, for the person (up to ${COMPUTE_ACCESS_NOTICE_MAX_CHARS} characters; mailed to them)`,
+    );
+  }
+  return command
     .option("--json", "Print the Worker's answer as JSON")
     .addHelpText("after", decisionHelp(decision))
     .action(
-      async (username: string | undefined, o: { id?: string; reason?: string; json?: boolean }) => {
+      async (
+        username: string | undefined,
+        o: { id?: string; reason?: string; notice?: string; json?: boolean },
+      ) => {
         const json = o.json === true;
         if (!requireSignedIn(json)) return;
         if ((username === undefined) === (o.id === undefined)) {
@@ -227,8 +277,13 @@ function decisionCommand(decision: ComputeAccessDecision): Command {
           });
           return;
         }
+        const noticeProblem = computeAccessNoticeProblem(decision, o.notice);
+        if (noticeProblem) {
+          failMessage(NOTICE_PROBLEM[noticeProblem], { json, answered: true });
+          return;
+        }
         try {
-          const res = await decideComputeAccess(decision, target, o.reason);
+          const res = await decideComputeAccess(decision, target, o.reason, o.notice);
           if (json) console.log(JSON.stringify(res, null, 2));
           else printDecision(res);
         } catch (err) {

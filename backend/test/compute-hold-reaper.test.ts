@@ -87,7 +87,9 @@ const production = () => fx.env();
  * default policy (a ceiling of 20 less the floors kept for people and the pipelines). The tests that hold more
  * than 10 reservations at once count the reaper's and the sweep's own bounds, not the ceiling, so they raise it.
  */
-const WIDE_TENANT = { tenant: { maxLiveJobs: 1000, reserved: { people: 0, pipelines: 0, partner: 0 } } };
+const WIDE_TENANT = {
+  tenant: { maxLiveJobs: 1000, reserved: { people: 0, pipelines: 0, partner: 0 } },
+};
 
 describe("a reservation past the owner's wait", () => {
   test("with one Tapis job under its tag that is the person's and matches: bound and verified like a report", async () => {
@@ -339,7 +341,7 @@ describe("a cancelled reservation and one whose person's compute ended", () => {
     const uuid = await partnerLaunch(w, busy, person);
     const decided = await w.h.call("POST", `/admin/compute/access/suspend/by-id/${person.id}`, {
       key: OWNER_KEY,
-      body: { reason: "test" },
+      body: { reason: "test", notice: "Compute access was suspended in a test." },
     });
     expect(decided.status).toBe(200);
     // A8/D1: the cascade does not touch a partner's reservation (it fails open), and freezes the pools.
