@@ -63,6 +63,8 @@ import {
 import { interceptingD1 } from "./helpers/d1";
 
 let h: ComputeHarness;
+/** The compute switch, on: `createJob` refuses every hold with it off (ADR 0118, amendment of 2026-11-22). */
+const on = (env: Bindings): Bindings => ({ ...env, COMPUTE_ENABLED: "1" });
 const MIB = 1024 * 1024;
 
 beforeAll(async () => {
@@ -104,7 +106,7 @@ async function bundleJob(
   await fundAccount(env.DB, accountId, 100_000);
   await fundPlatform(env.DB, "people", 1_000_000_000);
   const sha256 = await sha256Hex(archive);
-  const r = await createJob(env, {
+  const r = await createJob(on(env), {
     source: "cli",
     accountId,
     appId: "nemar-launch",
@@ -123,7 +125,7 @@ async function partnerJob(
   const accountId = await seedUser(env.DB);
   await fundAccount(env.DB, accountId, 100_000);
   await fundPlatform(env.DB, "people", 1_000_000_000);
-  const r = await createJob(env, {
+  const r = await createJob(on(env), {
     source: "partner",
     accountId,
     clientId: "client.one",
@@ -1759,12 +1761,12 @@ describe("a copy is bounded by what R2 copies in one request", () => {
     await fundAccount(env.DB, accountId, 100_000);
     await fundPlatform(env.DB, "people", 1_000_000_000);
     const base = { source: "cli" as const, accountId, appId: "nemar-launch", appVersion: "1.0.0" };
-    const refused = await createJob(env, {
+    const refused = await createJob(on(env), {
       ...base,
       spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES + 1, sha256: sha }),
     });
     expect(refused).toEqual({ ok: false, code: "bundle_too_large" });
-    const exact = await createJob(env, {
+    const exact = await createJob(on(env), {
       ...base,
       spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES, sha256: sha }),
     });

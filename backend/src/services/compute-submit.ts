@@ -29,9 +29,11 @@
  * job to sign for). The address is for the one key `incoming/<id>/bundle.tar.gz`, never one a person
  * names.
  *
- * THE COMPUTE SWITCH IS NOT READ HERE. A job made while compute is off is made (the hold is taken) and
- * `submitComputeJob`, the one place the switch is read, refuses to send it to the cluster; it waits for
- * the reservation wait and then fails `submit_timeout` with its hold released.
+ * THE COMPUTE SWITCH IS NOT READ HERE, but it is read by `createJob` (step 10, and the replay of step 4),
+ * which refuses `compute_disabled` before it reads or writes anything (ADR 0118, amendment of 2026-11-22):
+ * with compute off no hold is taken. `submitComputeJob` reads it again before a job is sent to the
+ * cluster, so a job held before compute was turned off waits for the reservation wait and then fails
+ * `submit_timeout` with its hold released.
  *
  * NOTHING A PERSON CHOSE IS LOGGED: a log line carries a job id and a fixed word.
  */

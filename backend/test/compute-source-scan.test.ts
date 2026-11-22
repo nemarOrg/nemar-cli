@@ -7,8 +7,9 @@
  *     expected)`; nothing in it compares either with `===`, `!==`, `==` or `!=`. A run cannot tell the two
  *     apart: both answer true for the same token. (MUTATION: write `token === expected`.)
  *  2. THE COMPUTE SWITCH IS READ IN ONE PLACE THAT GATES. `computeEnabled(` is called by `submitLeased`
- *     (the one place that refuses to put a job on a cluster) and by `computeStatus` (which only REPORTS it).
- *     Nowhere else, and never by a reference that is not a call and never as `.COMPUTE_ENABLED`: a switch
+ *     (the one place that refuses to put a job on a cluster), by `createJob` (the one place that refuses a
+ *     new hold, ADR 0118 amendment of 2026-11-22), and by `computeStatus` (which only REPORTS it), with the
+ *     later readers the test names. Nowhere else, and never by a reference that is not a call and never as `.COMPUTE_ENABLED`: a switch
  *     read in `applyTapisJob`'s terminal path would strand a running job's settlement the moment compute
  *     was turned off. The behaviour twin is `compute-lifecycle-money.test.ts`: a job that ends with
  *     compute off is settled. (MUTATION: call `computeEnabled(env)` in `commitTerminal`.)
@@ -166,10 +167,14 @@ describe("the compute switch is read in one place that gates", () => {
   // it acts only while the owner has switched compute on, and refuses before it lists anything. It moves
   // no job that is bound to a row (a job a row owns is left alone), but it does cancel a duplicate of a
   // NEMAR job and a job nobody reserved. Nothing that moves a job a row already owns reads it.
-  test("only submitLeased gates the lifecycle on it; the pipeline dispatch and its route refuse new work, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
+  // The amendment of 2026-11-22 adds `createJob`: the one function that takes a hold refuses with compute
+  // off, before it reads or writes anything, for every source (a person, a partner, a pipeline, a runner),
+  // so the switch stops new holds as well as submits. It moves no existing job.
+  test("only submitLeased gates the lifecycle on it; createJob refuses new holds, the pipeline dispatch and its route refuse new work, the tenant sweep acts only while it is on, the two reports only report it, and nothing else reads it", () => {
     expect(switchFindings(real)).toEqual({
       calls: [
         "routes/admin/compute-pipeline.ts:registerComputePipelineAdminRoutes",
+        "services/compute-jobs.ts:createJob",
         "services/compute-lifecycle.ts:submitLeased",
         "services/compute-pipeline.ts:dispatchPipelineJob",
         "services/compute-pipeline.ts:pipelineDryRun",
