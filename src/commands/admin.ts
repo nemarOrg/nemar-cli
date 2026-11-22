@@ -7913,8 +7913,8 @@ upstreamBackfillCommand
     },
   );
 
-adminCommand.addCommand(upstreamBackfillCommand);
-adminCommand.addCommand(upstreamStatusCommand);
+repullCommand.addCommand(upstreamBackfillCommand);
+repullCommand.addCommand(upstreamStatusCommand);
 
 // ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)

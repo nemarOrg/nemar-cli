@@ -130,6 +130,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "import-issue-triage", newPath: "import triage" },
   { oldPath: "import-coverage", newPath: "import coverage" },
   { oldPath: "import-weekly", newPath: "import weekly" },
+  { oldPath: "upstream-status", newPath: "repull upstream-status" },
+  { oldPath: "upstream-backfill", newPath: "repull upstream-backfill" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
