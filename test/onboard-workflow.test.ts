@@ -299,26 +299,83 @@ describe("onboard-openneuro calls only paths the CLI has", () => {
   const runs = Object.values(doc.jobs).flatMap((j) => (j.steps ?? []).map((s) => s.run ?? ""));
   const all = runs.join("\n");
 
-  /** The command path of `nemar admin ...` and `import_cmd=(admin ...)`: words until an argument. */
-  const pathsNamed = (text: string): string[] => {
+  type Cmd = import("commander").Command;
+  const childOf = (cmd: Cmd, word: string): Cmd | undefined =>
+    cmd.commands.find((c) => c.name() === word || c.aliases().includes(word));
+
+  /**
+   * The command path of each `nemar admin ...` and `import_cmd=(admin ...)`, read by walking the
+   * real tree as the words are matched: a word that names a child of the current command extends
+   * the path, and the first one that does not ends it, so an operand after a command is never
+   * read as part of its path. The one exception is a word under a group that has no action of
+   * its own: such a group takes no operand, so the word can only be meant as a subcommand, and it
+   * is kept, which makes a misspelled or missing command fail the existence check below.
+   */
+  const pathsNamed = async (text: string): Promise<string[]> => {
+    const { adminCommand } = await import("../src/commands/admin");
     const found = new Set<string>();
-    for (const m of text.matchAll(/nemar (admin(?: [a-z][a-z0-9-]*)+)/g)) found.add(m[1]);
-    for (const m of text.matchAll(/import_cmd=\((admin(?: [a-z][a-z0-9-]*)+)\)/g)) found.add(m[1]);
+    const starts = [
+      ...[...text.matchAll(/nemar admin((?: [^\s"'|\\;)]+)*)/g)].map((m) => m[1]),
+      ...[...text.matchAll(/import_cmd=\(admin([^)]*)\)/g)].map((m) => m[1]),
+    ];
+    for (const rest of starts) {
+      const words = rest.trim().split(/\s+/).filter(Boolean);
+      const path = ["admin"];
+      let cmd: Cmd = adminCommand;
+      for (const word of words) {
+        const next = childOf(cmd, word);
+        if (next) {
+          path.push(word);
+          cmd = next;
+          continue;
+        }
+        const isGroupWithoutAction =
+          cmd.commands.length > 0 &&
+          !(cmd as unknown as { _actionHandler: unknown })._actionHandler;
+        if (isGroupWithoutAction && /^[a-z][a-z0-9-]*$/.test(word)) path.push(word);
+        break;
+      }
+      found.add(path.join(" "));
+    }
     return [...found];
   };
 
   const resolve = async (path: string) => {
     const { adminCommand } = await import("../src/commands/admin");
     const { isMovedCommandStub } = await import("../src/lib/moved-commands");
-    let cmd: import("commander").Command | undefined = adminCommand;
+    let cmd: Cmd | undefined = adminCommand;
     for (const word of path.split(" ").slice(1)) {
       cmd = cmd?.commands.find((c) => c.name() === word || c.aliases().includes(word));
     }
     return { exists: cmd !== undefined, stub: cmd !== undefined && isMovedCommandStub(cmd) };
   };
 
+  test("the path reader stops at an operand and keeps a word a group can only mean as a command", async () => {
+    expect(
+      await pathsNamed(
+        [
+          "nemar admin import openneuro ds000001 --phase prepare",
+          "nemar admin import status on000001",
+          "nemar admin repull upstream-status --json",
+          "nemar admin import no-such-report",
+          "nemar admin improt openneuro",
+          "import_cmd=(admin import openneuro)",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      "admin import openneuro",
+      "admin import status",
+      "admin repull upstream-status",
+      "admin import no-such-report",
+      "admin improt",
+    ]);
+    // The two misspellings are what the existence check below rejects.
+    expect((await resolve("admin import no-such-report")).exists).toBe(false);
+    expect((await resolve("admin improt")).exists).toBe(false);
+  });
+
   test("every admin path the workflow runs is a live command, except the old-CLI fallback", async () => {
-    const paths = pathsNamed(all);
+    const paths = await pathsNamed(all);
     expect(paths).toContain("admin import openneuro");
     for (const path of paths) {
       const { exists, stub } = await resolve(path);
