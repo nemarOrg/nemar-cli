@@ -1002,8 +1002,8 @@ describe("CLI Dataset List", () => {
 });
 
 describe("CLI Admin Revert", () => {
-  test("nemar admin revert --help shows options", async () => {
-    const { stdout, exitCode } = await runCli(["admin", "revert", "--help"]);
+  test("nemar admin rework revert --help shows options", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "rework", "revert", "--help"]);
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("Revert a dataset to a previous version");
@@ -1015,16 +1015,16 @@ describe("CLI Admin Revert", () => {
     expect(stdout).toContain("[version]");
   });
 
-  test("nemar admin revert without auth shows error", async () => {
+  test("nemar admin rework revert without auth shows error", async () => {
     const ctx = createTestContext();
 
-    const { stdout, exitCode } = await runCli(["admin", "revert", "nm000104"], ctx);
+    const { stdout, exitCode } = await runCli(["admin", "rework", "revert", "nm000104"], ctx);
 
     expect(stdout).toContain("Not authenticated");
   });
 
   test.skipIf(LIVE_TARGET_BLOCKED)(
-    "nemar admin revert with nonexistent dataset shows error",
+    "nemar admin rework revert with nonexistent dataset shows error",
     async () => {
       const ctx = createTestContext();
       setTestConfig(ctx, {
@@ -1034,7 +1034,7 @@ describe("CLI Admin Revert", () => {
       });
 
       const { stdout, stderr, exitCode } = await runCli(
-        ["admin", "revert", "nm999999", "--list"],
+        ["admin", "rework", "revert", "nm999999", "--list"],
         ctx,
       );
 
