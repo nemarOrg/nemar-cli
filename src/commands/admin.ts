@@ -2315,7 +2315,7 @@ ciCommand
     }
   });
 
-adminCommand.addCommand(ciCommand);
+datasetGroupCommand.addCommand(ciCommand);
 
 // ============================================================================
 // DOI Management
@@ -3115,7 +3115,7 @@ doiCommand
     },
   );
 
-adminCommand.addCommand(doiCommand);
+datasetGroupCommand.addCommand(doiCommand);
 
 // ============================================================================
 // Revert (Admin Only)

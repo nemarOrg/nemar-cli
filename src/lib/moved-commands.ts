@@ -38,6 +38,17 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "publish", newPath: "dataset publish" },
   { oldPath: "withdraw", newPath: "dataset withdraw" },
   { oldPath: "restore", newPath: "dataset restore" },
+  // ADR 0135, phase P1: the per-dataset commands gather under `admin dataset`.
+  { oldPath: "ci", newPath: "dataset ci" },
+  { oldPath: "ci check", newPath: "dataset ci check" },
+  { oldPath: "ci add", newPath: "dataset ci add" },
+  { oldPath: "ci validate", newPath: "dataset ci validate" },
+  { oldPath: "ci sync", newPath: "dataset ci sync" },
+  { oldPath: "doi", newPath: "dataset doi" },
+  { oldPath: "doi create", newPath: "dataset doi create" },
+  { oldPath: "doi info", newPath: "dataset doi info" },
+  { oldPath: "doi update", newPath: "dataset doi update" },
+  { oldPath: "doi enrich", newPath: "dataset doi enrich" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
