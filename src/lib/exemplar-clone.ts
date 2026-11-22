@@ -600,7 +600,7 @@ export async function prepareExemplar(
     if (isConflict && msg.includes("Dataset")) {
       createSpinner.warn(`Exemplar ${xxId} already exists, continuing...`);
     } else if (isConflict) {
-      const orphan = `GitHub repo for ${xxId} exists but has no dataset record — a previous run failed between repo creation and the D1 insert. Delete the orphan with 'nemar admin delete-dataset ${xxId}' (or remove the repo manually) and re-run. Original: ${msg}`;
+      const orphan = `GitHub repo for ${xxId} exists but has no dataset record — a previous run failed between repo creation and the D1 insert. Delete the orphan with 'nemar admin dataset delete ${xxId}' (or remove the repo manually) and re-run. Original: ${msg}`;
       createSpinner.fail(orphan);
       throw new Error(orphan);
     } else {
@@ -806,7 +806,9 @@ export async function finalizeExemplar(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     ciSpinner.fail(`CI deployment failed: ${msg}`);
-    console.log(chalk.dim(`  After fixing the deploy failure, run 'nemar admin ci add ${xxId}'.`));
+    console.log(
+      chalk.dim(`  After fixing the deploy failure, run 'nemar admin dataset ci add ${xxId}'.`),
+    );
   }
 
   if (ciDeployed) {
@@ -839,7 +841,7 @@ export async function finalizeExemplar(
     if (reindexOk) {
       reindexSpinner.succeed("Refreshed enrichment + metadata columns");
     } else {
-      reindexSpinner.warn(`Partial reindex (run 'nemar admin reindex ${xxId}' to retry)`);
+      reindexSpinner.warn(`Partial reindex (run 'nemar admin dataset reindex ${xxId}' to retry)`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -857,7 +859,7 @@ export async function finalizeExemplar(
 
   if (!reindexOk) {
     throw new Error(
-      `Refusing to publish ${xxId}: metadata reindex did not fully succeed, so .nemar/metadata.json may still carry the source dataset's real identity. Re-run 'nemar admin reindex ${xxId}' until it succeeds, then 'nemar admin repo publish request/approve ${xxId}' to publish manually.`,
+      `Refusing to publish ${xxId}: metadata reindex did not fully succeed, so .nemar/metadata.json may still carry the source dataset's real identity. Re-run 'nemar admin dataset reindex ${xxId}' until it succeeds, then 'nemar admin dataset publish request/approve ${xxId}' to publish manually.`,
     );
   }
 
@@ -884,7 +886,7 @@ export async function finalizeExemplar(
         throw new Error(failMsg);
       }
       if (attempt === REQUEST_MAX_ATTEMPTS) {
-        const failMsg = `BIDS validation still running after ${REQUEST_MAX_ATTEMPTS} attempts. Re-run 'nemar admin repo publish request/approve ${xxId}' once validation completes.`;
+        const failMsg = `BIDS validation still running after ${REQUEST_MAX_ATTEMPTS} attempts. Re-run 'nemar admin dataset publish request/approve ${xxId}' once validation completes.`;
         pubSpinner.fail(failMsg);
         throw new Error(failMsg);
       }

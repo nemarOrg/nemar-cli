@@ -32,22 +32,10 @@ export const COMMON_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   // two commands a consumer types (search, download) kept adjacent.
   dataset: ["search", "download", "upload", "validate", "status", "list"],
 
-  // Day-to-day operator work: the user queue, the publication lifecycle (`repo`: publish,
-  // unpublish, withdraw, restore), the pull-request queue, DOIs, and the two
-  // destructive-but-routine dataset actions. Everything under `import*`, every `*-sweep`,
-  // every `backfill-*`, and the fleet/exemplar/zarr/s3 groups are deliberately absent --
-  // they are run from cron or a handful of times a year.
-  admin: [
-    "users",
-    "approve",
-    "revoke",
-    "repo",
-    "pr-reviews",
-    "mail",
-    "doi",
-    "make-public",
-    "delete-dataset",
-    "notify",
-    "doctor",
-  ],
+  // Day-to-day operator work: the user queue, one dataset (`dataset`, alias `repo`: the
+  // publication lifecycle, DOIs, deletion, the doctor checks), the pull-request queue, support
+  // mail and community mail. Everything under `import*`, every `*-sweep`, every `backfill-*`, and
+  // the fleet/zarr groups are deliberately absent -- they are run from cron or a handful of times
+  // a year.
+  admin: ["users", "approve", "revoke", "dataset", "pr-reviews", "mail", "notify"],
 };

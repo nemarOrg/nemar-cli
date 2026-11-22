@@ -228,7 +228,7 @@ export function decideSkipCiCheck(args: {
     return {
       skipCiCheck: false,
       abortReason:
-        "CI workflows did not deploy. Aborting before approval: --trust-upstream bypasses validation lookup, not workflow deployment. Re-run after fixing the deploy failure, or run `nemar admin ci add <id>` manually before approving.",
+        "CI workflows did not deploy. Aborting before approval: --trust-upstream bypasses validation lookup, not workflow deployment. Re-run after fixing the deploy failure, or run `nemar admin dataset ci add <id>` manually before approving.",
     };
   }
   const poll = args.poll;
@@ -2296,7 +2296,7 @@ export async function finalizeImport(
     ciSpinner.fail(`CI deployment failed: ${msg}`);
     console.log(
       chalk.dim(
-        `  After fixing the deploy failure, run 'nemar admin ci add ${nemarId}' and 'nemar admin repo publish request/approve ${nemarId}' to resume.`,
+        `  After fixing the deploy failure, run 'nemar admin dataset ci add ${nemarId}' and 'nemar admin dataset publish request/approve ${nemarId}' to resume.`,
       ),
     );
   }
@@ -2419,7 +2419,7 @@ export async function finalizeImport(
       }
       if (attempt === PUBLICATION_REQUEST_MAX_ATTEMPTS) {
         pubSpinner.fail(
-          `BIDS validation still in progress after ${PUBLICATION_REQUEST_MAX_ATTEMPTS} attempts (~${Math.round((PUBLICATION_REQUEST_MAX_ATTEMPTS * PUBLICATION_REQUEST_WAIT_MS) / 60000)}min). Re-run 'nemar admin repo publish request/approve ${nemarId}' once validation completes.`,
+          `BIDS validation still in progress after ${PUBLICATION_REQUEST_MAX_ATTEMPTS} attempts (~${Math.round((PUBLICATION_REQUEST_MAX_ATTEMPTS * PUBLICATION_REQUEST_WAIT_MS) / 60000)}min). Re-run 'nemar admin dataset publish request/approve ${nemarId}' once validation completes.`,
         );
         process.exit(1);
       }
@@ -2474,7 +2474,7 @@ export async function finalizeImport(
   //
   // Failure here is logged but non-fatal: the import itself is complete (and the
   // dataset published, when the screen was clear). Operators can re-run with
-  // `nemar admin reindex <id>` afterward.
+  // `nemar admin dataset reindex <id>` afterward.
   const reindexSpinner = ora("Refreshing metadata + LLM enrichment...").start();
   try {
     const result = await reindexDataset(nemarId);
@@ -2487,13 +2487,13 @@ export async function finalizeImport(
       if (!enrichmentOk) parts.push(`enrichment ${result.enrichment?.status ?? "missing"}`);
       if (!colsOk) parts.push("metadata columns not written");
       reindexSpinner.warn(
-        `Partial reindex: ${parts.join(", ")} (run 'nemar admin reindex ${nemarId}' to retry)`,
+        `Partial reindex: ${parts.join(", ")} (run 'nemar admin dataset reindex ${nemarId}' to retry)`,
       );
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     reindexSpinner.warn(
-      `Reindex failed (non-fatal): ${msg}. Run 'nemar admin reindex ${nemarId}' to retry.`,
+      `Reindex failed (non-fatal): ${msg}. Run 'nemar admin dataset reindex ${nemarId}' to retry.`,
     );
   }
 

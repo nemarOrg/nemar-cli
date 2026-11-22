@@ -9,10 +9,8 @@
  * - nemar admin approve            - Approve a pending user
  * - nemar admin revoke             - Revoke user access
  * - nemar admin role               - Change a user's role (owner only)
- * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
- * - nemar admin repo publish/unpublish/withdraw/restore - Dataset publication lifecycle
- * - nemar admin ci check/add       - Manage CI workflows
- * - nemar admin doi create/info/update/enrich - DOI management
+ * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
+ *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
  * - nemar admin email-preferences show/update - Email notification opt-out
@@ -311,13 +309,9 @@ User Management:
   role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
-  repo            - Dataset publication lifecycle (publish, unpublish, withdraw, restore)
-  ci              - Manage CI workflows (check status, deploy)
-  s3              - S3/IAM credential management
-  doi             - Create and manage DOIs for datasets
-  revert          - Revert dataset to previous version (via PR)
-  make-public     - Publish a dataset (pull it back with 'repo unpublish')
-  delete-dataset    - Delete a dataset and all associated resources
+  dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
+                      delete, reindex, doi, ci, s3, exemplar, doctor
+  revert            - Revert dataset to previous version (via PR)
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
 
 Examples:
@@ -326,10 +320,9 @@ Examples:
   $ nemar admin approve john_doe           # Approve a user
   $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
   $ nemar admin role john_doe admin        # Promote user to admin (owner only)
-  $ nemar admin repo unpublish nm000104    # Pull a published dataset back to private
-  $ nemar admin ci check nm000104          # Check CI status
-  $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
-  $ nemar admin doi create nm000104        # Create concept DOI`,
+  $ nemar admin dataset unpublish nm000104 # Pull a published dataset back to private
+  $ nemar admin dataset ci check nm000104  # Check CI status
+  $ nemar admin dataset doi create nm000104 # Create concept DOI`,
   );
 
 /**
@@ -1803,8 +1796,8 @@ its session token -- S3 refuses such a request with a bare 403 even on an object
 that is anonymously readable.
 
 Examples:
-  $ nemar admin s3 credential-check on007788
-  $ nemar admin s3 credential-check nm099999
+  $ nemar admin dataset s3 credential-check on007788
+  $ nemar admin dataset s3 credential-check nm099999
 `,
   )
   .action(async (datasetId: string) => {
@@ -1923,7 +1916,9 @@ ciCommand
           console.log(`      URL:    ${chalk.dim(result.bids_validation.url)}`);
         }
       } else {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       // Version Check
@@ -1931,7 +1926,9 @@ ciCommand
       const versionIcon = versionPresent ? chalk.green("[x]") : chalk.red("[ ]");
       console.log(`  ${versionIcon} Version Check`);
       if (!versionPresent) {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       console.log();
@@ -2040,7 +2037,7 @@ ciCommand
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
       console.log(
         chalk.dim(
-          "  (post-deploy parseability poll skipped for --all; run 'nemar admin ci validate <id>' per dataset)",
+          "  (post-deploy parseability poll skipped for --all; run 'nemar admin dataset ci validate <id>' per dataset)",
         ),
       );
       console.log();
@@ -2057,7 +2054,7 @@ ciCommand
       // Fleet deploys always skip the parseability poll. With many datasets
       // the per-dataset 2.5–7.5 s wait adds up; users running --all typically
       // just want fast confirmation of commits. Admins can run
-      // `nemar admin ci validate <id>` on individual datasets afterward.
+      // `nemar admin dataset ci validate <id>` on individual datasets afterward.
       // skipValidate is intentionally unused here — --no-validate accepts but
       // is a no-op on the fleet path (consistent with what the help text
       // says).
@@ -2531,7 +2528,7 @@ doiCommand
         }
       } else {
         console.log(chalk.yellow("No concept DOI created yet"));
-        console.log(chalk.dim("  Use 'nemar admin doi create' to create one"));
+        console.log(chalk.dim("  Use 'nemar admin dataset doi create' to create one"));
       }
 
       console.log();
@@ -2565,7 +2562,7 @@ doiCommand
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
   .option(
     "--unavailable",
-    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin repo withdraw' instead.",
+    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin dataset withdraw' instead.",
   )
   .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
@@ -3071,7 +3068,7 @@ doiCommand
         } else if (doiFetchFailed) {
           console.log(
             chalk.yellow(
-              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually.",
+              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin dataset doi update --refresh' manually.",
             ),
           );
         }
@@ -3660,7 +3657,7 @@ Unpublish versus withdraw:
              Undo with 'restore'.
 
 Also repairs a dataset that was made private by a bare visibility change and still carries a
-publication record. Making a dataset public is what publishing does ('admin repo publish').
+publication record. Making a dataset public is what publishing does ('admin dataset publish').
 
 Examples:
   $ nemar admin dataset unpublish nm000123                                    # dry run
@@ -5304,7 +5301,7 @@ datasetGroupCommand.addCommand(exemplarCommand);
 // Phase 2 metadata columns for one or many datasets.
 // ============================================================================
 
-/** The summary lines `nemar admin reindex` prints for one dataset. Pure, so
+/** The summary lines `nemar admin dataset reindex` prints for one dataset. Pure, so
  *  the wording operators act on (warnings, the lookup cap) is testable. */
 export function reindexLines(r: ReindexResponse, opts?: { showRef?: boolean }): string[] {
   const enrLabel = r.enrichment.status;
@@ -6917,7 +6914,7 @@ reindexCommand
         printReindexLine(r);
       }
       // Non-zero exit on partial bulk failure so shell scripts can chain
-      // safely (`nemar admin reindex --missing-metadata && do_next_step`).
+      // safely (`nemar admin dataset reindex --missing-metadata && do_next_step`).
       if (failed > 0) process.exit(1);
     },
   );
@@ -8171,7 +8168,7 @@ export interface DoctorFixLoopOutcome {
 }
 
 /**
- * Per-dataset driver for `nemar admin doctor fix` (#1133 review fix). Pure
+ * Per-dataset driver for `nemar admin dataset doctor fix` (#1133 review fix). Pure
  * aggregation over a dependency-injected `fixOne`, mirroring runReauditLoop's
  * extraction convention, so two properties are unit-testable without a server:
  * a dataset healed in the interim is counted as `resolved` (never silently
