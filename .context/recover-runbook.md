@@ -5,14 +5,14 @@ Operational sequence for re-copying the 45 datasets in `scripts/recover-datasets
 This is a **post-deploy, production-only, operator-gated** step -- it is not run as part
 of this PR and cannot be exercised in a dev sandbox. The proximate reason: outside
 production, the target `on######` ids have no `import_jobs` row (dev D1 is
-exemplars-only), so `recover --execute`'s source-id resolution fails loudly before any
+exemplars-only), so `rework recover --apply`'s source-id resolution fails loudly before any
 dispatch happens.
 
 **DANGER: `verifyImport` (the reclassify step) is NOT itself environment-gated.**
 Unlike the `import_jobs`-row check above, `POST /admin/imports/:id/verify` runs against
 whatever backend the CLI is pointed at -- it would reclassify a real `import_jobs` row
 (`complete` -> `incomplete`) on any environment that happens to have one. **Only ever run
-`nemar admin recover --execute` against production** (verify `nemar auth status` / the
+`nemar admin rework recover --apply` against production** (verify `nemar auth status` / the
 active API URL first); do not rely on an environment 403 to catch a mistaken target.
 
 ## Prerequisites
@@ -25,13 +25,13 @@ active API URL first); do not rely on an environment 403 to catch a mistaken tar
 
 1. **Dry run first.**
    ```
-   nemar admin recover --all
+   nemar admin rework recover --all
    ```
    Confirms the 45-target resolution and prints the per-dataset plan. No network mutation.
 
 2. **Execute.**
    ```
-   nemar admin recover --all --execute
+   nemar admin rework recover --all --apply
    ```
    For each of the 45: forces `POST /admin/imports/:id/verify` (reclassifies a stale
    `complete` `import_jobs` row to `incomplete`; a direct re-dispatch onto a `complete`
@@ -49,7 +49,7 @@ active API URL first); do not rely on an environment 403 to catch a mistaken tar
 
 4. **Watch remediation converge.**
    ```
-   nemar admin recover status --all
+   nemar admin rework recover status --all
    ```
    Reports each target's `data_complete`/`bytes_present` from the catalog (Phase 3's
    completion oracle). Re-run periodically until all 45 show `complete`. Do NOT read
@@ -71,7 +71,7 @@ active API URL first); do not rely on an environment 403 to catch a mistaken tar
    `data-integrity-sweep` output. If any target is still incomplete after the workflow run
    finishes, check `nemar admin import status <id>` for `last_error` / `recovery_attempts`;
    the Phase 2 retry engine will keep retrying automatically, or re-run step 2 for the
-   stragglers (`nemar admin recover <id> --execute`).
+   stragglers (`nemar admin rework recover <id> --apply`).
 
 ## Non-goals
 

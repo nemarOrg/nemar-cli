@@ -123,7 +123,7 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
     const classified = classifyImportFailure({ stage: "finalize", lastError: gateMessage });
     expect(classified.cause).toBe("data_unavailable");
     expect(classified.label).toBe("data-unavailable");
-    expect(classified.summary).toContain("content-recovery");
+    expect(classified.summary).toContain("nemar admin rework annex content-recovery");
   });
 
   test("the identifier scrub's refusal classifies as identifier_scrub (ADR 0089)", () => {

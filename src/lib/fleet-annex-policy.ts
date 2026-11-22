@@ -88,7 +88,7 @@ export type AnnexPolicyLabel = "compliant" | "policy" | "policy-and-data" | "dat
  * also keeps data in git.
  *
  * `policy` is the ordinary fleet case and needs no credentials; `data` means the S3
- * leg has to run, which is `nemar admin annex-normalize` with someone watching.
+ * leg has to run, which is `nemar admin rework annex normalize` with someone watching.
  */
 export function labelAnnexPolicyState(state: AnnexPolicyState): AnnexPolicyLabel {
   // The SAME question `isAnnexPolicyInForce` asks, so the two cannot disagree. They
@@ -265,7 +265,7 @@ export async function createGitHubReader(
               Authorization: `Bearer ${token}`,
               Accept: "application/vnd.github+json",
               "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "nemar-cli fleet annex-policy sweep",
+              "User-Agent": "nemar-cli rework annex policy sweep",
             },
           });
         } catch (error) {
@@ -453,7 +453,7 @@ export async function applyAnnexPolicyToDataset(
       before,
       action: "skipped-has-data",
       notes: [
-        `${before.gitResidentData.length} file(s) NEMAR policy calls data are in git; that needs the S3 leg (nemar admin annex-normalize ${datasetId})`,
+        `${before.gitResidentData.length} file(s) NEMAR policy calls data are in git; that needs the S3 leg (nemar admin rework annex normalize ${datasetId})`,
       ],
     };
   }
@@ -473,7 +473,7 @@ export async function applyAnnexPolicyToDataset(
         before,
         action: "skipped-has-data",
         notes: [
-          `the clone found ${plan.files.length} data file(s) in git that the tree listing did not; re-run with --include-data or use nemar admin annex-normalize ${datasetId}`,
+          `the clone found ${plan.files.length} data file(s) in git that the tree listing did not; re-run with --include-data or use nemar admin rework annex normalize ${datasetId}`,
         ],
       };
     }

@@ -939,7 +939,7 @@ export async function verifyImport(datasetId: string): Promise<ImportVerifyRespo
 }
 
 /**
- * Push `next_retry_at` forward for datasets `recover --execute` just
+ * Push `next_retry_at` forward for datasets `rework recover --apply` just
  * dispatched out-of-band, so the Phase-2 retry cron doesn't re-dispatch the
  * same onboard-openneuro.yml run on its next tick (#981).
  */

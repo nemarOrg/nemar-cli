@@ -392,7 +392,7 @@ describe("backfilling one dataset", () => {
 
   test("a dataset that also keeps data in git is skipped, not half-fixed", async () => {
     // Its fix needs the S3 leg -- credentials, an upload, and a verification -- so it
-    // belongs to `nemar admin annex-normalize` with an operator watching, not to a
+    // belongs to `nemar admin rework annex normalize` with an operator watching, not to a
     // sweep of 600. Skipping has to leave the repository exactly as it was: a
     // half-applied policy (attributes stripped, recording still in git) is worse than
     // either state.
@@ -406,7 +406,7 @@ describe("backfilling one dataset", () => {
     });
 
     expect(outcome.action).toBe("skipped-has-data");
-    expect(outcome.notes?.join(" ")).toContain("annex-normalize");
+    expect(outcome.notes?.join(" ")).toContain("nemar admin rework annex normalize");
     expect(await originPolicyState(origin)).toEqual(before);
     expect(existsSync(join(workRoot, WITH_DATA))).toBe(false);
   }, 300_000);

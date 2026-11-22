@@ -17,7 +17,7 @@
  * `POST /webhooks/import-state` has no post-success action at all today -- its
  * only side-effect block is gated on `status === "failed"`. A `complete` hook
  * would be the responsive option, but it would only ever catch recoveries that
- * pass through that webhook. A manual `nemar admin recover`, an operator's
+ * pass through that webhook. A manual `nemar admin rework recover`, an operator's
  * forced verify, and every one of the issues that accumulated before this existed
  * (ADR 0052 records the count and the date) would all be missed. One sweep covers
  * all of them through one tested path, and keeps GitHub I/O off a webhook route

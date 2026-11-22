@@ -1,5 +1,5 @@
 /**
- * Issue #1049: `nemar admin recover` was broken in published npm builds
+ * Issue #1049: `nemar admin rework recover` was broken in published npm builds
  * because `scripts/recover-datasets.json` was never shipped (package.json
  * "files" omitted it) AND `defaultRecoverDatasetsPath()` hardcoded a
  * "two levels up from this source file" resolution that only holds for a
@@ -17,7 +17,7 @@
  *  - `bun pm pack` is the actual npm packaging tool, so the packed-file-list
  *    assertion is what a real `npm publish` would ship, not a re-read of
  *    package.json's "files" array.
- *  - the path-resolution assertions run the real `nemar admin recover` /
+ *  - the path-resolution assertions run the real `nemar admin rework recover` /
  *    `nemar admin dataset withdraw` command as a subprocess, once from source
  *    (`bun run src/index.ts`) and once from a real `bun build` bundle
  *    placed at the same repo-relative layout npm installs it at
@@ -158,16 +158,19 @@ describe("npm package includes scripts/recover-datasets.json (#1049)", () => {
   });
 });
 
-describe("nemar admin recover resolves its default file from source (#1049)", () => {
+describe("nemar admin rework recover resolves its default file from source (#1049)", () => {
   test("`bun run src/index.ts admin recover --all --json` loads the real 45-entry list", async () => {
     const configDir = mkdtempSync(join(tmpdir(), "nemar-recover-src-"));
     seedAuthenticatedConfig(configDir);
     const notices = startNoticesStub();
     try {
-      const result = await run(["bun", "run", CLI_ENTRY, "admin", "recover", "--all", "--json"], {
-        NEMAR_CONFIG_DIR: configDir,
-        TEST_API_URL: notices.url,
-      });
+      const result = await run(
+        ["bun", "run", CLI_ENTRY, "admin", "rework", "recover", "--all", "--json"],
+        {
+          NEMAR_CONFIG_DIR: configDir,
+          TEST_API_URL: notices.url,
+        },
+      );
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout);
       expect(parsed.dry_run).toBe(true);
@@ -180,7 +183,7 @@ describe("nemar admin recover resolves its default file from source (#1049)", ()
   });
 });
 
-describe("nemar admin recover resolves its default file from a published-layout dist bundle (#1049)", () => {
+describe("nemar admin rework recover resolves its default file from a published-layout dist bundle (#1049)", () => {
   test("a real `bun build` bundle at dist/index.js (sibling of scripts/, the npm-installed layout) finds the file", async () => {
     // Build the actual single-file bundle at the same repo-relative path npm
     // ships it at (dist/index.js next to scripts/) -- dist/ is gitignored so
@@ -204,10 +207,13 @@ describe("nemar admin recover resolves its default file from a published-layout 
     seedAuthenticatedConfig(configDir);
     const notices = startNoticesStub();
     try {
-      const result = await run(["bun", DIST_ENTRY, "admin", "recover", "--all", "--json"], {
-        NEMAR_CONFIG_DIR: configDir,
-        TEST_API_URL: notices.url,
-      });
+      const result = await run(
+        ["bun", DIST_ENTRY, "admin", "rework", "recover", "--all", "--json"],
+        {
+          NEMAR_CONFIG_DIR: configDir,
+          TEST_API_URL: notices.url,
+        },
+      );
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout);
       expect(parsed.dry_run).toBe(true);

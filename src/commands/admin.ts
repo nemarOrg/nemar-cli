@@ -11,8 +11,8 @@
  * - nemar admin users role         - Change a user's role (owner only)
  * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
  *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
- * - nemar admin revert             - Revert dataset to a previous version
- * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
+ * - nemar admin rework            - Change an existing dataset: revert, recover [status], and
+ *   annex normalize/policy/key-registration/content-recovery
  * - nemar admin users verify/kind/kind-check/keys/duplicates/backfill-usernames - Accounts
  * - nemar admin users email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
@@ -310,7 +310,8 @@ User Management:
 Dataset Management:
   dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
                       delete, reindex, doi, ci, s3, exemplar, doctor
-  revert            - Revert dataset to previous version (via PR)
+  rework            - Change an existing dataset: revert (via PR), recover, and
+                      annex normalize, policy, key-registration, content-recovery
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
 
 Examples:
@@ -1727,6 +1728,23 @@ adminCommand.addCommand(datasetGroupCommand);
 datasetGroupCommand.addCommand(publishCommand);
 
 // ============================================================================
+// Rework group (`admin rework`; ADR 0135 decision 3): operations that change the content or
+// history of a dataset that already exists.
+// ============================================================================
+
+const reworkCommand = new Command("rework").description(
+  "Change the content or history of an existing dataset: revert, annex repairs, recovery",
+);
+
+adminCommand.addCommand(reworkCommand);
+
+const reworkAnnexCommand = new Command("annex").description(
+  "Repair a dataset's git-annex: normalize, policy, key registration, content recovery",
+);
+
+reworkCommand.addCommand(reworkAnnexCommand);
+
+// ============================================================================
 // S3: Object Lock and credential checks for one dataset (`admin dataset s3`)
 // ============================================================================
 
@@ -3088,7 +3106,7 @@ datasetGroupCommand.addCommand(doiCommand);
 // Revert (Admin Only)
 // ============================================================================
 
-adminCommand
+reworkCommand
   .command("revert")
   .description("Revert a dataset to a previous version (creates PR for review)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
@@ -3995,7 +4013,7 @@ export function importTagOptionError(
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
  * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
- * (non---local) branch, a brand-new import, and `recover --execute` (Phase
+ * (non---local) branch, a brand-new import, and `rework recover --apply` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
  *
@@ -4038,12 +4056,20 @@ async function dispatchOpenNeuroImportWorkflow(
   return { ok: true };
 }
 
-adminCommand
-  .command("annex-normalize <datasetId>")
-  .description(
-    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
+// Dry run by default since the admin tree restructure (ADR 0135): it commits to the dataset and
+// pushes, so `--apply` is what makes it write. `--dry-run`, the old preview flag, is still accepted
+// (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  reworkAnnexCommand
+    .command("normalize <datasetId>")
+    .description(
+      "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060). Dry-run by default.",
+    ),
+  "Make the change: annex, upload, commit and push (default is a dry run that only reports)",
+)
+  .addOption(
+    new Option("--dry-run", "Clone and report what would change; touch nothing").hideHelp(),
   )
-  .option("--dry-run", "Clone and report what would change; touch nothing")
   .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
   .option("--no-push", "Do everything except push, for a rehearsal")
   .option(
@@ -4055,6 +4081,7 @@ adminCommand
     "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
   )
   .option("-y, --yes", "Skip the confirmation prompt")
+  .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
     "after",
     `
@@ -4071,14 +4098,15 @@ and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
 are untouched.
 
 Examples:
-  $ nemar admin annex-normalize on007788 --dry-run
-  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+  $ nemar admin rework annex normalize on007788                 # dry run
+  $ nemar admin rework annex normalize on007788 --apply --dir /tmp/normalize-on007788
 `,
   )
   .action(
     async (
       datasetId: string,
       options: {
+        apply?: boolean;
         dryRun?: boolean;
         dir?: string;
         push?: boolean;
@@ -4089,6 +4117,11 @@ Examples:
       },
     ) => {
       if (!requireAuth()) return;
+
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
 
       let maxBytes: number | undefined;
       if (options.normalizeMaxGb !== undefined) {
@@ -4159,8 +4192,10 @@ Examples:
         );
       }
 
-      if (options.dryRun) {
-        console.log(chalk.dim("--dry-run: stopping before any change."));
+      if (!options.apply) {
+        console.log(
+          chalk.dim("Dry run: stopping before any change. Re-run with --apply to make it."),
+        );
         return;
       }
 
@@ -4690,7 +4725,7 @@ adminCommand.addCommand(importCommand);
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
  *  defaultWithdrawnDatasetsPath, which shares this same shape). Shipped
- *  to npm (package.json "files") so `nemar admin recover` works from an
+ *  to npm (package.json "files") so `nemar admin rework recover` works from an
  *  installed build, not just a repo checkout -- the two layouts put this
  *  file at different depths from `import.meta.dir` (#1049):
  *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
@@ -4712,10 +4747,13 @@ const recoverCommand = new Command("recover").description(
   "Re-copy epic #967 OpenNeuro imports published with 0-byte content, whose upstream is accessible (Phase 5, #972). Dry-run by default.",
 );
 
-recoverCommand
-  .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in recover-datasets list")
-  .option("--execute", "Actually verify + dispatch the re-copy (default is a dry run)")
+addApplyOption(
+  recoverCommand
+    .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
+    .option("--all", "Target every entry in the checked-in recover-datasets list"),
+  "Actually verify + dispatch the re-copy (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in recover-datasets list")
   .option(
     "--recover-file <path>",
@@ -4732,18 +4770,18 @@ Description:
   datasets published with 0-byte content whose OpenNeuro upstream is still
   accessible today. A direct re-dispatch onto a still-'complete' import_jobs
   row silently no-ops the status callback (only a non-terminal row accepts
-  an update), so --execute FIRST forces a per-key S3 verify on every target
+  an update), so --apply FIRST forces a per-key S3 verify on every target
   (reclassifying a stale 'complete' row to 'incomplete'), THEN dispatches
   ONE batch 'gh workflow run onboard-openneuro.yml' for the whole set.
-  Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
+  Afterward, treat 'nemar admin rework recover status' (datasets.data_complete) as
   the completion oracle, not import_jobs.status.
 
   The actual re-copy is production-only IN PRACTICE: outside production the
   target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
   source-id resolution fails loudly before any dispatch. But verifyImport
-  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  itself is NOT environment-gated -- --apply's reclassify step ('complete'
   -> 'incomplete') runs against whatever backend the CLI is pointed at, so
-  only ever run --execute against production. A target already
+  only ever run --apply against production. A target already
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
@@ -4757,7 +4795,7 @@ Description:
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         recoverFile?: string;
         json?: boolean;
@@ -4793,7 +4831,7 @@ Description:
       }
       const targets = resolved.targets;
 
-      if (!options.execute) {
+      if (!options.apply) {
         // JSON first and exclusive: `recover --all --json | jq` must see pure
         // JSON on stdout, nothing else.
         if (options.json) {
@@ -4808,14 +4846,14 @@ Description:
         console.log(
           chalk.dim(
             "\nEach target: POST /admin/imports/:id/verify (reclassify), then one batch " +
-              "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
+              "gh workflow run onboard-openneuro.yml for the whole set. Pass --apply to run.",
           ),
         );
         return;
       }
 
       // Every human-readable console.log below is gated behind `!options.json`
-      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // so `rework recover --apply --json | jq` sees pure JSON on stdout; the JSON
       // result is assembled as the flow proceeds and printed once at the end
       // (it needs the dispatch/verify results, so it can't print up front the
       // way the dry-run branch above does). ora spinners write to stderr by
@@ -4955,7 +4993,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
+            "  Watch progress with: nemar admin rework recover status  /  nemar admin data-integrity-sweep --reaudit",
           ),
         );
 
@@ -5084,7 +5122,7 @@ recoverStatusCommand.action(async (ids: string[]) => {
   console.log(chalk.bold(`\n${completeCount}/${results.length} data_complete`));
 });
 
-adminCommand.addCommand(recoverCommand);
+reworkCommand.addCommand(recoverCommand);
 
 // ============================================================================
 // Exemplar staging fleet (epic #923, Phase 5)
@@ -6000,8 +6038,8 @@ fleetCommand
     );
   });
 
-fleetCommand
-  .command("annex-policy")
+reworkAnnexCommand
+  .command("policy")
   .description(
     "Report, and optionally fix, dataset repos that NEMAR's annex policy does not actually govern (#1374, ADR 0060)",
   )
@@ -6031,17 +6069,17 @@ without cloning anything, so a sweep of the fleet costs minutes.
                    One commit, no data moves, no S3 traffic.
   policy-and-data  ALSO keeps recordings in git. Skipped unless --include-data:
                    that needs credentials and an upload, which is
-                   nemar admin annex-normalize <id> with someone watching.
+                   nemar admin rework annex normalize <id> with someone watching.
 
 --apply pushes to main and to the git-annex branch for every dataset it touches,
 which starts that repo's BIDS validation. Run it in batches (--limit) rather than
 across 600 repositories at once (ADR 0020).
 
 Examples:
-  $ nemar admin fleet annex-policy                       # report the imported fleet
-  $ nemar admin fleet annex-policy --prefix nm           # report the uploaded fleet
-  $ nemar admin fleet annex-policy on001810 --apply      # fix one
-  $ nemar admin fleet annex-policy --apply --limit 10    # fix a batch
+  $ nemar admin rework annex policy                      # report the imported fleet
+  $ nemar admin rework annex policy --prefix nm          # report the uploaded fleet
+  $ nemar admin rework annex policy on001810 --apply     # fix one
+  $ nemar admin rework annex policy --apply --limit 10   # fix a batch
 `,
   )
   .action(
@@ -6276,7 +6314,7 @@ Examples:
       if (needsDataLeg.length > 0) {
         console.log(
           chalk.dim(
-            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin annex-normalize <id>, or --include-data here).`,
+            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin rework annex normalize <id>, or --include-data here).`,
           ),
         );
       }
@@ -6387,7 +6425,7 @@ Examples:
     },
   );
 
-fleetCommand
+reworkAnnexCommand
   .command("key-registration")
   .description(
     "Re-register annexed content NEMAR holds in S3 but never recorded in the location log (#1392)",
@@ -6453,10 +6491,10 @@ How presence is established:
   403 and 403 also means private, expired, or signed without a session token.
 
 Examples:
-  $ nemar admin fleet key-registration --prefix on --limit 10
-  $ nemar admin fleet key-registration --prefix on --limit 10 --apply
-  $ nemar admin fleet key-registration on000246 --apply
-  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
+  $ nemar admin rework annex key-registration --prefix on --limit 10
+  $ nemar admin rework annex key-registration --prefix on --limit 10 --apply
+  $ nemar admin rework annex key-registration on000246 --apply
+  $ nemar admin rework annex key-registration on004917 --retract-false-claims --apply
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6547,7 +6585,7 @@ Examples:
     if (sweep.tally.failed > 0) process.exitCode = 1;
   });
 
-fleetCommand
+reworkAnnexCommand
   .command("content-recovery")
   .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
   .argument("[dataset-id...]", "Datasets to act on")
@@ -6600,13 +6638,13 @@ Credentials:
   credentials only to list what the bucket already holds.
 
 Registering what it recovers:
-  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  this writes no location log. Run \`nemar admin rework annex key-registration <id>
   --apply\` afterwards, which lists the bucket again and records what is there.
 
 Examples:
-  $ nemar admin fleet content-recovery on008730
-  $ nemar admin fleet content-recovery on008730 --apply
-  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+  $ nemar admin rework annex content-recovery on008730
+  $ nemar admin rework annex content-recovery on008730 --apply
+  $ nemar admin rework annex content-recovery on008730 on008798 --apply --json report.json
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6727,7 +6765,7 @@ Examples:
       console.log(
         chalk.dim(
           "\nThe location log still says nothing about these objects: run " +
-            "`nemar admin fleet key-registration <id> --apply` to record them.",
+            "`nemar admin rework annex key-registration <id> --apply` to record them.",
         ),
       );
     }

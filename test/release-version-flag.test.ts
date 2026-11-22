@@ -413,23 +413,31 @@ describe("bindShadowedOptionValues on the real command tree", () => {
     expect(release.opts.version).toBeUndefined();
   });
 
-  // `admin recover status` redeclares --recover-file from its parent group
-  // `admin recover`, which takes the value itself. The parent's parseOptions
+  // `admin rework recover status` redeclares --recover-file from its parent group
+  // `admin rework recover`, which takes the value itself. The parent's parseOptions
   // consumes the flag AND its value wherever they appear, and `status` reads
   // it back through optsWithGlobals() (src/commands/admin.ts), so there is
   // nothing for the pre-pass to rewrite, and no new way for it to fail.
   test("an ancestor option that takes the value itself is left alone", async () => {
     unchanged([
-      ["admin", "recover", "status", "--recover-file", "recover-1.json"],
-      ["admin", "recover", "status", "--recover-file", "recover-2.json", "--json"],
-      ["admin", "recover", "status", "--recover-file", "--json"],
-      ["admin", "recover", "status", "--recover-file"],
+      ["admin", "rework", "recover", "status", "--recover-file", "recover-1.json"],
+      ["admin", "rework", "recover", "status", "--recover-file", "recover-2.json", "--json"],
+      ["admin", "rework", "recover", "status", "--recover-file", "--json"],
+      ["admin", "rework", "recover", "status", "--recover-file"],
     ]);
-    const plain = await reach(["admin", "recover", "status", "--recover-file", "recover-3.json"]);
+    const plain = await reach([
+      "admin",
+      "rework",
+      "recover",
+      "status",
+      "--recover-file",
+      "recover-3.json",
+    ]);
     expect(plain.name).toBe("status");
     expect(plain.optsWithGlobals.recoverFile).toBe("recover-3.json");
     const withJson = await reach([
       "admin",
+      "rework",
       "recover",
       "status",
       "--recover-file",
@@ -499,8 +507,8 @@ describe("every same-named value option in the real tree", () => {
     const names = collisions(program).map(describeCollision);
     // The root's boolean --version claims a flag `release` takes a value for.
     expect(names).toContain("dataset release --version");
-    // `admin recover` takes --recover-file itself, and `status` redeclares it.
-    expect(names).toContain("admin recover status --recover-file");
+    // `admin rework recover` takes --recover-file itself, and `status` redeclares it.
+    expect(names).toContain("admin rework recover status --recover-file");
   });
 
   test("past a BOOLEAN ancestor option, --flag value is joined to --flag=value", () => {
@@ -517,7 +525,7 @@ describe("every same-named value option in the real tree", () => {
 
   test("past a VALUE-taking ancestor option, --flag value is left unchanged", () => {
     const valued = collisions(program).filter((c) => takesValue(c.claimant));
-    expect(valued.map(describeCollision)).toContain("admin recover status --recover-file");
+    expect(valued.map(describeCollision)).toContain("admin rework recover status --recover-file");
     unchanged(valued.map(({ path, option }) => [...path, option.long as string, "some-value"]));
   });
 
