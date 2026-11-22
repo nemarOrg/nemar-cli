@@ -39,11 +39,12 @@ describe("addApplyOption", () => {
   });
 
   test.each(["--execute", "--write", "--fix"] as const)(
-    "the hidden %s sets apply and no key of its own",
+    "the hidden %s sets apply and leaves no key of its own",
     async (alias) => {
       const opts = await parse([alias], ["nm1", alias]);
       expect(opts.apply).toBe(true);
-      expect(opts[alias.slice(2)]).toBeUndefined();
+      expect(opts).not.toHaveProperty(alias.slice(2));
+      expect(Object.keys(opts)).toEqual(["apply"]);
     },
   );
 

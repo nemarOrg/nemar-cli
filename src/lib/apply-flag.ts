@@ -27,9 +27,10 @@ export function addApplyOption(
     cmd.addOption(option);
     const key = option.attributeName();
     // Commander's own listener, added by addOption above, has already stored the alias under its
-    // own key; move it to `apply` so no action can come to depend on the old spelling.
+    // own key; move it to `apply` so no action can come to depend on the old spelling. `opts()` is
+    // the live store the action receives, so deleting from it removes the key outright.
     cmd.on(`option:${option.name()}`, () => {
-      cmd.setOptionValueWithSource(key, undefined, "default");
+      delete cmd.opts()[key];
       cmd.setOptionValueWithSource("apply", true, "cli");
     });
   }
