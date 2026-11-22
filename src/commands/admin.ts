@@ -9980,7 +9980,7 @@ importWeeklyCommand
     }
   });
 
-adminCommand.addCommand(importWeeklyCommand);
+importCommand.addCommand(importWeeklyCommand.name("weekly"));
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)

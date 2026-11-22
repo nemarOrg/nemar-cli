@@ -129,6 +129,7 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "import-openneuro", newPath: "import openneuro" },
   { oldPath: "import-issue-triage", newPath: "import triage" },
   { oldPath: "import-coverage", newPath: "import coverage" },
+  { oldPath: "import-weekly", newPath: "import weekly" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
