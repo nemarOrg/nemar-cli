@@ -19,10 +19,11 @@ earlier releases are described only by their generated notes.
 
 - **A suspension or an ending of compute access now tells the person why.**
   `POST /admin/compute/access/{suspend|revoke}/...` requires a `notice`, plain text for the person of up to 1000 characters (newline and tab allowed, other control characters refused); a denial may carry one and a grant refuses one (400 `invalid_body`, field `notice`).
-  The decision mail shows it under a fixed heading and, for a denial, a suspension or an ending, says how to ask for a review (reply to the mail or write to support@nemar.org).
+  The decision mail shows it under a fixed heading and, for a denial, a suspension or an ending, says how to ask for a review (reply to the mail or write to the support address the mail replies to, support@nemar.org in production).
   The audit `reason` is unchanged and is still never mailed.
-  `nemar admin compute access suspend` and `revoke` take a required `--notice <text>`, and `deny` an optional one.
-  A client that suspends or revokes without a notice (the website's compute tab until it adds the field) is refused.
+  A notice longer than the bound is refused as `notice_too_long`, however it is padded.
+  `nemar admin compute access suspend` and `revoke` take a required `--notice <text>`, and `deny` an optional one; the CLI sends it trimmed.
+  A client that suspends or revokes without a notice is refused, so the website compute tab and the Worker ship together: website staging first, then nemar-cli `dev`, and the two `main` promotions are a pair.
 
 ### Community mail (epic #2260, ADR 0132)
 
