@@ -38,7 +38,8 @@ function indexedFiles(readme: string): string[] {
 // 0127: reserved for PR #2210 (pull request review regardless of owner role); delete this entry when that ADR lands
 // 0130: reserved for the RFC program's process ADR (branch feature/rfc-program); delete this entry when that ADR lands
 // 0131: reserved for the biosig-zarr ADR (branch feature/rfc-A2-supersede-0128); delete this entry when that ADR lands
-const TOLERATED_GAPS: ReadonlySet<number> = new Set([120, 127, 130, 131]);
+// 0133: reserved for PR #2277 (format conformance vectors live in biosig-zarr); delete this entry when that ADR lands
+const TOLERATED_GAPS: ReadonlySet<number> = new Set([120, 127, 130, 131, 133]);
 
 /** The numbers missing between 1 and the highest one present, ascending. */
 function findGaps(nums: number[]): number[] {
