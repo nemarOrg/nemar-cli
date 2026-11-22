@@ -13,6 +13,15 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## Unreleased
+
+### Community mail (epic #2260, ADR 0132)
+
+- **The unsubscribe link in a message now opens the website's page.**
+  `GET /mail/unsubscribe/<token>` (also under `/nemar/mail`) answers `303 See Other` to `https://app.nemar.org/unsubscribe/<token>` (`https://test.nemar.org/...` on staging) instead of the API's own confirmation page, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it still changes nothing by itself.
+  Only a link in the token format is forwarded, whether or not it still works (the website page says so); anything else answers 410 `link_invalid` with no redirect.
+  The redirect needs no mail-link secret, so it no longer answers 503 when that secret is unset; `GET .../info` and the one-click `POST` are unchanged.
+
 ## 0.10.38 - 2026-11-21
 
 ### Community mail (epic #2260, ADR 0132)
