@@ -170,7 +170,7 @@ export const HED_SWEEP_STAMP_ONLY_SQL =
  *
  * A dataset_id-narrowed call is UNAFFECTED (no cap, no `remaining`): its
  * findings are already scoped to one dataset and stay small -- this is
- * exactly the `nemar admin doctor fix` per-dataset shape the incident
+ * exactly the `nemar admin dataset doctor fix` per-dataset shape the incident
  * write-up says to prefer.
  */
 export const DOCTOR_FIX_DEFAULT_LIMIT = 25;

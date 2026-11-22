@@ -469,7 +469,7 @@ export function __workerRouteTable(): ReadonlyArray<{
  * - Stale nm datasets: private, no DOI, no active pub requests, inactive 90 days.
  *   These are NEVER auto-deleted (#662). The cron emails the owner an escalating
  *   warning runway (30/14/7/2/1 days) and, at the deadline, asks admins to
- *   delete manually via `nemar admin delete-dataset`. Real archive data is only
+ *   delete manually via `nemar admin dataset delete`. Real archive data is only
  *   ever removed by a deliberate human action.
  */
 /**
@@ -736,7 +736,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
 
             if (daysLeft <= 0) {
               // Past the deadline: notify admins once, then leave it for a manual
-              // `nemar admin delete-dataset`. Advance the flag ONLY when an admin
+              // `nemar admin dataset delete`. Advance the flag ONLY when an admin
               // was actually reached, so a transient send failure or a missing
               // RESEND key retries next run instead of silently burying the
               // dataset (the failure mode that lost nm000111/116/117 one step up).

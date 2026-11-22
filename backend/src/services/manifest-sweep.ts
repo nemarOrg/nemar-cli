@@ -23,7 +23,7 @@
  * version (~800 today) and the daily cron invocation shares the Workers
  * subrequest budget with every other job. Full-catalog detection is the
  * zero-credential probe in nemar-observability; historical backfill is
- * `nemar admin doctor fix missing-manifest`.
+ * `nemar admin dataset doctor fix missing-manifest --apply`.
  */
 import type { Bindings } from "../types/bindings.js";
 import { missingManifestCheck } from "./doctor/checks/missing-manifest.js";
