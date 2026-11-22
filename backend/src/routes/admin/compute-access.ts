@@ -24,6 +24,12 @@
  * follow from the retried sweep. The person is mailed AFTER the commit and never inside it; a send that
  * fails leaves the decision standing and the response says `email_sent: false`.
  *
+ * TWO TEXTS, NEVER MIXED. The body's `reason` is for the record: it goes on the audit row and is never
+ * mailed. Its `notice` is for the person: it goes into the decision mail and is not stored. A suspension
+ * and a revocation require a notice, a denial may carry one, and a grant refuses one
+ * (`COMPUTE_ACCESS_NOTICE_RULE` in the shared contract, which also bounds it and refuses control
+ * characters); a refused notice is a 400 `invalid_body` naming `notice` with the rule's word.
+ *
  * THESE ROUTES READ NO COMPUTE SWITCH. A decision is bookkeeping: it spends nothing and calls no Tapis,
  * so it works whether or not compute is on (the switch is read in the one place
  * `compute-source-scan.test.ts` pins). They never read or write `service_access` (ADR 0040).
@@ -45,10 +51,11 @@ import type { ComputePool } from "../../../../shared/contract/compute";
 import {
   COMPUTE_ACCESS_ADMIN_ERROR_STATUS,
   COMPUTE_ACCESS_PAGE_MAX,
-  COMPUTE_ACCESS_REASON_MAX_CHARS,
   type ComputeAccessAccount,
   type ComputeAccessAdminErrorCode,
   type ComputeAccessAllocation,
+  computeAccessDecisionBodyShape,
+  computeAccessNoticeRefinement,
 } from "../../../../shared/contract/compute-access";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { ACTIVE_ACCOUNT_STATUSES } from "../../services/account-tier";
@@ -102,9 +109,15 @@ function refuse(c: Ctx, code: ComputeAccessAdminErrorCode, error?: string, extra
   );
 }
 
-/** A 400 that names the fields and what is wrong with each, never what was sent. */
+/**
+ * A 400 that names the fields and what is wrong with each, never what was sent. A custom issue (the
+ * notice rule) carries a fixed word as its message, and that word is the field's code.
+ */
 function invalid(c: Ctx, code: "invalid_body" | "invalid_query", error: z.ZodError) {
-  const fields = error.issues.slice(0, 20).map((i) => ({ path: fieldPath(i.path), code: i.code }));
+  const fields = error.issues.slice(0, 20).map((i) => ({
+    path: fieldPath(i.path),
+    code: i.code === "custom" ? i.message : i.code,
+  }));
   const named = fields.slice(0, 5).map((f) => `${f.path || "body"}: ${f.code}`);
   return refuse(c, code, `${SENTENCES[code]} ${named.join("; ")}`, { fields });
 }
@@ -195,9 +208,16 @@ export const ACCESS_LIST_SQL = `SELECT ${ACCOUNT_COLUMNS} FROM users
 
 // --- The decision ------------------------------------------------------------------------------
 
-const decisionBody = z
-  .object({ reason: z.string().max(COMPUTE_ACCESS_REASON_MAX_CHARS).optional() })
-  .strict();
+/**
+ * One CLOSED body schema per decision, the shared contract's shape and notice rule
+ * (`COMPUTE_ACCESS_NOTICE_RULE`) with `.strict()` added here: the contract's schemas stay open for old
+ * clients, and the Worker is where a misspelled field is refused.
+ */
+const closedBody = (d: ComputeAccessDecision) =>
+  z.object(computeAccessDecisionBodyShape).strict().superRefine(computeAccessNoticeRefinement(d));
+const DECISION_BODY = Object.fromEntries(
+  COMPUTE_ACCESS_DECISIONS.map((d) => [d, closedBody(d)]),
+) as Record<ComputeAccessDecision, ReturnType<typeof closedBody>>;
 
 /** The body as JSON; `{}` for an empty body, null for something that is not JSON. */
 async function readBody(c: Ctx): Promise<unknown | null> {
@@ -228,11 +248,15 @@ const MAIL_KIND: Record<ComputeAccessDecision, ComputeAccessDecisionMail> = {
   revoke: "revoked",
 };
 
-/** Mail the person what was decided, after the commit. Never throws; false when nothing went. */
+/**
+ * Mail the person what was decided, after the commit, with the administrator's notice when there is one
+ * (never the audit reason). Never throws; false when nothing went.
+ */
 async function mailDecision(
   c: Ctx,
   decision: ComputeAccessDecision,
   row: AccountRow,
+  notice: string | null,
 ): Promise<boolean> {
   try {
     // A service account has no inbox a person reads, as for a job's results.
@@ -243,6 +267,7 @@ async function mailDecision(
       row.email,
       row.given_name,
       `${appBase(c.env)}/compute`,
+      notice,
       c.env.RESEND_API_KEY,
       fromEmail,
       replyTo,
@@ -271,9 +296,11 @@ async function decide(
   const db = c.env.DB;
   const actor = c.get("user");
   try {
-    const parsed = decisionBody.safeParse(await readBody(c));
+    const parsed = DECISION_BODY[decision].safeParse(await readBody(c));
     if (!parsed.success) return invalid(c, "invalid_body", parsed.error);
     const reason = parsed.data.reason?.trim() || null;
+    // For the person, never the record: it goes into the mail and nowhere else.
+    const notice = parsed.data.notice?.trim() || null;
 
     const account = await lookup();
     if (!account) return refuse(c, "account_not_found");
@@ -363,7 +390,7 @@ async function decide(
     }
 
     const after = await db.prepare(ACCESS_ACCOUNT_BY_ID_SQL).bind(account.id).first<AccountRow>();
-    const emailSent = await mailDecision(c, decision, account);
+    const emailSent = await mailDecision(c, decision, account, notice);
 
     let allocation: ComputeAccessAllocation | undefined;
     if (decision === "grant") {

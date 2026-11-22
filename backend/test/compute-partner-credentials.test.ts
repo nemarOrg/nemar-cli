@@ -251,7 +251,7 @@ describe("the credential matrix on all three routes", () => {
     const list = await routes(owner);
     const decided = await w.h.call("POST", `/admin/compute/access/suspend/by-id/${owner.id}`, {
       key: OWNER_KEY,
-      body: { reason: "test" },
+      body: { reason: "test", notice: "Compute access was suspended in a test." },
     });
     expect(decided.status).toBe(200);
     for (const route of list)

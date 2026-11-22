@@ -1715,34 +1715,54 @@ const COMPUTE_DECISION_MAIL: Record<
     subject: "Your NEMAR compute access request",
     heading: "Compute access not granted",
     color: "#dc2626",
-    body: "An administrator has reviewed your request and has not granted compute access to your NEMAR account. The request has been answered and cannot be made again; if you think that is a mistake, contact the NEMAR administrators.",
+    body: "An administrator has reviewed your request and has not granted compute access to your NEMAR account. The request has been answered and cannot be made again.",
   },
   suspended: {
     subject: "NEMAR compute access suspended",
     heading: "Compute access suspended",
     color: "#d97706",
-    body: "An administrator has suspended compute access on your NEMAR account. Jobs that were running are being stopped. Contact the NEMAR administrators if you think this is a mistake.",
+    body: "An administrator has suspended compute access on your NEMAR account. Jobs that were running are being stopped.",
   },
   revoked: {
     subject: "NEMAR compute access ended",
     heading: "Compute access ended",
     color: "#dc2626",
-    body: "An administrator has ended compute access on your NEMAR account. Jobs that were running are being stopped. Contact the NEMAR administrators if you think this is a mistake.",
+    body: "An administrator has ended compute access on your NEMAR account. Jobs that were running are being stopped.",
   },
 };
+
+/** The fixed heading the administrator's notice is mailed under. */
+export const COMPUTE_DECISION_NOTICE_HEADING = "The reason for this decision";
+
+/**
+ * The fixed sentence every decision that takes or withholds access ends with (the compute terms promise
+ * it, nemarOrg/docs#105). A reply reaches support because the mail's Reply-To is the support address.
+ */
+export const COMPUTE_DECISION_REVIEW_SENTENCE =
+  "To ask for a review of this decision, reply to this email or write to support@nemar.org.";
 
 /**
  * Tell a person what an administrator decided about their compute access (epic #2021 phase D1). One
  * function for the four decisions, so the mails cannot drift apart. Sent AFTER the decision commits and
- * never inside it: a send that fails leaves the decision standing, and the route reports that. The
- * administrator's reason is NOT in the mail (it is on the audit row): free text typed for the record is
- * not text to send a person without asking. The link, for a grant only, is the person's compute page.
+ * never inside it: a send that fails leaves the decision standing, and the route reports that.
+ *
+ * The audit `reason` is NOT in the mail and never reaches this function: free text typed for the record
+ * is not text to send a person. The `notice` is: the administrator typed it FOR the person, and it is
+ * mailed escaped under {@link COMPUTE_DECISION_NOTICE_HEADING} (required for a suspension and an ending,
+ * optional for a denial, never for a grant: `COMPUTE_ACCESS_NOTICE_RULE`). A denial, a suspension and an
+ * ending close with {@link COMPUTE_DECISION_REVIEW_SENTENCE}. The link, for a grant only, is the person's
+ * compute page. The mail is HTML only: `sendEmail` sends no plain-text part.
+ *
+ * These sentences live here and not in `shared/contract/account-copy.ts`: that file is the copy the CLI
+ * and the website render (mirrored to the website and drift-tested), and neither renders a mail; every
+ * mail body in the Worker is declared in this module, next to the function that sends it.
  */
 export async function sendComputeAccessDecisionEmail(
   kind: ComputeAccessDecisionMail,
   to: string,
   givenName: string | null,
   computeUrl: string,
+  notice: string | null,
   resendApiKey: string,
   fromEmail: string,
   replyTo?: string,
@@ -1750,6 +1770,14 @@ export async function sendComputeAccessDecisionEmail(
   deliveryEnv?: EmailDeliveryEnv,
 ): Promise<void> {
   const m = COMPUTE_DECISION_MAIL[kind];
+  const noticeBlock =
+    kind !== "granted" && notice?.trim()
+      ? `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${COMPUTE_DECISION_NOTICE_HEADING}</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(notice.trim())}</div>
+`
+      : "";
+  const review = kind !== "granted" ? `<p>${COMPUTE_DECISION_REVIEW_SENTENCE}</p>` : "";
   const greeting = givenName?.trim() ? escapeHtml(givenName.trim()) : "there";
   const link =
     kind === "granted"
@@ -1768,6 +1796,8 @@ export async function sendComputeAccessDecisionEmail(
   <p>Hello ${greeting},</p>
 
   <p>${m.body}</p>
+  ${noticeBlock}
+  ${review}
   ${link}
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
 
