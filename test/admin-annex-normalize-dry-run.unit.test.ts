@@ -6,8 +6,9 @@
  * inherited `annex.largefiles` rule, so the plan is never "nothing to do" and the run reaches the
  * point where the default decides whether to stop.
  *
- * `--no` declines the confirmation that only a writing run asks for, so no run here commits,
- * uploads or pushes: a run that got past the dry-run stop shows as "Cancelled.".
+ * Every run passes `--no`, which declines the confirmation that only a writing run asks for, so
+ * no run here commits, uploads or pushes whatever the terminal: a run that got past the dry-run
+ * stop shows as "Declined.".
  *
  * CI TIER: unit-pure. Hermetic: git on local paths, and the CLI spawned with an environment
  * built from nothing.
@@ -79,25 +80,25 @@ const normalize = (...extra: string[]) =>
 
 describe("admin rework annex normalize", () => {
   test("without --apply it plans, stops before any change, and asks nothing", async () => {
-    const r = await normalize();
+    const r = await normalize("--no");
     expect(r.stdout).toContain(`Plan for ${DATASET}`);
     expect(r.stdout).toContain("Dry run: stopping before any change. Re-run with --apply");
-    expect(r.stdout).not.toContain("Cancelled.");
+    expect(r.stdout).not.toContain("Declined.");
     expect(r.exitCode).toBe(0);
     expect(cli.requests).toEqual([]);
   });
 
   test("the old --dry-run spelling is still a dry run", async () => {
-    const r = await normalize("--dry-run");
+    const r = await normalize("--dry-run", "--no");
     expect(r.stdout).toContain("Dry run: stopping before any change.");
-    expect(r.stdout).not.toContain("Cancelled.");
+    expect(r.stdout).not.toContain("Declined.");
   });
 
-  test("--apply goes past the plan to the confirmation (cancelled here)", async () => {
-    const r = await normalize("--apply");
+  test("--apply goes past the plan to the confirmation (declined by --no)", async () => {
+    const r = await normalize("--apply", "--no");
     expect(r.stdout).toContain(`Plan for ${DATASET}`);
     expect(r.stdout).not.toContain("Dry run: stopping");
-    expect(r.stdout).toContain("Cancelled.");
+    expect(r.stdout).toContain("Declined.");
     expect(cli.requests).toEqual([]);
   });
 
