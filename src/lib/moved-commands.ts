@@ -96,6 +96,10 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "role", newPath: "users role" },
   { oldPath: "verify", newPath: "users verify" },
   { oldPath: "kind", newPath: "users kind" },
+  { oldPath: "keys", newPath: "users keys" },
+  { oldPath: "keys create", newPath: "users keys create" },
+  { oldPath: "keys list", newPath: "users keys list" },
+  { oldPath: "keys revoke", newPath: "users keys revoke" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */

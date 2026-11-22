@@ -1601,7 +1601,7 @@ adminKeysCommand
     }
   });
 
-adminCommand.addCommand(adminKeysCommand);
+adminUsersCommand.addCommand(adminKeysCommand);
 
 // ============================================================================
 // Documentation retrieval
