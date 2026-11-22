@@ -2,10 +2,11 @@
  * Moved-command stubs (ADR 0135 decision 5), driven through the real entry point
  * (`bun run src/index.ts admin <old path> ...`) for every row of MOVED_COMMANDS.
  *
- * Each run gets an isolated NEMAR_CONFIG_DIR holding an admin key and points
- * TEST_API_URL at a local Bun.serve stand-in that records every request: a stub
+ * Each run gets an isolated NEMAR_CONFIG_DIR holding an admin account whose
+ * stored apiUrl is a local Bun.serve stand-in that records every request: a stub
  * that ran anything, or even fetched /notices, shows up as a request. The update
- * check is off, since it goes to the npm registry and not to the stand-in.
+ * check is off, since it goes to the npm registry and not to the stand-in, except
+ * in the one test that seeds its cache with a newer version.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -16,9 +17,11 @@ import { spawn } from "bun";
 import { Command } from "commander";
 import {
   MOVED_COMMANDS,
+  isMovedCommandStub,
   movedCommandMessage,
   registerMovedCommands,
 } from "../src/lib/moved-commands";
+import { FIXTURE_STUB_PATHS, buildFixtureProgram } from "./fixtures/moved-commands/tree-def";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const CLI_ENTRY = join(REPO_ROOT, "src", "index.ts");
@@ -31,15 +34,24 @@ let configDir: string;
 let server: ReturnType<typeof Bun.serve>;
 let requests: string[] = [];
 
-beforeAll(() => {
-  configDir = mkdtempSync(join(tmpdir(), "nemar-moved-commands-"));
+function writeAdminConfig(dir: string): void {
   writeFileSync(
-    join(configDir, "config.json"),
+    join(dir, "config.json"),
     JSON.stringify({
       activeAccount: "root",
-      accounts: { root: { apiKey: "test-admin-key", username: "root", role: "admin" } },
+      accounts: {
+        root: {
+          apiKey: "test-admin-key",
+          username: "root",
+          role: "admin",
+          apiUrl: `http://localhost:${server.port}`,
+        },
+      },
     }),
   );
+}
+
+beforeAll(() => {
   server = Bun.serve({
     port: 0,
     fetch(req) {
@@ -47,6 +59,8 @@ beforeAll(() => {
       return Response.json({ error: "a moved-command stub must make no request" }, { status: 500 });
     },
   });
+  configDir = mkdtempSync(join(tmpdir(), "nemar-moved-commands-"));
+  writeAdminConfig(configDir);
 });
 
 afterAll(() => {
@@ -58,12 +72,15 @@ beforeEach(() => {
   requests = [];
 });
 
-async function run(entry: string, args: string[]) {
+async function run(
+  entry: string,
+  args: string[],
+  { dir = configDir, updateCheck = false }: { dir?: string; updateCheck?: boolean } = {},
+) {
   const env: Record<string, string | undefined> = {
     ...process.env,
-    NEMAR_CONFIG_DIR: configDir,
-    TEST_API_URL: `http://localhost:${server.port}`,
-    NEMAR_NO_UPDATE_CHECK: "1",
+    NEMAR_CONFIG_DIR: dir,
+    NEMAR_NO_UPDATE_CHECK: updateCheck ? undefined : "1",
     NO_COLOR: "1",
   };
   env.FORCE_COLOR = undefined;
@@ -87,12 +104,18 @@ async function run(entry: string, args: string[]) {
 
 const stderrLines = (stderr: string): string[] => stderr.split("\n").filter((l) => l.trim() !== "");
 
-/** Argument shapes a caller might still send: bare, a real call, help, and junk options. */
+/**
+ * Argument shapes a caller might still send: bare, a real call, help, junk options, and
+ * the root's own options, which Commander would otherwise act on before the stub.
+ */
 const ARGUMENT_SHAPES: readonly string[][] = [
   [],
   ["nm000104", "--execute", "--yes"],
   ["--help"],
   ["approve", "nm000104", "--json", "--no-such-option", "value"],
+  ["nm000104", "--version", "2.0.0"],
+  ["-v"],
+  ["--debug"],
 ];
 
 describe("every moved admin command fails at once, without a request", () => {
@@ -142,13 +165,25 @@ describe("every moved admin command fails at once, without a request", () => {
 });
 
 describe("stubs under a live group and under a gone group", () => {
-  test.each([
+  const cases: [string[], string, string][] = [
     [["fleet", "annex-policy", "--apply"], "fleet annex-policy", "rework annex policy"],
     [["s3"], "s3", "dataset s3"],
     [["s3", "lock", "nm000104", "--yes"], "s3 lock", "dataset s3 lock"],
     [["s3", "credential-check"], "s3", "dataset s3"],
-  ])("admin %p points at the row it matches", async (args, oldPath, newPath) => {
-    const result = await run(TREE_FIXTURE, ["admin", ...args]);
+  ];
+  const rootOptions: string[][] = [[], ["--version", "2.0.0"], ["-v"], ["--debug"]];
+
+  test.each(
+    cases.flatMap(([args, oldPath, newPath]) =>
+      rootOptions.map((extra) => [
+        [...args, ...extra].join(" "),
+        [...args, ...extra],
+        oldPath,
+        newPath,
+      ]),
+    ),
+  )("admin %s points at the row it matches", async (_label, args, oldPath, newPath) => {
+    const result = await run(TREE_FIXTURE, ["admin", ...(args as string[])]);
     expect(result.exitCode).toBe(1);
     expect(stderrLines(result.stderr)).toEqual([
       movedCommandMessage(`nemar admin ${oldPath}`, `nemar admin ${newPath}`),
@@ -160,6 +195,63 @@ describe("stubs under a live group and under a gone group", () => {
     const result = await run(TREE_FIXTURE, ["admin", "fleet", "drift"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("LIVE fleet drift ran");
+  });
+
+  test("every stub registration creates, nested or not, is recognized as a stub", () => {
+    const { admin } = buildFixtureProgram();
+    const found = new Map<string, boolean>();
+    const walk = (cmd: Command, path: string[]): void => {
+      for (const sub of cmd.commands) {
+        const subPath = [...path, sub.name()];
+        found.set(subPath.join(" "), isMovedCommandStub(sub));
+        walk(sub, subPath);
+      }
+    };
+    walk(admin, []);
+    const stubPaths = [...found].filter(([, isStub]) => isStub).map(([p]) => p);
+    expect(stubPaths.sort()).toEqual([...FIXTURE_STUB_PATHS].sort());
+    // Every hidden command in the fixture is one of those stubs, so none escaped the registry.
+    const hidden: string[] = [];
+    const walkHidden = (cmd: Command, path: string[]): void => {
+      for (const sub of cmd.commands) {
+        const subPath = [...path, sub.name()];
+        if ((sub as unknown as { _hidden: boolean })._hidden) hidden.push(subPath.join(" "));
+        walkHidden(sub, subPath);
+      }
+    };
+    walkHidden(admin, []);
+    expect(hidden.sort()).toEqual([...FIXTURE_STUB_PATHS].sort());
+  });
+});
+
+describe("an outdated CLI prints no update banner after a stub", () => {
+  test("the pointer is still the only stderr line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-moved-commands-update-"));
+    try {
+      writeAdminConfig(dir);
+      writeFileSync(
+        join(dir, "update-check.json"),
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "999.0.0" }),
+      );
+      // Control: the seeded cache does print the banner on a live command.
+      const control = await run(CLI_ENTRY, ["admin", "repo", "--help"], {
+        dir,
+        updateCheck: true,
+      });
+      expect(control.stderr).toContain("Update available");
+      const row = MOVED_COMMANDS[0];
+      const result = await run(CLI_ENTRY, ["admin", ...row.oldPath.split(" "), "nm000104"], {
+        dir,
+        updateCheck: true,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(stderrLines(result.stderr)).toEqual([
+        movedCommandMessage(`nemar admin ${row.oldPath}`, `nemar admin ${row.newPath}`),
+      ]);
+      expect(requests).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

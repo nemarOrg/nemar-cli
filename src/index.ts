@@ -53,7 +53,7 @@ import {
 } from "./lib/debug-log.js";
 import { isGitCredentialInvocation } from "./lib/git-credential.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
-import { isMovedCommandStub } from "./lib/moved-commands.js";
+import { exitIfMovedCommand, isMovedCommandStub } from "./lib/moved-commands.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { installAutomaticQuiet, isAutomaticInvocation } from "./lib/repull/execute/automatic.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
@@ -311,6 +311,10 @@ function markCommanderExitsRecursively(cmd: Command): void {
   }
 }
 markCommanderExitsRecursively(program);
+
+// A moved command fails at once (ADR 0135): before any root option, the update check and banner,
+// the notices request or Commander's own parse can act on it.
+exitIfMovedCommand(program, rawArgs);
 
 // Display system notices before command execution
 program.hook("preAction", async (_root, actionCommand) => {

@@ -39,15 +39,41 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "restore", newPath: "repo restore" },
 ];
 
-const stubs = new WeakSet<Command>();
+/** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
+const stubs = new WeakMap<Command, (args: readonly string[]) => never>();
 
 /**
  * True for a command registered by {@link registerMovedCommands}. The root
- * `preAction` hook uses it to skip the `/notices` request, so a stub makes no
- * request at all.
+ * `preAction` hook uses it to skip the `/notices` request, should Commander
+ * ever dispatch to a stub that {@link exitIfMovedCommand} did not catch first.
  */
 export function isMovedCommandStub(cmd: Command): boolean {
   return stubs.has(cmd);
+}
+
+/**
+ * If `argv` (user arguments, `process.argv.slice(2)`) addresses a moved-command
+ * stub anywhere under `program`, runs that stub: one line to stderr, exit 1.
+ * Otherwise returns and does nothing.
+ *
+ * The CLI calls it before Commander parses anything, because Commander lets
+ * the root consume its own options wherever they appear: `nemar admin publish
+ * -v` would print the version and exit 0, and the update banner and the
+ * `/notices` request would run around the stub. The walk skips every token
+ * that starts with "-" and descends while a word names a subcommand (or an
+ * alias); it stops at "--".
+ */
+export function exitIfMovedCommand(program: Command, argv: readonly string[]): void {
+  let current = program;
+  const end = argv.indexOf("--") < 0 ? argv.length : argv.indexOf("--");
+  for (let i = 0; i < end; i++) {
+    if (argv[i].startsWith("-")) continue;
+    const next = child(current, argv[i]);
+    if (!next) return;
+    const run = stubs.get(next);
+    if (run) run(argv.slice(i + 1, end));
+    current = next;
+  }
 }
 
 /** The one stderr line a stub prints; also what the tests assert. */
@@ -82,7 +108,9 @@ function child(cmd: Command, name: string): Command | undefined {
  *
  * One stub is registered per distinct first missing word: under a live group
  * that is the row's last word; under a gone group it is the gone group's name,
- * and the stub picks the longest row matching the words typed after it.
+ * and the stub picks the longest row matching the words typed after it. An
+ * option typed before those words (`s3 --profile x lock`) ends the match, so
+ * the pointer falls back to the gone group's own row.
  */
 export function registerMovedCommands(
   root: Command,
@@ -121,25 +149,26 @@ export function registerMovedCommands(
 
   for (const [stubPath, { parent, name }] of stubRoots) {
     const stubWords = stubPath.split(" ");
+    const run = (args: readonly string[]): never => {
+      // Longest row whose remaining words are the first words typed after the stub.
+      let row = byOldPath.get(stubPath) as MovedCommand;
+      for (let n = 1; n <= args.length; n++) {
+        const candidate = byOldPath.get([...stubWords, ...args.slice(0, n)].join(" "));
+        if (candidate) row = candidate;
+      }
+      const prefix = fullName(root);
+      const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
+      const newFull = `${prefix} ${words(row.newPath).join(" ")}`;
+      console.error(chalk.red(movedCommandMessage(oldFull, newFull)));
+      markReportedExit();
+      process.exit(1);
+    };
     const stub = parent
       .command(name, { hidden: true })
       .helpOption(false)
       .allowUnknownOption()
       .allowExcessArguments()
-      .action((_opts: unknown, cmd: Command) => {
-        // Longest row whose remaining words are the first words typed after the stub.
-        let row = byOldPath.get(stubPath) as MovedCommand;
-        for (let n = 1; n <= cmd.args.length; n++) {
-          const candidate = byOldPath.get([...stubWords, ...cmd.args.slice(0, n)].join(" "));
-          if (candidate) row = candidate;
-        }
-        const prefix = fullName(root);
-        const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
-        const newFull = `${prefix} ${words(row.newPath).join(" ")}`;
-        console.error(chalk.red(movedCommandMessage(oldFull, newFull)));
-        markReportedExit();
-        process.exit(1);
-      });
-    stubs.add(stub);
+      .action((_opts: unknown, cmd: Command) => run(cmd.args));
+    stubs.set(stub, run);
   }
 }
