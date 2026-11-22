@@ -25,6 +25,8 @@ export interface RecordedRequest {
   method: string;
   path: string;
   body: Record<string, unknown> | null;
+  /** The query string with its "?", or undefined when there is none (so `toEqual` can omit it). */
+  query?: string;
 }
 
 export interface CliRun {
@@ -65,7 +67,13 @@ export function startIsolatedCli(
         req.method === "GET"
           ? null
           : ((await req.json().catch(() => null)) as Record<string, unknown> | null);
-      const recorded = { method: req.method, path, body };
+      const search = new URL(req.url).search;
+      const recorded: RecordedRequest = {
+        method: req.method,
+        path,
+        body,
+        query: search || undefined,
+      };
       requests.push(recorded);
       return answer(recorded);
     },
