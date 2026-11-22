@@ -28,6 +28,7 @@ earlier releases are described only by their generated notes.
   `createJob` refuses `compute_disabled` unless `COMPUTE_ENABLED` is on, before it reads or writes anything, so a person's `POST /compute/jobs` and a partner's `POST /compute/holds` answer `503 compute_disabled` with compute off and write no job, ledger entry or idempotency claim.
   Before this, either could take a hold that sat until the submit step refused it.
   A hold taken while compute was on is still settled, reaped or expired as before.
+  The `compute_disabled` sentence is now "Compute is not available right now." (it was "Compute storage is not configured.", which was wrong when the switch is what is off); the code and the 503 status are unchanged.
 
 ## 0.10.38 - 2026-11-21
 
