@@ -7758,18 +7758,19 @@ adminCommand.addCommand(zarrFidelitySweepCommand);
 const BACKFILL_PAUSE_MS = 250;
 
 const upstreamBackfillCommand = new Command("upstream-backfill").description(
-  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+  "Record which upstream snapshot each mirrored version came from (dry run unless --apply)",
 );
 
-upstreamBackfillCommand
-  .option("--execute", "Write the results; without it nothing is recorded")
+addApplyOption(upstreamBackfillCommand, "Write the results; without it nothing is recorded", [
+  "--execute",
+])
   .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
   .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
   .option("--max-batches <n>", "Stop after this many batches", "200")
   .option("--json", "Output one JSON summary instead of progress lines")
   .action(
     async (options: {
-      execute?: boolean;
+      apply?: boolean;
       limit?: string;
       after?: string;
       maxBatches?: string;
@@ -7779,11 +7780,12 @@ upstreamBackfillCommand
 
       const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
       const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
-      const execute = options.execute === true;
+      // The wire field is still `execute`; only the flag is `--apply` (ADR 0135 decision 4).
+      const execute = options.apply === true;
       const say = (line: string) => {
         if (!options.json) console.log(line);
       };
-      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --apply to record."));
       say(
         chalk.dim(
           "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
@@ -7904,7 +7906,7 @@ upstreamBackfillCommand
             ),
           );
         }
-        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+        if (!execute) console.log(chalk.yellow("Dry run, pass --apply to record."));
       }
 
       // Non-zero on any error, any failed batch, and any pass that did not finish, so a
