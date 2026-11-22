@@ -15,6 +15,141 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Community mail (epic #2260, ADR 0132)
+
+- **The unsubscribe link in a message now opens the website's page.**
+  `GET /mail/unsubscribe/<token>` (also under `/nemar/mail`) answers `303 See Other` to `https://app.nemar.org/unsubscribe/<token>` (`https://test.nemar.org/...` on staging) instead of the API's own confirmation page, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it still changes nothing by itself.
+  Only a link in the token format is forwarded, whether or not it still works (the website page says so); anything else answers 410 `link_invalid` with no redirect.
+  The redirect needs no mail-link secret, so it no longer answers 503 when that secret is unset; `GET .../info` and the one-click `POST` are unchanged.
+
+## 0.10.38 - 2026-11-21
+
+### Community mail (epic #2260, ADR 0132)
+
+- **Group mail now has four categories: `news`, `rfcs`, `maintenance` and `recall`.**
+  `news`, `rfcs` and `maintenance` are on by default and any account can turn each off; a recall (something NEMAR distributed or issued must stop being used, for privacy, integrity or security) is always on and has no switch.
+  `news` and `rfcs` reach `person` accounts at `verified` or `approved`, `maintenance` also reaches `service` accounts, and a recall also reaches `revoked` accounts, because a person whose access ended may still hold the recalled data.
+  `verified` accounts, who received no group mail before, now receive community mail unless they turn it off; that is the widest change here and it is deliberate.
+  Existing accounts keep what they had: whoever turned `announcements` off has all three categories off, and everyone else has all three on.
+- **Every community message carries a one-click unsubscribe.**
+  Each recipient's footer names the category, says why they receive it, and carries an unsubscribe link, a link to manage preferences and NEMAR's postal address; the message also carries the RFC 8058 headers `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, so a mail client's Unsubscribe button works without opening anything.
+  The link turns off only that message's category; its confirmation page (`GET /mail/unsubscribe/<token>`, which never changes anything by itself) has a second button that turns off all three.
+  The new public routes are `GET` and `POST /mail/unsubscribe/<token>` and `GET /mail/unsubscribe/<token>/info` (JSON for the website page), also under `/nemar/mail`; they need no sign-in, stay open in every maintenance mode, and answer 410 `link_invalid` for any link that no longer works.
+  A recall carries no unsubscribe link.
+- **`nemar auth mail` shows and changes your own mail categories, for any account, not only admins.**
+  `nemar auth mail` (or `nemar auth mail show`) lists them, and `nemar auth mail set <news|rfcs|maintenance> <on|off>` or `nemar auth mail set all off` changes them; the API is `GET` and `PUT /users/me/email-preferences`, which a `pending` account may also use.
+  Every change, from the CLI, the link or an admin, is recorded in the audit log.
+- **`nemar admin notify --to <group>` now requires `--category <news|rfcs|maintenance|recall>`.**
+  Recipients who turned the category off are skipped, including those who turn it off after the send is queued; group sends always go through the outbox.
+  An older CLI that sends a group mail without a category gets `category_required` and is told to upgrade.
+  `--user <username>` (direct contact) takes no category.
+- **A recall is owner only and needs `--recall-ref` and `--confirm-recall`.**
+  `--recall-ref` names what is recalled: a dataset id with an optional version (`nm000104@v1.2.0`, which must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL.
+  `--confirm-recall` must repeat the reference exactly (`--yes` does not replace it); the subject gets the `[NEMAR recall]` prefix and the body must have the headings "What is affected" and "What to do".
+  A recall sent with `--to all` that queued at least one email publishes a `critical` site notice naming the reference and subject, and a second send of the same reference within 24 hours reuses it; a send to `admins` or `members` (a canary) or one that queued nothing publishes none (`notice_skipped: canary` or `nothing_queued`). Clear the notice with `nemar admin notice clear <id>` when the recall is resolved.
+- **The same category, subject and group cannot go out twice within 24 hours unless `--allow-repeat` is given.**
+  The guard keys on the recipient group too, so a canary to `admins` does not block the send to `all`; subjects match after Unicode NFKC folding, trimming, collapsing any run of whitespace to one space and ignoring case, and a recall's subject is compared with its `[NEMAR recall]` prefix; `--dry-run` reports a send the guard would refuse, and a send that queued nothing does not count.
+- **A declined confirmation no longer goes ahead in `nemar admin notify` or `nemar admin notice clear`.**
+  The confirmation result was checked for truthiness, and a declined or cancelled answer is a non-empty string.
+- **`nemar admin email-preferences update` gains `--news`, `--rfcs` and `--maintenance`; `--announcements` is retired.**
+  `--announcements` now fails with a message naming the three new flags, and the backend refuses an older CLI that sends it (`announcements_retired`).
+  `--all` sets every switchable category and admin alert (recalls stay on).
+  With `--user`, the owner and any admin can show or change another account's community categories; another account's admin alerts stay the owner's.
+- **Migrations.**
+  0146 copies each live account's `announcements` value into `news`, `rfcs` and `maintenance` and writes one summary audit row; it keeps the stored `announcements` key so the previous Worker still reads it during the deploy, and a migration in the following release drops it. Do not roll back to the previous Worker once this one has run: it reads only `announcements`, so anyone who turned a category off here would get group mail again.
+  0147 adds `broadcast_emails.subject_key`, the normalized subject the 24-hour guard compares.
+- **New Worker secret `MAIL_LINK_SECRET`, required on dev and production before any categorized send.**
+  It signs the unsubscribe links: 32 characters or more (`openssl rand -hex 32`), a different value on dev (`--env dev`) and production, never a `[vars]` entry.
+  Unset or too short, a categorized send is refused before anything is queued (`mail_link_secret_unset`) and the unsubscribe routes answer 503 (`mail_links_unconfigured`); a recall carries no link and is not held back.
+  `MAIL_LINK_SECRET_PREVIOUS` is optional, the rotation slot: copy the old value there before rotating, or every link already in a mailbox stops working.
+- **Docs (nemarOrg/docs#130).**
+  New pages `policies/community-mail` (what each category is, the defaults and how to opt out) and `admin/operations/community-mail-sends` (the categorized-send and recall runbook), and the privacy policy describes the categories and the unsubscribe path.
+- **Not in this release:** the website's preferences and unsubscribe pages, the `nemar auth mail` docs page, and the monthly newsletter (#2267).
+- **Before the first categorized send after this release:** confirm the production API reports 0.10.38 (an older Worker drops `--category` and would send a plain announcement), and release the website (its Settings email card is what the footer's "Manage your email preferences" link opens).
+
+### Zarr conversion
+
+- **Zarr conversion pins biosigIO 1.2.14 (`>=1.2.14,<1.2.15`) and refuses a gapped EDF+D or BDF+D file.**
+  An EDF+D or BDF+D file whose data records have gaps used to convert with every sample after a gap placed too early on the time axis; biosigIO 1.2.14 refuses it (`discontinuous_recording`, biosigio#180) and the converter records it as a terminal data failure, with the gaps named in the failure's `detail`, never as a retry.
+  A +D file whose records are contiguous still converts and carries `edf_discontinuous_verified_contiguous` in the store's recording metadata.
+  A catalog scan found real gaps only in nm000456 v1.0.2 (102 files, 51 recordings).
+  `ZARR_ENGINE_VERSION` is not bumped (ADR 0033), so its published stores keep the shifted time axis until that dataset is requeued by itself.
+  The rebuild then publishes each gapped recording as a typed failure in place of its store, as long as at least one recording of the dataset converts, which holds for nm000456 (69 recordings, 51 gapped); a dataset whose every attempted recording is gapped keeps serving its old stores, because that run ends "all N conversion(s) failed; index left untouched".
+  Deploying the pin costs one skipped Hallu tick: the first tick after the merge still runs the old `hallu-zarr.sh`, which installs 1.2.14 and then refuses it at its old `<1.2.14` cap, and the next tick runs the new script; no queue row is touched.
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **`pr --from-ref` opens the integration pull request when the geometry adds nothing.**
+  When the collaborator's branch already holds the files the label track would write, and the other tracks skip, the apply used to be refused as "nothing to propose".
+  Now no geometry commit is made and no ownership file is written; `--bump-version` still applies (a "Set Version to X.Y.Z" commit only when the Version changes), the branch is pushed only if there is a new commit, and the pull request is opened or updated with a body that says the geometry adds no files and lists what each track decided.
+  A plain `pr` from `main` with nothing to add, and any errored track, still refuse.
+
+## 0.10.37 - 2026-11-21
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **The geometry pull request body shows the table cleaning.**
+  A `Table cleaning` section lists, per written electrodes file, the columns dropped, the column added, the cells set to n/a per column and the hemisphere values rewritten, so the owner merging the pull request (which mints a version DOI) sees what was not carried over from the authors' files; it is omitted when nothing was cleaned and cut with a count when long.
+  `pr` now refuses a mirror (`on` id) without `--bump-version`, pointing to the integration flow (`--from-ref <branch> --bump-version`), because the old "run `nemar dataset release`" step contradicts it.
+- **The geometry package reads renamed channels files.**
+  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
+  A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
+- **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
+  They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
+  Every written electrodes table now uses `n/a` for any missing value, puts `name`, `x`, `y`, `z`, `size` first, and keeps a column BIDS does not define only when the dataset's own `*_electrodes.json` defines it; other columns stay in the authors' file only.
+  The fetch now also checks out `*_electrodes.json` sidecars at every level; a row with a missing or repeated `name`, or a short or long row, is refused with a named reason (`electrodes-names`, `electrodes-rows`, `electrodes-columns`), and the report gains an optional `electrodes_cleaning` list of what each written table dropped, added or coerced.
+  The package version is 0.1.1.
+  Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
+- **`pr` computes from `main` when it is ahead of the release and records the paths.**
+  A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
+  A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
+- **`pr --from-ref <branch>` opens one integration pull request, and `--bump-version` sets the release version.**
+  The clone is of an existing branch (collaborator changes plus NEMAR's BIDS fixes), the geometry is one commit on top pushed to that branch (fast-forward only), and the pull request into `main` is opened or updated; the body lists the commits not on `main`.
+  `--bump-version` keeps a branch Version that is above `main`'s and every tag, otherwise sets the next patch above both (a byte-preserving edit of the `Version` value), so the central version check passes and merging tags the release without a separate `nemar dataset release`; a `CHANGES` entry ahead of it is reported, not refused.
+- **`pr` no longer sees CRLF blobs as modified.**
+  The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
+- **Release order, for operators (replaces step (d) of 0.10.36).**
+  A mirror's N.0.1 is one integration pull request: a branch from `main` that merges any collaborator branch and NEMAR's BIDS fixes, with the geometry added on top by `pr --from-ref <branch> --bump-version`.
+  Merging it into `main` tags the version (the central `run-pr-merge.yml`), and the tag push dispatches `run-version-doi.yml`, which mints the DOI; so never merge a collaborator pull request that changes `Version` on its own, and do not run `nemar dataset release` afterwards.
+  `run-pr-merge.yml` skips silently when the tag already exists, so a merge that leaves `Version` unchanged makes no release.
+  Merge 0.1.1 integration pull requests only after 0.10.37 is published (step (c) of 0.10.36 still applies): a re-pull runs the pipeline pinned to the released CLI, and a 0.10.36 checkout would regenerate the files as 0.1.0.
+  The nine open pipeline-0.1.0 pull requests (branch `nemar/ieeg-geometry-0.1.0`) are superseded: close each when its mirror's integration pull request opens.
+  Release a dataset with renamed channels only after nemarOrg/website#574 (merged to `staging`) reaches production, so the Brain panel pairs its channels.
+- **Central BIDS validation reads annexed content (nemarDatasets/.github#157).**
+  The check fetches the `git-annex` branch so the validator resolves annexed files over public remotes, and filters only errors on files it could not read; real errors that the old location-only filter hid (for example a missing `TaskName` on `on002799`) now show.
+
+## 0.10.36 - 2026-11-20
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
+  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
+  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
+  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **Re-pull planner version 2 to 3.**
+  A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
+  `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
+- **Release order, for operators.**
+  (a) Have the Worker on planner 3 before running the new CLI on a geometry dataset.
+  The Worker refuses another planner's plan on the automatic path (`auto-planner-version`).
+  A manual 0.10.36 CLI against a 0.10.35 Worker gets a 400 when it writes a new count: `invalid-body` at create, `field-invalid` on a transition.
+  The backend deploy and the npm publish run concurrently from `main`, so check the `version` in `/health` and `npm view nemar-cli version` before step (c).
+  (b) The central `nemarDatasets/.github` `run-upstream-repull.yml` carries the geometry step (applied 2026-11-20, nemarDatasets/.github#156).
+  It skips for a CLI tag that lacks `scripts/ieeg_geometry`.
+  (c) Merge geometry pull requests only after the CLI release carrying the package is published and the patch is live.
+  (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
+- **Rollback.** Roll the Worker and the CLI back together, never the Worker alone.
+  A 0.10.35 Worker stores and returns the new counts on records that already hold them.
+  It refuses with a 400 (`invalid-body` at create, `field-invalid` on a transition) any write that names `pipeline_owned`, `pipeline_failed` or `pipeline_attempts`, which a 0.10.36 CLI sends.
+  Records holding `pipeline_owned` were planned under planner 3, and 0.10.35 cannot execute or regenerate them: plan them again, or leave them until the roll forward.
+- **Zarr `--wipe` keeps `<id>/zarr/geometry/`.**
+  `generate_zarr.py --wipe` erases a dataset's Zarr prefix except the subject-surface display data the pipeline uploads there.
+- **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
+
+### Decisions
+
+- **ADR 0128: the Zarr serving copy is not an NWB container (#2218).** A decision record only; no behavior change.
+
 ### Staging
 
 - **Staging semantic search has the vector visibility filter on too (ADR 0126).**

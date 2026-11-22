@@ -395,6 +395,16 @@ export interface Bindings {
   // running job's launch spec), Tapis webhook address and observer token. Rotating it kills all of
   // them: drain running compute jobs first (compute-tokens.ts, ADR 0118 A5 amendment item 5).
 
+  // Unsubscribe links in community mail (epic #2260 phase 2, ADR 0132). HMAC keys, Worker secrets, a
+  // DIFFERENT value on dev and production (a production link presented to staging must fail). Unset or
+  // shorter than 32 characters, the public routes (`/mail/unsubscribe/*`) answer 503 and a categorized
+  // send must refuse (`mail_link_secret_unset`): no message goes out without a link that works.
+  // MAIL_LINK_SECRET_PREVIOUS is the rotation slot: while set, links signed under the old value still
+  // verify; the owner removes it once the old links need not work. Rotating without it ends every link
+  // in every mailbox at once. Never a [vars] entry.
+  MAIL_LINK_SECRET?: string;
+  MAIL_LINK_SECRET_PREVIOUS?: string;
+
   // Dataset pull-request review (ADR 0092). When PR_REVIEW_ENABLED is "1", a pull request opened
   // or updated against `main` of a dataset repository is reviewed by a model and the result is
   // published as a check-run and a pull-request comment. Default (unset) keeps the webhook

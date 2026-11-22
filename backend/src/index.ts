@@ -36,6 +36,7 @@ import { computeRoutes } from "./routes/compute";
 import { computeRunnerRoutes } from "./routes/compute-runners";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { mailRoutes } from "./routes/mail";
 import { mcpRoutes } from "./routes/mcp";
 import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
@@ -44,7 +45,7 @@ import { oidcDiscoveryRoutes } from "./routes/oidc-discovery";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
-import { userRoutes } from "./routes/users";
+import { userMailPreferenceRoutes, userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { accessReportsLogLine, runAccessReportCron } from "./services/access-attributes";
@@ -236,6 +237,9 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 // posts' images from the NEWS_MEDIA bucket. Admin writes are in
 // routes/admin/news.ts.
 api.route("/news", newsRoutes);
+// Unsubscribe links in community mail (epic #2260 phase 2): public, no session, the signed token is the
+// whole authority. Mounted with the rest of `api`, so it is also at /nemar/mail.
+api.route("/mail", mailRoutes);
 
 // The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
 // and artifacts the node's loader pulls, behind one shared bearer secret, each answer
@@ -283,6 +287,10 @@ api.route("/auth", authPrivateRoutes);
 // /oauth/authorize page server-side with its caller marker. 404 until OIDC_SECRET is set AND
 // HOST_PREFIXED_SESSION_COOKIE is "1" (routes/auth-oidc.ts).
 api.route("/auth", authOidcRoutes);
+// Self-service mail preferences (epic #2260 phase 4, ADR 0132). MUST stay above `/users`: that
+// router's authMiddleware refuses a pending account's session, and this one admits it
+// (routes/users.ts says why). Registered first, its handler answers before that middleware runs.
+api.route("/users/me/email-preferences", userMailPreferenceRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);

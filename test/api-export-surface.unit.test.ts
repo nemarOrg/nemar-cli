@@ -40,6 +40,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "completeSandbox",
     "createApiKey",
     "getCurrentUser",
+    "getMyEmailPreferences",
     "getSandboxStatus",
     "listApiKeys",
     "login",
@@ -57,6 +58,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "startOrcidCliLink",
     "suggestUsername",
     "unlinkOrcid",
+    "updateMyEmailPreferences",
     "updateProfile",
     "verifyEmailChange",
   ],
@@ -349,6 +351,8 @@ const POST_SPLIT_ADDITIONS = [
   "updateProfile", // #1266, ADR 0044: PATCH /auth/profile
   "verifyEmailChange", // #1266, ADR 0044: POST /auth/email/change/verify
   "requestUploadAccess", // #1253, epic #1250: POST /users/me/upload-access/request
+  "getMyEmailPreferences", // #2264, epic #2260, ADR 0132: GET /users/me/email-preferences
+  "updateMyEmailPreferences", // #2264, epic #2260, ADR 0132: PUT /users/me/email-preferences
   "recordingStatsSweep", // #1194, CLI wrapper for POST /admin/datasets/recording-stats-sweep
   "recordingStatsSweepReset", // #1194, CLI wrapper for the recording-stats sweep reset
   "signalDefaultsSweep", // #1194, CLI wrapper for POST /admin/datasets/signal-defaults-sweep

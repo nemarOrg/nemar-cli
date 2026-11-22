@@ -12,7 +12,7 @@ import { changedPaths, comparePlans, onlyNemarMoved } from "../src/lib/repull/ex
 
 function body(over: { main?: string; tree?: string; annex?: string; to?: string } = {}): PlanBody {
   return {
-    planner: 2,
+    planner: 3,
     dataset: "xx099999",
     upstream: { ds: "ds099999", from_tag: "1.0.0", to_tag: over.to ?? "1.1.0" },
     nemar: {

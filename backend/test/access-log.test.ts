@@ -40,6 +40,19 @@ describe("redactSecretPaths", () => {
     );
   });
 
+  test("the unsubscribe token is replaced, the route and its /info twin kept, at both mounts", () => {
+    const token = `v1.7.news.42.${"A".repeat(43)}`;
+    expect(redactSecretPaths(`<-- POST /mail/unsubscribe/${token}`)).toBe(
+      "<-- POST /mail/unsubscribe/[redacted]",
+    );
+    expect(redactSecretPaths(`--> GET /nemar/mail/unsubscribe/${token}/info 200 4ms`)).toBe(
+      "--> GET /nemar/mail/unsubscribe/[redacted]/info 200 4ms",
+    );
+    expect(redactSecretPaths(`<-- GET /mail/unsubscribe/${token}?x=1`)).toBe(
+      "<-- GET /mail/unsubscribe/[redacted]?x=1",
+    );
+  });
+
   test("every other line is returned exactly as it came", () => {
     for (const line of [
       "<-- GET /datasets",

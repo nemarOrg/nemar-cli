@@ -1,0 +1,35 @@
+name: iEEG geometry
+
+# The core library under scripts/ieeg_geometry is its own uv project, so it has its own workflow:
+# test.yml runs only on main, dev and the epic issue branches. Network-marked tests (full public
+# surfaces) are skipped here by the project's pytest default and run by hand.
+on:
+  pull_request:
+    branches: [epic/ieeg-geometry, dev]
+    paths:
+      - "scripts/ieeg_geometry/**"
+      - ".github/workflows/ieeg-geometry.yml"
+  push:
+    branches: [epic/ieeg-geometry, dev]
+    paths:
+      - "scripts/ieeg_geometry/**"
+      - ".github/workflows/ieeg-geometry.yml"
+
+jobs:
+  ieeg-geometry-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Lint, type check and test
+        working-directory: scripts/ieeg_geometry
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run ty check
+          uv run pytest -q

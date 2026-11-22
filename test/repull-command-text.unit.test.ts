@@ -13,6 +13,7 @@ import { confirmQuestion, repullCommand } from "../src/commands/admin-repull";
 import { releaseBody } from "../src/lib/repull/execute/pull-request";
 import type { ExecuteSummary } from "../src/lib/repull/execute/run";
 import { patchBody } from "../src/lib/repull/patch-turn";
+import { statusLines } from "../src/lib/repull/status";
 
 const SUMMARY: ExecuteSummary = {
   datasetId: "on004362",
@@ -219,5 +220,38 @@ describe("N.0.1's pull request body", () => {
     expect(body).toContain("Repull-Patch: corrections=1");
     expect(body).toContain("Nothing is scrubbed and nothing is copied");
     expect(body).not.toMatch(/sub-\d|\.json/);
+  });
+});
+
+describe("the status of a record whose pipeline regeneration failed", () => {
+  const row = {
+    id: 5,
+    dataset_id: "on004362",
+    status: "complete",
+    attempt: 1,
+    origin: "administrator",
+    upstream_ds: "ds004362",
+    from_tag: "1.0.0",
+    to_tag: "1.1.0",
+    from_version: "1.0.0",
+    to_version: "2.0.0",
+    plan_digest: `sha256:${"ab".repeat(32)}`,
+    planner: 1,
+    counts: { pipeline_owned: 2, pipeline_failed: 1, pipeline_attempts: 3 },
+    created_at: "2026-11-01 00:00:00",
+    updated_at: "2026-11-02 00:00:00",
+  } as unknown as Parameters<typeof statusLines>[0];
+
+  test("prints all three counts and a dedicated line", () => {
+    const text = statusLines(row, null).join("\n");
+    expect(text).toContain("Counts: pipeline_attempts=3, pipeline_failed=1, pipeline_owned=2");
+    expect(text).toContain(
+      "Pipeline: regeneration failed; N.0.1 has no pipeline files (attempts 3)",
+    );
+  });
+
+  test("no dedicated line when nothing failed", () => {
+    const ok = { ...row, counts: { pipeline_owned: 2 } };
+    expect(statusLines(ok, null).join("\n")).not.toContain("Pipeline:");
   });
 });

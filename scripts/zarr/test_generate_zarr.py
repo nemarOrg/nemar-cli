@@ -17952,6 +17952,326 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
         self.assert_refused(head_files, data, "so the file holds no whole frame")
 
 
+def write_edf_plus_with_onsets(
+    path: str, onsets: list[float], *, label: str = "D", bdf: bool = False
+) -> str:
+    """A tiny EDF+ (or BDF+) file whose data records start at `onsets` seconds,
+    laid out byte for byte from the EDF+ and BDF+ specifications (pyedflib will not
+    write EDF+D, and no writer spaces records out on purpose).
+
+    One 10 Hz channel, `EEG Ramp`, in 1 s records, plus the annotations signal
+    whose time-keeping annotation in every record gives that record's onset.
+    `label` is the byte after `EDF+` in the reserved field: `D` for discontinuous,
+    `C` for continuous, written as given, so a `D` file whose records happen to be
+    contiguous is a control. The ramp's value in microvolts is the TRUE time of the
+    sample, so a reader that closes a gap shows as a value that disagrees with its
+    position."""
+    rate, per_record, ann_samples = 10, 10, 40
+    width = 3 if bdf else 2
+    phys, dig = (("-1000", "1000"), ("-1000000", "1000000")) if bdf else (
+        ("-327.68", "327.67"), ("-32768", "32767")
+    )
+    scale = 1000 if bdf else 100
+
+    def field(text: str, size: int) -> bytes:
+        raw = text.encode("ascii")
+        assert len(raw) <= size, (text, size)
+        return raw.ljust(size, b" ")
+
+    n_signals, header_bytes = 2, 256 * 3
+    version = b"\xffBIOSEMI" if bdf else field("0", 8)
+    header = version + field("X X X X", 80) + field("Startdate 01-JAN-2020 X X X", 80)
+    header += field("01.01.20", 8) + field("12.00.00", 8) + field(str(header_bytes), 8)
+    header += field(("BDF+" if bdf else "EDF+") + label, 44) + field(str(len(onsets)), 8)
+    header += field("1", 8) + field(str(n_signals), 4)
+    signals = [
+        ("EEG Ramp", "", "uV", *phys, *dig, "", str(per_record), ""),
+        ("BDF Annotations" if bdf else "EDF Annotations", "", "", "-1", "1", *dig, "",
+         str(ann_samples), ""),
+    ]
+    for column, size in enumerate([16, 80, 8, 8, 8, 8, 8, 80, 8, 32]):
+        for sig in signals:
+            header += field(sig[column], size)
+    assert len(header) == header_bytes
+
+    body = b""
+    for onset in onsets:
+        digits = [round((onset + i / rate) * scale) for i in range(per_record)]
+        body += b"".join(d.to_bytes(width, "little", signed=True) for d in digits)
+        # The time-keeping TAL: `+<onset>` 0x14 0x14 0x00, padded with NULs.
+        tal = f"+{onset:g}".encode("ascii") + b"\x14\x14\x00"
+        body += tal.ljust(width * ann_samples, b"\x00")
+    with open(path, "wb") as fh:
+        fh.write(header + body)
+    return path
+
+
+class TestGappedEdfPlusDThroughConvertOne(ConvertOneKeepingStoreCase):
+    """An EDF+D or BDF+D file with a gap between its data records, through the
+    real `convert_one` on both exporters.
+
+    Before biosigIO 1.2.14 such a file converted, and every sample after a gap sat
+    earlier on the store's time axis than it was recorded while the annotations
+    kept their true times. 1.2.14 refuses it with `DiscontinuousRecordingError`
+    (`discontinuous_recording`, biosigio#180). The converter records that as a
+    terminal data failure, not an infrastructure failure to retry: the file's
+    bytes are what is wrong, and a retry reads the same bytes. The published
+    `detail` names the gaps. A +D file whose records are contiguous still
+    converts, and its store says it was verified (`edf_discontinuous_verified_
+    contiguous`).
+
+    The files are written by `write_edf_plus_with_onsets`, byte for byte, and read
+    by the real biosigIO. The streaming exporter is selected by lowering
+    `STREAM_EDF_MIN_BYTES`, which is path selection and not a substitute for any
+    logic."""
+
+    REQUIRES = ("zarr", "biosigio")
+    DIR = "sub-01/eeg"
+    VERIFIED = "edf_discontinuous_verified_contiguous"
+    PATHS: ClassVar[tuple[str, ...]] = ("in-memory", "streaming")
+
+    def write(self, onsets: list[float], *, label: str = "D", bdf: bool = False) -> tuple[str, set[str]]:
+        primary = f"{self.DIR}/sub-01_task-rest_eeg.{'bdf' if bdf else 'edf'}"
+        os.makedirs(os.path.join(self.repo, self.DIR), exist_ok=True)
+        write_edf_plus_with_onsets(os.path.join(self.repo, primary), onsets, label=label, bdf=bdf)
+        return primary, {primary}
+
+    def convert_on(self, path_name: str, primary: str, head_files: set[str]) -> dict:
+        """Convert the recording down one exporter, and check it was that one."""
+        StreamEdfThreshold.use(self, 1 if path_name == "streaming" else None)
+        shutil.rmtree(self.synced_dir, ignore_errors=True)
+        with StreamEdfThreshold.watching_writers() as writers:
+            result = self.convert(primary, head_files)
+        # A refusal in memory never reaches a writer; the streaming exporter is
+        # handed to `write_store` and refuses from inside it.
+        if path_name == "streaming":
+            self.assertEqual(writers, ["stream_to_zarr"], writers)
+        else:
+            self.assertNotIn("stream_to_zarr", writers)
+        return result
+
+    def test_a_gapped_edf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        # Records at 0, 1, 10, 11 s: one 8 s gap after the second record ends at 2 s.
+        primary, head_files = self.write([0, 1, 10, 11])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertNotIn("entry", result)
+                self.assertIn("1 gap or overlap", result["detail"])
+                self.assertIn("8 s at 2 s", result["detail"])
+                self.assertNotIn(self.repo, result["detail"])
+                self.assertFalse(result["subject_info_refused"])
+                # And no store reached the upload.
+                self.assertFalse(os.path.exists(self.synced_dir))
+
+    def test_a_gapped_bdf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        primary, head_files = self.write([0, 1, 10, 11], bdf=True)
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertIn("8 s at 2 s", result["detail"])
+
+    def test_the_gaps_are_published_while_they_fit_and_the_rest_are_counted(self):
+        # 31 records two seconds apart: thirty 1 s gaps, at 1 s, 3 s, ... 59 s.
+        primary, head_files = self.write([2.0 * i for i in range(31)])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                detail = result["detail"]
+                self.assertIn("30 gaps or overlaps", detail)
+                self.assertIn("1 s at 1 s, 1 s at 3 s", detail)
+                shown = detail.count(" s at ")
+                self.assertGreaterEqual(shown, 10)
+                self.assertTrue(detail.endswith(f", and {30 - shown} more"), detail)
+                self.assertLessEqual(len(detail), generate_zarr._DETAIL_MAX_CHARS)
+
+    def test_an_overlap_is_published_with_its_negative_length(self):
+        primary, head_files = self.write([0, 1, 1.5, 3])
+        result = self.convert_on("in-memory", primary, head_files)
+        self.assert_refused_as_data(result, "discontinuous_recording")
+        self.assertIn("2 gaps or overlaps", result["detail"])
+        self.assertIn("-0.5 s at 2 s", result["detail"])
+
+    def test_a_plus_d_file_with_contiguous_records_still_converts_and_says_it_was_verified(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="D")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                (group,) = result["entry"]["groups"]
+                self.assertEqual(group["n_samples"], 40)
+                self.assertIs(
+                    self.published_recording_metadata(result["entry"]).get(self.VERIFIED), True
+                )
+
+    def test_a_continuous_file_is_not_touched_by_the_rule(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="C")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertNotIn(
+                    self.VERIFIED, self.published_recording_metadata(result["entry"])
+                )
+
+    def test_a_run_of_only_gapped_recordings_is_deterministic(self):
+        # What `hallu-zarr.sh` turns into a terminal `data_failed`: no retry, no
+        # `retry_exhausted` after five rounds of reading the same bytes.
+        primary, head_files = self.write([0, 1, 10, 11])
+        result = self.convert_on("in-memory", primary, head_files)
+        entry = _failure_entry(result["primary"], result["code"], result["detail"])
+        self.assertEqual(entry["code"], "discontinuous_recording")
+        self.assertIn("gaps between its data records", entry["reason"])
+        self.assertNotIn(entry["code"], RETRYABLE_CODES)
+        self.assertNotIn(entry["code"], generate_zarr.STORAGE_STATE_CODES)
+        self.assertTrue(
+            generate_zarr.dataset_failure_is_deterministic([primary], [entry])
+        )
+
+
+class TestMainOverAGappedAndAGoodEdfPlusD(unittest.TestCase):
+    """`main()` over a dataset with one gapped EDF+D and one good EDF+D, with the
+    real exporter, the `aws` stand-in over local files and a local catalog (the
+    harness of `TestMainRetryPendingRound`). The run converts the good recording
+    and exits 0; the gapped one is a typed `discontinuous_recording` failure in the
+    published index. The callback's `deterministic` is True (every failure is a data
+    failure), which `hallu-zarr.sh` reads only for a run that converted nothing; this
+    run exits 0 and the dataset is done whatever it says
+    (`dataset_failure_is_deterministic`)."""
+
+    GOOD = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    GAPPED = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    _serve_catalog = TestMainRetryPendingRound._serve_catalog
+    _restore_env = staticmethod(TestMainRetryPendingRound._restore_env)
+    run_main = TestMainRetryPendingRound.run_main
+    published_index = TestMainRetryPendingRound.published_index
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        for sub in ("sub-01", "sub-02"):
+            os.makedirs(os.path.join(self.repo, sub, "eeg"))
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "gap fixture", "BIDSVersion": "1.8.0"}, fh)
+        # Records at 0, 1, 2, 3 s (contiguous) and at 0, 1, 10, 11 s (an 8 s gap).
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GOOD), [0, 1, 2, 3])
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GAPPED), [0, 1, 10, 11])
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+
+        self.row = {"dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"}
+        self.api = self._serve_catalog()
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    def test_the_good_recording_converts_and_the_gapped_one_is_a_typed_failure(self):
+        rc, log, callback = self.run_main()
+        self.assertEqual(rc, 0, log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.GOOD])
+        self.assertEqual([f["path"] for f in index["failures"]], [self.GAPPED])
+        (failure,) = index["failures"]
+        self.assertEqual(failure["code"], "discontinuous_recording")
+        self.assertIn("8 s at 2 s", failure["detail"])
+        self.assertEqual(index.get("pending", []), [])
+        # A partially successful run: ready, one data failure counted.
+        self.assertEqual(callback["status"], "ready")
+        self.assertEqual(callback["failure_count"], 1)
+        self.assertEqual(callback["data_failures"][0]["code"], "discontinuous_recording")
+        self.assertIs(callback["deterministic"], True)
+
+
+class TestDiscontinuityDetail(unittest.TestCase):
+    """`discontinuity_detail` and the `failure_verdict` rule that uses it, against
+    the real exception class: a malformed `.gaps` must publish biosigIO's own text
+    instead of crashing the worker's `except` branch."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from biosigio import DiscontinuousRecordingError
+            from biosigio.exceptions import TimeGap
+        except ImportError as exc:
+            raise unittest.SkipTest(f"biosigIO 1.2.14 unavailable: {exc}") from exc
+        cls.error = DiscontinuousRecordingError
+        cls.gap = TimeGap
+
+    def test_the_verdict_keeps_biosigios_code_and_publishes_the_gap_list(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0), self.gap(12.0, 1.5)], 1.0)
+        code, named = generate_zarr.failure_verdict(exc, "sub-01/eeg/x.edf", frozenset())
+        self.assertEqual(code, "discontinuous_recording")
+        self.assertEqual(
+            named,
+            "2 gaps or overlaps between EDF+D/BDF+D data records (length at start, in "
+            "seconds): 8 s at 2 s, 1.5 s at 12 s",
+        )
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+
+    def test_a_long_list_of_long_numbers_is_cut_where_it_stops_fitting_and_counted(self):
+        gaps = [self.gap(12345.678 + 1000.25 * i, 123.456) for i in range(12)]
+        exc = self.error("/scratch/x.edf", gaps, 1.0)
+        # The premise: biosigIO's own message, through `failure_detail`, is cut
+        # before it reaches the end of its ten gaps.
+        self.assertNotIn("and 2 more", generate_zarr.failure_detail(exc))
+        named = generate_zarr.discontinuity_detail(exc)
+        self.assertLessEqual(len(named), generate_zarr._DETAIL_MAX_CHARS)
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+        self.assertTrue(named.startswith("12 gaps or overlaps between EDF+D/BDF+D data records"))
+        self.assertIn("123.456 s at 12345.7 s, 123.456 s at 13345.9 s", named)
+        shown = named.count(" s at ")
+        self.assertGreater(shown, 5)
+        self.assertTrue(named.endswith(f", and {12 - shown} more"), named)
+
+    def test_a_malformed_gap_list_falls_back_to_the_exceptions_own_text(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0)], 1.0)
+        for bad in (None, [], "oops", [("a", "b")], [(1.0,)], [object()], 5):
+            with self.subTest(bad=bad):
+                exc.gaps = bad
+                code, named = generate_zarr.failure_verdict(exc, "x.edf", frozenset())
+                self.assertEqual((code, named), ("discontinuous_recording", None))
+                self.assertIn("DiscontinuousRecordingError", generate_zarr.failure_detail(exc))
+
+    def test_the_fallback_reason_is_biosigios_own_text(self):
+        from biosigio.exceptions import REASONS
+
+        self.assertEqual(
+            generate_zarr._FALLBACK_REASONS["discontinuous_recording"],
+            REASONS["discontinuous_recording"],
+        )
+
+
 class TestStreamedTruncatedFifThroughConvertOne(ConvertOneLocalCase):
     """A FIF cut short in its data, converted down the STREAMING path.
 
@@ -18214,7 +18534,7 @@ class TestSubjectInfoProblems(unittest.TestCase):
     writers that do or do not name the option. This tests the check itself:
     no conversion logic is replaced."""
 
-    def problems(self, installed="1.2.13", imported="1.2.13", strip=_strip_nothing, **writers):
+    def problems(self, installed="1.2.14", imported="1.2.14", strip=_strip_nothing, **writers):
         return generate_zarr.subject_info_problems(
             installed_version=installed, imported_version=imported,
             writers={**CAPABLE_WRITERS, **writers}, strip=strip,
@@ -18222,38 +18542,38 @@ class TestSubjectInfoProblems(unittest.TestCase):
 
     def test_a_capable_biosigio_passes(self):
         # "1.10.0" is the case a string comparison gets wrong: as strings it
-        # sorts below "1.2.13".
-        for version in ("1.2.13", "1.2.13.0", "1.2.13.post1", "1.2.13+local.1",
-                        "1.2.14", "1.3", "1.10.0", "2.0.0"):
+        # sorts below "1.2.14".
+        for version in ("1.2.14", "1.2.14.0", "1.2.14.post1", "1.2.14+local.1",
+                        "1.2.15", "1.3", "1.10.0", "2.0.0"):
             with self.subTest(version):
                 self.assertEqual(self.problems(version, version), [])
 
     def test_a_release_below_the_floor_is_refused(self):
-        for version in ("1.2.12", "1.2.12.post1", "1.2.11", "1.2.11.post1", "1.2.10",
-                        "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
+        for version in ("1.2.13", "1.2.13.post1", "1.2.12", "1.2.12.post1", "1.2.11",
+                        "1.2.11.post1", "1.2.10", "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
             with self.subTest(version):
                 problems = self.problems(version, version)
                 self.assertEqual(problems, [
-                    f"the installed biosigIO is {version}, below 1.2.13",
-                    f"the imported biosigIO is {version}, below 1.2.13",
+                    f"the installed biosigIO is {version}, below 1.2.14",
+                    f"the imported biosigIO is {version}, below 1.2.14",
                 ])
 
     def test_a_pre_release_or_unreadable_version_is_refused(self):
-        # `1.2.13rc1` sorts BELOW 1.2.13; read by its leading digits it would pass.
-        for version in ("1.2.13rc1", "1.2.13.dev0", "1.2.13a1", "1.2.14.dev0",
-                        "1.2.13.post1.dev0", "not-a-version", "", None):
+        # `1.2.14rc1` sorts BELOW 1.2.14; read by its leading digits it would pass.
+        for version in ("1.2.14rc1", "1.2.14.dev0", "1.2.14a1", "1.2.15.dev0",
+                        "1.2.14.post1.dev0", "not-a-version", "", None):
             with self.subTest(version):
                 self.assertEqual(len(self.problems(version, version)), 2)
 
     def test_an_import_older_than_the_installed_release_is_refused(self):
         # An older copy shadowing the installed one, or imported before an
-        # upgrade: the distribution says 1.2.13, the code that runs is 1.2.12.
-        self.assertEqual(self.problems("1.2.13", "1.2.12"),
-                         ["the imported biosigIO is 1.2.12, below 1.2.13"])
+        # upgrade: the distribution says 1.2.14, the code that runs is 1.2.13.
+        self.assertEqual(self.problems("1.2.14", "1.2.13"),
+                         ["the imported biosigIO is 1.2.13, below 1.2.14"])
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        self.assertEqual(self.problems("1.2.12", "1.2.13"),
-                         ["the installed biosigIO is 1.2.12, below 1.2.13"])
+        self.assertEqual(self.problems("1.2.13", "1.2.14"),
+                         ["the installed biosigIO is 1.2.13, below 1.2.14"])
 
     def test_every_writer_must_name_the_option(self):
         for name in generate_zarr.BIOSIGIO_STORE_WRITERS:
@@ -18280,7 +18600,7 @@ class TestSubjectInfoProblems(unittest.TestCase):
         self.assertFalse(generate_zarr.names_keyword(None, "exclude_subject_info"))
 
     def test_the_floor_is_the_pinned_release(self):
-        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 13))
+        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 14))
 
     def test_the_refusal_exit_is_ex_config(self):
         self.assertEqual(generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE, 78)
@@ -19125,6 +19445,73 @@ def mutating_aws_calls(calls: list[str]) -> list[str]:
     return out
 
 
+# An `aws` stand-in over a directory tree: keys are real nested paths under the root, and it
+# answers the calls a `--wipe` makes (probe, delimited listing, recursive removal with
+# `--exclude`) and the reads and writes around it. Every invocation is logged.
+STUB_AWS_TREE = r"""#!/usr/bin/env python3
+import fnmatch
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_S3_ROOT"]
+args = [a for a in sys.argv[1:] if not a.startswith("--cli-") and a != "--only-show-errors"]
+with open(os.environ["ZARR_TEST_S3_LOG"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def keys():
+    for base, _dirs, files in os.walk(ROOT):
+        for name in files:
+            yield os.path.relpath(os.path.join(base, name), ROOT)
+
+
+if args[:2] == ["s3api", "list-objects-v2"]:
+    prefix = opt("--prefix") or ""
+    found = sorted(k for k in keys() if k.startswith(prefix))
+    if opt("--delimiter"):
+        children = sorted({prefix + k[len(prefix):].split("/")[0] + "/"
+                           for k in found if "/" in k[len(prefix):]})
+        print("\t".join(children) if children else "None")
+    else:
+        print(found[0] if found else "None")
+    sys.exit(0)
+if args[:2] == ["s3", "rm"]:
+    url = args[2]
+    prefix = url.split("/", 3)[3]
+    excludes = [args[i + 1] for i, a in enumerate(args) if a == "--exclude"]
+    for k in list(keys()):
+        rel = k[len(prefix):]
+        if k.startswith(prefix) and not any(fnmatch.fnmatch(rel, e) for e in excludes):
+            os.remove(os.path.join(ROOT, k))
+    sys.exit(0)
+if args[:2] == ["s3", "cp"]:
+    src, dst = args[2], args[3]
+    if src.startswith("s3://"):
+        path = os.path.join(ROOT, src.split("/", 3)[3])
+        if not os.path.exists(path):
+            sys.stderr.write("NoSuchKey\n")
+            sys.exit(1)
+        if dst == "-":
+            sys.stdout.buffer.write(open(path, "rb").read())
+        else:
+            shutil.copyfile(path, dst)
+    else:
+        target = os.path.join(ROOT, dst.split("/", 3)[3])
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(src, target)
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\n")
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
 class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
     """`main` against a stand-in biosigIO, as a separate process so that
     `import biosigio` really resolves to it (PYTHONPATH, ahead of any installed
@@ -19179,7 +19566,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         git("add", "-A")
         git("commit", "-q", "-m", "init")
 
-    def standin(self, version: str = "1.2.13", dist_version: str | None = None,
+    def standin(self, version: str = "1.2.14", dist_version: str | None = None,
                 lacking: str | None = None, exporter_imports: bool = True,
                 mode: str = "read_nothing") -> str:
         """Write the stand-in package; `lacking` names the one writer that does
@@ -19279,21 +19666,21 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
 
     def test_a_release_below_the_floor_is_refused(self):
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.12"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.13"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.13, below 1.2.14")
 
     def test_a_stale_import_is_refused_although_the_installed_release_is_current(self):
-        # The distribution record says 1.2.13; the module imported says 1.2.12.
+        # The distribution record says 1.2.14; the module imported says 1.2.13.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.12", dist_version="1.2.13"), "--wipe")
-        self.assert_refused(rc, log, "the imported biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.13", dist_version="1.2.14"), "--wipe")
+        self.assert_refused(rc, log, "the imported biosigIO is 1.2.13, below 1.2.14")
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        # The other way round: the module says 1.2.13, but what the environment
-        # records as installed is 1.2.12.
+        # The other way round: the module says 1.2.14, but what the environment
+        # records as installed is 1.2.13.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.13", dist_version="1.2.12"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.14", dist_version="1.2.13"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.13, below 1.2.14")
 
     def test_a_biosigio_whose_exporter_cannot_be_imported_is_refused(self):
         # Fail closed: a check that cannot look must refuse, not wave through.
@@ -19318,6 +19705,72 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertEqual(body["pending_count"], 1)
         self.assertFalse(body["deterministic"])
         self.assertIs(body["provenance_fetch_failed"], True)
+
+    def _seed_tree(self) -> dict[str, bytes]:
+        """A serving prefix with stores, a loose key and the geometry/ prefix."""
+        keep = {
+            "on008083/zarr/geometry/index.json": b"{}",
+            "on008083/zarr/geometry/meshes/abc.mesh.bin": b"mesh",
+        }
+        gone = {
+            "on008083/zarr/loose.txt": b"x",
+            "on008083/zarr/sub-01/eeg/a.zarr/zarr.json": b"{}",
+            "on008083/zarr/sub-01/eeg/a.zarr/c/0": b"0",
+            "on008083/zarr/sub-02/eeg/b.zarr/zarr.json": b"{}",
+        }
+        # geometry-like names that are NOT the geometry/ prefix are wiped
+        gone["on008083/zarr/sub-01/geometry/lookalike.bin"] = b"x"
+        gone["on008083/zarr/geometry.txt"] = b"x"
+        for key, data in {**keep, **gone}.items():
+            target = os.path.join(self.s3, key)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(data)
+        self._gone = sorted(gone)
+        with open(os.path.join(self.dir, "bin", "aws"), "w") as fh:
+            fh.write(STUB_AWS_TREE)
+        return keep
+
+    def _remaining(self) -> list[str]:
+        return sorted(
+            os.path.relpath(os.path.join(base, name), self.s3)
+            for base, _dirs, files in os.walk(self.s3)
+            for name in files
+        )
+
+    def test_wipe_erases_the_serving_prefix_but_keeps_geometry(self):
+        self.commit(with_recording=True)
+        keep = self._seed_tree()
+        rc, log = self.run_main(self.standin(), "--wipe")
+        self.assertEqual(rc, 1, log)  # the stand-in cannot convert; the wipe came first
+        self.assertIn("--wipe: erasing s3://nemar-test/on008083/zarr/", log)
+        self.assertEqual(self._remaining(), sorted(keep))
+        for key, data in keep.items():
+            with open(os.path.join(self.s3, key), "rb") as fh:
+                self.assertEqual(fh.read(), data)
+
+    def test_rm_recursive_without_keep_still_erases_everything(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; g._rm_recursive('s3://nemar-test/on008083/zarr/')"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), [])
+        self.assertTrue(keep)
+
+    def test_rm_recursive_keep_skips_the_shard_and_excludes_it_from_the_sweep(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; "
+            "g._rm_recursive('s3://nemar-test/on008083/zarr/', keep=g.WIPE_KEEP)"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), sorted(keep))
+        rms = [c for c in self.aws_calls() if c.startswith("s3 rm")]
+        self.assertFalse(any(c.split()[2].endswith("/geometry/") for c in rms), rms)
+        self.assertIn("--exclude geometry/*", rms[-1])
 
     def test_a_run_whose_workers_refuse_every_store_exits_78(self):
         # Past the startup check: the writers name the option, but the store
