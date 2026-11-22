@@ -8469,7 +8469,7 @@ emailPrefsCommand
     },
   );
 
-adminCommand.addCommand(emailPrefsCommand);
+adminUsersCommand.addCommand(emailPrefsCommand);
 
 // ============================================================================
 // System Notices
