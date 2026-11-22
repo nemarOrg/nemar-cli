@@ -15,6 +15,32 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+## 0.10.39 - 2026-11-22
+
+Release with the website: the website's compute tab (admin decision notice) is already on website `staging`, and a suspension or ending without a notice is refused by this Worker, so promote website `staging` to `main` in the same hour as this release.
+
+### Compute for people and partners (epic #2116, ADR 0118 and 0119)
+
+Everything below is built and deployed dark in production: a person cannot ask for compute access until the owner publishes the compute terms (`COMPUTE_TERMS_PUBLISHED`), no job can be held or submitted while `COMPUTE_ENABLED` is off, and a partner needs an owner-registered sign-in client with `compute.reserve`.
+Staging runs all of it.
+
+- **A person can ask for compute access, and an admin decides.**
+  `nemar compute request-access` (and `POST /users/me/compute-access/request`) records a one-time request with a stated purpose; in production it answers 503 `terms_unpublished` until the terms are published.
+  `nemar admin compute access list|grant|deny|suspend|revoke` manages the states (`none`, `requested`, `active`, `suspended`, `denied`, `revoked`), and the person is mailed each decision.
+  Admins get the request in a new admin alert category, `compute_requests` (on by default; `--compute-requests` on `nemar admin email-preferences update`).
+  Ending an account, revoking its access or suspending compute ends the person's compute sign-in grants that carry a `compute.` scope; the tombstone sets `compute_access` to `revoked`.
+- **An institution on the account.**
+  `nemar auth profile set-affiliation <text>` sets it, and sign-up asks for it once the terms are published; the profile shows an `affiliation` gap and a `compute_access` block only then.
+- **Running jobs: `nemar compute ...`.**
+  `submit` runs a script, a folder or a container image; `list`, `status`, `logs`, `results` (list or download), `cancel`, `balance`, `limits` and `queue` read and manage your own jobs.
+  The API is `POST /compute/jobs`, `POST /compute/jobs/:id/finalize`, `POST /compute/jobs/:id/results/renew`, `GET /compute/me`, `/compute/me/usage`, `/compute/me/jobs`, `/compute/me/jobs/:id`, `/compute/stats`, `GET /compute/jobs/:id/logs` and `/compute/jobs/:id/results`; a sign-in access token with `compute.read`, `compute.stats` or `compute.reserve` is accepted on them.
+  CORS adds the request header `Idempotency-Key` and exposes `X-Nemar-Truncated` and `Idempotent-Replayed`.
+- **Partners reserve compute for their users.**
+  `POST /compute/holds` reserves, `POST /compute/jobs/:id/report` reports what a job used (any excess is charged to the partner's pool) and `DELETE /compute/holds/:id` releases; idempotency keys are stored.
+- **Two new production-only crons:** an upload that was never finished fails as `upload_expired` and releases its hold (ten jobs a tick), and an expired partner hold is reaped.
+- **Migrations 0131, 0132 and 0134** add the access columns on `users`, indexes, the idempotency-key table and the partner columns on `compute_jobs`.
+  They are numbered below migrations already applied in production (0140 to 0147) and apply on this deploy; all are additive.
+
 ### Compute access decisions
 
 - **A suspension or an ending of compute access now tells the person why.**
@@ -31,8 +57,10 @@ earlier releases are described only by their generated notes.
   `GET /mail/unsubscribe/<token>` (also under `/nemar/mail`) answers `303 See Other` to `https://app.nemar.org/unsubscribe/<token>` (`https://test.nemar.org/...` on staging) instead of the API's own confirmation page, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it still changes nothing by itself.
   Only a link in the token format is forwarded, whether or not it still works (the website page says so); anything else answers 410 `link_invalid` with no redirect.
   The redirect needs no mail-link secret, so it no longer answers 503 when that secret is unset; `GET .../info` and the one-click `POST` are unchanged.
+- **Migration 0148 removes the retired `announcements` key** from stored mail preferences.
+  Nothing has read it since 0.10.38; every account's `news`, `rfcs` and `maintenance` choices are unchanged.
 
-### Compute
+### Compute switch
 
 - **Turning compute off now stops new holds, not only submits (ADR 0118, amendment of 2026-11-22).**
   `createJob` refuses `compute_disabled` unless `COMPUTE_ENABLED` is on, after its pure argument validation and before it reads or writes anything of its own, so a person's `POST /compute/jobs` and a partner's `POST /compute/holds` answer `503 compute_disabled` with compute off and write no job, ledger entry or idempotency claim.
@@ -40,6 +68,11 @@ earlier releases are described only by their generated notes.
   Before this, either could take a hold that sat until the submit step refused it.
   A hold taken while compute was on is still settled, reaped or expired as before.
   The `compute_disabled` sentence is now "Compute is not available." (it was "Compute storage is not configured.", which was wrong when the switch is what is off); the code and the 503 status are unchanged.
+
+### Plans and records
+
+- ADR 0134 (proposed): pipeline checkpoints and plugins.
+- BIDS quality guidelines research under `.context/`, with generated quality tables.
 
 ## 0.10.38 - 2026-11-21
 
