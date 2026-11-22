@@ -20,13 +20,14 @@ The owner settled the main lines on 2026-11-21: `repo` becomes `dataset`, a `rew
 ## Decision
 
 1. **A top-level admin group names an object, and its children are verbs or sub-objects of it.**
-   The groups are `users`, `dataset` (alias `repo`), `rework`, `repull`, `import`, `fleet`, `maint`, `compute`, `oidc`, `pr-reviews`, `neurobagel`, `mail`, `notice`, `notify` and `docs`.
+   The groups are `users`, `dataset` (alias `repo`), `rework`, `repull`, `import`, `fleet`, `compute`, `oidc`, `pr-reviews`, `neurobagel`, `mail`, `notice`, `notify` and `docs`.
    A new command joins an existing group; a new top-level group needs a line in this ADR's index entry or a superseding ADR.
 2. **Depth is capped at three levels below `admin`** (`admin <group> <sub-group> <verb>`), which is today's deepest path.
    A group aims at no more than about twelve visible children; past that, a sub-group is made rather than a fourth level.
 3. **`rework` holds operations that change the content or history of a dataset that already exists:** revert, the annex repairs, content recovery, and later scrub, re-conversion and iEEG geometry.
    `repull` stays its own top-level group, because it mints a version DOI per merge and has its own switches (ADR 0111).
-   `maint` holds sweeps, backfills, checks and catalog rebuilds that cron runs and a person runs by hand rarely.
+   `fleet` holds what runs across all datasets or checks the platform without changing a dataset's content: governance, the derived-metadata sweeps, the summary and catalog checks and the end-to-end test.
+   There is no separate maintenance group.
 4. **`--apply` is the one flag that makes a dry-run-by-default command write.**
    `--execute`, `--write` and `--fix` stay accepted as hidden aliases of `--apply` on the commands that had them, so a script keeps working while its spelling is changed.
    A command that writes by default today keeps its default unless its own phase says otherwise; the flag name, not the default, is what this ADR unifies.
@@ -40,7 +41,7 @@ The owner settled the main lines on 2026-11-21: `repo` becomes `dataset`, a `rew
 
 ## Consequences
 
-- Plain `nemar admin --help` lists 15 groups instead of 51 commands; the "More commands" fold in `help-groups.ts` stops carrying most of the tree.
+- Plain `nemar admin --help` lists 14 groups instead of 51 commands; the "More commands" fold in `help-groups.ts` stops carrying most of the tree.
 - Every operator relearns paths once, and every script that names an old path breaks loudly on the first run after the release; the stub's one line is the migration guide.
 - A release that moves a command is cross-repository work: it cannot ship until the nemarDatasets workflows and the docs that name the path are ready to merge with it.
 - The stubs accumulate; removing one is a later decision with its own release note, not something this ADR schedules.

@@ -25,7 +25,7 @@ Measured by walking the Commander tree exported from `src/commands/admin.ts`
 
 ## Target tree
 
-Fifteen top-level groups, each named for an object (ADR 0135 decision 1).
+Fourteen top-level groups, each named for an object (ADR 0135 decision 1).
 Children are verbs or sub-objects; nothing goes deeper than three levels below `admin`.
 
 ```
@@ -44,8 +44,8 @@ admin
   repull           plan, execute, status, resume, merge, abandon, auto,
                    upstream-status, upstream-backfill
   import           openneuro, status, rollback, retry, verify, coverage, weekly, triage
-  fleet            drift, enforce, require-review, revalidate
-  maint            sweep {hed, recording-stats, signal-defaults, data-integrity,
+  fleet            drift, enforce, require-review, revalidate,
+                   sweep {hed, recording-stats, signal-defaults, data-integrity,
                           zarr-fidelity, anonymity, availability},
                    summary {check}, zarr-catalog {publish}, e2e-test
   compute          unchanged (policy, pool, status, observer, jobs, move-charge,
@@ -60,19 +60,23 @@ admin
 ```
 
 Counts after the move, with the owner's recommended answers below:
-15 visible top-level entries (from 51), 0 visible leaves directly under `admin` other than `notify` and `docs`, maximum depth still 3.
-The widest groups are `users` (13 children, two of them sub-groups), `dataset` (12) and `compute` (11, unchanged).
+14 visible top-level entries (from 51), 0 visible leaves directly under `admin` other than `notify` and `docs`, maximum depth still 3.
+The widest groups are `users` (13 children, two of them sub-groups), `dataset` (12), `compute` (11, unchanged) and `fleet` (8).
 `users` is one over the soft cap of twelve in ADR 0135 decision 2; retiring `backfill-names` (Q5) brings it to 12.
 
 Why these placements, where the choice was not obvious:
 
 - `dataset doctor`: every check but one is about a stuck dataset; the odd one, `doctor kinds`, checks accounts and goes to `users kind-check`.
 - `dataset s3 {lock, credential-check}`: both act on one dataset's bucket prefix; `s3 regenerate-iam` is dead (Q3), so the old `s3` group dissolves.
-- `dataset reindex`: refreshes one dataset's metadata (or all with `--all`); it is not a sweep of a derived column like the `maint sweep` family.
+- `dataset reindex`: refreshes one dataset's metadata (or all with `--all`); it is not a sweep of a derived column like the `fleet sweep` family.
 - `repull upstream-status` and `repull upstream-backfill`: both read or record the upstream snapshot a re-pull starts from; `upstream-backfill` retires once the fleet backfill has run (Q4).
 - `rework annex ...`: the owner put "annex repairs" in `rework`; the four annex commands share a sub-group so `rework` itself stays at three children plus the later ones.
-- `fleet` keeps only governance (drift, enforce, require-review, revalidate); its three annex repairs move to `rework annex`.
-- `maint sweep availability`: the per-dataset report and the `--all` drain are one command today; it is placed with the sweeps because its cron and `--all` form are the common use. Q7 offers `dataset availability` instead.
+- `fleet` is everything that runs across all datasets or checks the platform as a whole: governance (drift, enforce, require-review, revalidate), the sweeps that refresh or report derived metadata, the summary and Zarr catalog checks, and `e2e-test`.
+  None of it changes a dataset's content, which is what separates it from `rework`;
+  its three annex repairs do change content and move to `rework annex`.
+  There is no separate `maint` group (owner, 2026-11-22).
+  `e2e-test` sits here rather than under `dataset` because it checks the platform and `dataset` is already at the cap of twelve.
+- `fleet sweep availability`: the per-dataset report and the `--all` drain are one command today; it is placed with the sweeps because its cron and `--all` form are the common use.
 
 ## Old path to new path, every admin command
 
@@ -131,7 +135,7 @@ Group rows move with their children; a stub on a group path catches every child 
 | `restore` (hidden) | stub, repointed to `dataset restore` | P1 | leaf |
 | `annex-normalize` | `rework annex normalize` | P3 | leaf |
 | `import-openneuro` | `import openneuro` | P4 | leaf |
-| `e2e-test` | `maint e2e-test` | P5 | leaf |
+| `e2e-test` | `fleet e2e-test` | P5 | leaf |
 | `import` | `import` | unchanged | group |
 | `import status` | `import status` | unchanged | leaf |
 | `import rollback` | `import rollback` | unchanged | leaf |
@@ -152,15 +156,15 @@ Group rows move with their children; a stub on a group path catches every child 
 | `fleet key-registration` | `rework annex key-registration` | P3 | leaf |
 | `fleet content-recovery` | `rework annex content-recovery` | P3 | leaf |
 | `reindex` | `dataset reindex` | P1 | leaf |
-| `availability-report` | `maint sweep availability` | P5 | leaf |
-| `hed-sweep` | `maint sweep hed` | P5 | leaf |
-| `recording-stats-sweep` | `maint sweep recording-stats` | P5 | leaf |
-| `signal-defaults-sweep` | `maint sweep signal-defaults` | P5 | leaf |
-| `data-integrity-sweep` | `maint sweep data-integrity` | P5 | leaf |
-| `zarr-fidelity-sweep` | `maint sweep zarr-fidelity` | P5 | leaf |
+| `availability-report` | `fleet sweep availability` | P5 | leaf |
+| `hed-sweep` | `fleet sweep hed` | P5 | leaf |
+| `recording-stats-sweep` | `fleet sweep recording-stats` | P5 | leaf |
+| `signal-defaults-sweep` | `fleet sweep signal-defaults` | P5 | leaf |
+| `data-integrity-sweep` | `fleet sweep data-integrity` | P5 | leaf |
+| `zarr-fidelity-sweep` | `fleet sweep zarr-fidelity` | P5 | leaf |
 | `upstream-backfill` | `repull upstream-backfill` (retire after the fleet backfill, Q4) | P4 | leaf |
 | `upstream-status` | `repull upstream-status` | P4 | leaf |
-| `anonymity-sweep` | `maint sweep anonymity` | P5 | leaf |
+| `anonymity-sweep` | `fleet sweep anonymity` | P5 | leaf |
 | `doctor` | `dataset doctor` | P1 | group |
 | `doctor scan` | `dataset doctor scan` | P1 | leaf |
 | `doctor fix` | `dataset doctor fix` | P1 | leaf |
@@ -173,10 +177,10 @@ Group rows move with their children; a stub on a group path catches every child 
 | `notice set` | `notice set` | unchanged | leaf |
 | `notice clear` | `notice clear` | unchanged | leaf |
 | `notify` | `notify` | unchanged | leaf |
-| `summary` | `maint summary` | P5 | group |
-| `summary check` | `maint summary check` | P5 | leaf |
-| `zarr-catalog` | `maint zarr-catalog` | P5 | group |
-| `zarr-catalog publish` | `maint zarr-catalog publish` | P5 | leaf |
+| `summary` | `fleet summary` | P5 | group |
+| `summary check` | `fleet summary check` | P5 | leaf |
+| `zarr-catalog` | `fleet zarr-catalog` | P5 | group |
+| `zarr-catalog publish` | `fleet zarr-catalog publish` | P5 | leaf |
 | `backfill-names` | `users backfill-names` | P2 | leaf |
 | `import-issue-triage` | `import triage` | P4 | leaf |
 | `import-coverage` | `import coverage` | P4 | leaf |
@@ -298,8 +302,8 @@ The other spellings stay as hidden aliases on the commands that had them (Comman
 | `recover` (admin.ts:4893) | `--execute` | `rework recover --apply` (if kept, Q2) | P3 |
 | `upstream-backfill` (admin.ts:7902) | `--execute` | `repull upstream-backfill --apply` | P4 |
 | `neurobagel regenerate` (admin.ts:10618) | `--execute` | `neurobagel regenerate --apply` | P6 |
-| `availability-report` (admin.ts:7104) | `--write` | `maint sweep availability --apply` | P5 |
-| `summary check` (admin.ts:9250) | `--fix` (with `--yes`) | `maint summary check --apply` | P5 |
+| `availability-report` (admin.ts:7104) | `--write` | `fleet sweep availability --apply` | P5 |
+| `summary check` (admin.ts:9250) | `--fix` (with `--yes`) | `fleet summary check --apply` | P5 |
 | `fleet enforce`, `require-review`, `revalidate`; `fleet annex-policy`, `key-registration`, `content-recovery`; `backfill-names`, `backfill-usernames`; `import-issue-triage`, `import-coverage`, `import-weekly` | `--apply` | unchanged flag, new path where the table says | with the move |
 
 Commands that write by default and take `--dry-run` to preview are not flipped by this plan (ADR 0135 decision 4 unifies the flag name, not the default):
@@ -460,9 +464,9 @@ If phases are released one by one instead, these couplings are hard:
 - Acceptance: `test/onboard-workflow.test.ts` asserts the workflow calls only paths that exist in the current tree (walk the Commander tree for each `nemar admin ...` the YAML contains); `test/dataset-workflow-parity.test.ts` green.
 - Named tests: the P4 CLI tests above.
 
-### P5: `maint`
+### P5: sweeps and checks into `fleet`
 
-- The six `*-sweep` commands and `availability-report` become `maint sweep <name>`; `summary`, `zarr-catalog`, `e2e-test` move under `maint`.
+- The six `*-sweep` commands and `availability-report` become `fleet sweep <name>`; `summary`, `zarr-catalog`, `e2e-test` move under `fleet`.
 - `availability-report --write` and `summary check --fix` become `--apply`.
 - Update `.github/workflows/check-summary-drift.yml` text, AGENTS.md:50 and `.rules/datasets-and-fixtures.md` (`e2e-test`), `src/commands/dataset.ts:2097`.
 - Acceptance and tests: the P5 rows; `recording-signal-sweeps-cli`, `zarr-fidelity-sweep-cli`, `hed-sweep-cli`.
@@ -471,7 +475,7 @@ If phases are released one by one instead, these couplings are hard:
 
 - `neurobagel regenerate --execute` becomes `--apply`.
 - A tree test: no visible admin option is named `--execute`, `--write` or `--fix` (`test/admin-write-flag.unit.test.ts`, walking the tree); no visible top-level entry is a leaf other than `notify` and `docs`; no path is deeper than three below `admin`.
-- `help-groups.ts`: with 15 entries the admin fold may be dropped; update its comment and the 43 in `help.ts`.
+- `help-groups.ts`: with 14 entries the admin fold may be dropped; update its comment and the 43 in `help.ts`.
 - Regenerate docs.nemar.org `admin/commands.mdx`; edit the hand-written pages; release note listing every moved path.
 - Acceptance: the epic-to-`dev` full `bun test` and the live tier on staging; a staging walk-through of one import dispatch, one web-button approval and the summary-drift workflow.
 
@@ -501,8 +505,9 @@ Each with a recommendation; the first four came from the 2026-11-21 open items.
    *Recommendation:* retire `backfill-names` and change the approval hint; move `backfill-usernames` to `users backfill-usernames` and file the mail-retry side effect as its own issue (out of this epic).
 6. **Bulk writers that write by default.** Should `annex-normalize`, `reindex --all` and `doctor fix` become dry-run by default with `--apply`?
    *Recommendation:* yes for `annex-normalize` and `doctor fix` (they rewrite git history or dispatch repairs), no for `reindex` (idempotent, run by people and docs as a plain refresh). Do it in the same phase as the move, since the path already breaks there.
-7. **`maint` or `maintenance`?** `maintenance` is already two other things: the community mail category of ADR 0132 (`notify --category maintenance`) and maintenance mode (`MaintenanceError`, the maintenance banner).
-   *Recommendation:* `maint`, short to type and distinct from both; `availability-report` goes to `maint sweep availability` (the alternative is `dataset availability`).
+7. **`maint` or `maintenance`?** Resolved by the owner on 2026-11-22: neither.
+   There is no maintenance group; the sweeps, the summary and Zarr catalog checks and `e2e-test` fold into `fleet`, which avoids a third meaning for "maintenance" (the ADR 0132 mail category and maintenance mode).
+   `availability-report` goes to `fleet sweep availability`.
 8. **One release or one per phase?**
    *Recommendation:* one release for the whole epic, announced in advance through a CLI notice (`admin notice set`) a week before, so the break is a single event.
 9. **How long do stubs live?**
