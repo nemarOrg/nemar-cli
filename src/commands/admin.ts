@@ -244,6 +244,7 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { registerMovedCommands } from "../lib/moved-commands.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -4085,24 +4086,8 @@ repoCommand
     },
   );
 
-// The old top-level spellings moved under `admin repo`. They stay as hidden
-// commands that do nothing and exit nonzero, so a script that still calls them
-// fails loudly instead of silently running a different command.
-for (const [name, replacement] of [
-  ["publish", "nemar admin repo publish"],
-  ["withdraw", "nemar admin repo withdraw"],
-  ["restore", "nemar admin repo restore"],
-] as const) {
-  adminCommand
-    .command(name, { hidden: true })
-    .allowUnknownOption()
-    .allowExcessArguments()
-    .action(() => {
-      console.error(chalk.red(`'nemar admin ${name}' moved to '${replacement}'. Nothing was run.`));
-      markReportedExit();
-      process.exit(1);
-    });
-}
+// The old top-level spellings of the lifecycle commands are stubs in the moved-command
+// table (src/lib/moved-commands.ts), registered at the end of this file.
 
 // ============================================================================
 // Import OpenNeuro
@@ -10849,3 +10834,7 @@ adminCommand.addCommand(repullCommand);
 adminCommand.addCommand(oidcCommand);
 adminCommand.addCommand(mailCommand);
 adminCommand.addCommand(computeCommand);
+
+// Last, so every live command is registered before the moved-command stubs are checked
+// against the tree (ADR 0135 decision 5).
+registerMovedCommands(adminCommand);
