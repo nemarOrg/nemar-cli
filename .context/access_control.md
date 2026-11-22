@@ -164,7 +164,7 @@ s3://nemar/ (Your bucket, you own it)
    - Verify: Email confirmation
    - Wait: Admin approval
 
-2. Admin approves (nemar admin approve username)
+2. Admin approves (nemar admin users approve username)
    - Backend generates NEMAR API token
    - User's GitHub username is stored
    - User is now active
@@ -216,8 +216,8 @@ s3://nemar/ (Your bucket, you own it)
 ### What Admin Can Do
 ```
 - nemar admin users --pending   # See pending approvals
-- nemar admin approve <user>    # Approve user
-- nemar admin revoke <user>     # Revoke all access instantly
+- nemar admin users approve <user>  # Approve user
+- nemar admin users revoke <user>   # Revoke all access instantly
 - nemar admin dataset doi create <id>   # Create concept DOI
 ```
 
@@ -231,7 +231,7 @@ s3://nemar/ (Your bucket, you own it)
 3. Admin can restore: `aws s3api delete-object --bucket nemar --key nm000XXX/file.edf --version-id DELETE_MARKER_ID`
 
 ### User Account Compromised
-1. Admin runs: `nemar admin revoke username`
+1. Admin runs: `nemar admin users revoke username`
 2. Backend immediately:
    - Invalidates API token
    - Removes GitHub collaborator access from all repos
