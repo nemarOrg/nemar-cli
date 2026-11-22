@@ -53,6 +53,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "exemplar create", newPath: "dataset exemplar create" },
   { oldPath: "exemplar status", newPath: "dataset exemplar status" },
   { oldPath: "exemplar remint-dois", newPath: "dataset exemplar remint-dois" },
+  { oldPath: "doctor scan", newPath: "dataset doctor scan" },
+  { oldPath: "doctor fix", newPath: "dataset doctor fix" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */

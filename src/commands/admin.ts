@@ -8140,8 +8140,14 @@ adminCommand.addCommand(anonymitySweepCommand);
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
-const doctorCommand = new Command("doctor").description(
+// `admin dataset doctor` holds the dataset checks; the top-level `admin doctor` keeps only `kinds`,
+// an account check, until it moves to `admin users kind-check` (ADR 0135, phase P2).
+const datasetDoctorCommand = new Command("doctor").description(
   "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
+);
+
+const doctorCommand = new Command("doctor").description(
+  "Check operational account kinds (the dataset checks are 'admin dataset doctor')",
 );
 
 function printScanResults(res: DoctorScanResponse): number {
@@ -8157,7 +8163,7 @@ function printScanResults(res: DoctorScanResponse): number {
   return total;
 }
 
-doctorCommand
+datasetDoctorCommand
   .command("scan")
   .description("Run diagnostic checks (read-only)")
   .argument("[dataset-id]", "Narrow the scan to one dataset")
@@ -8190,7 +8196,7 @@ doctorCommand
     }
   });
 
-doctorCommand
+datasetDoctorCommand
   .command("fix")
   .description("Apply a check's remediation (writes; use --dry-run first)")
   .argument("<check>", "Check name (see: nemar admin doctor scan)")
@@ -8401,6 +8407,7 @@ doctorCommand
   });
 
 adminCommand.addCommand(doctorCommand);
+datasetGroupCommand.addCommand(datasetDoctorCommand);
 
 // ============================================================================
 // Email Notification Preferences
