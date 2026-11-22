@@ -70,13 +70,14 @@ function isLauncherCallback(method: string, path: string): boolean {
 const READ_ONLY_OIDC_READS = new Set(["/oauth/userinfo", "/oauth/introspect"]);
 
 /**
- * The public unsubscribe routes (epic #2260 phase 2), open in EVERY mode, `read-only` and `full` alike,
- * at both mounts: opting out of mail is never blocked by maintenance, because a person who cannot stop
- * the mail reports it as spam, and a mailbox provider's one-click POST that is refused is retried or
- * dropped. By exact shape only, so nothing else under `/mail` rides along: the page and its one POST at
- * `/mail/unsubscribe/<token>` (GET, HEAD, POST) and the JSON read at `/mail/unsubscribe/<token>/info`
- * (GET, HEAD only). Every other method or path is under the mode like any other route. The routes need
- * the database, so a D1 outage still answers an error; this middleware is not what refuses them.
+ * The public unsubscribe routes (epic #2260 phase 2), open in EVERY mode, `read-only` and `full`
+ * alike, at both mounts: opting out of mail is never blocked by maintenance, because a person who
+ * cannot stop the mail reports it as spam, and a mailbox provider's one-click POST that is refused
+ * is retried or dropped. By exact shape only, so nothing else under `/mail` rides along: the
+ * redirect and its one POST at `/mail/unsubscribe/<token>` (GET, HEAD, POST) and the JSON read at
+ * `/mail/unsubscribe/<token>/info` (GET, HEAD only). Every other method or path is under the mode
+ * like any other route. The routes need the database, so a D1 outage still answers an error; this
+ * middleware is not what refuses them.
  */
 const UNSUBSCRIBE_PAGE_RE = /^\/(?:nemar\/)?mail\/unsubscribe\/[^/]+$/;
 const UNSUBSCRIBE_INFO_RE = /^\/(?:nemar\/)?mail\/unsubscribe\/[^/]+\/info$/;
