@@ -22,6 +22,13 @@ earlier releases are described only by their generated notes.
   Only a link in the token format is forwarded, whether or not it still works (the website page says so); anything else answers 410 `link_invalid` with no redirect.
   The redirect needs no mail-link secret, so it no longer answers 503 when that secret is unset; `GET .../info` and the one-click `POST` are unchanged.
 
+### Compute
+
+- **Turning compute off now stops new holds, not only submits (ADR 0118, amendment of 2026-11-22).**
+  `createJob` refuses `compute_disabled` unless `COMPUTE_ENABLED` is on, before it reads or writes anything, so a person's `POST /compute/jobs` and a partner's `POST /compute/holds` answer `503 compute_disabled` with compute off and write no job, ledger entry or idempotency claim.
+  Before this, either could take a hold that sat until the submit step refused it.
+  A hold taken while compute was on is still settled, reaped or expired as before.
+
 ## 0.10.38 - 2026-11-21
 
 ### Community mail (epic #2260, ADR 0132)

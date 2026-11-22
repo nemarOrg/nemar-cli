@@ -252,7 +252,7 @@ What the build settled, each a rule and not a description of today:
    Links are 7-day presigned GETs of a finished job's declared outputs, for the owner only, at most 1,000 at a time (an optional `after` cursor in the request body pages through the rest, and a cursor that is not an output path is `invalid_spec`), renewable while a head finds the objects and `results_expired` once it does not; the mail links to the job's page and never to a file.
    A log is copied up to 5 MiB and the copy records that it was cut; a log that could not be read for any reason but not existing leaves the whole copy owed, so it is never stamped done without it.
 10. **Every compute cron is production only.**
-    `runComputeAdvanceCron` (ten live rows a tick in rotation, the unreported mark after a day without a good read, the nonce clear, the repairs) and `sweepComputeCancellations` ride the 30-minute tick's production block, are absent from `DEV_CRON_ALLOWLIST`, refuse outside exact production on their own and read no switch; the switch is read only where a job is submitted.
+    `runComputeAdvanceCron` (ten live rows a tick in rotation, the unreported mark after a day without a good read, the nonce clear, the repairs) and `sweepComputeCancellations` ride the 30-minute tick's production block, are absent from `DEV_CRON_ALLOWLIST`, refuse outside exact production on their own and read no switch; the switch is read where a job is created (its hold, `createJob`) and where it is submitted **[amended 2026-11-22: it was read only where a job is submitted, so a person's or a partner's hold could be taken with compute off; see the amendment of 2026-11-22]**.
     The rotation is by EXAMINATION and not by success: each row a tick takes is stamped `examined_at` before its step runs, so a row that cannot make progress goes to the back of the line and never holds a slot for good; the live rows Tapis has accepted and the `created` rows each have their own quota of ten, and so do the terminal rows owed a settlement and those owed a copy, so no kind of row can starve another.
 11. **Read-only maintenance mode lets a running job finish.**
     The three launcher callbacks (`POST /compute/jobs/<job id>/bundle`, `/outputs` and `/outputs/complete`) stay open in `read-only` mode by an exact pattern, for POST and a well-formed job id only: a job already on a cluster has nowhere to hold its results, and a launcher refused there would fail a job that did nothing wrong.
@@ -801,6 +801,7 @@ Migration `0131_compute_access.sql`, `shared/compute-access-state.ts`, `shared/c
    Two changes keep the backstop from doing the release's job: `CREATED_ROWS_SQL` no longer lists an `uploading` row with unwritten records, and `submitComputeJob` refuses such a row as `records_not_written` however old it is. A finalized job past the reservation wait (counted from the finalize) fails `submit_timeout` as any job does.
    While compute is off, and while uploads are abandoned, held units occupy the shared `people` budget pool until the window or the wait ends (an hour for an abandoned upload, the reservation wait for a finalized job that cannot be sent); the occupation is bounded by the per-person live-job limit and the per-job ceilings, and is released with no charge.
 8. **The compute switch is not read here.**
+   **[Superseded for the hold by the amendment of 2026-11-22: `createJob` refuses `compute_disabled` with compute off, so no hold is taken and nothing is written; the log, results, finalize and cancel still work with compute off.]**
    Only `submitLeased` reads it (`compute-source-scan.test.ts` holds that). A submission made with compute off takes its hold, answers `201` (`uploading`, or `created` for an image job), and waits; past the reservation wait the backstop fails it `submit_timeout` with the hold released. The log, results, finalize and cancel work with compute off. A test runs each.
 9. **The words.**
    New refusal words and statuses (`COMPUTE_REFUSAL_STATUS`): `version_not_found` 404, `version_untagged` 422, `too_many_files` 422, `entry_not_in_bundle` 422, `bundle_incomplete` 409, `idempotency_conflict` 422, `logs_not_available` 404, `upload_expired` 409, `storage_unavailable` 503 (storage or Tapis could not be reached just now). `version_not_found`, `version_untagged` and `too_many_files` moved from the pipelines' own list to the shared one, with the same statuses.
@@ -939,6 +940,7 @@ Only the bound Tapis uuid and NEMAR's own read of that job prove what ran.
     `TerminalPlan.releaseReason` lets the reaper's release carry the ledger reason `expired`.
     The new cancel reasons are `partner_release` and `hold_expired`, the new ledger reason `charge_moved`.
 14. **The compute switch is not read here** (`compute-source-scan.test.ts` holds it): with compute off the routes work, a hold is taken and the reaper expires it, as for a person's submission.
+    **[Superseded for the hold by the amendment of 2026-11-22: `POST /compute/holds` is refused `compute_disabled` with compute off, because `createJob` reads the switch; the other routes still work.]**
     The three routes are writes, so `read-only` maintenance refuses them (503) like any write; the crons, the reaper included, do not read the maintenance mode.
 15. **Deviations from the phase issue, recorded.**
     The issue's states say `held`: the real word is `created`, and `partner_state` says where the verification is.
@@ -1236,3 +1238,13 @@ It changes no code, no switch, no wrangler file and no version.
    The first production runner cap stays the code default (`RUNNERS_POLICY_DEFAULT`) until a second release that carries the epic is deployed, and only then is a cap stored as `policy.runners`; the owner chose that over lowering the code default.
 8. **Eligibility has a second, non-production text.**
    Eligibility stays one predicate written once as a list of terms (item 5 of the amendment of 2026-11-05 (#2011, phase A6)), and step S1 of the portable compute plan (#2164) added a second, non-production text of it (`PIPELINE_ELIGIBLE_SQL_NONPROD`) that admits the compute fixture `nm099996` outside production only; production's text is unchanged, and an `ENVIRONMENT` that is unset or misspelled behaves as production.
+
+## Amendment 2026-11-22: the compute switch stops new holds
+
+Item 10 of the A5 amendment said the switch is read only where a job is submitted, and item 11 says that turning it off "stops new holds and submits".
+The third-party branch (#2116) made those disagree: the person's `POST /compute/jobs` and the partner's `POST /compute/holds` take a hold through `createJob`, which did not read the switch.
+With `COMPUTE_ENABLED` absent, a person granted compute access, or a registered partner, could still take a hold that sat until the submit step refused.
+`createJob` now refuses `compute_disabled` unless `computeEnabled(env)`, before it reads or writes anything, for every source (a person, a partner, a pipeline, a runner job) and for a replay of an idempotency key, so the switch is read where a job is created and where it is submitted, and turning it off stops new holds as item 11 says.
+The routes answer it as they already answered `compute_disabled` (503, the shared sentence), and `compute-source-scan.test.ts` names `createJob` among the switch's readers.
+Nothing that moves an existing job reads it: a job held before compute was turned off is still settled, reaped or expired as before, and only its submit waits for the switch.
+No switch, no wrangler file and no version changes.
