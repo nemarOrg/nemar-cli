@@ -433,13 +433,13 @@ It widens rules 4 and 14 by exactly three WRITE paths: every other route of the 
 3. **The client is the token's, and a reservation is the person's and the client's.**
    A job that is another person's, another client's, not a partner's or absent is the same 404 `job_not_found`.
    A client's caps are the owner's policy (`clients`), with the client's own record as a second ceiling; a client the policy does not list can make no reservation (ADR 0118, the amendment of this phase, item 4).
-4. **The refusal words** are a closed list, `COMPUTE_PARTNER_ERROR_STATUS` in `shared/contract/compute-partner.ts`, each answered as `{ error, code }` (with `field` for `invalid_spec`, `mismatch` and `job_id` for `report_mismatch`), `Cache-Control: no-store`:
+4. **The refusal words** are a closed list, and `COMPUTE_PARTNER_ERROR_STATUS` in `shared/contract/compute-partner.ts` is authoritative: the list below summarizes it, and where the two differ the table wins. Each word is answered as `{ error, code }` (with `field` for `invalid_spec`, `mismatch` and `job_id` for `report_mismatch`), `Cache-Control: no-store`:
    - the credential: `missing_credential` 401, `invalid_token` 401, `forbidden_credential` 403, `insufficient_scope` 403, `wrong_audience` 403;
    - the request: `idempotency_key_required` 400, `invalid_spec` 400, `idempotency_conflict` 422;
-   - the person and the balances: `no_compute_access` 403, `suspended` 403, `partition_not_offered` 422, `over_job_limit` 422, `over_concurrency` 409, `insufficient_balance` 409, `platform_budget_exhausted` 409, `client_cap_reached` 409;
-   - the reservation: `job_not_found` 404, `already_bound` 409, `tapis_job_in_use` 409, `tapis_job_not_found` 422, `hold_released` 409, `hold_cancelled` 409, `hold_bound` 409, `report_mismatch` 409 (with `mismatch`: `owner_mismatch`, `app_mismatch` or `resources_mismatch`);
+   - the person and the balances: `no_compute_access` 403, `suspended` 403, `partition_not_offered` 422, `over_job_limit` 422, `over_concurrency` 409, `insufficient_balance` 409, `platform_budget_exhausted` 409, `client_cap_reached` 409, then NEMAR's tenant-wide ceiling, `platform_busy` 409 (ADR 0118, the P2 amendment of 2026-11-10);
+   - the reservation: `job_not_found` 404, `already_bound` 409, `tapis_job_in_use` 409, `tapis_job_not_found` 422, `tapis_job_unreadable` 422, `hold_released` 409, `hold_cancelled` 409, `hold_bound` 409, `report_mismatch` 409 (with `mismatch`: `owner_mismatch`, `app_mismatch`, `resources_mismatch` or `unverifiable`);
    - the files: `bundle_too_many_files` 413, `bundle_too_large` 413;
-   - the platform: `compute_disabled` 503, `policy_unavailable` 503, `storage_unavailable` 503.
+   - the platform: `partner_not_enabled` 503, `compute_disabled` 503, `policy_unavailable` 503, `storage_unavailable` 503.
 5. **The partner's side of rule 11.**
    The Tapis username of a person's compute credential is the `sub` itself (the identity transform); NEMAR compares the Tapis job's owner with it exactly.
    The partner may apply a fixed reversible transform once it names one, and `tapisUsernameForSub` (`compute-report-verify.ts`) is the one function that learns it.
