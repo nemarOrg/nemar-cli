@@ -139,7 +139,8 @@ describe("failWith", () => {
     const e = apiError(422, "name missing");
     e.blockReason = "owner_name_missing";
     const got = capture((spinner) => failWith(e, spinner, "Failed", { 422: "fix the CI issues" }));
-    expect(got.out).toContain("backfill-names");
+    expect(got.out).toContain("Settings on nemar.org");
+    expect(got.out).not.toContain("backfill-names");
     expect(got.out).not.toContain("fix the CI issues");
   });
 

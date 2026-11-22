@@ -363,7 +363,7 @@ export type AdminUsersListResponse = z.infer<typeof adminUsersListResponseSchema
  *                            invents an identity the person never chose
  *                            (ADR 0042), so these are listed for a human.
  *   no_name                  neither part, and no ORCID record to read one
- *                            from. Run `nemar admin backfill-names` first.
+ *                            from. The person adds a name (ORCID or Settings) first.
  *   lookup_failed            transient: the ORCID read failed. Retry the batch.
  *   conflict                 the suggested username was claimed between the
  *                            scan and the write. Retry picks the next suffix.

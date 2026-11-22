@@ -9950,7 +9950,7 @@ adminCommand.addCommand(importWeeklyCommand);
 // name (first initial plus family name) and, for a row it finishes, sends the
 // one verify-your-email message that lets the person sign in and use it.
 //
-// Run `nemar admin backfill-names` FIRST: this reads the names that one fills.
+// It reads the account's researcher name; an account with none is reported, never guessed at.
 // ============================================================================
 
 const backfillUsernamesCommand = new Command("backfill-usernames").description(
@@ -10048,7 +10048,7 @@ backfillUsernamesCommand
         );
       } else if (r.outcome === "no_name") {
         console.log(
-          `  ${chalk.yellow("no name   ")} ${who}: run 'nemar admin backfill-names --apply' first`,
+          `  ${chalk.yellow("no name   ")} ${who}: no name on record; the person makes it public on ORCID or types it into Settings first`,
         );
       } else if (r.outcome === "conflict") {
         console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);

@@ -1239,13 +1239,13 @@ export async function enrichDataset(
       // README/dataset_description webhook and from `nemar admin dataset reindex
       // --bulk`, and it rebuilds the DataCite document from live DB state.
       // For a published dataset whose owner has no researcher name on file
-      // -- most of the catalogue until `nemar admin backfill-names --apply`
-      // has been run -- the rebuilt document has NO DataCurator, and pushing
+      // -- once most of the catalogue, before the since-retired `nemar admin backfill-names`
+      // ran -- the rebuilt document has NO DataCurator, and pushing
       // it would delete the curator from a permanent record while logging
       // success. Skipping leaves the existing record intact; the metadata
       // this run would have refreshed is re-synced by the next enrichment
       // after the name lands.
-      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Run \`nemar admin backfill-names --apply\`, then re-run enrichment.`;
+      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Once the owner's name is on file (made public on ORCID and a fresh sign-in, or typed into Settings on nemar.org), re-run enrichment.`;
       console.error(`[llm-enrich] ATTRIBUTION SKIP ${message}`);
       doiSyncOutcome = { status: "skipped", reason: OWNER_NAME_MISSING_REASON, message };
     } else if (dataset.concept_doi) {

@@ -31,7 +31,7 @@ import { plain } from "./terminal-text.js";
  */
 export const BLOCK_REASON_HINTS: Record<string, string> = {
   owner_name_missing:
-    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; an ORCID-linked owner must otherwise make it public on ORCID and sign in again, and an owner with no linked ORCID can now type it into Settings on nemar.org (ADR 0042).",
+    "The owner has no researcher name on file. An ORCID-linked owner must make their name public on ORCID and sign in again; an owner with no linked ORCID can type it into Settings on nemar.org (ADR 0042).",
 };
 
 /** A line sink: standard error under `--json`, standard output otherwise. */

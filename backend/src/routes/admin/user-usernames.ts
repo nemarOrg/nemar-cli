@@ -254,7 +254,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       if (!base) {
         // Two different facts, kept apart because they ask different things of
         // the operator: a one-part name needs a human to pick a handle, no
-        // name at all needs `nemar admin backfill-names` first. NEITHER is
+        // name at all needs the person to add one (ORCID or Settings) first. NEITHER is
         // guessed at from the email local part (ADR 0042) -- the production
         // data has 3 single-name rows, and inventing `jsmith` for someone
         // recorded as "Prince" is a handle they never chose.
