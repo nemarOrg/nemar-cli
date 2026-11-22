@@ -970,6 +970,32 @@ describe("the notice to the person", () => {
     }
   });
 
+  test("a notice padded past the outer bound is refused as notice_too_long, never a raw too_big", async () => {
+    const max = COMPUTE_ACCESS_NOTICE_MAX_CHARS;
+    // Within the rule once trimmed, past the outer bound (4 * max UTF-16 units) as sent.
+    for (const notice of [
+      `${"n".repeat(max)}${" ".repeat(3 * max + 1)}`,
+      `${" ".repeat(2 * max)}${"n".repeat(max)}${" ".repeat(2 * max)}`,
+      "n".repeat(4 * max + 1),
+    ]) {
+      const id = seedPerson({ compute_access: "active" });
+      const calls = await withFakeResend(async (captured) => {
+        const res = await decideExact("suspend", "admin", id, { notice });
+        expect([res.status, res.body.code, noticeField(res)]).toEqual([
+          400,
+          "invalid_body",
+          "notice_too_long",
+        ]);
+        expect(res.text).not.toContain("too_big");
+        expect(res.body.error).toContain("notice: notice_too_long");
+        expect(res.text).not.toContain("nnnnnnnn");
+        return captured;
+      });
+      expect(calls).toEqual([]);
+      expect(row(id).compute_access).toBe("active");
+    }
+  });
+
   test("the mail carries the notice escaped under the fixed heading, the review sentence, and never the audit reason", async () => {
     const notice = 'NOTICE-MARKER <script>alert("x")</script> & more';
     for (const [decision, from] of [

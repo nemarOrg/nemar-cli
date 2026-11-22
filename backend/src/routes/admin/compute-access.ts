@@ -50,10 +50,12 @@ import {
 import type { ComputePool } from "../../../../shared/contract/compute";
 import {
   COMPUTE_ACCESS_ADMIN_ERROR_STATUS,
+  COMPUTE_ACCESS_NOTICE_PROBLEMS,
   COMPUTE_ACCESS_PAGE_MAX,
   type ComputeAccessAccount,
   type ComputeAccessAdminErrorCode,
   type ComputeAccessAllocation,
+  type ComputeAccessNoticeProblem,
   computeAccessDecisionBodyShape,
   computeAccessNoticeRefinement,
 } from "../../../../shared/contract/compute-access";
@@ -109,14 +111,19 @@ function refuse(c: Ctx, code: ComputeAccessAdminErrorCode, error?: string, extra
   );
 }
 
+function isNoticeProblem(message: string): message is ComputeAccessNoticeProblem {
+  return (COMPUTE_ACCESS_NOTICE_PROBLEMS as readonly string[]).includes(message);
+}
+
 /**
- * A 400 that names the fields and what is wrong with each, never what was sent. A custom issue (the
- * notice rule) carries a fixed word as its message, and that word is the field's code.
+ * A 400 that names the fields and what is wrong with each, never what was sent. An issue whose message
+ * is a notice rule word (the rule's refinement, and the outer notice bound) reports that word as the
+ * field's code, so a padded notice reads `notice_too_long` and never a raw `too_big`.
  */
 function invalid(c: Ctx, code: "invalid_body" | "invalid_query", error: z.ZodError) {
   const fields = error.issues.slice(0, 20).map((i) => ({
     path: fieldPath(i.path),
-    code: i.code === "custom" ? i.message : i.code,
+    code: isNoticeProblem(i.message) ? i.message : i.code,
   }));
   const named = fields.slice(0, 5).map((f) => `${f.path || "body"}: ${f.code}`);
   return refuse(c, code, `${SENTENCES[code]} ${named.join("; ")}`, { fields });

@@ -182,14 +182,30 @@ export interface ComputeAccessDecisionRequest {
   notice?: string;
 }
 
-/** The fields of a decision body; the outer notice bound keeps a huge body cheap to refuse. */
+/**
+ * The fields of a decision body. The outer notice bound keeps a huge body cheap to refuse before the rule
+ * trims it; it counts UTF-16 units on the value as sent, so a notice padded with whitespace can trip it
+ * while its trimmed text is within the rule. Its message is the rule's own word, so either refusal reads
+ * `notice: notice_too_long` (the Worker reports a message that is a {@link ComputeAccessNoticeProblem}
+ * word in place of zod's code). Senders trim before sending (the CLI and the website both do).
+ */
 export const computeAccessDecisionBodyShape = {
   reason: z.string().max(COMPUTE_ACCESS_REASON_MAX_CHARS).optional(),
   notice: z
     .string()
-    .max(COMPUTE_ACCESS_NOTICE_MAX_CHARS * 4)
+    .max(COMPUTE_ACCESS_NOTICE_MAX_CHARS * 4, {
+      message: "notice_too_long" satisfies ComputeAccessNoticeProblem,
+    })
     .optional(),
 };
+
+/** The fixed words of {@link ComputeAccessNoticeProblem}, for telling one apart from a zod message. */
+export const COMPUTE_ACCESS_NOTICE_PROBLEMS: readonly ComputeAccessNoticeProblem[] = [
+  "notice_required",
+  "notice_refused",
+  "notice_too_long",
+  "notice_control_char",
+];
 
 /**
  * The notice rule as a zod refinement: a notice the rule refuses is an issue at `notice` whose message
