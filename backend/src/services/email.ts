@@ -1734,12 +1734,22 @@ const COMPUTE_DECISION_MAIL: Record<
 /** The fixed heading the administrator's notice is mailed under. */
 export const COMPUTE_DECISION_NOTICE_HEADING = "The reason for this decision";
 
+/** The support address the review sentence names when the Worker has no REPLY_TO configured. */
+export const COMPUTE_DECISION_SUPPORT_FALLBACK = "support@nemar.org";
+
 /**
  * The fixed sentence every decision that takes or withholds access ends with (the compute terms promise
- * it, nemarOrg/docs#105). A reply reaches support because the mail's Reply-To is the support address.
+ * it, nemarOrg/docs#105). It names the same address the mail's Reply-To carries (the configured
+ * REPLY_TO, `support@test.nemar.org` on staging), so a reply and a written mail reach the same inbox;
+ * {@link COMPUTE_DECISION_SUPPORT_FALLBACK} only when none is configured.
  */
-export const COMPUTE_DECISION_REVIEW_SENTENCE =
-  "To ask for a review of this decision, reply to this email or write to support@nemar.org.";
+export function computeDecisionReviewSentence(replyTo?: string): string {
+  const configured = replyTo?.trim() ? parseMailbox(replyTo) : undefined;
+  const address =
+    (typeof configured === "string" ? configured : configured?.email) ||
+    COMPUTE_DECISION_SUPPORT_FALLBACK;
+  return `To ask for a review of this decision, reply to this email or write to ${address}.`;
+}
 
 /**
  * Tell a person what an administrator decided about their compute access (epic #2021 phase D1). One
@@ -1750,8 +1760,8 @@ export const COMPUTE_DECISION_REVIEW_SENTENCE =
  * is not text to send a person. The `notice` is: the administrator typed it FOR the person, and it is
  * mailed escaped under {@link COMPUTE_DECISION_NOTICE_HEADING} (required for a suspension and an ending,
  * optional for a denial, never for a grant: `COMPUTE_ACCESS_NOTICE_RULE`). A denial, a suspension and an
- * ending close with {@link COMPUTE_DECISION_REVIEW_SENTENCE}. The link, for a grant only, is the person's
- * compute page. The mail is HTML only: `sendEmail` sends no plain-text part.
+ * ending close with {@link computeDecisionReviewSentence}, naming the Reply-To address. The link, for a
+ * grant only, is the person's compute page. The mail is HTML only: `sendEmail` sends no plain-text part.
  *
  * These sentences live here and not in `shared/contract/account-copy.ts`: that file is the copy the CLI
  * and the website render (mirrored to the website and drift-tested), and neither renders a mail; every
@@ -1777,7 +1787,8 @@ export async function sendComputeAccessDecisionEmail(
   <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(notice.trim())}</div>
 `
       : "";
-  const review = kind !== "granted" ? `<p>${COMPUTE_DECISION_REVIEW_SENTENCE}</p>` : "";
+  const review =
+    kind !== "granted" ? `<p>${escapeHtml(computeDecisionReviewSentence(replyTo))}</p>` : "";
   const greeting = givenName?.trim() ? escapeHtml(givenName.trim()) : "there";
   const link =
     kind === "granted"

@@ -41,7 +41,8 @@ import { decisionFlipStatement } from "../src/services/compute-access";
 import { putPolicy } from "../src/services/compute-policy";
 import {
   COMPUTE_DECISION_NOTICE_HEADING,
-  COMPUTE_DECISION_REVIEW_SENTENCE,
+  COMPUTE_DECISION_SUPPORT_FALLBACK,
+  computeDecisionReviewSentence,
 } from "../src/services/email";
 import type { Bindings } from "../src/types/bindings";
 import {
@@ -1016,13 +1017,38 @@ describe("the notice to the person", () => {
         "NOTICE-MARKER &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; more",
       );
       expect(html).not.toContain("<script>");
-      expect(html).toContain(COMPUTE_DECISION_REVIEW_SENTENCE);
+      expect(html).toContain(computeDecisionReviewSentence());
       expect(html).not.toContain("REASON-MARKER");
       // The notice is for the person, not the record: it is not on the audit row.
       const action = { suspend: "suspended", revoke: "revoked", deny: "denied" }[decision];
       const [a] = audits(`compute_access_${action}`).slice(-1);
       expect(a?.details).toContain("REASON-MARKER");
       expect(a?.details ?? "").not.toContain("NOTICE-MARKER");
+    }
+  });
+
+  test("the review sentence names the configured Reply-To, the same address the mail carries", async () => {
+    const replyTo = "support@test.nemar.org";
+    for (const [mailbox, decision, from] of [
+      [replyTo, "suspend", "active"],
+      [`NEMAR Support <${replyTo}>`, "deny", "requested"],
+    ] as const) {
+      const email = `cmpdecide-replyto-${decision}@nemar.test`;
+      const id = seedPerson({ compute_access: from, email });
+      const calls = await withFakeResend(async (captured) => {
+        const res = await call("admin", "POST", `/${decision}/by-id/${id}`, {
+          body: withNotice(decision, {}),
+          env: env({ REPLY_TO: mailbox }),
+        });
+        expect([decision, res.status, res.body.email_sent]).toEqual([decision, 200, true]);
+        return captured;
+      });
+      const [sent] = sendsTo(calls, email) as Array<{ html: string; reply_to?: string }>;
+      expect(sent?.reply_to).toBe(mailbox);
+      expect(sent?.html).toContain(
+        `To ask for a review of this decision, reply to this email or write to ${replyTo}.`,
+      );
+      expect(sent?.html).not.toContain(COMPUTE_DECISION_SUPPORT_FALLBACK);
     }
   });
 
@@ -1034,14 +1060,14 @@ describe("the notice to the person", () => {
       return captured;
     });
     const deniedHtml = sendsTo(denied, email)[0]?.html ?? "";
-    expect(deniedHtml).toContain(COMPUTE_DECISION_REVIEW_SENTENCE);
+    expect(deniedHtml).toContain(computeDecisionReviewSentence());
     expect(deniedHtml).not.toContain(COMPUTE_DECISION_NOTICE_HEADING);
     const granted = await withFakeResend(async (captured) => {
       await decideExact("grant", "admin", personId);
       return captured;
     });
     const grantedHtml = sendsTo(granted, PERSON_EMAIL)[0]?.html ?? "";
-    expect(grantedHtml).not.toContain(COMPUTE_DECISION_REVIEW_SENTENCE);
+    expect(grantedHtml).not.toContain(computeDecisionReviewSentence());
     expect(grantedHtml).not.toContain(COMPUTE_DECISION_NOTICE_HEADING);
   });
 });
