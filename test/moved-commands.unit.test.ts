@@ -343,12 +343,16 @@ describe("a stub word in a live command's arguments reaches the live command", (
     expect(result.stdout).toContain("Approving user: publish");
   });
 
-  test("admin repo publish --help prints the live group's help", async () => {
-    const result = await run(CLI_ENTRY, ["admin", "repo", "publish", "--help"]);
-    expect(result.stderr + result.stdout).not.toMatch(pointer);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Usage: nemar admin repo publish");
-  });
+  test.each(["dataset", "repo"])(
+    "admin %s publish --help prints the live group's help",
+    async (group) => {
+      const result = await run(CLI_ENTRY, ["admin", group, "publish", "--help"]);
+      expect(result.stderr + result.stdout).not.toMatch(pointer);
+      expect(result.exitCode).toBe(0);
+      // Commander names a command by its canonical name, whichever alias reached it.
+      expect(result.stdout).toContain("Usage: nemar admin dataset publish");
+    },
+  );
 
   test("admin users show --query publish is Commander's own error", async () => {
     const result = await run(CLI_ENTRY, ["admin", "users", "show", "--query", "publish"]);

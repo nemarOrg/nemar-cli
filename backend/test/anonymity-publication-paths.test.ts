@@ -778,7 +778,7 @@ describe("every DOI mint asks whether the deposit is anonymous", () => {
   // A mint is the shortest path from a concealed deposit to a PERMANENT
   // DataCite record naming its depositor, and `resolveOwnerIdentity` reads the
   // real name, ORCID and username straight off the joined `users` row. The
-  // exemplar re-mint route (`nemar admin exemplar remint-dois`) did not pass
+  // exemplar re-mint route (`nemar admin dataset exemplar remint-dois`) did not pass
   // `anonymousDeposit`, and it is the documented maintenance command for the
   // fleet that contains the standing anonymous exemplar -- so running it would
   // have de-anonymized exactly the dataset the fleet keeps concealed.

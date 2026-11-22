@@ -550,7 +550,7 @@ describe("what unpublish refuses", () => {
       source: { withdrawn_at: "2026-10-01 00:00:00", withdrawn_reason: "broken" },
     });
     const r = await unpublish(ID, { reason: "x", dry_run: false });
-    expect(r.body.skipped).toContain("repo restore");
+    expect(r.body.skipped).toContain("nemar admin dataset restore");
     expect(requests()[0].unpublished_at).toBeNull();
   });
 
@@ -711,7 +711,7 @@ describe("more refusals", () => {
 
       expect(r.status).toBe(200);
       expect(r.body.skipped).toContain("publication request is open");
-      expect(r.body.skipped).toContain("nemar admin repo publish deny");
+      expect(r.body.skipped).toContain("nemar admin dataset publish deny");
       expect(github.calls).toEqual([]);
       expect(row()?.visibility).toBe("public");
     },
