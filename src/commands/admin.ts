@@ -303,8 +303,9 @@ Description:
   These commands require admin privileges.
 
 User Management:
-  users          - List and search users; approve, revoke, role, verify, kind,
-                   kind-check, keys, email-preferences, duplicates, backfill-usernames
+  users          - List and search accounts. Its subcommands: show, edit,
+                   approve, revoke, role, verify, kind, kind-check, keys,
+                   email-preferences, duplicates, backfill-usernames
 
 Dataset Management:
   dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
@@ -341,9 +342,7 @@ function requireAuth(): boolean {
 
 const adminUsersCommand = adminCommand
   .command("users")
-  .description(
-    "List and search NEMAR users; the subcommands work on accounts (approve, revoke, role, keys, ...)",
-  )
+  .description("List and search NEMAR accounts; its subcommands look up and manage them")
   // A stray word (`nemar admin users ada`) would otherwise be ignored and the
   // command would list EVERY account, which is the wrong answer to someone
   // looking for one person. Commander 12 allows excess arguments by default.
@@ -1307,9 +1306,9 @@ Rules:
   - Demoting a user revokes their tokens (they must re-login)
 
 Examples:
-  $ nemar admin users role john_doe admin  # Promote to admin
-  $ nemar admin users role john_doe member # Demote to member
-  $ nemar admin users role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  $ nemar admin users role john_doe admin    # Promote to admin
+  $ nemar admin users role john_doe member   # Demote to member
+  $ nemar admin users role jane_doe owner -y # Promote to owner (skip confirm)`,
   )
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
