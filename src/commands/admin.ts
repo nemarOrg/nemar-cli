@@ -4081,6 +4081,7 @@ addApplyOption(
     "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
   )
   .option("-y, --yes", "Skip the confirmation prompt")
+  .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
     "after",
     `
