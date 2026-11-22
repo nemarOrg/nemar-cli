@@ -122,6 +122,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "fleet annex-policy", newPath: "rework annex policy" },
   { oldPath: "fleet key-registration", newPath: "rework annex key-registration" },
   { oldPath: "fleet content-recovery", newPath: "rework annex content-recovery" },
+  { oldPath: "recover", newPath: "rework recover" },
+  { oldPath: "recover status", newPath: "rework recover status" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */

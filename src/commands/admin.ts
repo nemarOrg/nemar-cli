@@ -5101,7 +5101,7 @@ recoverStatusCommand.action(async (ids: string[]) => {
   console.log(chalk.bold(`\n${completeCount}/${results.length} data_complete`));
 });
 
-adminCommand.addCommand(recoverCommand);
+reworkCommand.addCommand(recoverCommand);
 
 // ============================================================================
 // Exemplar staging fleet (epic #923, Phase 5)
