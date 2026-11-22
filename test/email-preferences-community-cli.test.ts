@@ -191,6 +191,7 @@ describe("update", () => {
         dataset_anonymity: false,
         identifier_sweep: false,
         support_tickets: false,
+        compute_requests: false,
         news: false,
         rfcs: false,
         maintenance: false,

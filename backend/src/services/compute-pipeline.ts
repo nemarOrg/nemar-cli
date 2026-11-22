@@ -222,7 +222,8 @@ export type PipelineRefusal =
   | "daily_cap_reached"
   | "run_failed"
   | "create_failed"
-  | CreateJobRefusal;
+  // A pipeline job asks for no compute access (a service account, a platform pool).
+  | Exclude<CreateJobRefusal, "no_compute_access">;
 
 /** What the cron or an administrator is acting as. A cron may dispatch only an automatic recipe. */
 export type PipelineActor = { kind: "admin"; userId: number } | { kind: "cron" };
@@ -486,7 +487,7 @@ export function recipeEstimateMilli(recipe: ComputeRecipe): number {
 
 // --- What a run needs of the dataset ------------------------------------------------------------------
 
-type ResolvedRun =
+export type ResolvedRun =
   | {
       ok: true;
       tag: string;
@@ -532,22 +533,27 @@ const ZARR_COPY_SQL = "SELECT zarr_status, zarr_store_count FROM datasets WHERE 
  * commit S is the tag's commit T, or differs from it by metadata only (`zarr_source_mismatch` when it is
  * not, `zarr_source_unverifiable` when GitHub or the index could not be read), and the verified attestation is
  * what the recipe is given. Nothing is written by a refusal, so no stamp, hold or job comes of one. The manifest
- * bound (`too_many_files`) is a BIDS staging limit: a Zarr run stages no files. The input is the LAST
- * parameter (the order of the others is another card's merge checklist). A caller refuses an input the recipe
- * does not list before it gets here, so meeting one is a programming error and a throw.
+ * bound (`too_many_files`) is a BIDS staging limit: a Zarr run stages no files. The input is the last
+ * parameter but `except` (the order of the others is another card's merge checklist). A caller refuses an input
+ * the recipe does not list before it gets here, so meeting one is a programming error and a throw.
+ *
+ * A PERSON's submission (phase D3, #2024) calls the same function, so the two front doors cannot disagree about
+ * which datasets a job may read; it reads the `bids` input with no recipe and sets aside only the terms in
+ * `PERSON_EXCEPT_TERMS` (the pipelines' modality).
  */
-async function resolveRun(
+export async function resolveRun(
   db: D1Database,
   datasetId: string,
   wanted: string | undefined,
   recipe: ComputeRecipe | undefined,
   env: Bindings,
   input: RecipeInput,
+  except: readonly PipelineTermId[] = [],
 ): Promise<ResolvedRun> {
   if (recipe !== undefined && !recipe.inputs.includes(input)) {
     throw new RangeError("the recipe does not read that input");
   }
-  const loaded = await loadPipelineRow(db, datasetId, env);
+  const loaded = await loadPipelineRow(db, datasetId, env, except);
   if (!loaded.eligible) {
     return { ok: false, code: "dataset_not_eligible", extra: { blockedBy: loaded.blockedBy } };
   }
@@ -833,8 +839,10 @@ export async function dispatchPipelineJob(
     return fail("create_failed", datasetId, { version: tag, stampId });
   }
   if (!created.ok) {
-    await finishStamp(db, stampId, "refused", created.code);
-    return fail(created.code, datasetId, {
+    // `no_compute_access` is a person's refusal (`requireActiveAccess`), which no pipeline job asks for.
+    const code = created.code === "no_compute_access" ? "create_failed" : created.code;
+    await finishStamp(db, stampId, "refused", code);
+    return fail(code, datasetId, {
       version: tag,
       stampId,
       ...(created.field === undefined ? {} : { field: created.field }),

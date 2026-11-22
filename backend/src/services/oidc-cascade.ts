@@ -37,8 +37,10 @@
  * tells only those clients, so the person stays signed in elsewhere). The filter selects GRANTS, and
  * everything under a grant goes with it: its tokens (whatever scopes they carry, because a grant
  * accumulates the scopes of every sign-in and a token carries only those of its own code), its unused
- * codes, its logout. A compute suspension has no caller yet (its state does not exist; the compute
- * access phase adds the caller), so the filter is shipped and tested directly.
+ * codes, its logout. The filter's caller is `endComputeStatements` (`services/compute-access.ts`, epic
+ * #2021 phase D1): an administrator's suspension or revocation of a person's compute access. A
+ * revocation uses the same word as a suspension, `compute_suspended`, because the vocabulary has one
+ * word for the end of compute standing and a client is told nothing but "this person is gone".
  *
  * EVERY STATEMENT ENDS IN A PREDICATE, and takes its binds left to right, so a caller can append a
  * condition of its own and its binds after these: `tombstoneUserCascade`'s guarded call does, so that
@@ -83,6 +85,8 @@ export type OidcEndFilter = { rule: OidcSignInRule } | { scopePrefix: string };
  *   applyKindChange      the account's kind was changed away from `person`: the same grants end
  *   endAccount           the owner's `nemar admin oidc end-account`, the manual merge of ADR 0043 and
  *                        the incident tool
+ *   endComputeStatements an administrator suspended or revoked a person's compute access: only the grants
+ *                        that carry a `compute.` scope end (epic #2021 phase D1)
  */
 export const OIDC_END_CALLERS = [
   { file: "routes/admin/users.ts", site: "finalizeRevocation" },
@@ -91,6 +95,7 @@ export const OIDC_END_CALLERS = [
   { file: "routes/auth-orcid.ts", site: "relinkIdentity" },
   { file: "routes/admin/users.ts", site: "applyKindChange" },
   { file: "routes/admin/oidc.ts", site: "endAccount" },
+  { file: "services/compute-access.ts", site: "endComputeStatements" },
 ] as const;
 
 /** The one caller of {@link oidcClientEndStatements}: the owner's disabling of a client. */
@@ -170,12 +175,13 @@ const codesSql = (filter: FilterClause | null): string => `DELETE FROM oidc_code
  * the tombstone keeps; `next_attempt_at` is D1's `now`, so the sender's first attempt is due at once.
  * No network call, here or in any batch.
  *
- * SIX CALLERS, through {@link oidcEndStatements}, and the count is the point (the list is
+ * SEVEN CALLERS, through {@link oidcEndStatements}, and the count is the point (the list is
  * {@link OIDC_END_CALLERS} and a test holds the code to it): `finalizeRevocation` (admin revoke, by
  * username and by id), the tombstone cascade (`tombstoneUserCascade`, which both the owner's soft delete
  * and the sweep of the live tests' accounts run, so it counts once), the ORCID unlink, the ORCID relink,
- * the change of an account's kind away from `person`, and the owner's `end-account`. A seventh path that
- * ends a credential needs this line too. A compute suspension will be one more when its state exists.
+ * the change of an account's kind away from `person`, the owner's `end-account`, and an administrator's
+ * suspension or revocation of compute access (`endComputeStatements`, with the `compute.` scope filter, epic
+ * #2021 phase D1). An eighth path that ends a credential needs this line too.
  * The client's disabling is NOT one: it tells nobody ({@link oidcClientEndStatements}).
  */
 export const OIDC_ENQUEUE_LOGOUTS_SQL = enqueueSql({ sql: "", binds: [] });
@@ -185,7 +191,7 @@ export const OIDC_ENQUEUE_LOGOUTS_SQL = enqueueSql({ sql: "", binds: [] });
  * `OIDC_END_REASONS`). Binds: reason, userId (then userId and the filter's, if any). Run BEFORE the
  * grants are revoked, because a filtered ending selects the tokens through their grant.
  *
- * SIX CALLERS: the same six as {@link OIDC_ENQUEUE_LOGOUTS_SQL}, which it always runs beside.
+ * SEVEN CALLERS: the same seven as {@link OIDC_ENQUEUE_LOGOUTS_SQL}, which it always runs beside.
  */
 export const OIDC_END_TOKENS_SQL = tokensSql(null);
 
@@ -193,7 +199,7 @@ export const OIDC_END_TOKENS_SQL = tokensSql(null);
  * Revoke the account's live grants. A revoked grant stays for the record; a new sign-in is a new row.
  * Binds: userId (then userId and the filter's, if any).
  *
- * SIX CALLERS: the same six as {@link OIDC_ENQUEUE_LOGOUTS_SQL}.
+ * SEVEN CALLERS: the same seven as {@link OIDC_ENQUEUE_LOGOUTS_SQL}.
  */
 export const OIDC_END_GRANTS_SQL = grantsSql(null);
 
@@ -201,7 +207,7 @@ export const OIDC_END_GRANTS_SQL = grantsSql(null);
  * Delete the account's unused authorization codes. A used code is kept: a second redemption is
  * recognized by it. Binds: userId (then userId and the filter's, if any).
  *
- * SIX CALLERS: the same six as {@link OIDC_ENQUEUE_LOGOUTS_SQL}.
+ * SEVEN CALLERS: the same seven as {@link OIDC_ENQUEUE_LOGOUTS_SQL}.
  */
 export const OIDC_END_CODES_SQL = codesSql(null);
 

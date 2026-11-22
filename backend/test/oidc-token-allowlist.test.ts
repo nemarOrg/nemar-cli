@@ -36,6 +36,30 @@ import { type OidcHarness, startOidcHarness } from "./helpers/oidc-harness";
 const OIDC_ROUTE_RE =
   /^(\/nemar)?(\/\.well-known\/openid-configuration|\/oauth\/(jwks|token|userinfo|revoke|introspect))$/;
 
+/**
+ * The compute read routes (epic #2021 phase D2, ADR 0119 addendum): the only other paths that accept an
+ * access token, each for the scope `routes/compute/auth.ts` names (`COMPUTE_OIDC_ROUTES`). They are
+ * excluded from the table-wide comparison below, which would otherwise see them answer a token with a
+ * scope refusal and not the key path's; `compute-read-credentials.test.ts` pins what they do answer.
+ * `GET` only: the compute router's writes stay in the comparison and must refuse the token.
+ */
+const COMPUTE_READ_RE = /^(\/nemar)?\/compute\/(me|me\/usage|me\/jobs|me\/jobs\/:id|stats)$/;
+
+/**
+ * The partner contract's three routes (epic #2021 phase D4, ADR 0119 addendum): the only WRITE paths that
+ * accept an access token, each for `compute.reserve` and for a person's token whose audience names this API.
+ * They are excluded from the table-wide comparison, which would see them answer a token with a scope refusal
+ * and not the key path's; `compute-partner-credentials.test.ts` pins what they do answer. Method and path,
+ * exactly: every other write of the compute router stays in the comparison and must refuse the token.
+ */
+const COMPUTE_PARTNER_ROUTES = [
+  "POST /compute/holds",
+  "POST /compute/jobs/:id/report",
+  "DELETE /compute/holds/:id",
+] as const;
+const COMPUTE_PARTNER_RE =
+  /^(POST (\/nemar)?\/compute\/holds|POST (\/nemar)?\/compute\/jobs\/:id\/report|DELETE (\/nemar)?\/compute\/holds\/:id)$/;
+
 /** Where `oidcBearer` may sit: the resource routes that serve a scope. Today, userinfo only. */
 const OIDC_BEARER_ROUTE_RE = /^(\/nemar)?\/oauth\/userinfo$/;
 
@@ -97,6 +121,8 @@ function requestList(): Call[] {
     // without one is a route, called with GET and POST.
     if (route.method === "ALL" && route.path.includes("*")) continue;
     if (OIDC_ROUTE_RE.test(route.path)) continue;
+    if (route.method === "GET" && COMPUTE_READ_RE.test(route.path)) continue;
+    if (COMPUTE_PARTNER_RE.test(`${route.method} ${route.path}`)) continue;
     const methods = route.method === "ALL" ? ["GET", "POST"] : [route.method];
     const path = route.path
       .replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, name: string) => {
@@ -215,6 +241,50 @@ describe("an OIDC access token is refused by every route that is not an OIDC rou
     const all = __workerRouteTable().map((r) => r.path);
     for (const path of ["/oauth/token", "/oauth/userinfo", "/oauth/revoke", "/oauth/introspect"]) {
       expect(all).toContain(path);
+    }
+  });
+
+  test("the person's job routes (phase D3, #2024) are in the walk, so the token is refused on each: `compute.submit` is granted to no client yet", () => {
+    // They are not OIDC routes (not in COMPUTE_OIDC_ROUTES, not matched by COMPUTE_READ_RE), so the walk
+    // below calls every one of them with the token and holds the answer to an unknown key's.
+    const walked = requestList().map(
+      (c) => `${c.method} ${c.path.replace(PRIVATE_DATASET, ":id")}`,
+    );
+    for (const route of [
+      "POST /compute/jobs",
+      "POST /compute/jobs/:id/finalize",
+      "GET /compute/jobs/:id/logs",
+      "GET /compute/jobs/:id/results",
+      "POST /compute/jobs/:id/results/renew",
+    ]) {
+      expect(walked).toContain(route);
+      expect(COMPUTE_READ_RE.test(route.split(" ")[1] as string)).toBe(false);
+    }
+  });
+
+  test("the partner's three routes are the only compute writes left out of the walk, and they are in the router", () => {
+    const walked = requestList().map(
+      (c) =>
+        `${c.method} ${c.path.replace(PRIVATE_DATASET, ":id").replace(/job_[0-9a-f]{24}|x/, ":id")}`,
+    );
+    const table = __workerRouteTable().map((r) => `${r.method} ${r.path}`);
+    for (const route of COMPUTE_PARTNER_ROUTES) {
+      expect(table, route).toContain(route);
+      expect(COMPUTE_PARTNER_RE.test(route), route).toBe(true);
+    }
+    // The walk still holds the rest of the compute router's writes to the unknown-key answer.
+    for (const route of [
+      "POST /compute/jobs/:id/cancel",
+      "POST /compute/jobs/:id/links",
+      "POST /compute/jobs/:id/finalize",
+      "POST /compute/jobs",
+    ]) {
+      expect(table, route).toContain(route);
+      expect(COMPUTE_PARTNER_RE.test(route), route).toBe(false);
+    }
+    // And no partner route is walked as an ordinary one (it would answer a scope refusal, not a key's).
+    for (const route of COMPUTE_PARTNER_ROUTES) {
+      expect(walked.filter((w) => w === route)).toEqual([]);
     }
   });
 

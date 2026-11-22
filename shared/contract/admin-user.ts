@@ -245,6 +245,18 @@ export const adminUserDetailSchema = z
     service_access_granted_by: z.number().int().nullable().optional(),
     upload_access_requested_at: z.string().nullable().optional(),
     upload_access_notified_at: z.string().nullable().optional(),
+    /**
+     * Compute access (epic #2021 phase D1; migration 0131): its own grant, never `service_access`. The
+     * state is one of `shared/compute-access-state.ts`; the purpose text is not here (it is read in the
+     * compute access queue, `GET /admin/compute/access`).
+     */
+    compute_access: z.string().optional(),
+    compute_access_requested_at: z.string().nullable().optional(),
+    compute_access_notified_at: z.string().nullable().optional(),
+    compute_access_granted_at: z.string().nullable().optional(),
+    compute_access_granted_by: z.number().int().nullable().optional(),
+    compute_terms_version: z.string().nullable().optional(),
+    compute_terms_accepted_at: z.string().nullable().optional(),
     identity_conflict: z.number().int().nullable().optional(),
     username_auto_assigned: z.number().int().nullable().optional(),
     sandbox_completed: z.number().int().nullable().optional(),

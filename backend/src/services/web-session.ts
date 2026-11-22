@@ -18,6 +18,7 @@
  * brute-forced offline.
  */
 
+import type { ComputeAccessState } from "../../../shared/compute-access-state.js";
 import type { AccountKind, AccountStatus } from "../../../shared/contract/user.js";
 import { isPartnerHost } from "../../../shared/partner-hosts.js";
 import { flag } from "../db/flag";
@@ -379,6 +380,11 @@ export interface WebSessionUser {
    *  uses -- it is NOT itself put on the wire (webUserSchema carries no
    *  such field; only `userSchema` and `adminUserListItemSchema` do). */
   account_kind: AccountKind;
+  /** Compute access (epic #2021 phase D1; migration 0131): its own grant, never `service_access`.
+   *  Reported on `/auth/me` as optional fields so the dashboard can render its compute card. */
+  compute_access: ComputeAccessState;
+  compute_access_requested_at: string | null;
+  compute_access_granted_at: string | null;
 }
 
 /** The `waitUntil` half of an `ExecutionContext`: all a caller outside the
@@ -411,7 +417,8 @@ export async function findSessionByCookieId(
             u.given_name, u.family_name, u.orcid, u.orcid_verified,
             u.github_username, u.city, u.country, u.affiliation, u.service_access,
             u.username, u.username_auto_assigned,
-            u.service_access_granted_at, u.upload_access_requested_at, u.account_kind
+            u.service_access_granted_at, u.upload_access_requested_at, u.account_kind,
+            u.compute_access, u.compute_access_requested_at, u.compute_access_granted_at
        FROM web_sessions ws
        JOIN users u ON u.id = ws.user_id
       WHERE ws.cookie_id_hash = ?
@@ -457,6 +464,10 @@ export async function findSessionByCookieId(
       // Closed by migration 0082's CHECK constraint (epic #1272 phase 4,
       // #1284; ADR 0048).
       account_kind: AccountKind;
+      // Compute access (migration 0131): its own grant, never `service_access`.
+      compute_access: ComputeAccessState;
+      compute_access_requested_at: string | null;
+      compute_access_granted_at: string | null;
     }>();
   if (!row) return null;
 
@@ -499,6 +510,9 @@ export async function findSessionByCookieId(
       service_access_granted_at: row.service_access_granted_at,
       upload_access_requested_at: row.upload_access_requested_at,
       account_kind: row.account_kind,
+      compute_access: row.compute_access,
+      compute_access_requested_at: row.compute_access_requested_at,
+      compute_access_granted_at: row.compute_access_granted_at,
     },
   };
 }

@@ -97,6 +97,14 @@ export const COMPUTE_ADMIN_ERROR_CODES = [
   "record_missing",
   "compute_disabled",
   "audit_failed",
+  // Phase D4 (#2025): moving the charge of a job that skipped the reservation to a person.
+  "job_reserved",
+  "no_unreserved_charge",
+  "already_moved",
+  "target_not_in_good_standing",
+  "target_has_no_pool",
+  "owner_not_proven",
+  "partner_reservations_open",
 ] as const;
 
 export type ComputeAdminErrorCode = (typeof COMPUTE_ADMIN_ERROR_CODES)[number];
@@ -125,6 +133,13 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
   record_missing: 404,
   compute_disabled: 503,
   audit_failed: 500,
+  job_reserved: 409,
+  no_unreserved_charge: 409,
+  already_moved: 409,
+  target_not_in_good_standing: 409,
+  target_has_no_pool: 409,
+  owner_not_proven: 409,
+  partner_reservations_open: 409,
 } as const satisfies Record<ComputeAdminErrorCode, number>;
 
 // --- Requests (plain types: the Worker validates them, the CLI builds them) -------------------
@@ -133,6 +148,8 @@ export const COMPUTE_ADMIN_ERROR_STATUS = {
 export interface ComputePolicyPutRequest {
   policy: unknown;
   note?: string;
+  /** Write a policy that turns the partner contract off although partner reservations are open (they are frozen). */
+  force_partner_off?: boolean;
 }
 
 /** `POST /admin/compute/pools/.../grant`: SU into one pool. The reason is a fixed word. */
@@ -332,9 +349,11 @@ export const ComputeStatusResponseSchema = z
      * Today: `access_reports_failed` (ACCESS reports that ended failed), `cancel_pending_failed` (a
      * recorded cancel still not carried out an hour after it was asked for) and `copy_abandoned` (a
      * terminal job whose launcher files were never copied and no longer will be),
-     * `tenant_over_ceiling` (slots occupied above the tenant ceiling: a job NEMAR did not admit, or a
-     * ceiling lowered below what is already live) and `policy_unreadable` (1 when the stored owner policy
-     * cannot be read, which fails every hold, run and limit closed; then `tenant` is absent).
+     * `partner_capped_no_final` (a partner job capped at its hold whose final settlement has not come for a
+     * week, so its excess is billed to no one), `tenant_over_ceiling` (slots occupied above the tenant
+     * ceiling: a job NEMAR did not admit, or a ceiling lowered below what is already live) and
+     * `policy_unreadable` (1 when the stored owner policy cannot be read, which fails every hold, run and
+     * limit closed; then `tenant` is absent).
      */
     attention: z.record(z.unknown()).optional(),
     /**
@@ -403,6 +422,18 @@ export const ComputeJobViewSchema = z
     results_verified: z.boolean(),
     results_bytes: z.number().int().nullable(),
     records_copied: z.boolean(),
+    /**
+     * A partner's reservation (phase D4, #2025): `pending` (a Tapis job is bound and not verified yet),
+     * `verified` or `mismatch` (refused); null for a reservation nothing was reported under and for a job
+     * that is not a partner's. Optional: an older Worker does not send it.
+     */
+    partner_state: nullableString.optional(),
+    /**
+     * The fixed word an administrator is shown for a partner's job: `owner_mismatch`, `app_mismatch`,
+     * `resources_mismatch`, `hold_ended` (why a report was refused), `ambiguous_tag`, `tapis_unreachable`
+     * or `tapis_job_in_use`.
+     */
+    partner_flag: nullableString.optional(),
     /**
      * Portable compute (ADR 0121): who runs the job and how it is accounted, and, for a runner job, the
      * runner's claim and the usage it measured (a runner's own figures, never SU). Optional so a CLI that
@@ -550,9 +581,6 @@ export const COMPUTE_PIPELINE_ONLY_REFUSAL_STATUS = {
   recipe_not_automatic: 422,
   recipe_placeholder: 422,
   registry_drift: 409,
-  version_not_found: 404,
-  version_untagged: 422,
-  too_many_files: 422,
   /** A Zarr recipe over a version older than the newest, whose copy the row does not describe (DM-06). */
   zarr_version_not_newest: 422,
   /** A Zarr recipe over a dataset whose copy is not `ready` with a store. */
@@ -1048,3 +1076,26 @@ export const ComputeObserverRunResponseSchema = z
   .passthrough();
 
 export type ComputeObserverRunResponse = z.infer<typeof ComputeObserverRunResponseSchema>;
+
+/**
+ * `POST /admin/compute/jobs/:id/move-charge` (owner only, phase D4, #2025): the charge of a job that
+ * skipped the reservation, which the tenant sweep wrote to the partner's pool `tenant`, moved to a
+ * person's pool. `moved_milli` is the whole of that charge, in milli-SU; `pool` is the word of the two
+ * pools; `replayed` is true when the move had already been made to this account. The `people` budget is
+ * counted once: the unreserved entry counted the consumption, and the move does not count it again.
+ */
+export const ComputeMoveChargeResponseSchema = z
+  .object({
+    job_id: z.string(),
+    to_account_id: z.number().int(),
+    pool: z.string(),
+    moved_milli: z.number().int(),
+    replayed: z.boolean(),
+    /** The account the job's Tapis owner mapped to, or null; the move names another only on the owner's word. */
+    attributed_account_id: z.number().int().nullable().optional(),
+    /** Whether the target is the account the job was attributed to. */
+    owner_proven: z.boolean().optional(),
+  })
+  .passthrough();
+
+export type ComputeMoveChargeResponse = z.infer<typeof ComputeMoveChargeResponseSchema>;

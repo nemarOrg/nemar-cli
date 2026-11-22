@@ -8432,6 +8432,7 @@ const ADMIN_ALERT_ROWS: Array<{ key: keyof AdminAlertPreferences; label: string 
   { key: "dataset_anonymity", label: "Anonymity sweep findings" },
   { key: "identifier_sweep", label: "Identifier sweep weekly report" },
   { key: "support_tickets", label: "Support tickets assigned to you" },
+  { key: "compute_requests", label: "Compute access requests" },
 ];
 
 emailPrefsCommand
@@ -8496,6 +8497,7 @@ emailPrefsCommand
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--support-tickets <bool>", "Enable/disable support ticket notifications")
+  .option("--compute-requests <bool>", "Enable/disable compute access request notifications")
   .option("--all <bool>", "Enable/disable all notifications (recalls are always on)")
   .option(
     "--user <username>",
@@ -8512,6 +8514,7 @@ emailPrefsCommand
       datasetAnonymity?: string;
       identifierSweep?: string;
       supportTickets?: string;
+      computeRequests?: string;
       all?: string;
       user?: string;
     }) => {
@@ -8549,6 +8552,7 @@ emailPrefsCommand
         updates.dataset_anonymity = val;
         updates.identifier_sweep = val;
         updates.support_tickets = val;
+        updates.compute_requests = val;
         for (const category of COMMUNITY_MAIL_CATEGORIES) updates[category] = val;
       } else {
         const chosen: Partial<EmailPreferences> = {
@@ -8560,6 +8564,7 @@ emailPrefsCommand
           dataset_anonymity: parseBool(options.datasetAnonymity),
           identifier_sweep: parseBool(options.identifierSweep),
           support_tickets: parseBool(options.supportTickets),
+          compute_requests: parseBool(options.computeRequests),
         };
 
         if (Object.values(chosen).every((value) => value === undefined)) {
@@ -8572,6 +8577,7 @@ emailPrefsCommand
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --support-tickets <bool>       Support ticket notifications");
+          console.log("  --compute-requests <bool>      Compute access request notifications");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -8595,6 +8601,7 @@ emailPrefsCommand
           dataset_anonymity: "Anonymity findings:   ",
           identifier_sweep: "Identifier sweep:     ",
           support_tickets: "Support tickets:      ",
+          compute_requests: "Compute requests:     ",
         };
         for (const row of ADMIN_ALERT_ROWS) {
           const enabled = result[row.key];

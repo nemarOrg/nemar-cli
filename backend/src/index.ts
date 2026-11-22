@@ -62,6 +62,7 @@ import {
   sweepComputeCancellations,
 } from "./services/compute-advance";
 import { derivativesLogLine, runComputeDerivativesCron } from "./services/compute-derivatives";
+import { holdReaperLogLine, reapExpiredHolds } from "./services/compute-hold-reaper";
 import {
   pipelineDispatchLogLine,
   runComputePipelineDispatchCron,
@@ -69,6 +70,7 @@ import {
 import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
 import { runnerLeaseLogLine, sweepRunnerLeases } from "./services/compute-runner-queue";
 import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
+import { runUploadExpiryCron, uploadExpiryLogLine } from "./services/compute-uploads";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
@@ -173,7 +175,8 @@ api.use(
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version"],
+    // `Idempotency-Key` is the person's job submission's (phase D3, #2024); the website's job page sends it.
+    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version", "Idempotency-Key"],
     // The rate limit's answer is for browser callers too: a page on a nemar.org host
     // that is refused can read how long to wait.
     exposeHeaders: [
@@ -184,6 +187,9 @@ api.use(
       "X-RateLimit-Reset",
       "X-RateLimit-Bucket",
       "X-RateLimit-Caller",
+      // The job page reads these (phase D3, #2024): a log that was cut, and a submission that was a repeat.
+      "X-Nemar-Truncated",
+      "Idempotent-Replayed",
     ],
     credentials: true,
     maxAge: 86400,
@@ -1256,6 +1262,26 @@ export default {
               ),
             ),
         );
+        // #2024 (epic #2021 phase D3, ADR 0118): the release of abandoned uploads. A person's job with a
+        // code bundle that is still `uploading` an hour after it was made is failed `upload_expired`
+        // and its hold released, ten rows a tick. PRODUCTION-ONLY, and deliberately NOT in
+        // DEV_CRON_ALLOWLIST: it moves the allocation ledger, and the dev database shares real users.
+        // It also refuses outside exact production on its own and reads no switch. One log line, only
+        // when it took a row or failed: counts and fixed words.
+        ctx.waitUntil(
+          runUploadExpiryCron(env)
+            .then((r) => {
+              const log = r ? uploadExpiryLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-uploads] tick failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
         // Portable compute (card DM-07, ADR 0121 decision 4): the runner queue's lease rules. It releases an
         // expired unstarted claim, moves a started job whose lease expired to `unreported`, settles the
         // `unreported` ones (verified, `runner_revoked`, `lease_expired`), fails a job past its deadline, ends
@@ -1298,6 +1324,31 @@ export default {
             .catch((err) =>
               console.error(
                 "[access-report] tick failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // #2025 (epic #2021 phase D4, ADR 0118): the partner's hold reaper. A reservation no Tapis job was
+        // reported under, older than the owner's reservation wait, is looked up in Tapis BY ITS TAG and
+        // only then released (no Tapis job found: released; one: bound and verified like a report; several:
+        // flagged and kept; any Tapis error: kept, nothing is ever released on an error). The same tick
+        // verifies a Tapis job whose report could not be read back when it was made and carries out a
+        // refusal (the Tapis job cancelled, the hold released, what ran charged to the partner's pool).
+        // PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it cancels jobs in a tenant and
+        // moves the ledger, and the dev database shares real users. It also refuses outside exact
+        // production on its own and reads no switch. Bounded, and a Tapis call is never inside a batch.
+        // One log line, only when it acted or failed: counts and fixed words.
+        ctx.waitUntil(
+          reapExpiredHolds(env)
+            .then((r) => {
+              const log = r ? holdReaperLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log?.level === "warn") console.warn(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-reaper] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),

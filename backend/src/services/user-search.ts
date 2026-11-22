@@ -90,6 +90,10 @@ export const USER_COLUMN_ROLES = {
   service_access_granted_at: "text",
   upload_access_requested_at: "text",
   upload_access_notified_at: "text",
+  compute_access_requested_at: "text",
+  compute_access_notified_at: "text",
+  compute_access_granted_at: "text",
+  compute_terms_accepted_at: "text",
 
   email_verified: "flag",
   orcid_verified: "flag",
@@ -97,8 +101,14 @@ export const USER_COLUMN_ROLES = {
   sandbox_completed: "flag",
   identity_conflict: "flag",
   username_auto_assigned: "flag",
+  // The compute-access state and the terms version are words every account has one of (`none` is the
+  // default), so searching them as text would make `none` match almost everyone: returned, not
+  // searched, like the 0/1 flags (migration 0131).
+  compute_access: "flag",
+  compute_terms_version: "flag",
 
   service_access_granted_by: "ref",
+  compute_access_granted_by: "ref",
 
   password_hash: "secret",
   verification_token: "secret",
@@ -108,6 +118,9 @@ export const USER_COLUMN_ROLES = {
   oidc_subject: "secret",
 
   email_preferences: "omit",
+  // What the person wrote about their compute: read in the compute access queue, which is its own
+  // route, and not account detail (migration 0131).
+  compute_purpose: "omit",
 } as const satisfies Record<string, UserColumnRole>;
 
 /** A column of `users`, as the classification above spells it. Anything that

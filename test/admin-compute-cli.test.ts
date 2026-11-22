@@ -221,6 +221,34 @@ describe("policy", () => {
     ]);
   });
 
+  test("a file that turns the partner contract off while partner reservations are open is refused unless --force-partner-off (item 7)", async () => {
+    const confirmed = { tapisVisibilityConfirmed: true, execSystemId: "exec-1" };
+    expect(
+      (await runCli("owner", ["policy", "set", "--file", policyFile({ partner: confirmed })]))
+        .exitCode,
+    ).toBe(0);
+    db.query(
+      `INSERT INTO compute_jobs (id, source, kind, state, app_id, app_version, spec_digest, partition, pool,
+         nodes, cores_per_node, minutes) VALUES ('job_0000000000000000000000f1', 'partner', 'batch', 'created',
+         'a', '1', ?, 'shared', 'cpu', 1, 1, 1)`,
+    ).run("0".repeat(64));
+    const refused = await runCli("owner", ["policy", "set", "--file", policyFile()]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout + refused.stderr).toContain("turns the partner contract off");
+    expect(JSON.parse((await runCli("owner", ["policy", "show", "--json"])).stdout).version).toBe(
+      1,
+    );
+    const forced = await runCli("owner", [
+      "policy",
+      "set",
+      "--file",
+      policyFile(),
+      "--force-partner-off",
+    ]);
+    expect(forced.exitCode).toBe(0);
+    expect(forced.stdout).toContain("1 partner reservation is frozen");
+  });
+
   test("set checks the file before it sends anything", async () => {
     const bad = join(configDir, "bad.json");
     writeFileSync(

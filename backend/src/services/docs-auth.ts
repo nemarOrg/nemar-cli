@@ -296,7 +296,8 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * person is still an admin. A new path that removes an admin needs both sets.
  * TWO of those three paths, `finalizeRevocation` and the tombstone cascade, also run
  * `computeReleaseStatements` (`services/compute-release.ts`, epic #2005 phase A8), which ends the
- * account's compute: a role demotion does not (compute is not an admin's standing), and key revocation
+ * account's compute (as does an administrator's suspension or revocation of compute access alone,
+ * `endComputeStatements`, epic #2021 phase D1, which ends no credential): a role demotion does not (compute is not an admin's standing), and key revocation
  * does not (a job's identity is the account's, not a key's; the person still has the account, so a
  * stolen key's jobs already submitted keep running until a cancel or an administrative revoke). A new
  * path that ends a whole account needs that set too.
