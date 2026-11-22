@@ -170,7 +170,7 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
       expect(refusal.message).toContain("1.0.1");
       // The repair that passes the guard: the recorded tag, named.
       expect(
-        refusal.message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`),
+        refusal.message.endsWith(`nemar admin import openneuro ${UPSTREAM_ID} --tag 1.0.0`),
       ).toBe(true);
       expect(refusal.message.length).toBeLessThan(600);
       expect(state.calls.n).toBe(1);
@@ -215,7 +215,7 @@ describe("a released mirror whose upstream moved refuses, before anything moves"
       `To pull a newer snapshot as the next major, plan an upstream re-pull: \`nemar admin repull plan ${NEMAR_ID}\` (OpenNeuro's latest snapshot by default; \`--to-tag 1.0.1\` names this one).`,
     );
     // The repair at the recorded tag is still the last thing said.
-    expect(message.endsWith(`nemar admin import-openneuro ${UPSTREAM_ID} --tag 1.0.0`)).toBe(true);
+    expect(message.endsWith(`nemar admin import openneuro ${UPSTREAM_ID} --tag 1.0.0`)).toBe(true);
   }, 60_000);
 
   test("not knowing whether it is released is a plain failure, never a retarget", async () => {

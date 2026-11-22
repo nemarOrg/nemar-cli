@@ -1,6 +1,6 @@
 /**
- * CLI `nemar admin upstream-status` (epic #1046 phase 4b, #1910; ADR 0111), driven through the
- * real entry point (`bun run src/index.ts admin upstream-status ...`) as a subprocess pointed at a
+ * CLI `nemar admin repull upstream-status` (epic #1046 phase 4b, #1910; ADR 0111), driven through the
+ * real entry point (`bun run src/index.ts admin repull upstream-status ...`) as a subprocess pointed at a
  * real local HTTP server via TEST_API_URL, the harness `upstream-backfill-cli.test.ts` uses: the
  * recorded requests are what the CLI's own `fetch()` sent. The server is the backend stand-in
  * only, serving hand-written page bodies in the wire shape (wire fixtures); the route behind it
@@ -180,11 +180,11 @@ const CURRENT = row("on002893", "current", {
   recorded: { version: "1.0.0", tag: "2.0.0", basis: "doi" },
 });
 
-describe("nemar admin upstream-status: auth and arguments", () => {
+describe("nemar admin repull upstream-status: auth and arguments", () => {
   test("without a stored apiKey nothing is sent", async () => {
     const server = startServer([{ body: page([CURRENT]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -205,7 +205,7 @@ describe("nemar admin upstream-status: auth and arguments", () => {
         ["--after", "nope"],
         ["--dataset", "on003645", "--after", "on000001"],
       ]) {
-        const result = await runCli(["admin", "upstream-status", ...args], server.url);
+        const result = await runCli(["admin", "repull", "upstream-status", ...args], server.url);
         expect(result.exitCode).toBe(1);
       }
       expect(server.requests.length).toBe(0);
@@ -215,13 +215,16 @@ describe("nemar admin upstream-status: auth and arguments", () => {
   });
 });
 
-describe("nemar admin upstream-status: the request", () => {
+describe("nemar admin repull upstream-status: the request", () => {
   test("a GET carrying limit, after and dataset", async () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: page([STALE]) }]);
     try {
-      await runCli(["admin", "upstream-status", "--limit", "7", "--after", "on000010"], server.url);
-      await runCli(["admin", "upstream-status", "--dataset", "on003645"], server.url);
+      await runCli(
+        ["admin", "repull", "upstream-status", "--limit", "7", "--after", "on000010"],
+        server.url,
+      );
+      await runCli(["admin", "repull", "upstream-status", "--dataset", "on003645"], server.url);
       expect(server.methods).toEqual(["GET", "GET"]);
       expect(server.requests[0]?.pathname).toBe("/admin/upstream-status");
       expect(server.requests[0]?.searchParams.get("limit")).toBe("7");
@@ -246,7 +249,10 @@ describe("nemar admin upstream-status: the request", () => {
       { body: page([row("on000003", "current")], { population_total: 3 }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--limit", "1"], server.url);
+      const result = await runCli(
+        ["admin", "repull", "upstream-status", "--limit", "1"],
+        server.url,
+      );
       expect(server.requests.map((u) => u.searchParams.get("after"))).toEqual([
         null,
         "on000001",
@@ -260,13 +266,13 @@ describe("nemar admin upstream-status: the request", () => {
   });
 });
 
-describe("nemar admin upstream-status: the report", () => {
+describe("nemar admin repull upstream-status: the report", () => {
   test("every state prints with its number, zeros included, in order", async () => {
     seedAuthenticatedConfig();
     const rows = [STALE, CURRENT, row("on000004", "in_progress")];
     const server = startServer([{ body: page(rows) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       const lines = result.stdout.split("\n");
       let at = -1;
       for (const state of UPSTREAM_STATES) {
@@ -292,7 +298,7 @@ describe("nemar admin upstream-status: the report", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: page([STALE]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.stdout).toContain("on003645  ds003645  2.0.2 -> 2.1.0  reason for on003645");
     } finally {
       server.stop();
@@ -304,7 +310,10 @@ describe("nemar admin upstream-status: the report", () => {
     const rows = ["on000001", "on000002", "on000003"].map((id) => row(id, "stale_ready"));
     const server = startServer([{ body: page(rows) }]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--list", "2"], server.url);
+      const result = await runCli(
+        ["admin", "repull", "upstream-status", "--list", "2"],
+        server.url,
+      );
       expect(result.stdout).toContain("on000001  ds000001");
       expect(result.stdout).toContain("on000002  ds000002");
       expect(result.stdout).not.toContain("on000003  ds000003");
@@ -324,7 +333,7 @@ describe("nemar admin upstream-status: the report", () => {
       { body: page([STALE], { population_total: 1, counts: lie }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status", "--json"], server.url);
       const json = JSON.parse(result.stdout);
       expect(json.examined).toBe(1);
       expect(json.counts.states.stale_ready).toBe(1);
@@ -345,7 +354,7 @@ describe("nemar admin upstream-status: the report", () => {
     });
     const server = startServer([{ body: page([CURRENT, unknown]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.stdout).toContain("1 mirror(s) have an unknown tag");
       expect(result.stdout).toContain("not compared");
       expect(result.exitCode).toBe(0);
@@ -355,13 +364,13 @@ describe("nemar admin upstream-status: the report", () => {
   });
 });
 
-describe("nemar admin upstream-status: exit codes", () => {
+describe("nemar admin repull upstream-status: exit codes", () => {
   test("stale rows alone exit 0", async () => {
     seedAuthenticatedConfig();
     const rows = [STALE, row("on004362", "mirror_lag"), row("on000001", "stale_unverified")];
     const server = startServer([{ body: page(rows) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Stale in total: 3");
     } finally {
@@ -380,7 +389,7 @@ describe("nemar admin upstream-status: exit codes", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("1 mirror(s) could not be compared");
       // The row is named, so an administrator can find it.
@@ -396,7 +405,7 @@ describe("nemar admin upstream-status: exit codes", () => {
       { body: page([CURRENT], { errors: ["ds000001..ds000050: OpenNeuro answered HTTP 503"] }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("OpenNeuro answered HTTP 503");
     } finally {
@@ -414,7 +423,7 @@ describe("nemar admin upstream-status: exit codes", () => {
     });
     const server = startServer([{ status: 502, body: refused }, { body: page([CURRENT]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("HTTP 502");
       expect(result.stdout).toContain("OpenNeuro could not be read for any mirror");
@@ -428,7 +437,7 @@ describe("nemar admin upstream-status: exit codes", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ status: 502, body: page([row("on000001", "unchecked")]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("HTTP 502");
     } finally {
@@ -445,7 +454,10 @@ describe("nemar admin upstream-status: exit codes", () => {
       { body: page([row("on000002", "current")], { population_total: 2 }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--max-pages", "1"], server.url);
+      const result = await runCli(
+        ["admin", "repull", "upstream-status", "--max-pages", "1"],
+        server.url,
+      );
       expect(result.exitCode).toBe(2);
       expect(result.stdout).toContain("--max-pages");
       expect(server.requests.length).toBe(1);
@@ -463,7 +475,10 @@ describe("nemar admin upstream-status: exit codes", () => {
       { body: page([row("on000002", "current")], { population_total: 2 }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--max-pages", "2"], server.url);
+      const result = await runCli(
+        ["admin", "repull", "upstream-status", "--max-pages", "2"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
     } finally {
       server.stop();
@@ -480,10 +495,10 @@ describe("nemar admin upstream-status: exit codes", () => {
     ]);
     const shortOfPopulation = startServer([{ body: page([CURRENT], { population_total: 3 }) }]);
     try {
-      const a = await runCli(["admin", "upstream-status"], changedDuring.url);
+      const a = await runCli(["admin", "repull", "upstream-status"], changedDuring.url);
       expect(a.exitCode).toBe(2);
       expect(a.stdout).toContain("population changed");
-      const b = await runCli(["admin", "upstream-status"], shortOfPopulation.url);
+      const b = await runCli(["admin", "repull", "upstream-status"], shortOfPopulation.url);
       expect(b.exitCode).toBe(2);
       expect(b.stdout).toContain("rerun");
     } finally {
@@ -497,10 +512,12 @@ describe("nemar admin upstream-status: exit codes", () => {
     const server = startServer([{ body: page([CURRENT], { population_total: 900 }) }]);
     try {
       expect(
-        (await runCli(["admin", "upstream-status", "--after", "on000001"], server.url)).exitCode,
+        (await runCli(["admin", "repull", "upstream-status", "--after", "on000001"], server.url))
+          .exitCode,
       ).toBe(0);
       expect(
-        (await runCli(["admin", "upstream-status", "--dataset", "on002893"], server.url)).exitCode,
+        (await runCli(["admin", "repull", "upstream-status", "--dataset", "on002893"], server.url))
+          .exitCode,
       ).toBe(0);
     } finally {
       server.stop();
@@ -514,7 +531,7 @@ describe("nemar admin upstream-status: exit codes", () => {
     const server = startServer([{ body: page([], { population_total: 900 }) }]);
     try {
       const result = await runCli(
-        ["admin", "upstream-status", "--dataset", "on000008"],
+        ["admin", "repull", "upstream-status", "--dataset", "on000008"],
         server.url,
       );
       expect(result.exitCode).toBe(2);
@@ -528,7 +545,7 @@ describe("nemar admin upstream-status: exit codes", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ status: 500, body: { error: "boom" } }]);
     try {
-      const result = await runCli(["admin", "upstream-status"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Stopped:");
       expect(result.stdout).not.toContain("Examined");
@@ -546,7 +563,7 @@ describe("nemar admin upstream-status: exit codes", () => {
     ]);
     try {
       const result = await runCli(
-        ["admin", "upstream-status", "--dataset", "on000008"],
+        ["admin", "repull", "upstream-status", "--dataset", "on000008"],
         server.url,
       );
       expect(result.exitCode).toBe(1);
@@ -557,12 +574,12 @@ describe("nemar admin upstream-status: exit codes", () => {
   });
 });
 
-describe("nemar admin upstream-status --json", () => {
+describe("nemar admin repull upstream-status --json", () => {
   test("parses and carries complete, the population and could_not_see", async () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: page([STALE, CURRENT]) }]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status", "--json"], server.url);
       const json = JSON.parse(result.stdout);
       expect(json.complete).toBe(true);
       expect(json.could_not_see).toEqual([]);
@@ -587,7 +604,7 @@ describe("nemar admin upstream-status --json", () => {
       { status: 500, body: { error: "boom" } },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status", "--json"], server.url);
       const json = JSON.parse(result.stdout);
       expect(json.complete).toBe(false);
       expect(json.could_not_see.length).toBeGreaterThan(0);
@@ -603,7 +620,7 @@ describe("nemar admin upstream-status --json", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ status: 500, body: { error: "boom" } }]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status", "--json"], server.url);
       const json = JSON.parse(result.stdout);
       expect(json.complete).toBe(false);
       expect(json.rows).toEqual([]);
@@ -620,7 +637,7 @@ describe("nemar admin upstream-status --json", () => {
       { body: page([row("on000001", "unchecked")], { errors: ["batch failed"] }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-status", "--json"], server.url);
       const json = JSON.parse(result.stdout);
       expect(json.complete).toBe(false);
       expect(json.could_not_see.length).toBeGreaterThan(0);
@@ -636,7 +653,7 @@ describe("nemar admin upstream-status --json", () => {
 // --measure (Phase 4c)
 // ----------------------------------------------------------------------------
 
-describe("nemar admin upstream-status --measure", () => {
+describe("nemar admin repull upstream-status --measure", () => {
   // The two recorded listings: ds002893 1.0.0 -> 2.0.0 (data-changing, 3,431,782,003 bytes to copy)
   // and ds003082 1.0.0 -> 1.0.1 (metadata-only, a real zero). The wire rows are hand-written; their
   // snapshot lists are the recorded ones, so the DOI volume reads real creation dates.
@@ -670,7 +687,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const json = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -718,7 +735,11 @@ describe("nemar admin upstream-status --measure", () => {
         ["ds003082", "1.0.0", "1.0.1"],
       ]);
 
-      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      const human = await runCli(
+        ["admin", "repull", "upstream-status", "--measure"],
+        server.url,
+        env,
+      );
       expect(human.exitCode).toBe(0);
       expect(human.stdout).toContain("Measured 2: metadata-only 1, data-changing 1");
       expect(human.stdout).toContain("Files added 29, changed 326, deleted 76");
@@ -798,7 +819,7 @@ describe("nemar admin upstream-status --measure", () => {
         const server = startServer([{ body: page([META, DATA]) }], c.reply);
         try {
           const json = await runCli(
-            ["admin", "upstream-status", "--measure", "--json"],
+            ["admin", "repull", "upstream-status", "--measure", "--json"],
             server.url,
             env,
           );
@@ -809,7 +830,11 @@ describe("nemar admin upstream-status --measure", () => {
           // A reading the CLI understands is not a warning, whatever it says about the cap.
           expect(json.stderr).not.toContain("Warning:");
 
-          const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+          const human = await runCli(
+            ["admin", "repull", "upstream-status", "--measure"],
+            server.url,
+            env,
+          );
           expect(human.exitCode).toBe(0);
           expect(human.stdout).toContain(c.line);
           expect(human.stdout).not.toContain("default open cap");
@@ -854,7 +879,7 @@ describe("nemar admin upstream-status --measure", () => {
         const server = startServer([{ body: page([META, DATA]) }], reply);
         try {
           const result = await runCli(
-            ["admin", "upstream-status", "--measure", "--json"],
+            ["admin", "repull", "upstream-status", "--measure", "--json"],
             server.url,
             env,
           );
@@ -877,7 +902,11 @@ describe("nemar admin upstream-status --measure", () => {
       files.failDataset("ds003082", 503);
       const server = startServer([{ body: page([META, DATA]) }], failedCalls[0]);
       try {
-        const result = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+        const result = await runCli(
+          ["admin", "repull", "upstream-status", "--measure"],
+          server.url,
+          env,
+        );
         expect(result.exitCode).toBe(2);
         expect(result.stdout).toContain(
           "At the default open cap (2; the Worker's cap could not be read)",
@@ -900,7 +929,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const json = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -918,7 +947,11 @@ describe("nemar admin upstream-status --measure", () => {
       expect(bad.delta).toBeNull();
       expect(bad.reason).toContain("HTTP 503");
 
-      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      const human = await runCli(
+        ["admin", "repull", "upstream-status", "--measure"],
+        server.url,
+        env,
+      );
       expect(human.exitCode).toBe(2);
       expect(human.stdout).toContain("unknown; at least 3431782003");
       expect(human.stdout).toContain("delta unknown: OpenNeuro GraphQL answered HTTP 503");
@@ -936,7 +969,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--measure-limit", "1", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--measure-limit", "1", "--json"],
         server.url,
         env,
       );
@@ -965,7 +998,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -994,7 +1027,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const json = await runCli(
-        ["admin", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
         server.url,
         env,
       );
@@ -1002,7 +1035,7 @@ describe("nemar admin upstream-status --measure", () => {
       expect(JSON.parse(json.stdout).measurement).toBeNull();
 
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1024,7 +1057,11 @@ describe("nemar admin upstream-status --measure", () => {
         anomaly: 1,
         in_progress: 1,
       });
-      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      const human = await runCli(
+        ["admin", "repull", "upstream-status", "--measure"],
+        server.url,
+        env,
+      );
       expect(human.stdout).toContain(
         "2 unknown tag (1 of them probably stale by date), 1 never examined, 0 unchecked, 1 anomaly, 1 in progress, 0 parked, 0 unpublished",
       );
@@ -1044,13 +1081,13 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const byDataset = await runCli(
-        ["admin", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--dataset", "on002893", "--json"],
         server.url,
         env,
       );
       expect(JSON.parse(byDataset.stdout).measurement.scope).toBe("dataset");
       const byCursor = await runCli(
-        ["admin", "upstream-status", "--measure", "--after", "on000001", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--after", "on000001", "--json"],
         server.url,
         env,
       );
@@ -1074,7 +1111,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const json = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1082,7 +1119,11 @@ describe("nemar admin upstream-status --measure", () => {
       const out = JSON.parse(json.stdout);
       expect(out.measurement).toBeNull();
       expect(out.measurement_skipped).toContain("did not finish cleanly");
-      const human = await runCli(["admin", "upstream-status", "--measure"], server.url, env);
+      const human = await runCli(
+        ["admin", "repull", "upstream-status", "--measure"],
+        server.url,
+        env,
+      );
       expect(human.exitCode).toBe(2);
       expect(human.stdout).toContain("Not measured: the pass did not finish cleanly");
       expect(files.requests.length).toBe(0);
@@ -1104,7 +1145,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--max-pages", "1", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--max-pages", "1", "--json"],
         server.url,
         env,
       );
@@ -1124,7 +1165,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1147,7 +1188,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1173,7 +1214,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1204,7 +1245,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1242,7 +1283,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1263,7 +1304,11 @@ describe("nemar admin upstream-status --measure", () => {
     const files = startOpenNeuroFilesStandin();
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
-      const result = await runCli(["admin", "upstream-status", "--json"], server.url, env);
+      const result = await runCli(
+        ["admin", "repull", "upstream-status", "--json"],
+        server.url,
+        env,
+      );
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).not.toHaveProperty("measurement");
       expect(files.requests.length).toBe(0);
@@ -1281,7 +1326,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1303,7 +1348,7 @@ describe("nemar admin upstream-status --measure", () => {
     try {
       const env = { NEMAR_OPENNEURO_GRAPHQL_URL: files.url };
       const result = await runCli(
-        ["admin", "upstream-status", "--measure", "--json"],
+        ["admin", "repull", "upstream-status", "--measure", "--json"],
         server.url,
         env,
       );
@@ -1325,7 +1370,7 @@ describe("nemar admin upstream-status --measure", () => {
         ["--measure-limit", "3"],
         ["--measure", "--measure-limit", "0"],
       ]) {
-        const result = await runCli(["admin", "upstream-status", ...args], server.url);
+        const result = await runCli(["admin", "repull", "upstream-status", ...args], server.url);
         expect(result.exitCode).toBe(1);
       }
       expect(server.requests.length).toBe(0);

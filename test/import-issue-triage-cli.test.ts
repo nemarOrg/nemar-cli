@@ -1,6 +1,6 @@
 /**
- * CLI `nemar admin import-issue-triage` (#1310, epic #1306), driven through the
- * real entry point (`bun run src/index.ts admin import-issue-triage ...`).
+ * CLI `nemar admin import triage` (#1310, epic #1306), driven through the
+ * real entry point (`bun run src/index.ts admin import triage ...`).
  *
  * Harness mirrors test/hed-sweep-cli.test.ts exactly: a real subprocess CLI
  * invocation pointed at a real local HTTP server via TEST_API_URL
@@ -157,11 +157,11 @@ const DRY_RUN = {
   ok: true,
 };
 
-describe("nemar admin import-issue-triage: auth", () => {
+describe("nemar admin import triage: auth", () => {
   test("without a stored apiKey, nothing is sent", async () => {
     const server = startCaptureServer(DRY_RUN);
     try {
-      const result = await runCli(["admin", "import-issue-triage"], server.url);
+      const result = await runCli(["admin", "import", "triage"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -170,12 +170,12 @@ describe("nemar admin import-issue-triage: auth", () => {
   });
 });
 
-describe("nemar admin import-issue-triage: dry run is the default", () => {
+describe("nemar admin import triage: dry run is the default", () => {
   test("a bare invocation sends no apply param", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(DRY_RUN);
     try {
-      const result = await runCli(["admin", "import-issue-triage"], server.url);
+      const result = await runCli(["admin", "import", "triage"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toHaveLength(1);
       expect(server.requests[0]?.searchParams.get("apply")).toBeNull();
@@ -193,7 +193,7 @@ describe("nemar admin import-issue-triage: dry run is the default", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({ ...DRY_RUN, applied: true });
     try {
-      const result = await runCli(["admin", "import-issue-triage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "triage", "--apply"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests[0]?.searchParams.get("apply")).toBe("1");
       expect(result.stdout).not.toContain("DRY RUN");
@@ -207,7 +207,7 @@ describe("nemar admin import-issue-triage: dry run is the default", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(DRY_RUN);
     try {
-      await runCli(["admin", "import-issue-triage", "--limit", "7"], server.url);
+      await runCli(["admin", "import", "triage", "--limit", "7"], server.url);
       expect(server.requests[0]?.searchParams.get("limit")).toBe("7");
     } finally {
       server.stop();
@@ -225,7 +225,7 @@ describe("nemar admin import-issue-triage: dry run is the default", () => {
     ] as const) {
       const server = startCaptureServer(DRY_RUN);
       try {
-        await runCli(["admin", "import-issue-triage", "--limit", input], server.url);
+        await runCli(["admin", "import", "triage", "--limit", input], server.url);
         expect(server.requests[0]?.searchParams.get("limit")).toBe(sent);
       } finally {
         server.stop();
@@ -234,7 +234,7 @@ describe("nemar admin import-issue-triage: dry run is the default", () => {
   });
 });
 
-describe("nemar admin import-issue-triage: a bad --limit is refused, not coerced", () => {
+describe("nemar admin import triage: a bad --limit is refused, not coerced", () => {
   // parseInt stopped at the first non-digit and returned what it had, so `15abc`
   // became 15 and `3.9` became 3 -- a different batch size than the one asked for.
   for (const bad of ["abc", "0", "-5", "", "15abc", "3.9", " ", "Infinity"]) {
@@ -242,7 +242,7 @@ describe("nemar admin import-issue-triage: a bad --limit is refused, not coerced
       seedAuthenticatedConfig();
       const server = startCaptureServer(DRY_RUN);
       try {
-        const result = await runCli(["admin", "import-issue-triage", "--limit", bad], server.url);
+        const result = await runCli(["admin", "import", "triage", "--limit", bad], server.url);
         expect(result.exitCode).toBe(1);
         expect(result.stderr).toContain("Invalid --limit");
         // The operator asked for something specific; silently substituting 15
@@ -255,7 +255,7 @@ describe("nemar admin import-issue-triage: a bad --limit is refused, not coerced
   }
 });
 
-describe("nemar admin import-issue-triage: a failed action is not reported as done", () => {
+describe("nemar admin import triage: a failed action is not reported as done", () => {
   test("an entry marked failed prints FAILED CLOSE, not CLOSE", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -274,7 +274,7 @@ describe("nemar admin import-issue-triage: a failed action is not reported as do
       ],
     });
     try {
-      const result = await runCli(["admin", "import-issue-triage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "triage", "--apply"], server.url);
       expect(result.stdout).toContain("FAILED CLOSE");
       expect(result.stdout).toContain("apply: HTTP 403");
       // A per-issue error is not fatal, but it must not read as a clean run.
@@ -293,7 +293,7 @@ describe("nemar admin import-issue-triage: a failed action is not reported as do
       errors: [{ issue: 105, dataset_id: "on006136", stage: "plan", error: "S3 timeout" }],
     });
     try {
-      const result = await runCli(["admin", "import-issue-triage", "--json"], server.url);
+      const result = await runCli(["admin", "import", "triage", "--json"], server.url);
       expect(result.exitCode).toBe(1);
       const parsed = JSON.parse(result.stdout) as { errors: unknown[] };
       expect(parsed.errors).toHaveLength(1);
@@ -303,7 +303,7 @@ describe("nemar admin import-issue-triage: a failed action is not reported as do
   });
 });
 
-describe("nemar admin import-issue-triage: the 502 body is not discarded", () => {
+describe("nemar admin import triage: the 502 body is not discarded", () => {
   const TOTAL_FAILURE = {
     ...DRY_RUN,
     applied: true,
@@ -327,7 +327,7 @@ describe("nemar admin import-issue-triage: the 502 body is not discarded", () =>
     seedAuthenticatedConfig();
     const server = startCaptureServer(TOTAL_FAILURE, 502);
     try {
-      const result = await runCli(["admin", "import-issue-triage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "triage", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("#105");
       expect(result.stderr).toContain("HTTP 403 - forbidden");
@@ -341,10 +341,7 @@ describe("nemar admin import-issue-triage: the 502 body is not discarded", () =>
     seedAuthenticatedConfig();
     const server = startCaptureServer(TOTAL_FAILURE, 502);
     try {
-      const result = await runCli(
-        ["admin", "import-issue-triage", "--apply", "--json"],
-        server.url,
-      );
+      const result = await runCli(["admin", "import", "triage", "--apply", "--json"], server.url);
       expect(result.exitCode).toBe(1);
       // Without this, stdout was EMPTY on the most interesting outcome.
       const parsed = JSON.parse(result.stdout) as { errors?: unknown[] };
@@ -355,7 +352,7 @@ describe("nemar admin import-issue-triage: the 502 body is not discarded", () =>
   });
 });
 
-describe("nemar admin import-issue-triage: rollups are visible", () => {
+describe("nemar admin import triage: rollups are visible", () => {
   test("a release whose close failed prints FAILED RELEASE", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -370,7 +367,7 @@ describe("nemar admin import-issue-triage: rollups are visible", () => {
       errors: [{ issue: 900, dataset_id: null, stage: "apply", error: "HTTP 403 - forbidden" }],
     });
     try {
-      const result = await runCli(["admin", "import-issue-triage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "triage", "--apply"], server.url);
       expect(result.stdout).toContain("FAILED RELEASE");
       expect(result.exitCode).toBe(1);
     } finally {
@@ -386,7 +383,7 @@ describe("nemar admin import-issue-triage: rollups are visible", () => {
       rollupsReleased: 1,
     });
     try {
-      const result = await runCli(["admin", "import-issue-triage"], server.url);
+      const result = await runCli(["admin", "import", "triage"], server.url);
       expect(result.stdout).toContain("WOULD RELEASE");
       expect(result.stdout).toContain("#900");
       expect(result.stdout).toContain("Would release 1 rollup(s)");
@@ -396,12 +393,12 @@ describe("nemar admin import-issue-triage: rollups are visible", () => {
   });
 });
 
-describe("nemar admin import-issue-triage: the reconcile section (#1352)", () => {
+describe("nemar admin import triage: the reconcile section (#1352)", () => {
   test("agreement prints the counts, not silence", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(DRY_RUN);
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       expect(r.stdout).toContain("rows_without_issue=0");
       expect(r.stdout).toContain("issues_without_row=0");
       // The denominator: "they agree over 2 rows" is a different claim from "they
@@ -439,7 +436,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
       },
     });
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       expect(r.stdout).toContain("UNTRACKED");
       expect(r.stdout).toContain("on000777 (ds000777) failed at prepare");
       expect(r.stdout).toContain("auth_invalid");
@@ -469,7 +466,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
       },
     });
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       expect(r.stdout).toContain("NO IMPORT ROW");
       expect(r.stdout).toContain("#77 on004148");
     } finally {
@@ -487,7 +484,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
       reconcileError: "D1 read failed: no such table: import_jobs",
     });
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       expect(r.stdout).toContain("reconcile=unknown");
       expect(r.stdout).toContain("no such table: import_jobs");
       expect(r.stdout).not.toContain("rows_without_issue=0");
@@ -524,7 +521,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
       },
     });
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       // A list that stops without saying so under-counts, and an under-count reads
       // as good news.
       expect(r.stdout).toContain("... and 4 more untracked");
@@ -535,7 +532,7 @@ describe("nemar admin import-issue-triage: the reconcile section (#1352)", () =>
   });
 });
 
-describe("nemar admin import-issue-triage: an older backend omits the reconcile", () => {
+describe("nemar admin import triage: an older backend omits the reconcile", () => {
   /**
    * Found by the first real production run, AFTER the merge: production had the epic
    * but not the reconcile, so the response carried no `reconcile` key at all. The
@@ -551,7 +548,7 @@ describe("nemar admin import-issue-triage: an older backend omits the reconcile"
     const { reconcile: _r, reconcileError: _e, ...withoutReconcile } = DRY_RUN;
     const server = startCaptureServer(withoutReconcile);
     try {
-      const r = await runCli(["admin", "import-issue-triage"], server.url);
+      const r = await runCli(["admin", "import", "triage"], server.url);
       // The triage half is unaffected...
       expect(r.stdout).toContain("WOULD CLOSE");
       expect(r.stdout).toContain("open=2");

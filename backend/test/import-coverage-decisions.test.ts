@@ -615,7 +615,7 @@ describe("the issue body", () => {
   test("points at the things worth checking, including the exact-string trap", () => {
     const body = buildCoverageIssueBody(args);
     expect(body).toContain("Only the exact string counts");
-    expect(body).toContain("nemar admin import-coverage");
+    expect(body).toContain("nemar admin import coverage");
     // The hand-off check, which is the one a reader could not derive themselves.
     expect(body).toContain("the hand-off is failing after the audit row is written");
   });

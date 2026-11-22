@@ -245,7 +245,7 @@ describe("prepareImport at a tag against a dataset that already exists", () => {
     expect(
       r.lastFailure.startsWith(`[openneuro-upstream-moved] ${DS}: ${NEMAR_ID} has released`),
     ).toBe(true);
-    expect(r.lastFailure.endsWith(`nemar admin import-openneuro ${DS} --tag 1.0.0`)).toBe(true);
+    expect(r.lastFailure.endsWith(`nemar admin import openneuro ${DS} --tag 1.0.0`)).toBe(true);
     expect(await git(bare, "rev-parse", "main")).toBe(tip);
     // The work directory prepare made for itself does not outlive the refusal.
     const made = /Working directory: (\S+)/.exec(r.log)?.[1];

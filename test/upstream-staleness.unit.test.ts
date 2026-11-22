@@ -391,7 +391,7 @@ describe("precedence, first match wins", () => {
     expect(classifyMirror(facts({ versions: [] }), stale).state).toBe("unpublished");
     const unexamined = classifyMirror(facts({ tag: null, basis: null }), stale);
     expect(unexamined.state).toBe("not_examined");
-    expect(unexamined.reason).toContain("nemar admin upstream-backfill");
+    expect(unexamined.reason).toContain("nemar admin repull upstream-backfill");
     expect(needsUpstream(facts({ versions: [] }))).toBe(false);
     expect(needsUpstream(facts({ tag: null, basis: null }))).toBe(false);
   });

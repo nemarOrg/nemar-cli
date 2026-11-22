@@ -112,7 +112,7 @@ describe("prepareImport refuses a tag the mirror lacks, before it creates anythi
 });
 
 describe("the CLI's --tag reaches prepare", () => {
-  test("`admin import-openneuro --phase prepare --tag` refuses a tag the mirror lacks", async () => {
+  test("`admin import openneuro --phase prepare --tag` refuses a tag the mirror lacks", async () => {
     // The real entry point with an isolated config holding a key it never gets to use: the refusal
     // comes before the first API call. The configured API is a closed local port, so the start-up
     // notice fetch fails at once instead of reaching a real backend.
@@ -129,7 +129,8 @@ describe("the CLI's --tag reaches prepare", () => {
         "bun",
         join(import.meta.dir, "..", "src", "index.ts"),
         "admin",
-        "import-openneuro",
+        "import",
+        "openneuro",
         DATASET,
         "--phase",
         "prepare",

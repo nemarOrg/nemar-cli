@@ -9,6 +9,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// Importing admin.ts registers the whole tree, including the two upstream commands it adds to
+// `repull` (ADR 0135), so this file sees the same group whether it runs alone or with others.
+import { adminCommand } from "../src/commands/admin";
 import { confirmQuestion, repullCommand } from "../src/commands/admin-repull";
 import { releaseBody } from "../src/lib/repull/execute/pull-request";
 import type { ExecuteSummary } from "../src/lib/repull/execute/run";
@@ -92,7 +95,8 @@ function helpOf(name: string): string {
 }
 
 describe("no text names a command that does not exist", () => {
-  test("the commands that exist are plan, execute, status, resume, merge, abandon and auto", () => {
+  test("the commands that exist are plan, execute, status, resume, merge, abandon, auto and the upstream pair", () => {
+    expect(adminCommand.commands.find((c) => c.name() === "repull")).toBe(repullCommand);
     expect(repullCommand.commands.map((c) => c.name()).sort()).toEqual([
       "abandon",
       "auto",
@@ -101,6 +105,8 @@ describe("no text names a command that does not exist", () => {
       "plan",
       "resume",
       "status",
+      "upstream-backfill",
+      "upstream-status",
     ]);
   });
 

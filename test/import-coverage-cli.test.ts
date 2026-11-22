@@ -1,6 +1,6 @@
 /**
- * CLI `nemar admin import-coverage` (#1311, epic #1306 phase 3), driven through the
- * real entry point (`bun run src/index.ts admin import-coverage ...`).
+ * CLI `nemar admin import coverage` (#1311, epic #1306 phase 3), driven through the
+ * real entry point (`bun run src/index.ts admin import coverage ...`).
  *
  * Harness mirrors test/import-issue-triage-cli.test.ts: a real subprocess CLI
  * invocation pointed at a real local HTTP server via TEST_API_URL, no mocks.
@@ -152,11 +152,11 @@ const ALARM = {
   issue: { number: 900, action: "created" },
 };
 
-describe("nemar admin import-coverage: auth", () => {
+describe("nemar admin import coverage: auth", () => {
   test("without a stored apiKey, nothing is sent", async () => {
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -165,12 +165,12 @@ describe("nemar admin import-coverage: auth", () => {
   });
 });
 
-describe("nemar admin import-coverage: the exit code is the verdict", () => {
+describe("nemar admin import coverage: the exit code is the verdict", () => {
   test("healthy exits 0", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("HEALTHY");
       expect(result.stdout).toContain("never_attempted=2");
@@ -186,7 +186,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(ALARM);
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("ALARM (disabled)");
       expect(result.stdout).toContain("AUTO_IMPORT_ENABLED");
@@ -211,7 +211,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.stdout).toContain("never attempted: ds000001");
       expect(result.stdout).not.toContain("ds000900");
       // ...but the counts are all reported.
@@ -236,7 +236,7 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.stdout).toContain("and 30 more");
     } finally {
       server.stop();
@@ -244,12 +244,12 @@ describe("nemar admin import-coverage: the exit code is the verdict", () => {
   });
 });
 
-describe("nemar admin import-coverage: dry run is the default", () => {
+describe("nemar admin import coverage: dry run is the default", () => {
   test("a bare invocation sends no apply param and says what it would do", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(ALARM);
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(server.requests[0]?.searchParams.get("apply")).toBeNull();
       expect(result.stdout).toContain("would create");
       expect(result.stdout).toContain("Re-run with --apply");
@@ -262,7 +262,7 @@ describe("nemar admin import-coverage: dry run is the default", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({ ...ALARM, applied: true });
     try {
-      const result = await runCli(["admin", "import-coverage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--apply"], server.url);
       expect(server.requests[0]?.searchParams.get("apply")).toBe("1");
       expect(result.stdout).toContain("Issue: created #900");
       expect(result.stdout).not.toContain("Re-run with --apply");
@@ -272,7 +272,7 @@ describe("nemar admin import-coverage: dry run is the default", () => {
   });
 });
 
-describe("nemar admin import-coverage: an unknown verdict is not a healthy one", () => {
+describe("nemar admin import coverage: an unknown verdict is not a healthy one", () => {
   const UNKNOWN = {
     ...HEALTHY,
     status: "unknown",
@@ -287,7 +287,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     seedAuthenticatedConfig();
     const server = startCaptureServer(UNKNOWN, 502);
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.exitCode).toBe(2);
       // An operator has to be able to tell an OpenNeuro outage from a D1 one.
       expect(result.stderr).toContain("discovery");
@@ -301,7 +301,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     seedAuthenticatedConfig();
     const server = startCaptureServer(UNKNOWN, 502);
     try {
-      const result = await runCli(["admin", "import-coverage", "--json"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--json"], server.url);
       expect(result.exitCode).toBe(2);
       const parsed = JSON.parse(result.stdout) as { errors?: { stage?: string }[] };
       expect(parsed.errors?.[0]?.stage).toBe("discovery");
@@ -314,7 +314,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-coverage", "--json"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--json"], server.url);
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout) as { status: string };
       expect(parsed.status).toBe("healthy");
@@ -327,7 +327,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
     seedAuthenticatedConfig();
     const server = startCaptureServer(ALARM);
     try {
-      const result = await runCli(["admin", "import-coverage", "--json"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--json"], server.url);
       expect(result.exitCode).toBe(1);
       expect(JSON.parse(result.stdout).status).toBe("alarm");
     } finally {
@@ -336,7 +336,7 @@ describe("nemar admin import-coverage: an unknown verdict is not a healthy one",
   });
 });
 
-describe("nemar admin import-coverage: partial failures are surfaced", () => {
+describe("nemar admin import coverage: partial failures are surfaced", () => {
   test("a report-stage error is shown without invalidating the verdict", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -346,7 +346,7 @@ describe("nemar admin import-coverage: partial failures are surfaced", () => {
       errors: [{ stage: "report", error: "HTTP 403 - forbidden" }],
     });
     try {
-      const result = await runCli(["admin", "import-coverage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("ALARM");
       expect(result.stdout).toContain("report: HTTP 403");
@@ -363,7 +363,7 @@ describe("nemar admin import-coverage: partial failures are surfaced", () => {
       issue: { number: 900, action: "closed", commentError: "HTTP 502" },
     });
     try {
-      const result = await runCli(["admin", "import-coverage", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "coverage", "--apply"], server.url);
       expect(result.stdout).toContain("comment failed: HTTP 502");
     } finally {
       server.stop();
@@ -371,7 +371,7 @@ describe("nemar admin import-coverage: partial failures are surfaced", () => {
   });
 });
 
-describe("nemar admin import-coverage: the balance line", () => {
+describe("nemar admin import coverage: the balance line", () => {
   /**
    * The counts balance against `discovered` by construction. A line that does not
    * add up means the run did not see the whole catalogue, which is the one thing a
@@ -381,7 +381,7 @@ describe("nemar admin import-coverage: the balance line", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({ ...HEALTHY, discovered: 900 });
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.stdout).toContain("Counts do not balance");
       expect(result.stdout).toContain("treat the verdict as unreliable");
     } finally {
@@ -394,7 +394,7 @@ describe("nemar admin import-coverage: the balance line", () => {
     // 760 imported + 2 never-attempted = 762 discovered.
     const server = startCaptureServer({ ...HEALTHY, discovered: 762 });
     try {
-      const result = await runCli(["admin", "import-coverage"], server.url);
+      const result = await runCli(["admin", "import", "coverage"], server.url);
       expect(result.stdout).not.toContain("Counts do not balance");
     } finally {
       server.stop();
@@ -402,7 +402,7 @@ describe("nemar admin import-coverage: the balance line", () => {
   });
 });
 
-describe("nemar admin import-coverage: truncation matches the backend", () => {
+describe("nemar admin import coverage: truncation matches the backend", () => {
   /**
    * The CLI cannot import from backend/src, so it carries its own copy of the
    * truncation width. Pinned against the backend's constant here rather than left
@@ -417,7 +417,7 @@ describe("nemar admin import-coverage: truncation matches the backend", () => {
   });
 });
 
-describe("nemar admin import-coverage: a reported verdict is not a bug to file", () => {
+describe("nemar admin import coverage: a reported verdict is not a bug to file", () => {
   /**
    * The exit code IS the answer here -- 1 unhealthy, 2 could-not-determine -- and a
    * monitoring caller reads it. The exit hook used to print "Run again with --debug
@@ -430,7 +430,7 @@ describe("nemar admin import-coverage: a reported verdict is not a bug to file",
     seedAuthenticatedConfig();
     const server = startCaptureServer(ALARM);
     try {
-      const r = await runCli(["admin", "import-coverage"], server.url);
+      const r = await runCli(["admin", "import", "coverage"], server.url);
       expect(r.exitCode).not.toBe(0);
       const out = r.stdout + r.stderr;
       expect(out).not.toContain("attach the log to a new issue");

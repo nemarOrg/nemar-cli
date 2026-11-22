@@ -232,7 +232,7 @@ describe("nemar admin repull auto: the text", () => {
     expect(r.stdout).toContain("Advance tick last ran:  never recorded");
     expect(r.stdout).toContain("Open automatic re-pulls: none");
     expect(r.stdout).toContain("Recent dispatches: none");
-    expect(r.stdout).toContain("nemar admin import-weekly");
+    expect(r.stdout).toContain("nemar admin import weekly");
     expect(r.stdout).not.toContain("unknown");
   });
 

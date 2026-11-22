@@ -20,7 +20,7 @@
  *    part, and the section says unknown (ADR 0054), never zero;
  *  - attention follows ADR 0053 exactly: each reason alone, none for a switch that is off, a hold
  *    other than the two bounds or a run's refusal, and the thresholds exactly where they are stated;
- *  - the headline, the log line and `nemar admin import-weekly`'s rule are one function.
+ *  - the headline, the log line and `nemar admin import weekly`'s rule are one function.
  * Mail is pinned by `repull-no-mail-scan.test.ts`; the Resend capture below stays empty.
  */
 

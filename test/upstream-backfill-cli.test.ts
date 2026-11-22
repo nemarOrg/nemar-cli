@@ -1,12 +1,13 @@
 /**
- * CLI `nemar admin upstream-backfill` (epic #1046 phase 2, #1908; ADR 0111), driven through the
- * real entry point (`bun run src/index.ts admin upstream-backfill ...`) as a subprocess pointed
+ * CLI `nemar admin repull upstream-backfill` (epic #1046 phase 2, #1908; ADR 0111), driven through the
+ * real entry point (`bun run src/index.ts admin repull upstream-backfill ...`) as a subprocess pointed
  * at a real local HTTP server via TEST_API_URL, the harness `zarr-fidelity-sweep-cli.test.ts`
  * uses: the recorded requests are what the CLI's own `fetch()` sent. The server is the backend
  * stand-in only; the route behind it is tested on real SQLite in
  * `backend/test/upstream-backfill-route.test.ts`.
  *
- * What is pinned: a dry run by default (no `execute=1` on the wire), `--execute` sends it, the
+ * What is pinned: a dry run by default (no `execute=1` on the wire), `--apply` (or its hidden
+ * alias `--execute`) sends it, the
  * loop follows `next_cursor`, a 502 body is read (not thrown away) so the cursor is printed, and
  * every outcome that is not a finished, error-free pass exits 1.
  */
@@ -119,11 +120,11 @@ function batch(over: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-describe("nemar admin upstream-backfill: auth", () => {
+describe("nemar admin repull upstream-backfill: auth", () => {
   test("without a stored apiKey nothing is sent", async () => {
     const server = startServer([{ body: batch() }]);
     try {
-      const result = await runCli(["admin", "upstream-backfill"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -132,12 +133,12 @@ describe("nemar admin upstream-backfill: auth", () => {
   });
 });
 
-describe("nemar admin upstream-backfill: dry run by default", () => {
+describe("nemar admin repull upstream-backfill: dry run by default", () => {
   test("no execute on the wire, the default limit is sent, and it says so", async () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: batch() }]);
     try {
-      const result = await runCli(["admin", "upstream-backfill"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toHaveLength(1);
       const req = server.requests[0] as URL;
@@ -145,33 +146,37 @@ describe("nemar admin upstream-backfill: dry run by default", () => {
       expect(req.searchParams.has("execute")).toBe(false);
       expect(req.searchParams.get("limit")).toBe("25");
       expect(result.stdout).toContain("Dry run");
-      expect(result.stdout).toContain("pass --execute");
+      expect(result.stdout).toContain("pass --apply");
       expect(result.stdout).toContain("would record");
     } finally {
       server.stop();
     }
   });
 
-  test("--execute sends execute=1 and does not print the dry-run notice", async () => {
-    seedAuthenticatedConfig();
-    const server = startServer([{ body: batch({ execute: true }) }]);
-    try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
-      expect(result.exitCode).toBe(0);
-      expect((server.requests[0] as URL).searchParams.get("execute")).toBe("1");
-      expect(result.stdout).not.toContain("Dry run");
-      expect(result.stdout).toContain("On versions now: doi=2");
-    } finally {
-      server.stop();
-    }
-  });
+  // `--apply` is the flag (ADR 0135 decision 4); `--execute` is its hidden alias.
+  test.each(["--apply", "--execute"])(
+    "%s sends execute=1 and does not print the dry-run notice",
+    async (flag) => {
+      seedAuthenticatedConfig();
+      const server = startServer([{ body: batch({ execute: true }) }]);
+      try {
+        const result = await runCli(["admin", "repull", "upstream-backfill", flag], server.url);
+        expect(result.exitCode).toBe(0);
+        expect((server.requests[0] as URL).searchParams.get("execute")).toBe("1");
+        expect(result.stdout).not.toContain("Dry run");
+        expect(result.stdout).toContain("On versions now: doi=2");
+      } finally {
+        server.stop();
+      }
+    },
+  );
 
   test("--limit and --after are forwarded", async () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: batch() }]);
     try {
       await runCli(
-        ["admin", "upstream-backfill", "--limit", "10", "--after", "on000123@1.0.0"],
+        ["admin", "repull", "upstream-backfill", "--limit", "10", "--after", "on000123@1.0.0"],
         server.url,
       );
       const req = server.requests[0] as URL;
@@ -183,7 +188,7 @@ describe("nemar admin upstream-backfill: dry run by default", () => {
   });
 });
 
-describe("nemar admin upstream-backfill: the loop", () => {
+describe("nemar admin repull upstream-backfill: the loop", () => {
   test("it follows next_cursor until the pass is done, and sends each cursor as `after`", async () => {
     seedAuthenticatedConfig();
     const server = startServer([
@@ -192,7 +197,7 @@ describe("nemar admin upstream-backfill: the loop", () => {
       { body: batch({ next_cursor: null, remaining: 0 }) },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests.map((r) => r.searchParams.get("after"))).toEqual([
         null,
@@ -222,7 +227,7 @@ describe("nemar admin upstream-backfill: the loop", () => {
       { body: batch() },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(server.requests).toHaveLength(2);
       expect(result.stdout).toContain("on000001@1.0.0");
@@ -249,7 +254,7 @@ describe("nemar admin upstream-backfill: the loop", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(server.requests).toHaveLength(1);
       expect(result.stderr).toContain("read as absent");
@@ -265,7 +270,7 @@ describe("nemar admin upstream-backfill: the loop", () => {
       { status: 500, body: { error: "Failed to read or write dataset_versions" } },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Failed to read or write dataset_versions");
     } finally {
@@ -278,7 +283,7 @@ describe("nemar admin upstream-backfill: the loop", () => {
     const server = startServer([{ body: batch({ next_cursor: "on000002@1.0.0", remaining: 9 }) }]);
     try {
       const result = await runCli(
-        ["admin", "upstream-backfill", "--execute", "--max-batches", "2"],
+        ["admin", "repull", "upstream-backfill", "--apply", "--max-batches", "2"],
         server.url,
       );
       expect(result.exitCode).toBe(1);
@@ -291,14 +296,14 @@ describe("nemar admin upstream-backfill: the loop", () => {
   });
 });
 
-describe("nemar admin upstream-backfill: what the operator is told", () => {
-  test("it says that unknown is final, in a dry run and with --execute", async () => {
+describe("nemar admin repull upstream-backfill: what the operator is told", () => {
+  test("it says that unknown is final, in a dry run and with --apply", async () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: batch() }]);
     try {
       for (const args of [
-        ["admin", "upstream-backfill"],
-        ["admin", "upstream-backfill", "--execute"],
+        ["admin", "repull", "upstream-backfill"],
+        ["admin", "repull", "upstream-backfill", "--apply"],
       ]) {
         const result = await runCli(args, server.url);
         expect(result.stdout).toContain("'unknown' is final");
@@ -327,7 +332,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("2 row(s) were not examined after a transient error");
       expect(result.stdout).toContain("rerun without --after");
@@ -362,7 +367,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("1 row(s) were not examined after a transient error");
       expect(result.stdout).toContain(
@@ -389,7 +394,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
     ]);
     try {
       const result = await runCli(
-        ["admin", "upstream-backfill", "--execute", "--max-batches", "1"],
+        ["admin", "repull", "upstream-backfill", "--apply", "--max-batches", "1"],
         server.url,
       );
       expect(result.stdout).toContain("Resume with: --after on000002@1.0.0");
@@ -403,7 +408,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: batch() }]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--execute"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--apply"], server.url);
       expect(result.stdout).not.toContain("rerun without --after");
     } finally {
       server.stop();
@@ -414,7 +419,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
     seedAuthenticatedConfig();
     const server = startServer([{ body: batch() }]);
     try {
-      const result = await runCli(["admin", "upstream-backfill", "--json"], server.url);
+      const result = await runCli(["admin", "repull", "upstream-backfill", "--json"], server.url);
       expect(() => JSON.parse(result.stdout)).not.toThrow();
     } finally {
       server.stop();
@@ -422,7 +427,7 @@ describe("nemar admin upstream-backfill: what the operator is told", () => {
   });
 });
 
-describe("nemar admin upstream-backfill: --json", () => {
+describe("nemar admin repull upstream-backfill: --json", () => {
   test("prints one summary object with the totals and the final counts", async () => {
     seedAuthenticatedConfig();
     const server = startServer([
@@ -431,7 +436,7 @@ describe("nemar admin upstream-backfill: --json", () => {
     ]);
     try {
       const result = await runCli(
-        ["admin", "upstream-backfill", "--execute", "--json"],
+        ["admin", "repull", "upstream-backfill", "--apply", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
