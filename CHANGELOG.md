@@ -15,6 +15,20 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Admin command tree: the `dataset` group (epic #2307, ADR 0135)
+
+- **`nemar admin repo` is now `nemar admin dataset`, and the per-dataset commands moved under it.**
+  `repo` stays an alias, so `nemar admin repo publish approve` still runs.
+  `ci`, `doi`, `exemplar`, `s3 lock`, `s3 credential-check`, `doctor scan`, `doctor fix`, `reindex` and `bulk-delete` moved under `admin dataset` with their names; `delete-dataset` is `admin dataset delete`.
+  Each old path runs nothing, prints one line naming the new path and exits 1, including the ADR 0125 stubs `admin publish`, `withdraw` and `restore`, which now name `admin dataset ...`.
+  `admin doctor kinds` stays where it is until the `users` phase.
+- **Retired:** `admin make-public` (its line points at `admin dataset publish`; the `POST /datasets/:id/publish` route stays), and `admin regenerate-iam` and `admin s3 regenerate-iam`, which only printed a deprecation (the backend route still answers 410).
+- **`--apply` is the write flag** of `admin dataset unpublish`, `withdraw` and `restore`; `--execute` is still accepted as a hidden alias.
+- **`admin dataset doctor fix` is a dry run unless `--apply` is given.** The old `--dry-run` is accepted and hidden; `--apply` with `--dry-run` is refused.
+- **`admin dataset doi create` no longer takes `--provider`**, which could only ever be refused (EZID is the registrar, ADR 0007).
+- Backend mail and refusal text name the new paths (`admin dataset publish approve`, `admin dataset delete`, `admin dataset restore`).
+  Callers outside this repository that build or print a moved path change in the same release: the website's `cliApproveCommand`, the nemar-observability manifest alert, and docs.nemar.org.
+
 ### Compute access decisions
 
 - **A suspension or an ending of compute access now tells the person why.**

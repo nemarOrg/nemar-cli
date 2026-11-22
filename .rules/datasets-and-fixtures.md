@@ -63,7 +63,7 @@ The reservation is **not** environment-fenced: `nemarDatasets` is shared between
 
 Seven curated `xx0999NN` copies of real public datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED, published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82901` shoulder).
 Their `active`/`public` state lives in D1 and is the source of truth for the staging catalog; it does not depend on the registrar.
-The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks, so re-mint with `nemar admin exemplar remint-dois` only when a resolvable test DOI actually matters.
+The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks, so re-mint with `nemar admin dataset exemplar remint-dois` only when a resolvable test DOI actually matters.
 
 **The fleet has no anonymous deposit (#1433, ADR 0068).**
 It had one at `xx099907`, and that placement was the mistake ADR 0068 exists to prevent: `xx` publishes only through the exemplar exception, while an anonymous deposit's defining event is an anonymous RELEASE, so the one path the fixture needed was the one path its band refuses.
@@ -82,13 +82,13 @@ What is true now:
 Two caveats with the clone tool:
 
 - It reads `AWS_ACCESS_KEY_ID`/`SECRET` from the **ambient environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from the backend), and session credentials are short-lived, so export them immediately before each run.
-- Creation is **not retry-safe** after a partial failure (issue #955): recover with `nemar admin delete-dataset <id>` then recreate, rather than re-running `create`.
+- Creation is **not retry-safe** after a partial failure (issue #955): recover with `nemar admin dataset delete <id>` then recreate, rather than re-running `create`.
 
 ## [STRICT] `nm099998` is the standing anonymous deposit, and a NAMED publication destroys it
 
 It is the fixture every anonymity surface is exercised against (ADR 0065, #1407): a PUBLIC catalog row over a PRIVATE `nemarDatasets` repository, `anonymous = 1`, `first_published_at` NULL, with a version DOI minted and left **reserved** rather than published.
 It exists so anonymity is tested against a dataset that STAYS concealed across releases, deploys and enrichment runs, not only against rows a test creates and tears down in one process.
-That value ACCRUES: it was built on 2026-09-17, so deleting and rebuilding it costs whatever it has accumulated, which is the reason the reserved band's error text does not offer `delete-dataset` as routine advice.
+That value ACCRUES: it was built on 2026-09-17, so deleting and rebuilding it costs whatever it has accumulated, which is the reason the reserved band's error text does not offer `admin dataset delete` as routine advice.
 
 **Never publish it non-anonymously.**
 An ANONYMOUS release is fine and is the point; it has had one.
@@ -100,7 +100,7 @@ What is unrecoverable is a normal publication, and the mechanism lives in two fi
 So publishing it under a name does not dirty the fixture, it destroys it, and no repair exists short of rebuilding the dataset at a new id.
 An earlier version of this rule said the approve path stamps the column outright; that is false for an anonymous release, and the difference is the whole safety margin.
 
-The dev worker OWNS it (`DEV_OWNED_FIXTURE_IDS`, ADR 0068), so `nemar admin delete-dataset nm099998` works from staging and a failed rebuild is recoverable.
+The dev worker OWNS it (`DEV_OWNED_FIXTURE_IDS`, ADR 0068), so `nemar admin dataset delete nm099998` works from staging and a failed rebuild is recoverable.
 Production has no row for it, and the production webhook short-circuits a repository whose id is declared dev-owned (`backend/src/routes/webhooks/github.ts`).
 The declaration is on `main` (checked 2026-11-04 against 0.10.27), so failed production runs for this repository are no longer expected: if one appears, check the declaration before blaming the fixture.
 An earlier version of this rule said production still claimed its pushes until the next release; that gap has closed.

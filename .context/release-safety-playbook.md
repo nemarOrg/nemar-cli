@@ -42,7 +42,7 @@ The gaps are documented at the end.
 - Point the CLI at the dev worker with an isolated config so the real one is never clobbered:
   `NEMAR_CONFIG_DIR=$(mktemp -d) TEST_API_URL=https://nemar-api-dev.sccn-org.workers.dev`.
   The working dev admin credential is `TEST_ADMIN_API_KEY` from `test/.env.test` (no prod key works against dev).
-- Publish/DOI/reindex/zarr flows: use the exemplar fleet (`nemar admin exemplar create|status|remint-dois`) or an ephemeral dev-band id (`xx090001`-`xx099899`).
+- Publish/DOI/reindex/zarr flows: use the exemplar fleet (`nemar admin dataset exemplar create|status|remint-dois`) or an ephemeral dev-band id (`xx090001`-`xx099899`).
   Never a prod `nm` id (the repo lives in the shared `nemarDatasets` org).
 - Website changes: push to the `staging` branch and check `test.nemar.org`.
   The staging build must set `PUBLIC_API_BASE_URL`/`PUBLIC_DATA_BASE_URL`/`PUBLIC_ZARR_BASE_URL` to the `-test` hosts; all data-plane fetches resolve through `resolveDataBase()` (never hardcode `data.nemar.org`).
