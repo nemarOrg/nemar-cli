@@ -118,7 +118,7 @@ describe("owner_name_missing reaches the user on every path", () => {
     expect(err.blockReason).toBe(OWNER_NAME_MISSING_REASON);
   });
 
-  test("admin doi create: `message` wins over `error` when a block_reason is present", async () => {
+  test("admin dataset doi create: `message` wins over `error` when a block_reason is present", async () => {
     // This body still carries `error` for API clients that key on it; the
     // human-facing surface must not be the one-liner.
     const err = await call(422, DOI_CONCEPT_BODY);
