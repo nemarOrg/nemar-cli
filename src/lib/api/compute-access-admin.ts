@@ -11,6 +11,7 @@
 import type { ComputeAccessDecision } from "../../../shared/compute-access-state.js";
 import {
   COMPUTE_ACCESS_ADMIN_ERROR_CODES,
+  type ComputeAccessDecisionRequest,
   type ComputeAccessDecisionResponse,
   type ComputeAccessListResponse,
   computeAccessDecisionResponseSchema,
@@ -43,14 +44,20 @@ export type ComputeAccessTarget = { username: string } | { id: number };
 
 /**
  * `POST /admin/compute/access/{grant|deny|suspend|revoke}/...` (admin): decide. The optional reason is
- * recorded on the audit row and is NOT sent to the person. A grant opens the owner's default allocation
- * once; a suspension and a revocation freeze the person's pools and end their live compute.
+ * recorded on the audit row and is NOT sent to the person; the notice IS sent to the person (required
+ * for a suspension and a revocation, optional for a denial, refused for a grant:
+ * `COMPUTE_ACCESS_NOTICE_RULE`). A grant opens the owner's default allocation once; a suspension and a
+ * revocation freeze the person's pools and end their live compute.
  */
 export async function decideComputeAccess(
   decision: ComputeAccessDecision,
   target: ComputeAccessTarget,
   reason?: string,
+  notice?: string,
 ): Promise<ComputeAccessDecisionResponse> {
+  const body: ComputeAccessDecisionRequest = {};
+  if (reason !== undefined) body.reason = reason;
+  if (notice !== undefined) body.notice = notice;
   const where =
     "id" in target
       ? `by-id/${target.id}`
@@ -60,7 +67,7 @@ export async function decideComputeAccess(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reason === undefined ? {} : { reason }),
+      body: JSON.stringify(body),
     },
     true,
     computeAccessDecisionResponseSchema,
