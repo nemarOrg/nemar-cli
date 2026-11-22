@@ -112,7 +112,7 @@ const RULES: {
     cause: "data_unavailable",
     label: "data-unavailable",
     summary:
-      "NEMAR's bucket has no object for some of the keys this dataset's tree names, so it was not published (ADR 0064 withdraws a dataset below 90% of its data keys). This does NOT yet say the content is gone upstream: run `nemar admin fleet content-recovery <id>` to find out, per key, whether any recorded source is still readable.",
+      "NEMAR's bucket has no object for some of the keys this dataset's tree names, so it was not published (ADR 0064 withdraws a dataset below 90% of its data keys). This does NOT yet say the content is gone upstream: run `nemar admin rework annex content-recovery <id>` to find out, per key, whether any recorded source is still readable.",
     match: /\[nemar-data-unavailable\]/,
   },
   {

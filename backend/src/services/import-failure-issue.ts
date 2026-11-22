@@ -25,7 +25,7 @@
  *
  * Closing on recovery is deliberately NOT here. It belongs to a sweep
  * (services/import-issue-sweep.ts), because a recovery does not necessarily
- * pass through this code path at all -- a manual `nemar admin recover` or an
+ * pass through this code path at all -- a manual `nemar admin rework recover` or an
  * operator's forced verify would never reach it.
  */
 
