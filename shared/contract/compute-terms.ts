@@ -7,8 +7,8 @@
  * short word of letters, digits and `. _ -` (at most 32 characters), which is exactly what the
  * migration's CHECK allows.
  *
- * `COMPUTE_TERMS_PUBLISHED` is false until the University of California San Diego counsel has approved
- * the text and the owner publishes it. While it is false, a request in the exact production
+ * `COMPUTE_TERMS_PUBLISHED` is false until the compute terms are published, which happens when compute
+ * opens. While it is false, a request in the exact production
  * environment is refused 503 `terms_unpublished`: nobody can accept terms that do not exist yet. Other
  * environments take requests, so the flow is built and tested before publication. Changing the
  * constant is the owner's act, in a reviewed change.

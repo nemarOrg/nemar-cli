@@ -57,8 +57,15 @@ afterEach(() => {
 const setState = (userId: number, state: string) =>
   h.db.run("UPDATE users SET compute_access = ? WHERE id = ?", [state, userId]);
 
+// A suspension and a revocation require a notice to the person, a grant refuses one
+// (COMPUTE_ACCESS_NOTICE_RULE).
 const decide = (decision: string, userId: number) =>
-  h.call("POST", `/admin/compute/access/${decision}/by-id/${userId}`, { key: ADMIN_KEY });
+  h.call("POST", `/admin/compute/access/${decision}/by-id/${userId}`, {
+    key: ADMIN_KEY,
+    ...(decision === "suspend" || decision === "revoke"
+      ? { body: { notice: "Compute access was changed in a test." } }
+      : {}),
+  });
 
 async function world() {
   const compute = await registerLogoutClient(h, { allowed_scopes: [...COMPUTE_SCOPES] });
