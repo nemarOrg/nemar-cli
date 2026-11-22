@@ -4247,8 +4247,7 @@ Examples:
     },
   );
 
-adminCommand
-  .command("import-openneuro")
+const importOpenneuroCommand = new Command("openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
   .option("--local", "Run import locally instead of dispatching GitHub Actions workflow")
@@ -4717,6 +4716,7 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+importCommand.addCommand(importOpenneuroCommand);
 
 // ============================================================================
 // Dataset recovery (epic #967 phase 5, #972)
