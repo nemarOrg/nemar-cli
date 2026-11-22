@@ -11,7 +11,7 @@
  *   nemar admin repo publish screen <ds>            run the identifier screen of a request again
  *
  * Split out of `admin.ts` (epic #1726, phase 2) so the publication review's commands do not grow
- * a file of ten thousand lines. The group is registered on `repoCommand` (`nemar admin repo`; the old
+ * a file of ten thousand lines. The group is registered on `datasetGroupCommand` (`nemar admin dataset`, alias `repo`; the old
  * top-level `nemar admin publish` is a hidden stub that points here). `show` and `start` are registered from their own
  * file right after `list`, and `approve` and `next` after `screen`; commander lists a group's
  * subcommands alphabetically, so the order of registration does not show in `--help`.

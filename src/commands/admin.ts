@@ -1723,6 +1723,18 @@ both faster and easier on the rate limit than one command per page.`,
   });
 
 // ============================================================================
+// Dataset group (`admin dataset`, alias `repo`; ADR 0135)
+// ============================================================================
+
+const datasetGroupCommand = new Command("dataset")
+  .alias("repo")
+  .description("One dataset: publication lifecycle, DOIs, CI, S3 lock, deletion and repairs");
+
+adminCommand.addCommand(datasetGroupCommand);
+
+datasetGroupCommand.addCommand(publishCommand);
+
+// ============================================================================
 // S3 / IAM Management
 // ============================================================================
 
@@ -1897,16 +1909,6 @@ async function regenerateIamAction(_username: string, _options: ConfirmOptions) 
   console.log();
   console.log(chalk.dim("Users can upload datasets without any IAM setup."));
 }
-
-// ============================================================================
-// Repository Management
-// ============================================================================
-
-const repoCommand = new Command("repo").description(
-  "Dataset publication lifecycle: publish, unpublish, withdraw, restore",
-);
-
-adminCommand.addCommand(repoCommand);
 
 // ============================================================================
 // CI Management
@@ -3115,8 +3117,6 @@ doiCommand
 
 adminCommand.addCommand(doiCommand);
 
-repoCommand.addCommand(publishCommand);
-
 // ============================================================================
 // Revert (Admin Only)
 // ============================================================================
@@ -3800,7 +3800,7 @@ function printUnpublishResult(tag: string, result: UnpublishResponse): void {
     console.log(chalk.dim(`    ${UNPUBLISH_CACHE_NOTE}`));
 }
 
-repoCommand
+datasetGroupCommand
   .command("unpublish")
   .description(
     "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
@@ -3877,7 +3877,7 @@ Examples:
     },
   );
 
-repoCommand
+datasetGroupCommand
   .command("withdraw")
   .description(
     "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
@@ -3990,7 +3990,7 @@ repoCommand
     },
   );
 
-repoCommand
+datasetGroupCommand
   .command("restore")
   .description(
     "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",

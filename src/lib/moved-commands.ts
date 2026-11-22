@@ -19,7 +19,7 @@ import { markReportedExit } from "./debug-log.js";
 export interface MovedCommand {
   /** The path that no longer runs, below `nemar admin` (e.g. `publish`, `fleet annex-policy`). */
   readonly oldPath: string;
-  /** Where the command lives now, below `nemar admin` (e.g. `repo publish`). */
+  /** Where the command lives now, below `nemar admin` (e.g. `dataset publish`). */
   readonly newPath: string;
 }
 
@@ -33,10 +33,11 @@ export interface MovedCommand {
  * {@link registerMovedCommands} refuses a table without it.
  */
 export const MOVED_COMMANDS: readonly MovedCommand[] = [
-  // ADR 0125 decision 7: the dataset lifecycle moved under `admin repo`.
-  { oldPath: "publish", newPath: "repo publish" },
-  { oldPath: "withdraw", newPath: "repo withdraw" },
-  { oldPath: "restore", newPath: "repo restore" },
+  // ADR 0125 decision 7 moved the dataset lifecycle under `admin repo`; ADR 0135 renamed the
+  // group to `dataset` (`repo` stays its alias), so these point at the canonical name.
+  { oldPath: "publish", newPath: "dataset publish" },
+  { oldPath: "withdraw", newPath: "dataset withdraw" },
+  { oldPath: "restore", newPath: "dataset restore" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
