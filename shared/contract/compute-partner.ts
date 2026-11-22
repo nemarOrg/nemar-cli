@@ -169,7 +169,7 @@ export const COMPUTE_PARTNER_SENTENCES = {
   bundle_too_many_files: "The report declares more files than the limit allows.",
   bundle_too_large: "A declared file, or the files together, are over the size limit.",
   partner_not_enabled: "The partner contract is not enabled yet.",
-  compute_disabled: "Compute is not available right now.",
+  compute_disabled: "Compute is not available.",
   policy_unavailable: "The platform could not read its limits just now; ask again shortly.",
   storage_unavailable: "Compute storage could not be reached just now; ask again shortly.",
 } as const satisfies Record<ComputePartnerErrorCode, string>;

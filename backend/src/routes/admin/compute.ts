@@ -107,7 +107,7 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
   report_not_found: "There is no failed ACCESS report for that job.",
   invalid_reason: "A reason is 8 to 200 characters with no control character.",
   record_missing: "That record is not there.",
-  compute_disabled: "Compute is not available right now.",
+  compute_disabled: "Compute is not available.",
   audit_failed: "The audit row could not be written, so nothing was read.",
   job_reserved: "That job was reserved, so its charge is not the partner's to move.",
   no_unreserved_charge: "That job has no charge to the partner's pool to move.",
