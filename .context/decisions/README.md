@@ -8,6 +8,8 @@ Architecture Decision Records (ADRs) capture significant decisions that shape th
 - `0000-template.md` is the template; copy it to start a new ADR. Do not edit `0000-template.md` itself.
 - Number sequentially. The next ADR after `0007-...` is `0008-...`.
 - Status flows `proposed` -> `accepted` -> (later) `superseded by ADR-NNNN`. Never delete an ADR; supersede it.
+- An ADR moves from `proposed` to `accepted` once its decision is built, meaning merged to `dev`; a switch left off or a rollout not yet run does not hold it back unless the decision itself is that switch or rollout.
+  From 2026-11-22 an accepted ADR carries an `**Accepted:** YYYY-MM-DD` line under `Date`: the date, in UTC, that its completing pull request merged to `dev`. ADRs accepted before then have no such line.
 - An `Amendment YYYY-MM-DD:` block inside an accepted ADR is for a CLARIFICATION that leaves the
   verdict standing -- naming a mechanism the decision always implied, correcting a stale file path,
   recording what the decision turned out to cost. Anything that changes what was decided is a new
@@ -32,7 +34,6 @@ The ADR itself is the authority; where a summary here and an ADR disagree, the A
 This is the list `AGENTS.md` used to carry inline, and it is the "AGENTS.md summary" that ADRs 0093 and 0111 refer to.
 Every number is in the index below.
 Status is read from each ADR's own `Status` line on 2026-11-22 and marked only when it is not `accepted`.
-An ADR moves from `proposed` to `accepted` once its decision is built; its `Accepted` line gives the date that became true.
 
 - **ADR 0005**: partial data still serves.
 - **ADR 0009**: dev D1 is not a prod mirror.
