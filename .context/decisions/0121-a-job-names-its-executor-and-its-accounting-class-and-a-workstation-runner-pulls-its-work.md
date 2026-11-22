@@ -1,7 +1,8 @@
 # ADR 0121: A job names its executor and its accounting class, and a workstation runner pulls its work
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-13
+**Accepted:** 2026-11-18
 **Owner:** Seyed Yahya Shirazi
 
 Epic #2145.
