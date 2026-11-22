@@ -75,6 +75,7 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   },
   { oldPath: "delete-dataset", newPath: "dataset delete" },
   { oldPath: "bulk-delete", newPath: "dataset bulk-delete" },
+  { oldPath: "reindex", newPath: "dataset reindex" },
   { oldPath: "s3", newPath: "dataset s3" },
   { oldPath: "s3 lock", newPath: "dataset s3 lock" },
   { oldPath: "s3 credential-check", newPath: "dataset s3 credential-check" },

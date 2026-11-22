@@ -7054,7 +7054,7 @@ reindexCommand
     },
   );
 
-adminCommand.addCommand(reindexCommand);
+datasetGroupCommand.addCommand(reindexCommand);
 
 const availabilityReportCommand = new Command("availability-report")
   .description(
