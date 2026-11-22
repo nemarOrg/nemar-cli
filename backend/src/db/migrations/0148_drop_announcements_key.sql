@@ -10,6 +10,8 @@
 -- as it is. Corrupt text, NULL and non-object JSON are left alone: json_remove would raise on
 -- malformed text, so the CASE keeps json_type() from seeing it, and a member path on JSON that is
 -- not an object answers NULL.
+-- Deleted rows are rewritten too, unlike in 0146: the aim is that no row holds the key, and the
+-- column has no trigger or audit hook. Most deleted rows hold NULL anyway (the tombstone clears it).
 -- Safe to run twice: the second run matches no row.
 -- No audit row: the key carried no choice that `news`, `rfcs` and `maintenance` do not already
 -- hold.

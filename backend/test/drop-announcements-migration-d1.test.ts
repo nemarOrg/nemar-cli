@@ -34,6 +34,10 @@ const SEEDS: { name: string; prefs: string | null; deleted?: boolean }[] = [
     prefs:
       '{"user_approval":false,"announcements":false,"news":false,"rfcs":true,"maintenance":false}',
   },
+  // Any value counts as holding the key: json_type answers "null", "text" or "integer" for these, not SQL NULL.
+  { name: "ann_json_null", prefs: '{"announcements":null,"news":false}' },
+  { name: "ann_string", prefs: '{"announcements":"false","news":true}' },
+  { name: "ann_zero", prefs: '{"announcements":0,"news":true}' },
   { name: "no_key", prefs: '{"news":false,"support_tickets":false}' },
   { name: "never_chose", prefs: null },
   { name: "corrupt", prefs: "{not json" },
@@ -94,7 +98,7 @@ describe("0148 drops the retired announcements key", () => {
     }
   });
 
-  test("no parsed preference changes for any row", () => {
+  test("the other keys still parse to the same preferences (the parser itself ignores the dropped key)", () => {
     const db = seeded();
     const before = SEEDS.map((s) => parseEmailPreferences(raw(db, s.name)));
     db.exec(TARGET_SQL);
@@ -120,6 +124,14 @@ describe("0148 drops the retired announcements key", () => {
     const names = (
       db.prepare("SELECT name FROM changed ORDER BY name").all() as { name: string }[]
     ).map((r) => r.name);
-    expect(names).toEqual(["carried_off", "carried_on", "gone", "mixed"]);
+    expect(names).toEqual([
+      "ann_json_null",
+      "ann_string",
+      "ann_zero",
+      "carried_off",
+      "carried_on",
+      "gone",
+      "mixed",
+    ]);
   });
 });
