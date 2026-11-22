@@ -1741,14 +1741,6 @@ datasetGroupCommand.addCommand(publishCommand);
 const s3Command = new Command("s3").description("S3 and IAM credential management");
 
 s3Command
-  .command("regenerate-iam")
-  .description("Regenerate AWS IAM credentials for a user")
-  .argument("<username>", "Username to regenerate credentials for")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-s3Command
   .command("lock")
   .description("Apply S3 Object Lock (Governance mode) to a dataset")
   .argument("<dataset-id>", "Dataset ID to lock")
@@ -1891,24 +1883,6 @@ Examples:
   });
 
 adminCommand.addCommand(s3Command);
-
-// Hidden alias for backward compatibility
-adminCommand
-  .command("regenerate-iam", { hidden: true })
-  .argument("<username>")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-async function regenerateIamAction(_username: string, _options: ConfirmOptions) {
-  if (!requireAuth()) return;
-
-  console.log(chalk.yellow("\nThis command is deprecated.\n"));
-  console.log("S3 access is now managed through backend-scoped credentials.");
-  console.log("Per-user IAM credentials are no longer needed.");
-  console.log();
-  console.log(chalk.dim("Users can upload datasets without any IAM setup."));
-}
 
 // ============================================================================
 // CI Management

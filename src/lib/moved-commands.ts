@@ -67,6 +67,17 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "exemplar remint-dois", newPath: "dataset exemplar remint-dois" },
   { oldPath: "doctor scan", newPath: "dataset doctor scan" },
   { oldPath: "doctor fix", newPath: "dataset doctor fix" },
+  // Retired: the action only printed a deprecation; the backend route answers 410.
+  {
+    oldPath: "regenerate-iam",
+    retired:
+      "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
+  },
+  {
+    oldPath: "s3 regenerate-iam",
+    retired:
+      "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
+  },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
