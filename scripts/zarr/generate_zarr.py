@@ -18,7 +18,7 @@ A store holds the data, the events, channel names, types and units, and
 technical recording metadata, and never the subject (#1626). Every store is
 written through ``write_store``, which has biosigIO leave subject and operator
 information out (``exclude_subject_info``, added in biosigio 1.2.11), and ``main``
-refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.13) or one that
+refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.14) or one that
 cannot. Subject information stays at
 dataset scope, in ``participants.tsv``.
 
@@ -1780,6 +1780,11 @@ _FALLBACK_REASONS = {
         "This recording's data file appears truncated or corrupt, so the viewer "
         "could not be generated."
     ),
+    # biosigIO's own code (1.2.14, biosigio#180); the authoritative text is its REASONS.
+    "discontinuous_recording": (
+        "This recording has gaps between its data records (EDF+D/BDF+D), which "
+        "the viewer cannot represent yet."
+    ),
     "unsupported_format": "This file format is not yet supported by the viewer.",
     "empty_recording": "This recording contains no signal channels to display.",
     "file_read_error": "This recording could not be prepared for viewing.",
@@ -2031,6 +2036,56 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+# biosigIO's refusal of an EDF+D/BDF+D file whose data records are not contiguous
+# in time (1.2.14, biosigio#180): `DiscontinuousRecordingError`, a `FileReadError`
+# carrying `.gaps`, every discontinuity as `(start, length)` seconds. A property of
+# the file's bytes, so it is a terminal data failure like `corrupt_or_truncated`:
+# in neither `RETRYABLE_CODES` nor `STORAGE_STATE_CODES`, so a run that converts
+# nothing and fails only with this is `deterministic`.
+DISCONTINUOUS_RECORDING = "discontinuous_recording"
+# Room kept at the end of a gap list for ", and 99999 more".
+_DISCONTINUITY_TAIL_CHARS = 20
+
+
+def discontinuity_detail(exc: BaseException) -> str | None:
+    """The published `detail` for a `discontinuous_recording` refusal, built from
+    the exception's `.gaps` rather than its message: the message opens with the
+    scratch path and a paragraph of prose, and `failure_detail` keeps only the
+    first 300 characters of its first line, which cuts a long gap list off. Gaps
+    are named in file order for as long as they fit in `_DETAIL_MAX_CHARS`, and
+    the rest are counted. None when `.gaps` is not a non-empty list of `(start,
+    length)` pairs of numbers, so the exception's own text is published instead;
+    a malformed attribute must not turn a typed refusal into a crash inside
+    `convert_one`'s `except` branch.
+
+    A negative length is an overlap or a record that starts before the previous
+    one ended. The seconds are the file's own time axis."""
+    gaps = getattr(exc, "gaps", None)
+    if not isinstance(gaps, (list, tuple)) or not gaps:
+        return None
+    parts: list[str] = []
+    for gap in gaps:
+        try:
+            start, length = gap
+            parts.append(f"{float(length):g} s at {float(start):g} s")
+        except (TypeError, ValueError):
+            return None
+    noun = "gap or overlap" if len(parts) == 1 else "gaps or overlaps"
+    head = f"{len(parts)} {noun} between EDF+D/BDF+D data records (length at start, in seconds): "
+    budget = _DETAIL_MAX_CHARS - len(head) - _DISCONTINUITY_TAIL_CHARS
+    shown = [parts[0]]
+    used = len(parts[0])
+    for part in parts[1:]:
+        if used + 2 + len(part) > budget:
+            break
+        shown.append(part)
+        used += 2 + len(part)
+    text = head + ", ".join(shown)
+    if len(parts) > len(shown):
+        text += f", and {len(parts) - len(shown)} more"
+    return text
+
+
 def failure_verdict(
     exc: BaseException, primary: str, head_files: set[str] | frozenset[str]
 ) -> tuple[str | None, str | None]:
@@ -2058,6 +2113,10 @@ def failure_verdict(
        types the mismatch itself.
     4. Otherwise the exception's own code, which may be None.
 
+    `discontinuous_recording` (biosigIO 1.2.14) is already a statement of cause and
+    is never refined; only its `detail` is rebuilt, from the gap list
+    (`discontinuity_detail`).
+
     No rule types a bare `OSError` by its text. biosigIO types a streamed
     EDF/BDF refusal itself (`CorruptFileError`, since 1.2.12), and an `OSError`
     that carries an errno (EIO, ENOSPC, EACCES) or is a subclass
@@ -2072,6 +2131,8 @@ def failure_verdict(
     code = getattr(exc, "code", None)
     if not isinstance(code, str) or not code:
         code = None
+    if code == DISCONTINUOUS_RECORDING:
+        return code, discontinuity_detail(exc)
     if code not in _REFINABLE_CODES:
         return code, None
     chain = _exception_chain(exc)
@@ -6161,8 +6222,17 @@ def _s3_child_prefixes(url: str) -> list[str]:
     return [f"s3://{bucket}/{p}" for p in res.stdout.split() if p and p != "None"]
 
 
-def _rm_recursive(url: str) -> None:
+# Prefixes under `<id>/zarr/` that the Zarr rebuild does not own: `geometry/` holds the
+# subject surfaces that `ieeg_geometry upload-surfaces` writes (ADR 0129). A `--wipe` of
+# the serving prefix must leave them in place.
+WIPE_KEEP = ("geometry/",)
+
+
+def _rm_recursive(url: str, keep: tuple[str, ...] = ()) -> None:
     """Recursively delete an S3 prefix, sharded across child prefixes.
+
+    `keep` lists child prefixes (each ending in `/`, relative to `url`) that stay: no shard
+    is made for one, and the final sweep excludes it.
 
     `aws s3 rm --recursive` is single-process and paces at its profile's request
     concurrency, so a large prefix serializes into a long, near-idle wall-clock
@@ -6185,6 +6255,9 @@ def _rm_recursive(url: str) -> None:
             flush=True,
         )
         children = []
+    children = [
+        c for c in children if not any(c.startswith(url + k) for k in keep)
+    ]
     if children:
         print(f"[zarr] deleting {url} across {len(children)} shard(s)", flush=True)
         errors: list[BaseException] = []
@@ -6210,7 +6283,10 @@ def _rm_recursive(url: str) -> None:
     # Sweep: catches loose keys at the top level, and is a cheap no-op once the
     # shards have done the bulk.
     _aws(
-        ["aws", "s3", "rm", url, "--recursive", "--only-show-errors"],
+        [
+            "aws", "s3", "rm", url, "--recursive", "--only-show-errors",
+            *[arg for k in keep for arg in ("--exclude", f"{k}*")],
+        ],
         timeout=_AWS_RM_TIMEOUT,
         retries=_AWS_RM_RETRIES,
     )
@@ -8091,60 +8167,143 @@ def fetch_dataset_row(api_base: str, dataset_id: str) -> tuple[dict | None, bool
     return None, True
 
 
+def _sidecar_candidates(
+    primary_path: str, head_files: set[str], needle: str
+) -> list[tuple[int, int, str | None, str]]:
+    """The electrodes or coordsystem files that apply to a recording, as
+    `(directory depth, entity count, space, path)`.
+
+    `needle` is an entity-prefixed suffix such as ``_electrodes.tsv``. A file
+    matches when its basename ends with `needle` (``sub-01_task-rest_electrodes.tsv``)
+    or is exactly the bare form (``electrodes.tsv``). It applies when it sits in the
+    recording's directory or an ancestor and every entity in its name equals the
+    recording's, EXCEPT `space`: BIDS names the coordinate system with it and it
+    selects no recording, so the recording (which has none) never rejects a file for
+    carrying one. `space` is returned as its own field (None when the name has none)
+    and is not counted in the entity count, so a file's specificity is the same with
+    or without it.
+    """
+    rec_dir = os.path.dirname(primary_path)
+    rec_ents = _bids_entities(filename_stem(primary_path))
+    bare = needle.lstrip("_")  # "electrodes.tsv" from "_electrodes.tsv"
+    candidates: list[tuple[int, int, str | None, str]] = []
+    for f in head_files:
+        if not (f.endswith(needle) or os.path.basename(f) == bare):
+            continue
+        cdir = os.path.dirname(f)
+        if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
+            continue
+        cents = _bids_entities(filename_stem(f))
+        space = cents.pop("space", None)
+        if any(rec_ents.get(k) != v for k, v in cents.items()):
+            continue
+        depth = cdir.count("/") + (1 if cdir else 0)
+        candidates.append((depth, len(cents), space, f))
+    return candidates
+
+
+def _most_specific_sidecars(
+    candidates: list[tuple[int, int, str | None, str]],
+) -> list[tuple[int, int, str | None, str]]:
+    """The candidates tied for the most specific, by directory depth and then entity
+    count, sorted by path: the last is the base's choice among them."""
+    if not candidates:
+        return []
+    best = max((depth, count) for depth, count, _, _ in candidates)
+    return sorted((c for c in candidates if c[:2] == best), key=lambda c: c[3])
+
+
+# File sets `electrode_positions_for` has already warned about in this process. One
+# inherited file reaches every recording of a dataset, and a line per recording would
+# bury the log (GitHub also caps annotations). Keyed by the sorted file paths, so the
+# first warning names the first recording.
+_ELECTRODE_WARNED: set[tuple[str, ...]] = set()
+
+
+def _warn_electrode_once(paths: list[str], message: str) -> None:
+    """Print `::warning::<message>` once per process for this set of files. `message`
+    names files and recordings with `repr`, so no name can start a log line."""
+    key = tuple(sorted(paths))
+    if key in _ELECTRODE_WARNED:
+        return
+    _ELECTRODE_WARNED.add(key)
+    print(f"::warning::{message}", flush=True)
+
+
 def electrode_positions_for(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
 ) -> dict | None:
-    """BIDS electrode positions for a recording, resolved via the inheritance
-    principle: among the `_electrodes.tsv` sidecars in the recording's directory
-    or an ancestor whose entities are a subset of the recording's, the most
-    specific one wins. A sibling `_coordsystem.json` is resolved the same way.
+    """BIDS electrode positions for a recording, and where they came from.
 
-    The TSV is parsed by its header row to find the `name`/`x`/`y`/`z` columns
-    (robust to extra columns like type/impedance and to column-order variation).
-    Rows where any of x/y/z is missing, non-numeric, or "n/a" are skipped.
+    Which file (BIDS inheritance, `_sidecar_candidates`): among the `_electrodes.tsv`
+    files in the recording's directory or an ancestor whose entities equal the
+    recording's, the most specific wins (deepest directory, then most entities, then
+    the last by path). `space`, the entity that names the coordinate system, is the one
+    entity not compared with the recording's and not counted. If the most specific files
+    hold more than one distinct `space` value (a file with none counts as a value), the
+    recording has two coordinate systems and the converter does not choose: it prints a
+    `::warning::` naming those files and returns None.
+
+    The coordsystem: `_coordsystem.json` is resolved the same way, among only the files
+    whose `space` equals the chosen electrodes file's (both absent counts as equal); none
+    left gives an empty system and units. The system and units are the file's own
+    words, verbatim. A resolved coordsystem file that cannot be read, is not valid JSON
+    (an empty file included) or is not a JSON object also gives an empty system and
+    units, with a `::warning::` naming it and the recording; `coordsystem_file` still
+    names it, so it may name a file that supplied no system or units.
+
+    The TSV is parsed by its header row to find the `name`/`x`/`y`/`z` columns (robust to
+    extra columns like type/impedance and to column-order variation). A row whose x, y or z
+    is missing, `n/a`, not a number, or a number that is not finite (`NaN`, `inf`, any
+    case or sign) gives no position: a non-finite number would reach the store's root
+    `zarr.json` as a bare token that `JSON.parse` refuses.
+
+    An applicable electrodes file that cannot be read prints a `::warning::` naming it
+    and the recording, and gives no positions: that is a failure, not a dataset that
+    declares none. An empty file, or one with no valid row, gives none quietly.
+
+    Each warning is given once per process for its set of files (`_warn_electrode_once`),
+    naming the first recording it was met for: one inherited file reaches every
+    recording of a dataset, and a line per recording would bury the log. File and
+    recording names are printed with `repr`, so a newline in a name cannot start a line
+    of its own (GitHub reads a line that starts with `::` as a workflow command).
 
     Returns ``{"positions": {label: [x, y, z]}, "coordinate_system": str,
-    "coordinate_units": str}`` or None when no `_electrodes.tsv` resolves or it
-    contains no valid rows.
+    "coordinate_units": str, "positions_source": "subject" | "dataset",
+    "positions_file": str, "coordsystem_file": str}`` or None. `positions_source` is
+    `subject` when the electrodes file's NAME carries the `sub` entity and `dataset`
+    when it does not (one file applied to every subject it reaches): where the dataset
+    declares the positions, never whether they were measured (a per-subject file may
+    hold template coordinates), and never a template of the converter's own.
+    `positions_file` is the electrodes file's path in `head_files`; `coordsystem_file`
+    the coordsystem file's, present only when one resolved.
     """
-    stem = filename_stem(primary_path)
-    rec_dir = os.path.dirname(primary_path)
-    rec_ents = _bids_entities(stem)
-
-    def _resolve_sidecar(needle: str) -> str | None:
-        """Return the most-specific applicable sidecar path, or None.
-
-        `needle` is an entity-prefixed suffix like ``_electrodes.tsv``.
-        A file matches when its basename ends with `needle` (e.g.
-        ``sub-01_task-rest_electrodes.tsv``) or its basename is exactly
-        the bare form without the leading underscore (e.g. ``electrodes.tsv``
-        at the dataset root). Both forms carry empty entities, so the entity
-        subset check still applies correctly.
-        """
-        bare = needle.lstrip("_")  # "electrodes.tsv" from "_electrodes.tsv"
-        candidates: list[tuple[int, int, str]] = []
-        for f in head_files:
-            bname = os.path.basename(f)
-            if not (f.endswith(needle) or bname == bare):
-                continue
-            cdir = os.path.dirname(f)
-            if cdir and rec_dir != cdir and not rec_dir.startswith(cdir + "/"):
-                continue
-            cents = _bids_entities(filename_stem(f))
-            if any(rec_ents.get(k) != v for k, v in cents.items()):
-                continue
-            depth = cdir.count("/") + (1 if cdir else 0)
-            candidates.append((depth, len(cents), f))
-        if not candidates:
-            return None
-        candidates.sort()
-        # most specific = last after ascending sort
-        return candidates[-1][2]
-
-    elec_path = _resolve_sidecar("_electrodes.tsv")
-    if elec_path is None:
+    most_specific = _most_specific_sidecars(
+        _sidecar_candidates(primary_path, head_files, "_electrodes.tsv")
+    )
+    if not most_specific:
         return None
+    if len({space for _, _, space, _ in most_specific}) > 1:
+        paths = [path for _, _, _, path in most_specific]
+        _warn_electrode_once(
+            paths,
+            f"{', '.join(repr(path) for path in paths)} all apply to {primary_path!r} "
+            f"with different coordinate systems (space entities); no electrode "
+            f"positions are embedded",
+        )
+        return None
+    _, _, elec_space, elec_path = most_specific[-1]
     elec_text = _read_repo_text(repo_dir, head, elec_path)
+    if elec_text is None:
+        # NOT the same as "this dataset declares no positions": an electrodes file
+        # that applies is present at HEAD and we failed to read it. Same wording as
+        # the channels file's warning in `convert_one`.
+        _warn_electrode_once(
+            [elec_path],
+            f"could not read {elec_path!r}; electrode positions are NOT embedded for "
+            f"{primary_path!r}",
+        )
+        return None
     if not elec_text:
         return None
 
@@ -8177,39 +8336,69 @@ def electrode_positions_for(
             zv = cols[z_i].strip()
             if xv.lower() == "n/a" or yv.lower() == "n/a" or zv.lower() == "n/a":
                 continue
-            positions[label] = [float(xv), float(yv), float(zv)]
+            xyz = [float(xv), float(yv), float(zv)]
         except (ValueError, IndexError):
             continue
+        if not all(math.isfinite(v) for v in xyz):
+            continue  # `float` parses NaN and inf; a store's root JSON must not hold them
+        positions[label] = xyz
 
     if not positions:
         return None
 
-    # Resolve the sibling coordsystem.json for coordinate metadata.
+    # Resolve the coordsystem.json of the same coordinate system for the metadata.
     coord_system = ""
     coord_units = ""
-    cs_path = _resolve_sidecar("_coordsystem.json")
+    paired = [
+        c
+        for c in _sidecar_candidates(primary_path, head_files, "_coordsystem.json")
+        if c[2] == elec_space
+    ]
+    cs_path = _most_specific_sidecars(paired)[-1][3] if paired else None
     if cs_path is not None:
         cs_text = _read_repo_text(repo_dir, head, cs_path)
-        if cs_text:
+        cs_data: object = None
+        if cs_text is None:
+            cs_problem = f"could not read {cs_path!r}"
+        else:
             try:
                 cs_data = json.loads(cs_text)
-                if isinstance(cs_data, dict):
-                    sys_val = cs_data.get("EEGCoordinateSystem") or cs_data.get(
-                        "iEEGCoordinateSystem"
-                    ) or cs_data.get("MEGCoordinateSystem") or ""
-                    units_val = cs_data.get("EEGCoordinateUnits") or cs_data.get(
-                        "iEEGCoordinateUnits"
-                    ) or cs_data.get("MEGCoordinateUnits") or ""
-                    coord_system = str(sys_val) if sys_val else ""
-                    coord_units = str(units_val) if units_val else ""
             except ValueError:
-                pass
+                cs_problem = f"{cs_path!r} is not valid JSON"
+            else:
+                cs_problem = (
+                    None if isinstance(cs_data, dict) else f"{cs_path!r} is not a JSON object"
+                )
+        if cs_problem is not None:
+            # The positions stand, with no system or units; `coordsystem_file` still
+            # names the file, which is a fact about the dataset.
+            _warn_electrode_once(
+                [cs_path],
+                f"{cs_problem}; the electrode coordinate system and units are left "
+                f"empty for {primary_path!r}",
+            )
+        elif isinstance(cs_data, dict):
+            sys_val = cs_data.get("EEGCoordinateSystem") or cs_data.get(
+                "iEEGCoordinateSystem"
+            ) or cs_data.get("MEGCoordinateSystem") or ""
+            units_val = cs_data.get("EEGCoordinateUnits") or cs_data.get(
+                "iEEGCoordinateUnits"
+            ) or cs_data.get("MEGCoordinateUnits") or ""
+            coord_system = str(sys_val) if sys_val else ""
+            coord_units = str(units_val) if units_val else ""
 
-    return {
+    found: dict = {
         "positions": positions,
         "coordinate_system": coord_system,
         "coordinate_units": coord_units,
+        "positions_source": (
+            "subject" if "sub" in _bids_entities(filename_stem(elec_path)) else "dataset"
+        ),
+        "positions_file": elec_path,
     }
+    if cs_path is not None:
+        found["coordsystem_file"] = cs_path
+    return found
 
 
 def event_descriptions_for(
@@ -8375,7 +8564,7 @@ def _recording_size_bytes(primary_local: str) -> int:
 #     writer is referenced anywhere else.
 #   * `sync_store`, the one upload, runs the same read-back on the bytes it is
 #     about to upload, after every later rewrite of the root.
-#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.13.
+#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.14.
 #
 # `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
 # leaves the scratch file's name there instead of its whole path, and the
@@ -8385,17 +8574,20 @@ def _recording_size_bytes(primary_local: str) -> int:
 # is where the name comes from. 1.2.12 types a streamed EDF/BDF refusal itself
 # (`CorruptFileError`), and `failure_verdict` no longer reads a bare `OSError`'s
 # text, so a 1.2.11 run would take every streamed refusal for the node's fault and
-# retry it until `retry_exhausted`. 1.2.13 is the pin's floor: it refuses a
+# retry it until `retry_exhausted`. 1.2.13 refuses a
 # BrainVision data file whose header shows it was cut short, where 1.2.12 read it
 # with the tail dropped, and it adds `allow_partial_frame`, which
 # `convert_recording` passes to read the whole frames of a multiplexed file with a
 # trailing partial frame and no positive `DataPoints` count, and to record the
-# dropped bytes. So the converter takes no older release
-# (TestCutShortBrainVisionThroughConvertOne). A cut exactly at a frame boundary of
+# dropped bytes. 1.2.14 is the pin's floor: it refuses an EDF+D or BDF+D file
+# whose data records have gaps (`discontinuous_recording`), where 1.2.13 read it
+# with every sample after a gap placed too early on the time axis. So the
+# converter takes no older release (TestCutShortBrainVisionThroughConvertOne,
+# TestGappedEdfPlusDThroughConvertOne). A cut exactly at a frame boundary of
 # a file with no positive `DataPoints` count is not detected: multiplexed data
 # reads as a shorter recording, and vectorized data is corrupted from the second
 # channel on, because each channel is stored whole.
-SUBJECT_INFO_FLOOR = "1.2.13"
+SUBJECT_INFO_FLOOR = "1.2.14"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
 # The writers that put a store on disk, by the names `biosigio_subject_info_problems`
@@ -8614,7 +8806,8 @@ def write_store(
     if not names_keyword(writer, SUBJECT_INFO_OPTION):
         raise SubjectInfoExclusionUnavailable(
             f"{name} does not take {SUBJECT_INFO_OPTION}: this process has a biosigIO "
-            f"older than {SUBJECT_INFO_FLOOR}, so no store was written"
+            f"without subject-information exclusion (added in 1.2.11; the converter "
+            f"requires {SUBJECT_INFO_FLOOR}), so no store was written"
         )
     written = writer(*args, **kwargs, **{SUBJECT_INFO_OPTION: True})
     if isinstance(written, os.PathLike):
@@ -8893,6 +9086,12 @@ def convert_recording(
         )
         embed_root_attr(store_path, "electrode_coordinate_system", electrode_positions["coordinate_system"])
         embed_root_attr(store_path, "electrode_coordinate_units", electrode_positions["coordinate_units"])
+        # Where the dataset declares the positions (never "measured", never a template:
+        # `electrode_positions_for` says why), and the files they came from.
+        embed_root_attr(store_path, "electrode_positions_source", electrode_positions["positions_source"])
+        embed_root_attr(store_path, "electrode_positions_file", electrode_positions["positions_file"])
+        if "coordsystem_file" in electrode_positions:
+            embed_root_attr(store_path, "electrode_coordsystem_file", electrode_positions["coordsystem_file"])
 
 
 # --- Parallel conversion ------------------------------------------------------
@@ -10146,7 +10345,8 @@ def main() -> int:
     ap.add_argument(
         "--wipe",
         action="store_true",
-        help="erase s3://<bucket>/<id>/zarr/ before rebuilding. Recovery only (a "
+        help="erase s3://<bucket>/<id>/zarr/ before rebuilding, except its geometry/ "
+        "prefix (subject surfaces, not a Zarr store). Recovery only (a "
         "corrupt prefix, or an index that no longer describes what is on S3): it "
         "destroys the serving copy before the replacement exists, so the dataset "
         "has no viewer for the length of the run. Use with --clean.",
@@ -10394,7 +10594,7 @@ def main() -> int:
             print(f"[zarr] --wipe: s3://{bucket}/{prefix} already empty; skipping wipe", flush=True)
         else:
             print(f"[zarr] --wipe: erasing s3://{bucket}/{prefix} before full rebuild", flush=True)
-            _rm_recursive(f"s3://{bucket}/{prefix}")
+            _rm_recursive(f"s3://{bucket}/{prefix}", keep=WIPE_KEEP)
     print(
         f"[zarr] {dataset_id} head={head[:8]} prior={(prior_commit or 'none')[:8]} "
         f"full={full} convert={len(convert)} remove={len(remove)}",

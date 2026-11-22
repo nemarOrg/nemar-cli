@@ -419,11 +419,13 @@ describe("refusal codes", () => {
     ["logs_not_available", 404],
     ["upload_expired", 409],
     ["storage_unavailable", 503],
+    // Issue #2121, phase P2: NEMAR's tenant-wide ceiling on live jobs is full for the job's class.
+    ["platform_busy", 409],
   ];
 
-  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one, the outputs route's and phase D3's nine", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one, the outputs route's, phase D3's nine and the tenant ceiling's", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(36);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(37);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
@@ -488,7 +490,7 @@ describe("the ACCESS report words (phase A8, #2013)", () => {
 });
 
 describe("failure codes", () => {
-  test("COMPUTE_FAILURE_CODES is the launcher's seven, the platform's other nine, then the submitter's, in order", () => {
+  test("COMPUTE_FAILURE_CODES is the launcher's seven, the platform's other ten, then the submitter's, in order", () => {
     // Phase A5 checks a failure code read from launcher/result.json against this list.
     expect([...COMPUTE_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
@@ -507,6 +509,7 @@ describe("failure codes", () => {
       "result_verification_failed",
       "records_unavailable",
       "tapis_record_lost",
+      "runner_lost",
       // The submitter's own (phase D3, #2024): an upload window that closed. Never a platform failure.
       "upload_expired",
     ]);
@@ -537,7 +540,7 @@ describe("failure codes", () => {
     expect(launcherExitNumber("result_upload_failed")).toBe(16);
   });
 
-  test("the platform codes are the eleven the phase names and the one the review added", () => {
+  test("the platform codes are the eleven the phase names, the one the review added and the runner's", () => {
     expect([...PLATFORM_FAILURE_CODES]).toEqual([
       "code_fetch_failed",
       "dataset_fetch_failed",
@@ -551,6 +554,7 @@ describe("failure codes", () => {
       "records_unavailable",
       "result_upload_failed",
       "tapis_record_lost",
+      "runner_lost",
     ]);
   });
 
@@ -647,6 +651,7 @@ describe("launcher details and who pays", () => {
         "scratch_unavailable",
         "no_container_runtime",
         "image_missing",
+        "image_unverified",
         "runtime_unusable",
         "internal_error",
         "output_dir_not_empty",
@@ -740,6 +745,7 @@ describe("launcher details and who pays", () => {
       "scratch_unavailable",
       "no_container_runtime",
       "image_missing",
+      "image_unverified",
       "runtime_unusable",
       "internal_error",
       "output_dir_not_empty",

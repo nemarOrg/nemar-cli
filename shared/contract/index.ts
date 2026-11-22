@@ -21,6 +21,8 @@ export * from "./device-auth.js";
 // decides which fields are missing (#1268, ADR 0045).
 export * from "./account-copy.js";
 export * from "./profile-gaps.js";
+// The community mail categories and their audience rules, declared once (epic #2260, ADR 0132).
+export * from "./mail-categories.js";
 // Zarr serving index v3 reader and the MCP server's wire contract (issue
 // #1293, phase 1 of epic #1065; ADR 0049).
 export * from "./zarr-index.js";
@@ -50,3 +52,7 @@ export * from "./compute-submit-request.js";
 // and their sentences (epic #2021 phase D4, #2025), and the strict-by-design REQUESTS beside them.
 export * from "./compute-partner.js";
 export * from "./compute-partner-request.js";
+// The runner protocol `nemar.runner.v1` (portable compute): its words, prefixes, header, numbers and
+// the request and response shapes a runner and the Worker exchange. Its JSON Schema is shared byte for
+// byte with nemarOrg/nemar-process; the words shared with the job model are in `../compute-state.ts`.
+export * from "./compute-runner.js";

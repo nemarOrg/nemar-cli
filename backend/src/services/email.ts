@@ -7,6 +7,10 @@
  * Cloudflare path calls the `send_email` binding (epic #1893, ADR 0110).
  */
 
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  type CommunityMailPreferences,
+} from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
@@ -126,6 +130,11 @@ export interface EmailDeliveryEnv {
   EMAIL_FALLBACK?: string;
   /** The Cloudflare Email Service `send_email` binding. */
   EMAIL?: CloudflareSendEmail;
+  /**
+   * This API's origin. A `List-Unsubscribe` header is accepted only on exactly this origin
+   * ({@link validateMailHeaders}), so a send can never carry an unsubscribe URL that points elsewhere.
+   */
+  API_BASE_URL?: string;
 }
 
 /** The provider a send goes through; the Cloudflare case carries its binding. */
@@ -284,10 +293,15 @@ function sendFailureText(error: unknown, address: string): string {
   return redactAddressIn(error instanceof Error ? error.message : String(error), address);
 }
 
-export interface EmailPreferences {
-  user_approval: boolean;
-  publication_request: boolean;
-  announcements: boolean;
+/**
+ * The alerts an admin or owner receives about their own work. Each is switched per account in
+ * `users.email_preferences` and read by {@link getAdminEmailsForCategory}, which is why none of the
+ * community categories (news, RFCs, maintenance, recalls) is among them: a community message has
+ * no "at least one admin must receive it" fallback and must never reach that code (ADR 0132).
+ */
+export const ADMIN_ALERT_CATEGORIES = [
+  "user_approval",
+  "publication_request",
   /**
    * The anonymity sweep found something on an anonymous deposit (#1409).
    *
@@ -297,7 +311,7 @@ export interface EmailPreferences {
    * have been disclosed. Coupling the two would let the second be switched off
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
-  dataset_anonymity: boolean;
+  "dataset_anonymity",
   /**
    * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
    *
@@ -306,13 +320,13 @@ export interface EmailPreferences {
    * hearing which published datasets carry identifiers. Opted in by default,
    * like every category here, so a stored row from before it existed receives it.
    */
-  identifier_sweep: boolean;
+  "identifier_sweep",
   /**
    * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
    * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
    * the ticket stream without losing approval or publication mail. Opted in by default.
    */
-  support_tickets: boolean;
+  "support_tickets",
   /**
    * A person asked for compute access (epic #2021 phase D1, ADR 0118). Its own category, not
    * `user_approval`, for the reason `dataset_anonymity` has one: an admin who stops watching upload
@@ -320,19 +334,31 @@ export interface EmailPreferences {
    * export-control review of a separate grant. Opted in by default, so a stored row from before it
    * existed receives it.
    */
-  compute_requests: boolean;
-}
+  "compute_requests",
+] as const;
 
-export type EmailCategory = keyof EmailPreferences;
+export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
+
+export type AdminAlertPreferences = { [K in AdminAlertCategory]: boolean };
+
+/**
+ * Everything `users.email_preferences` can say: the admin alerts plus the three community
+ * categories a person may turn off. A recall is not here, because nothing may turn it off.
+ * `announcements`, the one key that used to cover all community mail, is retired (ADR 0132,
+ * migration 0146); it is carried into `news`, `rfcs` and `maintenance` and no longer stored.
+ */
+export type EmailPreferences = AdminAlertPreferences & CommunityMailPreferences;
 
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
-  announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
   support_tickets: true,
   compute_requests: true,
+  news: true,
+  rfcs: true,
+  maintenance: true,
 };
 
 interface ResendResponse {
@@ -347,25 +373,23 @@ interface AdminRow {
 }
 
 /**
- * Parse email preferences from DB JSON string, defaulting to all enabled
+ * Parse email preferences from DB JSON string, defaulting to all enabled.
+ *
+ * `!== false` for every key, so a key a row has never seen opts IN rather than out: defaulting a
+ * new alert to off would silently give every current admin no anonymity mail at all, and a
+ * community category an account never chose is on by default (ADR 0132, owner decision of
+ * 2026-11-20: news is opt-out). A row stored before the community keys existed is rewritten
+ * with explicit values by migration 0146, so "missing" here means "created after it".
  */
 export function parseEmailPreferences(raw: string | null): EmailPreferences {
   if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
   try {
     const parsed = JSON.parse(raw);
-    return {
-      user_approval: parsed.user_approval !== false,
-      publication_request: parsed.publication_request !== false,
-      announcements: parsed.announcements !== false,
-      // `!== false` throughout, so a row stored before this key existed opts
-      // IN rather than out. Defaulting a new alert to off would silently give
-      // every current admin no anonymity mail at all.
-      dataset_anonymity: parsed.dataset_anonymity !== false,
-      identifier_sweep: parsed.identifier_sweep !== false,
-      support_tickets: parsed.support_tickets !== false,
-      // `!== false`, like every key above, so a row stored before this existed opts IN.
-      compute_requests: parsed.compute_requests !== false,
-    };
+    const result = { ...DEFAULT_EMAIL_PREFERENCES };
+    for (const key of [...ADMIN_ALERT_CATEGORIES, ...COMMUNITY_MAIL_CATEGORIES]) {
+      result[key] = parsed[key] !== false;
+    }
+    return result;
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
     return { ...DEFAULT_EMAIL_PREFERENCES };
@@ -426,7 +450,7 @@ export function isAdminNotificationAllowed(env: AdminNotificationEnv | undefined
  */
 export async function getAdminEmailsForCategory(
   db: D1Database,
-  category: EmailCategory,
+  category: AdminAlertCategory,
   env: AdminNotificationEnv,
 ): Promise<string[]> {
   if (!isAdminNotificationAllowed(env)) {
@@ -589,7 +613,7 @@ export async function sendEmail(
   headers?: Record<string, string>,
 ): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
-  const extraHeaders = validateMailHeaders(headers);
+  const extraHeaders = validateMailHeaders(headers, deliveryEnv?.API_BASE_URL);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -683,12 +707,51 @@ export class MailHeaderError extends Error {
 }
 
 /**
- * The only extra headers a caller may set: the threading pair. Names compare case-insensitively.
+ * The only extra headers a caller may set: the threading pair, and the RFC 8058 one-click pair that
+ * community mail carries (epic #2260 phase 3). Names compare case-insensitively.
  * `Message-ID` is deliberately absent: the Cloudflare Email Service controls it and refuses the
  * whole send for it (`E_HEADER_NOT_ALLOWED`); the id a send went out under is read back from
- * {@link SendResult} instead.
+ * {@link SendResult} instead. The two `List-Unsubscribe` headers have value rules of their own
+ * (see {@link validateMailHeaders}); no other `List-*` header is allowed.
  */
-export const ALLOWED_MAIL_HEADERS: readonly string[] = ["In-Reply-To", "References"];
+export const ALLOWED_MAIL_HEADERS: readonly string[] = [
+  "In-Reply-To",
+  "References",
+  "List-Unsubscribe",
+  "List-Unsubscribe-Post",
+];
+
+/** The one value `List-Unsubscribe-Post` may have (RFC 8058, section 3.1). */
+export const LIST_UNSUBSCRIBE_POST_VALUE = "List-Unsubscribe=One-Click";
+
+/**
+ * `List-Unsubscribe` is exactly one angle-bracketed HTTPS URI on this API's unsubscribe path, with a
+ * token in the exact shape `services/mail-links.ts` mints: no `mailto:`, no list of URIs, no plain
+ * HTTP (RFC 8058 requires HTTPS, and Cloudflare refuses HTTP). The mailbox provider POSTs to it, so
+ * it must be the route of `routes/mail.ts` on the configured API origin and nothing else.
+ * Group 1 is the origin, compared with the configured one.
+ */
+const LIST_UNSUBSCRIBE_RE =
+  /^<(https:\/\/[^\s<>,/?#@]+)\/mail\/unsubscribe\/v1\.\d{1,12}\.(?:news|rfcs|maintenance)\.\d{1,12}\.[A-Za-z0-9_-]{43}>$/;
+
+/**
+ * The origin unsubscribe URLs are built on, or null when `API_BASE_URL` cannot carry one: it must
+ * be a bare https origin (a trailing slash is dropped), with no credentials, path, query or
+ * fragment, because the unsubscribe path is appended to it as given.
+ */
+export function unsubscribeOrigin(apiBaseUrl: string | undefined): string | null {
+  const raw = (apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!raw.startsWith("https://")) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return null;
+  if (/[?#]/.test(raw) || raw.slice("https://".length).includes("/")) return null;
+  return raw;
+}
 
 /**
  * The headers the Cloudflare Email Service accepts from a sender
@@ -746,11 +809,13 @@ const MAIL_HEADER_VALUE_MAX = 998;
 /**
  * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
  * their canonical names, or undefined when none. A name outside the list, a value with a control
- * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
- * provider is called.
+ * character (CR or LF would inject a header), an over-long value or a malformed one throws
+ * {@link MailHeaderError} before any provider is called. `apiBaseUrl` is this API's origin: a
+ * `List-Unsubscribe` URI is accepted only on it, so with none (or an unusable one) it is refused.
  */
 export function validateMailHeaders(
   headers: Record<string, string> | undefined,
+  apiBaseUrl?: string,
 ): Record<string, string> | undefined {
   if (!headers) return undefined;
   const out: Record<string, string> = {};
@@ -766,7 +831,29 @@ export function validateMailHeaders(
         `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
       );
     }
+    if (canonical === "List-Unsubscribe") {
+      const match = LIST_UNSUBSCRIBE_RE.exec(value);
+      const origin = unsubscribeOrigin(apiBaseUrl);
+      if (
+        !match ||
+        origin === null ||
+        (match[1] as string).toLowerCase() !== origin.toLowerCase()
+      ) {
+        throw new MailHeaderError(
+          "mail header List-Unsubscribe must be exactly one <https://...> unsubscribe URI on this API's origin",
+        );
+      }
+    }
+    if (canonical === "List-Unsubscribe-Post" && value !== LIST_UNSUBSCRIBE_POST_VALUE) {
+      throw new MailHeaderError(
+        `mail header List-Unsubscribe-Post must be exactly ${LIST_UNSUBSCRIBE_POST_VALUE}`,
+      );
+    }
     out[canonical] = value;
+  }
+  // RFC 8058: the Post header means nothing without the URI it applies to.
+  if (out["List-Unsubscribe-Post"] && !out["List-Unsubscribe"]) {
+    throw new MailHeaderError("mail header List-Unsubscribe-Post requires List-Unsubscribe");
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -1995,13 +2082,13 @@ ${screenSection}${reviewSection}
   <p>Review the dataset and approve or deny the request:</p>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin publish approve</span> ${escapeHtml(datasetId)}<br>
-    <span style="color: #dc2626;">nemar admin publish deny</span> ${escapeHtml(datasetId)} --reason "..."
+    <span style="color: #16a34a;">nemar admin repo publish approve</span> ${escapeHtml(datasetId)}<br>
+    <span style="color: #dc2626;">nemar admin repo publish deny</span> ${escapeHtml(datasetId)} --reason "..."
   </div>
 
   <p style="color: #666; font-size: 14px;">
     To see all pending requests:<br>
-    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin publish list</code>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin repo publish list</code>
   </p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">

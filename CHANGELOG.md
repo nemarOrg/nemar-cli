@@ -15,14 +15,353 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Community mail (epic #2260, ADR 0132)
+
+- **The unsubscribe link in a message now opens the website's page.**
+  `GET /mail/unsubscribe/<token>` (also under `/nemar/mail`) answers `303 See Other` to `https://app.nemar.org/unsubscribe/<token>` (`https://test.nemar.org/...` on staging) instead of the API's own confirmation page, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; it still changes nothing by itself.
+  Only a link in the token format is forwarded, whether or not it still works (the website page says so); anything else answers 410 `link_invalid` with no redirect.
+  The redirect needs no mail-link secret, so it no longer answers 503 when that secret is unset; `GET .../info` and the one-click `POST` are unchanged.
+
+## 0.10.38 - 2026-11-21
+
+### Community mail (epic #2260, ADR 0132)
+
+- **Group mail now has four categories: `news`, `rfcs`, `maintenance` and `recall`.**
+  `news`, `rfcs` and `maintenance` are on by default and any account can turn each off; a recall (something NEMAR distributed or issued must stop being used, for privacy, integrity or security) is always on and has no switch.
+  `news` and `rfcs` reach `person` accounts at `verified` or `approved`, `maintenance` also reaches `service` accounts, and a recall also reaches `revoked` accounts, because a person whose access ended may still hold the recalled data.
+  `verified` accounts, who received no group mail before, now receive community mail unless they turn it off; that is the widest change here and it is deliberate.
+  Existing accounts keep what they had: whoever turned `announcements` off has all three categories off, and everyone else has all three on.
+- **Every community message carries a one-click unsubscribe.**
+  Each recipient's footer names the category, says why they receive it, and carries an unsubscribe link, a link to manage preferences and NEMAR's postal address; the message also carries the RFC 8058 headers `List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, so a mail client's Unsubscribe button works without opening anything.
+  The link turns off only that message's category; its confirmation page (`GET /mail/unsubscribe/<token>`, which never changes anything by itself) has a second button that turns off all three.
+  The new public routes are `GET` and `POST /mail/unsubscribe/<token>` and `GET /mail/unsubscribe/<token>/info` (JSON for the website page), also under `/nemar/mail`; they need no sign-in, stay open in every maintenance mode, and answer 410 `link_invalid` for any link that no longer works.
+  A recall carries no unsubscribe link.
+- **`nemar auth mail` shows and changes your own mail categories, for any account, not only admins.**
+  `nemar auth mail` (or `nemar auth mail show`) lists them, and `nemar auth mail set <news|rfcs|maintenance> <on|off>` or `nemar auth mail set all off` changes them; the API is `GET` and `PUT /users/me/email-preferences`, which a `pending` account may also use.
+  Every change, from the CLI, the link or an admin, is recorded in the audit log.
+- **`nemar admin notify --to <group>` now requires `--category <news|rfcs|maintenance|recall>`.**
+  Recipients who turned the category off are skipped, including those who turn it off after the send is queued; group sends always go through the outbox.
+  An older CLI that sends a group mail without a category gets `category_required` and is told to upgrade.
+  `--user <username>` (direct contact) takes no category.
+- **A recall is owner only and needs `--recall-ref` and `--confirm-recall`.**
+  `--recall-ref` names what is recalled: a dataset id with an optional version (`nm000104@v1.2.0`, which must exist) or a `nemarOrg` or `nemarDatasets` issue, pull request or security advisory URL.
+  `--confirm-recall` must repeat the reference exactly (`--yes` does not replace it); the subject gets the `[NEMAR recall]` prefix and the body must have the headings "What is affected" and "What to do".
+  A recall sent with `--to all` that queued at least one email publishes a `critical` site notice naming the reference and subject, and a second send of the same reference within 24 hours reuses it; a send to `admins` or `members` (a canary) or one that queued nothing publishes none (`notice_skipped: canary` or `nothing_queued`). Clear the notice with `nemar admin notice clear <id>` when the recall is resolved.
+- **The same category, subject and group cannot go out twice within 24 hours unless `--allow-repeat` is given.**
+  The guard keys on the recipient group too, so a canary to `admins` does not block the send to `all`; subjects match after Unicode NFKC folding, trimming, collapsing any run of whitespace to one space and ignoring case, and a recall's subject is compared with its `[NEMAR recall]` prefix; `--dry-run` reports a send the guard would refuse, and a send that queued nothing does not count.
+- **A declined confirmation no longer goes ahead in `nemar admin notify` or `nemar admin notice clear`.**
+  The confirmation result was checked for truthiness, and a declined or cancelled answer is a non-empty string.
+- **`nemar admin email-preferences update` gains `--news`, `--rfcs` and `--maintenance`; `--announcements` is retired.**
+  `--announcements` now fails with a message naming the three new flags, and the backend refuses an older CLI that sends it (`announcements_retired`).
+  `--all` sets every switchable category and admin alert (recalls stay on).
+  With `--user`, the owner and any admin can show or change another account's community categories; another account's admin alerts stay the owner's.
+- **Migrations.**
+  0146 copies each live account's `announcements` value into `news`, `rfcs` and `maintenance` and writes one summary audit row; it keeps the stored `announcements` key so the previous Worker still reads it during the deploy, and a migration in the following release drops it. Do not roll back to the previous Worker once this one has run: it reads only `announcements`, so anyone who turned a category off here would get group mail again.
+  0147 adds `broadcast_emails.subject_key`, the normalized subject the 24-hour guard compares.
+- **New Worker secret `MAIL_LINK_SECRET`, required on dev and production before any categorized send.**
+  It signs the unsubscribe links: 32 characters or more (`openssl rand -hex 32`), a different value on dev (`--env dev`) and production, never a `[vars]` entry.
+  Unset or too short, a categorized send is refused before anything is queued (`mail_link_secret_unset`) and the unsubscribe routes answer 503 (`mail_links_unconfigured`); a recall carries no link and is not held back.
+  `MAIL_LINK_SECRET_PREVIOUS` is optional, the rotation slot: copy the old value there before rotating, or every link already in a mailbox stops working.
+- **Docs (nemarOrg/docs#130).**
+  New pages `policies/community-mail` (what each category is, the defaults and how to opt out) and `admin/operations/community-mail-sends` (the categorized-send and recall runbook), and the privacy policy describes the categories and the unsubscribe path.
+- **Not in this release:** the website's preferences and unsubscribe pages, the `nemar auth mail` docs page, and the monthly newsletter (#2267).
+- **Before the first categorized send after this release:** confirm the production API reports 0.10.38 (an older Worker drops `--category` and would send a plain announcement), and release the website (its Settings email card is what the footer's "Manage your email preferences" link opens).
+
+### Zarr conversion
+
+- **Zarr conversion pins biosigIO 1.2.14 (`>=1.2.14,<1.2.15`) and refuses a gapped EDF+D or BDF+D file.**
+  An EDF+D or BDF+D file whose data records have gaps used to convert with every sample after a gap placed too early on the time axis; biosigIO 1.2.14 refuses it (`discontinuous_recording`, biosigio#180) and the converter records it as a terminal data failure, with the gaps named in the failure's `detail`, never as a retry.
+  A +D file whose records are contiguous still converts and carries `edf_discontinuous_verified_contiguous` in the store's recording metadata.
+  A catalog scan found real gaps only in nm000456 v1.0.2 (102 files, 51 recordings).
+  `ZARR_ENGINE_VERSION` is not bumped (ADR 0033), so its published stores keep the shifted time axis until that dataset is requeued by itself.
+  The rebuild then publishes each gapped recording as a typed failure in place of its store, as long as at least one recording of the dataset converts, which holds for nm000456 (69 recordings, 51 gapped); a dataset whose every attempted recording is gapped keeps serving its old stores, because that run ends "all N conversion(s) failed; index left untouched".
+  Deploying the pin costs one skipped Hallu tick: the first tick after the merge still runs the old `hallu-zarr.sh`, which installs 1.2.14 and then refuses it at its old `<1.2.14` cap, and the next tick runs the new script; no queue row is touched.
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **`pr --from-ref` opens the integration pull request when the geometry adds nothing.**
+  When the collaborator's branch already holds the files the label track would write, and the other tracks skip, the apply used to be refused as "nothing to propose".
+  Now no geometry commit is made and no ownership file is written; `--bump-version` still applies (a "Set Version to X.Y.Z" commit only when the Version changes), the branch is pushed only if there is a new commit, and the pull request is opened or updated with a body that says the geometry adds no files and lists what each track decided.
+  A plain `pr` from `main` with nothing to add, and any errored track, still refuse.
+
+## 0.10.37 - 2026-11-21
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **The geometry pull request body shows the table cleaning.**
+  A `Table cleaning` section lists, per written electrodes file, the columns dropped, the column added, the cells set to n/a per column and the hemisphere values rewritten, so the owner merging the pull request (which mints a version DOI) sees what was not carried over from the authors' files; it is omitted when nothing was cleaned and cut with a count when long.
+  `pr` now refuses a mirror (`on` id) without `--bump-version`, pointing to the integration flow (`--from-ref <branch> --bump-version`), because the old "run `nemar dataset release`" step contradicts it.
+- **The geometry package reads renamed channels files.**
+  Collaborator pull requests write `channels.tsv` names as the recording headers do (`POL A1-AV`, `EEG G_03-REF`, `EEGGA_01REF`, `A1-A2`) while `electrodes.tsv` keeps the contact names; `ieeg_geometry/names.py` pairs them by one rule (the same as the website's Brain panel from nemarOrg/website#574) so contact types still come from `channels.tsv`.
+  A contact whose types disagree, whether through renamed channels or the same exact name in two channels files, stays untyped, with a warning; no data file is changed.
+- **The `space-` electrodes files the geometry pipeline writes add no BIDS validator errors.**
+  They used to repeat the source file's errors (`NaN` sizes, columns that no sidecar defines).
+  Every written electrodes table now uses `n/a` for any missing value, puts `name`, `x`, `y`, `z`, `size` first, and keeps a column BIDS does not define only when the dataset's own `*_electrodes.json` defines it; other columns stay in the authors' file only.
+  The fetch now also checks out `*_electrodes.json` sidecars at every level; a row with a missing or repeated `name`, or a short or long row, is refused with a named reason (`electrodes-names`, `electrodes-rows`, `electrodes-columns`), and the report gains an optional `electrodes_cleaning` list of what each written table dropped, added or coerced.
+  The package version is 0.1.1.
+  Checked with the pinned validator on `on004457`: 16 errors on the 4 written files before, 0 after.
+- **`pr` computes from `main` when it is ahead of the release and records the paths.**
+  A mirror whose `main` changed dataset files after its latest release tag is no longer refused; the pull request body states that `main` is ahead, lists every changed path (50 paths and 8,000 characters at most, then a count) and says the files were computed from `main`, which the patch release publishes.
+  A missing release tag still refuses, and so does an input that changed after the release and could not be fetched (annexed bytes are downloaded at the release); other fetch failures are listed in the body.
+- **`pr --from-ref <branch>` opens one integration pull request, and `--bump-version` sets the release version.**
+  The clone is of an existing branch (collaborator changes plus NEMAR's BIDS fixes), the geometry is one commit on top pushed to that branch (fast-forward only), and the pull request into `main` is opened or updated; the body lists the commits not on `main`.
+  `--bump-version` keeps a branch Version that is above `main`'s and every tag, otherwise sets the next patch above both (a byte-preserving edit of the `Version` value), so the central version check passes and merging tags the release without a separate `nemar dataset release`; a `CHANGES` entry ahead of it is reported, not refused.
+- **`pr` no longer sees CRLF blobs as modified.**
+  The clone ignores line-ending rules (`info/attributes` and `core.autocrlf=false`), so a dataset that committed CRLF files under `text eol=lf` is not refused and the commit renormalizes nothing.
+- **Release order, for operators (replaces step (d) of 0.10.36).**
+  A mirror's N.0.1 is one integration pull request: a branch from `main` that merges any collaborator branch and NEMAR's BIDS fixes, with the geometry added on top by `pr --from-ref <branch> --bump-version`.
+  Merging it into `main` tags the version (the central `run-pr-merge.yml`), and the tag push dispatches `run-version-doi.yml`, which mints the DOI; so never merge a collaborator pull request that changes `Version` on its own, and do not run `nemar dataset release` afterwards.
+  `run-pr-merge.yml` skips silently when the tag already exists, so a merge that leaves `Version` unchanged makes no release.
+  Merge 0.1.1 integration pull requests only after 0.10.37 is published (step (c) of 0.10.36 still applies): a re-pull runs the pipeline pinned to the released CLI, and a 0.10.36 checkout would regenerate the files as 0.1.0.
+  The nine open pipeline-0.1.0 pull requests (branch `nemar/ieeg-geometry-0.1.0`) are superseded: close each when its mirror's integration pull request opens.
+  Release a dataset with renamed channels only after nemarOrg/website#574 (merged to `staging`) reaches production, so the Brain panel pairs its channels.
+- **Central BIDS validation reads annexed content (nemarDatasets/.github#157).**
+  The check fetches the `git-annex` branch so the validator resolves annexed files over public remotes, and filters only errors on files it could not read; real errors that the old location-only filter hid (for example a missing `TaskName` on `on002799`) now show.
+
+## 0.10.36 - 2026-11-20
+
+### iEEG geometry (ADR 0129, ADR 0111 amendment of 2026-11-19)
+
+- **NEMAR can compute iEEG electrode positions in a template space and propose them as BIDS `space-` files.**
+  The new `scripts/ieeg_geometry` Python package (run with uv) fits a dataset's own electrodes to the claimed space's reference surface and writes a `space-<label>` electrodes and coordinate-system pair only when the fit passes, marked "Computed by NEMAR"; the authors' files are never changed.
+  Its commands are `python -m ieeg_geometry run <id>` (a report, or `--apply` to write), `pr <id>` (opens a pull request with the owner's own `gh` login; never merges) and `upload-surfaces <id>` (writes display surfaces under `<id>/zarr/geometry/` with the owner's AWS profile).
+  A new `ieeg-geometry.yml` workflow runs the package's lint, type check and tests in CI.
+- **Re-pull planner version 2 to 3.**
+  A path listed in `.nemar/ieeg-geometry.json` is now `pipeline-owned`: it is not a correction, so it no longer holds an automatic re-pull, and N.0.1 regenerates it by running the pipeline from a CLI checkout pinned to the release.
+  `nemar admin repull status` gains the counts `pipeline_owned`, `pipeline_failed` and `pipeline_attempts`; only a failure to run retries (at most three times), and a failure that reproduces completes N.0.1 without the pipeline files.
+- **Release order, for operators.**
+  (a) Have the Worker on planner 3 before running the new CLI on a geometry dataset.
+  The Worker refuses another planner's plan on the automatic path (`auto-planner-version`).
+  A manual 0.10.36 CLI against a 0.10.35 Worker gets a 400 when it writes a new count: `invalid-body` at create, `field-invalid` on a transition.
+  The backend deploy and the npm publish run concurrently from `main`, so check the `version` in `/health` and `npm view nemar-cli version` before step (c).
+  (b) The central `nemarDatasets/.github` `run-upstream-repull.yml` carries the geometry step (applied 2026-11-20, nemarDatasets/.github#156).
+  It skips for a CLI tag that lacks `scripts/ieeg_geometry`.
+  (c) Merge geometry pull requests only after the CLI release carrying the package is published and the patch is live.
+  (d) A mirror's N.0.1 is two steps: merge the `pr` pull request, then run `nemar dataset release <id> --type patch`.
+- **Rollback.** Roll the Worker and the CLI back together, never the Worker alone.
+  A 0.10.35 Worker stores and returns the new counts on records that already hold them.
+  It refuses with a 400 (`invalid-body` at create, `field-invalid` on a transition) any write that names `pipeline_owned`, `pipeline_failed` or `pipeline_attempts`, which a 0.10.36 CLI sends.
+  Records holding `pipeline_owned` were planned under planner 3, and 0.10.35 cannot execute or regenerate them: plan them again, or leave them until the roll forward.
+- **Zarr `--wipe` keeps `<id>/zarr/geometry/`.**
+  `generate_zarr.py --wipe` erases a dataset's Zarr prefix except the subject-surface display data the pipeline uploads there.
+- **Not in this release:** the central workflow and Worker dispatch that would run the pipeline on future pushes (P3b) are deferred, behind a dark switch, to #2235.
+
+### Decisions
+
+- **ADR 0128: the Zarr serving copy is not an NWB container (#2218).** A decision record only; no behavior change.
+
+### Staging
+
+- **Staging semantic search has the vector visibility filter on too (ADR 0126).**
+  `VECTORIZE_VISIBILITY_FILTER = "1"` is set in `[env.dev.vars]`, after the dev index got the `visibility` and `dataset_id` metadata indexes and its public vectors were relabeled; production is unchanged (on since 0.10.35).
+
+## 0.10.35 - 2026-11-18
+
+Release 0.10.35 is small: a CLI fix and the owner's switch for private-dataset semantic search.
+It has no migrations and adds one Worker variable, `VECTORIZE_VISIBILITY_FILTER`, in production only.
+
+### Production behavior changes
+
+- **Semantic search narrows by visibility labels, and private datasets get embedded (#2211, ADR 0126, now accepted).**
+  `VECTORIZE_VISIBILITY_FILTER = "1"` is set in production `[vars]`; staging stays off until its index is relabeled.
+  The metadata indexes and the relabel of all 910 public vectors were done on 2026-11-18, before this release.
+  Results stay limited to what the caller may see: every hit is still checked against the live `datasets` row.
+
+### CLI
+
+- **`nemar dataset invite`, `nemar dataset access approve` and `nemar dataset access deny` accept the username and the dataset id in either order (#2208).**
+  Before, `nemar dataset invite nm000289 alice` sent `alice` as the dataset id and failed with a misleading "Dataset not found".
+  The id is matched case-insensitively against the same bounded rule as the other admin commands; when neither argument is a dataset id, the CLI stops before calling the API and says what it expected.
+
+### Owner steps after release
+
+1. Run `POST /admin/vectorize/reindex-all` (keyset-paged with `after` and `last_id`) until `has_more` is false, to embed the private datasets; read `failed` in each answer and retry any failed id with `{"limit": 1, "after": "<the id before it>"}`.
+   Until it runs, the daily drain embeds them 50 at a time.
+   Then close #2200.
+
+## 0.10.34 - 2026-11-18
+
+Release 0.10.34 carries three blocks of work.
+The first is a repair of the dataset publication lifecycle (#2199, ADR 0125): a published dataset can now be pulled back to unpublished, and the commands that could leave one half published are gone.
+The second is search that returns every dataset the caller may see, private ones included (#2201, ADR 0126).
+The third is portable compute: a tenant-wide ceiling on live compute jobs (#2126, phase P2 of issue #2121) and workstation runners, a derivative store and runner reporting (epic #2145, ADR 0121 to ADR 0124).
+Two smaller fixes and a plan document ride along (#2139, #2163, #2197).
+The release has six migrations, 0140 to 0145, and sets no Worker variable or secret; the one change to the Worker configuration is the derivative store's bucket binding (see Deploy coupling).
+Compute stays dark in production: no job can be created while `COMPUTE_ENABLED` is absent, and no runner can claim work while `COMPUTE_RUNNERS_ENABLED` is absent.
+
+### Production behavior changes
+
+- **The administrator's publication and visibility commands moved under `nemar admin repo`, and two of them are gone (#2199, ADR 0125).**
+  `nemar admin repo publish` (with `list`, `show`, `start`, `next`, `approve`, `deny` and `screen`, options unchanged), `nemar admin repo unpublish`, `nemar admin repo withdraw` and `nemar admin repo restore` are the lifecycle commands.
+  The old top-level `nemar admin publish`, `nemar admin withdraw` and `nemar admin restore` are hidden stubs that do nothing and exit 1 with a pointer to the new name, so a script or runbook that calls one fails loudly until it is updated.
+  `nemar admin repo public` and `nemar admin repo private` are removed, because a bare visibility flip is how a dataset ends up public or private while its publication record says the opposite.
+  `nemar dataset publish` (the author's side) is unchanged.
+- **`PATCH /admin/datasets/:id/visibility` answers 409 in both directions (#2199).**
+  The route stays so that an old script gets a sentence naming `admin repo publish approve` or `admin repo unpublish`, not a bare 404.
+  Nothing changes visibility through it any more.
+- **Publication mail names the new command.**
+  The administrator notification that a publication request is waiting now says `nemar admin repo publish ...`.
+- **`GET /datasets/search` returns the datasets the caller can see (#2201, ADR 0126).**
+  An anonymous caller gets public datasets only, as before.
+  A signed-in caller also gets the private datasets they own or collaborate on, and an administrator or owner gets every dataset, the rule `GET /datasets/:id` already enforces.
+  Status, sandbox, exemplar and anonymous-deposit concealment are unchanged, and every search response stays `no-store`.
+  Private datasets are keyword-searchable for the people entitled to them as soon as this deploys; semantic search for them waits on the owner's rollout steps below.
+  The MCP `search_datasets` tool stays public: it never returns a private dataset.
+- **Three things run in production with no switch in the portable compute block.**
+  The runner lease sweep (`sweepRunnerLeases`) runs on the 30-minute scheduled tick; a credential that starts with `nmr_` or `nmra_` is refused by `resolveApiKeyUser` as a runner credential and never read as an API key; and `runnerEndStatements` ends a person's runners in the account deletion, account revocation and role demotion paths.
+  With no runner registered they have nothing to act on.
+- **The derivative store's daily pass runs in production,** because the bucket is now bound (see Deploy coupling).
+  It reads no switch, and it copies nothing until a pipeline job dispatched while `COMPUTE_ENABLED` is on has finished.
+- **Links to files whose names contain a reserved character now resolve (#2139).**
+  See Fixed.
+
+### Added
+
+- **`nemar admin repo unpublish` (#2199, ADR 0125, migration 0144).**
+  It takes a published dataset back to an ordinary unpublished private dataset: private on GitHub and S3 and in D1, with the publication request that published it stamped with the new column `publication_requests.unpublished_at` (the request's status is not rewritten, so the record that the dataset was once published stays).
+  It is a dry run by default; `--execute --reason <text>` applies it after a confirmation, and `--json` is available.
+  The route is `POST /admin/datasets/:id/unpublish`, and the reason is written to the audit log as `dataset_unpublished`.
+  It never calls EZID, so the concept and version DOIs stay as they were, and it leaves `first_published_at` (anonymity stays unavailable), collaborators, access requests, version records and the tag ruleset alone.
+  The author's `nemar dataset publish status` reads a stamped request as none, and the dataset can be published again.
+  It repairs the half state a bare flip leaves: a dataset already private whose request still says `published`.
+  It refuses the live datasets nm000103 to nm000107, the reserved fixture band, exemplars, anonymous deposits, withdrawn datasets (use `restore`) and a dataset with an open publication request (deny it first).
+  A public dataset that was never published is simply made private.
+  `withdraw` is the other way back: it is for a broken or removed dataset, and it tombstones the DOIs.
+  After an execute the command prints one line: search reflects the change at once, while the public dataset page and catalog list are cached at the edge and can keep showing the dataset for several minutes.
+  `nemar dataset publish status` reports a dataset that is public again (for example after `make-public`) by its request's own status, not as unpublished.
+- **Search follows the viewer, with two layers of protection (#2201, ADR 0126, migration 0145).**
+  One shared predicate, `buildViewerVisibilitySql`, decides what a caller sees in every tier: exact identifier, full-text, literal match, vector-hit hydration, reranker text, counts and `excluded_unknown`.
+  Layer 2, always on: every hit is checked against the live `datasets` row, so a stale label never decides visibility.
+  Layer 1, behind `VECTORIZE_VISIBILITY_FILTER=1`: vectors carry two routing labels, `visibility` and `dataset_id`, and a vector query is narrowed by them (anonymous asks for public; a signed-in user adds the private datasets they own or collaborate on; administrators are unfiltered).
+  A rejected filter, or a filtered query with no match, falls back to an unfiltered query with a warning.
+  With the flag off, only public datasets are embedded, as before, and the labels are still written to public vectors.
+  With it on, the daily drain and `POST /admin/vectorize/reindex-all` embed private datasets too.
+  Migration 0145 adds a trigger that marks a dataset's embedding stale (`embedding_dirty = 2`) when its visibility or status changes, and the drain takes the highest value first, so a dataset just published or unpublished is relabeled ahead of any backlog.
+- **The fixture id `nm099996` is declared dev-owned (#2163),** so production stops claiming pushes to a repository by that name before anyone creates it.
+- **A ceiling on the live jobs of the whole tenant, checked in the statement that takes each job's hold, whoever submits it (#2126).**
+  The owner's `tenant` policy key sets the ceiling and a floor of slots kept for people, for the pipelines and for partners; the schema refuses floors that add up to more than the ceiling, and a stored policy without the key falls back to the defaults, never to unlimited.
+  A job that would take a slot owed to another class, or pass the ceiling, is refused with the new word `platform_busy` (409).
+  It is not queued; a queue is a later phase.
+  The defaults are a ceiling of 20 with floors of 8 for people, 2 for the pipelines and 0 for partners, which leaves NEMAR's own pipelines their current room of 12 only while nothing else occupies a slot (an orphaned job, a job that skipped the reservation, or people holding more than their floor take it from them).
+  `platform_busy` stops a pipeline run and ends the daily dispatcher's run; `pipeline run` and its dry run are clamped to the tenant room.
+  `nemar admin compute status` prints the occupied slots by class and the attention count `tenant_over_ceiling`, and the live tenant sweep logs `tenant_live` and `occupied` and warns when the live count passes the ceiling.
+  The ceiling is checked on both database engines in tests (bun:sqlite and Miniflare D1), with racing requests for the last slots.
+  It carries no migration and sets no variable or secret.
+- **Workstation runners (epic #2145, ADR 0121 and ADR 0122, migration 0140).**
+  An owner registers a runner (`nemar admin compute runners register|list|revoke`), is shown its secret once, and the runner exchanges the secret for a 15-minute access token and pulls pipeline jobs over HTTPS (`/compute/runners/token`, `me`, `claim`, `heartbeat`, `complete`).
+  Migration 0140 adds the runner registry tables and twelve executor, accounting and lease columns on `compute_jobs`: a job records its executor (`tapis` or a runner) and its accounting class, and a runner job writes no ledger entry, because a runner-reported core-hour is never added to a service-unit total.
+  Leases expire and are swept, revoking a registration or ending its owner ends the runner's tokens and work in one batch, and a pipeline dispatch checks the Zarr copy's source commit first.
+  Creating a runner job and every runner claim stay behind the dark switch `COMPUTE_RUNNERS_ENABLED`; an owner can register a runner while it is off, and the registration does nothing until the switch is on.
+  A Tapis-executor pipeline run is refused `tapis_unconfigured` (503) before any write while Tapis is unconfigured, so `COMPUTE_ENABLED` may be set for runner jobs alone (ADR 0118 amendment, #2176); the Tapis go-live stays parked.
+  ADR 0122 records one container image that runs under Apptainer or Docker from one digest; Podman is unsupported.
+- **A waiting runner job that can never be claimed is ended by the lease sweep.**
+  When its dataset is deleted or no longer passes the pipeline eligibility predicate (unpublished, withdrawn, anonymous, tombstoned), the job ends `runner_lost` with the new detail `dataset_ineligible`, so it stops holding a `runners.maxLiveJobs` slot; a job whose dataset is still eligible is untouched.
+  A runner job that has waited unclaimed for over a day is counted as the attention word `runner_waiting_stale`.
+  The runner routes other than the secret exchange are rate limited by client address, not by bearer, so a made-up bearer mints no bucket.
+- **One `nemar-floor` recipe with two inputs (#2177, migration 0141).**
+  The recipe registry lists `nemar-floor` with inputs `bids` (on Tapis) and `zarr` (on a runner), and `nemar-floor-zarr` is removed.
+  A pipeline stamp now records the input, the reader, the engine and the digest of what the run read.
+  A dispatch whose input does not match its executor is refused `invalid_spec` with `field: "input"`.
+  A BIDS run's command and arguments are unchanged; a Zarr run's command is `nemar-recipe run nemar-floor --input zarr`.
+  The migration renames existing `nemar-floor-zarr` stamps to `nemar-floor` with input `zarr` and rebuilds the two live-stamp indexes; production holds no such stamps.
+- **Reports separate runner usage from service units (#2179, migration 0142).**
+  `nemar admin compute jobs list` takes `--executor`, `--accounting` and `--runner`; `jobs report` and `jobs record` show runner-reported usage, marked partial when the runner could not measure all of it, and never beside a service-unit figure.
+  `GET /admin/compute/report` counts service-unit jobs only in `totals` and `by_pool` and carries runner jobs in a separate `runner_totals`.
+  `nemar admin compute runners usage --from --to` (route `GET /admin/compute/reports/runners`, at most 366 days) reports each runner's jobs by state and its summed wall time, CPU time and largest resident memory.
+  Migration 0142 adds `compute_jobs.runner_usage_partial`.
+- **The derivative store (#2178, #2180, #2191, #2193, #2194, ADR 0123, migration 0143).**
+  A finished pipeline job's product is copied server side from the results bucket into a private derivatives bucket under `d/<key>/`, with a `derivative.json` that names what produced it, the source datasets (with the version DOI when one exists), the profile and every file with its size and SHA-256 digest.
+  A dataset that stopped being eligible after its job finished (unpublished, withdrawn, anonymous or tombstoned) is neither keyed, copied nor promoted.
+  The key is the SHA-256 of eight fields (dataset, version, recipe, recipe version, engine, input, profile and input digest), computed by `shared/contract/derivatives.ts`, which is import-free and has shared test vectors that a Python implementation reproduces.
+  A Zarr input's digest covers the electrode positions its recipe was handed (`nemar.input-digest.v2`), so a reconversion that changes only positions gets a new key.
+  Retention is by class: `canary` expires 30 days after it is stored, `catalog` is kept until a later catalog derivative of the same dataset, recipe, input and profile is promoted (then 30 days), and `published` is never expired, superseded or deleted by code and has no DOI minted by code.
+  Migration 0143 adds `compute_derivatives` and a skip log.
+  `nemar admin compute derivatives list|show|promote|sync` (routes under `/admin/compute/derivatives`; `published` is the owner's) manage it, and one daily production pass frees what is due and copies at most 100 objects.
+- **Architecture records and plans:** ADR 0121 to ADR 0124 (executor and accounting class, one image under two container runtimes, the keyed derivative store, reader conformance), the ADR 0118 amendment of 2026-11-14 on runner-only deployments (#2176), and the Brainlife indexing plan (#2197, documentation only).
+
+### Changed
+
+- **The Zarr converter records where a store's electrode positions came from (#2190).**
+  A store's root gains `electrode_positions_source` (`subject` or `dataset`), `electrode_positions_file` and, when one resolved, `electrode_coordsystem_file`, written only when positions are written.
+  Neither word means measured, and no template is ever written.
+  An `_electrodes.tsv` or `_coordsystem.json` named with the `space` entity now applies, and when the most specific files hold more than one `space` value the recording gets no positions and one warning names the files.
+  The change is in the converter script only: nothing is reconverted by this release, and a store carries the new attributes after its next conversion.
+- **Help text, README and the `repo` group description now use the new command names** ("Dataset publication lifecycle: publish, unpublish, withdraw, restore").
+
+### Fixed
+
+- **Files whose names contain a reserved character no longer 404 on `data.nemar.org` (#2139).**
+  `manifest.json` URLs encode each path segment, and the route decoded only part of the escapes, so `%2B`, `%23`, `%26` and the like never matched the manifest key (nm000454 v1.0.2 has 177 FreeSurfer `*+aseg.mgz` files that failed this way).
+  The route now decodes the pathname once per segment before the lookup; a literal `+` still resolves and decoded `..` segments are still refused.
+  Compact-manifest URLs have the same form and are fixed too.
+  The `/<id>/qa/*` route reads the path the same way and is not changed here.
+- **Converter defects found while adding provenance (#2190).**
+  A coordinate that parses to `NaN` or infinity (including an overflowing `1e999`) is skipped like `n/a`, where before it wrote a bare `NaN` token into the store's root `zarr.json`, which `JSON.parse` refuses.
+  An electrodes file that cannot be read now prints one warning naming it, instead of looking like a dataset that declares none.
+
+### Deploy coupling
+
+- **Migrations 0140 to 0145 apply with the Worker deploy,** before the Worker is deployed.
+  0140 adds the runner tables and `compute_jobs` columns, 0141 adds the stamp input columns and rebuilds two indexes, 0142 adds `runner_usage_partial`, 0143 adds the derivative tables and triggers, 0144 adds `publication_requests.unpublished_at`, and 0145 adds the trigger that marks an embedding stale when visibility or status changes.
+  Migrations 0131 to 0139 are unused; numbering continues above 0130 so a fresh replay and production agree.
+- **The derivative bucket `nemar-compute-derivatives` must exist before the release deploys** (it exists), or the Worker deploy fails after the migrations have applied and 0.10.33 keeps serving.
+  The dev Worker binds its own `nemar-compute-derivatives-dev`.
+  The production configuration gains the binding `COMPUTE_DERIVATIVES` and the variable `COMPUTE_DERIVATIVES_BUCKET_NAME`, and nothing else; no switch, secret or other variable changes.
+  The store reuses the compute token that already covers the other two compute buckets.
+- **The central approval workflow change (nemarDatasets/.github#155) must merge before this release.**
+- **Update scripts and runbooks that call `nemar admin publish`, `admin withdraw`, `admin restore`, `admin repo public` or `admin repo private`, or `PATCH /admin/datasets/:id/visibility`,** before or with the release.
+- **No website release is required.**
+  The website does not call the changed administrator commands, and search keeps its response shape.
+- **Run `bun run migrations:d1-check` before the release pull request.**
+- **Rolling back.**
+  The migrations add tables, columns, indexes and triggers that the 0.10.33 Worker ignores, so a rollback is safe for the schema.
+  Rolling a Worker back to a build from before the tenant block makes a stored policy that has the `tenant` key unreadable, and a build from before the runners block does the same for the `runners` key (the reader is strict and fails closed); turn runners off and drain them, and write a policy without the keys, before any rollback across them.
+  Concretely, once the owner has run `nemar admin compute policy set` with the new `tenant` or `runners` keys, the older Worker reads the policy as unavailable: roll back only before the first policy set, or revert the policy first.
+  After a Worker rollback, rows with `embedding_dirty = 2` wait until the release is deployed again, since the older drain does not read that value.
+
+### Owner steps after release
+
+None of these is done by the release.
+
+1. Repair nm000289, which a bare private flip on 2026-10-29 left private and still recorded as published.
+   Run `nemar admin repo unpublish nm000289` first (a dry run that changes nothing), then `nemar admin repo unpublish nm000289 --execute --reason "<why>"`.
+   Check `nemar dataset publish status nm000289` (no request, unpublished by an administrator) and `nemar dataset status nm000289` (found, DOIs still listed).
+   Then approve the pending access request with `nemar dataset access approve <user> nm000289`; `nemar dataset access list nm000289` shows it.
+   If the dataset is still not found, check that the CLI points at production (`nemar auth status`; unset any test API URL in the shell).
+2. Roll out semantic search for private datasets, after the deploy.
+   Done on 2026-11-18: the Vectorize metadata indexes `visibility` (string) and `dataset_id` (string) were created, and `POST /admin/vectorize/reindex-all` relabeled all 910 public vectors (7 transient failures retried one by one).
+   `VECTORIZE_VISIBILITY_FILTER=1` is set in production `[vars]` by #2211, so it takes effect with the release that carries that pull request.
+   After that release deploys, run `reindex-all` again (keyset-paged until `has_more` is false) to embed the private datasets; otherwise the daily drain embeds them 50 at a time.
+3. Verify re-publishing an unpublished dataset end to end on `nm099999` (#2202): unpublish, file a request, approve, and check the version and concept DOIs.
+4. `curl -s https://api.nemar.org/health | jq -r .version` prints `0.10.34`, and `nemar admin compute status --json | jq '.switches, .storage'` shows the compute switches false and the three bucket bindings true.
+
+### Known limits
+
+- After an unpublish or a withdraw, search reflects the change at once, but the anonymous dataset page and the public catalog list are cached at the edge and can keep showing the dataset for several minutes.
+- Vector labels refresh on the daily drain, so with `VECTORIZE_VISIBILITY_FILTER=1` on (production, from the release carrying #2211), anonymous semantic search can miss a just-published dataset until then; keyword search finds it at once.
+- The list and facet endpoints show private datasets only to administrators; owners and collaborators do not yet see their own private rows there (#2203).
+- Re-publishing an unpublished dataset has not been exercised end to end: the orchestrator reuses the existing concept and version DOIs and handles an existing DOI, but a second publish of the same version number was not run against EZID (#2202).
+- `nemar admin make-public` is still a bare public flip with no publication request, the same class of half state that `repo public` was; it is not changed here.
+- Query spelling correction uses only the public vocabulary, so a misspelled word that appears only in private datasets is not corrected.
+- Counting the orphaned platform jobs scans `compute_jobs` once per hold, because an index for it would need a migration.
+- The pipelines' daily cap is still read before a run and not checked in the hold's statement (see 0.10.33).
+- The derivative store copies nothing in production until a pipeline job succeeds, which needs the compute switches the owner has not set.
+
+## 0.10.33 - 2026-11-11
+
 NEMAR can now act as an OpenID Connect provider (epic #2014), and the first-party half of the compute gateway is in the code (epic #2005).
-Both stay inert in production until the owner switches them on.
-The OpenID Connect discovery document, key set and owner routes answer 404 until `OIDC_SECRET` is set, and the whole sign-in flow (authorize, consent, token, userinfo, revocation and introspection) stays dark until `HOST_PREFIXED_SESSION_COOKIE` is also `"1"`.
-No job can be submitted, no tenant is contacted and no pipeline is dispatched while the two compute switches are absent.
+The sign-in flow and compute stay dark in production until the owner switches them on.
+The OpenID Connect discovery document, key set and owner routes answer 404 until `OIDC_SECRET` is set (the owner sets it before the release, so they answer at deploy, with an empty key set), and the whole sign-in flow (authorize, consent, token, userinfo, revocation and introspection) stays dark until `HOST_PREFIXED_SESSION_COOKIE` is also `"1"`.
+No job can be submitted and no pipeline is dispatched while the two compute switches are absent.
+Nothing contacts the job scheduler's tenant except an administrator's `nemar admin compute status`, which mints one token and makes one health call when the tenant's credentials are set.
 The release has twelve migrations, 0114 to 0119 (compute), 0120 to 0124 (OpenID Connect) and 0130 (compute anonymization).
-Migration 0120 gives every existing user, deleted accounts included, a permanent `sub` and adds triggers that keep it unchanged; restoring a database to a point before it and replaying would assign every account a new `sub`, so take a backup first.
+Migration 0114 adds the four platform pools (pipelines and people, CPU and GPU) with nothing granted.
+Migration 0120 gives every existing user, deleted accounts included, a permanent `sub` and adds triggers that keep it unchanged.
+Restoring the database to a point before 0120 and replaying it gives every account a new `sub`.
+That is harmless until the first client is registered; after that, restore only to a point after 0120, or tell every client.
 It sets no Worker secret.
 The production Worker configuration gains the two private compute buckets as bindings and their names as variables; the buckets already exist.
+The CLI gains no runtime dependency: `jose`, `oauth4webapi` and `openid-client` are development dependencies that one test uses.
 Third-party compute (`nemar compute`) and the partner contract are not in this release.
 
 ### Production behavior changes
@@ -31,13 +370,25 @@ Third-party compute (`nemar compute`) and the partner contract are not in this r
   `nemar_oauth_state` and `nemar_orcid_pending` become `__Host-nemar_oauth_state` and `__Host-nemar_orcid_pending`, which a sibling host cannot set.
   They live for minutes, so a person who starts an ORCID sign-in just before the deploy and finishes it just after may need to start again.
   The change is not behind a flag, and the website must already accept the new pending-cookie name (see Deploy coupling).
+- **A plain ORCID sign-in no longer links the iD to the account already signed in (ADR 0119 rule 10).**
+  `GET /auth/orcid/start` starts a sign-in whatever its `mode` says; only the form POST from Settings, which checks the Origin and needs a session, starts a link or a relink.
+  A sign-in signs in the account the iD names, or starts a sign-up for an iD no account holds, and always issues a fresh session.
+  Website 0.2.37 carries the form POST; a website older than that starts a sign-up instead of a link (see Deploy coupling).
 - **Email-code sign-in is closed outside development and test (#2112).**
   `/auth/code/request` answers the same masked success without issuing a code, and `/auth/code/verify` answers 401, so nothing can obtain or redeem a sign-in code in production.
   The codes that confirm or change an email address for a signed-in account are separate and unchanged.
   ORCID is the only upstream identity; the code path stays in the repository, dormant.
-- **Usernames starting with `nmu_` are reserved, and credentials starting with `nmo_` are refused everywhere else.**
-  Signup and profile edits refuse a username that starts with `nmu_` in any case (`username_reserved`), because that prefix is the form of the OpenID Connect `sub`.
-  Every route outside the five that accept an OpenID Connect access token answers a credential starting with `nmo_` with 401 `oidc_token_not_accepted`.
+- **Usernames starting with `nmu_` are reserved, and credentials starting with `nmo_` are never read as API keys.**
+  A profile edit, the person's own (`PATCH /auth/profile`) or an owner's (`nemar admin users edit`), refuses a username that starts with `nmu_` in any case (`username_reserved`), and `GET /auth/check-username` reports one as unavailable, because that prefix is the form of the OpenID Connect `sub`.
+  An existing username is not changed.
+  Outside the provider's own routes (discovery, the key set and the four `/oauth` endpoints), a bearer credential starting with `nmo_` is refused before any lookup.
+  A route that needs a signed-in caller answers 401 `oidc_token_not_accepted`, and a route with an anonymous answer gives that answer, as it does for an unknown key.
+- **`compute.nemar.org` is no longer treated as a NEMAR page (ADR 0119 decision 9).**
+  The API sends it no CORS headers and refuses a cookie-authenticated write from it, although it ends in `.nemar.org`, because a partner runs it.
+- **The OpenID Connect back-channel logout retry runs on the 30-minute production tick from deploy.**
+  It reads no switch, and with no client registered it has nothing to send.
+  While `OIDC_SECRET` is set in the wrong form it writes nothing and logs `[oidc-logout] skipped reason=oidc_secret_malformed` at warning level on every tick, and once after each admin revocation, soft delete, kind change, manual account merge, `nemar admin oidc` grant ending, ORCID unlink or relink and test-account sweep; an absent secret is silent.
+- **Every cached `manifest.json` is rebuilt on its first request after deploy,** because the cache key moves to `v3` (see Fixed).
 - **The session cookie is unchanged.**
   `__Host-nemar_session` is written only when the owner sets `HOST_PREFIXED_SESSION_COOKIE` to `"1"`, after both releases are out; the legacy `nemar_session` name keeps being read for at least 31 days after that.
 
@@ -50,28 +401,99 @@ Third-party compute (`nemar compute`) and the partner contract are not in this r
   Discovery, the key set and the owner routes answer 404 until `OIDC_SECRET` is set, and the secret must have the `nmsso-` form (#2074).
   Authorize, consent, token, userinfo, revocation and introspection also need `HOST_PREFIXED_SESSION_COOKIE` to be `"1"`, so the whole flow is dark or lit together.
   Admin revocation, an owner soft delete and a manual account merge end an account's grants and queue a back-channel logout to each client.
-  Unlinking or relinking ORCID, and changing an account's kind away from person, end only the grants of clients that require a proven ORCID iD; a compute suspension ends only grants that carry a compute scope.
+  Unlinking or relinking ORCID, and changing an account's kind away from person, end only the grants of clients that require a proven ORCID iD.
+  No compute suspension exists yet, so none ends a grant.
   Signing out, revoking an API key and demoting a role deliberately leave grants alone, and every token use re-checks the account against the client's sign-in rule.
+  Discovery and the key set are exempt from the rate limiter, and a read of them from maintenance mode.
+  The token, revocation and introspection endpoints share a limit of 2,000 requests a minute per address (`oauth-ip`), and the authorization check and consent share a limit of 30 a minute per account.
+  In read-only maintenance mode userinfo and introspection still answer and the token endpoint and revocation are refused, so a partner's sessions lapse within the access token's 15 minutes.
   The protocol is documented at docs.nemar.org under Sign in with NEMAR; the operator runbook is in the gated administrator section.
 - **The compute gateway's first-party half (epic #2005, ADR 0118).**
-  An allocation ledger and owner policy in service units (SU), job records with two private storage buckets, a client for the job scheduler and a stand-in for it, the job lifecycle with webhooks, settlement and results, revocation that freezes a person's pools, and NEMAR's own processing pipelines dispatched by an administrator.
+  An allocation ledger and owner policy in service units (SU), job records with two private storage buckets, a client for the job scheduler, tested against a stand-in, the job lifecycle with webhooks, settlement and results, revocation that freezes a person's pools, and NEMAR's own processing pipelines dispatched by an administrator.
   `nemar admin compute` covers the policy, pools, status, jobs (including legal holds and the ACCESS reports), the observer token and `pipeline run|status`.
   Nothing runs until the owner sets `COMPUTE_ENABLED` and `COMPUTE_PIPELINES_DISPATCH_ENABLED`, which are absent from the production configuration and pinned absent by a test; every compute cron is production-only.
   The tenant sweep waits for `COMPUTE_ENABLED`, and the pipeline dispatcher waits for both switches.
-  Four never read a switch: job advance, cancellation retry, the ACCESS gateway-attribute reporter and retention.
-  They act only on jobs and pools that exist, so they have nothing to do until the first job, and turning compute off never strands a live job.
+  Five run without a switch: job advance, cancellation retry, the ACCESS gateway-attribute reporter, retention and the OpenID Connect logout retry.
+  Job advance checks `COMPUTE_ENABLED` at one step only, just before it would create a job at the scheduler, so a live job is always read back and a job that has not been submitted waits.
+  The four compute ones act only on jobs and pools that exist, so they have nothing to do until the first job, and turning compute off never strands a live job.
+  NEMAR's own pipelines obey their caps on every path, fixed before this release (#2122, from issue #2121): the live cap per pool is checked inside the statement that takes each pipeline job's hold, and an administrator's `pipeline run --eligible` also stops at what is left of the daily cap and dispatches at most 10 per invocation, reporting the room it had.
+  One named dataset is refused when its pool is full and counts toward the daily cap without being refused by it.
+  The daily dispatcher's counts and words are unchanged unless it races an administrator's run.
+  When the daily cap ended a `pipeline run --eligible`, the run reports the new word `daily_cap_reached` as its `stopped_by`; the word is declared with status 409, and no path returns it as an error status.
+  In read-only maintenance mode the launcher's three job callbacks stay open, so a job already running can still deliver its results; `full` refuses them.
 - **A development target for the OpenID Connect conformance workflow (#2075).**
   The suite can run against the deployed development system; the default is unchanged.
 
+### Changed
+
+- **`--debug` redacts `client_secret`.**
+  The client secret that `nemar admin oidc clients add` and `rotate-secret` print once is written as `[REDACTED]` in a `--debug` log, like an API key.
+- **The Worker's request log writes the token of a Tapis webhook address as `[redacted]`.**
+  Its lines are otherwise unchanged: method, path with its query string, status and time, at the same volume.
+- **CI: the test workflow checks out `nemarOrg/nemar-process` at its epic branch, and the OpenID Connect conformance workflow is new on `main`.**
+  The checkout (`feature/issue-1-epic-process`) supplies the observation schema, its fixtures and the queue-memory template to the drift tests, with `NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT` and `NEMAR_REQUIRE_PROCESS_QUEUES` set to `1`, so the tests fail, not skip, if that branch or its files are gone.
+  Move the checkout to that repository's `main` when its epic merges; until then, deleting the branch breaks CI on `main`.
+  `oidc-conformance.yml` runs by manual dispatch only.
+
+### Fixed
+
+- **A file whose name has no dot no longer gets that name appended to its checksum in `manifest.json` (#2118).**
+  Some keys in the published datasets were written upstream (OpenNeuro tooling), not by git-annex, with the tail of a dotless file name straight after the digest: `COR-001` has the key `SHA256E-s65536--<64 hex>COR-001`, where git-annex itself would write the bare digest.
+  The central manifest generator wrote the stored manifest from those keys and had the same parse; this change makes the Worker's own reader and builder correct, and the generator now cuts the digest the same way (nemarDatasets/.github #152).
+  The parse took every hex character after `--` as the digest, and the leading `C` of `COR-001` and the `01` of `01_brain_surface` came along: 260 entries in the manifest of `on003104` at `v1.0.0` carried 65 or 66 characters instead of 64.
+  The compute launcher verifies manifest checksums and would refuse those files.
+  The digest is now cut to the backend's length, for every git-annex hash backend whose key the parser identifies (SHA256, SHA512, MD5, SHA1, the SHA3, SKEIN and BLAKE2 families, with or without the `E` suffix), and the backend name now accepts `_` and a size-less key, so `SHA3_512E` keys are no longer read as `sha256`.
+  A key of any other backend (`URL`, `WORM`, one the parser does not know) is read as before.
+  The served `manifest.json` re-derives the value from the stored key when a stored value has the wrong shape for its algorithm, so manifests already published are served correctly with no regeneration.
+  The cached `manifest.json` documents are keyed anew (`v3`), because the old ones are only revalidated against the source manifest's ETag and would otherwise keep serving the old digest for up to seven days.
+  Valid entries and `git` entries are served as before.
+  A value that cannot be repaired is served as stored.
+  Each build of a `manifest.json` that repaired a value or met one it could not repair logs one error-level line, `[data] MANIFEST CHECKSUM: dataset=<id> version=<version> repaired=<n> malformed=<n>`, with the first unrepairable path when there is one.
+  `bun scripts/audit-manifest-checksums.ts` reads every public manifest from the data host, with GET requests only and no credential, and lists each version whose checksums have the wrong shape for their algorithm.
+  It lists the manifests too large for `manifest.json` (413) without failing on them, and exits 1 when it finds a wrong-shaped checksum or cannot read a version.
+  The in-Worker manifest builder never refuses a manifest over a digest: it carries the value as found and logs once per build (dataset, version, path and backend, no checksum value) when an identified backend has a digest of the wrong length.
+
 ### Deploy coupling
 
-- **Release the website first.**
-  The website's `staging` carries the reader for the `__Host-` session cookie (website #499), the authorization page (#501) and the cross-site form exemption for the authorization request (#503).
-  The API must not reach production before the website has the reader, because the API moves the ORCID flow cookies at deploy.
-- **Then the API, then the owner's switches, in this order:** set `OIDC_SECRET` in the `nmsso-` form; deploy; check ORCID sign-in end to end; set `HOST_PREFIXED_SESSION_COOKIE` to `"1"`; check sign-in again.
+- **Release the website first (0.2.37), and let its deploy finish.**
+  Its `staging` carries the reader for the `__Host-` session cookie and for the ORCID pending cookie under either name (website #499), the authorization page, the Settings "Connect your ORCID" form POST and the proxy's refusal of `/auth/oidc/*` (#501), and the cross-site form exemption for the authorization request (#503).
+  If this API reaches production first, every brand-new ORCID sign-up fails at the email step, because the released website looks only for `nemar_orcid_pending`.
+  "Connect your ORCID" in Settings then starts a sign-up instead of a link, because the released website sends it as a link this API no longer honors.
+  The released API accepts everything the new website sends, so the website can go first with no gap.
+- **Before merging, check that the two compute buckets exist, and put `OIDC_SECRET` in the `nmsso-` form.**
+  The deploy applies the migrations before it deploys the Worker, so a missing bucket fails the Worker deploy after the schema has changed, and 0.10.32 keeps serving.
+  A valid `OIDC_SECRET` lights discovery, the key set and the owner routes at deploy; the key set is empty until `nemar admin oidc keys rotate`.
+- **Merging the release pull request deploys it twice,** the merge commit under its `-devN` version and then the tagged `0.10.33`; the first deploy applies the twelve migrations.
+- **Then check ORCID sign-in end to end, turn `HOST_PREFIXED_SESSION_COOKIE` on, and check sign-in again.**
+  The flag is a Worker secret, or a `[vars]` entry added by a reviewed change that edits `backend/test/session-cookie-name.test.ts`; a dashboard variable is dropped by the next deploy.
   Turning the cookie flag on before the website reads the new name logs everyone out of the website.
+  Before turning it on, count the active accounts that have no verified ORCID iD (a read-only query on `users`, `orcid_verified = 0`).
+  With the flag on, a session read under the legacy `nemar_session` name is no longer slid and cannot start an ORCID link, and email-code sign-in is closed, so such an account can connect an iD only with `nemar auth profile orcid link` or through an owner's edit; ask those people to connect while the flag is off, or tell them how.
+- **Rolling back.**
+  The migrations add tables and indexes, one column on an existing table (`users.oidc_subject`, filled for every user), triggers (0130 replaces two) and four empty pools, and the 0.10.32 Worker reads none of them, so a rollback to 0.10.32 is safe while the cookie flag is off; ORCID sign-ins in flight fail once, as at deploy.
+  Once the flag is on, a rollback below 0.10.33 signs out everyone who signed in since, because 0.10.32 does not read `__Host-nemar_session`.
 - **Run `bun run migrations:d1-check` before the release pull request.**
   The twelve migrations replay on real D1; one of them (0130) replaces two append-only triggers, one on the pools and one on the ledger.
+
+### Owner steps after release
+
+None of these is done by the release.
+
+1. `curl -s https://api.nemar.org/health | jq -r .version` prints `0.10.33`.
+2. `nemar admin compute status --json | jq '.switches, .storage'` shows `compute_enabled` and `pipelines_dispatch_enabled` false and both bucket bindings true.
+3. `curl -s -o /dev/null -w '%{http_code}\n' https://api.nemar.org/.well-known/openid-configuration` prints 200 with a valid `OIDC_SECRET` and 404 without, and the same with `-X POST https://api.nemar.org/oauth/token` prints 404 until the cookie flag is on.
+4. `curl -s -H 'Authorization: Bearer nmo_at_x' https://api.nemar.org/users/me` answers 401 with `"code":"oidc_token_not_accepted"`, and `nemar auth whoami` still answers with a CLI key.
+5. Sign in with ORCID at https://nemar.org/login, and connect ORCID from Settings with an account that has none, if one is at hand.
+6. `bun scripts/audit-manifest-checksums.ts` reports no wrong-shaped checksum and lists the manifests that answer 413.
+
+### Known limits
+
+- The pipelines' daily cap is read before a run and not checked in the hold's statement, so two runs at the same moment can together pass it; an atomic daily guard is planned beside the tenant ceiling (#2126, phase P2, from issue #2121).
+- The `manifest.json` reader repairs a wrong stored digest at read time, and the central generator now writes the right digest for new manifests.
+  The one stored manifest known to carry wrong digests (`on003104` at `v1.0.0`) has been regenerated, and the per-file `ETag` of those files changed once.
+  If the audit finds another stored manifest written before the generator fix, it is served repaired and stays wrong in storage until it is regenerated.
+- Migration numbers 0125 to 0129 are unused and 0130 is applied; a later migration must be numbered above 0130, or production applies it in a different order from a fresh replay.
+- The authorization flow has run in tests and, without a sign-in, against the development system (34 of the 35 modules of the conformance suite's Basic plan); its first production use is the check.
 
 ## 0.10.32 - 2026-11-09
 

@@ -187,6 +187,7 @@ export const COMPUTE_SUBMIT_SENTENCES = {
   over_job_limit: "The job asks for more than one job may have on that partition.",
   over_concurrency: "You already have as many jobs running or waiting as you may.",
   platform_budget_exhausted: "The shared compute budget has no room for this job right now.",
+  platform_busy: "NEMAR's share of the cluster is full right now; ask again shortly.",
   partition_not_offered: "That partition is not offered to people.",
   runtime_unavailable: "That runtime is not available.",
   registry_not_allowed: "The container image is not from a registry that is allowed.",

@@ -224,7 +224,7 @@ describe("broadcastRequestSchema (issue #381)", () => {
 describe("sendBroadcast RESEND_API_KEY precondition", () => {
   const baseParams = {
     sentById: 1,
-    group: "all" as const,
+    group: "user:broadcastadmin" as const,
     subject: "Test",
     bodyMarkdown: "Hello",
     recipients: ["user@example.com"],

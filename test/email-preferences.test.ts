@@ -22,7 +22,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -32,12 +34,14 @@ describe("parseEmailPreferences", () => {
 
   test("valid JSON with both fields", () => {
     const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false, publication_request: true, announcements: true }),
+      JSON.stringify({ user_approval: false, publication_request: true, news: true }),
     );
     expect(result).toEqual({
       user_approval: false,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -52,12 +56,14 @@ describe("parseEmailPreferences", () => {
     // that matters. Defaulting a new alert to OFF would have given every
     // current admin no anonymity mail at all, silently, on the day it shipped.
     const result = parseEmailPreferences(
-      JSON.stringify({ user_approval: false, publication_request: false, announcements: false }),
+      JSON.stringify({ user_approval: false, publication_request: false, news: false }),
     );
     expect(result).toEqual({
       user_approval: false,
       publication_request: false,
-      announcements: false,
+      news: false,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -71,7 +77,7 @@ describe("parseEmailPreferences", () => {
     // would satisfy every other assertion in this file.
     const result = parseEmailPreferences(JSON.stringify({ dataset_anonymity: false }));
     expect(result.dataset_anonymity).toBe(false);
-    expect(result.announcements).toBe(true);
+    expect(result.news).toBe(true);
   });
 
   test("an explicit support_tickets: false is honored, and a row that predates it opts in", () => {
@@ -112,7 +118,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -125,7 +133,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: false,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -138,7 +148,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: false,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -151,7 +163,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -164,7 +178,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -179,12 +195,38 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: false,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
       compute_requests: true,
     });
+  });
+
+  test("each community key is read on its own, and a key a row has never seen is on", () => {
+    // Owner decision 2026-11-20: news is opt-out, so "never chose" is ON for all three, and one
+    // key's opt-out must not leak into its neighbors (a parse that read one key for all three
+    // would pass every all-true and all-false case above).
+    const off = (key: "news" | "rfcs" | "maintenance") =>
+      parseEmailPreferences(JSON.stringify({ [key]: false }));
+    expect(off("news")).toMatchObject({ news: false, rfcs: true, maintenance: true });
+    expect(off("rfcs")).toMatchObject({ news: true, rfcs: false, maintenance: true });
+    expect(off("maintenance")).toMatchObject({ news: true, rfcs: true, maintenance: false });
+  });
+
+  test("the retired announcements key is ignored, never read as a community opt-out", () => {
+    // Migration 0146 carries it into the three keys; a row that somehow still has it (a rollback
+    // window, a restore) must not silently decide anyone's mail, and must not appear in the result.
+    const result = parseEmailPreferences(JSON.stringify({ announcements: false }));
+    expect(result).toMatchObject({ news: true, rfcs: true, maintenance: true });
+    expect("announcements" in result).toBe(false);
+  });
+
+  test("a recall has no stored key, so no stored value can switch it off", () => {
+    const result = parseEmailPreferences(JSON.stringify({ recall: false }));
+    expect("recall" in result).toBe(false);
   });
 
   test("null values in fields default to true", () => {
@@ -194,7 +236,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
@@ -210,7 +254,9 @@ describe("parseEmailPreferences", () => {
     expect(result).toEqual({
       user_approval: true,
       publication_request: true,
-      announcements: true,
+      news: true,
+      rfcs: true,
+      maintenance: true,
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,

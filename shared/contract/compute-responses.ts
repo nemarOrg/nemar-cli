@@ -18,12 +18,15 @@
 import { z } from "zod";
 
 /**
- * `POST /compute/jobs/:id/cancel`, 200: the intent is recorded, the job was already cancelled, or it had
- * already ended another way (`already_ended`, `cancelled: false`). The one refusal left is `job_not_found`,
+ * `POST /compute/jobs/:id/cancel`, 200: the intent is recorded, the job was cancelled at once (a waiting
+ * runner job), the job was already cancelled, or it had already ended another way (`already_ended`,
+ * `cancelled: false`). The one refusal left is `job_not_found`,
  * the `{ error, code }` answer of status 404.
  */
 export const COMPUTE_CANCEL_OUTCOMES = [
   "cancel_requested",
+  // A waiting runner job (portable compute) is ended at once, in one batch.
+  "cancelled",
   "already_cancelled",
   // Phase D3 (#2024): the job had already ended some other way; it is answered 200 with its unchanged
   // state and `cancelled: false`, not refused.

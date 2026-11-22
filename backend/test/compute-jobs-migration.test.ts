@@ -36,6 +36,7 @@ import {
   PARTITION_NAMES,
   PIPELINES_TAPIS_OWNER,
 } from "../../shared/contract/compute";
+import { PIPELINE_LIVE_JOBS_SQL } from "../src/services/compute-jobs";
 import { type Engine, startEngines } from "./helpers/compute-engines";
 import { MIGRATIONS_DIR } from "./helpers/miniflare-d1";
 
@@ -935,6 +936,33 @@ describe("the indexes", () => {
       /USING (COVERING )?INDEX compute_jobs_live/,
     );
   });
+});
+
+describe("the pipelines' live count", () => {
+  onEveryEngine(
+    "is answered from a partial index of the live states, never the whole table, on both engines",
+    async (e) => {
+      // The statement the hold guards on. It names no account (the cap is NEMAR's pipelines in total), so
+      // the planner scans a partial index of the live rows: `compute_jobs_live` or `compute_jobs_examined`,
+      // both partial on the same list of states, so the scan is over live jobs only.
+      const plan = await e.all<{ detail: string }>(
+        `EXPLAIN QUERY PLAN ${PIPELINE_LIVE_JOBS_SQL}`,
+        "cpu",
+      );
+      expect(plan.map((p) => p.detail).join(" | ")).toMatch(
+        /USING (COVERING )?INDEX compute_jobs_(live|examined)\b/,
+      );
+      const partial = new Map(
+        (
+          await e.all<{ name: string; partial: number }>(
+            "SELECT name, \"partial\" AS partial FROM pragma_index_list('compute_jobs')",
+          )
+        ).map((r) => [r.name, r.partial]),
+      );
+      expect(partial.get("compute_jobs_live")).toBe(1);
+      expect(partial.get("compute_jobs_examined")).toBe(1);
+    },
+  );
 });
 
 describe("the pseudonym table is written in one place", () => {

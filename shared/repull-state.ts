@@ -342,6 +342,12 @@ export const REPULL_COUNT_KEYS = [
   "conflicts",
   "corrections",
   "resolutions",
+  // The iEEG geometry pipeline's paths (ADR 0111, the amendment of 2026-11-19): how many the plan
+  // listed, and 1 when N.0.1 was made without regenerating them because the run failed.
+  "pipeline_owned",
+  "pipeline_failed",
+  // How many times N.0.1 tried the pipeline and could not run it (at most three, then it settles).
+  "pipeline_attempts",
   "copied",
   "registered",
   "locked",
@@ -893,7 +899,7 @@ export const FIXED_WORD_RE = /^[a-z0-9-]{1,64}$/;
  * other rules, so the Worker refuses it at the automatic create (`auto-planner-version`); the CLI's
  * `PLANNER_VERSION` must equal it.
  */
-export const CURRENT_PLANNER_VERSION = 2;
+export const CURRENT_PLANNER_VERSION = 3;
 
 /**
  * The most an automatic plan may copy, in bytes (1 TiB): a larger copy, or one of unknown size, is

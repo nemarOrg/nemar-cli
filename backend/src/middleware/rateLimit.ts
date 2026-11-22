@@ -51,6 +51,7 @@ import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "../services/account-tier";
 import { logPseudonym } from "../services/log-pseudonym";
 import { hashApiKey } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
+import { redactSecretPaths } from "./access-log";
 
 // Rate limit configuration
 const WINDOW_SIZE = 60; // seconds
@@ -139,7 +140,7 @@ const SITE_IP_MAX_REQUESTS = 2000;
 // of removing the floor.
 const SITE_UNATTRIBUTED_MAX_REQUESTS = 20_000;
 // Authenticated bucket. Originally sized for the heaviest single admin
-// orchestration: `nemar admin publish approve` on a 6500-object dataset
+// orchestration: `nemar admin repo publish approve` on a 6500-object dataset
 // makes ~65 sequential CLI→Worker HTTP calls (one batch per ~100-object
 // page) plus the surrounding orchestrator steps — call it ~165 total
 // requests counting orchestrator overhead. (Each Worker invocation
@@ -864,6 +865,34 @@ const OAUTH_PATHS: ReadonlySet<string> = new Set([
   "/oauth/introspect",
 ]);
 const OAUTH_MAX_REQUESTS = 2000;
+// The workstation runner's routes (portable compute, ADR 0121) other than `/token`: claim, heartbeat,
+// outputs, complete, me and the rest. Their bearer is an access token that only the handler validates, so a
+// bearer-keyed bucket would let a caller mint a fresh 1,000/min bucket per request with a made-up bearer
+// AND make each one cost a privileged-token D1 lookup (the hole the Neurobagel route documents). They are
+// IP-keyed whatever they carry. A lab's runners share one address and poll a few times a minute each, so
+// 2,000/min is far above any fleet and still bounds a runaway caller. `/token` is deliberately NOT here:
+// its bearer is the runner's long secret, which falls through to the ordinary bearer branch.
+const RUNNER_PATH_RE = /^\/compute\/runners(?!\/token(\/|$))(\/|$)/;
+const RUNNER_MAX_REQUESTS = 2000;
+// The public unsubscribe routes (epic #2260 phase 2): `/mail/unsubscribe/<token>` (GET page, GET info, POST
+// one-click). IP-keyed whatever they carry: no bearer is read, and a made-up one must not mint a bucket.
+// The cap is not tight on purpose. A one-click POST is made by the recipient's MAILBOX PROVIDER, from its
+// own egress pool, so a handful of addresses stand for every Gmail user who presses Unsubscribe within a
+// minute of a send, and link scanners fetch every link of a delivered message from shared addresses too.
+// Refusing a provider's POST is a person who cannot stop the mail and a spam report instead, so 300 a
+// minute per address is far above one provider's burst for a community of this size while still bounding
+// a loop: each request costs two D1 reads and one HMAC. A refusal here is the limiter's own 429 body, never
+// `link_invalid`.
+//
+// TWO BUCKETS, by method. The cap above is for POST (the opt-out itself) and anything else that is
+// not a read. A GET or HEAD (the redirect to the website page and its /info twin) is counted in
+// `mail-read-ip` at a higher cap, because security scanners and link previews fetch every link of
+// every delivered message from a few shared addresses, right after a send, at the very moment real
+// opt-outs arrive. Sharing one bucket would let that volume refuse a person's POST. A scanner that
+// exhausts the read bucket costs nobody an opt-out.
+const MAIL_LINK_PATH_RE = /^\/mail\/unsubscribe(\/|$)/;
+const MAIL_LINK_MAX_REQUESTS = 300;
+const MAIL_LINK_READ_MAX_REQUESTS = 3000;
 // The zarr serving gateway (#901), the highest-request-volume data-plane path,
 // which bypassed the middleware stack and went unthrottled. Two reachable path
 // shapes, because Hono's `app.route("/zarrproxy", zarrDataRoutes)` PREPENDS the
@@ -930,6 +959,11 @@ const AUTH_PATHS = [
   // authenticate a request with. Its own per-row 5-second floor
   // (`DEVICE_POLL_SQL`) answers `slow_down` to anything faster than that
   // without ever 429ing the loop.
+  // A runner's secret exchange (portable compute, card DM-05): credential-less in the sense that the
+  // bearer is a secret being tried, so it is keyed by IP in the strict bucket like the identity routes
+  // above. A runner exchanges once per 15 minutes. The runner's other routes (`/me`, claim, ...) are not
+  // here: they carry an access token and have their own IP-keyed `runner-ip` bucket (RUNNER_PATH_RE).
+  "/compute/runners/token",
   "/auth/device/start",
   "/auth/device/lookup",
   "/auth/device/confirm",
@@ -1061,6 +1095,8 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *  - `oauth-ip` for the OpenID Connect token, revocation and introspection
  *    endpoints. 2,000/60s, IP-keyed, checked before the bearer branch for the
  *    reasons at OAUTH_PATHS.
+ *  - `runner-ip` for the workstation runner's routes other than `/compute/runners/token`.
+ *    2,000/60s, IP-keyed, checked before the bearer branch for the reasons at RUNNER_PATH_RE.
  *  - `ip` for everything else (the unauthenticated cap), or, for a caller
  *    without `CF-Connecting-IP`, `site-ip` (the visitor it forwarded) or
  *    `site-unattributed` (nobody named). The `ip` argument is the caller key
@@ -1080,7 +1116,10 @@ export interface __BucketSelection {
     | "token"
     | "data-ip"
     | "neurobagel-ip"
-    | "oauth-ip";
+    | "oauth-ip"
+    | "runner-ip"
+    | "mail-ip"
+    | "mail-read-ip";
   /** Pre-hash key material: the caller key (see {@link __CallerIdentity}), or the raw bearer token. */
   rawKey: string;
   maxRequests: number;
@@ -1331,6 +1370,7 @@ export function __selectBucket(
   authHeader: string | undefined,
   ip: string,
   source: __CallerSource = "edge",
+  method?: string,
 ): __BucketSelection {
   const path = __normalizeMountPath(rawPath);
   if (AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`))) {
@@ -1350,6 +1390,19 @@ export function __selectBucket(
   // The OpenID Connect client endpoints: IP-keyed whatever they carry (see OAUTH_PATHS).
   if (OAUTH_PATHS.has(path)) {
     return { keyKind: "oauth-ip", rawKey: ip, maxRequests: OAUTH_MAX_REQUESTS };
+  }
+  // The unsubscribe routes: IP-keyed whatever they carry (see MAIL_LINK_PATH_RE).
+  if (MAIL_LINK_PATH_RE.test(path)) {
+    // Reads (the page and /info) and the one-click POST are counted apart: link scanners fetch every link of
+    // every delivered message, and their volume must never be able to refuse a person's real opt-out.
+    if (method === "GET" || method === "HEAD") {
+      return { keyKind: "mail-read-ip", rawKey: ip, maxRequests: MAIL_LINK_READ_MAX_REQUESTS };
+    }
+    return { keyKind: "mail-ip", rawKey: ip, maxRequests: MAIL_LINK_MAX_REQUESTS };
+  }
+  // The runner routes: IP-keyed whatever they carry (see RUNNER_PATH_RE).
+  if (RUNNER_PATH_RE.test(path)) {
+    return { keyKind: "runner-ip", rawKey: ip, maxRequests: RUNNER_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
   if (bearer) {
@@ -1591,6 +1644,9 @@ export async function rateLimiter(
   }
 
   const path = c.req.path;
+  // What this middleware PRINTS about the request: the path with any token in it taken out
+  // (`/mail/unsubscribe/<token>`). Bucket selection above and below still reads the real `path`.
+  const loggedPath = redactSecretPaths(path);
   // Who this request's address names. `CF-Connecting-IP` decides whenever it is
   // present and `X-Forwarded-For` is then never read, so a client cannot choose
   // its bucket; see `__CallerSource`. A request with neither shares ONE bucket per
@@ -1619,6 +1675,7 @@ export async function rateLimiter(
     options.anonymousSurface ? undefined : c.req.header("Authorization"),
     caller.key,
     caller.source,
+    c.req.method,
   );
   // A request this Worker built for itself is not a caller of the data plane: see
   // `__CallerSource`. It used to be bucketed by a random UUID, which is to say not at
@@ -1635,7 +1692,7 @@ export async function rateLimiter(
   // Only where the address chose the bucket. A token bucket is keyed by the token,
   // so a line about "counted by its forwarded visitor" or "in a shared bucket"
   // would be false of it.
-  if (keyKind !== "token") logIdentityOnce(caller, keyKind, maxRequests, path);
+  if (keyKind !== "token") logIdentityOnce(caller, keyKind, maxRequests, loggedPath);
 
   // Token buckets hash the raw bearer; the auth middleware later
   // re-hashes the same value to look the user up in D1. IP buckets use
@@ -1689,7 +1746,9 @@ export async function rateLimiter(
       // Bounded and logged like every other wait: a put that never settles would
       // otherwise leave no line and no count.
       defer(
-        cacheCall("put", write).catch((err: unknown) => logCacheFault(keyKind, path, err, "put")),
+        cacheCall("put", write).catch((err: unknown) =>
+          logCacheFault(keyKind, loggedPath, err, "put"),
+        ),
       );
       return;
     }
@@ -1702,7 +1761,7 @@ export async function rateLimiter(
     try {
       await cacheCall("put", write);
     } catch (err) {
-      logCacheFault(keyKind, path, err, "put");
+      logCacheFault(keyKind, loggedPath, err, "put");
     }
   }
 
@@ -1746,7 +1805,7 @@ export async function rateLimiter(
         logOncePerWindow(`observe:${keyKind}`, (suppressed, sinceMs) => {
           console.warn("[rate-limit] observe-only bucket would have tripped", {
             ...(ipHash === null ? {} : { ipHash }),
-            path,
+            path: loggedPath,
             count: count + 1,
             suppressed,
             sinceMs,
@@ -1783,7 +1842,7 @@ export async function rateLimiter(
     // isolate, and again at the milestones, see `logCacheFault`) so Workers tail /
     // log tooling surfaces the issue.
     // TODO(#478): replace with Sentry captureException once DSN is wired.
-    logCacheFault(keyKind, path, error, phase);
+    logCacheFault(keyKind, loggedPath, error, phase);
   }
 
   await next();
@@ -2053,6 +2112,9 @@ export const __limits = {
   PRIVATE_GRANT_MAX_REQUESTS,
   OIDC_AUTHORIZE_MAX_REQUESTS,
   OAUTH_MAX_REQUESTS,
+  RUNNER_MAX_REQUESTS,
+  MAIL_LINK_MAX_REQUESTS,
+  MAIL_LINK_READ_MAX_REQUESTS,
   WINDOW_SIZE,
 };
 

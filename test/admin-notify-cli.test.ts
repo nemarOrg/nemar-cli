@@ -96,7 +96,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -122,7 +134,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.stderr).toContain("Broadcast sent to 2 recipient(s) (ID: 8)");
@@ -146,7 +170,19 @@ describe("nemar admin notify", () => {
     });
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--subject", "S", "--body", "B", "--yes"],
+        [
+          "admin",
+          "notify",
+          "--to",
+          "all",
+          "--category",
+          "news",
+          "--subject",
+          "S",
+          "--body",
+          "B",
+          "--yes",
+        ],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -171,6 +207,20 @@ describe("nemar admin notify", () => {
       expect(r.stdout).toContain("Pending: 2");
       expect(r.stdout).toContain("shown redacted and may not be unique");
       expect(r.stdout).toContain("a***@nemar.test");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--status counts skipped recipients as accounted for, not as pending", async () => {
+    // 10 queued = 6 delivered + 1 failed + 1 unconfirmed + 2 skipped. A pending figure that forgot
+    // the skipped ones would print "Pending: 2" for a send that is finished.
+    const server = startServer({ "GET /admin/notify/7": { ...STATUS_BODY, skipped_count: 2 } });
+    try {
+      const r = await runCli(["admin", "notify", "--status", "7"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Skipped: 2");
+      expect(r.stdout).not.toContain("Pending");
     } finally {
       server.stop();
     }
@@ -202,7 +252,7 @@ describe("nemar admin notify", () => {
     const server = startServer({});
     try {
       const r = await runCli(
-        ["admin", "notify", "--to", "all", "--body", "B", "--yes"],
+        ["admin", "notify", "--to", "all", "--category", "news", "--body", "B", "--yes"],
         server.url,
       );
       expect(r.exitCode).toBe(1);

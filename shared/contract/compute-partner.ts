@@ -97,6 +97,8 @@ export const COMPUTE_PARTNER_ERROR_STATUS = {
   insufficient_balance: 409,
   platform_budget_exhausted: 409,
   client_cap_reached: 409,
+  // NEMAR's tenant-wide ceiling on live jobs (issue #2121, phase P2), the last step of the reserve order.
+  platform_busy: 409,
   // A reservation.
   job_not_found: 404,
   already_bound: 409,
@@ -153,6 +155,7 @@ export const COMPUTE_PARTNER_SENTENCES = {
   platform_budget_exhausted:
     "The shared compute budget has no room for this reservation right now.",
   client_cap_reached: "This client has reached the limit the owner set for it.",
+  platform_busy: "NEMAR's share of the cluster is full right now; ask again shortly.",
   job_not_found: "No such job.",
   already_bound: "A different Tapis job is already reported under this reservation.",
   tapis_job_in_use: "That Tapis job is already accounted for.",

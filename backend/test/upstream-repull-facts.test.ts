@@ -114,7 +114,7 @@ function seedRepull(status: RepullStatus, over: Row = {}): number {
     dataset_id: DS,
     upstream_ds: UPSTREAM,
     origin: "automatic",
-    planner: 2,
+    planner: 3,
     actor_user_id: adminId,
     head_sha: HEAD,
     base_sha: BASE,

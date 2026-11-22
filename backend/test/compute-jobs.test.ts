@@ -40,6 +40,7 @@ import {
   JOB_INSERT_SQL,
   LIVE_JOBS_GUARD_SQL,
   PARTNER_HOLD_BODY_MAX_BYTES,
+  PIPELINE_LIVE_JOBS_SQL,
   createJob,
   getJob,
   newGatewayUser,
@@ -58,12 +59,26 @@ import {
   jobSpec,
   roundTripD1,
   seedUser,
-  setPolicy,
+  setPolicy as setPolicyOf,
   sha256Hex,
   trace,
 } from "./helpers/compute-seed";
 
 let h: ComputeHarness;
+
+/**
+ * Miniflare's D1 keeps every job of every earlier case live, so the tenant ceiling (issue #2121, phase P2: its
+ * own file proves it) is lifted on that engine, or the accumulated jobs would fill the default 20 and refuse a
+ * case about something else. bun:sqlite is new for every case and keeps the default.
+ */
+const setPolicy = (d1: D1Database, ownerId: number, over: Record<string, unknown>) =>
+  setPolicyOf(d1, ownerId, {
+    ...(d1 === h.d1
+      ? { tenant: { maxLiveJobs: 1000, reserved: { people: 0, pipelines: 0, partner: 0 } } }
+      : {}),
+    ...over,
+  });
+
 /** An owner of the Miniflare D1, which is never reset: the policy is restored to the default before each case. */
 let miniflareOwner = 0;
 
@@ -639,12 +654,106 @@ describe("two requests racing for the last live-job slot", () => {
   );
 });
 
+describe("the pipelines' live cap, a guard inside the hold (issue #2121)", () => {
+  type Pool = "cpu" | "gpu";
+  /** A pipeline job on a pool: `large-shared` is the CPU pool and `gpu-shared` the GPU pool, both for NEMAR only. */
+  const pipelineJob = (env: Bindings, pool: Pool) =>
+    createJob(env, {
+      source: "pipeline" as const,
+      accountId: null,
+      appId: "nemar-launch",
+      appVersion: "1.0.0",
+      spec:
+        pool === "cpu"
+          ? jobSpec({ partition: "large-shared" })
+          : jobSpec({ partition: "gpu-shared", gpus: 1 }),
+    });
+  /** Pipeline jobs live in a pool now, by the statement the guard counts with. Miniflare's D1 is never reset. */
+  const live = async (w: World, pool: Pool) =>
+    (await w.d1.prepare(PIPELINE_LIVE_JOBS_SQL).bind(pool).first<{ n: number }>())?.n ?? 0;
+  /** The owner's caps: a case sets each pool's to what is live there plus the room it wants. */
+  async function caps(w: World, cpu: number, gpu: number) {
+    const owner = await seedUser(w.d1, { role: "owner" });
+    await setPolicy(w.d1, owner, {
+      pipelines: { ...DEFAULT_COMPUTE_POLICY.pipelines, maxLiveJobs: { cpu, gpu } },
+    });
+    await fundPlatform(w.d1, "pipelines", 1_000_000, "cpu");
+    await fundPlatform(w.d1, "pipelines", 1_000_000, "gpu");
+  }
+
+  onBoth("six requests racing for two slots make exactly two jobs and two holds", async (w) => {
+    await caps(w, (await live(w, "cpu")) + 2, 100);
+    const env = racing(w);
+    const before = await trace(w.d1);
+    const results = await Promise.all(Array.from({ length: 6 }, () => pipelineJob(env, "cpu")));
+    expect(results.filter((r) => r.ok)).toHaveLength(2);
+    expect(results.filter((r) => !r.ok && r.code === "over_concurrency")).toHaveLength(4);
+    const after = await trace(w.d1);
+    expect(after.jobs - before.jobs).toBe(2);
+    expect(after.holds - before.holds).toBe(2);
+  });
+
+  onBoth("a cap of 0 refuses every job, and a refusal leaves no trace", async (w) => {
+    await caps(w, 0, 0);
+    const before = await trace(w.d1);
+    for (const pool of ["cpu", "gpu"] as const) {
+      const r = await pipelineJob(w.env(), pool);
+      expect([pool, r.ok ? "ok" : r.code]).toEqual([pool, "over_concurrency"]);
+    }
+    expect(await trace(w.d1)).toEqual(before);
+  });
+
+  onBoth("the CPU and GPU pools are counted apart", async (w) => {
+    // A CPU job is live first, so a count that ignored the pool would see a job on the GPU side too.
+    await caps(w, 100, 100);
+    expect((await pipelineJob(w.env(), "cpu")).ok).toBe(true);
+    const cpuLive = await live(w, "cpu");
+    await caps(w, cpuLive, (await live(w, "gpu")) + 1);
+    const cpu = await pipelineJob(w.env(), "cpu");
+    expect(cpu.ok ? "ok" : cpu.code).toBe("over_concurrency");
+    const gpu = await pipelineJob(w.env(), "gpu");
+    expect(gpu.ok).toBe(true);
+    expect(gpu.ok && gpu.job.pool).toBe("gpu");
+    const full = await pipelineJob(w.env(), "gpu");
+    expect(full.ok ? "ok" : full.code).toBe("over_concurrency");
+    // The GPU pool being full does not stop the CPU pool when the owner gives it room.
+    await caps(w, cpuLive + 1, await live(w, "gpu"));
+    const cpuAgain = await pipelineJob(w.env(), "cpu");
+    expect(cpuAgain.ok).toBe(true);
+  });
+
+  onBoth("a job that is only `created` (not yet submitted) holds its slot", async (w) => {
+    await caps(w, (await live(w, "cpu")) + 1, 100);
+    const first = await pipelineJob(w.env(), "cpu");
+    expect(first.ok && first.job.state).toBe("created");
+    const second = await pipelineJob(w.env(), "cpu");
+    expect(second.ok ? "ok" : second.code).toBe("over_concurrency");
+  });
+
+  onBoth(
+    "a person's jobs and another source's do not count against the pipelines' cap",
+    async (w) => {
+      await caps(w, (await live(w, "cpu")) + 1, 100);
+      const { accountId } = await person(w);
+      const mine = await createJob(w.env(), input(accountId));
+      expect(mine.ok).toBe(true);
+      const pipeline = await pipelineJob(w.env(), "cpu");
+      expect(pipeline.ok).toBe(true);
+    },
+  );
+});
+
 describe("the other sources", () => {
   onBoth(
     "a pipeline job is held on the pipelines pool, counts against no person, and is NEMAR's own",
     async (w) => {
       const owner = await seedUser(w.d1, { role: "owner" });
-      await setPolicy(w.d1, owner, { maxLiveJobsPerPerson: 1 });
+      // The pipelines' own live cap is not what this case is about, and Miniflare's D1 is never reset, so
+      // the jobs the cap cases above leave live must not decide it.
+      await setPolicy(w.d1, owner, {
+        maxLiveJobsPerPerson: 1,
+        pipelines: { ...DEFAULT_COMPUTE_POLICY.pipelines, maxLiveJobs: { cpu: 1000, gpu: 1000 } },
+      });
       await fundPlatform(w.d1, "pipelines", 1_000_000);
       const before = await trace(w.d1);
       // NEMAR's pipelines run as a service account (or as none): either way no person's limit is theirs.

@@ -1453,6 +1453,11 @@ class TestEventDescriptionsFor(unittest.TestCase):
 class TestElectrodePositionsFor(unittest.TestCase):
     """Tests for electrode_positions_for -- TSV parsing, BIDS inheritance, coordsystem."""
 
+    def setUp(self):
+        # Warnings are given once per process per file set: each test starts unwarned.
+        generate_zarr._ELECTRODE_WARNED.clear()
+        self.addCleanup(generate_zarr._ELECTRODE_WARNED.clear)
+
     def _write(self, root: str, rel: str, body: str) -> None:
         p = os.path.join(root, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -1464,6 +1469,32 @@ class TestElectrodePositionsFor(unittest.TestCase):
 
     def _tsv(self, *rows: tuple) -> str:
         return "\n".join("\t".join(str(c) for c in row) for row in rows) + "\n"
+
+    REC = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+
+    def _elec(self, label: str) -> str:
+        """An electrodes file holding one electrode, named `label`."""
+        return self._tsv(("name", "x", "y", "z"), (label, 1.0, 2.0, 3.0))
+
+    def _put(self, root: str, rels: list[str]) -> set[str]:
+        """Write one electrodes file or coordsystem file per path, and return the
+        head file set. Each electrodes file holds a single electrode named for its
+        file, so a result says which file it came from; each coordsystem file names
+        its own file as its system."""
+        for rel in rels:
+            if rel.endswith("_coordsystem.json"):
+                self._write_json(
+                    root, rel, {"EEGCoordinateSystem": rel, "EEGCoordinateUnits": "mm"}
+                )
+            else:
+                self._write(root, rel, self._elec(rel))
+        return set(rels)
+
+    def _run(self, root: str, rec: str, head: set[str]) -> tuple[dict | None, list[str]]:
+        """`electrode_positions_for` and the `::warning::` lines it printed."""
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            result = electrode_positions_for(root, rec, head, "HEAD")
+        return result, [ln for ln in out.getvalue().splitlines() if ln.startswith("::warning::")]
 
     # -- TSV parsing -----------------------------------------------------------
 
@@ -1571,6 +1602,42 @@ class TestElectrodePositionsFor(unittest.TestCase):
             self._write(d, "sub-01/eeg/sub-01_electrodes.tsv", tsv)
             head = {"sub-01/eeg/sub-01_electrodes.tsv"}
             result = electrode_positions_for(d, rec, head, "HEAD")
+            self.assertIsNone(result)
+
+    # -- non-finite cells ------------------------------------------------------
+
+    NON_FINITE_CELLS = (
+        "NaN", "nan", "NAN", "-nan", "inf", "-inf", "+inf", "INF", "Infinity",
+        "-Infinity", "1e999", "-1e999",
+    )
+
+    def test_non_finite_cells_are_skipped_like_na(self):
+        """`float()` parses `NaN` and the infinities, and `json.dump` then writes a
+        bare token that `JSON.parse` refuses. A cell that is not a finite number,
+        in any of the three coordinates, gives no position, exactly as `n/a` does."""
+        rows = [("Cz", "0.0", "0.0", "88.0")]
+        for cell in self.NON_FINITE_CELLS:
+            rows.append((f"x:{cell}", cell, "2.0", "3.0"))
+            rows.append((f"y:{cell}", "1.0", cell, "3.0"))
+            rows.append((f"z:{cell}", "1.0", "2.0", cell))
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_eeg.set"
+            elec = "sub-01/eeg/sub-01_electrodes.tsv"
+            self._write(d, elec, self._tsv(("name", "x", "y", "z"), *rows))
+            result, warnings = self._run(d, rec, {elec})
+            self.assertIsNotNone(result)
+            self.assertEqual(result["positions"], {"Cz": [0.0, 0.0, 88.0]})
+            self.assertEqual(warnings, [])  # skipped quietly, as `n/a` is
+            json.dumps(result["positions"], allow_nan=False)  # a strict encoder agrees
+
+    def test_all_non_finite_rows_return_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_eeg.set"
+            elec = "sub-01/eeg/sub-01_electrodes.tsv"
+            self._write(d, elec, self._tsv(
+                ("name", "x", "y", "z"), ("A", "NaN", "NaN", "NaN"), ("B", "inf", "0", "0"),
+            ))
+            result, _ = self._run(d, rec, {elec})
             self.assertIsNone(result)
 
     # -- BIDS inheritance ------------------------------------------------------
@@ -1762,6 +1829,320 @@ class TestElectrodePositionsFor(unittest.TestCase):
             self.assertAlmostEqual(result["positions"]["FP1"][0], 80.784)
             self.assertEqual(result["coordinate_system"], "EEGLAB")
             self.assertEqual(result["coordinate_units"], "mm")
+
+    # -- the `space` entity ----------------------------------------------------
+    #
+    # BIDS names electrodes and coordsystem files with an optional `space` entity
+    # that names the coordinate system and selects no recording, so a recording
+    # (which has none) must not reject a file for carrying one.
+
+    def test_a_space_named_electrodes_file_applies(self):
+        elec = "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_space-CapTrak_coordsystem.json"
+        with tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [elec, cs])
+            result, warnings = self._run(d, self.REC, head)
+            self.assertIsNotNone(result)
+            self.assertEqual(set(result["positions"]), {elec})
+            # The pairing found that coordsystem: its system names its own file.
+            self.assertEqual(result["coordinate_system"], cs)
+            self.assertEqual(result["coordinate_units"], "mm")
+            self.assertEqual(warnings, [])
+
+    def test_every_other_entity_is_still_compared(self):
+        """Only `space` is left out of the comparison: another subject or task still
+        rejects the file, whether or not it names a space."""
+        with tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [
+                "sub-01/eeg/sub-02_space-CapTrak_electrodes.tsv",
+                "sub-01/eeg/sub-01_task-other_space-CapTrak_electrodes.tsv",
+            ])
+            result, warnings = self._run(d, self.REC, head)
+            self.assertIsNone(result)
+            self.assertEqual(warnings, [])
+
+    def test_two_most_specific_coordinate_systems_give_no_positions_and_one_warning(self):
+        """Two coordinate systems for one recording is a choice the converter does not
+        make. The most specific files (same directory depth, same entity count with
+        `space` not counted) hold two `space` values, the absence of one counting as
+        a value."""
+        cases = {
+            "two named spaces": [
+                "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv",
+                "sub-01/eeg/sub-01_space-MNI152NLin2009cAsym_electrodes.tsv",
+            ],
+            "a named space and none": [
+                "sub-01/eeg/sub-01_electrodes.tsv",
+                "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv",
+            ],
+            "space does not count as an entity": [
+                "sub-01/eeg/sub-01_task-rest_electrodes.tsv",
+                "sub-01/eeg/sub-01_task-rest_space-CapTrak_electrodes.tsv",
+            ],
+        }
+        for name, files in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                head = self._put(d, files)
+                result, warnings = self._run(d, self.REC, head)
+                self.assertIsNone(result)
+                self.assertEqual(len(warnings), 1, warnings)
+                self.assertIn(self.REC, warnings[0])
+                for f in files:
+                    self.assertIn(f, warnings[0])
+
+    def test_a_more_specific_file_beats_a_space_file_without_a_warning(self):
+        """Ambiguity is judged among the MOST specific files only: a `space` file in
+        the subject directory, or with fewer entities, loses to the sibling, and a
+        deeper `space` file beats a root file."""
+        cases = {
+            "shallower directory": (
+                ["sub-01/sub-01_space-CapTrak_electrodes.tsv",
+                 "sub-01/eeg/sub-01_task-rest_electrodes.tsv"],
+                "sub-01/eeg/sub-01_task-rest_electrodes.tsv",
+            ),
+            "fewer entities": (
+                ["sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv",
+                 "sub-01/eeg/sub-01_task-rest_electrodes.tsv"],
+                "sub-01/eeg/sub-01_task-rest_electrodes.tsv",
+            ),
+            "deeper directory": (
+                ["electrodes.tsv", "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv"],
+                "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv",
+            ),
+        }
+        for name, (files, expected) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                head = self._put(d, files)
+                result, warnings = self._run(d, self.REC, head)
+                self.assertIsNotNone(result)
+                self.assertEqual(set(result["positions"]), {expected})
+                self.assertEqual(result["positions_file"], expected)
+                self.assertEqual(warnings, [])
+
+    def test_the_same_space_among_the_most_specific_files_takes_the_last_by_path(self):
+        """No two coordinate systems, so no refusal: the base's choice stands."""
+        rec = "sub-01/eeg/sub-01_ses-1_task-rest_eeg.edf"
+        by_ses = "sub-01/eeg/sub-01_ses-1_space-CapTrak_electrodes.tsv"
+        by_task = "sub-01/eeg/sub-01_task-rest_space-CapTrak_electrodes.tsv"
+        with tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [by_ses, by_task])
+            result, warnings = self._run(d, rec, head)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["positions_file"], max(by_ses, by_task))
+            self.assertEqual(warnings, [])
+
+    # -- pairing the coordsystem with the electrodes file ----------------------
+
+    def test_a_coordsystem_with_another_space_is_not_paired(self):
+        elec = "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv"
+        cases = {
+            "another space": ["sub-01/eeg/sub-01_space-MNI152NLin2009cAsym_coordsystem.json"],
+            "no space, for a space file": ["sub-01/eeg/sub-01_coordsystem.json"],
+        }
+        for name, others in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                head = self._put(d, [elec, *others])
+                result, _ = self._run(d, self.REC, head)
+                self.assertIsNotNone(result)
+                self.assertEqual(result["coordinate_system"], "")
+                self.assertEqual(result["coordinate_units"], "")
+                self.assertNotIn("coordsystem_file", result)
+        with self.subTest("a space coordsystem, for a file with no space"), \
+                tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [
+                "sub-01/eeg/sub-01_electrodes.tsv",
+                "sub-01/eeg/sub-01_space-CapTrak_coordsystem.json",
+            ])
+            result, _ = self._run(d, self.REC, head)
+            self.assertEqual(result["coordinate_system"], "")
+            self.assertNotIn("coordsystem_file", result)
+
+    def test_the_paired_coordsystem_wins_over_a_more_specific_one_for_another_space(self):
+        """The restriction comes first: the coordsystem of the chosen file's space is
+        taken even when a file for another space has more entities."""
+        elec = "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv"
+        paired = "sub-01/eeg/sub-01_space-CapTrak_coordsystem.json"
+        other = "sub-01/eeg/sub-01_task-rest_space-MNI152NLin2009cAsym_coordsystem.json"
+        with tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [elec, paired, other])
+            result, warnings = self._run(d, self.REC, head)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["coordsystem_file"], paired)
+            self.assertEqual(result["coordinate_system"], paired)
+            self.assertEqual(warnings, [])
+
+    def test_a_coordsystem_file_that_gives_no_system_warns_and_is_still_named(self):
+        """Resolved but unusable: the positions stand, the system and units are empty,
+        `coordsystem_file` still names the file (a fact about the dataset), and one
+        warning says why."""
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_coordsystem.json"
+        cases = {
+            "unreadable": (None, "could not read"),
+            "invalid JSON": ("{not json", "is not valid JSON"),
+            "empty": ("", "is not valid JSON"),
+            "not an object": ("[1, 2]", "is not a JSON object"),
+        }
+        for name, (body, wording) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                generate_zarr._ELECTRODE_WARNED.clear()  # the same file path in each case
+                head = self._put(d, [elec])
+                head.add(cs)
+                if body is not None:
+                    self._write(d, cs, body)
+                result, warnings = self._run(d, self.REC, head)
+                self.assertIsNotNone(result)
+                self.assertEqual(set(result["positions"]), {elec})
+                self.assertEqual(result["coordinate_system"], "")
+                self.assertEqual(result["coordinate_units"], "")
+                self.assertEqual(result["coordsystem_file"], cs)
+                self.assertEqual(len(warnings), 1, warnings)
+                self.assertIn(repr(cs), warnings[0])
+                self.assertIn(repr(self.REC), warnings[0])
+                self.assertIn(wording, warnings[0])
+
+    def test_a_usable_coordsystem_file_without_a_system_stays_quiet(self):
+        """A JSON object that names no system is a dataset that declares none."""
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_coordsystem.json"
+        with tempfile.TemporaryDirectory() as d:
+            head = self._put(d, [elec])
+            head.add(cs)
+            self._write_json(d, cs, {"EEGCoordinateUnits": "mm"})
+            result, warnings = self._run(d, self.REC, head)
+            self.assertEqual(result["coordinate_system"], "")
+            self.assertEqual(result["coordinate_units"], "mm")
+            self.assertEqual(warnings, [])
+
+    # -- where the positions came from -----------------------------------------
+
+    def test_the_source_word_follows_the_file_name_not_its_directory(self):
+        """`subject` when the chosen file's NAME carries the `sub` entity, `dataset`
+        otherwise: the directory says nothing (a file in the subject directory named
+        without `sub` is shared, and a root file named for the subject is not)."""
+        cases = [
+            ("sub-01/eeg/sub-01_electrodes.tsv", "subject"),
+            ("sub-01/eeg/sub-01_task-rest_electrodes.tsv", "subject"),
+            ("sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv", "subject"),
+            ("electrodes.tsv", "dataset"),
+            ("space-CapTrak_electrodes.tsv", "dataset"),
+            ("task-rest_electrodes.tsv", "dataset"),
+            ("sub-01/electrodes.tsv", "dataset"),
+            ("sub-01/eeg/space-CapTrak_electrodes.tsv", "dataset"),
+            ("sub-01_electrodes.tsv", "subject"),
+        ]
+        for rel, word in cases:
+            with self.subTest(rel), tempfile.TemporaryDirectory() as d:
+                head = self._put(d, [rel])
+                result, _ = self._run(d, self.REC, head)
+                self.assertIsNotNone(result)
+                self.assertEqual(result["positions_source"], word)
+                self.assertEqual(result["positions_file"], rel)
+
+    def test_the_coordsystem_path_is_given_only_when_one_resolved(self):
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_coordsystem.json"
+        with tempfile.TemporaryDirectory() as d:
+            result, _ = self._run(d, self.REC, self._put(d, [elec, cs]))
+            self.assertEqual(result["coordsystem_file"], cs)
+            self.assertEqual(result["positions_file"], elec)
+        with tempfile.TemporaryDirectory() as d:
+            result, _ = self._run(d, self.REC, self._put(d, [elec]))
+            self.assertNotIn("coordsystem_file", result)
+            self.assertEqual(result["coordinate_system"], "")
+
+    # -- an applicable file that cannot be read --------------------------------
+
+    def test_an_unreadable_applicable_electrodes_file_warns_once(self):
+        """Listed at the head but neither on disk nor in a repository: that is not a
+        dataset that declares no positions, so it must not look like one."""
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        with tempfile.TemporaryDirectory() as d:
+            result, warnings = self._run(d, self.REC, {elec})
+            self.assertIsNone(result)
+            self.assertEqual(len(warnings), 1, warnings)
+            self.assertIn(elec, warnings[0])
+            self.assertIn(self.REC, warnings[0])
+
+    def test_a_warning_is_given_once_per_file_set_and_names_the_first_recording(self):
+        """One inherited file reaches every recording of a dataset: one line per
+        recording would bury the log (and GitHub caps annotations)."""
+        recs = ["sub-01/eeg/sub-01_task-rest_eeg.edf", "sub-02/eeg/sub-02_task-rest_eeg.edf"]
+        cases = {
+            "two coordinate systems": {"space-A_electrodes.tsv", "space-B_electrodes.tsv"},
+            "an unreadable file": {"electrodes.tsv"},
+        }
+        for name, head in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                first, first_warnings = self._run(d, recs[0], head)
+                again, again_warnings = self._run(d, recs[1], head)
+                self.assertIsNone(first)
+                self.assertIsNone(again)  # the refusal stands for every recording
+                self.assertEqual(len(first_warnings), 1, first_warnings)
+                self.assertIn(recs[0], first_warnings[0])
+                self.assertEqual(again_warnings, [])
+        # Another set of files is its own condition and is warned about.
+        with tempfile.TemporaryDirectory() as d:
+            _, warnings = self._run(d, recs[1], {"sub-02/eeg/sub-02_electrodes.tsv"})
+            self.assertEqual(len(warnings), 1, warnings)
+            self.assertIn(recs[1], warnings[0])
+
+    def test_file_names_cannot_forge_a_workflow_command(self):
+        """GitHub reads a log line that starts with `::` as a workflow command, and a
+        newline or carriage return in a dataset's file name would start one. Names are
+        printed as `repr` does, so each warning stays one line."""
+        forged = "::error::forged"
+        rec = f"sub-01/eeg/sub-01_task-rest\n{forged}_eeg.edf"
+        cases = {
+            "two coordinate systems": (
+                [f"sub-01/eeg/sub-01_space-A\n{forged}_electrodes.tsv",
+                 f"sub-01/eeg/sub-01_space-B\r{forged}_electrodes.tsv"],
+                {},
+            ),
+            "an unreadable electrodes file": (
+                [f"sub-01/eeg/sub-01_space-C\n{forged}_electrodes.tsv"],
+                {},
+            ),
+            # A readable electrodes file; its coordsystem is missing, invalid, or no object.
+            "an unreadable coordsystem file": (
+                [f"sub-01/eeg/sub-01_space-D\n{forged}_electrodes.tsv",
+                 f"sub-01/eeg/sub-01_space-D\n{forged}_coordsystem.json"],
+                {"electrodes": True},
+            ),
+            "an invalid coordsystem file": (
+                [f"sub-01/eeg/sub-01_space-E\r{forged}_electrodes.tsv",
+                 f"sub-01/eeg/sub-01_space-E\r{forged}_coordsystem.json"],
+                {"electrodes": True, "coordsystem": "{"},
+            ),
+            "a coordsystem file that is no object": (
+                [f"sub-01/eeg/sub-01_space-F\n{forged}_electrodes.tsv",
+                 f"sub-01/eeg/sub-01_space-F\n{forged}_coordsystem.json"],
+                {"electrodes": True, "coordsystem": "[]"},
+            ),
+        }
+        for name, (head, on_disk) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                if on_disk.get("electrodes"):
+                    self._write(d, head[0], self._elec("Cz"))
+                if "coordsystem" in on_disk:
+                    self._write(d, head[1], on_disk["coordsystem"])
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    electrode_positions_for(d, rec, set(head), "HEAD")
+                lines = out.getvalue().splitlines()
+                self.assertEqual(len(lines), 1, lines)
+                self.assertTrue(lines[0].startswith("::warning::"), lines)
+                self.assertEqual([ln for ln in lines if ln.startswith("::")], lines)
+
+    def test_no_electrodes_file_and_an_empty_one_stay_quiet(self):
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        with tempfile.TemporaryDirectory() as d:
+            result, warnings = self._run(d, self.REC, set())
+            self.assertIsNone(result)
+            self.assertEqual(warnings, [])
+            self._write(d, elec, "")
+            result, warnings = self._run(d, self.REC, {elec})
+            self.assertIsNone(result)
+            self.assertEqual(warnings, [])
 
 
 class TestKitAndCtf(unittest.TestCase):
@@ -11921,6 +12302,106 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertEqual(positions["F7"], [-0.07, 0.04, 0.0])
         self.assertIn("Fp1", positions)  # the sidecar's own key is kept
 
+    # -- where a store's electrode positions came from ---------------------------
+    #
+    # Real EDF, real `convert_one`, the root `zarr.json` the converter wrote.
+
+    ELECTRODE_ATTRS = (
+        "electrode_positions",
+        "electrode_coordinate_system",
+        "electrode_coordinate_units",
+        "electrode_positions_source",
+        "electrode_positions_file",
+        "electrode_coordsystem_file",
+    )
+
+    def declare_electrodes(self, files: dict[str, str]) -> None:
+        """A three-channel EDF whose dataset tree holds `files` (path -> body)."""
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fz"])
+        for rel, body in files.items():
+            os.makedirs(os.path.dirname(os.path.join(self.repo, rel)), exist_ok=True)
+            with open(os.path.join(self.repo, rel), "w", encoding="utf-8") as fh:
+                fh.write(body)
+        self.extra_head_files = set(files)
+
+    def converted_root(self, files: dict[str, str]) -> tuple[str, dict]:
+        """Convert with `files` declared; the root `zarr.json` text and its attributes."""
+        self.declare_electrodes(files)
+        result, out = self.convert(None)
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertNotIn("::warning::could not read", out)
+        path = os.path.join(self.synced_dir, os.path.basename(result["entry"]["zarr"]), "zarr.json")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        return text, json.loads(text)["attributes"]
+
+    @staticmethod
+    def parse_strictly(text: str) -> dict:
+        """Parse as `JSON.parse` does: a bare `NaN` or `Infinity` token is an error."""
+
+        def refuse(token: str):
+            raise ValueError(f"{token} is not a JSON token")
+
+        return json.loads(text, parse_constant=refuse)
+
+    def test_a_nan_cell_never_reaches_the_store_root(self):
+        """`float("NaN")` parses, and `json.dump` writes a bare `NaN` that `JSON.parse`
+        (the viewer's reader, and the scrub stage's) refuses."""
+        text, attrs = self.converted_root({
+            "sub-01/eeg/sub-01_electrodes.tsv":
+                "name\tx\ty\tz\nFp1\tNaN\t0.08\t0.0\nF7\t-0.07\tinf\t0.0\nFz\t0.0\t0.05\t0.09\n",
+        })
+        self.assertEqual(self.parse_strictly(text)["attributes"], attrs)
+        self.assertEqual(attrs["electrode_positions"], {"Fz": [0.0, 0.05, 0.09]})
+
+    def test_a_subject_file_says_subject_and_names_its_files(self):
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_coordsystem.json"
+        _, attrs = self.converted_root({
+            elec: "name\tx\ty\tz\nFp1\t-0.03\t0.08\t0.0\nF7\t-0.07\t0.04\t0.0\n",
+            cs: json.dumps({"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "m"}),
+        })
+        self.assertEqual(attrs["electrode_positions"], {"Fp1": [-0.03, 0.08, 0.0], "F7": [-0.07, 0.04, 0.0]})
+        self.assertEqual(attrs["electrode_coordinate_system"], "CapTrak")
+        self.assertEqual(attrs["electrode_coordinate_units"], "m")
+        self.assertEqual(attrs["electrode_positions_source"], "subject")
+        self.assertEqual(attrs["electrode_positions_file"], elec)
+        self.assertEqual(attrs["electrode_coordsystem_file"], cs)
+        # The three existing attributes keep their place; the new ones follow, in order.
+        written = [k for k in attrs if k in self.ELECTRODE_ATTRS]
+        self.assertEqual(written, list(self.ELECTRODE_ATTRS))
+
+    def test_a_dataset_file_says_dataset_and_has_no_coordsystem_attribute(self):
+        _, attrs = self.converted_root({
+            "space-CapTrak_electrodes.tsv": "name\tx\ty\tz\nFz\t0.0\t0.05\t0.09\n",
+        })
+        self.assertEqual(attrs["electrode_positions"], {"Fz": [0.0, 0.05, 0.09]})
+        self.assertEqual(attrs["electrode_positions_source"], "dataset")
+        self.assertEqual(attrs["electrode_positions_file"], "space-CapTrak_electrodes.tsv")
+        self.assertNotIn("electrode_coordsystem_file", attrs)
+        self.assertEqual(attrs["electrode_coordinate_system"], "")
+        self.assertEqual(attrs["electrode_coordinate_units"], "")
+
+    def test_a_space_file_with_a_nan_cell_reaches_the_store_as_valid_json(self):
+        elec = "sub-01/eeg/sub-01_space-CapTrak_electrodes.tsv"
+        cs = "sub-01/eeg/sub-01_space-CapTrak_coordsystem.json"
+        text, attrs = self.converted_root({
+            elec: "name\tx\ty\tz\nFp1\tNaN\t0.08\t0.0\nF7\t-0.07\tinf\t0.0\nFz\t0.0\t0.05\t0.09\n",
+            cs: json.dumps({"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "m"}),
+        })
+        # The store root parses the way a browser parses it, whatever the cells said.
+        root = self.parse_strictly(text)["attributes"]
+        self.assertEqual(root, attrs)
+        self.assertEqual(attrs["electrode_positions"], {"Fz": [0.0, 0.05, 0.09]})
+        self.assertEqual(attrs["electrode_coordinate_system"], "CapTrak")
+        self.assertEqual(attrs["electrode_positions_source"], "subject")
+        self.assertEqual(attrs["electrode_positions_file"], elec)
+        self.assertEqual(attrs["electrode_coordsystem_file"], cs)
+
+    def test_no_electrodes_file_writes_no_electrode_attribute(self):
+        _, attrs = self.converted_root({})
+        self.assertEqual([k for k in attrs if k in self.ELECTRODE_ATTRS], [])
+
     def entry_is_published(self, result: dict) -> None:
         """The entry validates inside a real merged index, the way `main`
         publishes it, against the served schema."""
@@ -17471,6 +17952,326 @@ class TestCutShortBrainVisionThroughConvertOne(ConvertOneKeepingStoreCase):
         self.assert_refused(head_files, data, "so the file holds no whole frame")
 
 
+def write_edf_plus_with_onsets(
+    path: str, onsets: list[float], *, label: str = "D", bdf: bool = False
+) -> str:
+    """A tiny EDF+ (or BDF+) file whose data records start at `onsets` seconds,
+    laid out byte for byte from the EDF+ and BDF+ specifications (pyedflib will not
+    write EDF+D, and no writer spaces records out on purpose).
+
+    One 10 Hz channel, `EEG Ramp`, in 1 s records, plus the annotations signal
+    whose time-keeping annotation in every record gives that record's onset.
+    `label` is the byte after `EDF+` in the reserved field: `D` for discontinuous,
+    `C` for continuous, written as given, so a `D` file whose records happen to be
+    contiguous is a control. The ramp's value in microvolts is the TRUE time of the
+    sample, so a reader that closes a gap shows as a value that disagrees with its
+    position."""
+    rate, per_record, ann_samples = 10, 10, 40
+    width = 3 if bdf else 2
+    phys, dig = (("-1000", "1000"), ("-1000000", "1000000")) if bdf else (
+        ("-327.68", "327.67"), ("-32768", "32767")
+    )
+    scale = 1000 if bdf else 100
+
+    def field(text: str, size: int) -> bytes:
+        raw = text.encode("ascii")
+        assert len(raw) <= size, (text, size)
+        return raw.ljust(size, b" ")
+
+    n_signals, header_bytes = 2, 256 * 3
+    version = b"\xffBIOSEMI" if bdf else field("0", 8)
+    header = version + field("X X X X", 80) + field("Startdate 01-JAN-2020 X X X", 80)
+    header += field("01.01.20", 8) + field("12.00.00", 8) + field(str(header_bytes), 8)
+    header += field(("BDF+" if bdf else "EDF+") + label, 44) + field(str(len(onsets)), 8)
+    header += field("1", 8) + field(str(n_signals), 4)
+    signals = [
+        ("EEG Ramp", "", "uV", *phys, *dig, "", str(per_record), ""),
+        ("BDF Annotations" if bdf else "EDF Annotations", "", "", "-1", "1", *dig, "",
+         str(ann_samples), ""),
+    ]
+    for column, size in enumerate([16, 80, 8, 8, 8, 8, 8, 80, 8, 32]):
+        for sig in signals:
+            header += field(sig[column], size)
+    assert len(header) == header_bytes
+
+    body = b""
+    for onset in onsets:
+        digits = [round((onset + i / rate) * scale) for i in range(per_record)]
+        body += b"".join(d.to_bytes(width, "little", signed=True) for d in digits)
+        # The time-keeping TAL: `+<onset>` 0x14 0x14 0x00, padded with NULs.
+        tal = f"+{onset:g}".encode("ascii") + b"\x14\x14\x00"
+        body += tal.ljust(width * ann_samples, b"\x00")
+    with open(path, "wb") as fh:
+        fh.write(header + body)
+    return path
+
+
+class TestGappedEdfPlusDThroughConvertOne(ConvertOneKeepingStoreCase):
+    """An EDF+D or BDF+D file with a gap between its data records, through the
+    real `convert_one` on both exporters.
+
+    Before biosigIO 1.2.14 such a file converted, and every sample after a gap sat
+    earlier on the store's time axis than it was recorded while the annotations
+    kept their true times. 1.2.14 refuses it with `DiscontinuousRecordingError`
+    (`discontinuous_recording`, biosigio#180). The converter records that as a
+    terminal data failure, not an infrastructure failure to retry: the file's
+    bytes are what is wrong, and a retry reads the same bytes. The published
+    `detail` names the gaps. A +D file whose records are contiguous still
+    converts, and its store says it was verified (`edf_discontinuous_verified_
+    contiguous`).
+
+    The files are written by `write_edf_plus_with_onsets`, byte for byte, and read
+    by the real biosigIO. The streaming exporter is selected by lowering
+    `STREAM_EDF_MIN_BYTES`, which is path selection and not a substitute for any
+    logic."""
+
+    REQUIRES = ("zarr", "biosigio")
+    DIR = "sub-01/eeg"
+    VERIFIED = "edf_discontinuous_verified_contiguous"
+    PATHS: ClassVar[tuple[str, ...]] = ("in-memory", "streaming")
+
+    def write(self, onsets: list[float], *, label: str = "D", bdf: bool = False) -> tuple[str, set[str]]:
+        primary = f"{self.DIR}/sub-01_task-rest_eeg.{'bdf' if bdf else 'edf'}"
+        os.makedirs(os.path.join(self.repo, self.DIR), exist_ok=True)
+        write_edf_plus_with_onsets(os.path.join(self.repo, primary), onsets, label=label, bdf=bdf)
+        return primary, {primary}
+
+    def convert_on(self, path_name: str, primary: str, head_files: set[str]) -> dict:
+        """Convert the recording down one exporter, and check it was that one."""
+        StreamEdfThreshold.use(self, 1 if path_name == "streaming" else None)
+        shutil.rmtree(self.synced_dir, ignore_errors=True)
+        with StreamEdfThreshold.watching_writers() as writers:
+            result = self.convert(primary, head_files)
+        # A refusal in memory never reaches a writer; the streaming exporter is
+        # handed to `write_store` and refuses from inside it.
+        if path_name == "streaming":
+            self.assertEqual(writers, ["stream_to_zarr"], writers)
+        else:
+            self.assertNotIn("stream_to_zarr", writers)
+        return result
+
+    def test_a_gapped_edf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        # Records at 0, 1, 10, 11 s: one 8 s gap after the second record ends at 2 s.
+        primary, head_files = self.write([0, 1, 10, 11])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertNotIn("entry", result)
+                self.assertIn("1 gap or overlap", result["detail"])
+                self.assertIn("8 s at 2 s", result["detail"])
+                self.assertNotIn(self.repo, result["detail"])
+                self.assertFalse(result["subject_info_refused"])
+                # And no store reached the upload.
+                self.assertFalse(os.path.exists(self.synced_dir))
+
+    def test_a_gapped_bdf_is_a_terminal_discontinuous_recording_on_both_paths(self):
+        primary, head_files = self.write([0, 1, 10, 11], bdf=True)
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                self.assertIn("8 s at 2 s", result["detail"])
+
+    def test_the_gaps_are_published_while_they_fit_and_the_rest_are_counted(self):
+        # 31 records two seconds apart: thirty 1 s gaps, at 1 s, 3 s, ... 59 s.
+        primary, head_files = self.write([2.0 * i for i in range(31)])
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assert_refused_as_data(result, "discontinuous_recording")
+                detail = result["detail"]
+                self.assertIn("30 gaps or overlaps", detail)
+                self.assertIn("1 s at 1 s, 1 s at 3 s", detail)
+                shown = detail.count(" s at ")
+                self.assertGreaterEqual(shown, 10)
+                self.assertTrue(detail.endswith(f", and {30 - shown} more"), detail)
+                self.assertLessEqual(len(detail), generate_zarr._DETAIL_MAX_CHARS)
+
+    def test_an_overlap_is_published_with_its_negative_length(self):
+        primary, head_files = self.write([0, 1, 1.5, 3])
+        result = self.convert_on("in-memory", primary, head_files)
+        self.assert_refused_as_data(result, "discontinuous_recording")
+        self.assertIn("2 gaps or overlaps", result["detail"])
+        self.assertIn("-0.5 s at 2 s", result["detail"])
+
+    def test_a_plus_d_file_with_contiguous_records_still_converts_and_says_it_was_verified(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="D")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                (group,) = result["entry"]["groups"]
+                self.assertEqual(group["n_samples"], 40)
+                self.assertIs(
+                    self.published_recording_metadata(result["entry"]).get(self.VERIFIED), True
+                )
+
+    def test_a_continuous_file_is_not_touched_by_the_rule(self):
+        primary, head_files = self.write([0, 1, 2, 3], label="C")
+        for path_name in self.PATHS:
+            with self.subTest(path=path_name):
+                result = self.convert_on(path_name, primary, head_files)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertNotIn(
+                    self.VERIFIED, self.published_recording_metadata(result["entry"])
+                )
+
+    def test_a_run_of_only_gapped_recordings_is_deterministic(self):
+        # What `hallu-zarr.sh` turns into a terminal `data_failed`: no retry, no
+        # `retry_exhausted` after five rounds of reading the same bytes.
+        primary, head_files = self.write([0, 1, 10, 11])
+        result = self.convert_on("in-memory", primary, head_files)
+        entry = _failure_entry(result["primary"], result["code"], result["detail"])
+        self.assertEqual(entry["code"], "discontinuous_recording")
+        self.assertIn("gaps between its data records", entry["reason"])
+        self.assertNotIn(entry["code"], RETRYABLE_CODES)
+        self.assertNotIn(entry["code"], generate_zarr.STORAGE_STATE_CODES)
+        self.assertTrue(
+            generate_zarr.dataset_failure_is_deterministic([primary], [entry])
+        )
+
+
+class TestMainOverAGappedAndAGoodEdfPlusD(unittest.TestCase):
+    """`main()` over a dataset with one gapped EDF+D and one good EDF+D, with the
+    real exporter, the `aws` stand-in over local files and a local catalog (the
+    harness of `TestMainRetryPendingRound`). The run converts the good recording
+    and exits 0; the gapped one is a typed `discontinuous_recording` failure in the
+    published index. The callback's `deterministic` is True (every failure is a data
+    failure), which `hallu-zarr.sh` reads only for a run that converted nothing; this
+    run exits 0 and the dataset is done whatever it says
+    (`dataset_failure_is_deterministic`)."""
+
+    GOOD = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    GAPPED = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    _serve_catalog = TestMainRetryPendingRound._serve_catalog
+    _restore_env = staticmethod(TestMainRetryPendingRound._restore_env)
+    run_main = TestMainRetryPendingRound.run_main
+    published_index = TestMainRetryPendingRound.published_index
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        for sub in ("sub-01", "sub-02"):
+            os.makedirs(os.path.join(self.repo, sub, "eeg"))
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "gap fixture", "BIDSVersion": "1.8.0"}, fh)
+        # Records at 0, 1, 2, 3 s (contiguous) and at 0, 1, 10, 11 s (an 8 s gap).
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GOOD), [0, 1, 2, 3])
+        write_edf_plus_with_onsets(os.path.join(self.repo, self.GAPPED), [0, 1, 10, 11])
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+
+        self.row = {"dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"}
+        self.api = self._serve_catalog()
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    def test_the_good_recording_converts_and_the_gapped_one_is_a_typed_failure(self):
+        rc, log, callback = self.run_main()
+        self.assertEqual(rc, 0, log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.GOOD])
+        self.assertEqual([f["path"] for f in index["failures"]], [self.GAPPED])
+        (failure,) = index["failures"]
+        self.assertEqual(failure["code"], "discontinuous_recording")
+        self.assertIn("8 s at 2 s", failure["detail"])
+        self.assertEqual(index.get("pending", []), [])
+        # A partially successful run: ready, one data failure counted.
+        self.assertEqual(callback["status"], "ready")
+        self.assertEqual(callback["failure_count"], 1)
+        self.assertEqual(callback["data_failures"][0]["code"], "discontinuous_recording")
+        self.assertIs(callback["deterministic"], True)
+
+
+class TestDiscontinuityDetail(unittest.TestCase):
+    """`discontinuity_detail` and the `failure_verdict` rule that uses it, against
+    the real exception class: a malformed `.gaps` must publish biosigIO's own text
+    instead of crashing the worker's `except` branch."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from biosigio import DiscontinuousRecordingError
+            from biosigio.exceptions import TimeGap
+        except ImportError as exc:
+            raise unittest.SkipTest(f"biosigIO 1.2.14 unavailable: {exc}") from exc
+        cls.error = DiscontinuousRecordingError
+        cls.gap = TimeGap
+
+    def test_the_verdict_keeps_biosigios_code_and_publishes_the_gap_list(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0), self.gap(12.0, 1.5)], 1.0)
+        code, named = generate_zarr.failure_verdict(exc, "sub-01/eeg/x.edf", frozenset())
+        self.assertEqual(code, "discontinuous_recording")
+        self.assertEqual(
+            named,
+            "2 gaps or overlaps between EDF+D/BDF+D data records (length at start, in "
+            "seconds): 8 s at 2 s, 1.5 s at 12 s",
+        )
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+
+    def test_a_long_list_of_long_numbers_is_cut_where_it_stops_fitting_and_counted(self):
+        gaps = [self.gap(12345.678 + 1000.25 * i, 123.456) for i in range(12)]
+        exc = self.error("/scratch/x.edf", gaps, 1.0)
+        # The premise: biosigIO's own message, through `failure_detail`, is cut
+        # before it reaches the end of its ten gaps.
+        self.assertNotIn("and 2 more", generate_zarr.failure_detail(exc))
+        named = generate_zarr.discontinuity_detail(exc)
+        self.assertLessEqual(len(named), generate_zarr._DETAIL_MAX_CHARS)
+        self.assertEqual(generate_zarr.failure_detail(named), named)
+        self.assertTrue(named.startswith("12 gaps or overlaps between EDF+D/BDF+D data records"))
+        self.assertIn("123.456 s at 12345.7 s, 123.456 s at 13345.9 s", named)
+        shown = named.count(" s at ")
+        self.assertGreater(shown, 5)
+        self.assertTrue(named.endswith(f", and {12 - shown} more"), named)
+
+    def test_a_malformed_gap_list_falls_back_to_the_exceptions_own_text(self):
+        exc = self.error("/scratch/x.edf", [self.gap(2.0, 8.0)], 1.0)
+        for bad in (None, [], "oops", [("a", "b")], [(1.0,)], [object()], 5):
+            with self.subTest(bad=bad):
+                exc.gaps = bad
+                code, named = generate_zarr.failure_verdict(exc, "x.edf", frozenset())
+                self.assertEqual((code, named), ("discontinuous_recording", None))
+                self.assertIn("DiscontinuousRecordingError", generate_zarr.failure_detail(exc))
+
+    def test_the_fallback_reason_is_biosigios_own_text(self):
+        from biosigio.exceptions import REASONS
+
+        self.assertEqual(
+            generate_zarr._FALLBACK_REASONS["discontinuous_recording"],
+            REASONS["discontinuous_recording"],
+        )
+
+
 class TestStreamedTruncatedFifThroughConvertOne(ConvertOneLocalCase):
     """A FIF cut short in its data, converted down the STREAMING path.
 
@@ -17733,7 +18534,7 @@ class TestSubjectInfoProblems(unittest.TestCase):
     writers that do or do not name the option. This tests the check itself:
     no conversion logic is replaced."""
 
-    def problems(self, installed="1.2.13", imported="1.2.13", strip=_strip_nothing, **writers):
+    def problems(self, installed="1.2.14", imported="1.2.14", strip=_strip_nothing, **writers):
         return generate_zarr.subject_info_problems(
             installed_version=installed, imported_version=imported,
             writers={**CAPABLE_WRITERS, **writers}, strip=strip,
@@ -17741,38 +18542,38 @@ class TestSubjectInfoProblems(unittest.TestCase):
 
     def test_a_capable_biosigio_passes(self):
         # "1.10.0" is the case a string comparison gets wrong: as strings it
-        # sorts below "1.2.13".
-        for version in ("1.2.13", "1.2.13.0", "1.2.13.post1", "1.2.13+local.1",
-                        "1.2.14", "1.3", "1.10.0", "2.0.0"):
+        # sorts below "1.2.14".
+        for version in ("1.2.14", "1.2.14.0", "1.2.14.post1", "1.2.14+local.1",
+                        "1.2.15", "1.3", "1.10.0", "2.0.0"):
             with self.subTest(version):
                 self.assertEqual(self.problems(version, version), [])
 
     def test_a_release_below_the_floor_is_refused(self):
-        for version in ("1.2.12", "1.2.12.post1", "1.2.11", "1.2.11.post1", "1.2.10",
-                        "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
+        for version in ("1.2.13", "1.2.13.post1", "1.2.12", "1.2.12.post1", "1.2.11",
+                        "1.2.11.post1", "1.2.10", "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
             with self.subTest(version):
                 problems = self.problems(version, version)
                 self.assertEqual(problems, [
-                    f"the installed biosigIO is {version}, below 1.2.13",
-                    f"the imported biosigIO is {version}, below 1.2.13",
+                    f"the installed biosigIO is {version}, below 1.2.14",
+                    f"the imported biosigIO is {version}, below 1.2.14",
                 ])
 
     def test_a_pre_release_or_unreadable_version_is_refused(self):
-        # `1.2.13rc1` sorts BELOW 1.2.13; read by its leading digits it would pass.
-        for version in ("1.2.13rc1", "1.2.13.dev0", "1.2.13a1", "1.2.14.dev0",
-                        "1.2.13.post1.dev0", "not-a-version", "", None):
+        # `1.2.14rc1` sorts BELOW 1.2.14; read by its leading digits it would pass.
+        for version in ("1.2.14rc1", "1.2.14.dev0", "1.2.14a1", "1.2.15.dev0",
+                        "1.2.14.post1.dev0", "not-a-version", "", None):
             with self.subTest(version):
                 self.assertEqual(len(self.problems(version, version)), 2)
 
     def test_an_import_older_than_the_installed_release_is_refused(self):
         # An older copy shadowing the installed one, or imported before an
-        # upgrade: the distribution says 1.2.13, the code that runs is 1.2.12.
-        self.assertEqual(self.problems("1.2.13", "1.2.12"),
-                         ["the imported biosigIO is 1.2.12, below 1.2.13"])
+        # upgrade: the distribution says 1.2.14, the code that runs is 1.2.13.
+        self.assertEqual(self.problems("1.2.14", "1.2.13"),
+                         ["the imported biosigIO is 1.2.13, below 1.2.14"])
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        self.assertEqual(self.problems("1.2.12", "1.2.13"),
-                         ["the installed biosigIO is 1.2.12, below 1.2.13"])
+        self.assertEqual(self.problems("1.2.13", "1.2.14"),
+                         ["the installed biosigIO is 1.2.13, below 1.2.14"])
 
     def test_every_writer_must_name_the_option(self):
         for name in generate_zarr.BIOSIGIO_STORE_WRITERS:
@@ -17799,7 +18600,7 @@ class TestSubjectInfoProblems(unittest.TestCase):
         self.assertFalse(generate_zarr.names_keyword(None, "exclude_subject_info"))
 
     def test_the_floor_is_the_pinned_release(self):
-        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 13))
+        self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 14))
 
     def test_the_refusal_exit_is_ex_config(self):
         self.assertEqual(generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE, 78)
@@ -18644,6 +19445,73 @@ def mutating_aws_calls(calls: list[str]) -> list[str]:
     return out
 
 
+# An `aws` stand-in over a directory tree: keys are real nested paths under the root, and it
+# answers the calls a `--wipe` makes (probe, delimited listing, recursive removal with
+# `--exclude`) and the reads and writes around it. Every invocation is logged.
+STUB_AWS_TREE = r"""#!/usr/bin/env python3
+import fnmatch
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_S3_ROOT"]
+args = [a for a in sys.argv[1:] if not a.startswith("--cli-") and a != "--only-show-errors"]
+with open(os.environ["ZARR_TEST_S3_LOG"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def keys():
+    for base, _dirs, files in os.walk(ROOT):
+        for name in files:
+            yield os.path.relpath(os.path.join(base, name), ROOT)
+
+
+if args[:2] == ["s3api", "list-objects-v2"]:
+    prefix = opt("--prefix") or ""
+    found = sorted(k for k in keys() if k.startswith(prefix))
+    if opt("--delimiter"):
+        children = sorted({prefix + k[len(prefix):].split("/")[0] + "/"
+                           for k in found if "/" in k[len(prefix):]})
+        print("\t".join(children) if children else "None")
+    else:
+        print(found[0] if found else "None")
+    sys.exit(0)
+if args[:2] == ["s3", "rm"]:
+    url = args[2]
+    prefix = url.split("/", 3)[3]
+    excludes = [args[i + 1] for i, a in enumerate(args) if a == "--exclude"]
+    for k in list(keys()):
+        rel = k[len(prefix):]
+        if k.startswith(prefix) and not any(fnmatch.fnmatch(rel, e) for e in excludes):
+            os.remove(os.path.join(ROOT, k))
+    sys.exit(0)
+if args[:2] == ["s3", "cp"]:
+    src, dst = args[2], args[3]
+    if src.startswith("s3://"):
+        path = os.path.join(ROOT, src.split("/", 3)[3])
+        if not os.path.exists(path):
+            sys.stderr.write("NoSuchKey\n")
+            sys.exit(1)
+        if dst == "-":
+            sys.stdout.buffer.write(open(path, "rb").read())
+        else:
+            shutil.copyfile(path, dst)
+    else:
+        target = os.path.join(ROOT, dst.split("/", 3)[3])
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(src, target)
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    sys.stderr.write("An error occurred (NoSuchKey) when calling GetObject\n")
+    sys.exit(1)
+sys.exit(0)
+"""
+
+
 class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
     """`main` against a stand-in biosigIO, as a separate process so that
     `import biosigio` really resolves to it (PYTHONPATH, ahead of any installed
@@ -18698,7 +19566,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         git("add", "-A")
         git("commit", "-q", "-m", "init")
 
-    def standin(self, version: str = "1.2.13", dist_version: str | None = None,
+    def standin(self, version: str = "1.2.14", dist_version: str | None = None,
                 lacking: str | None = None, exporter_imports: bool = True,
                 mode: str = "read_nothing") -> str:
         """Write the stand-in package; `lacking` names the one writer that does
@@ -18798,21 +19666,21 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
 
     def test_a_release_below_the_floor_is_refused(self):
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.12"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.13"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.13, below 1.2.14")
 
     def test_a_stale_import_is_refused_although_the_installed_release_is_current(self):
-        # The distribution record says 1.2.13; the module imported says 1.2.12.
+        # The distribution record says 1.2.14; the module imported says 1.2.13.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.12", dist_version="1.2.13"), "--wipe")
-        self.assert_refused(rc, log, "the imported biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.13", dist_version="1.2.14"), "--wipe")
+        self.assert_refused(rc, log, "the imported biosigIO is 1.2.13, below 1.2.14")
 
     def test_an_installed_release_older_than_the_import_is_refused(self):
-        # The other way round: the module says 1.2.13, but what the environment
-        # records as installed is 1.2.12.
+        # The other way round: the module says 1.2.14, but what the environment
+        # records as installed is 1.2.13.
         self.commit(with_recording=True)
-        rc, log = self.run_main(self.standin(version="1.2.13", dist_version="1.2.12"), "--wipe")
-        self.assert_refused(rc, log, "the installed biosigIO is 1.2.12, below 1.2.13")
+        rc, log = self.run_main(self.standin(version="1.2.14", dist_version="1.2.13"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.13, below 1.2.14")
 
     def test_a_biosigio_whose_exporter_cannot_be_imported_is_refused(self):
         # Fail closed: a check that cannot look must refuse, not wave through.
@@ -18837,6 +19705,72 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertEqual(body["pending_count"], 1)
         self.assertFalse(body["deterministic"])
         self.assertIs(body["provenance_fetch_failed"], True)
+
+    def _seed_tree(self) -> dict[str, bytes]:
+        """A serving prefix with stores, a loose key and the geometry/ prefix."""
+        keep = {
+            "on008083/zarr/geometry/index.json": b"{}",
+            "on008083/zarr/geometry/meshes/abc.mesh.bin": b"mesh",
+        }
+        gone = {
+            "on008083/zarr/loose.txt": b"x",
+            "on008083/zarr/sub-01/eeg/a.zarr/zarr.json": b"{}",
+            "on008083/zarr/sub-01/eeg/a.zarr/c/0": b"0",
+            "on008083/zarr/sub-02/eeg/b.zarr/zarr.json": b"{}",
+        }
+        # geometry-like names that are NOT the geometry/ prefix are wiped
+        gone["on008083/zarr/sub-01/geometry/lookalike.bin"] = b"x"
+        gone["on008083/zarr/geometry.txt"] = b"x"
+        for key, data in {**keep, **gone}.items():
+            target = os.path.join(self.s3, key)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(data)
+        self._gone = sorted(gone)
+        with open(os.path.join(self.dir, "bin", "aws"), "w") as fh:
+            fh.write(STUB_AWS_TREE)
+        return keep
+
+    def _remaining(self) -> list[str]:
+        return sorted(
+            os.path.relpath(os.path.join(base, name), self.s3)
+            for base, _dirs, files in os.walk(self.s3)
+            for name in files
+        )
+
+    def test_wipe_erases_the_serving_prefix_but_keeps_geometry(self):
+        self.commit(with_recording=True)
+        keep = self._seed_tree()
+        rc, log = self.run_main(self.standin(), "--wipe")
+        self.assertEqual(rc, 1, log)  # the stand-in cannot convert; the wipe came first
+        self.assertIn("--wipe: erasing s3://nemar-test/on008083/zarr/", log)
+        self.assertEqual(self._remaining(), sorted(keep))
+        for key, data in keep.items():
+            with open(os.path.join(self.s3, key), "rb") as fh:
+                self.assertEqual(fh.read(), data)
+
+    def test_rm_recursive_without_keep_still_erases_everything(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; g._rm_recursive('s3://nemar-test/on008083/zarr/')"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), [])
+        self.assertTrue(keep)
+
+    def test_rm_recursive_keep_skips_the_shard_and_excludes_it_from_the_sweep(self):
+        keep = self._seed_tree()
+        env = {**self.env, "PYTHONPATH": os.path.dirname(generate_zarr.__file__)}
+        code = (
+            "import generate_zarr as g; "
+            "g._rm_recursive('s3://nemar-test/on008083/zarr/', keep=g.WIPE_KEEP)"
+        )
+        subprocess.run([sys.executable, "-c", code], env=env, check=True, capture_output=True)
+        self.assertEqual(self._remaining(), sorted(keep))
+        rms = [c for c in self.aws_calls() if c.startswith("s3 rm")]
+        self.assertFalse(any(c.split()[2].endswith("/geometry/") for c in rms), rms)
+        self.assertIn("--exclude geometry/*", rms[-1])
 
     def test_a_run_whose_workers_refuse_every_store_exits_78(self):
         # Past the startup check: the writers name the option, but the store

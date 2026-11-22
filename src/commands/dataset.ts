@@ -296,6 +296,7 @@ import {
   createOrResumeDataset,
   initializeAnnexDataset,
 } from "../lib/upload/transfer.js";
+import { requireUserDatasetArgs } from "../lib/user-dataset-args.js";
 import { isMirror, refuseMirrorMajor } from "../lib/version-policy.js";
 
 /**
@@ -4203,6 +4204,7 @@ datasetCommand
 Description:
   Invite a NEMAR user as a collaborator to your dataset.
   Only dataset owners and admins can invite collaborators.
+  The username and dataset id may be given in either order.
 
   Works for both public and private repositories.
 
@@ -4213,8 +4215,12 @@ Requirements:
 Examples:
   $ nemar dataset invite johndoe nm000104`,
   )
-  .action(async (username, datasetId) => {
+  .action(async (first, second) => {
     requireAuth();
+
+    const args = requireUserDatasetArgs(first, second);
+    if (!args) return;
+    const { username, datasetId } = args;
 
     const spinner = ora(`Inviting ${username} to ${datasetId}...`).start();
 
@@ -4403,12 +4409,17 @@ accessCommand
 Description:
   Grant a user collaborator (write) access after they requested it.
   Only the dataset owner or an admin can approve.
+  The username and dataset id may be given in either order.
 
 Examples:
   $ nemar dataset access approve johndoe nm000104`,
   )
-  .action(async (username, datasetId) => {
+  .action(async (first, second) => {
     requireAuth();
+
+    const args = requireUserDatasetArgs(first, second);
+    if (!args) return;
+    const { username, datasetId } = args;
 
     const spinner = ora(`Approving ${username} for ${datasetId}...`).start();
     try {
@@ -4436,12 +4447,17 @@ accessCommand
 Description:
   Reject a pending access request. The user is not granted access and may
   request again later. Only the dataset owner or an admin can deny.
+  The username and dataset id may be given in either order.
 
 Examples:
   $ nemar dataset access deny johndoe nm000104`,
   )
-  .action(async (username, datasetId) => {
+  .action(async (first, second) => {
     requireAuth();
+
+    const args = requireUserDatasetArgs(first, second);
+    if (!args) return;
+    const { username, datasetId } = args;
 
     const spinner = ora(`Denying ${username} for ${datasetId}...`).start();
     try {
@@ -4909,12 +4925,12 @@ Description:
   you are ready ('nemar dataset publish request <dataset-id>', with or without
   --anonymous).
 
-  This is not 'nemar admin withdraw', which takes a broken published dataset
+  This is not 'nemar admin repo withdraw', which takes a broken published dataset
   out of the catalog.
 
   Only the dataset owner can withdraw the request, even though an administrator
   may file a publication request on someone else's dataset. An administrator
-  ends a request with 'nemar admin publish deny'.
+  ends a request with 'nemar admin repo publish deny'.
 
   It works while the request is waiting for review ("requested") or held on a
   fix ("blocked"), as long as publishing has not started. Once an administrator

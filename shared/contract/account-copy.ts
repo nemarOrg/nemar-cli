@@ -542,6 +542,25 @@ export const ACCOUNT_COPY = {
     "NEMAR could not complete this sign-in right now. Try again in a moment.",
   "oidc.error.rate_limited": "Too many sign-in attempts. Try again in a minute.",
 
+  // -------------------------------------------------------------------------
+  // Community mail (nemar-cli ADR 0132). Read through `mailCategoryLabel`,
+  // `mailCategoryDescription` and `mailRecallWhy` in `mail-categories.ts`, which
+  // type the key per category so a category without its two sentences does not
+  // compile. The categories themselves (who may turn one off, who receives it)
+  // are declared there, not here: this file holds only the words.
+  // -------------------------------------------------------------------------
+  "mail.category.news.label": "News",
+  "mail.category.news.description": "New features, data and events.",
+  "mail.category.rfcs.label": "Requests for comments",
+  "mail.category.rfcs.description": "A new NEMAR request for comments is open for discussion.",
+  "mail.category.maintenance.label": "Maintenance",
+  "mail.category.maintenance.description": "Planned downtime and changes to the service.",
+  "mail.category.recall.label": "Recalls",
+  "mail.category.recall.description":
+    "A dataset, release or credential NEMAR distributed has a problem you need to act on.",
+  "mail.recall.why":
+    "Recalls cannot be turned off: they tell you to stop using, delete or replace something NEMAR distributed or issued, because continuing to use it can cause harm.",
+
   // ===========================================================================
   // CLI-ONLY (`cli.` prefix). The website has no surface for these and its
   // drift test reports them as a note rather than as missing copy.

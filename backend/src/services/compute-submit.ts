@@ -206,12 +206,32 @@ export function manifestRefusal(
 
 // --- Step 9: the datasets ---------------------------------------------------------------------------
 
-/** The datasets through the pipelines' own gate, in order; the first refusal is the answer. */
-async function datasetRefusal(db: D1Database, spec: JobSpec): Promise<SubmitRefusal | null> {
+/**
+ * The datasets through the pipelines' own gate, in order; the first refusal is the answer. A person's job
+ * reads the `bids` input with no recipe, under the environment's predicate.
+ */
+async function datasetRefusal(env: Bindings, spec: JobSpec): Promise<SubmitRefusal | null> {
   for (let i = 0; i < spec.datasets.length; i++) {
     const dataset = spec.datasets[i] as JobSpec["datasets"][number];
-    const run = await resolveRun(db, dataset.id, dataset.version, PERSON_EXCEPT_TERMS);
+    const run = await resolveRun(
+      env.DB,
+      dataset.id,
+      dataset.version,
+      undefined,
+      env,
+      "bids",
+      PERSON_EXCEPT_TERMS,
+    );
     if (run.ok) continue;
+    // A `bids` read never meets the Zarr serving copy's refusals: one would be a programming error.
+    if (
+      run.code === "zarr_version_not_newest" ||
+      run.code === "zarr_copy_not_ready" ||
+      run.code === "zarr_source_mismatch" ||
+      run.code === "zarr_source_unverifiable"
+    ) {
+      throw new RangeError(`a bids read was refused ${run.code}`);
+    }
     // One answer for every reason a dataset is not eligible: which term failed (anonymous, withdrawn,
     // private) is not told.
     const field =
@@ -428,7 +448,7 @@ export async function submitPersonJob(
       return refuse("bundle_too_large");
     }
   }
-  const dataset = await datasetRefusal(env.DB, spec);
+  const dataset = await datasetRefusal(env, spec);
   if (dataset) return dataset;
 
   // 10. The hold.

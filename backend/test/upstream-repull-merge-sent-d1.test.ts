@@ -79,7 +79,7 @@ async function seedClaim(age = 3, over: Row = {}): Promise<Claim> {
   const row = rowAt("gates_clear", {
     dataset_id: DATASET,
     origin: "automatic",
-    planner: 2,
+    planner: 3,
     merge_claim_sha: SHA,
     merge_claimed_at: claimedAt,
     revision: REVISION,

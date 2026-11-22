@@ -82,6 +82,12 @@ const tenant = () => poolOf(w, "partner", "tenant") as Record<string, number> | 
 const cancels = () => fx.tapis.log.filter((r) => r.route === "POST /v3/jobs/:uuid/cancel");
 const tapisRequests = () => fx.tapis.log.filter((r) => r.route !== "POST /v3/oauth2/tokens").length;
 const production = () => fx.env();
+/**
+ * The tenant-wide ceiling on live jobs (issue #2121, phase P2) admits at most 10 partner reservations under the
+ * default policy (a ceiling of 20 less the floors kept for people and the pipelines). The tests that hold more
+ * than 10 reservations at once count the reaper's and the sweep's own bounds, not the ceiling, so they raise it.
+ */
+const WIDE_TENANT = { tenant: { maxLiveJobs: 1000, reserved: { people: 0, pipelines: 0, partner: 0 } } };
 
 describe("a reservation past the owner's wait", () => {
   test("with one Tapis job under its tag that is the person's and matches: bound and verified like a report", async () => {
@@ -396,6 +402,7 @@ describe("the tick is bounded, in rotation, production only, and reads no switch
     const { setPartnerPolicy } = await import("./helpers/compute-partner-world");
     await setPartnerPolicy(w.env().DB, fx.ownerId, {
       clients: { [w.client.clientId]: { maxOpenReservations: 100, maxReservedMilliPerDay: 1e9 } },
+      ...WIDE_TENANT,
     });
     const holds: Hold[] = [];
     for (let i = 0; i < 30; i++) {
@@ -609,6 +616,7 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
       await setPartnerPolicy(w.env().DB, fx.ownerId, {
         ...confirmedClients(),
         maxLiveJobsPerPerson: 100,
+        ...WIDE_TENANT,
       });
       const rich = await newPartnerPerson(w, { grant: 10_000_000 });
       const sheltered: string[] = [];
@@ -651,6 +659,7 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
       await setPartnerPolicy(w.env().DB, fx.ownerId, {
         ...confirmedClients(),
         maxLiveJobsPerPerson: 100,
+        ...WIDE_TENANT,
       });
       const rich = await newPartnerPerson(w, { grant: 10_000_000 });
       const target = await reserve(w, rich);
@@ -665,6 +674,7 @@ describe("the review round: visibility, ambiguity, the sweep's shelter, keys and
       await setPartnerPolicy(w.env().DB, fx.ownerId, {
         ...confirmedClients(),
         maxLiveJobsPerPerson: 100,
+        ...WIDE_TENANT,
       });
       const rich2 = await newPartnerPerson(w, { grant: 10_000_000 });
       for (let i = 0; i < 26; i++) age(await reserve(w, rich2), 100);

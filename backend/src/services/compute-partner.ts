@@ -219,10 +219,11 @@ export type ReserveResult =
  *   3b. a NEW reservation needs the owner's confirmation (`policy.partner`): `partner_not_enabled`;
  *   4. the owner's ceilings (`partition_not_offered`, `over_job_limit`);
  *   5. the person's live jobs against the owner's limit (`over_concurrency`);
- *   6. THE HOLD, one conditional INSERT that also carries the client's caps and the platform budget:
- *      `no_compute_access` or `suspended` again if access ended in between, `insufficient_balance`,
- *      `over_concurrency`, `client_cap_reached`, `platform_budget_exhausted`, told apart by a read AFTER the
- *      refusal and never by a pre-check.
+ *   6. THE HOLD, one conditional INSERT that also carries the client's caps, the platform budget and the
+ *      tenant ceiling: `no_compute_access` or `suspended` again if access ended in between,
+ *      `insufficient_balance`, `platform_budget_exhausted`, `over_concurrency`, `client_cap_reached` and,
+ *      after the client's caps, `platform_busy` (NEMAR's tenant-wide ceiling, issue #2121 phase P2), told
+ *      apart by a read AFTER the refusal and never by a pre-check.
  */
 export async function reserveHold(
   env: Bindings,

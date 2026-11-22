@@ -22,6 +22,16 @@ import inquirer from "inquirer";
 import ora from "ora";
 import { accountCopy } from "../../shared/contract/account-copy.js";
 import type { ApiKeySummary } from "../../shared/contract/device-auth.js";
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  type CommunityMailCategory,
+  type CommunityMailPreferencesView,
+  RECALL_CATEGORY,
+  isCommunityMailCategory,
+  mailCategoryDescription,
+  mailCategoryLabel,
+  mailRecallWhy,
+} from "../../shared/contract/mail-categories.js";
 import { resolveProfileGaps } from "../../shared/contract/profile-gaps.js";
 import {
   type ContractUser,
@@ -39,6 +49,7 @@ import {
   type UploadAccessRequestResponse,
   createApiKey,
   getCurrentUser,
+  getMyEmailPreferences,
   listApiKeys,
   login,
   requestEmailChange,
@@ -50,6 +61,7 @@ import {
   startOrcidCliLink,
   suggestUsername,
   unlinkOrcid,
+  updateMyEmailPreferences,
   updateProfile,
   verifyEmailChange,
 } from "../lib/api/auth.js";
@@ -1947,6 +1959,149 @@ Examples:
   $ nemar auth keys create build-box      # Mint a key for a headless host
   $ nemar auth keys revoke 12             # Revoke by id
   $ nemar auth keys revoke current        # Revoke this machine's own key`,
+);
+
+// ============================================================================
+// Mail categories (epic #2260 phase 4, ADR 0132)
+// ============================================================================
+//
+// The community mail an account receives: news, RFCs and maintenance, each switchable, and recalls,
+// which are always on. Every label, description and the recall sentence come from the account-copy
+// table through shared/contract/mail-categories.ts, so the terminal and Settings say the same words.
+
+/** What `nemar auth mail set` may name: one category, or `all` (to turn everything off). */
+export type MailSetTarget = CommunityMailCategory | "all";
+
+const MAIL_SET_USAGE = `Expected one of ${COMMUNITY_MAIL_CATEGORIES.join(", ")}, or all`;
+
+export function parseMailSetTarget(raw: string): MailSetTarget {
+  const value = raw.trim().toLowerCase();
+  if (value === "all" || isCommunityMailCategory(value)) return value;
+  if (value === RECALL_CATEGORY) throw new InvalidArgumentError(mailRecallWhy());
+  throw new InvalidArgumentError(MAIL_SET_USAGE);
+}
+
+export function parseMailSwitch(raw: string): boolean {
+  const value = raw.trim().toLowerCase();
+  if (value === "on") return true;
+  if (value === "off") return false;
+  throw new InvalidArgumentError("Expected on or off");
+}
+
+/** The four categories, one line each, recalls last with the sentence that says why. */
+function printMailPreferences(prefs: CommunityMailPreferencesView): void {
+  const width =
+    Math.max(
+      ...[...COMMUNITY_MAIL_CATEGORIES, RECALL_CATEGORY].map((c) => mailCategoryLabel(c).length),
+    ) + 2;
+  for (const category of COMMUNITY_MAIL_CATEGORIES) {
+    const state = prefs[category] ? chalk.green("on ") : chalk.yellow("off");
+    console.log(
+      `  ${mailCategoryLabel(category).padEnd(width)} ${state}  ${chalk.dim(mailCategoryDescription(category))}`,
+    );
+  }
+  console.log(
+    `  ${mailCategoryLabel(RECALL_CATEGORY).padEnd(width)} ${chalk.green("always on")}  ${chalk.dim(mailCategoryDescription(RECALL_CATEGORY))}`,
+  );
+  console.log(chalk.dim(`  ${mailRecallWhy()}`));
+}
+
+/** `nemar auth mail` (and `nemar auth mail show`): this account's mail categories. */
+export async function mailShowAction(): Promise<void> {
+  if (!requireAuthenticatedForChange()) return;
+  const spinner = ora("Fetching your mail categories...").start();
+  try {
+    const prefs = await getMyEmailPreferences();
+    spinner.stop();
+    console.log(chalk.bold("Mail from NEMAR"));
+    printMailPreferences(prefs);
+    console.log();
+    console.log(
+      chalk.dim(
+        `  Change one: nemar auth mail set <${COMMUNITY_MAIL_CATEGORIES.join("|")}> <on|off>`,
+      ),
+    );
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not fetch your mail categories");
+  }
+}
+
+/** `nemar auth mail set <category|all> <on|off>`. */
+export async function mailSetAction(target: MailSetTarget, on: boolean): Promise<void> {
+  if (target === "all" && on) {
+    // `all` exists to stop everything at once (the unsubscribe page's second button); turning
+    // categories back on is a choice made one at a time.
+    console.error(
+      chalk.red(
+        `'all' only turns everything off. Turn categories on one at a time: nemar auth mail set <${COMMUNITY_MAIL_CATEGORIES.join("|")}> on`,
+      ),
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!requireAuthenticatedForChange()) return;
+  const categories = target === "all" ? [...COMMUNITY_MAIL_CATEGORIES] : [target];
+  const changes = Object.fromEntries(categories.map((category) => [category, on])) as Partial<
+    Record<CommunityMailCategory, boolean>
+  >;
+  const spinner = ora("Updating your mail categories...").start();
+  try {
+    const prefs = await updateMyEmailPreferences(changes);
+    spinner.succeed(
+      target === "all"
+        ? "Every category that can be turned off is off"
+        : `${mailCategoryLabel(target)} turned ${on ? "on" : "off"}`,
+    );
+    printMailPreferences(prefs);
+  } catch (error) {
+    failWithApiError(spinner, error, "Could not update your mail categories");
+  }
+}
+
+const mailCmd = authCommand
+  .command("mail")
+  .description("Show or change which mail NEMAR sends you")
+  // `nemar auth mail bogus` is a mistyped subcommand, not a request to show.
+  .allowExcessArguments(false)
+  .action(mailShowAction);
+
+mailCmd
+  .command("show")
+  .description("Show your mail categories (same as 'nemar auth mail')")
+  .action(mailShowAction);
+
+mailCmd
+  .command("set")
+  .description("Turn a mail category on or off, or every category off")
+  .argument(
+    "<category>",
+    `One of ${COMMUNITY_MAIL_CATEGORIES.join(", ")}, or all`,
+    parseMailSetTarget,
+  )
+  .argument("<on|off>", "on or off ('all' takes off only)", parseMailSwitch)
+  .action(mailSetAction);
+
+addVerboseHelp(
+  mailCmd,
+  `
+Description:
+  NEMAR sends account holders four kinds of mail. News, requests for
+  comments and maintenance notices can each be turned off here, in Settings
+  on nemar.org, or from the link at the bottom of any of those messages.
+
+  ${mailRecallWhy()}
+
+  An account whose email address is not verified yet receives none of these;
+  what you set here applies once it is.
+
+  Admin alerts (approvals, publication requests, ...) are not here: admins
+  change them with 'nemar admin email-preferences'.
+
+Examples:
+  $ nemar auth mail                       # Show (default action)
+  $ nemar auth mail set news off          # Stop news
+  $ nemar auth mail set rfcs on           # Hear about new RFCs again
+  $ nemar auth mail set all off           # Stop everything except recalls`,
 );
 
 // ============================================================================
