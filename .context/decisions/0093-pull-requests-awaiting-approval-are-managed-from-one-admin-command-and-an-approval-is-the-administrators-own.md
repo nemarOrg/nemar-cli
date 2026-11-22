@@ -1,7 +1,8 @@
 # ADR 0093: Pull requests awaiting approval are managed from one admin command, and an approval is the administrator's own
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-08
+**Accepted:** 2026-10-12
 **Owner:** Seyed Yahya Shirazi
 
 Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the `exempt` verdict, the changes to `allow`, `start --all` and the list's volume line, and the review ruleset exist, and the required check is not switched on):

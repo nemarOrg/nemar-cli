@@ -1,7 +1,8 @@
 # ADR 0092: Dataset pull requests get a derived verdict from a Worker-gated model review
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-08
+**Accepted:** 2026-10-09
 **Owner:** Seyed Yahya Shirazi
 
 Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the exemption of owners and administrators, the removal of the caps, the pool and the automatic pause, the two stages and the tooling for the required check all exist, and the required check is not switched on),
