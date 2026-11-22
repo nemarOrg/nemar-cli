@@ -1244,7 +1244,8 @@ It changes no code, no switch, no wrangler file and no version.
 Item 10 of the A5 amendment said the switch is read only where a job is submitted, and item 11 says that turning it off "stops new holds and submits".
 The third-party branch (#2116) made those disagree: the person's `POST /compute/jobs` and the partner's `POST /compute/holds` take a hold through `createJob`, which did not read the switch.
 With `COMPUTE_ENABLED` absent, a person granted compute access, or a registered partner, could still take a hold that sat until the submit step refused.
-`createJob` now refuses `compute_disabled` unless `computeEnabled(env)`, before it reads or writes anything, for every source (a person, a partner, a pipeline, a runner job) and for a replay of an idempotency key, so the switch is read where a job is created and where it is submitted, and turning it off stops new holds as item 11 says.
+`createJob` now refuses `compute_disabled` unless `computeEnabled(env)`, after its pure argument validation and before it reads or writes anything of its own, for every source (a person, a partner, a pipeline, a runner job) and for a replay of an idempotency key, so the switch is read where a job is created and where it is submitted, and turning it off stops new holds as item 11 says.
+A route may still answer an earlier refusal of its own (an invalid specification, no compute access) before it reaches `createJob`.
 The routes answer it as they already answered `compute_disabled` (503, the shared sentence), and `compute-source-scan.test.ts` names `createJob` among the switch's readers.
 Nothing that moves an existing job reads it: a job held before compute was turned off is still settled, reaped or expired as before, and only its submit waits for the switch.
 No switch, no wrangler file and no version changes.

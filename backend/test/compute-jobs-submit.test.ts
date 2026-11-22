@@ -215,6 +215,7 @@ describe("compute off", () => {
     const image = await submit(p, imageRequest());
     w.fx.tapis.up();
     expect(image.status).toBe(201);
+    expect(image.body.state).toBe("created");
     expect(w.fx.tapis.jobs.size).toBe(0);
     // Past the reservation wait, with compute off, the image job fails and its hold is released.
     const later = Date.now() + 31 * 60_000;

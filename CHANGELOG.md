@@ -25,7 +25,8 @@ earlier releases are described only by their generated notes.
 ### Compute
 
 - **Turning compute off now stops new holds, not only submits (ADR 0118, amendment of 2026-11-22).**
-  `createJob` refuses `compute_disabled` unless `COMPUTE_ENABLED` is on, before it reads or writes anything, so a person's `POST /compute/jobs` and a partner's `POST /compute/holds` answer `503 compute_disabled` with compute off and write no job, ledger entry or idempotency claim.
+  `createJob` refuses `compute_disabled` unless `COMPUTE_ENABLED` is on, after its pure argument validation and before it reads or writes anything of its own, so a person's `POST /compute/jobs` and a partner's `POST /compute/holds` answer `503 compute_disabled` with compute off and write no job, ledger entry or idempotency claim.
+  A route may still answer an earlier refusal of its own (an invalid specification, no compute access) first.
   Before this, either could take a hold that sat until the submit step refused it.
   A hold taken while compute was on is still settled, reaped or expired as before.
   The `compute_disabled` sentence is now "Compute is not available." (it was "Compute storage is not configured.", which was wrong when the switch is what is off); the code and the 503 status are unchanged.
