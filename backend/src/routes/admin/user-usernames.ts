@@ -5,7 +5,7 @@
  * where the column has been NULL by design since migration 0026 and nothing
  * has ever filled it. That is now load-bearing rather than cosmetic: an upload
  * request needs a username (it is what the admin review card names and what
- * `nemar admin approve <username>` addresses), the admin listing falls back to
+ * `nemar admin users approve <username>` addresses), the admin listing falls back to
  * printing an email and a numeric id, and the person has no handle to be known
  * by anywhere in the product.
  *

@@ -339,7 +339,7 @@ export function registerUserEditRoutes(admin: AdminRouter): void {
       // change it if you like" prompt (ADR 0045) no longer applies.
       sets.push("username_auto_assigned = 0");
       notes.push(
-        "Anything that refers to the old username by name (scripts, 'nemar admin approve <username>') now needs the new one. API keys are unaffected.",
+        "Anything that refers to the old username by name (scripts, 'nemar admin users approve <username>') now needs the new one. API keys are unaffected.",
       );
     }
     if (changed.github_username?.to) {
