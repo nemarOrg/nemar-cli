@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import type { Command } from "commander";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import { markReportedExit } from "./debug-log.js";
 
 /**
@@ -113,8 +114,7 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   // ORCID at sign-up. The backend route stays.
   {
     oldPath: "backfill-names",
-    retired:
-      "names now come from ORCID at sign-up, and the backfill has nothing left to fill; an owner with no name makes it public on ORCID and signs in again, or types it into Settings on nemar.org.",
+    retired: `names now come from ORCID at sign-up, and the backfill has nothing left to fill. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
   },
 ];
 

@@ -11,6 +11,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
+import { accountCopy } from "../../../../shared/contract/account-copy.js";
 import {
   datasetLandingUrl,
   datasetVersionLandingUrl,
@@ -761,7 +762,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
         body.refresh_metadata && refreshWouldStripAttribution(dataset, refreshUploader);
       if (attributionSkip) {
         console.error(
-          `[doi/update] ATTRIBUTION SKIP ${datasetId}: refusing to refresh DOI metadata; the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Get the owner's name on file first (made public on ORCID and a fresh sign-in, or typed into Settings on nemar.org).`,
+          `[doi/update] ATTRIBUTION SKIP ${datasetId}: refusing to refresh DOI metadata; the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
         );
         if (!body.status) {
           // Nothing left to do: refusing the refresh IS the whole outcome, so

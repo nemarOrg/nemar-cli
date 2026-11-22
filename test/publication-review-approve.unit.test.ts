@@ -219,7 +219,7 @@ describe("3. a blocked request that has not started publishing is refused whatev
     const d = refusal(
       decide({ status: "blocked", gate: "off", blockReason: "owner_name_missing" }),
     );
-    expect(d.lines.join("\n")).toContain("type it into Settings on nemar.org");
+    expect(d.lines.join("\n")).toContain("types it into Settings on nemar.org");
   });
 
   test("a blocked request with no block reason still says it is blocked", () => {

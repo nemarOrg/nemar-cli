@@ -29,6 +29,7 @@ import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import {
   ADMIN_USER_DESCRIPTIVE_FIELDS,
   ADMIN_USER_IDENTITY_FIELDS,
@@ -10051,7 +10052,7 @@ backfillUsernamesCommand
         );
       } else if (r.outcome === "no_name") {
         console.log(
-          `  ${chalk.yellow("no name   ")} ${who}: no name on record; the person makes it public on ORCID or types it into Settings first`,
+          `  ${chalk.yellow("no name   ")} ${who}: no name on record. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
         );
       } else if (r.outcome === "conflict") {
         console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);

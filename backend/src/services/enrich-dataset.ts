@@ -16,6 +16,7 @@
  */
 
 import { formatFileSize } from "../../../shared/bytes.js";
+import { accountCopy } from "../../../shared/contract/account-copy.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
 import { ANONYMOUS_DEPOSIT_REASON, blindEnrichmentMetadata, isAnonymous } from "./anonymity.js";
@@ -1245,7 +1246,7 @@ export async function enrichDataset(
       // success. Skipping leaves the existing record intact; the metadata
       // this run would have refreshed is re-synced by the next enrichment
       // after the name lands.
-      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. Once the owner's name is on file (made public on ORCID and a fresh sign-in, or typed into Settings on nemar.org), re-run enrichment.`;
+      const message = `DOI metadata sync skipped for ${datasetId}: the owner has no researcher name on file, so the rebuilt record would drop the existing DataCurator. ${accountCopy("cli.admin.owner_name_missing.fix")} Then re-run enrichment.`;
       console.error(`[llm-enrich] ATTRIBUTION SKIP ${message}`);
       doiSyncOutcome = { status: "skipped", reason: OWNER_NAME_MISSING_REASON, message };
     } else if (dataset.concept_doi) {
