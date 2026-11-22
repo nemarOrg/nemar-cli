@@ -260,3 +260,4 @@ The manager reads the newest rows through `status`, never the whole file.
 | 2026-11-21T10:56-08:00 | B4d report: rfcs#2 head b6bbb3cd; manager ran acceptance (all pass), rfc-check pass, still draft; r1 + seam review of whole RFC-0001 out before O5 |
 | 2026-11-21T10:57-08:00 | B4d r1 + seam review of whole RFC-0001 clean (links resolve at their tags, no stale refs, questions 1-40 once each, rfc-check ok); RFC-0001 text ready; O5 waits on mail epic #2260 in production and owner |
 | 2026-11-21T11:14-08:00 | Manager paused: handoff and memories written to nemarOrg/rfcs (PR #3); temp worktree tmp.Teu8fPYl0M removed; loop stopped |
+| 2026-11-21T23:06-08:00 | Mail slice for O5 live in production (reported by doi-work; manager verified 2026-11-22T07:06Z: /health 0.10.38, release v0.10.38 06:30Z, docs policies/community-mail 200, /mail/unsubscribe/bogus/info 410 link_invalid, nemar.org/unsubscribe/bogus 410). O5 now waits only on the owner. Epic #2260 stays open. |
