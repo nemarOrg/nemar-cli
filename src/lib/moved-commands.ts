@@ -109,6 +109,13 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "backfill-usernames", newPath: "users backfill-usernames" },
   { oldPath: "doctor", newPath: "dataset doctor" },
   { oldPath: "doctor kinds", newPath: "users kind-check" },
+  // Retired: drained (a production dry run found nothing left to fill), and names now come from
+  // ORCID at sign-up. The backend route stays.
+  {
+    oldPath: "backfill-names",
+    retired:
+      "names now come from ORCID at sign-up, and the backfill has nothing left to fill; an owner with no name makes it public on ORCID and signs in again, or types it into Settings on nemar.org.",
+  },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */

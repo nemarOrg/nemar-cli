@@ -92,7 +92,6 @@ import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
-  type BackfillNamesResponse,
   type BackfillUsernamesResponse,
   type BroadcastDryRunResponse,
   type BroadcastResponse,
@@ -133,7 +132,6 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
-  backfillUserNames,
   backfillUsernames,
   bulkDeleteDatasets,
   changeUserRole,
@@ -9283,104 +9281,6 @@ zarrCatalogCommand
   });
 
 adminCommand.addCommand(zarrCatalogCommand);
-
-// ============================================================================
-// Researcher-name backfill (#1255, epic #1250)
-//
-// DOIs cite the uploader by real name and publishing is blocked without one,
-// but most accounts predate the signup-time ORCID name lookup. This fills the
-// gap from each account's own public ORCID record.
-// ============================================================================
-
-const backfillNamesCommand = new Command("backfill-names").description(
-  "Fill missing researcher names from users' public ORCID records (dry run by default)",
-);
-
-backfillNamesCommand
-  .option("--apply", "Write the names (without this flag, only report what would change)")
-  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
-  .option("--json", "Output raw JSON instead of the human summary")
-  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
-    if (!requireAuth()) return;
-
-    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
-    const apply = options.apply === true;
-    const spinner = ora(
-      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
-    ).start();
-
-    let res: BackfillNamesResponse;
-    try {
-      res = await backfillUserNames({ apply, limit });
-      spinner.stop();
-    } catch (err) {
-      spinner.fail("Name backfill failed");
-      console.error(chalk.red(errorDetail(err)));
-      process.exit(1);
-      return;
-    }
-
-    // Computed before the --json branch returns, so a scripted caller reading
-    // the exit code sees the same verdict as someone reading the summary below.
-    // A lookup failure leaves the row a candidate for the next run, and an
-    // unknown remainder means the batch's own bookkeeping failed. Neither is
-    // fatal, but a caller must not read either as a clean sweep.
-    if (res.lookup_failed > 0 || (res.write_failed ?? 0) > 0 || res.remaining === null) {
-      process.exitCode = 1;
-    }
-
-    if (options.json) {
-      console.log(JSON.stringify(res, null, 2));
-      return;
-    }
-
-    console.log();
-    if (!res.apply) {
-      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
-    }
-    console.log(
-      chalk.cyan(
-        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
-          res.apply ? res.filled : res.would_fill
-        } no_public_name=${res.no_public_name} lookup_failed=${
-          res.lookup_failed
-        } write_failed=${res.write_failed ?? 0} remaining=${res.remaining ?? "unknown"}`,
-      ),
-    );
-    for (const r of res.results) {
-      const who = r.username ?? `id ${r.id} <${r.email}>`;
-      if (r.outcome === "filled" || r.outcome === "would_fill") {
-        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
-        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
-      } else if (r.outcome === "no_public_name") {
-        console.log(
-          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
-        );
-      } else if (r.outcome === "write_failed") {
-        // Not folded in with the ORCID failure below: the name was READ fine
-        // and our own write is what refused it, so the operator is looking at
-        // D1 rather than at orcid.org.
-        console.log(`  ${chalk.red("write   ")} ${who}: ${r.error}; retry the batch`);
-      } else {
-        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
-      }
-    }
-    // `remaining=unknown` above means the count query itself failed; say what
-    // failed rather than leaving the operator to guess (#1255 review item 28).
-    if (res.warning) {
-      console.log(chalk.yellow(`  Warning: ${res.warning}`));
-    }
-    if (res.no_public_name > 0) {
-      console.log();
-      console.log(
-        chalk.dim(
-          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for an ORCID-linked account, because the record is re-read on every sign-in and would overwrite it. An account with no verified ORCID can set its name in Settings (ADR 0042).",
-        ),
-      );
-    }
-  });
-
-adminCommand.addCommand(backfillNamesCommand);
 
 // ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
