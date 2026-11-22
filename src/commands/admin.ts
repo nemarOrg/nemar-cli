@@ -6017,8 +6017,8 @@ fleetCommand
     );
   });
 
-fleetCommand
-  .command("annex-policy")
+reworkAnnexCommand
+  .command("policy")
   .description(
     "Report, and optionally fix, dataset repos that NEMAR's annex policy does not actually govern (#1374, ADR 0060)",
   )
@@ -6404,7 +6404,7 @@ Examples:
     },
   );
 
-fleetCommand
+reworkAnnexCommand
   .command("key-registration")
   .description(
     "Re-register annexed content NEMAR holds in S3 but never recorded in the location log (#1392)",
@@ -6564,7 +6564,7 @@ Examples:
     if (sweep.tally.failed > 0) process.exitCode = 1;
   });
 
-fleetCommand
+reworkAnnexCommand
   .command("content-recovery")
   .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
   .argument("[dataset-id...]", "Datasets to act on")

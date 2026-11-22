@@ -119,6 +119,9 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   // ADR 0135, phase P3: the repairs that change an existing dataset gather under `admin rework`.
   { oldPath: "revert", newPath: "rework revert" },
   { oldPath: "annex-normalize", newPath: "rework annex normalize" },
+  { oldPath: "fleet annex-policy", newPath: "rework annex policy" },
+  { oldPath: "fleet key-registration", newPath: "rework annex key-registration" },
+  { oldPath: "fleet content-recovery", newPath: "rework annex content-recovery" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
