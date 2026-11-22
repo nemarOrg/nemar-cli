@@ -222,7 +222,7 @@ describe("onboard-openneuro pins the upstream tag", () => {
       chmodSync(join(bin, "nemar"), 0o755);
       // Cut where the import would start; print what it would have been given.
       const body = prepareStep.run as string;
-      const cut = body.indexOf('nemar admin import-openneuro "$DATASET_ID"');
+      const cut = body.indexOf('nemar "${import_cmd[@]}" "$DATASET_ID"');
       expect(cut).toBeGreaterThan(0);
       const script = join(dir, "prepare.sh");
       writeFileSync(
@@ -241,7 +241,7 @@ describe("onboard-openneuro pins the upstream tag", () => {
         NEMAR_NO_UPDATE_CHECK: "1",
         DATASET_ID: "ds004362",
       };
-      const helpProc = Bun.spawn(["bun", cli, "admin", "import-openneuro", "--help"], {
+      const helpProc = Bun.spawn(["bun", cli, "admin", "import", "openneuro", "--help"], {
         env,
         stdout: "pipe",
         stderr: "pipe",
@@ -282,5 +282,154 @@ describe("onboard-openneuro pins the upstream tag", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 60_000);
+});
+
+// ADR 0135, phase P4: `admin import-openneuro` moved to `admin import openneuro`. The workflow is
+// deployed to nemarDatasets/.github and installs the CLI unpinned, so each step that runs the
+// import asks the installed CLI which path it has and uses that one for the call.
+describe("onboard-openneuro calls only paths the CLI has", () => {
+  type RunStep = { name?: string; run?: string };
+  const doc = parse(
+    readFileSync(
+      join(import.meta.dir, "..", ".github/dataset-workflows/onboard-openneuro.yml"),
+      "utf-8",
+    ),
+  ) as { jobs: Record<string, { steps?: RunStep[] }> };
+  const runs = Object.values(doc.jobs).flatMap((j) => (j.steps ?? []).map((s) => s.run ?? ""));
+  const all = runs.join("\n");
+
+  /** The command path of `nemar admin ...` and `import_cmd=(admin ...)`: words until an argument. */
+  const pathsNamed = (text: string): string[] => {
+    const found = new Set<string>();
+    for (const m of text.matchAll(/nemar (admin(?: [a-z][a-z0-9-]*)+)/g)) found.add(m[1]);
+    for (const m of text.matchAll(/import_cmd=\((admin(?: [a-z][a-z0-9-]*)+)\)/g)) found.add(m[1]);
+    return [...found];
+  };
+
+  const resolve = async (path: string) => {
+    const { adminCommand } = await import("../src/commands/admin");
+    const { isMovedCommandStub } = await import("../src/lib/moved-commands");
+    let cmd: import("commander").Command | undefined = adminCommand;
+    for (const word of path.split(" ").slice(1)) {
+      cmd = cmd?.commands.find((c) => c.name() === word || c.aliases().includes(word));
+    }
+    return { exists: cmd !== undefined, stub: cmd !== undefined && isMovedCommandStub(cmd) };
+  };
+
+  test("every admin path the workflow runs is a live command, except the old-CLI fallback", async () => {
+    const paths = pathsNamed(all);
+    expect(paths).toContain("admin import openneuro");
+    for (const path of paths) {
+      const { exists, stub } = await resolve(path);
+      expect({ path, exists }).toEqual({ path, exists: true });
+      // The old path is named only as the fallback for a CLI that predates the move; on this CLI it
+      // is the moved-command stub. Anything else the workflow names must run.
+      expect({ path, stub }).toEqual({ path, stub: path === "admin import-openneuro" });
+    }
+  });
+
+  test("the import is never called by a hard-coded path, only through the probe's choice", () => {
+    expect(all).not.toMatch(/nemar admin import[ -]openneuro "\$DATASET_ID"/);
+    const calls = all.match(
+      /nemar "\$\{import_cmd\[@\]\}" "\$DATASET_ID" --phase (prepare|copy|finalize)/g,
+    );
+    expect(calls?.length).toBe(3);
+  });
+
+  /** Each step's probe, from `import_cmd=(admin import openneuro)` to its closing `fi`. */
+  const probes = runs
+    .filter((r) => r.includes("import_cmd=(admin import openneuro)"))
+    .map((r) => {
+      const start = r.indexOf("import_cmd=(admin import openneuro)");
+      const end = r.indexOf("\nfi\n", start);
+      return r.slice(start, end + 3);
+    });
+
+  test("the prepare, copy and finalize steps each carry the same probe", () => {
+    expect(probes).toHaveLength(3);
+    expect(new Set(probes).size).toBe(1);
+  });
+
+  const CLI = join(import.meta.dir, "..", "src", "index.ts");
+
+  /** Runs the probe with `nemar` defined by `nemarFn`; returns the chosen path and the help. */
+  async function runProbe(nemarFn: string, extraEnv: Record<string, string> = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "onboard-probe-"));
+    try {
+      const script = `${nemarFn}\n${probes[0]}\nprintf 'CMD:%s\\n' "\${import_cmd[*]}"\nprintf '%s' "$cli_help" > "$HELP_OUT"\n`;
+      const proc = Bun.spawn(["bash", "-eo", "pipefail", "-c", script], {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: dir,
+          TMPDIR: dir,
+          NEMAR_CONFIG_DIR: dir,
+          NEMAR_NO_UPDATE_CHECK: "1",
+          NEMAR_NO_BROWSER: "1",
+          CLI,
+          HELP_OUT: join(dir, "help.txt"),
+          ...extraEnv,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [out, err] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      expect({ code: await proc.exited, err: err.slice(-500) }).toEqual({ code: 0, err: "" });
+      return {
+        cmd: out.match(/^CMD:(.*)$/m)?.[1],
+        help: readFileSync(join(dir, "help.txt"), "utf-8"),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const realCli = 'nemar() { bun "$CLI" "$@" 2>/dev/null; }';
+
+  test("against this CLI it picks admin import openneuro, and its help names --tag", async () => {
+    const r = await runProbe(realCli);
+    expect(r.cmd).toBe("admin import openneuro");
+    expect(r.help).toContain("Usage: nemar admin import openneuro ");
+    expect(r.help).toContain("--tag <tag>");
+  }, 60_000);
+
+  test("colored help is stripped before it is matched", async () => {
+    const r = await runProbe(realCli, { FORCE_COLOR: "1" });
+    expect(r.cmd).toBe("admin import openneuro");
+    expect(r.help).not.toContain("\u001b[");
+    expect(r.help).toContain("--tag <tag>");
+  }, 60_000);
+
+  test("control: an unknown word under import answers with the group's help and exit 0", async () => {
+    // Why the probe reads the usage line and not the exit code: a CLI without `import openneuro`
+    // answers `admin import openneuro --help` like this.
+    const proc = Bun.spawn(["bun", CLI, "admin", "import", "no-such-command", "--help"], {
+      env: { PATH: process.env.PATH ?? "", NEMAR_NO_UPDATE_CHECK: "1", NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out).toContain("Usage: nemar admin import [options] [command]");
+  }, 30_000);
+
+  test("against a CLI from before the move it falls back to admin import-openneuro", async () => {
+    // A CLI from before the move, answered from this CLI's real help: `import openneuro --help`
+    // gets the `import` group's help (the control above), and `import-openneuro --help` gets the
+    // command's own help under its old name. The real 0.10.39 was checked by hand; see the PR.
+    const oldCli = `nemar() {
+  case "$*" in
+    "admin import openneuro --help") bun "$CLI" admin import --help 2>/dev/null ;;
+    "admin import-openneuro --help") bun "$CLI" admin import openneuro --help 2>/dev/null | sed 's/nemar admin import openneuro/nemar admin import-openneuro/' ;;
+    *) echo "unexpected: $*" >&2; return 1 ;;
+  esac
+}`;
+    const r = await runProbe(oldCli);
+    expect(r.cmd).toBe("admin import-openneuro");
+    expect(r.help).toContain("Usage: nemar admin import-openneuro ");
+    expect(r.help).toContain("--tag <tag>");
   }, 60_000);
 });
