@@ -61,13 +61,22 @@ export function isMovedCommandStub(cmd: Command): boolean {
  * -v` would print the version and exit 0, and the update banner and the
  * `/notices` request would run around the stub. The walk skips every token
  * that starts with "-" and descends while a word names a subcommand (or an
- * alias); it stops at "--".
+ * alias); it stops at "--". Commander's implicit `help` word is stepped over,
+ * so `nemar admin help publish` gets the pointer too.
+ *
+ * Skipping a "-" token does not skip that option's value, so the walk is right
+ * only while no option on the root, on `admin` or on a group with a stub child
+ * takes a value; a value there that spelled a command name would be walked as
+ * that command. test/moved-commands.unit.test.ts fails when one appears, and
+ * this walk must then learn to step over that option's value.
  */
 export function exitIfMovedCommand(program: Command, argv: readonly string[]): void {
   let current = program;
   const end = argv.indexOf("--") < 0 ? argv.length : argv.indexOf("--");
   for (let i = 0; i < end; i++) {
     if (argv[i].startsWith("-")) continue;
+    // Commander's implicit `help <words>` addresses the same command as the words themselves.
+    if (argv[i] === "help" && current.commands.length > 0 && !child(current, "help")) continue;
     const next = child(current, argv[i]);
     if (!next) return;
     const run = stubs.get(next);

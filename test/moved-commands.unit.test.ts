@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { Command } from "commander";
+import { adminCommand } from "../src/commands/admin";
 import {
   MOVED_COMMANDS,
   isMovedCommandStub,
@@ -77,15 +78,19 @@ async function run(
   args: string[],
   { dir = configDir, updateCheck = false }: { dir?: string; updateCheck?: boolean } = {},
 ) {
+  // Built from nothing rather than from process.env: in a shared `bun test` process another file's
+  // setup exports an API override that the CLI prefers over the stored apiUrl, which would send a
+  // live command's request past the stand-in. With only these variables, the stand-in is the one
+  // backend a child can reach.
   const env: Record<string, string | undefined> = {
-    ...process.env,
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    TMPDIR: process.env.TMPDIR,
     NEMAR_CONFIG_DIR: dir,
     NEMAR_NO_UPDATE_CHECK: updateCheck ? undefined : "1",
+    NEMAR_NO_BROWSER: "1",
     NO_COLOR: "1",
   };
-  env.FORCE_COLOR = undefined;
-  env.CLICOLOR_FORCE = undefined;
-  env.NEMAR_DEBUG = undefined;
   const proc = spawn({
     cmd: ["bun", "run", entry, ...args],
     cwd: REPO_ROOT,
@@ -136,6 +141,14 @@ describe("every moved admin command fails at once, without a request", () => {
       },
     );
 
+    test(`admin help ${row.oldPath} gets the pointer, not the stub's usage`, async () => {
+      const result = await run(CLI_ENTRY, ["admin", "help", ...row.oldPath.split(" ")]);
+      expect(result.exitCode).toBe(1);
+      expect(stderrLines(result.stderr)).toEqual([expected]);
+      expect(result.stdout).toBe("");
+      expect(requests).toEqual([]);
+    });
+
     test(`the pointer for admin ${row.oldPath} names a live command`, async () => {
       const result = await run(CLI_ENTRY, ["admin", ...row.newPath.split(" "), "--help"]);
       expect(result.exitCode).toBe(0);
@@ -170,6 +183,7 @@ describe("stubs under a live group and under a gone group", () => {
     [["s3"], "s3", "dataset s3"],
     [["s3", "lock", "nm000104", "--yes"], "s3 lock", "dataset s3 lock"],
     [["s3", "credential-check"], "s3", "dataset s3"],
+    [["fleet", "help", "annex-policy"], "fleet annex-policy", "rework annex policy"],
   ];
   const rootOptions: string[][] = [[], ["--version", "2.0.0"], ["-v"], ["--debug"]];
 
@@ -282,5 +296,74 @@ describe("registerMovedCommands refuses a table that cannot be right", () => {
     expect(() =>
       registerMovedCommands(tree(), [{ oldPath: "s3 lock", newPath: "repo publish" }]),
     ).toThrow("add a row for 's3'");
+  });
+});
+
+describe("a stub word in a live command's arguments reaches the live command", () => {
+  const pointer = /moved to '.*'\. Nothing was run\./;
+
+  test("admin users show publish looks the account up", async () => {
+    const result = await run(CLI_ENTRY, ["admin", "users", "show", "publish"]);
+    expect(result.stderr + result.stdout).not.toMatch(pointer);
+    expect(requests.some((r) => r.startsWith("GET /admin/users"))).toBe(true);
+  });
+
+  test("admin approve publish asks to approve the user named publish", async () => {
+    const result = await run(CLI_ENTRY, ["admin", "approve", "publish"]);
+    expect(result.stderr + result.stdout).not.toMatch(pointer);
+    expect(result.stdout).toContain("Approving user: publish");
+  });
+
+  test("admin repo publish --help prints the live group's help", async () => {
+    const result = await run(CLI_ENTRY, ["admin", "repo", "publish", "--help"]);
+    expect(result.stderr + result.stdout).not.toMatch(pointer);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage: nemar admin repo publish");
+  });
+
+  test("admin users show --query publish is Commander's own error", async () => {
+    const result = await run(CLI_ENTRY, ["admin", "users", "show", "--query", "publish"]);
+    expect(result.stderr + result.stdout).not.toMatch(pointer);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("error: unknown option '--query'");
+  });
+});
+
+describe("exitIfMovedCommand can skip every option it walks past", () => {
+  const takesValue = (cmd: Command): string[] =>
+    cmd.options.filter((o) => o.required || o.optional).map((o) => o.flags);
+  const guardMessage = (where: string, flags: string[]): string =>
+    `${where} declares ${flags.join(", ")}, which takes a value: exitIfMovedCommand ` +
+    "skips only the option token, so it must first learn to step over that option's value";
+
+  test("no option on the root takes a value", async () => {
+    const { stdout } = await run(CLI_ENTRY, ["--help"]);
+    const optionsBlock = stdout.split(/^Options:$/m)[1]?.split(/^Commands:$/m)[0] ?? "";
+    expect(optionsBlock).toContain("--version");
+    const flags = optionsBlock
+      .split("\n")
+      .map((l) => /^ {2}(-\S.*?)(?: {2,}|$)/.exec(l)?.[1])
+      .filter((f): f is string => f !== undefined);
+    const withValue = flags.filter((f) => /[<[]/.test(f));
+    expect(withValue, guardMessage("the root", withValue)).toEqual([]);
+  });
+
+  test("no option on admin, or on a group with a stub child, takes a value", () => {
+    const groups = new Map<string, Command>([["admin", adminCommand]]);
+    for (const row of MOVED_COMMANDS) {
+      const parts = row.oldPath.split(" ");
+      let cmd: Command | undefined = adminCommand;
+      const path = ["admin"];
+      for (const part of parts.slice(0, -1)) {
+        cmd = cmd?.commands.find((c) => c.name() === part);
+        if (!cmd) break;
+        path.push(part);
+        groups.set(path.join(" "), cmd);
+      }
+    }
+    for (const [where, cmd] of groups) {
+      const withValue = takesValue(cmd);
+      expect(withValue, guardMessage(where, withValue)).toEqual([]);
+    }
   });
 });
