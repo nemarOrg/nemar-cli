@@ -131,7 +131,7 @@ sequenceDiagram
     API-->>U: Verification email
     U->>API: Click verification link
     API->>Admin: Notification: new user pending
-    Admin->>CLI: nemar admin approve <user>
+    Admin->>CLI: nemar admin users approve <user>
     CLI->>API: POST /admin/approve
     API-->>U: Approval email with instructions
     U->>CLI: nemar auth login
@@ -379,9 +379,11 @@ request `approving`; run it again once the cause the warning names is fixed).
 # User management
 nemar admin users                          # List all users
 nemar admin users --pending                # List pending approvals
-nemar admin approve <username>             # Approve user
-nemar admin revoke <username>              # Revoke user access
-nemar admin role <username> <role>         # Change user role
+nemar admin users approve <username>       # Approve user
+nemar admin users revoke <username>        # Revoke user access
+nemar admin users role <username> <role>   # Change user role
+nemar admin users kind <username> <kind>   # Change account kind (person, service, test)
+nemar admin users keys list <username>     # API keys of a service or test account
 
 # Dataset management (`admin dataset`; `admin repo` is an alias)
 nemar admin dataset unpublish <id>         # Authors pull a published dataset back to private (DOIs untouched, can publish again)

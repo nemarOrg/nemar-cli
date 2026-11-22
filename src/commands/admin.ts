@@ -6,14 +6,15 @@
  * Commands:
  * - nemar admin users              - List users (pending, approved, all), or search every field
  * - nemar admin users show/edit    - Look up one account's details; edit a closed set of fields
- * - nemar admin approve            - Approve a pending user
- * - nemar admin revoke             - Revoke user access
- * - nemar admin role               - Change a user's role (owner only)
+ * - nemar admin users approve      - Approve a pending user
+ * - nemar admin users revoke       - Revoke user access
+ * - nemar admin users role         - Change a user's role (owner only)
  * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
  *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
- * - nemar admin email-preferences show/update - Email notification opt-out
+ * - nemar admin users verify/kind/kind-check/keys/duplicates/backfill-usernames - Accounts
+ * - nemar admin users email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
@@ -28,6 +29,7 @@ import { Command, Option } from "commander";
 import inquirer from "inquirer";
 import ora, { type Ora } from "ora";
 import { formatBytesCli } from "../../shared/bytes.js";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import {
   ADMIN_USER_DESCRIPTIVE_FIELDS,
   ADMIN_USER_IDENTITY_FIELDS,
@@ -92,7 +94,6 @@ import {
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
-  type BackfillNamesResponse,
   type BackfillUsernamesResponse,
   type BroadcastDryRunResponse,
   type BroadcastResponse,
@@ -133,7 +134,6 @@ import {
   availabilityReport,
   availabilityReportSweep,
   availabilityReportSweepReset,
-  backfillUserNames,
   backfillUsernames,
   bulkDeleteDatasets,
   changeUserRole,
@@ -303,10 +303,9 @@ Description:
   These commands require admin privileges.
 
 User Management:
-  users          - List users and their status
-  approve        - Approve a pending user registration
-  revoke         - Revoke user access
-  role           - Change a user's role (owner only: owner > admin > member)
+  users          - List and search accounts. Its subcommands: show, edit,
+                   approve, revoke, role, verify, kind, kind-check, keys,
+                   email-preferences, duplicates, backfill-usernames
 
 Dataset Management:
   dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
@@ -317,9 +316,9 @@ Dataset Management:
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin users --role admin         # List all admins
-  $ nemar admin approve john_doe           # Approve a user
-  $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
-  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
+  $ nemar admin users approve john_doe     # Approve a user
+  $ nemar admin users approve --id 123     # Approve a web/ORCID user (no username)
+  $ nemar admin users role john_doe admin  # Promote user to admin (owner only)
   $ nemar admin dataset unpublish nm000104 # Pull a published dataset back to private
   $ nemar admin dataset ci check nm000104  # Check CI status
   $ nemar admin dataset doi create nm000104 # Create concept DOI`,
@@ -343,7 +342,7 @@ function requireAuth(): boolean {
 
 const adminUsersCommand = adminCommand
   .command("users")
-  .description("List and search NEMAR users; 'show' and 'edit' work on one account")
+  .description("List and search NEMAR accounts; its subcommands look up and manage them")
   // A stray word (`nemar admin users ada`) would otherwise be ignored and the
   // command would list EVERY account, which is the wrong answer to someone
   // looking for one person. Commander 12 allows excess arguments by default.
@@ -367,7 +366,7 @@ const adminUsersCommand = adminCommand
 Tiers (ADR 0040):
   browse   base tier: browse, dashboard, settings, CLI API key, and sandbox
            training (ADR 0040 phase 2, landed)
-  upload   an admin granted upload access; 'nemar admin approve' is the grant
+  upload   an admin granted upload access; 'nemar admin users approve' is the grant
   unknown  the API reported no tier for this account (a backend older than
            the tier split, or a rolling deploy)
 
@@ -599,7 +598,7 @@ Examples:
 
         // Web/ORCID accounts have username = NULL by design (#1012), so the
         // heading falls back to the email and carries the numeric id — the
-        // only key `nemar admin approve --id` can address them by. Printing
+        // only key `nemar admin users approve --id` can address them by. Printing
         // the raw field would put the literal "null" in the listing.
         const heading = safeText(user.username ?? user.email);
         // A search is how an admin finds the id `show` and `edit` take, so the
@@ -717,37 +716,37 @@ const LISTING_ONLY_OPTIONS: ReadonlyArray<{
   {
     key: "role",
     flag: "--role",
-    hint: "A role is changed with 'nemar admin role <username> <role>' (owners only).",
+    hint: "A role is changed with 'nemar admin users role <username> <role>' (owners only).",
   },
   {
     key: "kind",
     flag: "--kind",
-    hint: "An account kind is changed with 'nemar admin kind <username> <kind>' (owners only).",
+    hint: "An account kind is changed with 'nemar admin users kind <username> <kind>' (owners only).",
   },
   {
     key: "pending",
     flag: "--pending",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "verified",
     flag: "--verified",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "approved",
     flag: "--approved",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "revoked",
     flag: "--revoked",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "uploadAccess",
     flag: "--no-upload-access",
-    hint: "Upload access is granted with 'nemar admin approve'.",
+    hint: "Upload access is granted with 'nemar admin users approve'.",
   },
   { key: "awaitingApproval", flag: "--awaiting-approval" },
   // `show` honours this one (it can read a deleted account); `edit` cannot edit one.
@@ -943,8 +942,8 @@ Who can change what:
       key minting. An owner changes their own in Settings ('nemar auth profile').
 
 What this does NOT change (each has its own command):
-  role / status / upload access   nemar admin role | approve | revoke
-  account kind                    nemar admin kind
+  role / status / upload access   nemar admin users role | approve | revoke
+  account kind                    nemar admin users kind
   ORCID iD sign-in record         the person links it in Settings or with
                                   'nemar auth profile orcid link'; --orcid records
                                   an owner's attestation without that record, and
@@ -1089,7 +1088,7 @@ Examples:
 // Approve
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("approve")
   .description("Approve a pending user")
   .argument("[username]", "Username to approve (CLI accounts)")
@@ -1201,7 +1200,7 @@ adminCommand
 // Revoke
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("revoke")
   .description("Revoke user access")
   .argument("[username]", "Username to revoke (CLI accounts)")
@@ -1209,7 +1208,7 @@ adminCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
-    // Exactly one addressing key, the same rule `admin approve` enforces:
+    // Exactly one addressing key, the same rule `admin users approve` enforces:
     // username (CLI accounts) or --id (web/ORCID accounts, whose username is
     // NULL by design). Approval can reach those accounts by id, so revocation
     // has to as well (ADR 0040: revoke is the eraser of what approval wrote).
@@ -1286,7 +1285,7 @@ adminCommand
 // Role Management (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("role")
   .description("Change a user's role (owner only)")
   .argument("<username>", "Username to change role for")
@@ -1307,9 +1306,9 @@ Rules:
   - Demoting a user revokes their tokens (they must re-login)
 
 Examples:
-  $ nemar admin role john_doe admin        # Promote to admin
-  $ nemar admin role john_doe member       # Demote to member
-  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  $ nemar admin users role john_doe admin    # Promote to admin
+  $ nemar admin users role john_doe member   # Demote to member
+  $ nemar admin users role jane_doe owner -y # Promote to owner (skip confirm)`,
   )
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
@@ -1358,7 +1357,7 @@ Examples:
 // Force Verify (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("verify")
   .description("Mark a pending account's email as verified (owner only)")
   .argument("<id>", "Numeric user id (find it with 'nemar admin users --pending')")
@@ -1378,11 +1377,11 @@ self-verify flows where the person proved their own inbox.
 Rules:
   - Only owners; it asserts an inbox the person did not prove
   - Only pending accounts; use approve or revoke for the other tiers
-  - It grants no upload access: that is still 'nemar admin approve'
+  - It grants no upload access: that is still 'nemar admin users approve'
 
 Examples:
-  $ nemar admin verify 80
-  $ nemar admin verify 80 -y`,
+  $ nemar admin users verify 80
+  $ nemar admin users verify 80 -y`,
   )
   .action(async (idArg: string, options: ConfirmOptions) => {
     const id = Number.parseInt(idArg, 10);
@@ -1433,7 +1432,7 @@ Examples:
 // Account Kind (Owner Only) -- epic #1272 phase 4, #1284; ADR 0048
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("kind")
   .description("Change a user's account kind (owner only)")
   .argument("<username>", "Username to change the kind for")
@@ -1446,7 +1445,7 @@ adminCommand
 Kinds:
   person  - a human's own account (the default)
   service - operational automation; no human signs in to it directly, keys
-            are owner-minted with 'nemar admin keys create'
+            are owner-minted with 'nemar admin users keys create'
   test    - a human's secondary persona; signs in and uploads like a person,
             but on production may only own xx sandbox datasets
 
@@ -1458,9 +1457,9 @@ Rules:
   - Keys are not revoked on a kind change
 
 Examples:
-  $ nemar admin kind cool-vibers test      # Mark a persona account
-  $ nemar admin kind nemarAdmin service    # Mark an operational account
-  $ nemar admin kind cool-vibers person -y # Revert (skip confirm)`,
+  $ nemar admin users kind cool-vibers test      # Mark a persona account
+  $ nemar admin users kind nemarAdmin service    # Mark an operational account
+  $ nemar admin users kind cool-vibers person -y # Revert (skip confirm)`,
   )
   .action(async (username: string, kindArg: string, options: ConfirmOptions) => {
     if (!requireAuth()) return;
@@ -1537,7 +1536,7 @@ adminKeysCommand
         // either side of that commit -- the key may already exist even
         // though this command never saw the response (epic #1272 phase 4,
         // #1284 review).
-        0: `The key may have been minted before the connection dropped; run \`nemar admin keys list ${username}\` before retrying.`,
+        0: `The key may have been minted before the connection dropped; run \`nemar admin users keys list ${username}\` before retrying.`,
       });
     }
   });
@@ -1579,7 +1578,7 @@ adminKeysCommand
   .command("revoke")
   .description("Revoke one of a target account's keys")
   .argument("<username>", "Username of the account")
-  .argument("<id>", "Key row id (from 'nemar admin keys list')")
+  .argument("<id>", "Key row id (from 'nemar admin users keys list')")
   .action(async (username: string, idStr: string) => {
     if (!requireAuth()) return;
 
@@ -1601,7 +1600,7 @@ adminKeysCommand
     }
   });
 
-adminCommand.addCommand(adminKeysCommand);
+adminUsersCommand.addCommand(adminKeysCommand);
 
 // ============================================================================
 // Documentation retrieval
@@ -7981,14 +7980,10 @@ adminCommand.addCommand(anonymitySweepCommand);
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
-// `admin dataset doctor` holds the dataset checks; the top-level `admin doctor` keeps only `kinds`,
-// an account check, until it moves to `admin users kind-check` (ADR 0135, phase P2).
+// `admin dataset doctor` holds the dataset checks; the one account check, the former
+// `admin doctor kinds`, is `admin users kind-check` (ADR 0135), so `admin doctor` is gone.
 const datasetDoctorCommand = new Command("doctor").description(
   "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
-);
-
-const doctorCommand = new Command("doctor").description(
-  "Check operational account kinds (the dataset checks are 'admin dataset doctor')",
 );
 
 function printScanResults(res: DoctorScanResponse): number {
@@ -8207,8 +8202,8 @@ export async function runDoctorFixLoop(
   return { totals, results };
 }
 
-doctorCommand
-  .command("kinds")
+adminUsersCommand
+  .command("kind-check")
   .description("Check that operational accounts carry their expected account kind (read-only)")
   .action(async () => {
     if (!requireAuth()) return;
@@ -8250,17 +8245,16 @@ doctorCommand
       }
       console.log(
         chalk.yellow(
-          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin kind <username> <kind>\`.`,
+          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin users kind <username> <kind>\`.`,
         ),
       );
     } catch (err) {
-      spinner.fail("Doctor kinds check failed");
+      spinner.fail("Account kind check failed");
       console.error(chalk.red(errorDetail(err)));
       process.exit(1);
     }
   });
 
-adminCommand.addCommand(doctorCommand);
 datasetGroupCommand.addCommand(datasetDoctorCommand);
 
 // ============================================================================
@@ -8317,7 +8311,9 @@ emailPrefsCommand
       console.log(chalk.dim(`  ${mailRecallWhy()}`));
 
       console.log();
-      console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
+      console.log(
+        chalk.dim("  Use 'nemar admin users email-preferences update' to change settings."),
+      );
     } catch (err) {
       spinner.fail("Failed to fetch preferences");
       console.error(chalk.red(errorDetail(err)));
@@ -8469,7 +8465,7 @@ emailPrefsCommand
     },
   );
 
-adminCommand.addCommand(emailPrefsCommand);
+adminUsersCommand.addCommand(emailPrefsCommand);
 
 // ============================================================================
 // System Notices
@@ -9290,104 +9286,6 @@ zarrCatalogCommand
 adminCommand.addCommand(zarrCatalogCommand);
 
 // ============================================================================
-// Researcher-name backfill (#1255, epic #1250)
-//
-// DOIs cite the uploader by real name and publishing is blocked without one,
-// but most accounts predate the signup-time ORCID name lookup. This fills the
-// gap from each account's own public ORCID record.
-// ============================================================================
-
-const backfillNamesCommand = new Command("backfill-names").description(
-  "Fill missing researcher names from users' public ORCID records (dry run by default)",
-);
-
-backfillNamesCommand
-  .option("--apply", "Write the names (without this flag, only report what would change)")
-  .option("--limit <n>", "Users per batch (server clamps to [1,100])", "25")
-  .option("--json", "Output raw JSON instead of the human summary")
-  .action(async (options: { apply?: boolean; limit?: string; json?: boolean }) => {
-    if (!requireAuth()) return;
-
-    const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
-    const apply = options.apply === true;
-    const spinner = ora(
-      apply ? "Backfilling names from ORCID..." : "Checking ORCID for missing names...",
-    ).start();
-
-    let res: BackfillNamesResponse;
-    try {
-      res = await backfillUserNames({ apply, limit });
-      spinner.stop();
-    } catch (err) {
-      spinner.fail("Name backfill failed");
-      console.error(chalk.red(errorDetail(err)));
-      process.exit(1);
-      return;
-    }
-
-    // Computed before the --json branch returns, so a scripted caller reading
-    // the exit code sees the same verdict as someone reading the summary below.
-    // A lookup failure leaves the row a candidate for the next run, and an
-    // unknown remainder means the batch's own bookkeeping failed. Neither is
-    // fatal, but a caller must not read either as a clean sweep.
-    if (res.lookup_failed > 0 || (res.write_failed ?? 0) > 0 || res.remaining === null) {
-      process.exitCode = 1;
-    }
-
-    if (options.json) {
-      console.log(JSON.stringify(res, null, 2));
-      return;
-    }
-
-    console.log();
-    if (!res.apply) {
-      console.log(chalk.yellow("DRY RUN — nothing was written. Re-run with --apply."));
-    }
-    console.log(
-      chalk.cyan(
-        `scanned=${res.scanned} ${res.apply ? "filled" : "would_fill"}=${
-          res.apply ? res.filled : res.would_fill
-        } no_public_name=${res.no_public_name} lookup_failed=${
-          res.lookup_failed
-        } write_failed=${res.write_failed ?? 0} remaining=${res.remaining ?? "unknown"}`,
-      ),
-    );
-    for (const r of res.results) {
-      const who = r.username ?? `id ${r.id} <${r.email}>`;
-      if (r.outcome === "filled" || r.outcome === "would_fill") {
-        const verb = r.outcome === "filled" ? chalk.green("filled  ") : chalk.cyan("would fill");
-        console.log(`  ${verb} ${who}: ${r.given_name} ${r.family_name}  (${r.orcid})`);
-      } else if (r.outcome === "no_public_name") {
-        console.log(
-          `  ${chalk.yellow("no name ")} ${who}: ORCID ${r.orcid} does not publish a full name`,
-        );
-      } else if (r.outcome === "write_failed") {
-        // Not folded in with the ORCID failure below: the name was READ fine
-        // and our own write is what refused it, so the operator is looking at
-        // D1 rather than at orcid.org.
-        console.log(`  ${chalk.red("write   ")} ${who}: ${r.error}; retry the batch`);
-      } else {
-        console.log(`  ${chalk.red("error   ")} ${who}: ${r.error}`);
-      }
-    }
-    // `remaining=unknown` above means the count query itself failed; say what
-    // failed rather than leaving the operator to guess (#1255 review item 28).
-    if (res.warning) {
-      console.log(chalk.yellow(`  Warning: ${res.warning}`));
-    }
-    if (res.no_public_name > 0) {
-      console.log();
-      console.log(
-        chalk.dim(
-          "These accounts must make their name public on their ORCID record and sign in again; NEMAR cannot type a name in for an ORCID-linked account, because the record is re-read on every sign-in and would overwrite it. An account with no verified ORCID can set its name in Settings (ADR 0042).",
-        ),
-      );
-    }
-  });
-
-adminCommand.addCommand(backfillNamesCommand);
-
-// ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
 // ============================================================================
 
@@ -10055,7 +9953,7 @@ adminCommand.addCommand(importWeeklyCommand);
 // name (first initial plus family name) and, for a row it finishes, sends the
 // one verify-your-email message that lets the person sign in and use it.
 //
-// Run `nemar admin backfill-names` FIRST: this reads the names that one fills.
+// It reads the account's researcher name; an account with none is reported, never guessed at.
 // ============================================================================
 
 const backfillUsernamesCommand = new Command("backfill-usernames").description(
@@ -10153,7 +10051,7 @@ backfillUsernamesCommand
         );
       } else if (r.outcome === "no_name") {
         console.log(
-          `  ${chalk.yellow("no name   ")} ${who}: run 'nemar admin backfill-names --apply' first`,
+          `  ${chalk.yellow("no name   ")} ${who}: no name on record. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
         );
       } else if (r.outcome === "conflict") {
         console.log(`  ${chalk.yellow("conflict  ")} ${who}: ${r.error}`);
@@ -10195,14 +10093,14 @@ backfillUsernamesCommand
     }
   });
 
-adminCommand.addCommand(backfillUsernamesCommand);
+adminUsersCommand.addCommand(backfillUsernamesCommand);
 
 // ============================================================================
 // Duplicate accounts (#1254, epic #1250; ADR 0043)
 // ============================================================================
 
 /**
- * `nemar admin duplicates` — live accounts sharing an ORCID iD, an email
+ * `nemar admin users duplicates` — live accounts sharing an ORCID iD, an email
  * address, or a GitHub handle, plus the `--clear` half that un-flags a row
  * once its collision is gone.
  *
@@ -10307,7 +10205,7 @@ duplicatesCommand
             `${report.flagged_count} account(s) still carry an identity-conflict flag with no remaining collision.`,
           ),
         );
-        console.log(chalk.dim("  Clear each with 'nemar admin duplicates --clear <id>'."));
+        console.log(chalk.dim("  Clear each with 'nemar admin users duplicates --clear <id>'."));
       }
       return;
     }
@@ -10333,7 +10231,7 @@ duplicatesCommand
     process.exitCode = 1;
   });
 
-adminCommand.addCommand(duplicatesCommand);
+adminUsersCommand.addCommand(duplicatesCommand);
 
 // ============================================================================
 // Neurobagel federation artifacts (epic #1586 phase 4, ADR 0084)

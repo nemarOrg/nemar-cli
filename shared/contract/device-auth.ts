@@ -151,7 +151,7 @@ export const DEVICE_AUTH_MESSAGES: Record<DeviceAuthRefusalCode, string> = {
   identity_conflict:
     "This account shares an identifier with another NEMAR account and cannot sign in until that is resolved. Fix it in Settings on nemar.org or contact the NEMAR team.",
   service_account:
-    "This is a service or test account, and it cannot sign in this way. Ask an owner to create a key for it with `nemar admin keys create`.",
+    "This is a service or test account, and it cannot sign in this way. Ask an owner to create a key for it with `nemar admin users keys create`.",
   person_account:
     "This account belongs to a person. A person creates their own keys with `nemar auth login` or in Settings on nemar.org.",
   too_many_keys: `This account already has ${MAX_LIVE_API_KEYS} active keys. Revoke one in Settings on nemar.org or with \`nemar auth keys\`, then try again.`,

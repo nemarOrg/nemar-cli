@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import type { Command } from "commander";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import { markReportedExit } from "./debug-log.js";
 
 /**
@@ -90,6 +91,30 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     oldPath: "s3 regenerate-iam",
     retired:
       "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
+  },
+  // ADR 0135, phase P2: the account commands gather under `admin users`, and `admin doctor`,
+  // whose dataset checks moved in P1, dissolves with its last child.
+  { oldPath: "approve", newPath: "users approve" },
+  { oldPath: "revoke", newPath: "users revoke" },
+  { oldPath: "role", newPath: "users role" },
+  { oldPath: "verify", newPath: "users verify" },
+  { oldPath: "kind", newPath: "users kind" },
+  { oldPath: "keys", newPath: "users keys" },
+  { oldPath: "keys create", newPath: "users keys create" },
+  { oldPath: "keys list", newPath: "users keys list" },
+  { oldPath: "keys revoke", newPath: "users keys revoke" },
+  { oldPath: "email-preferences", newPath: "users email-preferences" },
+  { oldPath: "email-preferences show", newPath: "users email-preferences show" },
+  { oldPath: "email-preferences update", newPath: "users email-preferences update" },
+  { oldPath: "duplicates", newPath: "users duplicates" },
+  { oldPath: "backfill-usernames", newPath: "users backfill-usernames" },
+  { oldPath: "doctor", newPath: "dataset doctor" },
+  { oldPath: "doctor kinds", newPath: "users kind-check" },
+  // Retired: drained (a production dry run found nothing left to fill), and names now come from
+  // ORCID at sign-up. The backend route stays.
+  {
+    oldPath: "backfill-names",
+    retired: `names now come from ORCID at sign-up, and the backfill has nothing left to fill. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
   },
 ];
 

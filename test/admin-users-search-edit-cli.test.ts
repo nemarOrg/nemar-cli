@@ -754,7 +754,7 @@ describe("show and edit refuse listing options they would silently drop", () => 
     ]);
     expect(result.exitCode).not.toBe(0);
     expect(result.all).toContain("--role");
-    expect(result.all).toContain("nemar admin role");
+    expect(result.all).toContain("nemar admin users role");
     expect(column(id, "city")).toBeNull();
     expect(column(id, "role")).toBe("member");
   });

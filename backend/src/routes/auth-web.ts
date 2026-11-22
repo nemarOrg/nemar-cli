@@ -982,7 +982,7 @@ export const _profilePatchShapesAgree: MutuallyAssignable<
  *     because the 19 web/ORCID rows this phase exists for are approved and
  *     hold NULL, and a first assignment is not a change -- and CHANGED until
  *     an admin approves the account, after which a rename is locked (409
- *     `username_locked`): it is what `nemar admin approve <username>`
+ *     `username_locked`): it is what `nemar admin users approve <username>`
  *     addresses and what the dataset repos an approved account owns are
  *     attributed to.
  *   - a name is refused (409 `name_is_orcid_canonical`) while a VERIFIED ORCID

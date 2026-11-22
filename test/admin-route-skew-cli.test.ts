@@ -97,7 +97,7 @@ describe("the 0.10.18 Worker: a route it does not have says so, and is an answer
   test("`admin verify` says only that the backend does not support it, not that the user is missing", async () => {
     await h.user("skewowner", "owner", OWNER_KEY);
 
-    const r = await onOld(["admin", "verify", "80", "--yes"]);
+    const r = await onOld(["admin", "users", "verify", "80", "--yes"]);
 
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain("Route POST /admin/users/by-id/80/verify not found");
@@ -154,7 +154,7 @@ describe("a Worker of this release: the answers those two commands already had a
   test("`admin verify` of an unknown account still says the user was not found", async () => {
     await h.user("skewowner", "owner", OWNER_KEY);
 
-    const r = await h.cli(["admin", "verify", "99999", "--yes"]);
+    const r = await h.cli(["admin", "users", "verify", "99999", "--yes"]);
 
     expect(r.exitCode).toBe(1);
     expect(output(r)).toContain("User not found");

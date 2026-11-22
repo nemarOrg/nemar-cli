@@ -348,8 +348,8 @@ describe("a stub word in a live command's arguments reaches the live command", (
     expect(requests.some((r) => r.startsWith("GET /admin/users"))).toBe(true);
   });
 
-  test("admin approve publish asks to approve the user named publish", async () => {
-    const result = await run(CLI_ENTRY, ["admin", "approve", "publish"]);
+  test("admin users approve publish asks to approve the user named publish", async () => {
+    const result = await run(CLI_ENTRY, ["admin", "users", "approve", "publish"]);
     expect(result.stderr + result.stdout).not.toMatch(pointer);
     expect(result.stdout).toContain("Approving user: publish");
   });

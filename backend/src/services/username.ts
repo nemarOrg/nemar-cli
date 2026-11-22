@@ -5,7 +5,7 @@
  *   - web/ORCID sign-ups, whose `users.username` is NULL by design
  *     (migration 0026) and stays NULL forever -- 19 live rows;
  *   - anyone who wants to request upload access, since the request's admin
- *     review card and `nemar admin approve <username>` are both keyed on it.
+ *     review card and `nemar admin users approve <username>` are both keyed on it.
  *
  * ADR 0042 fixes the default at FIRST INITIAL + FAMILY NAME (`alovelace`),
  * derived from the same `given_name`/`family_name` pair ADR 0041 made

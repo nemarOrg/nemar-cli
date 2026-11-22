@@ -75,7 +75,6 @@ import type {
   StartReviewResponse,
   WaiveNamingResponse,
 } from "../../../shared/contract/pr-review-admin.js";
-import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
 import type { RepullWeekFacts } from "../../../shared/repull-observability.js";
 import type {
@@ -320,7 +319,7 @@ export async function setAccountKind(
   );
 }
 
-/** The fields `nemar admin doctor kinds` reads off `GET
+/** The fields `nemar admin users kind-check` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
  *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
  *  credentials are never returned, ADR 0096) plus two computed columns, so
@@ -2349,59 +2348,6 @@ export async function importWeeklySummary(options?: {
   return request<WeeklySummaryResponse>(
     `/admin/imports/weekly-summary${query}`,
     { method: "POST", headers: { "Content-Type": "application/json" } },
-    true,
-  );
-}
-
-// ============================================================================
-// Researcher-name backfill (#1255, epic #1250)
-// ============================================================================
-
-export interface BackfillNameResult {
-  id: number;
-  username: string | null;
-  email: string;
-  orcid: string;
-  outcome: BackfillNameOutcome;
-  given_name?: string | null;
-  family_name?: string | null;
-  error?: string;
-}
-
-export interface BackfillNamesResponse {
-  apply: boolean;
-  scanned: number;
-  filled: number;
-  would_fill: number;
-  no_public_name: number;
-  lookup_failed: number;
-  /** Rows whose name UPDATE threw. Optional: a backend that predates #1274 had
-   *  no such outcome -- one failed write 500ed the whole batch. */
-  write_failed?: number;
-  /** Candidates still missing a name after this batch; `null` when the count
-   *  query itself failed (never confuse that with "nothing left"). */
-  remaining: number | null;
-  /** Set when a non-fatal part of the batch failed, e.g. the remaining count. */
-  warning?: string;
-  results: BackfillNameResult[];
-}
-
-/** Fill NULL researcher names from the public ORCID record. Dry run unless
- *  `apply` is true. */
-export async function backfillUserNames(options?: {
-  apply?: boolean;
-  limit?: number;
-}): Promise<BackfillNamesResponse> {
-  return request<BackfillNamesResponse>(
-    "/admin/users/backfill-names",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        apply: options?.apply ?? false,
-        ...(options?.limit != null ? { limit: options.limit } : {}),
-      }),
-    },
     true,
   );
 }

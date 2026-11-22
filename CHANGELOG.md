@@ -15,6 +15,16 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Admin command tree: the `users` group (epic #2307, ADR 0135)
+
+- **The account commands moved under `nemar admin users`.**
+  `approve`, `revoke`, `role`, `verify`, `kind`, `keys` (with `create`, `list`, `revoke`), `email-preferences` (with `show`, `update`), `duplicates` and `backfill-usernames` keep their names under `users`; `admin doctor kinds` is `admin users kind-check`, which empties `admin doctor`, so `admin doctor` alone points at `admin dataset doctor`.
+  `nemar admin users` itself still lists and searches accounts, and its option values (`--search approve`, `--kind test`) stay values.
+  Each old path runs nothing, prints one line naming the new path and exits 1.
+- **Retired:** `admin backfill-names`, which had nothing left to fill now that names come from ORCID at sign-up (the backend route stays).
+  The hint for a dataset whose owner has no researcher name no longer tells admins to run it; it says, in one shared sentence (`cli.admin.owner_name_missing.fix` in `shared/contract/account-copy.ts`), that an ORCID-linked owner makes the name public on their ORCID record and signs in again, and that only an owner with no verified ORCID link types it into Settings on nemar.org (Settings refuses the edit for an ORCID-linked owner).
+- The approval mail and the upload-access request mail name `nemar admin users approve <username>` (or `--id <id>`); the other backend and refusal text that named an account command names its `users` path.
+
 ### Admin command tree: the `dataset` group (epic #2307, ADR 0135)
 
 - **`nemar admin repo` is now `nemar admin dataset`, and the per-dataset commands moved under it.**

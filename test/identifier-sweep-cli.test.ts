@@ -88,11 +88,11 @@ async function runCli(args: string[], apiUrl: string) {
   return { stdout, stderr, exitCode: await proc.exited };
 }
 
-describe("nemar admin email-preferences and the identifier sweep", () => {
+describe("nemar admin users email-preferences and the identifier sweep", () => {
   test("show lists the weekly report and its state", async () => {
     const server = startServer();
     try {
-      const r = await runCli(["admin", "email-preferences", "show"], server.url);
+      const r = await runCli(["admin", "users", "email-preferences", "show"], server.url);
       expect(r.exitCode).toBe(0);
       expect(`${r.stdout}${r.stderr}`).toMatch(/Identifier sweep weekly report\s+disabled/);
     } finally {
@@ -104,7 +104,7 @@ describe("nemar admin email-preferences and the identifier sweep", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--all", "false"],
+        ["admin", "users", "email-preferences", "update", "--all", "false"],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -131,7 +131,7 @@ describe("nemar admin email-preferences and the identifier sweep", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--identifier-sweep", "off"],
+        ["admin", "users", "email-preferences", "update", "--identifier-sweep", "off"],
         server.url,
       );
       expect(r.exitCode).toBe(0);

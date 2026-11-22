@@ -1310,7 +1310,7 @@ export async function sendKeyRegenerationVerificationEmail(
  * `username` and `github_username` are nullable because a web/ORCID account
  * has neither (migration 0026): the mail names the account by id and its
  * approve command by `--id` in that case, rather than rendering an empty
- * GitHub link and a `nemar admin approve` with no argument.
+ * GitHub link and a `nemar admin users approve` with no argument.
  */
 export async function sendAdminNotificationEmail(
   adminEmails: string[],
@@ -1329,8 +1329,8 @@ export async function sendAdminNotificationEmail(
 ): Promise<void> {
   const label = user.username ?? (user.id ? `id ${user.id}` : user.email);
   const approveCommand = user.username
-    ? `nemar admin approve</span> ${escapeHtml(user.username)}`
-    : `nemar admin approve</span> --id ${escapeHtml(String(user.id ?? ""))}`;
+    ? `nemar admin users approve</span> ${escapeHtml(user.username)}`
+    : `nemar admin users approve</span> --id ${escapeHtml(String(user.id ?? ""))}`;
   const githubCell = user.github_username
     ? `<a href="https://github.com/${escapeHtml(user.github_username)}" style="color: #2563eb;">${escapeHtml(user.github_username)}</a>`
     : "<em>not linked</em>";
@@ -1519,7 +1519,7 @@ export async function sendUploadAccessRequestEmail(
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Granting upload access</h2>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin approve</span> ${escapeHtml(request.username)}
+    <span style="color: #16a34a;">nemar admin users approve</span> ${escapeHtml(request.username)}
   </div>
 
   <p style="color: #666; font-size: 14px;">

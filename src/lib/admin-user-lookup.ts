@@ -294,7 +294,7 @@ export function userDetailLines(user: AdminUserDetail): string[] {
   // The conditions worth a line only when true, so a normal account reads clean.
   if (user.identity_conflict) {
     lines.push(
-      `  ${chalk.yellow("! Flagged as a duplicate identity: see 'nemar admin duplicates'")}`,
+      `  ${chalk.yellow("! Flagged as a duplicate identity: see 'nemar admin users duplicates'")}`,
     );
   }
   if (user.username_auto_assigned) {

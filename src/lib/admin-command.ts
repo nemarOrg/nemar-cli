@@ -16,6 +16,7 @@
 
 import chalk from "chalk";
 import type { Ora } from "ora";
+import { accountCopy } from "../../shared/contract/account-copy.js";
 import { PUBLICATION_DATASET_ID_RE } from "../../shared/publication-limits.js";
 import { ApiError, errorDetail } from "./api/errors.js";
 import { reviewErrorCode } from "./api/publish.js";
@@ -30,8 +31,7 @@ import { plain } from "./terminal-text.js";
  * researcher name sends them to the wrong place entirely (#1255).
  */
 export const BLOCK_REASON_HINTS: Record<string, string> = {
-  owner_name_missing:
-    "Run `nemar admin backfill-names --apply` if the owner's ORCID record publishes their name; an ORCID-linked owner must otherwise make it public on ORCID and sign in again, and an owner with no linked ORCID can now type it into Settings on nemar.org (ADR 0042).",
+  owner_name_missing: `The owner has no researcher name on file. ${accountCopy("cli.admin.owner_name_missing.fix")} (ADR 0042)`,
 };
 
 /** A line sink: standard error under `--json`, standard output otherwise. */

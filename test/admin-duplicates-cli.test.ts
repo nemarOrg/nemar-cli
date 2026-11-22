@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin duplicates` (#1254, epic #1250; ADR 0043), driven through
+ * CLI `nemar admin users duplicates` (#1254, epic #1250; ADR 0043), driven through
  * the real entry point (`bun run src/index.ts admin duplicates`).
  *
  * The duplicate report is the whole operator interface for the
@@ -128,11 +128,11 @@ async function runCli(args: string[], testApiUrl: string) {
   return { stdout, stderr, exitCode };
 }
 
-describe("nemar admin duplicates", () => {
+describe("nemar admin users duplicates", () => {
   test("prints the group, marks the canonical row, and exits non-zero", async () => {
     const server = startServer({ report: REPORT_WITH_GROUP });
     try {
-      const result = await runCli(["admin", "duplicates"], server.url);
+      const result = await runCli(["admin", "users", "duplicates"], server.url);
       expect(result.stdout).toContain("1 duplicate group(s); 1 account(s) flagged");
       expect(result.stdout).toContain("orcid  0000-0002-1974-1293");
       expect(result.stdout).toContain("id 42");
@@ -150,7 +150,7 @@ describe("nemar admin duplicates", () => {
   test("a clean catalog says so and exits zero", async () => {
     const server = startServer({ report: EMPTY_REPORT });
     try {
-      const result = await runCli(["admin", "duplicates"], server.url);
+      const result = await runCli(["admin", "users", "duplicates"], server.url);
       expect(result.stdout).toContain("No duplicate accounts.");
       expect(result.exitCode).toBe(0);
     } finally {
@@ -165,7 +165,7 @@ describe("nemar admin duplicates", () => {
       report: { groups: [], group_count: 0, flagged_count: 2 },
     });
     try {
-      const result = await runCli(["admin", "duplicates"], server.url);
+      const result = await runCli(["admin", "users", "duplicates"], server.url);
       expect(result.stdout).toContain("No duplicate accounts.");
       expect(result.stdout).toContain("2 account(s) still carry an identity-conflict flag");
       expect(result.stdout).toContain("--clear <id>");
@@ -177,7 +177,7 @@ describe("nemar admin duplicates", () => {
   test("--json emits the raw report and nothing else", async () => {
     const server = startServer({ report: REPORT_WITH_GROUP });
     try {
-      const result = await runCli(["admin", "duplicates", "--json"], server.url);
+      const result = await runCli(["admin", "users", "duplicates", "--json"], server.url);
       const parsed = JSON.parse(result.stdout);
       expect(parsed.group_count).toBe(1);
       expect(parsed.groups[0].canonical_user_id).toBe(43);
@@ -192,7 +192,7 @@ describe("nemar admin duplicates", () => {
       clear: { status: 200, body: { ok: true, id: 42, cleared: true } },
     });
     try {
-      const result = await runCli(["admin", "duplicates", "--clear", "42"], server.url);
+      const result = await runCli(["admin", "users", "duplicates", "--clear", "42"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Cleared the identity-conflict flag on user 42");
       expect(server.requests).toContain("POST /admin/users/42/clear-identity-conflict");
@@ -207,7 +207,7 @@ describe("nemar admin duplicates", () => {
       clear: { status: 200, body: { ok: true, id: 7, cleared: false } },
     });
     try {
-      const result = await runCli(["admin", "duplicates", "--clear", "7"], server.url);
+      const result = await runCli(["admin", "users", "duplicates", "--clear", "7"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("was not flagged");
     } finally {
@@ -231,7 +231,7 @@ describe("nemar admin duplicates", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "duplicates", "--clear", "42"], server.url);
+      const result = await runCli(["admin", "users", "duplicates", "--clear", "42"], server.url);
       expect(result.exitCode).toBe(1);
       expect(`${result.stdout}${result.stderr}`).toContain("Still colliding");
       // The SENTENCE, not the code. Until #1266 taught the client which
@@ -250,7 +250,7 @@ describe("nemar admin duplicates", () => {
     // an operator reads it as "nothing to do".
     const server = startServer({ report: { groups: "not-an-array", group_count: 1 } });
     try {
-      const result = await runCli(["admin", "duplicates"], server.url);
+      const result = await runCli(["admin", "users", "duplicates"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).not.toContain("No duplicate accounts.");
       expect(`${result.stdout}${result.stderr}`).toContain("contract");
@@ -264,7 +264,7 @@ describe("nemar admin duplicates", () => {
     // `--clear` half exists for: flags with no collision left behind them.
     const server = startServer({ report: { groups: [], group_count: 0 } });
     try {
-      const result = await runCli(["admin", "duplicates"], server.url);
+      const result = await runCli(["admin", "users", "duplicates"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).not.toContain("No duplicate accounts.");
     } finally {
@@ -275,7 +275,7 @@ describe("nemar admin duplicates", () => {
   test("a non-numeric --clear id is rejected before any request", async () => {
     const server = startServer({});
     try {
-      const result = await runCli(["admin", "duplicates", "--clear", "abc"], server.url);
+      const result = await runCli(["admin", "users", "duplicates", "--clear", "abc"], server.url);
       expect(result.exitCode).toBe(1);
       expect(`${result.stdout}${result.stderr}`).toContain("Invalid user id");
       expect(server.requests.some((r) => r.includes("clear-identity-conflict"))).toBe(false);

@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin backfill-usernames` (ADR 0042, #1253, epic #1250), driven
+ * CLI `nemar admin users backfill-usernames` (ADR 0042, #1253, epic #1250), driven
  * through the real entry point (`bun run src/index.ts admin ...`).
  *
  * The sweep is destructive-ish (it assigns handles and mails people), so the
@@ -128,12 +128,12 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
-describe("nemar admin backfill-usernames", () => {
+describe("nemar admin users backfill-usernames", () => {
   test("defaults to a dry run and says so", async () => {
     seedAuthenticatedConfig();
     const server = startServer(DRY_RUN_REPLY);
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.bodies[0]).toMatchObject({ apply: false, limit: 25 });
       expect(result.stdout).toContain("DRY RUN");
@@ -162,7 +162,7 @@ describe("nemar admin backfill-usernames", () => {
       })),
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--apply"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.bodies[0]).toMatchObject({ apply: true });
       expect(result.stdout).not.toContain("DRY RUN");
@@ -179,7 +179,7 @@ describe("nemar admin backfill-usernames", () => {
     seedAuthenticatedConfig();
     const server = startServer(DRY_RUN_REPLY);
     try {
-      await runCli(["admin", "backfill-usernames", "--limit", "5"], server.url);
+      await runCli(["admin", "users", "backfill-usernames", "--limit", "5"], server.url);
       expect(server.bodies[0]).toMatchObject({ limit: 5 });
     } finally {
       server.stop();
@@ -207,7 +207,7 @@ describe("nemar admin backfill-usernames", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("one name");
       expect(result.stdout).toContain("pick a username by hand");
@@ -244,7 +244,7 @@ describe("nemar admin backfill-usernames", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("exhausted ");
       expect(result.stdout).toContain("No free variant of 'alovelace' within the suffix limit");
@@ -284,7 +284,7 @@ describe("nemar admin backfill-usernames", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("write     ");
       expect(result.stdout).toContain("D1_ERROR: claim blocked for this row");
@@ -316,7 +316,7 @@ describe("nemar admin backfill-usernames", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       // A transient failure must not read as a clean sweep to a script.
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("HTTP 503");
@@ -340,7 +340,7 @@ describe("nemar admin backfill-usernames", () => {
       results: [{ ...DRY_RUN_REPLY.results[0], outcome: "assigned", verify: "failed" }],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("verify_failed=1");
     } finally {
@@ -360,7 +360,7 @@ describe("nemar admin backfill-usernames", () => {
       results: [{ ...DRY_RUN_REPLY.results[0], outcome: "assigned", verify: "rate_limited" }],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--apply"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("verify_rate_limited=1");
     } finally {
@@ -387,7 +387,7 @@ describe("nemar admin backfill-usernames", () => {
       remaining: 0,
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--apply"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--apply"], server.url);
       expect(result.stdout).toContain("re-sent");
       expect(result.stdout).toContain("retried@example.org");
       expect(result.stdout).toContain("verify failed");
@@ -404,7 +404,7 @@ describe("nemar admin backfill-usernames", () => {
     seedAuthenticatedConfig();
     const server = startServer(DRY_RUN_REPLY);
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("verify_failed=0");
     } finally {
@@ -420,7 +420,7 @@ describe("nemar admin backfill-usernames", () => {
       warning: "Could not count remaining candidates: D1_ERROR",
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("remaining=unknown");
       expect(result.stdout).toContain("Could not count remaining candidates");
@@ -433,7 +433,7 @@ describe("nemar admin backfill-usernames", () => {
     seedAuthenticatedConfig();
     const server = startServer(DRY_RUN_REPLY);
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--json"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--json"], server.url);
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(result.stdout)).toEqual(DRY_RUN_REPLY);
     } finally {
@@ -467,7 +467,7 @@ describe("nemar admin backfill-usernames", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "backfill-usernames", "--json"], server.url);
+      const result = await runCli(["admin", "users", "backfill-usernames", "--json"], server.url);
       expect(result.exitCode).toBe(1);
       expect(JSON.parse(result.stdout)).toMatchObject({ exhausted: 1 });
     } finally {

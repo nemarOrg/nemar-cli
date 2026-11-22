@@ -124,7 +124,6 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "availabilityReport",
     "availabilityReportSweep",
     "availabilityReportSweepReset",
-    "backfillUserNames",
     "backfillUsernames",
     "bulkDeleteDatasets",
     "changeUserRole",
@@ -334,7 +333,6 @@ const POST_SPLIT_ADDITIONS = [
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "revokeUserById", // #1274, ADR 0040: id-keyed revoke, the approve twin's eraser
   "verifyUserById", // ADR 0103: owner force verify, POST /admin/users/by-id/:id/verify
-  "backfillUserNames", // #1255, epic #1250: POST /admin/users/backfill-names
   "backfillUsernames", // #1253, epic #1250: POST /admin/users/backfill-usernames
   "checkOrcidName", // #1255, epic #1250: GET /auth/orcid-name pre-signup lookup
   "clearIdentityConflict", // #1254, ADR 0043: POST /admin/users/:id/clear-identity-conflict
@@ -347,7 +345,7 @@ const POST_SPLIT_ADDITIONS = [
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "editAdminUser", // ADR 0096: PATCH /admin/users/by-id/:id, `nemar admin users edit`
   "getAdminUserById", // ADR 0096: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
-  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
+  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin users kind-check`
   "getBroadcastStatus", // epic #1893 phase 2: GET /admin/notify/:id, `nemar admin notify --status`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates
