@@ -171,6 +171,7 @@ That record is kept seven years, the period the compute records themselves keep 
 - The governing queue is the ticket's `queue_tag`.
   No code path changes it after creation, so the queue at purge time is the queue the ticket was filed in, and a ticket cannot leave `legal-process` to be purged early; a test fails if an update of `queue_tag` appears in the Worker's source.
   A request that arrived elsewhere is forwarded to `legal-process@`, which makes a new ticket in that queue; the original keeps its own queue's retention.
+  Mail to `legal-process@` never threads into a ticket of another queue (the `created` event records `retention_mismatch`), so a reply quoting a `security` or `conduct` ticket still opens a new `legal-process` ticket, while a reply to a `legal-process` ticket from another address threads into it and keeps the longer period.
   Tags are never read for retention, as they are never read for access.
 - The raw message in R2 still expires by the bucket's lifecycle rule (two years in production): the raw key carries no queue, so no rule can single these out.
   Between two and seven years a `legal-process` ticket's record is its D1 copy (messages, internal notes, events); a reprocess of its raw key is not possible then.
