@@ -1,7 +1,8 @@
 # ADR 0114: An authenticated data host is read through the CLI's own special remote and credential helper
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-26
+**Accepted:** 2026-10-27
 **Owner:** Seyed Yahya Shirazi
 
 Issue #1977.

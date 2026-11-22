@@ -1,7 +1,8 @@
 # ADR 0116: A phrase search returns the datasets judged to answer it, not every dataset that shares a word
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-29
+**Accepted:** 2026-10-29
 **Owner:** Seyed Yahya Shirazi
 
 ## Context
