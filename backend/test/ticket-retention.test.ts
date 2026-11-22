@@ -6,6 +6,8 @@
 
 import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { Hono } from "hono";
 import { Miniflare } from "miniflare";
 import { adminRoutes } from "../src/routes/admin";
@@ -17,7 +19,9 @@ import {
   replyToTicket,
   setTicketStatus,
 } from "../src/services/mail-admin";
+import { LEGAL_PROCESS_QUEUE_TAG } from "../src/services/ticket-assignment";
 import {
+  QUEUE_RETENTION_DAYS,
   purgeExpiredTickets,
   purgeOneTicket,
   retentionDays,
@@ -789,5 +793,148 @@ describe("review round 1: failure isolation, activity, races", () => {
     const r = await call("owner", "POST", `/tickets/${t}/reply`, { text: "hi" });
     expect(r.status).toBe(409);
     expect(binding.sent.length).toBe(0);
+  });
+});
+
+describe("queue retention: legal-process is kept seven years (ADR 0112 amendment 2026-11-22)", () => {
+  const NOW = new Date("2026-10-24T12:00:00Z");
+  const STAMP = "2026-10-24 12:00:00";
+  // 730 days before NOW (MAIL_RETENTION_DAYS) and 2557 days before NOW (the queue's floor).
+  const CUTOFF = "2024-10-24 12:00:00";
+  const LEGAL_CUTOFF = "2019-10-24 12:00:00";
+  const legal = (lastAt: string) =>
+    ticket({ queue: LEGAL_PROCESS_QUEUE_TAG, restricted: true, lastAt });
+
+  test("the floor is declared once, at 2557 days, for legal-process only", () => {
+    expect([...QUEUE_RETENTION_DAYS]).toEqual([["legal-process", 2557]]);
+  });
+
+  test("migration 0149 seeds the queue restricted, as a pool with no assignee", () => {
+    const q = db
+      .query(
+        "SELECT restricted, strategy, assignee_user_id, backup_user_id FROM mail_queues WHERE tag = ?",
+      )
+      .get(LEGAL_PROCESS_QUEUE_TAG);
+    expect(q).toEqual({
+      restricted: 1,
+      strategy: "pool",
+      assignee_user_id: null,
+      backup_user_id: null,
+    });
+  });
+
+  test("older than two years and younger than seven: kept, while other queues purge as before", async () => {
+    const kept = legal("2023-01-01 00:00:00");
+    const others = ["support", "*", "security", "conduct"].map((queue) =>
+      ticket({
+        queue,
+        restricted: queue === "security" || queue === "conduct",
+        lastAt: "2023-01-01 00:00:00",
+      }),
+    );
+    const r = await purgeExpiredTickets(env(), NOW);
+    expect(r).toMatchObject({ status: "ok", cutoff: CUTOFF, purged: 4, failed: 0 });
+    expect(row(kept).purged_at).toBeNull();
+    expect(row(kept).requester_email).toBe("ada@sender.example");
+    expect(others.every((id) => row(id).purged_at !== null)).toBe(true);
+  });
+
+  test("older than seven years: purged like any ticket, the boundary strict", async () => {
+    const older = legal("2019-10-24 11:59:59");
+    const exact = legal(LEGAL_CUTOFF);
+    const newer = legal("2019-10-24 12:00:01");
+    const r = await purgeExpiredTickets(env(), NOW);
+    expect(r).toMatchObject({ status: "ok", purged: 1 });
+    expect(row(older).purged_at).toBe(STAMP);
+    expect(row(older).requester_email).toBe("");
+    expect(events(older).at(-1)?.kind).toBe("purged");
+    expect(row(exact).purged_at).toBeNull();
+    expect(row(newer).purged_at).toBeNull();
+  });
+
+  test("the floor only lengthens: a longer MAIL_RETENTION_DAYS still governs legal-process", async () => {
+    retention = "3000";
+    // 2600 days old: past the queue's 2557, inside the general 3000.
+    const t = legal("2019-09-02 12:00:00");
+    expect((await purgeExpiredTickets(env(), NOW)).purged).toBe(0);
+    expect(row(t).purged_at).toBeNull();
+  });
+
+  test("staging's 30 days does not shorten it either", async () => {
+    retention = "30";
+    const t = legal("2026-01-01 00:00:00");
+    const other = ticket({ lastAt: "2026-01-01 00:00:00" });
+    expect((await purgeExpiredTickets(env(), NOW)).purged).toBe(1);
+    expect(row(t).purged_at).toBeNull();
+    expect(row(other).purged_at).not.toBeNull();
+  });
+
+  test("the per-ticket claim re-checks the floor, so a direct purge of a young legal ticket does nothing", async () => {
+    const t = legal("2023-01-01 00:00:00");
+    expect(await purgeOneTicket(realD1(db), t, STAMP, CUTOFF)).toBe(false);
+    expect(row(t).purged_at).toBeNull();
+    expect(count("mail_messages", t)).toBe(0);
+    const old = legal("2019-01-01 00:00:00");
+    expect(await purgeOneTicket(realD1(db), old, STAMP, CUTOFF)).toBe(true);
+  });
+
+  test("mail to legal-process@ lands in the queue and is kept, even with the queue row deleted", async () => {
+    db.run("DELETE FROM mail_queues WHERE tag = ?", [LEGAL_PROCESS_QUEUE_TAG]);
+    const received = new Date("2023-01-01T00:00:00Z");
+    const result = await ingestInboundMessage(realD1(db), {
+      rawKey: "inbound/raw/2023/01/01/7d1e2f3a-1111-4222-8333-444455556666.eml",
+      raw: eml({ from: "clerk@court.example", to: "legal-process@nemar.org", subject: "Subpoena" }),
+      envelopeFrom: "clerk@court.example",
+      envelopeTo: "legal-process@nemar.org",
+      receivedAt: received,
+    });
+    expect(result.outcome).toBe("created");
+    expect(row(result.ticketId)).toMatchObject({ queue_tag: "legal-process", restricted: 1 });
+    await purgeExpiredTickets(env(), NOW);
+    expect(row(result.ticketId).purged_at).toBeNull();
+    expect(count("mail_messages", result.ticketId)).toBe(1);
+  });
+
+  test("a request forwarded to legal-process@ from another ticket is a new legal-process ticket", async () => {
+    // Moving is forwarding: the runbook forwards a request that arrived elsewhere, and the copy is a
+    // ticket of its own in legal-process, kept seven years, whatever happens to the original.
+    const original = ticket({ queue: "support", lastAt: "2023-01-01 00:00:00" });
+    const forwarded = await ingestInboundMessage(realD1(db), {
+      rawKey: "inbound/raw/2023/01/02/8e2f3a4b-1111-4222-8333-444455556666.eml",
+      raw: eml({
+        from: "owner@nemar.org",
+        to: "legal-process@nemar.org",
+        subject: "Fwd: Subpoena",
+      }),
+      envelopeFrom: "owner@nemar.org",
+      envelopeTo: "legal-process@nemar.org",
+      receivedAt: new Date("2023-01-02T00:00:00Z"),
+    });
+    expect(forwarded.ticketId).not.toBe(original);
+    expect(row(forwarded.ticketId).queue_tag).toBe("legal-process");
+    await purgeExpiredTickets(env(), NOW);
+    expect(row(original).purged_at).not.toBeNull();
+    expect(row(forwarded.ticketId).purged_at).toBeNull();
+  });
+
+  test("no code path moves a ticket between queues, so its queue at purge time is its queue at filing", () => {
+    // If a move is ever added, the purge's governing queue must be revisited: a ticket that was in
+    // legal-process must not be purged early by leaving it. This scan fails first.
+    const root = join(import.meta.dir, "../src");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "migrations") walk(full);
+        } else if (entry.name.endsWith(".ts")) files.push(full);
+      }
+    };
+    walk(root);
+    expect(files.length).toBeGreaterThan(50);
+    const moves = files.filter((f) =>
+      /UPDATE\s+mail_tickets\s+SET[^;`]*\bqueue_tag\s*=/i.test(readFileSync(f, "utf-8")),
+    );
+    expect(moves).toEqual([]);
   });
 });
