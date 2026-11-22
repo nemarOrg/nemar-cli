@@ -1727,6 +1727,23 @@ adminCommand.addCommand(datasetGroupCommand);
 datasetGroupCommand.addCommand(publishCommand);
 
 // ============================================================================
+// Rework group (`admin rework`; ADR 0135 decision 3): operations that change the content or
+// history of a dataset that already exists.
+// ============================================================================
+
+const reworkCommand = new Command("rework").description(
+  "Change the content or history of an existing dataset: revert, annex repairs, recovery",
+);
+
+adminCommand.addCommand(reworkCommand);
+
+const reworkAnnexCommand = new Command("annex").description(
+  "Repair a dataset's git-annex: normalize, policy, key registration, content recovery",
+);
+
+reworkCommand.addCommand(reworkAnnexCommand);
+
+// ============================================================================
 // S3: Object Lock and credential checks for one dataset (`admin dataset s3`)
 // ============================================================================
 
@@ -3088,7 +3105,7 @@ datasetGroupCommand.addCommand(doiCommand);
 // Revert (Admin Only)
 // ============================================================================
 
-adminCommand
+reworkCommand
   .command("revert")
   .description("Revert a dataset to a previous version (creates PR for review)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")

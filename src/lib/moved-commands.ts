@@ -116,6 +116,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     oldPath: "backfill-names",
     retired: `names now come from ORCID at sign-up, and the backfill has nothing left to fill. ${accountCopy("cli.admin.owner_name_missing.fix")}`,
   },
+  // ADR 0135, phase P3: the repairs that change an existing dataset gather under `admin rework`.
+  { oldPath: "revert", newPath: "rework revert" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
