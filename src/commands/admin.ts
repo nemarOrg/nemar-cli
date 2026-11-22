@@ -222,6 +222,7 @@ import {
   deleteNotice,
   listAdminNotices,
 } from "../lib/api/notices.js";
+import { addApplyOption } from "../lib/apply-flag.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -3604,7 +3605,7 @@ function printTransitionResult(
   }
 }
 
-/** Print one unpublish result (the plan on a dry run, the outcome on an execute). */
+/** Print one unpublish result (the plan on a dry run, the outcome on an --apply run). */
 function printUnpublishResult(tag: string, result: UnpublishResponse): void {
   if ("skipped" in result) {
     console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${result.dataset_id}: ${result.skipped}`);
@@ -3639,14 +3640,17 @@ function printUnpublishResult(tag: string, result: UnpublishResponse): void {
     console.log(chalk.dim(`    ${UNPUBLISH_CACHE_NOTE}`));
 }
 
-datasetGroupCommand
-  .command("unpublish")
-  .description(
-    "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
-  )
-  .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
-  .option("--reason <reason>", "Why it is being unpublished (required with --execute)")
-  .option("--execute", "Actually apply the unpublish (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("unpublish")
+    .description(
+      "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
+    )
+    .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
+    .option("--reason <reason>", "Why it is being unpublished (required with --apply)"),
+  "Actually apply the unpublish (default is a dry run)",
+  ["--execute"],
+)
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .option("--json", "Output raw JSON")
@@ -3664,19 +3668,19 @@ Also repairs a dataset that was made private by a bare visibility change and sti
 publication record. Making a dataset public is what publishing does ('admin repo publish').
 
 Examples:
-  $ nemar admin repo unpublish nm000123                                      # dry run
-  $ nemar admin repo unpublish nm000123 --execute --reason "authors request"`,
+  $ nemar admin dataset unpublish nm000123                                    # dry run
+  $ nemar admin dataset unpublish nm000123 --apply --reason "authors request"`,
   )
   .action(
     async (
       datasetId: string,
-      options: { reason?: string; execute?: boolean; json?: boolean } & ConfirmOptions,
+      options: { reason?: string; apply?: boolean; json?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       if (!dryRun && !options.reason) {
-        console.log(chalk.red("Error: --reason is required with --execute"));
+        console.log(chalk.red("Error: --reason is required with --apply"));
         process.exit(1);
       }
 
@@ -3709,22 +3713,25 @@ Examples:
         console.log();
         printUnpublishResult(dryRun ? "[dry-run] " : "", result);
         if (dryRun && !("skipped" in result)) {
-          console.log(chalk.dim("\nNothing was changed. Re-run with --execute --reason <why>."));
+          console.log(chalk.dim("\nNothing was changed. Re-run with --apply --reason <why>."));
         }
       }
       if (!("skipped" in result) && result.visibility.status === "failed") process.exit(1);
     },
   );
 
-datasetGroupCommand
-  .command("withdraw")
-  .description(
-    "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
-  .option("--execute", "Actually apply the withdrawal (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("withdraw")
+    .description(
+      "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list")
+    .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)"),
+  "Actually apply the withdrawal (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
   .option(
     "--withdrawn-file <path>",
@@ -3739,7 +3746,7 @@ datasetGroupCommand
       options: {
         all?: boolean;
         reason?: string;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         withdrawnFile?: string;
         json?: boolean;
@@ -3784,7 +3791,7 @@ datasetGroupCommand
       }
       const targets = resolved.targets;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {
@@ -3829,14 +3836,17 @@ datasetGroupCommand
     },
   );
 
-datasetGroupCommand
-  .command("restore")
-  .description(
-    "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--execute", "Actually apply the restore (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("restore")
+    .description(
+      "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list"),
+  "Actually apply the restore (default is a dry run)",
+  ["--execute"],
+)
   .option(
     "--withdrawn-file <path>",
     "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
@@ -3849,7 +3859,7 @@ datasetGroupCommand
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         withdrawnFile?: string;
         json?: boolean;
       } & ConfirmOptions,
@@ -3880,7 +3890,7 @@ datasetGroupCommand
         targets = ids;
       }
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {

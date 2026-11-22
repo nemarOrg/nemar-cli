@@ -201,7 +201,7 @@ export function resolveWithdrawTargets(
     // Being ON the list is not the same as being a target. A reinstated entry
     // stays on it as the record of a withdrawal that was reversed, so the
     // not-on-the-list guard passes it straight through, and `nemar admin
-    // withdraw <id> --execute` would take a dataset this list says is whole and
+    // dataset withdraw <id> --apply` would take a dataset this list says is whole and
     // make it private with its DOIs tombstoned -- filing the outcome of the
     // repair, "recovered", as the reason for the withdrawal. `--all` learned
     // this via stillWithdrawn; the explicit-id path had not.
