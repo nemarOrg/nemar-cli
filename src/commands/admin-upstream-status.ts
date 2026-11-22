@@ -1,11 +1,11 @@
 /**
- * `nemar admin upstream-status`: which OpenNeuro mirrors are behind upstream (epic #1046 phase 4b,
+ * `nemar admin repull upstream-status`: which OpenNeuro mirrors are behind upstream (epic #1046 phase 4b,
  * #1910; ADR 0111, Phase 4a amendment).
  *
- *   nemar admin upstream-status                 every managed mirror, page after page
- *   nemar admin upstream-status --dataset on003645
- *   nemar admin upstream-status --json          the same, as one JSON document
- *   nemar admin upstream-status --measure       also read what a re-pull of each stale mirror would carry
+ *   nemar admin repull upstream-status          every managed mirror, page after page
+ *   nemar admin repull upstream-status --dataset on003645
+ *   nemar admin repull upstream-status --json   the same, as one JSON document
+ *   nemar admin repull upstream-status --measurealso read what a re-pull of each stale mirror would carry
  *
  * READ-ONLY: it calls `GET /admin/upstream-status`, which writes nothing. The pages are walked
  * here and added up by `lib/upstream-status-report.ts` from the rows, not from the pages' counts.

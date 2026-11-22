@@ -295,7 +295,7 @@ function withoutUpstream(m: MirrorFacts, row: ClassifiedMirror): ClassifiedMirro
     return settle(
       row,
       "not_examined",
-      `version ${mt.version} has not been examined for its upstream tag; run nemar admin upstream-backfill`,
+      `version ${mt.version} has not been examined for its upstream tag; run nemar admin repull upstream-backfill`,
     );
   }
   return null;

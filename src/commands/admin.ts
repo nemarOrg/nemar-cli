@@ -312,7 +312,8 @@ Dataset Management:
                       delete, reindex, doi, ci, s3, exemplar, doctor
   rework            - Change an existing dataset: revert (via PR), recover, and
                       annex normalize, policy, key-registration, content-recovery
-  import-openneuro  - Import an OpenNeuro dataset into NEMAR
+  import            - OpenNeuro imports: openneuro (import a dataset), status, rollback,
+                      retry, verify, coverage, weekly, triage
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -4012,7 +4013,7 @@ export function importTagOptionError(
 /**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
- * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
+ * hardened in epic #967 Phases 1-3. Shared by `import openneuro`'s default
  * (non---local) branch, a brand-new import, and `rework recover --apply` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
@@ -9827,7 +9828,7 @@ importWeeklyCommand
 
     const f = res.facts;
 
-    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // Exit codes mirror `nemar admin import coverage`, so one rule works across the
     // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
     // An earlier version set 1 only when a section failed to READ, so a week with
     // auto-import switched off exited 0 -- the exact condition this epic exists to

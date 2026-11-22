@@ -2,7 +2,7 @@
  * Aggregating and rendering the upstream staleness report across pages (epic #1046 phase 4b,
  * #1910; ADR 0111, Phase 4a amendment).
  *
- * Pure: `nemar admin upstream-status` fetches the pages, this decides what they add up to.
+ * Pure: `nemar admin repull upstream-status` fetches the pages, this decides what they add up to.
  *
  * AGGREGATION IS THE CALLER'S JOB. A page's `counts` are for that page; the totals here are
  * recounted from the DEDUPED rows with the shared `countUpstreamStates`, never by adding page
@@ -135,7 +135,7 @@ const MEANING: Record<UpstreamState, string> = {
   stale_unverified: "upstream is newer; the GitHub mirror could not be checked",
   anomaly: "upstream and NEMAR disagree in a way that needs a look (kinds below)",
   unknown: "upstream tag unknown; NOT compared, so not verified clean",
-  not_examined: "never examined for its tag; run nemar admin upstream-backfill",
+  not_examined: "never examined for its tag; run nemar admin repull upstream-backfill",
   unpublished: "no NEMAR version yet",
   in_progress: "an import is running",
   parked: "parked (blocklisted, quarantined or rolled back)",

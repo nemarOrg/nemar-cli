@@ -1,6 +1,6 @@
 /**
  * Does this week need a person to look? One rule, shared by the weekly report's headline
- * (backend/src/services/import-weekly-summary.ts) and by `nemar admin import-weekly`'s exit
+ * (backend/src/services/import-weekly-summary.ts) and by `nemar admin import weekly`'s exit
  * code (src/commands/admin.ts), so the two cannot drift (ADR 0054; epic #1586, phase 6).
  *
  * Before this file the command restated the rule by hand, and the Neurobagel reasons were added
