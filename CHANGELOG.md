@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Compute access decisions
+
+- **A suspension or an ending of compute access now tells the person why.**
+  `POST /admin/compute/access/{suspend|revoke}/...` requires a `notice`, plain text for the person of up to 1000 characters (newline and tab allowed, other control characters refused); a denial may carry one and a grant refuses one (400 `invalid_body`, field `notice`).
+  The decision mail shows it under a fixed heading and, for a denial, a suspension or an ending, says how to ask for a review (reply to the mail or write to support@nemar.org).
+  The audit `reason` is unchanged and is still never mailed.
+  `nemar admin compute access suspend` and `revoke` take a required `--notice <text>`, and `deny` an optional one.
+  A client that suspends or revokes without a notice (the website's compute tab until it adds the field) is refused.
+
 ### Community mail (epic #2260, ADR 0132)
 
 - **The unsubscribe link in a message now opens the website's page.**
