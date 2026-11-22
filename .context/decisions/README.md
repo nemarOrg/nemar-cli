@@ -31,8 +31,8 @@ The ones to know before touching the area they bind, each as a one-line summary 
 The ADR itself is the authority; where a summary here and an ADR disagree, the ADR wins.
 This is the list `AGENTS.md` used to carry inline, and it is the "AGENTS.md summary" that ADRs 0093 and 0111 refer to.
 Every number is in the index below.
-Status is read from each ADR's own `Status` line on 2026-11-04 and marked only when it is not `accepted`.
-ADRs 0092, 0093, 0110 and 0112 still read `proposed` although the features they decide are built and running; moving a header is the owner's call, so it is flagged here and left alone.
+Status is read from each ADR's own `Status` line on 2026-11-22 and marked only when it is not `accepted`.
+An ADR moves from `proposed` to `accepted` once its decision is built; its `Accepted` line gives the date that became true.
 
 - **ADR 0005**: partial data still serves.
 - **ADR 0009**: dev D1 is not a prod mirror.
