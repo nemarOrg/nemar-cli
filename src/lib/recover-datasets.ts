@@ -105,7 +105,7 @@ export interface ResolvedImportSources {
 /**
  * Resolve each target dataset id's OpenNeuro `ds######` source id from a flat
  * import_jobs listing (as returned by GET /admin/imports), so `nemar admin
- * recover --execute` can fail loudly BEFORE any mutating call if a target
+ * rework recover --apply` can fail loudly BEFORE any mutating call if a target
  * has no row (or an empty source_id). Pure so it is unit-testable without a
  * live backend; the CLI action is a thin wrapper around this.
  *

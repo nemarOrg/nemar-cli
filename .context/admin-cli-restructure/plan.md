@@ -152,7 +152,7 @@ Group rows move with their children; a stub on a group path catches every child 
 | `fleet enforce` | `fleet enforce` | unchanged | leaf |
 | `fleet require-review` | `fleet require-review` | unchanged | leaf |
 | `fleet revalidate` | `fleet revalidate` | unchanged | leaf |
-| `fleet annex-policy` | `rework annex annex-policy` | P3 | leaf |
+| `fleet annex-policy` | `rework annex policy` | P3 | leaf |
 | `fleet key-registration` | `rework annex key-registration` | P3 | leaf |
 | `fleet content-recovery` | `rework annex content-recovery` | P3 | leaf |
 | `reindex` | `dataset reindex` | P1 | leaf |

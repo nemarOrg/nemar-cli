@@ -265,7 +265,7 @@ export async function createGitHubReader(
               Authorization: `Bearer ${token}`,
               Accept: "application/vnd.github+json",
               "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "nemar-cli fleet annex-policy sweep",
+              "User-Agent": "nemar-cli rework annex policy sweep",
             },
           });
         } catch (error) {

@@ -567,11 +567,12 @@ export function registerImportRoutes(admin: AdminRouter): void {
 
   /**
    * POST /admin/imports/dispatch-cooldown - push `next_retry_at` forward for
-   * datasets `recover --execute` just dispatched out-of-band (#981).
+   * datasets `nemar admin rework recover --apply` (`--execute` is its hidden alias) just
+   * dispatched out-of-band (#981).
    *
    * The Phase-2 retry cron (services/import-retry.ts sweepImportRetries)
    * independently scans `incomplete` rows with `next_retry_at <= now` and
-   * re-dispatches onboard-openneuro.yml for them. `recover --execute`
+   * re-dispatches onboard-openneuro.yml for them. `rework recover --apply`
    * reclassifies a row to `incomplete` with `next_retry_at = now` (see
    * /imports/:id/verify above) and then dispatches the same workflow itself,
    * so without this call the next cron tick can re-dispatch the very same
@@ -582,7 +583,7 @@ export function registerImportRoutes(admin: AdminRouter): void {
    *
    * The WHERE mirrors IMPORT_RETRY_CANDIDATES_QUERY's cron-eligible status
    * set (`incomplete`, `failed`, `quarantined`) rather than pinning to
-   * `incomplete` alone: `recover --execute`'s verify step does NOT reduce
+   * `incomplete` alone: `rework recover --apply`'s verify step does NOT reduce
    * every target to a two-outcome complete/incomplete model -- that
    * collapse only happens for a target that started `complete` (see
    * /imports/:id/verify above). A target that was already `failed` or
