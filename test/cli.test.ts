@@ -199,6 +199,13 @@ describe("CLI Help", () => {
 
     expect(exitCode).toBe(0);
     expect(stdout).toContain("users");
+    expect(stdout).toContain("dataset");
+  });
+
+  test("nemar admin users --help shows the account subcommands", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "users", "--help"]);
+
+    expect(exitCode).toBe(0);
     expect(stdout).toContain("approve");
     expect(stdout).toContain("revoke");
   });
