@@ -378,26 +378,6 @@ export async function revokeKeyFor(username: string, id: number): Promise<{ ok: 
 // Admin - Repository Management
 // ============================================================================
 
-export interface PublishDatasetResponse {
-  success: boolean;
-  message: string;
-  dataset_id: string;
-  github_url: string;
-  s3_url: string;
-}
-
-/**
- * Publish a dataset (make public) - admin only
- * This is a one-way operation that cannot be undone
- */
-export async function publishDataset(datasetId: string): Promise<PublishDatasetResponse> {
-  return request<PublishDatasetResponse>(
-    `/datasets/${datasetId}/publish`,
-    { method: "POST" },
-    true,
-  );
-}
-
 // ============================================================================
 // Admin - CI Management
 // ============================================================================

@@ -73,6 +73,9 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     retired:
       "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
   },
+  // Retired: a bare visibility flip with no DOI, request or screen; publishing is the
+  // publication workflow now. The backend route stays.
+  { oldPath: "make-public", newPath: "dataset publish" },
   { oldPath: "delete-dataset", newPath: "dataset delete" },
   { oldPath: "bulk-delete", newPath: "dataset bulk-delete" },
   { oldPath: "reindex", newPath: "dataset reindex" },
