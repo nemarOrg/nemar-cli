@@ -2,7 +2,7 @@
 
 Status: DRAFT for owner review, 2026-11-22.
 No issues are filed and no command code is changed yet.
-The decision this plan builds is ADR 0135 (proposed), which refines ADR 0125 decision 7.
+The decision this plan builds is ADR 0135 (accepted 2026-11-22), which refines ADR 0125 decision 7.
 
 ## Goal
 
@@ -490,6 +490,12 @@ If phases are released one by one instead, these couplings are hard:
 - **`backfill-usernames --apply` sends mail.** Moving it is harmless, but any test or walk-through that runs it with `--apply` against staging re-sends verify mail (the dead-command check measured 25 retries pending in production on 2026-11-22). Never run it with `--apply` as part of this epic.
 
 ## Owner questions
+
+**Answered by the owner on 2026-11-22:** adopt every recommendation below, with one change to Q2.
+`recover` moves to `rework recover` without the production status run, so no step of this epic runs a command against production; it retires in a later change once its 45 ids are confirmed complete.
+Q1 retires the `make-public` command only: the `POST /datasets/:id/publish` route stays, and no break-glass flag is added.
+Q5 files the `backfill-usernames` mail-retry side effect as its own issue.
+Q6 makes `annex-normalize` and `doctor fix` dry-run by default in P3 and P1.
 
 Each with a recommendation; the first four came from the 2026-11-21 open items.
 
