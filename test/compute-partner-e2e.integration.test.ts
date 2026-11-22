@@ -180,7 +180,7 @@ describe("the partner's story", () => {
   test("a suspended person's reserve is refused with `suspended`", async () => {
     const decided = await w.h.call("POST", `/admin/compute/access/suspend/by-id/${person.id}`, {
       key: OWNER_KEY,
-      body: { reason: "e2e" },
+      body: { reason: "e2e", notice: "Compute access was suspended in a test." },
     });
     expect(decided.status).toBe(200);
     // Signing in does not need compute access, so the person has a fresh token; the reserve is refused by state.

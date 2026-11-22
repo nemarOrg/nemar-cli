@@ -96,8 +96,17 @@ function call(key: string, method: string, path: string, body?: unknown): Promis
   );
 }
 
+// A suspension and a revocation require a notice to the person, a grant refuses one
+// (COMPUTE_ACCESS_NOTICE_RULE).
 const decide = (decision: string, id: number) =>
-  call(ADMIN_KEY, "POST", `/admin/compute/access/${decision}/by-id/${id}`);
+  call(
+    ADMIN_KEY,
+    "POST",
+    `/admin/compute/access/${decision}/by-id/${id}`,
+    decision === "suspend" || decision === "revoke"
+      ? { notice: "Compute access was changed in a test." }
+      : undefined,
+  );
 
 const setAccess = (id: number, state: string) =>
   db().run(

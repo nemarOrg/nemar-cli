@@ -242,6 +242,12 @@ export const ACCOUNT_COPY = {
   "compute_admin.dialog.reason_label": "Reason (optional)",
   "compute_admin.dialog.reason_hint": "Recorded in the audit log. The person is not sent it.",
   "compute_admin.dialog.reason_count": "{count} of {max}",
+  "compute_admin.dialog.notice_label": "Notice to the person",
+  "compute_admin.dialog.notice_label_optional": "Notice to the person (optional)",
+  "compute_admin.dialog.notice_help":
+    "Emailed to the person under a fixed heading, with how to ask for a review. Write it for them. It is not the reason, which stays in the audit log.",
+  "compute_admin.dialog.notice_required_hint":
+    "A suspension or a revocation tells the person why. Write the notice to confirm.",
   "compute_admin.dialog.ack_export_review":
     "Confirm that you have reviewed this person’s name, affiliation and stated country against the export-control rules",
   "compute_admin.dialog.type_word": "Type {word} to confirm",
@@ -285,6 +291,11 @@ export const ACCOUNT_COPY = {
   "compute_admin.error.bad_id": "That is not an account id.",
   "compute_admin.error.bad_decision": "That is not a decision.",
   "compute_admin.error.reason_too_long": "A reason is at most {max} characters.",
+  "compute_admin.error.notice_required": "This decision needs a notice to the person.",
+  "compute_admin.error.notice_refused": "A grant does not take a notice to the person.",
+  "compute_admin.error.notice_too_long": "A notice is at most {max} characters.",
+  "compute_admin.error.notice_control_char":
+    "A notice may not contain control characters other than newline and tab.",
   "compute_admin.error.bad_quarter": "A quarter is written like 2026Q4.",
   "compute_admin.section.failed": "Could not load {what}: {reason}",
   "compute_admin.col.holder": "Holder",
