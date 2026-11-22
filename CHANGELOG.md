@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Admin command tree: the `rework` group (epic #2307, ADR 0135)
+
+- **Repairs that change an existing dataset moved under `nemar admin rework`.**
+  `revert` is `admin rework revert`; `recover` (with `status`) is `admin rework recover`; `annex-normalize` is `admin rework annex normalize`; `fleet annex-policy`, `fleet key-registration` and `fleet content-recovery` are `admin rework annex policy`, `key-registration` and `content-recovery`.
+  `admin fleet` stays, with its governance commands.
+  Each old path runs nothing, prints one line naming the new path and exits 1.
+- **`admin rework annex normalize` is a dry run unless `--apply` is given**, since it commits to the dataset and pushes. The old `--dry-run` is accepted and hidden; `--apply` with `--dry-run` is refused.
+- **`--apply` is the write flag of `admin rework recover`**; `--execute` is still accepted as a hidden alias.
+
 ### Admin command tree: the `users` group (epic #2307, ADR 0135)
 
 - **The account commands moved under `nemar admin users`.**
