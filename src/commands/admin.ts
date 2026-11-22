@@ -8034,7 +8034,7 @@ datasetDoctorCommand
       if (total > 0) {
         console.log(
           chalk.yellow(
-            `\n${total} finding(s). Preview the remediation with: nemar admin doctor fix <check> --dry-run`,
+            `\n${total} finding(s). Preview the remediation with: nemar admin dataset doctor fix <check>`,
           ),
         );
       }
@@ -8045,22 +8045,32 @@ datasetDoctorCommand
     }
   });
 
-datasetDoctorCommand
-  .command("fix")
-  .description("Apply a check's remediation (writes; use --dry-run first)")
-  .argument("<check>", "Check name (see: nemar admin doctor scan)")
-  .argument("[dataset-id]", "Narrow to one dataset")
-  .option("--dry-run", "List what would be fixed without writing")
+// Dry run by default since the admin tree restructure (ADR 0135): `--apply` dispatches the repairs. `--dry-run`, the
+// old preview flag, is still accepted (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  datasetDoctorCommand
+    .command("fix")
+    .description("List a check's remediation; --apply runs it (dry run by default)")
+    .argument("<check>", "Check name (see: nemar admin dataset doctor scan)")
+    .argument("[dataset-id]", "Narrow to one dataset"),
+  "Run the remediation (default is a dry run that lists what would be fixed)",
+)
+  .addOption(new Option("--dry-run", "List what would be fixed without writing").hideHelp())
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
     async (
       check: string,
       datasetId: string | undefined,
-      options: { dryRun?: boolean; json?: boolean },
+      options: { apply?: boolean; dryRun?: boolean; json?: boolean },
     ) => {
       if (!requireAuth()) return;
 
-      if (options.dryRun) {
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
+
+      if (!options.apply) {
         const spinner = ora(`Listing ${check} findings (dry run)...`).start();
         try {
           const res = await doctorFix({ check, datasetId, dryRun: true });
@@ -8072,6 +8082,9 @@ datasetDoctorCommand
           console.log(`Would fix ${res.would_fix} finding(s) for ${chalk.bold(check)}:`);
           for (const f of res.findings) {
             console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
+          }
+          if (res.would_fix > 0) {
+            console.log(chalk.dim("\nNothing was changed. Re-run with --apply to fix."));
           }
         } catch (err) {
           spinner.fail("Dry run failed");
