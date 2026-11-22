@@ -164,7 +164,7 @@ export const PARKED_QUERY = `SELECT dataset_id, blocklist_reason, first_incomple
  * Rows are filtered to `source: "cron"` in JS, NOT with `json_extract` in the SQL.
  * The filter itself is required: the admin ROUTE has always written the same action
  * with the same `closed`/`relabelled` keys, so without it a manual
- * `nemar admin import-issue-triage --apply` is reported as something the daily sweep
+ * `nemar admin import triage --apply` is reported as something the daily sweep
  * did -- which makes the `source` key load-bearing in both writers. But doing it in
  * SQL meant one malformed `details` payload raised "malformed JSON" and aborted the
  * whole SELECT, blinding the entire section over a single bad row. In JS that row is
