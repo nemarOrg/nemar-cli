@@ -2305,7 +2305,6 @@ doiCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--title <title>", "DOI title (defaults to dataset name)")
   .option("--description <desc>", "DOI description")
-  .option("--provider <provider>", "DOI provider: ezid (default) or zenodo", "ezid")
   .option("--sandbox", "Use sandbox/test DOI")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -2315,7 +2314,6 @@ doiCommand
       options: {
         title?: string;
         description?: string;
-        provider?: string;
         sandbox?: boolean;
       } & ConfirmOptions,
     ) => {
@@ -2368,19 +2366,16 @@ doiCommand
       }
       console.log();
 
-      // Enhanced sandbox warning
-      const provider = (options.provider === "zenodo" ? "zenodo" : "ezid") as "ezid" | "zenodo";
+      // EZID is the registrar (ADR 0007); the backend refuses a Zenodo concept DOI, so there is
+      // no provider to choose.
+      const provider = "ezid";
 
       if (options.sandbox) {
         console.log(chalk.yellow("━".repeat(60)));
         console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
         console.log(chalk.yellow("━".repeat(60)));
-        if (provider === "zenodo") {
-          console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
-        } else {
-          console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
-          console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
-        }
+        console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
+        console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
         console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
         console.log(chalk.yellow("  • DOI will NOT resolve in production"));
         console.log(chalk.yellow("  • Use this for testing workflows only"));
