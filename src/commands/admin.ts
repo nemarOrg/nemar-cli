@@ -1735,10 +1735,12 @@ adminCommand.addCommand(datasetGroupCommand);
 datasetGroupCommand.addCommand(publishCommand);
 
 // ============================================================================
-// S3 / IAM Management
+// S3: Object Lock and credential checks for one dataset (`admin dataset s3`)
 // ============================================================================
 
-const s3Command = new Command("s3").description("S3 and IAM credential management");
+const s3Command = new Command("s3").description(
+  "S3 Object Lock and credential checks for one dataset",
+);
 
 s3Command
   .command("lock")
@@ -1882,7 +1884,7 @@ Examples:
     }
   });
 
-adminCommand.addCommand(s3Command);
+datasetGroupCommand.addCommand(s3Command);
 
 // ============================================================================
 // CI Management
