@@ -333,8 +333,7 @@ describe("exitIfMovedCommand can skip every option it walks past", () => {
   const takesValue = (cmd: Command): string[] =>
     cmd.options.filter((o) => o.required || o.optional).map((o) => o.flags);
   const guardMessage = (where: string, flags: string[]): string =>
-    `${where} declares ${flags.join(", ")}, which takes a value: exitIfMovedCommand ` +
-    "skips only the option token, so it must first learn to step over that option's value";
+    `${where} declares ${flags.join(", ")}, which takes a value: exitIfMovedCommand skips only the option token, so it must first learn to step over that option's value`;
 
   test("no option on the root takes a value", async () => {
     const { stdout } = await run(CLI_ENTRY, ["--help"]);
