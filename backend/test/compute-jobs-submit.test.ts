@@ -15,6 +15,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { COMPUTE_REFUSAL_STATUS } from "../../shared/compute-state";
 import { BUNDLE_MAX_FILES } from "../../shared/contract/compute-bundle";
 import {
+  COMPUTE_SUBMIT_SENTENCES,
   ComputeSubmitErrorSchema,
   ComputeSubmitResponseSchema,
 } from "../../shared/contract/compute-submit";
@@ -478,6 +479,37 @@ describe("the order of refusal: one failing request per code", () => {
   });
 });
 
+/**
+ * A database whose read of the access state by the route is answered truthfully (`active`) and is followed
+ * at once by the grant moving to `to`: the interleaving the D1 amendment names. Every other statement, a
+ * batch included, is the real one.
+ */
+function endsAfterRouteRead(p: Person, to: string): D1Database {
+  const real = w.env().DB;
+  return {
+    prepare(sql: string) {
+      const statement = real.prepare(sql);
+      if (sql !== COMPUTE_ACCESS_READ_SQL) return statement;
+      return {
+        bind(...args: unknown[]) {
+          const bound = statement.bind(...args);
+          return {
+            async first() {
+              const row = await bound.first();
+              await real
+                .prepare("UPDATE users SET compute_access = ?1 WHERE id = ?2")
+                .bind(to, p.id)
+                .run();
+              return row;
+            },
+          };
+        },
+      };
+    },
+    batch: (statements: D1PreparedStatement[]) => real.batch(statements),
+  } as unknown as D1Database;
+}
+
 describe("compute access is read in the hold's own statement, not only from the pools", () => {
   test("pools funded and UNFROZEN, access not active: refused for every state but active", async () => {
     for (const access of ["revoked", "suspended", "denied", "none"]) {
@@ -501,31 +533,7 @@ describe("compute access is read in the hold's own statement, not only from the 
   test("through the route: access ends AFTER the route read it and BEFORE the hold, and the hold's own statement refuses", async () => {
     const p = await newPerson(w);
     const real = w.env().DB;
-    // A database whose read of the access state is answered truthfully (`active`) and is followed at once
-    // by the end of the grant: the interleaving the D1 amendment names. Every other statement, a batch
-    // included, is the real one.
-    const flipping = {
-      prepare(sql: string) {
-        const statement = real.prepare(sql);
-        if (sql !== COMPUTE_ACCESS_READ_SQL) return statement;
-        return {
-          bind(...args: unknown[]) {
-            const bound = statement.bind(...args);
-            return {
-              async first() {
-                const row = await bound.first();
-                await real
-                  .prepare("UPDATE users SET compute_access = 'revoked' WHERE id = ?1")
-                  .bind(p.id)
-                  .run();
-                return row;
-              },
-            };
-          },
-        };
-      },
-      batch: (statements: D1PreparedStatement[]) => real.batch(statements),
-    } as unknown as D1Database;
+    const flipping = endsAfterRouteRead(p, "revoked");
     const before = await trace(real);
     const r = await call(w, "POST", "/compute/jobs", {
       key: p.key,
@@ -568,6 +576,33 @@ describe("compute access is read in the hold's own statement, not only from the 
       spec,
     });
     expect(unguarded.ok).toBe(true);
+  });
+
+  test("access is named before the tenant ceiling: suspended with the ceiling full, platform_busy once access is back", async () => {
+    // A tenant ceiling of ONE live job with no floors, which another person's job fills.
+    await setPolicy(w.env().DB, w.fx.ownerId, {
+      tenant: { maxLiveJobs: 1, reserved: { people: 0, pipelines: 0, partner: 0 } },
+    });
+    expect((await submit(await newPerson(w), bundleRequest(makeBundle()))).status).toBe(201);
+    const p = await newPerson(w);
+    const real = w.env().DB;
+    const before = await trace(real);
+    // The route reads `active`; the grant is then paused before the hold, which the full ceiling and the
+    // paused grant both refuse: the account's word is the one named.
+    const paused = await call(w, "POST", "/compute/jobs", {
+      key: p.key,
+      json: bundleRequest(makeBundle()),
+      env: { ...w.env(), DB: endsAfterRouteRead(p, "suspended") },
+    });
+    expect([paused.status, paused.body.code]).toEqual([403, "suspended"]);
+    expect(await trace(real)).toEqual(before);
+    // Access restored, the ceiling still full: platform_busy, 409, with the person's sentence.
+    await real.prepare("UPDATE users SET compute_access = 'active' WHERE id = ?1").bind(p.id).run();
+    const busy = await submit(p, bundleRequest(makeBundle()));
+    expect([busy.status, busy.body.code]).toEqual([409, "platform_busy"]);
+    expect(busy.body.error).toBe(COMPUTE_SUBMIT_SENTENCES.platform_busy);
+    expect(ComputeSubmitErrorSchema.safeParse(busy.body).success).toBe(true);
+    expect(await trace(real)).toEqual(before);
   });
 });
 
