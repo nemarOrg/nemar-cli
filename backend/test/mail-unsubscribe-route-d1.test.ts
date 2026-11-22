@@ -1,22 +1,25 @@
 /**
- * The public unsubscribe routes (epic #2260 phase 2, ADR 0132): `GET`/`POST /mail/unsubscribe/:token`
- * and `GET .../info`, driven through the Worker's own entry point (`worker.fetch`), at BOTH mounts
- * (`/mail/...` and `/nemar/mail/...`), over the real migrated schema. Nothing is replaced.
+ * The public unsubscribe routes (epic #2260 phase 2, ADR 0132):
+ * `GET`/`POST /mail/unsubscribe/:token` and `GET .../info`, driven through the Worker's own entry
+ * point (`worker.fetch`), at BOTH mounts (`/mail/...` and `/nemar/mail/...`), over the real
+ * migrated schema. Nothing is replaced.
  *
- * What it holds: the link's GET is a 303 to `${APP_BASE_URL}/unsubscribe/<token>` for any token that
- * parses, reads neither D1 nor the secret (a D1 that throws on any statement proves it), and is the
- * uniform 410 with no Location for anything else (phase 5); /info changes nothing; an RFC 8058 one-click POST changes exactly the
- * token's category, answers 200, never redirects, needs no cookie or key, and is idempotent; the page's
- * second button turns off all three; a recall token, another category's token, another account's token,
- * a tampered signature, a rotated secret, a changed address, a deleted account and a missing broadcast
- * all answer the one uniform 410 from /info and the POST and change nothing; an unset or short secret is
- * a 503 there; every change is
- * one audit row from `saveEmailPreferences` with its `via`; and neither a token nor an address is logged.
+ * What it holds: the link's GET is a 303 to `${APP_BASE_URL}/unsubscribe/<token>` for any token
+ * that parses, reads neither D1 nor the secret (a D1 that throws on any statement proves it), and
+ * is the uniform 410 with no Location for anything else (phase 5); /info changes nothing; an
+ * RFC 8058 one-click POST changes exactly the token's category, answers 200 JSON, never redirects,
+ * needs no cookie or key, and is idempotent. The website page drives the same POST, with
+ * `from=page` for one category and `scope=all` for all three. A recall token, another category's
+ * token, another account's token, a tampered signature, a rotated secret, a changed address, a
+ * deleted account and a missing broadcast all answer the one uniform 410 from /info and the POST
+ * and change nothing; an unset or short secret is a 503 there; every change is one audit row from
+ * `saveEmailPreferences` with its `via`; and neither a token nor an address is logged.
  *
- * MUTATIONS (each makes a test below fail, and was applied and run): GET calls the writer; the signature
- * check returns true; the address is left out of the signed message; the `deleted_at IS NULL` or the
- * broadcast-row condition is removed; the parser accepts `recall`; the previous secret is not tried; the
- * POST answers a redirect; the secret check is removed; the GET's parse guard is removed (phase 5).
+ * MUTATIONS (each makes a test below fail, and was applied and run): GET calls the writer; the
+ * signature check returns true; the address is left out of the signed message; the
+ * `deleted_at IS NULL` or the broadcast-row condition is removed; the parser accepts `recall`; the
+ * previous secret is not tried; the POST answers a redirect; the secret check is removed; the GET's
+ * parse guard is removed (phase 5).
  */
 
 import type { Database } from "bun:sqlite";
@@ -159,7 +162,7 @@ function snapshot(): string {
 
 const prefsOf = (id: number) => JSON.parse(stored(id) ?? "{}") as Record<string, unknown>;
 
-/** A D1 that fails the test on any statement: the redirecting GET must not read or write anything. */
+/** A D1 that fails the test on any statement: the redirecting GET must not read or write it. */
 const untouchableDb = {
   prepare(sql: string) {
     throw new Error(`the redirecting GET touched D1: ${sql}`);
@@ -371,11 +374,16 @@ describe("the one-click POST", () => {
     expect(prefsOf(userId)).toEqual({ news: false });
   });
 
-  test("an HTML-accepting client gets a page, still 200, still no redirect", async () => {
+  test("an HTML-accepting client gets the same JSON, still 200, still no redirect", async () => {
     const res = await post("", await tokenFor(), ONE_CLICK, { accept: "text/html" });
     expect(res.status).toBe(200);
     expect(res.headers.get("location")).toBeNull();
-    expect(await res.text()).toContain("will no longer receive NEMAR News mail");
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({
+      status: "unsubscribed",
+      scope: "category",
+      category: "news",
+    });
   });
 
   test("twice: the second changes nothing, answers the same, and adds no audit row", async () => {
