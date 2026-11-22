@@ -64,9 +64,9 @@ beforeAll(() => {
 afterAll(() => {
   // Guarded restore (#1175): assigning undefined stringifies to "undefined"
   // and poisons the var for every later test in this shared process.
-  if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
+  if (previousConfigDir === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
-  if (previousApiUrl === undefined) delete process.env.TEST_API_URL;
+  if (previousApiUrl === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
   else process.env.TEST_API_URL = previousApiUrl;
   rmSync(configDir, { recursive: true, force: true });
   server.stop(true);
