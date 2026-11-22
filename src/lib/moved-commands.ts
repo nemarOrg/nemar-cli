@@ -103,6 +103,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "email-preferences", newPath: "users email-preferences" },
   { oldPath: "email-preferences show", newPath: "users email-preferences show" },
   { oldPath: "email-preferences update", newPath: "users email-preferences update" },
+  { oldPath: "duplicates", newPath: "users duplicates" },
+  { oldPath: "backfill-usernames", newPath: "users backfill-usernames" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */

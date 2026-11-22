@@ -10195,7 +10195,7 @@ backfillUsernamesCommand
     }
   });
 
-adminCommand.addCommand(backfillUsernamesCommand);
+adminUsersCommand.addCommand(backfillUsernamesCommand);
 
 // ============================================================================
 // Duplicate accounts (#1254, epic #1250; ADR 0043)
@@ -10333,7 +10333,7 @@ duplicatesCommand
     process.exitCode = 1;
   });
 
-adminCommand.addCommand(duplicatesCommand);
+adminUsersCommand.addCommand(duplicatesCommand);
 
 // ============================================================================
 // Neurobagel federation artifacts (epic #1586 phase 4, ADR 0084)
