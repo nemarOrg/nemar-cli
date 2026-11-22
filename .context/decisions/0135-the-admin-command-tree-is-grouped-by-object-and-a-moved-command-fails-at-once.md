@@ -1,6 +1,6 @@
 # ADR 0135: The admin command tree is grouped by object, three levels deep at most, and a moved command fails at once
 
-**Status:** accepted (owner, 2026-11-22)
+**Status:** accepted
 **Date:** 2026-11-22
 **Owner:** Seyed Yahya Shirazi
 **Refines:** ADR 0125 decision 7 (the stub style for moved commands)
