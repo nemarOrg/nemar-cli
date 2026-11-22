@@ -21,6 +21,7 @@
  */
 
 import { z } from "zod";
+import type { ComputeAccessDecision } from "../compute-access-state.js";
 // --- The person's request ----------------------------------------------------------------------
 
 /** The bounds of the purpose text, in characters (code points). The migration's CHECK says the same. */
@@ -125,9 +126,92 @@ export const COMPUTE_ACCESS_REASON_MAX_CHARS = 500;
 /** The most accounts one listing answers with at once. */
 export const COMPUTE_ACCESS_PAGE_MAX = 200;
 
-/** `POST /admin/compute/access/{grant|deny|suspend|revoke}/...`: an optional reason. */
+/** The most characters (code points) the notice to the person may have, counted after trimming. */
+export const COMPUTE_ACCESS_NOTICE_MAX_CHARS = 1000;
+
+/**
+ * Whether a decision takes a `notice`, the text the PERSON is sent (the compute terms promise that a
+ * suspension or an ending is mailed with the reason and how to ask for a review, nemarOrg/docs#105):
+ *
+ *   suspend, revoke  required; a decision that takes access away says why.
+ *   deny             optional; a declined request may say why, and the mail stands without it.
+ *   grant            refused; the grant mail says nothing of the kind, and an administrator who typed
+ *                    one would otherwise believe it was sent.
+ */
+export const COMPUTE_ACCESS_NOTICE_RULE = {
+  grant: "refused",
+  deny: "optional",
+  suspend: "required",
+  revoke: "required",
+} as const satisfies Record<ComputeAccessDecision, "required" | "optional" | "refused">;
+
+/** Why a notice cannot go with a decision, as a fixed word, or null when it can. */
+export type ComputeAccessNoticeProblem =
+  | "notice_required"
+  | "notice_refused"
+  | "notice_too_long"
+  | "notice_control_char";
+
+/**
+ * The ONE notice rule, read by the Worker's body schema and by the CLI before it sends. `notice` is the
+ * value as sent (undefined when absent); a notice of only whitespace counts as absent. Newline and tab
+ * are allowed (a notice may run to paragraphs); any other control character is refused, as for a purpose.
+ */
+export function computeAccessNoticeProblem(
+  decision: ComputeAccessDecision,
+  notice: string | undefined,
+): ComputeAccessNoticeProblem | null {
+  const rule = COMPUTE_ACCESS_NOTICE_RULE[decision];
+  if (rule === "refused") return notice === undefined ? null : "notice_refused";
+  const trimmed = notice?.trim() ?? "";
+  if (trimmed === "") return rule === "required" ? "notice_required" : null;
+  if ([...trimmed].length > COMPUTE_ACCESS_NOTICE_MAX_CHARS) return "notice_too_long";
+  if (hasPurposeControlChar(trimmed)) return "notice_control_char";
+  return null;
+}
+
+/**
+ * `POST /admin/compute/access/{grant|deny|suspend|revoke}/...`. Two texts that never mix:
+ *
+ *  - `reason` is for the RECORD: free text on the audit row, optional, and never mailed.
+ *  - `notice` is for the PERSON: mailed under a fixed heading with how to ask for a review. Whether it is
+ *    required, optional or refused is {@link COMPUTE_ACCESS_NOTICE_RULE}.
+ */
 export interface ComputeAccessDecisionRequest {
   reason?: string;
+  notice?: string;
+}
+
+/** The fields of a decision body; the outer notice bound keeps a huge body cheap to refuse. */
+export const computeAccessDecisionBodyShape = {
+  reason: z.string().max(COMPUTE_ACCESS_REASON_MAX_CHARS).optional(),
+  notice: z
+    .string()
+    .max(COMPUTE_ACCESS_NOTICE_MAX_CHARS * 4)
+    .optional(),
+};
+
+/**
+ * The notice rule as a zod refinement: a notice the rule refuses is an issue at `notice` whose message
+ * is the {@link ComputeAccessNoticeProblem} word (the Worker names the field and the word, never the
+ * value).
+ */
+export function computeAccessNoticeRefinement(decision: ComputeAccessDecision) {
+  return (body: { notice?: string }, ctx: z.RefinementCtx): void => {
+    const problem = computeAccessNoticeProblem(decision, body.notice);
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["notice"], message: problem });
+  };
+}
+
+/**
+ * The decision body for one decision, with the notice rule. Open like every schema in this directory
+ * (an unknown key is dropped, not refused); the Worker closes the same shape itself, so a misspelled
+ * field is a 400 there and never silently ignored.
+ */
+export function computeAccessDecisionBodySchema(decision: ComputeAccessDecision) {
+  return z
+    .object(computeAccessDecisionBodyShape)
+    .superRefine(computeAccessNoticeRefinement(decision));
 }
 
 export const COMPUTE_ACCESS_ADMIN_ERROR_CODES = [
