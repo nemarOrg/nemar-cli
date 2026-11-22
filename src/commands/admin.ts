@@ -1089,7 +1089,7 @@ Examples:
 // Approve
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("approve")
   .description("Approve a pending user")
   .argument("[username]", "Username to approve (CLI accounts)")
@@ -1201,7 +1201,7 @@ adminCommand
 // Revoke
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("revoke")
   .description("Revoke user access")
   .argument("[username]", "Username to revoke (CLI accounts)")
@@ -1286,7 +1286,7 @@ adminCommand
 // Role Management (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("role")
   .description("Change a user's role (owner only)")
   .argument("<username>", "Username to change role for")
@@ -1358,7 +1358,7 @@ Examples:
 // Force Verify (Owner Only)
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("verify")
   .description("Mark a pending account's email as verified (owner only)")
   .argument("<id>", "Numeric user id (find it with 'nemar admin users --pending')")
@@ -1433,7 +1433,7 @@ Examples:
 // Account Kind (Owner Only) -- epic #1272 phase 4, #1284; ADR 0048
 // ============================================================================
 
-adminCommand
+adminUsersCommand
   .command("kind")
   .description("Change a user's account kind (owner only)")
   .argument("<username>", "Username to change the kind for")

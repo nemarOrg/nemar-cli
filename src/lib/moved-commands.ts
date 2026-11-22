@@ -90,7 +90,12 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     oldPath: "s3 regenerate-iam",
     retired:
       "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
-  },
+  }, // ADR 0135, phase P2: the account commands gather under `admin users`.
+  { oldPath: "approve", newPath: "users approve" },
+  { oldPath: "revoke", newPath: "users revoke" },
+  { oldPath: "role", newPath: "users role" },
+  { oldPath: "verify", newPath: "users verify" },
+  { oldPath: "kind", newPath: "users kind" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
