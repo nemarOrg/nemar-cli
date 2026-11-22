@@ -1,7 +1,8 @@
 # ADR 0112: Inbound mail becomes support tickets
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-24
+**Accepted:** 2026-10-25
 **Owner:** Seyed Yahya Shirazi
 
 ## Context

@@ -327,6 +327,14 @@ export const ADMIN_ALERT_CATEGORIES = [
    * the ticket stream without losing approval or publication mail. Opted in by default.
    */
   "support_tickets",
+  /**
+   * A person asked for compute access (epic #2021 phase D1, ADR 0118). Its own category, not
+   * `user_approval`, for the reason `dataset_anonymity` has one: an admin who stops watching upload
+   * requests has said nothing about wanting to stop hearing about compute, which is a separate
+   * export-control review of a separate grant. Opted in by default, so a stored row from before it
+   * existed receives it.
+   */
+  "compute_requests",
 ] as const;
 
 export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
@@ -347,6 +355,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   dataset_anonymity: true,
   identifier_sweep: true,
   support_tickets: true,
+  compute_requests: true,
   news: true,
   rfcs: true,
   maintenance: true,
@@ -1556,6 +1565,260 @@ export async function sendUploadAccessRequestEmail(
     }
   }
   return outcome;
+}
+
+/**
+ * Tell the admins a person asked for compute access (epic #2021 phase D1; ADR 0118). Same delivery shape
+ * as {@link sendUploadAccessRequestEmail}, whose per-recipient results it returns for the same reason: a
+ * request that nobody receives is a person waiting forever for a review that was never queued, so the
+ * route stamps `compute_access_notified_at` only when one send landed and re-sends when none did.
+ *
+ * The card carries every field the review reads (name, institution, location, ORCID iD, the purpose
+ * and the terms version accepted) and LINKS to the administrator's compute tab (`adminUrl`), never to a
+ * file or a result. Nothing is sent to the requester: they asked, and the answer arrives as the decision
+ * mail. Recipients in `failures` are redacted.
+ */
+export async function sendComputeAccessRequestEmail(
+  adminEmails: string[],
+  request: {
+    id: number;
+    username: string | null;
+    given_name: string;
+    family_name: string;
+    email: string;
+    orcid: string | null;
+    affiliation: string;
+    city: string;
+    country: string;
+    purpose: string;
+    terms_version: string;
+    /** The administrator's compute tab, built by the caller from the app base address. */
+    adminUrl: string;
+  },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const notSet = "<em>not set</em>";
+  const row = (label: string, value: string) =>
+    `<tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">${label}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${value}</td>
+    </tr>`;
+  const who = request.username ?? `id ${request.id}`;
+  const grantCommand = request.username
+    ? `nemar admin compute access grant ${escapeHtml(request.username)}`
+    : `nemar admin compute access grant --id ${request.id}`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Compute Access Requested</h1>
+
+  <p>A verified account with a proven ORCID iD has asked for compute access. This is a separate grant from
+  upload access: check the person, their institution, their location and what they intend to compute, then
+  grant or decline. A grant lets the person use compute within the limits an administrator sets; the owner policy's default allocation applies, if there is one.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Requester</h2>
+
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    ${row("Username", request.username ? escapeHtml(request.username) : notSet)}
+    ${row("Name", escapeHtml(`${request.given_name} ${request.family_name}`))}
+    ${row("Email", escapeHtml(request.email))}
+    ${row(
+      "ORCID",
+      request.orcid
+        ? `<a href="https://orcid.org/${escapeHtml(request.orcid)}" style="color: #2563eb;">${escapeHtml(request.orcid)}</a>`
+        : notSet,
+    )}
+    ${row("Affiliation", escapeHtml(request.affiliation))}
+    ${row("City", escapeHtml(request.city))}
+    ${row("Country", escapeHtml(request.country))}
+    ${row("Terms accepted", escapeHtml(request.terms_version))}
+  </table>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">What they intend to compute</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(request.purpose)}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Deciding</h2>
+
+  <p>Review the request on the compute tab:
+  <a href="${escapeHtml(request.adminUrl)}" style="color: #2563eb;">${escapeHtml(request.adminUrl)}</a></p>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">${grantCommand}</span>
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see every open request:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin compute access list --state requested</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Compute access requested: ${who}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      const detail = sendFailureText(error, adminEmail);
+      console.error(
+        `Failed to send compute-access request to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
+}
+
+/** What an administrator decided about a person's compute access, as the person is told it. */
+export type ComputeAccessDecisionMail = "granted" | "denied" | "suspended" | "revoked";
+
+const COMPUTE_DECISION_MAIL: Record<
+  ComputeAccessDecisionMail,
+  { subject: string; heading: string; color: string; body: string }
+> = {
+  granted: {
+    subject: "Compute access granted on NEMAR",
+    heading: "Compute access granted",
+    color: "#16a34a",
+    body: "An administrator has reviewed your request and granted compute access to your NEMAR account. You can use compute within the limits an administrator sets, and your balances are on your compute page.",
+  },
+  denied: {
+    subject: "Your NEMAR compute access request",
+    heading: "Compute access not granted",
+    color: "#dc2626",
+    body: "An administrator has reviewed your request and has not granted compute access to your NEMAR account. The request has been answered and cannot be made again.",
+  },
+  suspended: {
+    subject: "NEMAR compute access suspended",
+    heading: "Compute access suspended",
+    color: "#d97706",
+    body: "An administrator has suspended compute access on your NEMAR account. Jobs that were running are being stopped.",
+  },
+  revoked: {
+    subject: "NEMAR compute access ended",
+    heading: "Compute access ended",
+    color: "#dc2626",
+    body: "An administrator has ended compute access on your NEMAR account. Jobs that were running are being stopped.",
+  },
+};
+
+/** The fixed heading the administrator's notice is mailed under. */
+export const COMPUTE_DECISION_NOTICE_HEADING = "The reason for this decision";
+
+/** The support address the review sentence names when the Worker has no REPLY_TO configured. */
+export const COMPUTE_DECISION_SUPPORT_FALLBACK = "support@nemar.org";
+
+/**
+ * The fixed sentence every decision that takes or withholds access ends with (the compute terms promise
+ * it, nemarOrg/docs#105). It names the same address the mail's Reply-To carries (the configured
+ * REPLY_TO, `support@test.nemar.org` on staging), so a reply and a written mail reach the same inbox;
+ * {@link COMPUTE_DECISION_SUPPORT_FALLBACK} only when none is configured.
+ */
+export function computeDecisionReviewSentence(replyTo?: string): string {
+  const configured = replyTo?.trim() ? parseMailbox(replyTo) : undefined;
+  const address =
+    (typeof configured === "string" ? configured : configured?.email) ||
+    COMPUTE_DECISION_SUPPORT_FALLBACK;
+  return `To ask for a review of this decision, reply to this email or write to ${address}.`;
+}
+
+/**
+ * Tell a person what an administrator decided about their compute access (epic #2021 phase D1). One
+ * function for the four decisions, so the mails cannot drift apart. Sent AFTER the decision commits and
+ * never inside it: a send that fails leaves the decision standing, and the route reports that.
+ *
+ * The audit `reason` is NOT in the mail and never reaches this function: free text typed for the record
+ * is not text to send a person. The `notice` is: the administrator typed it FOR the person, and it is
+ * mailed escaped under {@link COMPUTE_DECISION_NOTICE_HEADING} (required for a suspension and an ending,
+ * optional for a denial, never for a grant: `COMPUTE_ACCESS_NOTICE_RULE`). A denial, a suspension and an
+ * ending close with {@link computeDecisionReviewSentence}, naming the Reply-To address. The link, for a
+ * grant only, is the person's compute page. The mail is HTML only: `sendEmail` sends no plain-text part.
+ *
+ * These sentences live here and not in `shared/contract/account-copy.ts`: that file is the copy the CLI
+ * and the website render (mirrored to the website and drift-tested), and neither renders a mail; every
+ * mail body in the Worker is declared in this module, next to the function that sends it.
+ */
+export async function sendComputeAccessDecisionEmail(
+  kind: ComputeAccessDecisionMail,
+  to: string,
+  givenName: string | null,
+  computeUrl: string,
+  notice: string | null,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const m = COMPUTE_DECISION_MAIL[kind];
+  const noticeBlock =
+    kind !== "granted" && notice?.trim()
+      ? `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${COMPUTE_DECISION_NOTICE_HEADING}</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(notice.trim())}</div>
+`
+      : "";
+  const review =
+    kind !== "granted" ? `<p>${escapeHtml(computeDecisionReviewSentence(replyTo))}</p>` : "";
+  const greeting = givenName?.trim() ? escapeHtml(givenName.trim()) : "there";
+  const link =
+    kind === "granted"
+      ? `<p style="margin: 24px 0;"><a href="${escapeHtml(computeUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(computeUrl)}</a></p>`
+      : "";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: ${m.color};">${m.heading}</h1>
+
+  <p>Hello ${greeting},</p>
+
+  <p>${m.body}</p>
+  ${noticeBlock}
+  ${review}
+  ${link}
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  await sendEmail(to, m.subject, html, resendApiKey, fromEmail, replyTo, isDev, deliveryEnv);
 }
 
 /**

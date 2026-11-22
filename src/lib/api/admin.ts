@@ -1580,6 +1580,8 @@ export interface AdminAlertPreferences {
   identifier_sweep: boolean;
   /** Epic #1893 phase 3 (ADR 0112): support tickets assigned, unassigned or escalated to you. */
   support_tickets: boolean;
+  /** Epic #2021 phase D1 (ADR 0118): a person asked for compute access. */
+  compute_requests: boolean;
 }
 
 /**

@@ -29,6 +29,10 @@
  *     unusable. The tombstone clears the stamp (`USER_TOMBSTONE_MASK_SQL` nulls
  *     `upload_access_requested_at`) and stamps `deleted_at`, which the admin listing and its
  *     awaiting-approval filter exclude by default. A GRANTED request is never swept.
+ *     COMPUTE ACCESS is the opposite (epic #2021 phase D1): a candidate must still be at `none`. A
+ *     generated address cannot be a person, but a compute request, a grant, a denial or a suspension
+ *     is a decision an administrator made on the record (and may hold a pool and live jobs), so such
+ *     an account is left alone for a human to end, exactly as a granted upload request is.
  *
  * WHAT IS RE-CHECKED BEFORE THE WRITE, exactly. The regular expression is re-run in code on the
  * row's own address, and the write itself is conditional: the mask requires the row to still
@@ -144,6 +148,7 @@ export const TEST_ACCOUNT_SWEEP_CANDIDATES_SQL = `SELECT id, email FROM users
     AND aws_iam_username IS NULL
     AND aws_access_key_id_encrypted IS NULL
     AND service_access = 0 -- an OPEN upload request (requested_at set) is allowed; a grant is not
+    AND compute_access = 'none' -- a compute request, grant or closed state is a decision someone made
     AND created_at < datetime('now', ?)
     AND NOT EXISTS (SELECT 1 FROM datasets d WHERE d.owner_user_id = users.id)
     AND NOT EXISTS (SELECT 1 FROM dataset_collaborators c WHERE c.user_id = users.id)

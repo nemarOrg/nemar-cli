@@ -274,6 +274,7 @@ for (const mount of MOUNTS) {
         "dataset_anonymity",
         "identifier_sweep",
         "support_tickets",
+        "compute_requests",
       ]) {
         test(`the admin alert ${alert} is refused by name`, async () => {
           const res = await call(mount, "PUT", { key: MEMBER_KEY }, { [alert]: false });

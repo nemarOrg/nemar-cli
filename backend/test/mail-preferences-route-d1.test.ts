@@ -109,6 +109,7 @@ describe("reading", () => {
       dataset_anonymity: true,
       identifier_sweep: true,
       support_tickets: true,
+      compute_requests: true,
       news: true,
       rfcs: true,
       maintenance: true,

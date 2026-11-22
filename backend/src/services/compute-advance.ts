@@ -18,7 +18,8 @@
  * `scheduled()` and are absent from `DEV_CRON_ALLOWLIST`, and each refuses outside exact production by
  * itself (the dev database shares real users and the GitHub org, and development advances a job by its
  * webhook, by a read and by an administrator's command). Neither reads a switch, so a job that is
- * live is never stranded by turning compute off; the switch is read only where a job is submitted.
+ * live is never stranded by turning compute off; the switch is read only where a job is created (its hold)
+ * and where it is submitted.
  * A database read of the live rows comes first: a Worker with no Tapis configuration and no jobs does
  * nothing at all.
  *
@@ -83,15 +84,18 @@ export const ADVANCE_ROWS_PER_TICK = 10;
  */
 export const BOUND_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND tapis_uuid IS NOT NULL AND flag_unreserved = 0
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
 /**
  * The `created` and `uploading` rows with no Tapis job, least recently examined first: the ones to be
  * submitted. A partner's reservation that has no Tapis job yet is the partner contract's, not this
- * tick's.
+ * tick's. A job still `uploading` with its records unwritten is the person's (the upload window) and the
+ * abandoned-upload release's, not this tick's: submitting it would only be refused (phase D3, #2024).
  */
 export const CREATED_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN ('created', 'uploading') AND tapis_uuid IS NULL AND source <> 'partner'
+    AND NOT (state = 'uploading' AND records_written_at IS NULL)
     AND executor = 'tapis'
   ORDER BY examined_at ASC, created_at ASC LIMIT ?1`;
 
@@ -118,6 +122,7 @@ export const CANCEL_ROWS_SQL = `SELECT id FROM compute_jobs
   WHERE state IN (${LIVE_STATES_SQL}) AND cancel_requested_at IS NOT NULL
     AND flag_unreserved = 0 AND executor = 'tapis'
     AND NOT (source = 'partner' AND tapis_uuid IS NULL)
+    AND (partner_state IS NULL OR partner_state = 'verified')
   ORDER BY cancel_attempted_at ASC, cancel_requested_at ASC LIMIT ?1`;
 
 export interface ComputeTickResult {

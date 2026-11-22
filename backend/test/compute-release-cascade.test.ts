@@ -154,13 +154,18 @@ const poolsOf = (accountId: number): PoolRow[] =>
 
 /** A job for an existing account: its hold, its row and its records, made by the real `createJob`. */
 async function jobFor(env: Bindings, accountId: number): Promise<ComputeJobRow> {
-  const made = await createJob(env, {
-    source: "cli",
-    accountId,
-    appId: "nemar-launch",
-    appVersion: "1.0.0",
-    spec: launchableSpec(),
-  });
+  // A hold is taken only with compute on, in a compute environment (ADR 0118, amendment of 2026-11-22);
+  // the routes under test may run as `test`, so the seed takes its hold with the switch on.
+  const made = await createJob(
+    { ...env, ENVIRONMENT: "production", COMPUTE_ENABLED: "1" },
+    {
+      source: "cli",
+      accountId,
+      appId: "nemar-launch",
+      appVersion: "1.0.0",
+      spec: launchableSpec(),
+    },
+  );
   if (!made.ok) throw new Error(`could not make a job: ${made.code}`);
   if (!made.recordsWritten) throw new Error("the job's records were not written");
   return made.job;

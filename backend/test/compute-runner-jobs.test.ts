@@ -580,8 +580,10 @@ const sha = async (text: string) => sha256Hex(new TextEncoder().encode(text));
 
 describe("what did not change", () => {
   test("JOB_INSERT_SQL, GATEWAY_USER_INSERT_SQL and the hold statement are byte for byte what they were", async () => {
+    // JOB_INSERT_SQL's hash is the third-party compute epic's text (#2116 at 82ddd0a0), which the runner
+    // branch leaves as it is.
     expect(await sha(JOB_INSERT_SQL)).toBe(
-      "60ae2c9f394758de682d4e76c7a4bff67bbe19400af452487637fbc11cbddcf5",
+      "6901f46667cf1a88a7fd3d5e86aee244e0e908ee909e3487337cf11c183207f8",
     );
     expect(await sha(GATEWAY_USER_INSERT_SQL)).toBe(
       "61ce8d69135699c950e2addea40409ff61ac1f3b2202153c1a12e5550f2b8d73",
@@ -601,7 +603,9 @@ describe("what did not change", () => {
       .replace(/ AND accounting = 'su'/g, "");
 
   test("each Tapis statement the change touched is its old text plus the one predicate (hashes of the base text, MUTATION: edit any other word of one)", async () => {
-    // The hashes are of the text at the epic base before this card (bc0ba1cf), taken by importing it.
+    // The hashes are of the text at the epic base before this card (bc0ba1cf), taken by importing it, except
+    // CANDIDATE_ROWS_SQL, CREATED_ROWS_SQL, CANCEL_ROWS_SQL and CANCEL_PENDING_FAILED_SQL, which are the
+    // third-party compute epic's text (#2116 at 82ddd0a0, merged with `dev`), taken the same way.
     const base: Array<[string, string, string]> = [
       [
         "PIPELINE_LIVE_JOBS_SQL",
@@ -626,17 +630,17 @@ describe("what did not change", () => {
       [
         "CANDIDATE_ROWS_SQL",
         CANDIDATE_ROWS_SQL,
-        "d58a2e31a5d3b33c1715763da1709b8504562c80a110e33e97eeea89dda1db25",
+        "4e098da92b83133ff748b28a9c85df511299666e737cd9534086a026b03dcb1d",
       ],
       [
         "CREATED_ROWS_SQL",
         CREATED_ROWS_SQL,
-        "6e23001935fab6191005933005f3a6f089184b39787fa3037804f6911f07f807",
+        "803028256d6a271e83af689b85d0c5b5479d6584ee3b5e77575cc946af564192",
       ],
       [
         "CANCEL_ROWS_SQL",
         CANCEL_ROWS_SQL,
-        "82282a66449c8d262096c75b08584c90e8b97bb2195208368138ed00ea8b0743",
+        "8c6494e64cdeee3b5a22360367a33ae77e1bff2eabbd6088f27fa82e42331a14",
       ],
       [
         "CLAIM_SUBMIT_SQL",
@@ -651,7 +655,7 @@ describe("what did not change", () => {
       [
         "CANCEL_PENDING_FAILED_SQL",
         CANCEL_PENDING_FAILED_SQL,
-        "f61155a920c3d64c99df5454c5232485d921509a4ff5710f66eb1060ecf7fac3",
+        "2c7b3c03c122d3d31021bad0c49874baa14586b7d99e2ce4be4a723ab1178dbd",
       ],
       [
         "MARK_COPY_ABANDONED_SQL",

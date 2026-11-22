@@ -1,7 +1,8 @@
 # ADR 0117: An upstream re-pull's own pull request is waived from the review by NEMAR's record
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-29
+**Accepted:** 2026-10-30
 **Owner:** Seyed Yahya Shirazi
 
 Issue #1998.

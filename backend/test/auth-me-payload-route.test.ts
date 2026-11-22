@@ -151,6 +151,50 @@ describe("GET /auth/me", () => {
     expect((await (await authMe(id)).json()).user).not.toHaveProperty("upload_access_notified_at");
   });
 
+  test("carries the compute-access state and its two dates, and not the notification stamp (epic #2021 phase D1)", async () => {
+    // Compute access is a grant of its own: the state a dashboard card renders, and when it was asked
+    // for and granted. MUTATION: drop `compute_access` from `publicUser`, and a requested account reads
+    // as unknown on the dashboard.
+    const id = seedUser({ username: "alovelace" });
+    db.query(
+      `UPDATE users SET compute_access = 'active', compute_access_requested_at = '2026-11-01T09:00:00Z',
+         compute_access_granted_at = '2026-11-02T09:00:00Z',
+         compute_access_notified_at = '2026-11-01T09:05:00Z' WHERE id = ?`,
+    ).run(id);
+
+    const user = (await (await authMe(id)).json()).user;
+    expect(user.compute_access).toBe("active");
+    expect(user.compute_access_requested_at).toBe("2026-11-01T09:00:00Z");
+    expect(user.compute_access_granted_at).toBe("2026-11-02T09:00:00Z");
+    expect(user).not.toHaveProperty("compute_access_notified_at");
+    // Upload access is a different grant and reads as it was.
+    expect(user.service_access).toBe(false);
+    expect(authMeResponseSchema.safeParse({ user }).success).toBe(true);
+  });
+
+  test("an account that never asked for compute reports none, with null dates", async () => {
+    const id = seedUser({ username: "alovelace" });
+    const user = (await (await authMe(id)).json()).user;
+    expect(user.compute_access).toBe("none");
+    expect(user.compute_access_requested_at).toBeNull();
+    expect(user.compute_access_granted_at).toBeNull();
+  });
+
+  test("the PATCH echo reports the compute-access state too (the same publicUser)", async () => {
+    const id = seedUser({ username: "alovelace" });
+    db.query("UPDATE users SET compute_access = 'requested' WHERE id = ?").run(id);
+    const res = await app.request(
+      "/auth/profile",
+      {
+        method: "PATCH",
+        headers: { Origin: ORIGIN, Cookie: await cookieFor(id), "content-type": "application/json" },
+        body: JSON.stringify({ city: "Boston" }),
+      },
+      env(),
+    );
+    expect((await res.json()).user.compute_access).toBe("requested");
+  });
+
   test("an anonymous browser still gets { user: null }", async () => {
     const res = await app.request("/auth/me", {}, env());
     expect(authMeResponseSchema.parse(await res.json()).user).toBeNull();

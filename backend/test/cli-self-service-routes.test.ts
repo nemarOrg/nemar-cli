@@ -137,6 +137,9 @@ interface SeedOpts {
   familyName?: string | null;
   city?: string | null;
   country?: string | null;
+  /** Epic #2021 phase D1: a blank affiliation is the one gap that stops compute access alone, so a
+   *  test about a row that must be gap-free sets it. */
+  affiliation?: string | null;
 }
 
 async function seedUser(
@@ -147,8 +150,8 @@ async function seedUser(
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, signup_source,
                         email_verified, orcid, orcid_verified, github_username,
-                        given_name, family_name, city, country)
-     VALUES (?, ?, 'x', ?, 'member', 'cli', 1, ?, ?, ?, ?, ?, ?, ?)`,
+                        given_name, family_name, city, country, affiliation)
+     VALUES (?, ?, 'x', ?, 'member', 'cli', 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       opts.username ?? null,
       email,
@@ -160,6 +163,7 @@ async function seedUser(
       opts.familyName ?? null,
       opts.city ?? null,
       opts.country ?? null,
+      opts.affiliation ?? null,
     ],
   );
   const row = db.query<{ id: number }, [string]>("SELECT id FROM users WHERE email = ?").get(email);
@@ -771,6 +775,7 @@ describe("POST /auth/orcid/cli-start", () => {
       github: "alovelace",
       city: "London",
       country: "United Kingdom",
+      affiliation: "University College London",
     });
     tokenOrcid = ADA_ORCID;
 
