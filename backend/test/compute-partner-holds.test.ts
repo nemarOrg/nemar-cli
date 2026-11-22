@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { DEFAULT_COMPUTE_POLICY, PARTITION_NAMES } from "../../shared/contract/compute";
 import {
   COMPUTE_PARTNER_ERROR_STATUS,
+  COMPUTE_PARTNER_SENTENCES,
   type ComputePartnerErrorCode,
   ComputePartnerHoldResponseSchema,
   holdIdForJob,
@@ -373,6 +374,22 @@ describe("one request per refusal word, and a refusal writes nothing", () => {
     // The balance before the client's cap: no balance AND the cap is reached.
     const poor = await newPartnerPerson(w, { grant: 100 });
     await refused(poor, holdBody(), "insufficient_balance");
+  });
+
+  test("the client's cap before the tenant ceiling: both full is client_cap_reached, the ceiling alone is platform_busy", async () => {
+    // A tenant ceiling of ONE live job with no floors, which the first reservation fills.
+    const tenant = { maxLiveJobs: 1, reserved: { people: 0, pipelines: 0, partner: 0 } };
+    await caps(10, 1_000_000, { tenant });
+    await reserve(w, await newPartnerPerson(w));
+    // The client's cap of one open reservation is full too: the client's word is named, not the tenant's.
+    await caps(1, 1_000_000, { tenant });
+    const second = await newPartnerPerson(w);
+    await refused(second, holdBody(), "client_cap_reached");
+    // The client's cap lifted, the ceiling still full: platform_busy, 409, with its own sentence.
+    await caps(10, 1_000_000, { tenant });
+    const res = await refused(second, holdBody(), "platform_busy");
+    expect(res.status).toBe(409);
+    expect(res.json?.error).toBe(COMPUTE_PARTNER_SENTENCES.platform_busy);
   });
 });
 
