@@ -11,8 +11,8 @@
  * query -- it comes from the epic's forensic sweep -- so it is a checked-in
  * constant, mirroring `scripts/withdrawn-datasets.json` / `parseWithdrawnDatasets`.
  *
- * `nemar admin recover --all` / `nemar admin recover status --all` load this
- * file; `nemar admin recover <id>` (explicit-id form) also consults it to
+ * `nemar admin rework recover --all` / `nemar admin rework recover status --all` load this
+ * file; `nemar admin rework recover <id>` (explicit-id form) also consults it to
  * refuse an id that isn't on the list unless `--force` is passed (fat-finger
  * guard, same rationale as withdraw).
  */
@@ -68,7 +68,7 @@ export function loadRecoverDatasets(path: string): RecoverDatasetEntry[] {
  * checked-in list: refuse an id that isn't on the list unless `force` is set
  * (guards against a fat-fingered dataset id triggering a live re-verify +
  * re-dispatch of the OpenNeuro import workflow). Pure and side-effect free
- * so `nemar admin recover <id>`'s guard is unit-testable without Commander
+ * so `nemar admin rework recover <id>`'s guard is unit-testable without Commander
  * or a network call; the CLI action is a thin wrapper around this.
  */
 export function resolveRecoverTargets(

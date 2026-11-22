@@ -16,7 +16,7 @@
  * value and whose long flag an ancestor declares as a BOOLEAN is joined to its
  * value (`--version 2.0.0` -> `--version=2.0.0`). Only the tokens after that
  * command's name are its own. An ancestor option that takes a value itself
- * (`admin recover --recover-file`) needs no join: the ancestor consumes the
+ * (`admin rework recover --recover-file`) needs no join: the ancestor consumes the
  * flag and its value together, and the leaf reads it back through
  * `optsWithGlobals()`.
  *
@@ -109,7 +109,7 @@ function findSubcommand(cmd: Command, name: string): Command | undefined {
  * The outermost ancestor declaring a flag is the one Commander parses it
  * with. A boolean takes the flag and leaves the value behind as a stray
  * argument, so those are the options that need a join. An ancestor that takes a
- * value itself (`admin recover --recover-file`) consumes the flag and its value
+ * value itself (`admin rework recover --recover-file`) consumes the flag and its value
  * together, so nothing is shadowed.
  */
 function shadowedOptions(command: Command, ancestors: readonly Command[]): Map<string, Option> {
@@ -158,7 +158,7 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   // Walk to the leaf command: descend while a non-flag token names a
   // subcommand of the current one, skipping tokens that start with "-". That
   // assumes no command with subcommands takes a value option, so no option
-  // value can be mistaken for a subcommand name. Only `admin recover
+  // value can be mistaken for a subcommand name. Only `admin rework recover
   // --recover-file` does; its value ends the walk at `recover`, which shadows
   // nothing. The one value the walk steps over is a shadowed flag's own.
   const treeFlags = shadowedFlagsInTree(root, []);

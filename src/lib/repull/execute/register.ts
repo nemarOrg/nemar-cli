@@ -255,7 +255,7 @@ export async function registerCopied(args: {
   if (!gate.ok) {
     throw new ExecuteRefused(
       "held-key-absent",
-      `${gate.unbacked.length} of ${treeKeys.size} annexed key(s) the N.0.0 tree names have no object of their declared size in NEMAR's bucket (${(gate.available * 100).toFixed(1)}% available). Nothing was registered or pushed: those keys would be advertised as content no clone can fetch. Recover the content first (nemar admin fleet content-recovery ${args.datasetId}).`,
+      `${gate.unbacked.length} of ${treeKeys.size} annexed key(s) the N.0.0 tree names have no object of their declared size in NEMAR's bucket (${(gate.available * 100).toFixed(1)}% available). Nothing was registered or pushed: those keys would be advertised as content no clone can fetch. Recover the content first (nemar admin rework annex content-recovery ${args.datasetId}).`,
     );
   }
   const retire = replacedKeys(args.body, tree, new Set(args.manifest.local.map((i) => i.key)));

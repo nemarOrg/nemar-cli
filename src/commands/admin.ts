@@ -11,8 +11,8 @@
  * - nemar admin users role         - Change a user's role (owner only)
  * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
  *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
- * - nemar admin revert             - Revert dataset to a previous version
- * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
+ * - nemar admin rework            - Change an existing dataset: revert, recover [status], and
+ *   annex normalize/policy/key-registration/content-recovery
  * - nemar admin users verify/kind/kind-check/keys/duplicates/backfill-usernames - Accounts
  * - nemar admin users email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
@@ -310,7 +310,8 @@ User Management:
 Dataset Management:
   dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
                       delete, reindex, doi, ci, s3, exemplar, doctor
-  revert            - Revert dataset to previous version (via PR)
+  rework            - Change an existing dataset: revert (via PR), recover, and
+                      annex normalize, policy, key-registration, content-recovery
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
 
 Examples:
@@ -4723,7 +4724,7 @@ adminCommand.addCommand(importCommand);
 /** Default location of the checked-in recovery target list, resolved
  *  relative to this source file rather than cwd (mirrors
  *  defaultWithdrawnDatasetsPath, which shares this same shape). Shipped
- *  to npm (package.json "files") so `nemar admin recover` works from an
+ *  to npm (package.json "files") so `nemar admin rework recover` works from an
  *  installed build, not just a repo checkout -- the two layouts put this
  *  file at different depths from `import.meta.dir` (#1049):
  *   - source (`bun run src/index.ts`): this code lives at src/commands/, so
@@ -4991,7 +4992,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin recover status  /  nemar admin data-integrity-sweep --reaudit",
+            "  Watch progress with: nemar admin rework recover status  /  nemar admin data-integrity-sweep --reaudit",
           ),
         );
 
@@ -6067,17 +6068,17 @@ without cloning anything, so a sweep of the fleet costs minutes.
                    One commit, no data moves, no S3 traffic.
   policy-and-data  ALSO keeps recordings in git. Skipped unless --include-data:
                    that needs credentials and an upload, which is
-                   nemar admin annex-normalize <id> with someone watching.
+                   nemar admin rework annex normalize <id> with someone watching.
 
 --apply pushes to main and to the git-annex branch for every dataset it touches,
 which starts that repo's BIDS validation. Run it in batches (--limit) rather than
 across 600 repositories at once (ADR 0020).
 
 Examples:
-  $ nemar admin fleet annex-policy                       # report the imported fleet
-  $ nemar admin fleet annex-policy --prefix nm           # report the uploaded fleet
-  $ nemar admin fleet annex-policy on001810 --apply      # fix one
-  $ nemar admin fleet annex-policy --apply --limit 10    # fix a batch
+  $ nemar admin rework annex policy                      # report the imported fleet
+  $ nemar admin rework annex policy --prefix nm          # report the uploaded fleet
+  $ nemar admin rework annex policy on001810 --apply     # fix one
+  $ nemar admin rework annex policy --apply --limit 10   # fix a batch
 `,
   )
   .action(
@@ -6312,7 +6313,7 @@ Examples:
       if (needsDataLeg.length > 0) {
         console.log(
           chalk.dim(
-            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin annex-normalize <id>, or --include-data here).`,
+            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin rework annex normalize <id>, or --include-data here).`,
           ),
         );
       }
@@ -6489,10 +6490,10 @@ How presence is established:
   403 and 403 also means private, expired, or signed without a session token.
 
 Examples:
-  $ nemar admin fleet key-registration --prefix on --limit 10
-  $ nemar admin fleet key-registration --prefix on --limit 10 --apply
-  $ nemar admin fleet key-registration on000246 --apply
-  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
+  $ nemar admin rework annex key-registration --prefix on --limit 10
+  $ nemar admin rework annex key-registration --prefix on --limit 10 --apply
+  $ nemar admin rework annex key-registration on000246 --apply
+  $ nemar admin rework annex key-registration on004917 --retract-false-claims --apply
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6636,13 +6637,13 @@ Credentials:
   credentials only to list what the bucket already holds.
 
 Registering what it recovers:
-  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  this writes no location log. Run \`nemar admin rework annex key-registration <id>
   --apply\` afterwards, which lists the bucket again and records what is there.
 
 Examples:
-  $ nemar admin fleet content-recovery on008730
-  $ nemar admin fleet content-recovery on008730 --apply
-  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+  $ nemar admin rework annex content-recovery on008730
+  $ nemar admin rework annex content-recovery on008730 --apply
+  $ nemar admin rework annex content-recovery on008730 on008798 --apply --json report.json
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -6763,7 +6764,7 @@ Examples:
       console.log(
         chalk.dim(
           "\nThe location log still says nothing about these objects: run " +
-            "`nemar admin fleet key-registration <id> --apply` to record them.",
+            "`nemar admin rework annex key-registration <id> --apply` to record them.",
         ),
       );
     }
