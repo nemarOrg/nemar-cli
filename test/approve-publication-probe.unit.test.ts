@@ -103,6 +103,9 @@ describe("approve-publication.yml's help probe", () => {
   test("the path it picks runs, and the fallback is a stub that exits 1", async () => {
     const live = await cli.run(["admin", "repo", "publish", "approve", "--help"]);
     expect(live.exitCode).toBe(0);
+    // Commander answers --help under an unknown word with the parent's help and exit 0, so the
+    // exit code alone cannot tell; the usage line names the command that answered.
+    expect(live.stdout).toContain("Usage: nemar admin dataset publish approve");
     const dead = await cli.run(["admin", "publish", "approve", "nm000999", "--yes"]);
     expect(dead.exitCode).toBe(1);
     expect(dead.stderr).toContain("moved to 'nemar admin dataset publish'");

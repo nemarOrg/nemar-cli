@@ -152,6 +152,9 @@ describe("every moved admin command fails at once, without a request", () => {
       test(`the pointer for admin ${row.oldPath} names a live command`, async () => {
         const result = await run(CLI_ENTRY, ["admin", ...row.newPath.split(" "), "--help"]);
         expect(result.exitCode).toBe(0);
+        // --help under an unknown word prints the parent's help and exits 0 too; the usage line
+        // is what says the new path itself answered.
+        expect(result.stdout).toContain(`Usage: nemar admin ${row.newPath} `);
         expect(requests).toEqual([]);
       });
     }
