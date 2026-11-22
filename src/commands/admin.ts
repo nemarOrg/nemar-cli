@@ -4055,8 +4055,8 @@ async function dispatchOpenNeuroImportWorkflow(
   return { ok: true };
 }
 
-adminCommand
-  .command("annex-normalize <datasetId>")
+reworkAnnexCommand
+  .command("normalize <datasetId>")
   .description(
     "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
   )
