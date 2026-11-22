@@ -168,6 +168,14 @@ describe("every moved admin command fails at once, without a request", () => {
     ]);
   });
 
+  test("make-public is retired, not moved: dataset publish is not a bare flip", () => {
+    const row = MOVED_COMMANDS.find((r) => r.oldPath === "make-public");
+    expect(row && "retired" in row).toBe(true);
+    expect(stubMessage(row as (typeof MOVED_COMMANDS)[number], "nemar admin")).toBe(
+      "'nemar admin make-public' was retired: a bare visibility flip that skipped the publication request and screen no longer exists; use 'nemar admin dataset publish'. Nothing was run.",
+    );
+  });
+
   test("a retired command's line says why it is gone", () => {
     expect(
       stubMessage({ oldPath: "regenerate-iam", retired: "Nothing replaces it." }, "nemar admin"),

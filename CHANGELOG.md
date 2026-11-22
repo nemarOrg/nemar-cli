@@ -22,7 +22,7 @@ earlier releases are described only by their generated notes.
   `ci`, `doi`, `exemplar`, `s3 lock`, `s3 credential-check`, `doctor scan`, `doctor fix`, `reindex` and `bulk-delete` moved under `admin dataset` with their names; `delete-dataset` is `admin dataset delete`.
   Each old path runs nothing, prints one line naming the new path and exits 1, including the ADR 0125 stubs `admin publish`, `withdraw` and `restore`, which now name `admin dataset ...`.
   `admin doctor kinds` stays where it is until the `users` phase.
-- **Retired:** `admin make-public` (its line points at `admin dataset publish`; the `POST /datasets/:id/publish` route stays), and `admin regenerate-iam` and `admin s3 regenerate-iam`, which only printed a deprecation (the backend route still answers 410).
+- **Retired:** `admin make-public`, whose line says the bare visibility flip that skipped the publication request and screen no longer exists and to use `admin dataset publish` (the `POST /datasets/:id/publish` route stays, with no break-glass flag), and `admin regenerate-iam` and `admin s3 regenerate-iam`, which only printed a deprecation (the backend route still answers 410).
 - **`--apply` is the write flag** of `admin dataset unpublish`, `withdraw` and `restore`; `--execute` is still accepted as a hidden alias.
 - **`admin dataset doctor fix` is a dry run unless `--apply` is given.** The old `--dry-run` is accepted and hidden; `--apply` with `--dry-run` is refused.
 - **`admin dataset doi create` no longer takes `--provider`**, which could only ever be refused (EZID is the registrar, ADR 0007).
