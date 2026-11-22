@@ -22,6 +22,9 @@
  *    `compute-access-cascade.test.ts`);
  *  - every decision is audited with the actor, the states and the reason, and the person is mailed after
  *    the commit (the reason is NOT in the mail); a send that fails leaves the decision standing;
+ *  - the notice to the person (nemarOrg/docs#105): required for a suspension and a revocation, optional
+ *    for a denial, refused for a grant, bounded and free of control characters; it is mailed escaped
+ *    under a fixed heading with the review sentence, and it is never on the audit row;
  *  - none of it reads or writes `service_access`, and none of it reads the compute switch.
  *
  * MUTATIONS, each run alone (the results are in the PR): change the default grant's key so a re-grant
@@ -32,9 +35,15 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { DEFAULT_COMPUTE_POLICY } from "../../shared/contract/compute";
+import { COMPUTE_ACCESS_NOTICE_MAX_CHARS } from "../../shared/contract/compute-access";
 import { COMPUTE_TERMS_VERSION } from "../../shared/contract/compute-terms";
 import { decisionFlipStatement } from "../src/services/compute-access";
 import { putPolicy } from "../src/services/compute-policy";
+import {
+  COMPUTE_DECISION_NOTICE_HEADING,
+  COMPUTE_DECISION_SUPPORT_FALLBACK,
+  computeDecisionReviewSentence,
+} from "../src/services/email";
 import type { Bindings } from "../src/types/bindings";
 import {
   COMPUTE_KEYS,
@@ -49,6 +58,8 @@ import { sendsTo, withFakeResend } from "./helpers/resend";
 const handle = makeComputeApp();
 const PERSON_EMAIL = "cmpdecide-person@nemar.test";
 const SECRET_REASON = "REASON-MARKER-7741 the export review notes";
+/** The notice the suspension and revocation tests send when the test is not about the notice. */
+const TEST_NOTICE = "NOTICE-MARKER-3318 your jobs exceeded the agreed allocation.";
 
 let db: Database;
 let ids: Record<ComputeWho, number>;
@@ -149,7 +160,24 @@ async function call(
   return { status: res.status, body, text };
 }
 
+/** A notice for a decision that requires one, so a test about something else stays about that. */
+const withNotice = (decision: string, body?: unknown): unknown => {
+  if (decision !== "suspend" && decision !== "revoke") return body;
+  if (body !== undefined && typeof body === "object" && body !== null && "notice" in body)
+    return body;
+  return { ...((body as object | undefined) ?? {}), notice: TEST_NOTICE };
+};
+
+/** The decision route; a suspension or a revocation gets {@link TEST_NOTICE} unless the body names one. */
 const decide = (
+  decision: string,
+  who: ComputeWho | null,
+  target: string | number,
+  body?: unknown,
+) => decideExact(decision, who, target, withNotice(decision, body));
+
+/** The decision route with the body exactly as given. */
+const decideExact = (
   decision: string,
   who: ComputeWho | null,
   target: string | number,
@@ -595,7 +623,10 @@ describe("a decision that loses a race changes nothing", () => {
     e.DB = racing(realD1(db), isAccountRead, () =>
       db.run("UPDATE users SET compute_access = 'revoked' WHERE id = ?", [id]),
     );
-    const raced = await call("admin", "POST", `/suspend/by-id/${id}`, { env: e });
+    const raced = await call("admin", "POST", `/suspend/by-id/${id}`, {
+      env: e,
+      body: { notice: TEST_NOTICE },
+    });
     expect([raced.status, raced.body.code]).toEqual([409, "stale_state"]);
     expect(row(id).compute_access).toBe("revoked");
     expect(pools(id).map((p) => p.frozen)).toEqual([0]);
@@ -608,7 +639,10 @@ describe("a decision binds the state the administrator read (MUTATION: drop `com
   async function raced(decision: string, id: number, then: () => void) {
     const e = env();
     e.DB = racing(realD1(db), isAccountRead, then);
-    return call("admin", "POST", `/${decision}/by-id/${id}`, { env: e });
+    return call("admin", "POST", `/${decision}/by-id/${id}`, {
+      env: e,
+      body: withNotice(decision),
+    });
   }
 
   test("a grant read on `suspended` loses to a revoke that landed first: stale_state, the account stays revoked and frozen", async () => {
@@ -855,6 +889,189 @@ describe("the audit row and the mail", () => {
   });
 });
 
+describe("the notice to the person", () => {
+  const noticeField = (res: Called) =>
+    (res.body.fields as Array<{ path: string; code: string }> | undefined)?.find(
+      (f) => f.path === "notice",
+    )?.code;
+
+  test("a suspension and a revocation without a notice are refused, write nothing and mail nobody", async () => {
+    for (const decision of ["suspend", "revoke"]) {
+      for (const body of [undefined, {}, { notice: "" }, { notice: " \n\t " }, { reason: "r" }]) {
+        const id = seedPerson({ compute_access: "active" });
+        const before = row(id);
+        const calls = await withFakeResend(async (captured) => {
+          const res = await decideExact(decision, "admin", id, body);
+          expect([decision, res.status, res.body.code, noticeField(res)]).toEqual([
+            decision,
+            400,
+            "invalid_body",
+            "notice_required",
+          ]);
+          return captured;
+        });
+        expect(calls).toEqual([]);
+        expect(row(id)).toEqual(before);
+      }
+    }
+    expect(audits("compute_access_suspended")).toHaveLength(0);
+    expect(audits("compute_access_revoked")).toHaveLength(0);
+  });
+
+  test("a grant refuses a notice, even an empty one, and writes nothing", async () => {
+    for (const notice of ["Welcome aboard", ""]) {
+      const res = await decideExact("grant", "admin", personId, { notice });
+      expect([res.status, res.body.code, noticeField(res)]).toEqual([
+        400,
+        "invalid_body",
+        "notice_refused",
+      ]);
+      expect(row().compute_access).toBe("requested");
+    }
+    expect(audits("compute_access_granted")).toHaveLength(0);
+  });
+
+  test("a denial takes a notice or none", async () => {
+    const bare = await withFakeResend(() => decideExact("deny", "admin", personId));
+    expect(bare.status).toBe(200);
+    const id = seedPerson();
+    const told = await withFakeResend(() =>
+      decideExact("deny", "admin", id, {
+        notice: "The purpose is outside what NEMAR compute is for.",
+      }),
+    );
+    expect(told.status).toBe(200);
+  });
+
+  test("a notice is bounded in characters after trimming, refuses control characters, and keeps newline and tab", async () => {
+    const max = COMPUTE_ACCESS_NOTICE_MAX_CHARS;
+    const refused: Array<[string, string]> = [
+      ["n".repeat(max + 1), "notice_too_long"],
+      ["\u{1F600}".repeat(max + 1), "notice_too_long"],
+      ["NOTICE-SECRET\u0007bell", "notice_control_char"],
+      ["NOTICE-SECRET\u0000nul", "notice_control_char"],
+      ["NOTICE-SECRET\u007fdel", "notice_control_char"],
+    ];
+    for (const [notice, word] of refused) {
+      const id = seedPerson({ compute_access: "active" });
+      const res = await decideExact("suspend", "admin", id, { notice });
+      expect([res.status, noticeField(res)]).toEqual([400, word]);
+      expect(res.text).not.toContain("NOTICE-SECRET");
+      expect(res.text).not.toContain("nnnnnnnn");
+      expect(row(id).compute_access).toBe("active");
+    }
+    for (const notice of [
+      `  ${"n".repeat(max)}  `,
+      "\u{1F600}".repeat(max),
+      "First line.\n\tSecond line.",
+    ]) {
+      const id = seedPerson({ compute_access: "active" });
+      const res = await withFakeResend(() => decideExact("suspend", "admin", id, { notice }));
+      expect(res.status).toBe(200);
+    }
+  });
+
+  test("a notice padded past the outer bound is refused as notice_too_long, never a raw too_big", async () => {
+    const max = COMPUTE_ACCESS_NOTICE_MAX_CHARS;
+    // Within the rule once trimmed, past the outer bound (4 * max UTF-16 units) as sent.
+    for (const notice of [
+      `${"n".repeat(max)}${" ".repeat(3 * max + 1)}`,
+      `${" ".repeat(2 * max)}${"n".repeat(max)}${" ".repeat(2 * max)}`,
+      "n".repeat(4 * max + 1),
+    ]) {
+      const id = seedPerson({ compute_access: "active" });
+      const calls = await withFakeResend(async (captured) => {
+        const res = await decideExact("suspend", "admin", id, { notice });
+        expect([res.status, res.body.code, noticeField(res)]).toEqual([
+          400,
+          "invalid_body",
+          "notice_too_long",
+        ]);
+        expect(res.text).not.toContain("too_big");
+        expect(res.body.error).toContain("notice: notice_too_long");
+        expect(res.text).not.toContain("nnnnnnnn");
+        return captured;
+      });
+      expect(calls).toEqual([]);
+      expect(row(id).compute_access).toBe("active");
+    }
+  });
+
+  test("the mail carries the notice escaped under the fixed heading, the review sentence, and never the audit reason", async () => {
+    const notice = 'NOTICE-MARKER <script>alert("x")</script> & more';
+    for (const [decision, from] of [
+      ["suspend", "active"],
+      ["revoke", "suspended"],
+      ["deny", "requested"],
+    ] as const) {
+      const email = `cmpdecide-notice-${decision}@nemar.test`;
+      const id = seedPerson({ compute_access: from, email });
+      const calls = await withFakeResend(async (captured) => {
+        const res = await decideExact(decision, "admin", id, { notice, reason: SECRET_REASON });
+        expect([decision, res.status, res.body.email_sent]).toEqual([decision, 200, true]);
+        return captured;
+      });
+      const html = sendsTo(calls, email)[0]?.html ?? "";
+      expect(html).toContain(COMPUTE_DECISION_NOTICE_HEADING);
+      expect(html).toContain(
+        "NOTICE-MARKER &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; more",
+      );
+      expect(html).not.toContain("<script>");
+      expect(html).toContain(computeDecisionReviewSentence());
+      expect(html).not.toContain("REASON-MARKER");
+      // The notice is for the person, not the record: it is not on the audit row.
+      const action = { suspend: "suspended", revoke: "revoked", deny: "denied" }[decision];
+      const [a] = audits(`compute_access_${action}`).slice(-1);
+      expect(a?.details).toContain("REASON-MARKER");
+      expect(a?.details ?? "").not.toContain("NOTICE-MARKER");
+    }
+  });
+
+  test("the review sentence names the configured Reply-To, the same address the mail carries", async () => {
+    const replyTo = "support@test.nemar.org";
+    for (const [mailbox, decision, from] of [
+      [replyTo, "suspend", "active"],
+      [`NEMAR Support <${replyTo}>`, "deny", "requested"],
+    ] as const) {
+      const email = `cmpdecide-replyto-${decision}@nemar.test`;
+      const id = seedPerson({ compute_access: from, email });
+      const calls = await withFakeResend(async (captured) => {
+        const res = await call("admin", "POST", `/${decision}/by-id/${id}`, {
+          body: withNotice(decision, {}),
+          env: env({ REPLY_TO: mailbox }),
+        });
+        expect([decision, res.status, res.body.email_sent]).toEqual([decision, 200, true]);
+        return captured;
+      });
+      const [sent] = sendsTo(calls, email) as Array<{ html: string; reply_to?: string }>;
+      expect(sent?.reply_to).toBe(mailbox);
+      expect(sent?.html).toContain(
+        `To ask for a review of this decision, reply to this email or write to ${replyTo}.`,
+      );
+      expect(sent?.html).not.toContain(COMPUTE_DECISION_SUPPORT_FALLBACK);
+    }
+  });
+
+  test("a denial without a notice has the review sentence and no heading; a grant has neither", async () => {
+    const email = "cmpdecide-bare-deny@nemar.test";
+    const id = seedPerson({ email });
+    const denied = await withFakeResend(async (captured) => {
+      await decideExact("deny", "admin", id);
+      return captured;
+    });
+    const deniedHtml = sendsTo(denied, email)[0]?.html ?? "";
+    expect(deniedHtml).toContain(computeDecisionReviewSentence());
+    expect(deniedHtml).not.toContain(COMPUTE_DECISION_NOTICE_HEADING);
+    const granted = await withFakeResend(async (captured) => {
+      await decideExact("grant", "admin", personId);
+      return captured;
+    });
+    const grantedHtml = sendsTo(granted, PERSON_EMAIL)[0]?.html ?? "";
+    expect(grantedHtml).not.toContain(computeDecisionReviewSentence());
+    expect(grantedHtml).not.toContain(COMPUTE_DECISION_NOTICE_HEADING);
+  });
+});
+
 describe("independence from upload access and from the compute switch", () => {
   test("a decision never reads or writes service_access", async () => {
     db.run("UPDATE users SET service_access = 1, status = 'approved' WHERE id = ?", [personId]);
@@ -879,7 +1096,10 @@ describe("independence from upload access and from the compute switch", () => {
       const e = env({ COMPUTE_ENABLED });
       await withFakeResend(async () => {
         for (const d of ["grant", "suspend", "revoke"]) {
-          const res = await call("admin", "POST", `/${d}/by-id/${id}`, { env: e });
+          const res = await call("admin", "POST", `/${d}/by-id/${id}`, {
+            env: e,
+            body: withNotice(d),
+          });
           expect([COMPUTE_ENABLED, d, res.status]).toEqual([COMPUTE_ENABLED, d, 200]);
         }
       });
