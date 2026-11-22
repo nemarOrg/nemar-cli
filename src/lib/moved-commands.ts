@@ -3,8 +3,10 @@
  *
  * A command that moves keeps its old path registered as a hidden stub that
  * accepts any arguments, runs nothing, makes no request, prints one line naming
- * the new path to stderr and exits 1. There is no forwarding: an unattended
- * workflow that still calls the old path has to fail where someone reads it.
+ * the new path to stderr and exits 1. A command retired with nothing to
+ * replace it gets the same stub; its line says why the command is gone.
+ * There is no forwarding: an unattended workflow that still calls the old path
+ * has to fail where someone reads it.
  *
  * Every stub is a row of {@link MOVED_COMMANDS}; a phase that moves a command
  * appends a row and nothing else here. Paths are written relative to the
@@ -16,12 +18,22 @@ import chalk from "chalk";
 import type { Command } from "commander";
 import { markReportedExit } from "./debug-log.js";
 
-export interface MovedCommand {
-  /** The path that no longer runs, below `nemar admin` (e.g. `publish`, `fleet annex-policy`). */
-  readonly oldPath: string;
-  /** Where the command lives now, below `nemar admin` (e.g. `repo publish`). */
-  readonly newPath: string;
-}
+/**
+ * One row: an old path and either where the command lives now (`newPath`) or, for a command
+ * retired with nothing to replace it, the reason it is gone (`retired`).
+ */
+export type MovedCommand =
+  | {
+      /** The path that no longer runs, below `nemar admin` (e.g. `publish`, `fleet annex-policy`). */
+      readonly oldPath: string;
+      /** Where the command lives now, below `nemar admin` (e.g. `dataset publish`). */
+      readonly newPath: string;
+    }
+  | {
+      readonly oldPath: string;
+      /** Why the command is gone, one sentence ending in a period. */
+      readonly retired: string;
+    };
 
 /**
  * The one table of moved admin commands.
@@ -33,10 +45,52 @@ export interface MovedCommand {
  * {@link registerMovedCommands} refuses a table without it.
  */
 export const MOVED_COMMANDS: readonly MovedCommand[] = [
-  // ADR 0125 decision 7: the dataset lifecycle moved under `admin repo`.
-  { oldPath: "publish", newPath: "repo publish" },
-  { oldPath: "withdraw", newPath: "repo withdraw" },
-  { oldPath: "restore", newPath: "repo restore" },
+  // ADR 0125 decision 7 moved the dataset lifecycle under `admin repo`; ADR 0135 renamed the
+  // group to `dataset` (`repo` stays its alias), so these point at the canonical name.
+  { oldPath: "publish", newPath: "dataset publish" },
+  { oldPath: "withdraw", newPath: "dataset withdraw" },
+  { oldPath: "restore", newPath: "dataset restore" },
+  // ADR 0135, phase P1: the per-dataset commands gather under `admin dataset`.
+  { oldPath: "ci", newPath: "dataset ci" },
+  { oldPath: "ci check", newPath: "dataset ci check" },
+  { oldPath: "ci add", newPath: "dataset ci add" },
+  { oldPath: "ci validate", newPath: "dataset ci validate" },
+  { oldPath: "ci sync", newPath: "dataset ci sync" },
+  { oldPath: "doi", newPath: "dataset doi" },
+  { oldPath: "doi create", newPath: "dataset doi create" },
+  { oldPath: "doi info", newPath: "dataset doi info" },
+  { oldPath: "doi update", newPath: "dataset doi update" },
+  { oldPath: "doi enrich", newPath: "dataset doi enrich" },
+  { oldPath: "exemplar", newPath: "dataset exemplar" },
+  { oldPath: "exemplar create", newPath: "dataset exemplar create" },
+  { oldPath: "exemplar status", newPath: "dataset exemplar status" },
+  { oldPath: "exemplar remint-dois", newPath: "dataset exemplar remint-dois" },
+  { oldPath: "doctor scan", newPath: "dataset doctor scan" },
+  { oldPath: "doctor fix", newPath: "dataset doctor fix" },
+  // Retired: the action only printed a deprecation; the backend route answers 410.
+  {
+    oldPath: "regenerate-iam",
+    retired:
+      "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
+  },
+  // Retired, not moved: `dataset publish` is the request, screen and approve workflow, not a
+  // bare flip. The `POST /datasets/:id/publish` route stays (ADR 0135, amendment 2026-11-22).
+  {
+    oldPath: "make-public",
+    retired:
+      "a bare visibility flip that skipped the publication request and screen no longer exists; use 'nemar admin dataset publish'.",
+  },
+  { oldPath: "delete-dataset", newPath: "dataset delete" },
+  { oldPath: "bulk-delete", newPath: "dataset bulk-delete" },
+  { oldPath: "reindex", newPath: "dataset reindex" },
+  { oldPath: "s3", newPath: "dataset s3" },
+  { oldPath: "s3 lock", newPath: "dataset s3 lock" },
+  { oldPath: "s3 credential-check", newPath: "dataset s3 credential-check" },
+  {
+    oldPath: "s3 regenerate-iam",
+    retired:
+      "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
+  },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
@@ -90,6 +144,18 @@ export function movedCommandMessage(oldFullPath: string, newFullPath: string): s
   return `'${oldFullPath}' moved to '${newFullPath}'. Nothing was run.`;
 }
 
+/** The one stderr line the stub of a retired command prints. */
+export function retiredCommandMessage(oldFullPath: string, reason: string): string {
+  return `'${oldFullPath}' was retired: ${reason} Nothing was run.`;
+}
+
+/** The line a row's stub prints, with `prefix` (`nemar admin`) before each path. */
+export function stubMessage(row: MovedCommand, prefix: string): string {
+  const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
+  if ("retired" in row) return retiredCommandMessage(oldFull, row.retired);
+  return movedCommandMessage(oldFull, `${prefix} ${words(row.newPath).join(" ")}`);
+}
+
 function words(path: string): string[] {
   const parts = path.trim().split(/\s+/);
   if (parts.length === 0 || parts[0] === "") throw new Error("moved-commands: empty path");
@@ -128,7 +194,13 @@ export function registerMovedCommands(
   const byOldPath = new Map<string, MovedCommand>();
   for (const row of rows) {
     const key = words(row.oldPath).join(" ");
-    words(row.newPath);
+    if ("retired" in row) {
+      if (!/\S.*\.$/.test(row.retired)) {
+        throw new Error(`moved-commands: '${key}' needs a retirement reason ending in a period`);
+      }
+    } else {
+      words(row.newPath);
+    }
     if (byOldPath.has(key)) throw new Error(`moved-commands: duplicate old path '${key}'`);
     byOldPath.set(key, row);
   }
@@ -165,10 +237,7 @@ export function registerMovedCommands(
         const candidate = byOldPath.get([...stubWords, ...args.slice(0, n)].join(" "));
         if (candidate) row = candidate;
       }
-      const prefix = fullName(root);
-      const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
-      const newFull = `${prefix} ${words(row.newPath).join(" ")}`;
-      console.error(chalk.red(movedCommandMessage(oldFull, newFull)));
+      console.error(chalk.red(stubMessage(row, fullName(root))));
       markReportedExit();
       process.exit(1);
     };

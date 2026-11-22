@@ -1236,7 +1236,7 @@ export async function enrichDataset(
       doiSyncOutcome = { status: "skipped", reason: ANONYMOUS_DEPOSIT_REASON, message };
     } else if (dataset.concept_doi && refreshWouldStripAttribution(dataset, doiUploader)) {
       // DO NOT SYNC (#1255). This path runs automatically from the
-      // README/dataset_description webhook and from `nemar admin reindex
+      // README/dataset_description webhook and from `nemar admin dataset reindex
       // --bulk`, and it rebuilds the DataCite document from live DB state.
       // For a published dataset whose owner has no researcher name on file
       // -- most of the catalogue until `nemar admin backfill-names --apply`

@@ -382,7 +382,7 @@ export async function normalizeDatasetRepo(
     });
     if (probe.outcome === "refused") {
       throw new Error(
-        `The credentials the API minted for ${datasetId} cannot read s3://${probe.bucket}/${probe.prefix}/: ${probe.detail}. Refusing to start the migration. Check that the API's S3 identity still covers the bucket and that the session policy names this dataset; \`nemar admin s3 credential-check ${datasetId}\` reports both. \`--via-aws-cli\` moves the same content with this machine's own AWS configuration instead.`,
+        `The credentials the API minted for ${datasetId} cannot read s3://${probe.bucket}/${probe.prefix}/: ${probe.detail}. Refusing to start the migration. Check that the API's S3 identity still covers the bucket and that the session policy names this dataset; \`nemar admin dataset s3 credential-check ${datasetId}\` reports both. \`--via-aws-cli\` moves the same content with this machine's own AWS configuration instead.`,
       );
     }
     if (probe.outcome === "unavailable") {

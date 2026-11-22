@@ -1,9 +1,10 @@
 /**
- * `nemar admin repo unpublish`, through the real command against the real backend app (ADR 0125).
+ * `nemar admin dataset unpublish`, through the real command against the real backend app (ADR 0125).
  *
  * The execute path needs GitHub and S3 and is proven in backend/test/unpublish.test.ts, with the
  * stand-ins for both. What only the command can break is here: that it sends the request the
- * Worker expects, that a dry run changes nothing, that --execute needs a reason before anything
+ * Worker expects, that a dry run changes nothing, that --apply (or its hidden alias --execute)
+ * needs a reason before anything
  * is sent, that a skip is reported and exits 0, and that the output says the DOIs are untouched.
  *
  * CI TIER: unit-pure. Hermetic: an in-process backend over a local database, the CLI spawned
@@ -58,11 +59,11 @@ const resetCount = (id: string) =>
     )
     .get(id)?.n;
 
-describe("nemar admin repo unpublish", () => {
+describe("nemar admin dataset unpublish", () => {
   test("a dry run plans the repair of a half state and changes nothing", async () => {
     seedHalfState("nm000289");
 
-    const r = await h.cli(["admin", "repo", "unpublish", "nm000289"]);
+    const r = await h.cli(["admin", "dataset", "unpublish", "nm000289"]);
 
     expect(r.exitCode).toBe(0);
     const out = output(r);
@@ -74,13 +75,13 @@ describe("nemar admin repo unpublish", () => {
     expect(h.posted.map((p) => p.body)).toEqual([{ dry_run: true }]);
   });
 
-  test("--execute without --reason sends nothing", async () => {
+  test.each(["--apply", "--execute"])("%s without --reason sends nothing", async (flag) => {
     seedHalfState("nm000289");
 
-    const r = await h.cli(["admin", "repo", "unpublish", "nm000289", "--execute", "--yes"]);
+    const r = await h.cli(["admin", "dataset", "unpublish", "nm000289", flag, "--yes"]);
 
     expect(r.exitCode).toBe(1);
-    expect(output(r)).toContain("--reason is required with --execute");
+    expect(output(r)).toContain("--reason is required with --apply");
     expect(h.posted).toEqual([]);
     expect(resetCount("nm000289")).toBe(0);
   });
@@ -90,10 +91,10 @@ describe("nemar admin repo unpublish", () => {
 
     const r = await h.cli([
       "admin",
-      "repo",
+      "dataset",
       "unpublish",
       "nm000289",
-      "--execute",
+      "--apply",
       "--reason",
       "authors request",
       "--no",
@@ -111,7 +112,7 @@ describe("nemar admin repo unpublish", () => {
       [ownerId],
     );
 
-    const r = await h.cli(["admin", "repo", "unpublish", "nm000104", "--json"]);
+    const r = await h.cli(["admin", "dataset", "unpublish", "nm000104", "--json"]);
 
     expect(r.exitCode).toBe(0);
     expect(JSON.parse(r.stdout)).toMatchObject({ dataset_id: "nm000104", dry_run: true });
@@ -119,7 +120,7 @@ describe("nemar admin repo unpublish", () => {
   });
 
   test("an unknown dataset is reported as skipped, not as a crash", async () => {
-    const r = await h.cli(["admin", "repo", "unpublish", "nm000998"]);
+    const r = await h.cli(["admin", "dataset", "unpublish", "nm000998"]);
 
     expect(r.exitCode).toBe(0);
     expect(output(r)).toContain("Dataset not found");
@@ -129,7 +130,7 @@ describe("nemar admin repo unpublish", () => {
 describe("the cache note after an execute", () => {
   test("a dry run does not print it (nothing changed, nothing to wait for)", async () => {
     seedHalfState("nm000290");
-    const dry = await h.cli(["admin", "repo", "unpublish", "nm000290"]);
+    const dry = await h.cli(["admin", "dataset", "unpublish", "nm000290"]);
     expect(output(dry)).not.toContain("cached at the edge");
   });
 

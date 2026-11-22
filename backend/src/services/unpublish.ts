@@ -130,13 +130,13 @@ export function decideUnpublish(input: {
   if (input.withdrawnAt) {
     return {
       skipped:
-        "Dataset is withdrawn (its DOIs are tombstoned); reverse that with 'nemar admin repo restore', not unpublish",
+        "Dataset is withdrawn (its DOIs are tombstoned); reverse that with 'nemar admin dataset restore', not unpublish",
     };
   }
   if ((input.openRequests ?? 0) > 0) {
     return {
       skipped:
-        "A publication request is open; deny it first with `nemar admin repo publish deny <dataset> -r <reason>`, then unpublish",
+        "A publication request is open; deny it first with `nemar admin dataset publish deny <dataset> -r <reason>`, then unpublish",
     };
   }
   if (input.visibility === "public") {

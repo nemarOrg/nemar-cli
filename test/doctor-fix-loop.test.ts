@@ -1,6 +1,6 @@
 /**
  * Unit tests for runDoctorFixLoop -- the per-dataset driver behind
- * `nemar admin doctor fix` (#1133 review fix).
+ * `nemar admin dataset doctor fix` (#1133 review fix).
  *
  * Guards the two properties the review found unprotected:
  *  1. A dataset healed between enumeration and its fix turn (the narrowed

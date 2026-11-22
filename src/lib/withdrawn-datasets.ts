@@ -9,8 +9,8 @@
  * plan -- so it is a checked-in, forensically-sourced constant, mirroring
  * `scripts/exemplar-fleet.json` / `parseExemplarFleet` in exemplar-clone.ts.
  *
- * `nemar admin repo withdraw --all` / `nemar admin repo restore --all` load this file;
- * `nemar admin repo withdraw <id>` (single-id form) also consults it to refuse an
+ * `nemar admin dataset withdraw --all` / `nemar admin dataset restore --all` load this file;
+ * `nemar admin dataset withdraw <id>` (single-id form) also consults it to refuse an
  * id that isn't on the list unless `--force` is passed (fat-finger guard).
  */
 
@@ -181,7 +181,7 @@ export interface WithdrawTarget {
  * set (guards against a fat-fingered dataset id triggering a real
  * visibility flip + DOI tombstone), and require a reason -- either the
  * explicit override or the list entry's own -- per id. Pure and side-effect
- * free so `nemar admin repo withdraw <id>`'s guard is unit-testable without
+ * free so `nemar admin dataset withdraw <id>`'s guard is unit-testable without
  * Commander or a network call; the CLI action is a thin wrapper around this.
  */
 export function resolveWithdrawTargets(
@@ -201,7 +201,7 @@ export function resolveWithdrawTargets(
     // Being ON the list is not the same as being a target. A reinstated entry
     // stays on it as the record of a withdrawal that was reversed, so the
     // not-on-the-list guard passes it straight through, and `nemar admin
-    // withdraw <id> --execute` would take a dataset this list says is whole and
+    // dataset withdraw <id> --apply` would take a dataset this list says is whole and
     // make it private with its DOIs tombstoned -- filing the outcome of the
     // repair, "recovered", as the reason for the withdrawal. `--all` learned
     // this via stillWithdrawn; the explicit-id path had not.

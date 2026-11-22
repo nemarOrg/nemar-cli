@@ -240,7 +240,7 @@ describe("prod-safety gates use the fail-closed helper, not a literal comparison
 
 describe("deleteDatasetCascade prod-repo fence", () => {
   // The cascade's GitHub half is NOT environment-scoped: it always deletes
-  // nemarDatasets/<id>. The manual delete endpoints (admin delete-dataset,
+  // nemarDatasets/<id>. The manual delete endpoints (admin dataset delete,
   // bulk-delete, draft delete, import rollback) all funnel through here, and
   // dev's D1 is a prod mirror, so without this fence deleting a real id from
   // the dev worker would destroy the real repository.

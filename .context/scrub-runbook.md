@@ -373,7 +373,7 @@ rm -rf $W/check
 1. The tooling PR and the docs PRs are merged, and the maintainer has said go for this dataset.
    The first dataset is also the first real run of every stage: take it slowly, and stop at the first word this runbook does not explain.
 2. The real-bucket checklist has been run with the current checkout, after the last change to an S3 call.
-3. The dataset is private with the bucket-policy exclusion (`nemar admin repo unpublish $D` is the supported transition: the GitHub repository, the bucket policy and the catalog row, with the DOIs left alone), verified by C6: an anonymous `HEAD` of one of its objects answers 403, and a public control answers 200.
+3. The dataset is private with the bucket-policy exclusion (`nemar admin dataset unpublish $D` is the supported transition: the GitHub repository, the bucket policy and the catalog row, with the DOIs left alone), verified by C6: an anonymous `HEAD` of one of its objects answers 403, and a public control answers 200.
 4. The uploader, and for a mirror the source archive, have been told and asked not to upload over it.
    Nothing here stops an upload: a push the uploader makes during the run is caught by the leases of step 9 (`remote-moved-since-clone`), and a recording written to S3 after the plan is caught by `delete-old` (`unplanned-recording`), as is any raw object (`raw-copy-not-in-plan`).
 5. **Read the member names, not the values, of the real Zarr stores**, so the lists in `scripts/scrub/s3/zarr-json.ts` are known to cover what the converter wrote.
@@ -697,7 +697,7 @@ The legacy workflows themselves are a fleet-drift finding (`GET /admin/fleet/dri
 
 ```bash
 gh api repos/nemarDatasets/$D/actions/permissions > $W/actions-before.json      # all sixteen read {"enabled":true,"allowed_actions":"all"} on 2026-10-06
-nemar admin doi info $D > $W/doi-before.txt                                      # compared in step 15c
+nemar admin dataset doi info $D > $W/doi-before.txt                                      # compared in step 15c
 ```
 
 **Open the window**, after the announcement and every go of the batch:
@@ -1195,7 +1195,7 @@ Dispatch a manifest or records file again only if that check fails: a file regen
 Last, the catalog's version DOI pointer:
 
 ```bash
-nemar admin doi info $D | diff $W/doi-before.txt -          # expect no difference
+nemar admin dataset doi info $D | diff $W/doi-before.txt -          # expect no difference
 ```
 
 `datasets.latest_version_doi` is written, unconditionally, by every successful version-DOI publish (`mintEzidVersionDoi` in `backend/src/services/central-manifest.ts`), and the runs of several tags race with no `concurrency` group, so the last one to finish wins.
@@ -1280,7 +1280,7 @@ Last, step 14b again.
 > This step is held for an owner decision on how a scrubbed dataset goes public again (through the publication flow, or a purpose-built operation); until then do not run it.
 > The visibility change takes a few minutes to settle, as the 2026-10-04 change to private did.
 >
-> **If anything below fails**, make it private again (`nemar admin repo unpublish $D`) and stop: the new objects were verified twice, so the fault is in a manifest, a cache or a route, not in the bytes.
+> **If anything below fails**, make it private again (`nemar admin dataset unpublish $D`) and stop: the new objects were verified twice, so the fault is in a manifest, a cache or a route, not in the bytes.
 
 Wait a few minutes, then confirm with C6's two commands (the dataset's object must now answer 200).
 Then the archive that step 15c rebuilt (not for a dataset over the archive policy), which must now answer 200 anonymously (`$S3` as in C6, `$V` as in step 15c):
@@ -1370,7 +1370,7 @@ Do step 17 only after all of this passes.
 - Ask the scheduled sweep to screen the dataset again (`POST /admin/identifier-sweep/$D/rescreen` as an admin, ADR 0088), so the weekly report stops listing its pre-scrub finding; there is no CLI client for the route.
 - Comment on the dataset issue in plain words and close it; tell the uploader and the authors, and the source archive for a mirror.
 - Do not ask GitHub Support to clear cached views or pull-request refs: they are an accepted residual (decision of 2026-10-06).
-- Walk "Residuals" for this dataset: run the read-only checks it names (the `Zenodo:` line of `nemar admin doi info $D`, and the count of this dataset's id in the logs of the central runs that ran for it) and post what they show, as counts and yes or no, on the dataset issue.
+- Walk "Residuals" for this dataset: run the read-only checks it names (the `Zenodo:` line of `nemar admin dataset doi info $D`, and the count of this dataset's id in the logs of the central runs that ran for it) and post what they show, as counts and yes or no, on the dataset issue.
   Nothing in this procedure changes any of them.
 - Delete the working directory, the bundle and the local clones: `rm -rf $W`.
 
@@ -1443,7 +1443,7 @@ None of them is solved, and none may be reported as solved.
    It is skipped for an `on` dataset and when no key is configured, fails above 100 MB, and stays a draft; it is never published.
    A draft made before the scrub holds the pre-scrub tree.
    Published legacy Zenodo records (concept DOIs `10.5281/zenodo.*`, from the datasets deposited when Zenodo was the registrar) cannot be deleted by NEMAR.
-   Whether a draft or a record exists for a dataset, and whether a Zenodo key is set in production, is UNVERIFIED: `nemar admin doi info $D` prints a `Zenodo:` line when the row records a deposition, and whether that is a draft or a published record has to be read at Zenodo.
+   Whether a draft or a record exists for a dataset, and whether a Zenodo key is set in production, is UNVERIFIED: `nemar admin dataset doi info $D` prints a `Zenodo:` line when the row records a deposition, and whether that is a draft or a published record has to be read at Zenodo.
    Not decided: the maintainer has not ruled on drafts, and a published record is beyond NEMAR.
 4. **Public Actions logs of `nemarDatasets/.github`.**
    The repository is public and keeps logs for 90 days (read on 2026-10-06, when the runs on record were: `run-bids-validation.yml` 6,140, `run-enrichment.yml` 2,537, `generate-manifest.yml` 1,674, `generate-records.yml` 1,141, `run-generate-archive.yml` 1,096, `run-version-doi.yml` 1,080).

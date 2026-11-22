@@ -344,7 +344,9 @@ export async function deployCiStep(
       } else {
         const msg = error instanceof Error ? error.message : String(error);
         spinner.warn(`Could not configure CI: ${msg}`);
-        console.log(chalk.dim(`  An admin can add it later with: nemar admin ci add ${datasetId}`));
+        console.log(
+          chalk.dim(`  An admin can add it later with: nemar admin dataset ci add ${datasetId}`),
+        );
       }
     }
 
@@ -392,7 +394,7 @@ export function printUploadSuccess(
   ci: CiOutcome = "unknown",
 ): void {
   // Note: Branch protection is NOT applied here for private datasets.
-  // Protection is applied when creating a DOI (admin doi create) or making public.
+  // Protection is applied when creating a DOI (admin dataset doi create) or making public.
 
   // Step 13: Success!
   // Clear progress file and update last upload timestamp

@@ -2,7 +2,7 @@
  * Publication Workflow Tests
  *
  * Tests the user-facing publish commands (request, status, resend)
- * and admin repo publish commands (list, deny, approve).
+ * and admin dataset publish commands (list, deny, approve).
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
@@ -70,8 +70,8 @@ describe("publish workflow - help output", () => {
     expect(stdout).toContain("Publication workflow management");
   });
 
-  test("admin repo publish --help shows list, deny, approve", async () => {
-    const { stdout, exitCode } = await runCli(["admin", "repo", "publish", "--help"]);
+  test("admin dataset publish --help shows list, deny, approve", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "dataset", "publish", "--help"]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("list");
     expect(stdout).toContain("deny");
@@ -79,8 +79,8 @@ describe("publish workflow - help output", () => {
     expect(stdout).toContain("Publication workflow management");
   });
 
-  test("admin --help shows publish subgroup", async () => {
-    const { stdout, exitCode } = await runCli(["admin", "--help"]);
+  test("admin dataset --help shows publish subgroup", async () => {
+    const { stdout, exitCode } = await runCli(["admin", "dataset", "--help"]);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("publish");
   });
@@ -112,24 +112,27 @@ describe("publish workflow - auth requirements", () => {
     expect(stdout).toContain("Not authenticated");
   });
 
-  test("admin repo publish list requires auth", async () => {
+  test("admin dataset publish list requires auth", async () => {
     const ctx = createTestContext();
-    const { stdout } = await runCli(["admin", "repo", "publish", "list"], ctx);
+    const { stdout } = await runCli(["admin", "dataset", "publish", "list"], ctx);
     expect(stdout).toContain("Not authenticated");
   });
 
-  test("admin repo publish deny requires auth", async () => {
+  test("admin dataset publish deny requires auth", async () => {
     const ctx = createTestContext();
     const { stdout } = await runCli(
-      ["admin", "repo", "publish", "deny", "nm000104", "-r", "test", "-y"],
+      ["admin", "dataset", "publish", "deny", "nm000104", "-r", "test", "-y"],
       ctx,
     );
     expect(stdout).toContain("Not authenticated");
   });
 
-  test("admin repo publish approve requires auth", async () => {
+  test("admin dataset publish approve requires auth", async () => {
     const ctx = createTestContext();
-    const { stdout } = await runCli(["admin", "repo", "publish", "approve", "nm000104", "-y"], ctx);
+    const { stdout } = await runCli(
+      ["admin", "dataset", "publish", "approve", "nm000104", "-y"],
+      ctx,
+    );
     expect(stdout).toContain("Not authenticated");
   });
 });
@@ -149,7 +152,7 @@ describe("publish workflow - non-admin rejection", () => {
       username: "test-user",
     });
 
-    const { stdout } = await runCli(["admin", "repo", "publish", "list"], ctx);
+    const { stdout } = await runCli(["admin", "dataset", "publish", "list"], ctx);
     // Should not show request list (gets 403)
     expect(stdout).not.toContain("Publication Requests");
   });
@@ -164,7 +167,10 @@ describe("publish workflow - non-admin rejection", () => {
       username: "test-user",
     });
 
-    const { stdout } = await runCli(["admin", "repo", "publish", "approve", "nm000104", "-y"], ctx);
+    const { stdout } = await runCli(
+      ["admin", "dataset", "publish", "approve", "nm000104", "-y"],
+      ctx,
+    );
     // Should not show success output
     expect(stdout).not.toContain("published successfully");
   });
@@ -269,7 +275,7 @@ describe("publish workflow - user operations", () => {
 // ============================================================================
 
 describe("publish workflow - admin operations", () => {
-  test("admin repo publish list returns response", async () => {
+  test("admin dataset publish list returns response", async () => {
     if (!TEST_CONFIG.adminApiKey) return;
 
     const ctx = createTestContext();
@@ -279,7 +285,7 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout } = await runCli(["admin", "repo", "publish", "list"], ctx);
+    const { stdout } = await runCli(["admin", "dataset", "publish", "list"], ctx);
     // Should show requests, empty state, or 404 if endpoint not yet deployed
     expect(
       stdout.includes("Publication Requests") ||
@@ -288,7 +294,7 @@ describe("publish workflow - admin operations", () => {
     ).toBe(true);
   });
 
-  test("admin repo publish deny non-existent request returns error", async () => {
+  test("admin dataset publish deny non-existent request returns error", async () => {
     if (!TEST_CONFIG.adminApiKey) return;
 
     const ctx = createTestContext();
@@ -299,7 +305,7 @@ describe("publish workflow - admin operations", () => {
     });
 
     const { stdout, stderr } = await runCli(
-      ["admin", "repo", "publish", "deny", ABSENT_DATASET_ID, "-r", "test reason", "-y"],
+      ["admin", "dataset", "publish", "deny", ABSENT_DATASET_ID, "-r", "test reason", "-y"],
       ctx,
     );
     // ABSENT_DATASET_ID, not nm999999: that id is outside the 0-99999 cap, so the
@@ -314,7 +320,7 @@ describe("publish workflow - admin operations", () => {
     ).toBe(true);
   });
 
-  test("admin repo publish approve non-existent request returns error", async () => {
+  test("admin dataset publish approve non-existent request returns error", async () => {
     if (!TEST_CONFIG.adminApiKey) return;
 
     const ctx = createTestContext();
@@ -325,7 +331,7 @@ describe("publish workflow - admin operations", () => {
     });
 
     const { stdout, stderr } = await runCli(
-      ["admin", "repo", "publish", "approve", ABSENT_DATASET_ID, "-y"],
+      ["admin", "dataset", "publish", "approve", ABSENT_DATASET_ID, "-y"],
       ctx,
     );
     // Error message appears in stderr (via ora spinner.fail) or stdout
@@ -337,7 +343,7 @@ describe("publish workflow - admin operations", () => {
     ).toBe(true);
   });
 
-  test("admin repo publish list with status filter returns response", async () => {
+  test("admin dataset publish list with status filter returns response", async () => {
     if (!TEST_CONFIG.adminApiKey) return;
 
     const ctx = createTestContext();
@@ -347,7 +353,7 @@ describe("publish workflow - admin operations", () => {
       username: "test-admin",
     });
 
-    const { stdout } = await runCli(["admin", "repo", "publish", "list", "--requested"], ctx);
+    const { stdout } = await runCli(["admin", "dataset", "publish", "list", "--requested"], ctx);
     expect(
       stdout.includes("Publication Requests") ||
         stdout.includes("No requests with status requested found") ||

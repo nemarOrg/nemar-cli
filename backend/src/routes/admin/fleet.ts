@@ -282,7 +282,7 @@ export function registerFleetRoutes(admin: AdminRouter): void {
     return c.json(
       {
         error:
-          "Direct visibility changes are no longer supported: they leave the publication state out of step with the repository. Use POST /admin/publish/:id/approve to publish, or POST /admin/datasets/:id/unpublish to pull a dataset back to private (nemar admin repo publish approve / unpublish).",
+          "Direct visibility changes are no longer supported: they leave the publication state out of step with the repository. Use POST /admin/publish/:id/approve to publish, or POST /admin/datasets/:id/unpublish to pull a dataset back to private (nemar admin dataset publish approve / unpublish).",
         code: "visibility_change_refused",
         publish: `/admin/publish/${c.req.param("id")}/approve`,
         unpublish: `/admin/datasets/${c.req.param("id")}/unpublish`,

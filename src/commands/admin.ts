@@ -9,10 +9,8 @@
  * - nemar admin approve            - Approve a pending user
  * - nemar admin revoke             - Revoke user access
  * - nemar admin role               - Change a user's role (owner only)
- * - nemar admin s3 regenerate-iam  - Regenerate AWS credentials for a user
- * - nemar admin repo publish/unpublish/withdraw/restore - Dataset publication lifecycle
- * - nemar admin ci check/add       - Manage CI workflows
- * - nemar admin doi create/info/update/enrich - DOI management
+ * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
+ *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
  * - nemar admin email-preferences show/update - Email notification opt-out
@@ -173,7 +171,6 @@ import {
   listUsers,
   neurobagelRegenerate,
   neurobagelVerify,
-  publishDataset,
   publishZarrCatalog,
   recordingStatsSweep,
   recordingStatsSweepReset,
@@ -223,6 +220,7 @@ import {
   deleteNotice,
   listAdminNotices,
 } from "../lib/api/notices.js";
+import { addApplyOption } from "../lib/apply-flag.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
   type ConfirmOptions,
@@ -311,13 +309,9 @@ User Management:
   role           - Change a user's role (owner only: owner > admin > member)
 
 Dataset Management:
-  repo            - Dataset publication lifecycle (publish, unpublish, withdraw, restore)
-  ci              - Manage CI workflows (check status, deploy)
-  s3              - S3/IAM credential management
-  doi             - Create and manage DOIs for datasets
-  revert          - Revert dataset to previous version (via PR)
-  make-public     - Publish a dataset (pull it back with 'repo unpublish')
-  delete-dataset    - Delete a dataset and all associated resources
+  dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
+                      delete, reindex, doi, ci, s3, exemplar, doctor
+  revert            - Revert dataset to previous version (via PR)
   import-openneuro  - Import an OpenNeuro dataset into NEMAR
 
 Examples:
@@ -326,10 +320,9 @@ Examples:
   $ nemar admin approve john_doe           # Approve a user
   $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
   $ nemar admin role john_doe admin        # Promote user to admin (owner only)
-  $ nemar admin repo unpublish nm000104    # Pull a published dataset back to private
-  $ nemar admin ci check nm000104          # Check CI status
-  $ nemar admin s3 regenerate-iam john_doe # Regenerate AWS credentials
-  $ nemar admin doi create nm000104        # Create concept DOI`,
+  $ nemar admin dataset unpublish nm000104 # Pull a published dataset back to private
+  $ nemar admin dataset ci check nm000104  # Check CI status
+  $ nemar admin dataset doi create nm000104 # Create concept DOI`,
   );
 
 /**
@@ -1723,18 +1716,24 @@ both faster and easier on the rate limit than one command per page.`,
   });
 
 // ============================================================================
-// S3 / IAM Management
+// Dataset group (`admin dataset`, alias `repo`; ADR 0135)
 // ============================================================================
 
-const s3Command = new Command("s3").description("S3 and IAM credential management");
+const datasetGroupCommand = new Command("dataset")
+  .alias("repo")
+  .description("One dataset: publication lifecycle, DOIs, CI, S3 lock, deletion and repairs");
 
-s3Command
-  .command("regenerate-iam")
-  .description("Regenerate AWS IAM credentials for a user")
-  .argument("<username>", "Username to regenerate credentials for")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
+adminCommand.addCommand(datasetGroupCommand);
+
+datasetGroupCommand.addCommand(publishCommand);
+
+// ============================================================================
+// S3: Object Lock and credential checks for one dataset (`admin dataset s3`)
+// ============================================================================
+
+const s3Command = new Command("s3").description(
+  "S3 Object Lock and credential checks for one dataset",
+);
 
 s3Command
   .command("lock")
@@ -1797,8 +1796,8 @@ its session token -- S3 refuses such a request with a bare 403 even on an object
 that is anonymously readable.
 
 Examples:
-  $ nemar admin s3 credential-check on007788
-  $ nemar admin s3 credential-check nm099999
+  $ nemar admin dataset s3 credential-check on007788
+  $ nemar admin dataset s3 credential-check nm099999
 `,
   )
   .action(async (datasetId: string) => {
@@ -1878,35 +1877,7 @@ Examples:
     }
   });
 
-adminCommand.addCommand(s3Command);
-
-// Hidden alias for backward compatibility
-adminCommand
-  .command("regenerate-iam", { hidden: true })
-  .argument("<username>")
-  .option(YES_OPTION, YES_DESCRIPTION)
-  .option(NO_OPTION, NO_DESCRIPTION)
-  .action(regenerateIamAction);
-
-async function regenerateIamAction(_username: string, _options: ConfirmOptions) {
-  if (!requireAuth()) return;
-
-  console.log(chalk.yellow("\nThis command is deprecated.\n"));
-  console.log("S3 access is now managed through backend-scoped credentials.");
-  console.log("Per-user IAM credentials are no longer needed.");
-  console.log();
-  console.log(chalk.dim("Users can upload datasets without any IAM setup."));
-}
-
-// ============================================================================
-// Repository Management
-// ============================================================================
-
-const repoCommand = new Command("repo").description(
-  "Dataset publication lifecycle: publish, unpublish, withdraw, restore",
-);
-
-adminCommand.addCommand(repoCommand);
+datasetGroupCommand.addCommand(s3Command);
 
 // ============================================================================
 // CI Management
@@ -1945,7 +1916,9 @@ ciCommand
           console.log(`      URL:    ${chalk.dim(result.bids_validation.url)}`);
         }
       } else {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       // Version Check
@@ -1953,7 +1926,9 @@ ciCommand
       const versionIcon = versionPresent ? chalk.green("[x]") : chalk.red("[ ]");
       console.log(`  ${versionIcon} Version Check`);
       if (!versionPresent) {
-        console.log(`      ${chalk.dim("Not deployed. Use 'nemar admin ci add' to deploy.")}`);
+        console.log(
+          `      ${chalk.dim("Not deployed. Use 'nemar admin dataset ci add' to deploy.")}`,
+        );
       }
 
       console.log();
@@ -2062,7 +2037,7 @@ ciCommand
       console.log("  3. PR Merge Handler (creates releases, publishes DOIs)");
       console.log(
         chalk.dim(
-          "  (post-deploy parseability poll skipped for --all; run 'nemar admin ci validate <id>' per dataset)",
+          "  (post-deploy parseability poll skipped for --all; run 'nemar admin dataset ci validate <id>' per dataset)",
         ),
       );
       console.log();
@@ -2079,7 +2054,7 @@ ciCommand
       // Fleet deploys always skip the parseability poll. With many datasets
       // the per-dataset 2.5–7.5 s wait adds up; users running --all typically
       // just want fast confirmation of commits. Admins can run
-      // `nemar admin ci validate <id>` on individual datasets afterward.
+      // `nemar admin dataset ci validate <id>` on individual datasets afterward.
       // skipValidate is intentionally unused here — --no-validate accepts but
       // is a no-op on the fleet path (consistent with what the help text
       // says).
@@ -2313,7 +2288,7 @@ ciCommand
     }
   });
 
-adminCommand.addCommand(ciCommand);
+datasetGroupCommand.addCommand(ciCommand);
 
 // ============================================================================
 // DOI Management
@@ -2327,7 +2302,6 @@ doiCommand
   .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
   .option("--title <title>", "DOI title (defaults to dataset name)")
   .option("--description <desc>", "DOI description")
-  .option("--provider <provider>", "DOI provider: ezid (default) or zenodo", "ezid")
   .option("--sandbox", "Use sandbox/test DOI")
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
@@ -2337,7 +2311,6 @@ doiCommand
       options: {
         title?: string;
         description?: string;
-        provider?: string;
         sandbox?: boolean;
       } & ConfirmOptions,
     ) => {
@@ -2390,19 +2363,16 @@ doiCommand
       }
       console.log();
 
-      // Enhanced sandbox warning
-      const provider = (options.provider === "zenodo" ? "zenodo" : "ezid") as "ezid" | "zenodo";
+      // EZID is the registrar (ADR 0007); the backend refuses a Zenodo concept DOI, so there is
+      // no provider to choose.
+      const provider = "ezid";
 
       if (options.sandbox) {
         console.log(chalk.yellow("━".repeat(60)));
         console.log(chalk.yellow.bold("                 SANDBOX MODE ENABLED"));
         console.log(chalk.yellow("━".repeat(60)));
-        if (provider === "zenodo") {
-          console.log(chalk.yellow("  • Using Zenodo sandbox (sandbox.zenodo.org)"));
-        } else {
-          console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
-          console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
-        }
+        console.log(chalk.yellow("  • Using EZID test shoulder (doi:10.5072/FK2)"));
+        console.log(chalk.yellow("  • Test DOIs auto-delete after 2 weeks"));
         console.log(chalk.yellow("  • DOI will NOT be indexed by DataCite"));
         console.log(chalk.yellow("  • DOI will NOT resolve in production"));
         console.log(chalk.yellow("  • Use this for testing workflows only"));
@@ -2558,7 +2528,7 @@ doiCommand
         }
       } else {
         console.log(chalk.yellow("No concept DOI created yet"));
-        console.log(chalk.dim("  Use 'nemar admin doi create' to create one"));
+        console.log(chalk.dim("  Use 'nemar admin dataset doi create' to create one"));
       }
 
       console.log();
@@ -2592,7 +2562,7 @@ doiCommand
   .option("--make-public", "Transition DOI from reserved to public (permanent)")
   .option(
     "--unavailable",
-    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin repo withdraw' instead.",
+    "Tombstone the concept DOI (EZID _status=unavailable); concept-only, reversible via --make-public. For a full withdrawal (visibility + every version DOI) use 'nemar admin dataset withdraw' instead.",
   )
   .option("--refresh", "Refresh metadata from dataset_description.json and .nemar/metadata.json")
   .option(YES_OPTION, YES_DESCRIPTION)
@@ -3098,7 +3068,7 @@ doiCommand
         } else if (doiFetchFailed) {
           console.log(
             chalk.yellow(
-              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin doi update --refresh' manually.",
+              "  DOI refresh skipped: could not verify DOI exists. Run 'nemar admin dataset doi update --refresh' manually.",
             ),
           );
         }
@@ -3113,9 +3083,7 @@ doiCommand
     },
   );
 
-adminCommand.addCommand(doiCommand);
-
-repoCommand.addCommand(publishCommand);
+datasetGroupCommand.addCommand(doiCommand);
 
 // ============================================================================
 // Revert (Admin Only)
@@ -3401,147 +3369,11 @@ adminCommand
   );
 
 // ============================================================================
-// Make Public (One-Way Publish)
-// ============================================================================
-
-adminCommand
-  .command("make-public")
-  .description(
-    "Publish a dataset (make repository and data public); pull back with 'repo unpublish'",
-  )
-  .argument("<dataset-id>", "Dataset ID (e.g., nm000104)")
-  .addHelpText(
-    "after",
-    `
-Description:
-  Publish a dataset by making both the GitHub repository and S3 data publicly accessible.
-
-  ${chalk.yellow("WARNING: Publication mints DOIs that stay registered even if the dataset is later pulled back with 'nemar admin repo unpublish'")}
-
-  Once published:
-  - GitHub repository will be publicly visible
-  - S3 data files will be publicly downloadable
-  - git-annex will use public URLs for downloads
-
-  Publication leaves marks that unpublishing does not remove:
-  - Data may be cached, indexed, or linked externally
-  - Minted DOIs stay registered (DOI permanence); 'repo unpublish' never calls the registrar
-
-  Use this when:
-  - Dataset has been reviewed and validated
-  - Ready for public release and citation
-  - Associated with a DOI (concept or version)
-
-Requirements:
-  - Dataset must not be a sandbox dataset
-  - Dataset must have a GitHub repository
-  - Admin only; owners request publication via 'nemar dataset publish request'
-
-Examples:
-  $ nemar admin make-public nm000104
-
-  This will prompt for confirmation by requiring you to type
-  the dataset ID to confirm. Publication mints DOIs, which stay registered;
-  'nemar admin repo unpublish' pulls the dataset back to private afterwards.
-`,
-  )
-  .action(async (datasetIdArg: string) => {
-    if (!requireAuth()) return;
-
-    const datasetId = datasetIdArg.trim();
-
-    // Fetch dataset details first
-    let dataset: Dataset;
-    try {
-      dataset = await getDataset(datasetId);
-    } catch (error) {
-      if (error instanceof ApiError && error.statusCode === 404) {
-        console.error(chalk.red(`Dataset '${datasetId}' not found`));
-      } else {
-        console.error(
-          chalk.red(
-            `Failed to fetch dataset: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-        );
-      }
-      process.exit(1);
-    }
-
-    // Show warning and dataset info
-    console.log(
-      chalk.yellow(
-        "\nWARNING: Publishing mints DOIs that stay registered. The dataset can be pulled back to private with 'nemar admin repo unpublish', but its DOIs remain.\n",
-      ),
-    );
-    console.log("This will:");
-    console.log("  1. Make the GitHub repository PUBLIC");
-    console.log("  2. Allow public S3 access to all dataset files");
-    console.log("  3. Update git-annex configuration for web access\n");
-    console.log(`Dataset: ${chalk.cyan(dataset.dataset_id)} - ${dataset.name}`);
-    if (dataset.owner_username) {
-      console.log(`Owner: ${dataset.owner_username}`);
-    }
-    if (dataset.github_repo) {
-      console.log(`Repository: ${dataset.github_repo}`);
-    }
-    console.log();
-
-    // Require typing dataset ID to confirm
-    const confirmation = await inquirer.prompt([
-      {
-        type: "input",
-        name: "datasetId",
-        message: `Type '${datasetId}' to confirm:`,
-        validate: (input: string) => {
-          if (input.trim() === datasetId) {
-            return true;
-          }
-          return `Please type exactly '${datasetId}' to confirm`;
-        },
-      },
-    ]);
-
-    if (confirmation.datasetId !== datasetId) {
-      console.log(chalk.dim("Cancelled."));
-      process.exit(0);
-    }
-
-    const spinner = ora("Publishing dataset...").start();
-
-    try {
-      const result = await publishDataset(datasetId);
-      spinner.succeed(chalk.green("Dataset published successfully"));
-      console.log(`\nGitHub: ${chalk.cyan(result.github_url)}`);
-      console.log(`S3: ${chalk.cyan(result.s3_url)}`);
-    } catch (error) {
-      spinner.fail(chalk.red("Failed to publish dataset"));
-      if (error instanceof ApiError) {
-        console.error(chalk.red(`\n${error.message}`));
-        if (error.details) {
-          console.error(chalk.dim(JSON.stringify(error.details, null, 2)));
-        }
-        if (error.statusCode === 403) {
-          console.log(
-            chalk.dim(
-              "  Admin only; owners request publication via 'nemar dataset publish request'",
-            ),
-          );
-        } else if (error.statusCode === 400 && error.message.includes("sandbox")) {
-          console.log(chalk.dim("  Sandbox datasets cannot be published"));
-        }
-      } else {
-        console.error(chalk.red(`\n${error instanceof Error ? error.message : String(error)}`));
-      }
-      process.exit(1);
-    }
-  });
-
-// ============================================================================
 // Delete Dataset (Admin/Owner Only)
 // ============================================================================
 
-adminCommand
-  .command("delete-dataset")
+datasetGroupCommand
+  .command("delete")
   .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
   .option("--force", "Force deletion of published datasets with DOIs (owner only)")
@@ -3640,7 +3472,7 @@ adminCommand
 // Bulk Delete
 // ============================================================================
 
-adminCommand
+datasetGroupCommand
   .command("bulk-delete")
   .description("Delete multiple phantom/orphaned datasets at once (owner only)")
   .argument("<dataset-ids>", "Comma-separated dataset IDs (e.g., nm000153,nm000154,nm000155)")
@@ -3765,7 +3597,7 @@ function printTransitionResult(
   }
 }
 
-/** Print one unpublish result (the plan on a dry run, the outcome on an execute). */
+/** Print one unpublish result (the plan on a dry run, the outcome on an --apply run). */
 function printUnpublishResult(tag: string, result: UnpublishResponse): void {
   if ("skipped" in result) {
     console.log(`  ${chalk.yellow("skipped".padEnd(8))} ${result.dataset_id}: ${result.skipped}`);
@@ -3800,14 +3632,17 @@ function printUnpublishResult(tag: string, result: UnpublishResponse): void {
     console.log(chalk.dim(`    ${UNPUBLISH_CACHE_NOTE}`));
 }
 
-repoCommand
-  .command("unpublish")
-  .description(
-    "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
-  )
-  .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
-  .option("--reason <reason>", "Why it is being unpublished (required with --execute)")
-  .option("--execute", "Actually apply the unpublish (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("unpublish")
+    .description(
+      "Authors pull a dataset back: private everywhere, publication state reset, DOIs untouched, can be published again. A broken or removed dataset is 'withdraw' instead. Dry-run by default.",
+    )
+    .argument("<dataset-id>", "Dataset id (e.g., nm000104)")
+    .option("--reason <reason>", "Why it is being unpublished (required with --apply)"),
+  "Actually apply the unpublish (default is a dry run)",
+  ["--execute"],
+)
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .option("--json", "Output raw JSON")
@@ -3822,22 +3657,22 @@ Unpublish versus withdraw:
              Undo with 'restore'.
 
 Also repairs a dataset that was made private by a bare visibility change and still carries a
-publication record. Making a dataset public is what publishing does ('admin repo publish').
+publication record. Making a dataset public is what publishing does ('admin dataset publish').
 
 Examples:
-  $ nemar admin repo unpublish nm000123                                      # dry run
-  $ nemar admin repo unpublish nm000123 --execute --reason "authors request"`,
+  $ nemar admin dataset unpublish nm000123                                    # dry run
+  $ nemar admin dataset unpublish nm000123 --apply --reason "authors request"`,
   )
   .action(
     async (
       datasetId: string,
-      options: { reason?: string; execute?: boolean; json?: boolean } & ConfirmOptions,
+      options: { reason?: string; apply?: boolean; json?: boolean } & ConfirmOptions,
     ) => {
       if (!requireAuth()) return;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       if (!dryRun && !options.reason) {
-        console.log(chalk.red("Error: --reason is required with --execute"));
+        console.log(chalk.red("Error: --reason is required with --apply"));
         process.exit(1);
       }
 
@@ -3870,22 +3705,25 @@ Examples:
         console.log();
         printUnpublishResult(dryRun ? "[dry-run] " : "", result);
         if (dryRun && !("skipped" in result)) {
-          console.log(chalk.dim("\nNothing was changed. Re-run with --execute --reason <why>."));
+          console.log(chalk.dim("\nNothing was changed. Re-run with --apply --reason <why>."));
         }
       }
       if (!("skipped" in result) && result.visibility.status === "failed") process.exit(1);
     },
   );
 
-repoCommand
-  .command("withdraw")
-  .description(
-    "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
-  .option("--execute", "Actually apply the withdrawal (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("withdraw")
+    .description(
+      "Withdraw a BROKEN or removed published dataset: private + EZID DOIs tombstoned (concept + every version). Authors pulling a dataset back use 'unpublish' instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list")
+    .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)"),
+  "Actually apply the withdrawal (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
   .option(
     "--withdrawn-file <path>",
@@ -3900,7 +3738,7 @@ repoCommand
       options: {
         all?: boolean;
         reason?: string;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         withdrawnFile?: string;
         json?: boolean;
@@ -3945,7 +3783,7 @@ repoCommand
       }
       const targets = resolved.targets;
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {
@@ -3990,14 +3828,17 @@ repoCommand
     },
   );
 
-repoCommand
-  .command("restore")
-  .description(
-    "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
-  )
-  .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target the still-withdrawn entries on the checked-in list")
-  .option("--execute", "Actually apply the restore (default is a dry run)")
+addApplyOption(
+  datasetGroupCommand
+    .command("restore")
+    .description(
+      "Reverse a 'withdraw': public again and EZID DOIs restored (concept + every version). Not for an 'unpublish'; publish again instead. Dry-run by default.",
+    )
+    .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
+    .option("--all", "Target the still-withdrawn entries on the checked-in list"),
+  "Actually apply the restore (default is a dry run)",
+  ["--execute"],
+)
   .option(
     "--withdrawn-file <path>",
     "Path to the withdrawn-datasets JSON (default: scripts/withdrawn-datasets.json)",
@@ -4010,7 +3851,7 @@ repoCommand
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         withdrawnFile?: string;
         json?: boolean;
       } & ConfirmOptions,
@@ -4041,7 +3882,7 @@ repoCommand
         targets = ids;
       }
 
-      const dryRun = !options.execute;
+      const dryRun = !options.apply;
       const tag = dryRun ? "[dry-run] " : "";
 
       if (!dryRun) {
@@ -5453,14 +5294,14 @@ exemplarCommand
     }
   });
 
-adminCommand.addCommand(exemplarCommand);
+datasetGroupCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment +
 // Phase 2 metadata columns for one or many datasets.
 // ============================================================================
 
-/** The summary lines `nemar admin reindex` prints for one dataset. Pure, so
+/** The summary lines `nemar admin dataset reindex` prints for one dataset. Pure, so
  *  the wording operators act on (warnings, the lookup cap) is testable. */
 export function reindexLines(r: ReindexResponse, opts?: { showRef?: boolean }): string[] {
   const enrLabel = r.enrichment.status;
@@ -7073,12 +6914,12 @@ reindexCommand
         printReindexLine(r);
       }
       // Non-zero exit on partial bulk failure so shell scripts can chain
-      // safely (`nemar admin reindex --missing-metadata && do_next_step`).
+      // safely (`nemar admin dataset reindex --missing-metadata && do_next_step`).
       if (failed > 0) process.exit(1);
     },
   );
 
-adminCommand.addCommand(reindexCommand);
+datasetGroupCommand.addCommand(reindexCommand);
 
 const availabilityReportCommand = new Command("availability-report")
   .description(
@@ -8140,8 +7981,14 @@ adminCommand.addCommand(anonymitySweepCommand);
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
-const doctorCommand = new Command("doctor").description(
+// `admin dataset doctor` holds the dataset checks; the top-level `admin doctor` keeps only `kinds`,
+// an account check, until it moves to `admin users kind-check` (ADR 0135, phase P2).
+const datasetDoctorCommand = new Command("doctor").description(
   "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
+);
+
+const doctorCommand = new Command("doctor").description(
+  "Check operational account kinds (the dataset checks are 'admin dataset doctor')",
 );
 
 function printScanResults(res: DoctorScanResponse): number {
@@ -8157,7 +8004,7 @@ function printScanResults(res: DoctorScanResponse): number {
   return total;
 }
 
-doctorCommand
+datasetDoctorCommand
   .command("scan")
   .description("Run diagnostic checks (read-only)")
   .argument("[dataset-id]", "Narrow the scan to one dataset")
@@ -8179,7 +8026,7 @@ doctorCommand
       if (total > 0) {
         console.log(
           chalk.yellow(
-            `\n${total} finding(s). Preview the remediation with: nemar admin doctor fix <check> --dry-run`,
+            `\n${total} finding(s). Preview the remediation with: nemar admin dataset doctor fix <check>`,
           ),
         );
       }
@@ -8190,22 +8037,32 @@ doctorCommand
     }
   });
 
-doctorCommand
-  .command("fix")
-  .description("Apply a check's remediation (writes; use --dry-run first)")
-  .argument("<check>", "Check name (see: nemar admin doctor scan)")
-  .argument("[dataset-id]", "Narrow to one dataset")
-  .option("--dry-run", "List what would be fixed without writing")
+// Dry run by default since the admin tree restructure (ADR 0135): `--apply` dispatches the repairs. `--dry-run`, the
+// old preview flag, is still accepted (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  datasetDoctorCommand
+    .command("fix")
+    .description("List a check's remediation; --apply runs it (dry run by default)")
+    .argument("<check>", "Check name (see: nemar admin dataset doctor scan)")
+    .argument("[dataset-id]", "Narrow to one dataset"),
+  "Run the remediation (default is a dry run that lists what would be fixed)",
+)
+  .addOption(new Option("--dry-run", "List what would be fixed without writing").hideHelp())
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
     async (
       check: string,
       datasetId: string | undefined,
-      options: { dryRun?: boolean; json?: boolean },
+      options: { apply?: boolean; dryRun?: boolean; json?: boolean },
     ) => {
       if (!requireAuth()) return;
 
-      if (options.dryRun) {
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
+
+      if (!options.apply) {
         const spinner = ora(`Listing ${check} findings (dry run)...`).start();
         try {
           const res = await doctorFix({ check, datasetId, dryRun: true });
@@ -8217,6 +8074,9 @@ doctorCommand
           console.log(`Would fix ${res.would_fix} finding(s) for ${chalk.bold(check)}:`);
           for (const f of res.findings) {
             console.log(`  ${f.dataset_id}${f.version ? `@v${f.version}` : ""}`);
+          }
+          if (res.would_fix > 0) {
+            console.log(chalk.dim("\nNothing was changed. Re-run with --apply to fix."));
           }
         } catch (err) {
           spinner.fail("Dry run failed");
@@ -8308,7 +8168,7 @@ export interface DoctorFixLoopOutcome {
 }
 
 /**
- * Per-dataset driver for `nemar admin doctor fix` (#1133 review fix). Pure
+ * Per-dataset driver for `nemar admin dataset doctor fix` (#1133 review fix). Pure
  * aggregation over a dependency-injected `fixOne`, mirroring runReauditLoop's
  * extraction convention, so two properties are unit-testable without a server:
  * a dataset healed in the interim is counted as `resolved` (never silently
@@ -8401,6 +8261,7 @@ doctorCommand
   });
 
 adminCommand.addCommand(doctorCommand);
+datasetGroupCommand.addCommand(datasetDoctorCommand);
 
 // ============================================================================
 // Email Notification Preferences

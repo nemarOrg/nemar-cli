@@ -54,6 +54,13 @@ The owner settled the main lines on 2026-11-21: `repo` becomes `dataset`, a `rew
 - **Go deeper (four levels) to keep every group small.** People get lost below three levels, and the deepest paths today (`admin oidc clients add`, `admin compute jobs cancel`) already sit at three.
 - **Keep the flat tree and rely on `--help` folding.** Presentation only: the names still collide (`import`, `import-openneuro`, `import-coverage`) and a new command still has no rule for where it goes.
 
+## Amendment 2026-11-22: `make-public` is retired
+
+The owner's answer on `make-public`: the CLI command `nemar admin make-public` is retired, not moved.
+Its old path is a retired-command stub that says a bare visibility flip that skipped the publication request and screen no longer exists, and to use `nemar admin dataset publish`;
+it does not point at `dataset publish` as its new home, because that is the request, screen and approve workflow, not a bare flip.
+The backend route `POST /datasets/:id/publish` stays, and no break-glass flag is added to the approval path.
+
 ## Receipts
 
 - Owner decisions of 2026-11-21 on the admin tree.

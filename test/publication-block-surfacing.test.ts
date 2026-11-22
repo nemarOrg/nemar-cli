@@ -4,7 +4,7 @@
  * The owner_name_missing refusals carry a short label in `error` and the
  * ACTIONABLE sentence in `message`. The CLI's client preferred `error`, so all
  * a user saw was "Owner has no researcher name on file" -- true, and useless.
- * Worse, `nemar admin repo publish approve` pinned the fixed 422 hint "Fix the CI
+ * Worse, `nemar admin dataset publish approve` pinned the fixed 422 hint "Fix the CI
  * issues and retry with --resume" onto this case, sending an admin to look at
  * a workflow run that is perfectly healthy.
  *
@@ -64,9 +64,9 @@ beforeAll(() => {
 afterAll(() => {
   // Guarded restore (#1175): assigning undefined stringifies to "undefined"
   // and poisons the var for every later test in this shared process.
-  if (previousConfigDir === undefined) delete process.env.NEMAR_CONFIG_DIR;
+  if (previousConfigDir === undefined) Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
   else process.env.NEMAR_CONFIG_DIR = previousConfigDir;
-  if (previousApiUrl === undefined) delete process.env.TEST_API_URL;
+  if (previousApiUrl === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
   else process.env.TEST_API_URL = previousApiUrl;
   rmSync(configDir, { recursive: true, force: true });
   server.stop(true);
@@ -118,7 +118,7 @@ describe("owner_name_missing reaches the user on every path", () => {
     expect(err.blockReason).toBe(OWNER_NAME_MISSING_REASON);
   });
 
-  test("admin doi create: `message` wins over `error` when a block_reason is present", async () => {
+  test("admin dataset doi create: `message` wins over `error` when a block_reason is present", async () => {
     // This body still carries `error` for API clients that key on it; the
     // human-facing surface must not be the one-liner.
     const err = await call(422, DOI_CONCEPT_BODY);

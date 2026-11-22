@@ -63,6 +63,7 @@ A single writer was not enough. The first draft stamped only in the orchestrator
 `nemar admin make-public` able to publish a dataset with the column still NULL, and therefore
 able to make an already-published dataset anonymous afterwards -- the exact thing the triggers
 exist to refuse.
+(Note 2026-11-22: the CLI command `nemar admin make-public` is retired, ADR 0135 amendment 2026-11-22; the route it called stays.)
 
 **Identity is withheld by the WRITER, not filtered by the reader.** Wherever NEMAR writes the
 depositor's identity, the writer checks anonymity, so the public columns never hold the real

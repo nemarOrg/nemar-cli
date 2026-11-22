@@ -110,7 +110,7 @@ describe("staleness emails write the right request to Resend", () => {
     // The dataset id is in the subject so the admin knows what to act on.
     expect(String(captured[0].body.subject)).toContain("nm000111");
     // The action the admin must take is in the body.
-    expect(String(captured[0].body.html)).toContain("nemar admin delete-dataset");
+    expect(String(captured[0].body.html)).toContain("nemar admin dataset delete");
   });
 
   test("admin review email reports zero delivered when every send fails", async () => {

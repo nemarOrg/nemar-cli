@@ -218,7 +218,7 @@ s3://nemar/ (Your bucket, you own it)
 - nemar admin users --pending   # See pending approvals
 - nemar admin approve <user>    # Approve user
 - nemar admin revoke <user>     # Revoke all access instantly
-- nemar admin doi create <id>   # Create concept DOI
+- nemar admin dataset doi create <id>   # Create concept DOI
 ```
 
 ---
