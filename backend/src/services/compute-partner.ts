@@ -23,8 +23,10 @@
  *    (`hold_released`): a job launched under a released reservation is a job that skipped the reservation,
  *    which the tenant sweep cancels and charges to the partner.
  *
- * THE COMPUTE SWITCH IS NOT READ HERE (`compute-source-scan.test.ts` pins that). With compute off a hold is
- * taken and expires like a person's submission; the routes work.
+ * THE COMPUTE SWITCH IS NOT READ HERE (`compute-source-scan.test.ts` pins that), but `createJob` reads it
+ * first (ADR 0118, amendment of 2026-11-22): with compute off a new hold, and the replay of a hold's key, is
+ * refused `compute_disabled` and nothing is written. A hold taken before compute was turned off expires like
+ * a person's submission; the other routes work.
  *
  * NOTHING THE PARTNER SENT IS LOGGED: a log line carries a job id and a fixed word.
  */

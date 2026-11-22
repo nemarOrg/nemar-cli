@@ -1,10 +1,11 @@
 # ADR 0093: Pull requests awaiting approval are managed from one admin command, and an approval is the administrator's own
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-08
+**Accepted:** 2026-10-12
 **Owner:** Seyed Yahya Shirazi
 
-Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on the epic branch, so the `exempt` verdict, the changes to `allow`, `start --all` and the list's volume line, and the review ruleset exist, and the required check is not switched on):
+Partially superseded by [ADR 0107](0107-dataset-pull-requests-are-screened-on-content-owners-and-administrators-are-exempt-and-the-review-check-is-required.md) (proposed with epic #1813; phases P1 to P6 are built on `dev`, so the `exempt` verdict, the changes to `allow`, `start --all` and the list's volume line, and the review ruleset exist, and the required check is not switched on):
 `allow` only clears an administrator's block, `start --all` no longer stops on a daily pool, the queue gains the verdict `exempt` and a volume line, and the review will join the required checks where its ruleset exists.
 Its "What this supersedes" section lists what it replaces here.
 Narrowed by [ADR 0111](0111-an-upstream-re-pull-is-a-reviewed-delta-on-a-release-branch.md) (its Phase 7g amendment, 2026-10-26) in one aspect, the merge, for one class only: a machine-clean re-pull pull request the automatic path opened, which the Worker merges while `AUTO_REPULL_MERGE_ENABLED` is on, approving nothing; the approval sentences stand as written, and every other pull request is approved and merged as this record says.

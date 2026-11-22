@@ -14,8 +14,9 @@
  *
  * THE CONTRACT, the order of every refusal and the words are `shared/contract/compute-partner.ts` and
  * `services/compute-partner.ts`. Every response is `Cache-Control: no-store`: an upload address is a bearer
- * secret. The routes read no compute switch (`compute-source-scan.test.ts` pins that), and read the body
- * under a bound before anything in it is trusted. Nothing the partner sent is logged.
+ * secret. The routes do not read the compute switch themselves (`compute-source-scan.test.ts` pins that):
+ * `createJob` reads it, so a new hold while compute is off is refused `compute_disabled` (ADR 0118,
+ * amendment of 2026-11-22). They read the body under a bound before anything in it is trusted. Nothing the partner sent is logged.
  */
 
 import type { Context, Hono } from "hono";
