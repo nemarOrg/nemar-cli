@@ -1,7 +1,8 @@
 # ADR 0122: One OCI image runs under Apptainer or Docker from one digest
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-13
+**Accepted:** 2026-11-14
 **Owner:** Seyed Yahya Shirazi
 
 Epic #2145.
