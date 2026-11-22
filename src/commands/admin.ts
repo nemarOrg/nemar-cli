@@ -4055,12 +4055,20 @@ async function dispatchOpenNeuroImportWorkflow(
   return { ok: true };
 }
 
-reworkAnnexCommand
-  .command("normalize <datasetId>")
-  .description(
-    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
+// Dry run by default since the admin tree restructure (ADR 0135): it commits to the dataset and
+// pushes, so `--apply` is what makes it write. `--dry-run`, the old preview flag, is still accepted
+// (hidden) and changes nothing, since a dry run is the default.
+addApplyOption(
+  reworkAnnexCommand
+    .command("normalize <datasetId>")
+    .description(
+      "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060). Dry-run by default.",
+    ),
+  "Make the change: annex, upload, commit and push (default is a dry run that only reports)",
+)
+  .addOption(
+    new Option("--dry-run", "Clone and report what would change; touch nothing").hideHelp(),
   )
-  .option("--dry-run", "Clone and report what would change; touch nothing")
   .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
   .option("--no-push", "Do everything except push, for a rehearsal")
   .option(
@@ -4088,14 +4096,15 @@ and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
 are untouched.
 
 Examples:
-  $ nemar admin annex-normalize on007788 --dry-run
-  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+  $ nemar admin rework annex normalize on007788                 # dry run
+  $ nemar admin rework annex normalize on007788 --apply --dir /tmp/normalize-on007788
 `,
   )
   .action(
     async (
       datasetId: string,
       options: {
+        apply?: boolean;
         dryRun?: boolean;
         dir?: string;
         push?: boolean;
@@ -4106,6 +4115,11 @@ Examples:
       },
     ) => {
       if (!requireAuth()) return;
+
+      if (options.apply && options.dryRun) {
+        console.error(chalk.red("Error: pass --apply or --dry-run, not both"));
+        process.exit(1);
+      }
 
       let maxBytes: number | undefined;
       if (options.normalizeMaxGb !== undefined) {
@@ -4176,8 +4190,10 @@ Examples:
         );
       }
 
-      if (options.dryRun) {
-        console.log(chalk.dim("--dry-run: stopping before any change."));
+      if (!options.apply) {
+        console.log(
+          chalk.dim("Dry run: stopping before any change. Re-run with --apply to make it."),
+        );
         return;
       }
 
