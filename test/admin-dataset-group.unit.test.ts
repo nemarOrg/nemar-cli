@@ -57,6 +57,18 @@ describe("--apply writes; --execute is its hidden alias", () => {
     });
   }
 
+  for (const flag of ["--apply", "--execute"]) {
+    test.each(cases)(
+      `dataset %s ${flag} --yes sends the write, not a dry run`,
+      async (name, args) => {
+        await cli.run(["admin", "dataset", ...args, flag, "--yes"]);
+        expect(cli.requests.map((q) => q.path)).toEqual([`/admin/datasets/nm000999/${name}`]);
+        expect(cli.requests[0].body?.dry_run).not.toBe(true);
+        expect(cli.requests[0].body?.dry_run).toBe(false);
+      },
+    );
+  }
+
   test.each(cases)("dataset %s --help lists --apply and hides --execute", async (_name, args) => {
     const r = await cli.run(["admin", "dataset", args[0], "--help"]);
     expect(r.exitCode).toBe(0);
