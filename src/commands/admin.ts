@@ -4532,7 +4532,9 @@ Examples:
 // Import jobs (issue #754)
 // ============================================================================
 
-const importCommand = new Command("import").description("View and recover OpenNeuro import jobs");
+const importCommand = new Command("import").description(
+  "OpenNeuro imports: import a dataset, follow and recover its job, and the coverage, weekly and triage reports",
+);
 
 importCommand
   .command("status")
