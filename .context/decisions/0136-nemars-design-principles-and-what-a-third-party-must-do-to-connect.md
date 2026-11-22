@@ -1,7 +1,8 @@
 # ADR 0136: NEMAR's design principles, and what a third party must do to connect
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-22
+**Accepted:** 2026-11-22
 **Owner:** Seyed Yahya Shirazi
 
 Refines [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) and [ADR 0119](0119-nemar-is-an-openid-connect-provider-and-orcid-stays-the-upstream-identity.md) by naming the partner requirements as binding.
@@ -355,7 +356,7 @@ The differences are of form only:
 - Back-channel logout has its own row here; the gated table folds it into the token row.
 - The rule against a usage report to an allocation program is "must not" on the public page and "Checked" on the gated page; it is "by agreement" here, because NEMAR cannot see such a report.
   The pages should say the same.
-- The gated page says the principles have no ADR of their own; that sentence and its tracker row are stale once this ADR is accepted.
+- The gated page says the principles have no ADR of their own; that sentence and its tracker row are stale now that this ADR is accepted.
 
 ## Consequences
 
