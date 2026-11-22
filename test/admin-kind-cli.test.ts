@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin users --kind`, the `Kind:` row line, `nemar admin kind`,
+ * CLI `nemar admin users --kind`, the `Kind:` row line, `nemar admin users kind`,
  * and `nemar auth status`'s `Kind:` line (epic #1272 phase 4, #1284; ADR
  * 0048), driven through the real entry point (`bun run src/index.ts ...`).
  *
@@ -216,7 +216,7 @@ describe("nemar admin users --kind", () => {
   });
 });
 
-describe("nemar admin kind", () => {
+describe("nemar admin users kind", () => {
   test("--yes skips the confirmation prompt and prints the server's message", async () => {
     seedAuthenticatedConfig();
     const server = startKindServer({
@@ -224,7 +224,10 @@ describe("nemar admin kind", () => {
       user: { username: "cool-vibers", account_kind: "test" },
     });
     try {
-      const result = await runCli(["admin", "kind", "cool-vibers", "test", "--yes"], server.url);
+      const result = await runCli(
+        ["admin", "users", "kind", "cool-vibers", "test", "--yes"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       // ora's spinner writes to stderr under a non-TTY pipe (as every other
       // ora-only success line in this CLI does); the combined stream is what
@@ -244,7 +247,10 @@ describe("nemar admin kind", () => {
     seedAuthenticatedConfig();
     const server = startKindServer({ message: "unused" });
     try {
-      const result = await runCli(["admin", "kind", "cool-vibers", "bogus", "--yes"], server.url);
+      const result = await runCli(
+        ["admin", "users", "kind", "cool-vibers", "bogus", "--yes"],
+        server.url,
+      );
       expect(result.exitCode).not.toBe(0);
       expect(`${result.stdout}${result.stderr}`).toContain("Invalid kind");
       expect(server.requests).toHaveLength(0);
@@ -257,7 +263,10 @@ describe("nemar admin kind", () => {
     seedAuthenticatedConfig();
     const server = startKindServer({ message: "unused" });
     try {
-      const result = await runCli(["admin", "kind", "cool-vibers", "test", "--no"], server.url);
+      const result = await runCli(
+        ["admin", "users", "kind", "cool-vibers", "test", "--no"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests).toHaveLength(0);
     } finally {
@@ -269,7 +278,10 @@ describe("nemar admin kind", () => {
     seedAuthenticatedConfig();
     const server = startKindServer({ error: "Owner access required" }, 403);
     try {
-      const result = await runCli(["admin", "kind", "cool-vibers", "test", "--yes"], server.url);
+      const result = await runCli(
+        ["admin", "users", "kind", "cool-vibers", "test", "--yes"],
+        server.url,
+      );
       expect(`${result.stdout}${result.stderr}`).toContain("Owner access required");
     } finally {
       server.stop();
@@ -278,7 +290,7 @@ describe("nemar admin kind", () => {
 
   test("a 409 orcid_linked refusal prints the SENTENCE a person reads, not just the bare code", async () => {
     // Epic #1272 phase 4 (#1284 review; ADR 0048): every kind-route refusal
-    // is `{ error: <code>, message }`, and `nemar admin kind` must show the
+    // is `{ error: <code>, message }`, and `nemar admin users kind` must show the
     // MESSAGE -- the bare code `orcid_linked` on its own tells nobody what
     // to do next.
     seedAuthenticatedConfig();
@@ -291,7 +303,10 @@ describe("nemar admin kind", () => {
       409,
     );
     try {
-      const result = await runCli(["admin", "kind", "cool-vibers", "service", "--yes"], server.url);
+      const result = await runCli(
+        ["admin", "users", "kind", "cool-vibers", "service", "--yes"],
+        server.url,
+      );
       const combined = `${result.stdout}${result.stderr}`;
       expect(combined).toContain(
         "An ORCID iD identifies a person, and this account has one verified and linked.",
@@ -415,7 +430,7 @@ describe("nemar auth status: Kind:", () => {
   });
 });
 
-describe("nemar admin doctor kinds", () => {
+describe("nemar admin users kind-check", () => {
   /** Stand-in for `GET /admin/users/:username`, the one endpoint `nemar
    *  admin doctor kinds` calls once per entry of OPERATIONAL_ACCOUNT_KINDS
    *  (#1284 review). `users` maps username -> the kind the stand-in should
@@ -449,7 +464,7 @@ describe("nemar admin doctor kinds", () => {
     seedAuthenticatedConfig();
     const server = startAdminUserServer(allExpectedKinds());
     try {
-      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      const result = await runCli(["admin", "users", "kind-check"], server.url);
       expect(result.exitCode).toBe(0);
       const combined = `${result.stdout}${result.stderr}`;
       expect(combined).toContain("carry their expected kind");
@@ -467,12 +482,12 @@ describe("nemar admin doctor kinds", () => {
     users.nemarOwner = "person"; // expected 'service'
     const server = startAdminUserServer(users);
     try {
-      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      const result = await runCli(["admin", "users", "kind-check"], server.url);
       expect(result.exitCode).toBe(0);
       const combined = `${result.stdout}${result.stderr}`;
       expect(combined).toContain("kind mismatch");
       expect(combined).toContain("nemarOwner: expected 'service', found 'person'");
-      expect(combined).toContain("nemar admin kind <username> <kind>");
+      expect(combined).toContain("nemar admin users kind <username> <kind>");
     } finally {
       server.stop();
     }
@@ -483,7 +498,7 @@ describe("nemar admin doctor kinds", () => {
     const { "test-owner": _omitted, ...users } = allExpectedKinds();
     const server = startAdminUserServer(users);
     try {
-      const result = await runCli(["admin", "doctor", "kinds"], server.url);
+      const result = await runCli(["admin", "users", "kind-check"], server.url);
       expect(result.exitCode).toBe(0);
       const combined = `${result.stdout}${result.stderr}`;
       expect(combined).toContain("account absent");

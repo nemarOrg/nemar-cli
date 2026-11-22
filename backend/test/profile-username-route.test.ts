@@ -4,7 +4,7 @@
  *
  * 19 live accounts have `username = NULL` -- web/ORCID sign-ups, where the
  * column has been NULL by design since migration 0026. They cannot be approved
- * for upload (the review card and `nemar admin approve <username>` are keyed on
+ * for upload (the review card and `nemar admin users approve <username>` are keyed on
  * it) and cannot be addressed anywhere in the product. This is where they get
  * one, and where an account whose ORCID record hides its name can finally type
  * one in (ADR 0041 left that dead end open on purpose, for this phase).
@@ -214,7 +214,7 @@ describe("PATCH /auth/profile: username", () => {
     // The 19 rows this phase exists for. They are approved and hold NULL, so a
     // lock on the FIELD (rather than on a change) would leave them permanently
     // without a username -- the exact state ADR 0042 exists to end, and the
-    // thing `nemar admin approve <username>` needs to address them by.
+    // thing `nemar admin users approve <username>` needs to address them by.
     const id = seedUser("approved-null@example.org", { username: null, status: "approved" });
 
     const res = await patch(id, { username: "alovelace" });
@@ -307,7 +307,7 @@ describe("PATCH /auth/profile: username", () => {
     //
     // Without 0080 this passes and the table ends up holding `Ada` and `ada`
     // as two accounts: 0001's UNIQUE is BINARY, so to it they are different
-    // strings, while `nemar admin approve <username>`, the suggestion scan and
+    // strings, while `nemar admin users approve <username>`, the suggestion scan and
     // the sign-in claim all compare NOCASE and cannot tell them apart.
     const id = seedUser("shift-key@example.org");
     db.run(

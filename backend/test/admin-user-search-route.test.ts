@@ -524,7 +524,7 @@ describe("credentials are neither searched nor returned", () => {
         username: "holdssecrets",
         email: "holds@example.org",
         status: "verified",
-        // `nemar admin doctor kinds` reads these two.
+        // `nemar admin users kind-check` reads these two.
         account_kind: "test",
         // A non-secret column the route has always returned stays returned.
         email_preferences: '{"digest":false}',

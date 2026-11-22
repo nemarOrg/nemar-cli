@@ -387,14 +387,21 @@ describe("CLI Error Handling", () => {
   // exactly-one-of rule is enforced by the action itself, before the auth
   // gate. These pin that contract.
   test("approve without username or --id shows error", async () => {
-    const { stderr, exitCode } = await runCli(["admin", "approve"]);
+    const { stderr, exitCode } = await runCli(["admin", "users", "approve"]);
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain("provide a username or --id");
   });
 
   test("approve with both username and --id shows error", async () => {
-    const { stderr, exitCode } = await runCli(["admin", "approve", "someone", "--id", "5"]);
+    const { stderr, exitCode } = await runCli([
+      "admin",
+      "users",
+      "approve",
+      "someone",
+      "--id",
+      "5",
+    ]);
 
     expect(exitCode).toBe(1);
     expect(stderr).toContain("mutually exclusive");

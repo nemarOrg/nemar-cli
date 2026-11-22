@@ -345,7 +345,7 @@ const POST_SPLIT_ADDITIONS = [
   "doctorScan", // #1130, CLI wrapper for POST /admin/doctor/scan
   "editAdminUser", // ADR 0096: PATCH /admin/users/by-id/:id, `nemar admin users edit`
   "getAdminUserById", // ADR 0096: GET /admin/users/by-id/:id, `nemar admin users show` and `edit`
-  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin doctor kinds`
+  "getAdminUserByUsername", // #1284 review, epic #1272 phase 4, ADR 0048: GET /admin/users/:username, read by `nemar admin users kind-check`
   "getBroadcastStatus", // epic #1893 phase 2: GET /admin/notify/:id, `nemar admin notify --status`
   "getFacets", // #1149, epic #1144 phase 5b: GET /datasets/facets for shell completion
   "getUserDuplicates", // #1254, ADR 0043: GET /admin/users/duplicates

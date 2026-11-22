@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin revoke` addressing (#1274), driven through the real entry
+ * CLI `nemar admin users revoke` addressing (#1274), driven through the real entry
  * point (`bun run src/index.ts admin revoke ...`).
  *
  * `admin approve` grew `--id` for web/ORCID accounts, whose username is NULL by
@@ -109,12 +109,12 @@ async function runCli(args: string[], testApiUrl: string) {
   return { stdout, stderr, exitCode };
 }
 
-describe("nemar admin revoke: addressing", () => {
+describe("nemar admin users revoke: addressing", () => {
   test("--id revokes by numeric id", async () => {
     seedAuthenticatedConfig();
     const server = startRevokeServer(NAMELESS_BODY);
     try {
-      const result = await runCli(["admin", "revoke", "--id", "31", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "revoke", "--id", "31", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toContain("/admin/revoke/by-id/31");
       // The account has no username, so every line the admin sees names the id
@@ -132,7 +132,7 @@ describe("nemar admin revoke: addressing", () => {
     seedAuthenticatedConfig();
     const server = startRevokeServer(NAMELESS_BODY);
     try {
-      const result = await runCli(["admin", "revoke", "--id", "31", "--no"], server.url);
+      const result = await runCli(["admin", "users", "revoke", "--id", "31", "--no"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).not.toContain("/admin/revoke/by-id/31");
       expect(result.stdout).toContain("Skipped");
@@ -145,7 +145,7 @@ describe("nemar admin revoke: addressing", () => {
     seedAuthenticatedConfig();
     const server = startRevokeServer(NAMED_BODY);
     try {
-      const result = await runCli(["admin", "revoke", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "revoke", "halloway", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toContain("/admin/revoke/halloway");
       expect(server.requests).not.toContain("/admin/revoke/by-id/halloway");
@@ -161,7 +161,7 @@ describe("nemar admin revoke: addressing", () => {
     seedAuthenticatedConfig();
     const server = startRevokeServer(NAMED_BODY);
     try {
-      const result = await runCli(["admin", "revoke", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "revoke", "halloway", "--yes"], server.url);
       expect(result.stdout).toContain("Revoke upload access");
     } finally {
       server.stop();
@@ -169,25 +169,25 @@ describe("nemar admin revoke: addressing", () => {
   });
 });
 
-describe("nemar admin revoke: the exactly-one-of rule", () => {
+describe("nemar admin users revoke: the exactly-one-of rule", () => {
   // Enforced by the action before the auth gate, like `admin approve`'s, so
   // these run without a seeded config and never reach the network.
   const UNREACHABLE = "http://127.0.0.1:1";
 
   test("neither a username nor --id is refused", async () => {
-    const result = await runCli(["admin", "revoke"], UNREACHABLE);
+    const result = await runCli(["admin", "users", "revoke"], UNREACHABLE);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("provide a username or --id");
   });
 
   test("both a username and --id is refused", async () => {
-    const result = await runCli(["admin", "revoke", "someone", "--id", "5"], UNREACHABLE);
+    const result = await runCli(["admin", "users", "revoke", "someone", "--id", "5"], UNREACHABLE);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("mutually exclusive");
   });
 
   test("a non-numeric --id is refused before anything is revoked", async () => {
-    const result = await runCli(["admin", "revoke", "--id", "abc", "--yes"], UNREACHABLE);
+    const result = await runCli(["admin", "users", "revoke", "--id", "abc", "--yes"], UNREACHABLE);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("invalid user id");
   });

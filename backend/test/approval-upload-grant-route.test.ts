@@ -1,7 +1,7 @@
 /**
  * Real route tests for the approval-grants-upload rule (ADR 0040, #1251).
  *
- * #1249: `nemar admin approve` flipped `status` to 'approved' and wrote
+ * #1249: `nemar admin users approve` flipped `status` to 'approved' and wrote
  * nothing to `service_access`, so the admin's one action approved a user who
  * then hit the upload gate. These tests pin that the two now move together on
  * both approve routes, that revoke erases the grant AND its stamps, and that

@@ -165,7 +165,7 @@ describe("GET /auth/verify (the CLI verification link)", () => {
     expect(toAdmin[0].subject).toContain("New verified account");
     // The admin's action is the upload grant, so that is the command the
     // mail names.
-    expect(toAdmin[0].html).toContain("nemar admin approve");
+    expect(toAdmin[0].html).toContain("nemar admin users approve");
   });
 
   test("outside production, the admin notification is suppressed by default", async () => {
