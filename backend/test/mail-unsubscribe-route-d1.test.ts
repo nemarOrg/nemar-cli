@@ -3,17 +3,20 @@
  * and `GET .../info`, driven through the Worker's own entry point (`worker.fetch`), at BOTH mounts
  * (`/mail/...` and `/nemar/mail/...`), over the real migrated schema. Nothing is replaced.
  *
- * What it holds: a GET changes nothing (page and info); an RFC 8058 one-click POST changes exactly the
+ * What it holds: the link's GET is a 303 to `${APP_BASE_URL}/unsubscribe/<token>` for any token that
+ * parses, reads neither D1 nor the secret (a D1 that throws on any statement proves it), and is the
+ * uniform 410 with no Location for anything else (phase 5); /info changes nothing; an RFC 8058 one-click POST changes exactly the
  * token's category, answers 200, never redirects, needs no cookie or key, and is idempotent; the page's
  * second button turns off all three; a recall token, another category's token, another account's token,
  * a tampered signature, a rotated secret, a changed address, a deleted account and a missing broadcast
- * all answer the one uniform 410 and change nothing; an unset or short secret is a 503; every change is
+ * all answer the one uniform 410 from /info and the POST and change nothing; an unset or short secret is
+ * a 503 there; every change is
  * one audit row from `saveEmailPreferences` with its `via`; and neither a token nor an address is logged.
  *
  * MUTATIONS (each makes a test below fail, and was applied and run): GET calls the writer; the signature
  * check returns true; the address is left out of the signed message; the `deleted_at IS NULL` or the
  * broadcast-row condition is removed; the parser accepts `recall`; the previous secret is not tried; the
- * POST answers a redirect; the secret check is removed.
+ * POST answers a redirect; the secret check is removed; the GET's parse guard is removed (phase 5).
  */
 
 import type { Database } from "bun:sqlite";
@@ -156,28 +159,158 @@ function snapshot(): string {
 
 const prefsOf = (id: number) => JSON.parse(stored(id) ?? "{}") as Record<string, unknown>;
 
-describe("GET changes nothing", () => {
-  for (const mount of MOUNTS) {
-    test(`the confirmation page at ${mount || "/"}: two buttons, a masked address, no write`, async () => {
-      const before = snapshot();
-      const token = await tokenFor();
-      const res = await call(mount, "GET", token, { headers: { accept: "text/html" } });
-      expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toContain("text/html");
-      expect(res.headers.get("cache-control")).toBe("no-store");
-      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
-      expect(res.headers.get("x-robots-tag")).toContain("noindex");
-      const html = await res.text();
-      expect(html).toContain('<form method="post">');
-      expect(html).toContain("Unsubscribe from News");
-      expect(html).toContain("Unsubscribe from all NEMAR community mail");
-      expect(html).toContain("r***@links.test");
-      expect(html).not.toContain(EMAIL);
-      expect(html).not.toContain(token);
-      expect(html).toContain('name="robots" content="noindex');
-      expect(snapshot()).toBe(before);
-    });
+/** A D1 that fails the test on any statement: the redirecting GET must not read or write anything. */
+const untouchableDb = {
+  prepare(sql: string) {
+    throw new Error(`the redirecting GET touched D1: ${sql}`);
+  },
+  batch() {
+    throw new Error("the redirecting GET touched D1 (batch)");
+  },
+  exec(sql: string) {
+    throw new Error(`the redirecting GET touched D1: ${sql}`);
+  },
+} as unknown as D1Database;
 
+describe("the GET redirects to the website page and changes nothing", () => {
+  const APP_BASES = [
+    ["production", "https://app.nemar.org"],
+    ["staging", "https://test.nemar.org"],
+  ] as const;
+
+  for (const mount of MOUNTS) {
+    for (const [name, base] of APP_BASES) {
+      test(`${name} at ${mount || "/"}: 303 to ${base}/unsubscribe/<token>, no-store, no-referrer, no write`, async () => {
+        const before = snapshot();
+        const token = await tokenFor();
+        // The token's alphabet needs no escaping in a path, so it goes into Location as it is.
+        expect(encodeURIComponent(token)).toBe(token);
+        for (const accept of ["text/html", "application/json", ""]) {
+          const res = await call(mount, "GET", token, {
+            headers: accept ? { accept } : {},
+            env: env({ APP_BASE_URL: base }),
+          });
+          expect(res.status).toBe(303);
+          expect(res.headers.get("location")).toBe(`${base}/unsubscribe/${token}`);
+          expect(res.headers.get("cache-control")).toBe("no-store");
+          expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+          expect(res.headers.get("x-robots-tag")).toContain("noindex");
+          expect(res.headers.get("set-cookie")).toBeNull();
+          expect(await res.text()).toBe("");
+        }
+        expect(snapshot()).toBe(before);
+      });
+    }
+
+    test(`at ${mount || "/"}: a HEAD answers the same redirect`, async () => {
+      const token = await tokenFor();
+      const res = await worker.fetch(
+        new Request(`https://api.nemar.org${mount}/mail/unsubscribe/${token}`, { method: "HEAD" }),
+        env(),
+        ctx,
+      );
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe(`https://app.nemar.org/unsubscribe/${token}`);
+    });
+  }
+
+  test("a trailing slash on APP_BASE_URL is not doubled, and an unset one is production's", async () => {
+    const token = await tokenFor();
+    const slashed = await call("", "GET", token, {
+      env: env({ APP_BASE_URL: "https://test.nemar.org/" }),
+    });
+    expect(slashed.headers.get("location")).toBe(`https://test.nemar.org/unsubscribe/${token}`);
+    const unset = await call("/nemar", "GET", token, { env: env({ APP_BASE_URL: undefined }) });
+    expect(unset.headers.get("location")).toBe(`https://app.nemar.org/unsubscribe/${token}`);
+  });
+
+  test("a query string is not carried into Location", async () => {
+    const token = await tokenFor();
+    const res = await call("", "GET", token, { suffix: "?next=https://evil.example/" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(`https://app.nemar.org/unsubscribe/${token}`);
+  });
+
+  test("reads neither D1 nor the secret: a parsed token is forwarded with the secret unset and with a D1 that throws", async () => {
+    const token = await tokenFor();
+    for (const bindings of [
+      env({ DB: untouchableDb }),
+      env({ DB: untouchableDb, MAIL_LINK_SECRET: undefined }),
+      env({ DB: untouchableDb, MAIL_LINK_SECRET: "short" }),
+    ]) {
+      for (const mount of MOUNTS) {
+        const res = await call(mount, "GET", token, { env: bindings });
+        expect(res.status).toBe(303);
+        expect(res.headers.get("location")).toBe(`https://app.nemar.org/unsubscribe/${token}`);
+      }
+    }
+  });
+
+  test("a token that parses but is dead (bad signature, unknown account) is forwarded too: the page says so from /info", async () => {
+    const before = snapshot();
+    const good = await tokenFor();
+    const dead = [
+      `${good.slice(0, -1)}${good.endsWith("A") ? "B" : "A"}`,
+      await tokenFor({ userId: 99999 }),
+      await tokenFor({}, EMAIL, OTHER),
+    ];
+    for (const token of dead) {
+      const res = await call("", "GET", token);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe(`https://app.nemar.org/unsubscribe/${token}`);
+      expect((await call("", "GET", token, { suffix: "/info" })).status).toBe(410);
+    }
+    expect(snapshot()).toBe(before);
+  });
+
+  test("anything that is not the token format is the uniform 410, with no Location, at both mounts", async () => {
+    const before = snapshot();
+    const token = await tokenFor();
+    const sig = token.split(".").at(-1) as string;
+    // Each is the raw path segment as sent; the router decodes it before the route sees it.
+    const refused: Record<string, string> = {
+      malformed: "not-a-token",
+      encoded_slash: `${token.slice(0, 10)}%2F${token.slice(10)}`,
+      encoded_question_mark: `${token}%3Fx`,
+      encoded_hash: `${token}%23x`,
+      encoded_space: `${token}%20`,
+      encoded_percent: `${token}%25`,
+      encoded_crlf: `${token}%0D%0ALocation:%20https:%2F%2Fevil.example`,
+      non_ascii: `${token}%C3%A9`,
+      uppercase_version: `V1${token.slice(2)}`,
+      recall: `v1.${userId}.recall.${recallBroadcast}.${sig}`,
+      unknown_category: `v1.${userId}.weekly.${newsBroadcast}.${sig}`,
+      short_signature: token.slice(0, -1),
+      long_signature: `${token}A`,
+      overlong: `v1.${"1".repeat(200)}.news.1.${sig}`,
+      absolute_url: "https:%2F%2Fevil.example",
+    };
+    for (const mount of MOUNTS) {
+      for (const [name, segment] of Object.entries(refused)) {
+        const res = await worker.fetch(
+          new Request(`https://api.nemar.org${mount}/mail/unsubscribe/${segment}`),
+          env(),
+          ctx,
+        );
+        expect(res.status, name).toBe(410);
+        expect(res.headers.get("location"), name).toBeNull();
+        expect(res.headers.get("cache-control"), name).toBe("no-store");
+        expect(await res.json(), name).toEqual({
+          error: "link_invalid",
+          message: "This unsubscribe link is not valid.",
+        });
+      }
+    }
+    // A raw `/` never reaches the token: it makes another path, which no route answers.
+    for (const mount of MOUNTS) {
+      const res = await call(mount, "GET", token, { suffix: "/https://evil.example" });
+      expect(res.status).toBe(404);
+      expect(res.headers.get("location")).toBeNull();
+    }
+    expect(snapshot()).toBe(before);
+  });
+
+  for (const mount of MOUNTS) {
     test(`the info route at ${mount || "/"} answers JSON and writes nothing, however often it is read`, async () => {
       const before = snapshot();
       const token = await tokenFor({ category: "rfcs", broadcastId: rfcsBroadcast });
@@ -195,15 +328,13 @@ describe("GET changes nothing", () => {
     });
   }
 
-  test("the page and info say when the category is already off", async () => {
+  test("info says when the category is already off", async () => {
     db.query("UPDATE users SET email_preferences = ? WHERE id = ?").run('{"news":false}', userId);
     const token = await tokenFor();
     const info = (await (await call("", "GET", token, { suffix: "/info" })).json()) as {
       on: boolean;
     };
     expect(info.on).toBe(false);
-    const html = await (await call("", "GET", token, { headers: { accept: "text/html" } })).text();
-    expect(html).toContain("already does not receive");
   });
 });
 
@@ -358,12 +489,21 @@ describe("every invalid link is one uniform 410 that changes nothing", () => {
   }
 
   for (const mount of MOUNTS) {
-    test(`at ${mount || "/"}: GET, info and POST alike`, async () => {
+    test(`at ${mount || "/"}: info and POST alike, and GET for a token that does not parse`, async () => {
       const before = snapshot();
       const bodies = new Set<string>();
       for (const [name, token] of Object.entries(await refusals())) {
+        // The GET forwards any token that parses (the website page reads /info); only a token that
+        // does not parse is refused there, with this same body.
+        const get = await call(mount, "GET", token);
+        if (name === "malformed" || name === "recall") {
+          expect(get.status, name).toBe(410);
+          expect(get.headers.get("location"), name).toBeNull();
+          bodies.add(await get.text());
+        } else {
+          expect(get.status, name).toBe(303);
+        }
         for (const res of [
-          await call(mount, "GET", token),
           await call(mount, "GET", token, { suffix: "/info" }),
           await post(mount, token),
           await post(mount, token, `${ONE_CLICK}&scope=all`),
@@ -431,7 +571,7 @@ describe("every invalid link is one uniform 410 that changes nothing", () => {
     const token = await tokenFor();
     db.query("UPDATE users SET deleted_at = datetime('now') WHERE id = ?").run(userId);
     expect((await post("", token)).status).toBe(410);
-    expect((await call("", "GET", token)).status).toBe(410);
+    expect((await call("", "GET", token, { suffix: "/info" })).status).toBe(410);
     expect(stored(userId)).toBeNull();
   });
 
@@ -458,7 +598,7 @@ describe("every invalid link is one uniform 410 that changes nothing", () => {
 });
 
 describe("the secret", () => {
-  test("unset or too short: every route answers 503 and writes nothing", async () => {
+  test("unset or too short: info and POST answer 503 and write nothing; the GET still redirects", async () => {
     const token = await tokenFor();
     for (const bindings of [
       env({ MAIL_LINK_SECRET: undefined }),
@@ -466,8 +606,8 @@ describe("the secret", () => {
       env({ MAIL_LINK_SECRET: undefined, MAIL_LINK_SECRET_PREVIOUS: SECRET }),
     ]) {
       const before = snapshot();
+      expect((await call("", "GET", token, { env: bindings })).status).toBe(303);
       for (const res of [
-        await call("", "GET", token, { env: bindings }),
         await call("", "GET", token, { suffix: "/info", env: bindings }),
         await call("", "POST", token, { body: ONE_CLICK, headers: FORM, env: bindings }),
         await call("/nemar", "POST", "garbage", { body: ONE_CLICK, headers: FORM, env: bindings }),
@@ -506,7 +646,7 @@ describe("maintenance mode never blocks an opt-out", () => {
 
   for (const mode of modes) {
     for (const mount of MOUNTS) {
-      test(`${mode} at ${mount || "/"}: the page, /info and the one-click POST all work, and the POST writes`, async () => {
+      test(`${mode} at ${mount || "/"}: the redirect, /info and the one-click POST all work, and the POST writes`, async () => {
         const bindings = env({ MAINTENANCE_MODE: mode });
         const token = await tokenFor();
         // Control: maintenance really is on, so a route outside the allowance is refused.
@@ -517,7 +657,7 @@ describe("maintenance mode never blocks an opt-out", () => {
         );
         expect(control.status).toBe(503);
 
-        expect((await call(mount, "GET", token, { env: bindings })).status).toBe(200);
+        expect((await call(mount, "GET", token, { env: bindings })).status).toBe(303);
         expect((await call(mount, "GET", token, { suffix: "/info", env: bindings })).status).toBe(
           200,
         );
@@ -737,13 +877,16 @@ describe("a misconfigured secret is said aloud, once, without the value", () => 
   test("unset or short MAIL_LINK_SECRET: one error line per window, naming the binding and no value", async () => {
     const token = await tokenFor();
     const lines = await logged(async () => {
-      await call("", "GET", token, { env: env({ MAIL_LINK_SECRET: undefined }) });
+      await call("", "GET", token, { suffix: "/info", env: env({ MAIL_LINK_SECRET: undefined }) });
       await call("", "POST", token, {
         body: ONE_CLICK,
         headers: FORM,
         env: env({ MAIL_LINK_SECRET: LEAKY_SHORT }),
       });
-      await call("/nemar", "GET", token, { env: env({ MAIL_LINK_SECRET: undefined }) });
+      await call("/nemar", "GET", token, {
+        suffix: "/info",
+        env: env({ MAIL_LINK_SECRET: undefined }),
+      });
     });
     const ours = lines.filter((l) => l.includes("[mail-links]"));
     expect(ours).toHaveLength(1);
@@ -753,7 +896,7 @@ describe("a misconfigured secret is said aloud, once, without the value", () => 
 
   test("a configured secret says nothing", async () => {
     const lines = await logged(async () => {
-      await call("", "GET", await tokenFor());
+      await call("", "GET", await tokenFor(), { suffix: "/info" });
     });
     expect(lines.filter((l) => l.includes("[mail-links]"))).toEqual([]);
   });
@@ -763,8 +906,8 @@ describe("a misconfigured secret is said aloud, once, without the value", () => 
     const bindings = env({ MAIL_LINK_SECRET_PREVIOUS: LEAKY_SHORT });
     let status = 0;
     const lines = await logged(async () => {
-      status = (await call("", "GET", token, { env: bindings })).status;
-      await call("", "GET", token, { env: bindings });
+      status = (await call("", "GET", token, { suffix: "/info", env: bindings })).status;
+      await call("", "GET", token, { suffix: "/info", env: bindings });
     });
     expect(status).toBe(410);
     const ours = lines.filter((l) => l.includes("[mail-links]"));
@@ -775,7 +918,10 @@ describe("a misconfigured secret is said aloud, once, without the value", () => 
 
   test("an unset previous secret is not a problem", async () => {
     const lines = await logged(async () => {
-      await call("", "GET", await tokenFor(), { env: env({ MAIL_LINK_SECRET_PREVIOUS: "" }) });
+      await call("", "GET", await tokenFor(), {
+        suffix: "/info",
+        env: env({ MAIL_LINK_SECRET_PREVIOUS: "" }),
+      });
     });
     expect(lines.filter((l) => l.includes("[mail-links]"))).toEqual([]);
   });

@@ -3,8 +3,9 @@
  * (epic #2260 phase 2, ADR 0132). No session, no API key, no cookie: the link in the URL is the whole
  * authority, and it can do exactly one thing (see `services/mail-links.ts`).
  *
- *   GET  /mail/unsubscribe/:token        the interim confirmation page; NEVER changes state (mail
- *                                        scanners and link previews fetch every link they find)
+ *   GET  /mail/unsubscribe/:token        a 303 to the website's page, `${APP_BASE_URL}/unsubscribe/<token>`
+ *                                        (phase 5); NEVER changes state (mail scanners and link previews
+ *                                        fetch every link they find) and reads nothing but the path
  *   GET  /mail/unsubscribe/:token/info   JSON for the website page: category, label, masked address, on
  *   POST /mail/unsubscribe/:token        the change. RFC 8058 one-click: the body is
  *                                        `List-Unsubscribe=One-Click` (urlencoded or multipart), the
@@ -21,7 +22,8 @@
  *
  * Every refusal for a link looks the same: 410 `link_invalid`, whichever part failed (a bad token, a
  * deleted account, a changed address, a rotated secret). A missing secret is the one other answer, 503
- * `mail_links_unconfigured`, because it is the server's fault and not the link's. A rate-limit refusal
+ * `mail_links_unconfigured` from `/info` and the POST, because it is the server's fault and not the
+ * link's; the redirecting GET needs no secret and forwards regardless. A rate-limit refusal
  * (429) is the limiter's own body, never this one's.
  *
  * Maintenance mode never blocks these routes (`middleware/maintenance.ts`, exact shapes, both mounts).
@@ -40,7 +42,13 @@ import {
   mailRecallWhy,
 } from "../../../shared/contract/mail-categories.js";
 import { parseEmailPreferences } from "../services/email";
-import { type ResolvedMailLink, maskAddress, resolveMailLink } from "../services/mail-links";
+import { appBase } from "../services/environment";
+import {
+  type ResolvedMailLink,
+  maskAddress,
+  parseMailLinkToken,
+  resolveMailLink,
+} from "../services/mail-links";
 import { type MailChangeVia, saveEmailPreferences } from "../services/mail-preferences";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -73,8 +81,6 @@ function page(title: string, body: string): string {
 <title>${escapeHtml(title)}</title>
 <style>
 body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#1a1a1a;background:#fff}
-button{font:inherit;padding:.6rem 1rem;margin:.25rem 0;cursor:pointer}
-form{margin:.5rem 0}
 .note{color:#555;font-size:.9rem}
 @media (prefers-color-scheme:dark){body{color:#eee;background:#161616}.note{color:#aaa}}
 </style>
@@ -123,25 +129,24 @@ async function resolve(
 const isOn = (link: ResolvedMailLink): boolean =>
   parseEmailPreferences(link.user.emailPreferences)[link.claims.category];
 
-mailRoutes.get("/unsubscribe/:token", async (c) => {
-  const resolved = await resolve(c);
-  if ("refusal" in resolved) return resolved.refusal;
-  const { link } = resolved;
-  const label = escapeHtml(mailCategoryLabel(link.claims.category));
-  const masked = escapeHtml(maskAddress(link.user.email));
-  const already = !isOn(link);
-  const oneClick = '<input type="hidden" name="List-Unsubscribe" value="One-Click">';
-  const body = `<h1>Unsubscribe</h1>
-<p>${
-    already
-      ? `${masked} already does not receive NEMAR ${label} mail.`
-      : `Stop NEMAR ${label} mail to ${masked}?`
-  }</p>
-<form method="post">${oneClick}<input type="hidden" name="from" value="page"><button type="submit">Unsubscribe from ${label}</button></form>
-<form method="post">${oneClick}<input type="hidden" name="scope" value="all"><button type="submit">Unsubscribe from all NEMAR community mail</button></form>
-<p class="note">${escapeHtml(mailRecallWhy())}</p>
-<p class="note">Nothing changes until you press a button.</p>`;
-  return c.html(page("Unsubscribe", body), 200, NO_LEAK_HEADERS);
+/**
+ * The link in the mail lands here and is sent on to the website's page, which reads `/info` and posts
+ * the change itself. Only a token that parses strictly is forwarded: the parser's alphabet is digits,
+ * lowercase letters, `.`, `_`, `-` and base64url, all unreserved in a URL path, so the token goes into
+ * `Location` as it is and nothing a sender typed (a `/`, `?`, `#`, `%` or space) can reach the header.
+ * Anything else is the uniform 410 here, without a redirect.
+ *
+ * Neither the secret nor the database is read: a parsed token whose signature is bad, whose account is
+ * gone, or which arrives while `MAIL_LINK_SECRET` is unset is still forwarded, and the website page says
+ * so from `/info`. That keeps this GET free of any side effect and of any HMAC cost.
+ */
+mailRoutes.get("/unsubscribe/:token", (c) => {
+  const token = c.req.param("token") ?? "";
+  if (!parseMailLinkToken(token)) return respondInvalid(c);
+  return c.body(null, 303, {
+    ...NO_LEAK_HEADERS,
+    Location: `${appBase(c.env)}/unsubscribe/${token}`,
+  });
 });
 
 mailRoutes.get("/unsubscribe/:token/info", async (c) => {

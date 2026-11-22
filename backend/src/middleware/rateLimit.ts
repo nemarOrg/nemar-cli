@@ -885,9 +885,9 @@ const RUNNER_MAX_REQUESTS = 2000;
 // `link_invalid`.
 //
 // TWO BUCKETS, by method. The cap above is for POST (the opt-out itself) and anything else that is not a
-// read. A GET or HEAD (the confirmation page and its /info twin) is counted in `mail-read-ip` at a higher
-// cap, because security scanners and link previews fetch every link of every delivered message from a few
-// shared addresses, right after a send, at the very moment real opt-outs arrive. Sharing one bucket would
+// read. A GET or HEAD (the redirect to the website page and its /info twin) is counted in `mail-read-ip`
+// at a higher cap, because security scanners and link previews fetch every link of every delivered message
+// from a few shared addresses, right after a send, at the very moment real opt-outs arrive. Sharing one bucket would
 // let that volume refuse a person's POST. A scanner that exhausts the read bucket costs nobody an opt-out.
 const MAIL_LINK_PATH_RE = /^\/mail\/unsubscribe(\/|$)/;
 const MAIL_LINK_MAX_REQUESTS = 300;
