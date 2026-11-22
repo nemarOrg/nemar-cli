@@ -3516,8 +3516,8 @@ Examples:
 // Delete Dataset (Admin/Owner Only)
 // ============================================================================
 
-adminCommand
-  .command("delete-dataset")
+datasetGroupCommand
+  .command("delete")
   .description("Delete a dataset and all associated resources (GitHub, S3, D1)")
   .argument("<dataset-id>", "Dataset ID (e.g., nm000108)")
   .option("--force", "Force deletion of published datasets with DOIs (owner only)")
@@ -3616,7 +3616,7 @@ adminCommand
 // Bulk Delete
 // ============================================================================
 
-adminCommand
+datasetGroupCommand
   .command("bulk-delete")
   .description("Delete multiple phantom/orphaned datasets at once (owner only)")
   .argument("<dataset-ids>", "Comma-separated dataset IDs (e.g., nm000153,nm000154,nm000155)")

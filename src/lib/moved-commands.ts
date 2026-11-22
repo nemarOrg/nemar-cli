@@ -73,6 +73,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     retired:
       "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
   },
+  { oldPath: "delete-dataset", newPath: "dataset delete" },
+  { oldPath: "bulk-delete", newPath: "dataset bulk-delete" },
   { oldPath: "s3", newPath: "dataset s3" },
   { oldPath: "s3 lock", newPath: "dataset s3 lock" },
   { oldPath: "s3 credential-check", newPath: "dataset s3 credential-check" },
