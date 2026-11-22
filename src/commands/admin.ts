@@ -4745,10 +4745,13 @@ const recoverCommand = new Command("recover").description(
   "Re-copy epic #967 OpenNeuro imports published with 0-byte content, whose upstream is accessible (Phase 5, #972). Dry-run by default.",
 );
 
-recoverCommand
-  .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in recover-datasets list")
-  .option("--execute", "Actually verify + dispatch the re-copy (default is a dry run)")
+addApplyOption(
+  recoverCommand
+    .argument("[ids...]", "Dataset id(s) to recover (omit when using --all)")
+    .option("--all", "Target every entry in the checked-in recover-datasets list"),
+  "Actually verify + dispatch the re-copy (default is a dry run)",
+  ["--execute"],
+)
   .option("--force", "Allow a dataset id that is not on the checked-in recover-datasets list")
   .option(
     "--recover-file <path>",
@@ -4765,18 +4768,18 @@ Description:
   datasets published with 0-byte content whose OpenNeuro upstream is still
   accessible today. A direct re-dispatch onto a still-'complete' import_jobs
   row silently no-ops the status callback (only a non-terminal row accepts
-  an update), so --execute FIRST forces a per-key S3 verify on every target
+  an update), so --apply FIRST forces a per-key S3 verify on every target
   (reclassifying a stale 'complete' row to 'incomplete'), THEN dispatches
   ONE batch 'gh workflow run onboard-openneuro.yml' for the whole set.
-  Afterward, treat 'nemar admin recover status' (datasets.data_complete) as
+  Afterward, treat 'nemar admin rework recover status' (datasets.data_complete) as
   the completion oracle, not import_jobs.status.
 
   The actual re-copy is production-only IN PRACTICE: outside production the
   target on###### ids have no import_jobs row (dev D1 is exemplars-only), so
   source-id resolution fails loudly before any dispatch. But verifyImport
-  itself is NOT environment-gated -- --execute's reclassify step ('complete'
+  itself is NOT environment-gated -- --apply's reclassify step ('complete'
   -> 'incomplete') runs against whatever backend the CLI is pointed at, so
-  only ever run --execute against production. A target already
+  only ever run --apply against production. A target already
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
@@ -4790,7 +4793,7 @@ Description:
       ids: string[],
       options: {
         all?: boolean;
-        execute?: boolean;
+        apply?: boolean;
         force?: boolean;
         recoverFile?: string;
         json?: boolean;
@@ -4826,7 +4829,7 @@ Description:
       }
       const targets = resolved.targets;
 
-      if (!options.execute) {
+      if (!options.apply) {
         // JSON first and exclusive: `recover --all --json | jq` must see pure
         // JSON on stdout, nothing else.
         if (options.json) {
@@ -4841,14 +4844,14 @@ Description:
         console.log(
           chalk.dim(
             "\nEach target: POST /admin/imports/:id/verify (reclassify), then one batch " +
-              "gh workflow run onboard-openneuro.yml for the whole set. Pass --execute to run.",
+              "gh workflow run onboard-openneuro.yml for the whole set. Pass --apply to run.",
           ),
         );
         return;
       }
 
       // Every human-readable console.log below is gated behind `!options.json`
-      // so `recover --execute --json | jq` sees pure JSON on stdout; the JSON
+      // so `rework recover --apply --json | jq` sees pure JSON on stdout; the JSON
       // result is assembled as the flow proceeds and printed once at the end
       // (it needs the dispatch/verify results, so it can't print up front the
       // way the dry-run branch above does). ora spinners write to stderr by
