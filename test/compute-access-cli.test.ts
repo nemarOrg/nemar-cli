@@ -540,6 +540,27 @@ describe("the notice to the person", () => {
     expect(r.exitCode).toBe(0);
   });
 
+  test("a notice padded past the Worker's outer bound is sent trimmed and the decision stands", async () => {
+    // 1000 characters plus 3001 spaces: within the rule once trimmed, past the outer bound as typed.
+    const text = `${"p".repeat(999)}Z`;
+    const id = await seedPerson({ compute_access: "active" });
+    const email = row(id).email as string;
+    const calls = await withFakeResend(async (captured) => {
+      const r = await admin("admin", [
+        "suspend",
+        "--id",
+        String(id),
+        "--notice",
+        `${text}${" ".repeat(3001)}`,
+      ]);
+      expect(r.stderr).not.toContain("too_big");
+      expect(r.exitCode).toBe(0);
+      return captured;
+    });
+    expect(row(id).compute_access).toBe("suspended");
+    expect(sendsTo(calls, email)[0]?.html ?? "").toContain(text);
+  });
+
   test("help names --notice as required for suspend and revoke, optional for deny, and absent for grant", async () => {
     for (const decision of ["suspend", "revoke"]) {
       const help = await runCli(null, ["admin", "compute", "access", decision, "--help"]);

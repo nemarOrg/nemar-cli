@@ -57,7 +57,9 @@ export async function decideComputeAccess(
 ): Promise<ComputeAccessDecisionResponse> {
   const body: ComputeAccessDecisionRequest = {};
   if (reason !== undefined) body.reason = reason;
-  if (notice !== undefined) body.notice = notice;
+  // Trimmed, as the website sends it: the rule counts the trimmed text, and the Worker's outer bound
+  // counts the value as sent, so padding must not reach it.
+  if (notice !== undefined) body.notice = notice.trim();
   const where =
     "id" in target
       ? `by-id/${target.id}`
