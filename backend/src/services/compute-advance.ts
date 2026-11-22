@@ -18,7 +18,8 @@
  * `scheduled()` and are absent from `DEV_CRON_ALLOWLIST`, and each refuses outside exact production by
  * itself (the dev database shares real users and the GitHub org, and development advances a job by its
  * webhook, by a read and by an administrator's command). Neither reads a switch, so a job that is
- * live is never stranded by turning compute off; the switch is read only where a job is submitted.
+ * live is never stranded by turning compute off; the switch is read only where a job is created (its hold)
+ * and where it is submitted.
  * A database read of the live rows comes first: a Worker with no Tapis configuration and no jobs does
  * nothing at all.
  *

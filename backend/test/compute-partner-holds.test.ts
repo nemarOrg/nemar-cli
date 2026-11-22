@@ -8,8 +8,8 @@
  *     THIS person and THIS client (`created`, no Tapis job, the person's Tapis username recorded), its hold
  *     is on the person's pool and counted against the people budget, nothing is charged, the hold body is
  *     kept BYTE FOR BYTE as `records/<id>/spec.json` and its digest is `spec_digest`, and the identity
- *     snapshot is written. The routes work with the compute switch OFF (a hold is taken and expires, as
- *     for a person's submission).
+ *     snapshot is written. With the compute switch OFF a new hold is `compute_disabled` and writes
+ *     nothing (ADR 0118, amendment of 2026-11-22); with it on, the same request is held.
  *  2. ONE REQUEST PER REFUSAL WORD of the order, each writing nothing: `no_compute_access` (none,
  *     requested, denied, revoked), `suspended`, `invalid_spec` (naming the field), `partition_not_offered`,
  *     `over_job_limit`, `over_concurrency`, `insufficient_balance`, `platform_budget_exhausted`,
@@ -175,11 +175,38 @@ describe("a reservation", () => {
     expect(claim.request_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test("works with the compute switch OFF: the hold is taken and waits, as a person's submission does", async () => {
+  // ADR 0118, amendment of 2026-11-22: the compute switch stops new holds. `createJob` refuses before it
+  // reads or writes anything, so no job, ledger entry or idempotency claim is written.
+  test("is refused compute_disabled with the compute switch absent, and writes nothing", async () => {
     const person = await newPartnerPerson(w);
-    const res = await post(person, holdBody(), undefined, { COMPUTE_ENABLED: undefined });
+    const before = snapshot();
+    for (const COMPUTE_ENABLED of [undefined, "0", "true"]) {
+      const res = await post(person, holdBody(), undefined, { COMPUTE_ENABLED });
+      expect([COMPUTE_ENABLED, res.status, res.json?.code]).toEqual([
+        COMPUTE_ENABLED,
+        COMPUTE_PARTNER_ERROR_STATUS.compute_disabled,
+        "compute_disabled",
+      ]);
+    }
+    expect(snapshot()).toEqual(before);
+    // A replay of a key whose hold exists is refused too, and still writes nothing.
+    const held = await post(person, holdBody(), "switch-replay-1");
+    expect(held.status).toBe(201);
+    const after = snapshot();
+    const replay = await post(person, holdBody(), "switch-replay-1", {
+      COMPUTE_ENABLED: undefined,
+    });
+    expect([replay.status, replay.json?.code]).toEqual([503, "compute_disabled"]);
+    expect(snapshot()).toEqual(after);
+  });
+
+  test("with the compute switch on the same request is held (201), one job and one ledger entry", async () => {
+    const person = await newPartnerPerson(w);
+    const [ledger, jobs] = snapshot();
+    const res = await post(person, holdBody(), undefined, { COMPUTE_ENABLED: "1" });
     expect(res.status).toBe(201);
     expect(row(w, res.json?.job_id as string).state).toBe("created");
+    expect(snapshot().slice(0, 2)).toEqual([(ledger as number) + 1, (jobs as number) + 1]);
   });
 
   test("the GPU form reserves on the gpu pool", async () => {

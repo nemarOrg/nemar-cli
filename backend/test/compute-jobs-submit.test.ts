@@ -8,7 +8,8 @@
  * reports the first), that a refusal writes nothing and returns no address, compute access read in the
  * hold's own statement and not only from the pools, the dataset gate the pipelines use, the upload
  * address (one fixed key, short expiry, the owner only), image mode, the Idempotency-Key, and that the
- * routes work with the compute switch off.
+ * compute switch off refuses a new hold (`compute_disabled`, nothing written; ADR 0118, amendment of
+ * 2026-11-22) while a job held before it waits and then fails `submit_timeout`.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -158,27 +159,65 @@ describe("an image job", () => {
 });
 
 describe("compute off", () => {
-  test("the routes work with the switch off; the job waits, then fails submit_timeout with its hold released", async () => {
+  const counts = () =>
+    ["compute_jobs", "compute_ledger"].map(
+      (t) => (w.fx.harness.db.query(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n,
+    );
+
+  // ADR 0118, amendment of 2026-11-22: the switch stops new holds. `createJob` refuses before it reads or
+  // writes anything, so the route answers `compute_disabled` and neither table gains a row.
+  test("with the switch absent POST /compute/jobs is compute_disabled and writes no job and no ledger row", async () => {
+    await allowRegistry(w);
+    const p = await newPerson(w);
+    const before = counts();
+    for (const COMPUTE_ENABLED of [undefined, "0", "true"]) {
+      const off = w.env({ COMPUTE_ENABLED });
+      for (const json of [imageRequest(), bundleRequest(makeBundle())]) {
+        const r = await call(w, "POST", "/compute/jobs", { key: p.key, json, env: off });
+        expect([COMPUTE_ENABLED, r.status, r.body.code]).toEqual([
+          COMPUTE_ENABLED,
+          COMPUTE_REFUSAL_STATUS.compute_disabled,
+          "compute_disabled",
+        ]);
+      }
+    }
+    expect(counts()).toEqual(before);
+    expect(w.fx.tapis.jobs.size).toBe(0);
+    // A replay of a key whose job exists is refused too: nothing moves while compute is off.
+    const on = await submit(p, imageRequest(), { "Idempotency-Key": "switch-replay-1" });
+    expect(on.status).toBe(201);
+    const held = counts();
+    const replay = await call(w, "POST", "/compute/jobs", {
+      key: p.key,
+      json: imageRequest(),
+      headers: { "Idempotency-Key": "switch-replay-1" },
+      env: w.env({ COMPUTE_ENABLED: undefined }),
+    });
+    expect([replay.status, replay.body.code]).toEqual([503, "compute_disabled"]);
+    expect(counts()).toEqual(held);
+  });
+
+  test("with the switch on the same request is held as before (201)", async () => {
+    await allowRegistry(w);
+    const p = await newPerson(w);
+    const [jobs, ledger] = counts();
+    const r = await submit(p, bundleRequest(makeBundle()));
+    expect([r.status, r.body.state]).toEqual([201, "uploading"]);
+    expect(counts()).toEqual([jobs + 1, ledger + 1]);
+  });
+
+  test("a job held while compute was on waits once it is off, then fails submit_timeout with its hold released", async () => {
     await allowRegistry(w);
     const p = await newPerson(w);
     const off = w.env({ COMPUTE_ENABLED: undefined });
-    const image = await call(w, "POST", "/compute/jobs", {
-      key: p.key,
-      json: imageRequest(),
-      env: off,
-    });
+    // Held while on, with Tapis down so the submit right after the hold does not send it.
+    w.fx.tapis.down();
+    const image = await submit(p, imageRequest());
+    w.fx.tapis.up();
     expect(image.status).toBe(201);
     expect(image.body.state).toBe("created");
     expect(w.fx.tapis.jobs.size).toBe(0);
-    const bundle = makeBundle();
-    const script = await call(w, "POST", "/compute/jobs", {
-      key: p.key,
-      json: bundleRequest(bundle),
-      env: off,
-    });
-    expect(script.status).toBe(201);
-    expect(script.body.state).toBe("uploading");
-    // Past the reservation wait the image job fails and its hold is released.
+    // Past the reservation wait, with compute off, the image job fails and its hold is released.
     const later = Date.now() + 31 * 60_000;
     await submitComputeJob(off, image.body.job_id, later);
     const row = jobRow(w, image.body.job_id);

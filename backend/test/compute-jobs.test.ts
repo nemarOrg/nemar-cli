@@ -102,9 +102,16 @@ interface World {
   d1: D1Database;
   env(over?: Partial<Bindings>): Bindings;
 }
+/** The compute switch, on: what a production Worker with compute switched on holds. */
+const ON = { COMPUTE_ENABLED: "1" } as const;
 const worlds = (): World[] => [
-  { name: "bun:sqlite", d1: h.env().DB, env: (over) => h.env(over) },
-  { name: "Miniflare D1", d1: h.d1 as D1Database, env: (over) => h.env({ DB: h.d1, ...over }) },
+  // Compute on (ADR 0118, amendment of 2026-11-22): `createJob` refuses every hold with the switch off.
+  { name: "bun:sqlite", d1: h.env().DB, env: (over) => h.env({ ...ON, ...over }) },
+  {
+    name: "Miniflare D1",
+    d1: h.d1 as D1Database,
+    env: (over) => h.env({ ...ON, DB: h.d1, ...over }),
+  },
 ];
 
 /** Run a case on both engines; `h.reset()` has already given bun:sqlite a new database. */
