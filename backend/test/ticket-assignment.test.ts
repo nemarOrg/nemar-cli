@@ -45,13 +45,14 @@ function away(
 }
 
 describe("migration 0102", () => {
-  test("seeds security and conduct restricted pool queues, and a fallback with no assignee when no default admin exists", () => {
+  test("seeds security, conduct (0102) and legal-process (0149) restricted pool queues, and a fallback with no assignee when no default admin exists", () => {
     const rows = db
       .query<Record<string, unknown>, []>("SELECT * FROM mail_queues ORDER BY tag")
       .all();
     expect(rows.map((r) => [r.tag, r.restricted, r.strategy, r.assignee_user_id])).toEqual([
       ["*", 0, "fixed", null],
       ["conduct", 1, "pool", null],
+      ["legal-process", 1, "pool", null],
       ["security", 1, "pool", null],
     ]);
   });
@@ -320,6 +321,8 @@ describe("restricted tags do not depend on the queue row", () => {
     db.run("DELETE FROM mail_queues WHERE tag IN ('security', 'conduct')");
     expect(isRestrictedQueue("security")).toBe(true);
     expect(isRestrictedQueue("conduct", { restricted: 0 })).toBe(true);
+    expect(isRestrictedQueue("legal-process")).toBe(true);
+    expect(isRestrictedQueue("legal-process", { restricted: 0 })).toBe(true);
     expect(isRestrictedQueue("support", { restricted: 0 })).toBe(false);
     expect(isRestrictedQueue("support", { restricted: 1 })).toBe(true);
     expect(await resolveAssignee(d1, "security", {}, NOW)).toBeNull();
