@@ -5453,7 +5453,7 @@ exemplarCommand
     }
   });
 
-adminCommand.addCommand(exemplarCommand);
+datasetGroupCommand.addCommand(exemplarCommand);
 
 // ============================================================================
 // Reindex (epic #417 phase 3): refresh enrichment +

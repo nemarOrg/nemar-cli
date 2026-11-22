@@ -49,6 +49,10 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "doi info", newPath: "dataset doi info" },
   { oldPath: "doi update", newPath: "dataset doi update" },
   { oldPath: "doi enrich", newPath: "dataset doi enrich" },
+  { oldPath: "exemplar", newPath: "dataset exemplar" },
+  { oldPath: "exemplar create", newPath: "dataset exemplar create" },
+  { oldPath: "exemplar status", newPath: "dataset exemplar status" },
+  { oldPath: "exemplar remint-dois", newPath: "dataset exemplar remint-dois" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
