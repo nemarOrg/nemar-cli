@@ -6,14 +6,15 @@
  * Commands:
  * - nemar admin users              - List users (pending, approved, all), or search every field
  * - nemar admin users show/edit    - Look up one account's details; edit a closed set of fields
- * - nemar admin approve            - Approve a pending user
- * - nemar admin revoke             - Revoke user access
- * - nemar admin role               - Change a user's role (owner only)
+ * - nemar admin users approve      - Approve a pending user
+ * - nemar admin users revoke       - Revoke user access
+ * - nemar admin users role         - Change a user's role (owner only)
  * - nemar admin dataset (alias repo) - One dataset: publish/unpublish/withdraw/restore, delete,
  *   bulk-delete, reindex, doi, ci, s3 lock/credential-check, exemplar, doctor scan/fix
  * - nemar admin revert             - Revert dataset to a previous version
  * - nemar admin recover [status]   - Re-copy epic #967 imports whose upstream is accessible
- * - nemar admin email-preferences show/update - Email notification opt-out
+ * - nemar admin users verify/kind/kind-check/keys/duplicates/backfill-usernames - Accounts
+ * - nemar admin users email-preferences show/update - Email notification opt-out
  * - nemar admin notice list/set/clear - System notice management
  * - nemar admin notify              - Send broadcast email to users
  * - nemar admin pr-reviews          - Dataset pull requests awaiting approval, with the automated review
@@ -301,10 +302,8 @@ Description:
   These commands require admin privileges.
 
 User Management:
-  users          - List users and their status
-  approve        - Approve a pending user registration
-  revoke         - Revoke user access
-  role           - Change a user's role (owner only: owner > admin > member)
+  users          - List and search users; approve, revoke, role, verify, kind,
+                   kind-check, keys, email-preferences, duplicates, backfill-usernames
 
 Dataset Management:
   dataset           - One dataset (alias 'repo'): publish, unpublish, withdraw, restore,
@@ -315,9 +314,9 @@ Dataset Management:
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
   $ nemar admin users --role admin         # List all admins
-  $ nemar admin approve john_doe           # Approve a user
-  $ nemar admin approve --id 123           # Approve a web/ORCID user (no username)
-  $ nemar admin role john_doe admin        # Promote user to admin (owner only)
+  $ nemar admin users approve john_doe     # Approve a user
+  $ nemar admin users approve --id 123     # Approve a web/ORCID user (no username)
+  $ nemar admin users role john_doe admin  # Promote user to admin (owner only)
   $ nemar admin dataset unpublish nm000104 # Pull a published dataset back to private
   $ nemar admin dataset ci check nm000104  # Check CI status
   $ nemar admin dataset doi create nm000104 # Create concept DOI`,
@@ -365,7 +364,7 @@ const adminUsersCommand = adminCommand
 Tiers (ADR 0040):
   browse   base tier: browse, dashboard, settings, CLI API key, and sandbox
            training (ADR 0040 phase 2, landed)
-  upload   an admin granted upload access; 'nemar admin approve' is the grant
+  upload   an admin granted upload access; 'nemar admin users approve' is the grant
   unknown  the API reported no tier for this account (a backend older than
            the tier split, or a rolling deploy)
 
@@ -597,7 +596,7 @@ Examples:
 
         // Web/ORCID accounts have username = NULL by design (#1012), so the
         // heading falls back to the email and carries the numeric id — the
-        // only key `nemar admin approve --id` can address them by. Printing
+        // only key `nemar admin users approve --id` can address them by. Printing
         // the raw field would put the literal "null" in the listing.
         const heading = safeText(user.username ?? user.email);
         // A search is how an admin finds the id `show` and `edit` take, so the
@@ -715,37 +714,37 @@ const LISTING_ONLY_OPTIONS: ReadonlyArray<{
   {
     key: "role",
     flag: "--role",
-    hint: "A role is changed with 'nemar admin role <username> <role>' (owners only).",
+    hint: "A role is changed with 'nemar admin users role <username> <role>' (owners only).",
   },
   {
     key: "kind",
     flag: "--kind",
-    hint: "An account kind is changed with 'nemar admin kind <username> <kind>' (owners only).",
+    hint: "An account kind is changed with 'nemar admin users kind <username> <kind>' (owners only).",
   },
   {
     key: "pending",
     flag: "--pending",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "verified",
     flag: "--verified",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "approved",
     flag: "--approved",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "revoked",
     flag: "--revoked",
-    hint: "Status is changed with 'nemar admin approve' or 'revoke'.",
+    hint: "Status is changed with 'nemar admin users approve' or 'revoke'.",
   },
   {
     key: "uploadAccess",
     flag: "--no-upload-access",
-    hint: "Upload access is granted with 'nemar admin approve'.",
+    hint: "Upload access is granted with 'nemar admin users approve'.",
   },
   { key: "awaitingApproval", flag: "--awaiting-approval" },
   // `show` honours this one (it can read a deleted account); `edit` cannot edit one.
@@ -941,8 +940,8 @@ Who can change what:
       key minting. An owner changes their own in Settings ('nemar auth profile').
 
 What this does NOT change (each has its own command):
-  role / status / upload access   nemar admin role | approve | revoke
-  account kind                    nemar admin kind
+  role / status / upload access   nemar admin users role | approve | revoke
+  account kind                    nemar admin users kind
   ORCID iD sign-in record         the person links it in Settings or with
                                   'nemar auth profile orcid link'; --orcid records
                                   an owner's attestation without that record, and
@@ -1207,7 +1206,7 @@ adminUsersCommand
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .action(async (username: string | undefined, options: ConfirmOptions & { id?: string }) => {
-    // Exactly one addressing key, the same rule `admin approve` enforces:
+    // Exactly one addressing key, the same rule `admin users approve` enforces:
     // username (CLI accounts) or --id (web/ORCID accounts, whose username is
     // NULL by design). Approval can reach those accounts by id, so revocation
     // has to as well (ADR 0040: revoke is the eraser of what approval wrote).
@@ -1305,9 +1304,9 @@ Rules:
   - Demoting a user revokes their tokens (they must re-login)
 
 Examples:
-  $ nemar admin role john_doe admin        # Promote to admin
-  $ nemar admin role john_doe member       # Demote to member
-  $ nemar admin role jane_doe owner -y     # Promote to owner (skip confirm)`,
+  $ nemar admin users role john_doe admin  # Promote to admin
+  $ nemar admin users role john_doe member # Demote to member
+  $ nemar admin users role jane_doe owner -y     # Promote to owner (skip confirm)`,
   )
   .action(async (username: string, role: string, options: { yes?: boolean }) => {
     if (!requireAuth()) return;
@@ -1376,11 +1375,11 @@ self-verify flows where the person proved their own inbox.
 Rules:
   - Only owners; it asserts an inbox the person did not prove
   - Only pending accounts; use approve or revoke for the other tiers
-  - It grants no upload access: that is still 'nemar admin approve'
+  - It grants no upload access: that is still 'nemar admin users approve'
 
 Examples:
-  $ nemar admin verify 80
-  $ nemar admin verify 80 -y`,
+  $ nemar admin users verify 80
+  $ nemar admin users verify 80 -y`,
   )
   .action(async (idArg: string, options: ConfirmOptions) => {
     const id = Number.parseInt(idArg, 10);
@@ -1444,7 +1443,7 @@ adminUsersCommand
 Kinds:
   person  - a human's own account (the default)
   service - operational automation; no human signs in to it directly, keys
-            are owner-minted with 'nemar admin keys create'
+            are owner-minted with 'nemar admin users keys create'
   test    - a human's secondary persona; signs in and uploads like a person,
             but on production may only own xx sandbox datasets
 
@@ -1456,9 +1455,9 @@ Rules:
   - Keys are not revoked on a kind change
 
 Examples:
-  $ nemar admin kind cool-vibers test      # Mark a persona account
-  $ nemar admin kind nemarAdmin service    # Mark an operational account
-  $ nemar admin kind cool-vibers person -y # Revert (skip confirm)`,
+  $ nemar admin users kind cool-vibers test      # Mark a persona account
+  $ nemar admin users kind nemarAdmin service    # Mark an operational account
+  $ nemar admin users kind cool-vibers person -y # Revert (skip confirm)`,
   )
   .action(async (username: string, kindArg: string, options: ConfirmOptions) => {
     if (!requireAuth()) return;
@@ -1535,7 +1534,7 @@ adminKeysCommand
         // either side of that commit -- the key may already exist even
         // though this command never saw the response (epic #1272 phase 4,
         // #1284 review).
-        0: `The key may have been minted before the connection dropped; run \`nemar admin keys list ${username}\` before retrying.`,
+        0: `The key may have been minted before the connection dropped; run \`nemar admin users keys list ${username}\` before retrying.`,
       });
     }
   });
@@ -1577,7 +1576,7 @@ adminKeysCommand
   .command("revoke")
   .description("Revoke one of a target account's keys")
   .argument("<username>", "Username of the account")
-  .argument("<id>", "Key row id (from 'nemar admin keys list')")
+  .argument("<id>", "Key row id (from 'nemar admin users keys list')")
   .action(async (username: string, idStr: string) => {
     if (!requireAuth()) return;
 
@@ -8244,11 +8243,11 @@ adminUsersCommand
       }
       console.log(
         chalk.yellow(
-          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin kind <username> <kind>\`.`,
+          `\n${mismatches.length + absent.length} finding(s). Fix a mismatch with \`nemar admin users kind <username> <kind>\`.`,
         ),
       );
     } catch (err) {
-      spinner.fail("Doctor kinds check failed");
+      spinner.fail("Account kind check failed");
       console.error(chalk.red(errorDetail(err)));
       process.exit(1);
     }
@@ -8310,7 +8309,9 @@ emailPrefsCommand
       console.log(chalk.dim(`  ${mailRecallWhy()}`));
 
       console.log();
-      console.log(chalk.dim("  Use 'nemar admin email-preferences update' to change settings."));
+      console.log(
+        chalk.dim("  Use 'nemar admin users email-preferences update' to change settings."),
+      );
     } catch (err) {
       spinner.fail("Failed to fetch preferences");
       console.error(chalk.red(errorDetail(err)));
@@ -10097,7 +10098,7 @@ adminUsersCommand.addCommand(backfillUsernamesCommand);
 // ============================================================================
 
 /**
- * `nemar admin duplicates` — live accounts sharing an ORCID iD, an email
+ * `nemar admin users duplicates` — live accounts sharing an ORCID iD, an email
  * address, or a GitHub handle, plus the `--clear` half that un-flags a row
  * once its collision is gone.
  *
@@ -10202,7 +10203,7 @@ duplicatesCommand
             `${report.flagged_count} account(s) still carry an identity-conflict flag with no remaining collision.`,
           ),
         );
-        console.log(chalk.dim("  Clear each with 'nemar admin duplicates --clear <id>'."));
+        console.log(chalk.dim("  Clear each with 'nemar admin users duplicates --clear <id>'."));
       }
       return;
     }

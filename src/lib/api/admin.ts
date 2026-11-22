@@ -319,7 +319,7 @@ export async function setAccountKind(
   );
 }
 
-/** The fields `nemar admin doctor kinds` reads off `GET
+/** The fields `nemar admin users kind-check` reads off `GET
  *  /admin/users/:username` (epic #1272 phase 4, #1284 review; ADR 0048).
  *  The route selects every NON-SECRET column (`ADMIN_USER_NON_SECRET_SELECT`;
  *  credentials are never returned, ADR 0096) plus two computed columns, so

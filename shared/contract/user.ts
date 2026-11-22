@@ -70,8 +70,8 @@ export function isAccountKind(value: string): value is AccountKind {
  * keyed by username (epic #1272 phase 4, #1284 review; ADR 0048). ONE
  * shared source for what used to be three independent copies -- the
  * migration's own data half, `scripts/seed-dev-db.sql`'s repeat of it for a
- * database seeded fresh after that migration ran, and `nemar admin doctor
- * kinds`' read-only check -- so the three cannot drift apart silently.
+ * database seeded fresh after that migration ran, and `nemar admin users
+ * kind-check`'s read-only check -- so the three cannot drift apart silently.
  *
  * The migration and the seed script are SQL and cannot import this
  * (migration 0082's header says so); this is the source the migration's own
