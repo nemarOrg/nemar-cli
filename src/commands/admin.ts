@@ -9572,7 +9572,7 @@ importIssueTriageCommand
     }
   });
 
-adminCommand.addCommand(importIssueTriageCommand);
+importCommand.addCommand(importIssueTriageCommand.name("triage"));
 
 // ============================================================================
 // Import coverage (#1311, epic #1306 phase 3)
@@ -9766,7 +9766,7 @@ importCoverageCommand
     }
   });
 
-adminCommand.addCommand(importCoverageCommand);
+importCommand.addCommand(importCoverageCommand.name("coverage"));
 
 // ============================================================================
 // Weekly import summary (#1312, epic #1306 phase 4)

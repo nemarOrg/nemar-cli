@@ -127,6 +127,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   // ADR 0135, phase P4: the import reports join `admin import`, and the upstream snapshot commands
   // join `admin repull`, which starts from that snapshot.
   { oldPath: "import-openneuro", newPath: "import openneuro" },
+  { oldPath: "import-issue-triage", newPath: "import triage" },
+  { oldPath: "import-coverage", newPath: "import coverage" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
