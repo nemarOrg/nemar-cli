@@ -7981,14 +7981,10 @@ adminCommand.addCommand(anonymitySweepCommand);
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
-// `admin dataset doctor` holds the dataset checks; the top-level `admin doctor` keeps only `kinds`,
-// an account check, until it moves to `admin users kind-check` (ADR 0135, phase P2).
+// `admin dataset doctor` holds the dataset checks; the one account check, the former
+// `admin doctor kinds`, is `admin users kind-check` (ADR 0135), so `admin doctor` is gone.
 const datasetDoctorCommand = new Command("doctor").description(
   "Diagnose and heal stuck-dataset patterns (e.g. missing S3 version manifests)",
-);
-
-const doctorCommand = new Command("doctor").description(
-  "Check operational account kinds (the dataset checks are 'admin dataset doctor')",
 );
 
 function printScanResults(res: DoctorScanResponse): number {
@@ -8207,8 +8203,8 @@ export async function runDoctorFixLoop(
   return { totals, results };
 }
 
-doctorCommand
-  .command("kinds")
+adminUsersCommand
+  .command("kind-check")
   .description("Check that operational accounts carry their expected account kind (read-only)")
   .action(async () => {
     if (!requireAuth()) return;
@@ -8260,7 +8256,6 @@ doctorCommand
     }
   });
 
-adminCommand.addCommand(doctorCommand);
 datasetGroupCommand.addCommand(datasetDoctorCommand);
 
 // ============================================================================

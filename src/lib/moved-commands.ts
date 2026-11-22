@@ -90,7 +90,9 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
     oldPath: "s3 regenerate-iam",
     retired:
       "S3 access uses backend-scoped credentials, so there are no per-user IAM keys to regenerate.",
-  }, // ADR 0135, phase P2: the account commands gather under `admin users`.
+  },
+  // ADR 0135, phase P2: the account commands gather under `admin users`, and `admin doctor`,
+  // whose dataset checks moved in P1, dissolves with its last child.
   { oldPath: "approve", newPath: "users approve" },
   { oldPath: "revoke", newPath: "users revoke" },
   { oldPath: "role", newPath: "users role" },
@@ -105,6 +107,8 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "email-preferences update", newPath: "users email-preferences update" },
   { oldPath: "duplicates", newPath: "users duplicates" },
   { oldPath: "backfill-usernames", newPath: "users backfill-usernames" },
+  { oldPath: "doctor", newPath: "dataset doctor" },
+  { oldPath: "doctor kinds", newPath: "users kind-check" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
