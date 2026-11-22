@@ -97,6 +97,8 @@ Does this feature add a second identity, a second place to change a setting, or 
 
 **Known exceptions.**
 Service and test accounts are explicit kinds, not persons (ADR 0048).
+A person cannot yet withdraw a partner's access from their own profile:
+until a connected-apps page exists, there is no self-service way to do so for up to 90 days, the lifetime of a refresh token (ADR 0119, rule 12).
 An ORCID iD that was attested for a person, and not proven by the person's own sign-in, does not count as proof for a client that requires it (ADRs 0106, 0119).
 
 #### P4. Declare once, and hold every copy by a test
@@ -153,7 +155,7 @@ and status that lags behind the code is a defect.
 
 - Every claim about the system says which state it is in: designed, built, released, or on in production.
   An ADR annotates what is built and what is not (ADR 0111), and a page that describes unreleased work carries a dated "Where this stands".
-- A document does not claim more than was checked: "verified" means what the check can see (ADR 0067), and an unmeasured figure is said to be unmeasured (ADRs 0116, 0122 decision 3).
+- A document does not claim more than was checked: "verified" means what the check can see (ADRs 0067, 0122 decision 3), and an unmeasured figure is said to be unmeasured (ADR 0116).
 - A test is shown to fail when the line it guards is changed (`.rules/testing.md`, mutation), with no mock of NEMAR's logic.
   ADR 0067 exists because deleting two blinds left 3,418 tests green.
 - A report arrives whether or not anything is wrong, so that its absence is evidence (ADR 0054).
@@ -173,12 +175,12 @@ A known lag is recorded where a reader will find it, as the index does for ADR h
 
 **Statement.**
 Records are appended and superseded, not rewritten,
-and automation that finds a disagreement reports it before anything acts on it.
+and automation that finds a disagreement in data integrity or anonymity reports it before anything acts on it.
 
 **Requires.**
 
 - ADRs are superseded and never deleted; the ledger is append-only (ADR 0118, decision 3); derivatives are immutable once stored (ADR 0123).
-- A sweep or a reconcile reports, and files or repairs nothing until the report's shape is proven (ADRs 0055, 0061, 0067, 0088).
+- A sweep or a reconcile over datasets, identifiers or published data reports, and files or repairs nothing until the report's shape is proven (ADRs 0055, 0061, 0067, 0088).
 - A state change is a stamp on the old row, not a rewrite (ADRs 0104, 0125), and the raw object is the record from which tables are rebuilt (ADR 0112).
 
 **Reviewer's test.**
@@ -187,6 +189,9 @@ After this runs, can someone reconstruct what was true before, and who decided t
 **Rests on.** ADRs 0055, 0061, 0067, 0088, 0104, 0112, 0118, 0123, 0125.
 
 **Known exceptions.**
+The compute sweeps act in the run that finds the disagreement, on NEMAR's own job records:
+the tenant sweep cancels a job that skipped its reservation and charges it to the partner pool, and the hold reaper releases a hold with no job and cancels a mismatch (ADR 0118, decision 5).
+Each act is an appended ledger entry or an audit row, so the history is kept; Part B relies on this.
 Privacy overrides it: a correction scrubs every version in place and keeps only counts and fixed words (ADR 0085).
 A recovered copy that does not verify is deleted (ADR 0063), and password hashes were cleared when password sign-in was retired (ADR 0097).
 
@@ -222,7 +227,7 @@ among options that meet the requirement, the cheaper one is chosen when its perf
 **Requires.**
 
 - The application programming interface (API), the data plane, the Model Context Protocol (MCP) server and mail run as Cloudflare Workers in one account (ADRs 0008, 0050, 0066, 0072, 0078, 0095, 0110).
-- State lives in the platform's managed stores: the SQL database and the vector index (ADR 0003), and private object-store buckets for news images, raw mail, compute records and derivatives (ADRs 0076, 0112, 0118 decision 7, 0123).
+- State lives in the platform's managed stores: the Structured Query Language (SQL) database and the vector index (ADR 0003), and private object-store buckets for news images, raw mail, compute records and derivatives (ADRs 0076, 0112, 0118 decision 7, 0123).
 - NEMAR's servers do not run compute for users: it runs in the browser, on registered runners or on the supercomputer (ADRs 0049, 0121), and the application host is not an executor (ADR 0080).
 - Cost is weighed explicitly.
   Dataset bytes stay in the sponsored object store and the Worker never proxies bulk bytes (ADR 0076 records why);
@@ -234,7 +239,7 @@ The performance cost of the cheaper option is manageable when both of these hold
 1. It is measured, on the platform the design will run on, not estimated.
    ADR 0049 corrected its own estimate after measuring, ADR 0069 measured the download before choosing, and ADR 0116 says plainly that its latency was not measured.
 2. The measurement is within the user-facing budget that the ADR for that surface sets:
-   for example the memory bound of one Worker isolate and the 60-second trust in an edge copy (ADR 0072),
+   for example the 128-megabyte memory bound of one Worker isolate (ADR 0072),
    the 4-second bound on reranking (ADR 0116),
    or the download budget of the browser runtime (ADR 0069).
    Where no ADR sets a budget for the surface, the design proposes one and records it before choosing.
@@ -250,7 +255,8 @@ If a cheaper option was chosen, where is the measurement, and which budget does 
 
 **Known exceptions.**
 The Neurobagel node runs stock on the lab's shared host, under hard limits and fed by pull, because its unmodified stack cannot run on Workers (ADR 0082, an approved exception that also says a service needing more is a different decision).
-Batch Zarr conversion runs on a lab node because one conversion needs tens of gibibytes of memory (ADRs 0029, 0101);
+Batch Zarr conversion runs on a lab node and not in GitHub Actions, because a large dataset stalls past the 120-minute cap there (ADR 0029),
+and one recording reserves 20 to 55 gibibytes of memory (ADR 0101);
 it is batch work, not a service.
 
 #### P10. Least disclosure, and ending a credential ends what it minted
@@ -276,7 +282,10 @@ Which single function ends them?
 **Rests on.** ADRs 0017, 0021, 0057, 0065, 0079, 0085, 0086, 0087, 0089, 0091, 0102, 0114, 0115, 0118, 0119, 0132.
 
 **Known exceptions.**
-A role demotion and an API key revocation deliberately leave `private` sessions and OIDC grants alone, because neither was minted from the role or the key (ADRs 0079, 0119).
+Signing out of the app session deliberately leaves an OIDC grant alone, although the grant was minted from that session.
+ADR 0119 records this, after the table of rule 12, as a departure from the cascade of ADRs 0021, 0056 and 0079:
+signing out of NEMAR is not withdrawing a third party's delegated access.
+A role demotion and an API key revocation also leave `private` sessions and OIDC grants alone, but these are not exceptions: nothing was minted from the role or the key (ADRs 0079, 0119).
 A recall reaches revoked accounts (ADR 0132).
 With a person's consent, a client may also read the name and the ORCID iD through scopes (ADR 0119, rule 6), so the opaque subject is a stable key, not a promise of anonymity.
 
@@ -326,10 +335,10 @@ Each is tied to its principle and marked by how it holds on `dev` today:
 | Release the reservation when a launch fails | P2, P7 | ADR 0118 decision 3 | Enforced in effect: `DELETE /compute/holds/:id` exists, and a reservation with no job is released by the hold reaper after a search of the job platform for its tag finds none. |
 | Declare and upload the submitted files of every batch job | P2 | ADR 0118 decision 2 | By agreement. `files` is optional in `ComputeReportRequestSchema`, so a report without it is accepted and the record then holds no submitted files. |
 | Honor every refusal and limit, including the client's caps | P5 | ADR 0118; ADR 0119 rule 8 | Enforced in code at reserve: the refusal words are a closed list (`COMPUTE_PARTNER_ERROR_STATUS`), with `client_cap_reached` and `platform_busy`. That the partner launches nothing after a refusal is caught afterwards by the sweep above. |
-| Send no separate usage report to an external allocation program | P2 | ADR 0118 decision 9 | By agreement. NEMAR's own reporter is built. |
-| Honor back-channel logout | P10 | ADR 0119 | NEMAR's sender is built (`backend/src/services/oidc-cascade.ts`). The partner's side is by agreement, and the read before every launch is the control that does not depend on it. |
+| Send no usage report to an external allocation program, unless NEMAR and the partner agree it | P2 | ADR 0118 decision 9 | By agreement: NEMAR cannot see it in code. NEMAR's own reporter is built. |
+| Honor back-channel logout | P10 | ADR 0119 | NEMAR's sender is built: an ending queues `oidc_logout_deliveries` rows (`backend/src/services/oidc-cascade.ts`), and `backend/src/services/oidc-logout.ts` delivers them (`deferLogoutDelivery`, `runOidcLogoutRetryTick`). The partner's side is by agreement, and the read before every launch is the control that does not depend on it. |
 | Run a job that follows the pipeline contract unchanged: the nemar-process image or one built from it, the launcher and its launch specification, declared checkpoints, signalJourney records | P1 | ADR 0122; ADR 0134 decision 8 | Planned. How a partner-launched job receives a launch specification is not designed; until then a partner's jobs report job-level states only. |
-| Serve interactive sessions so that their pages cannot set cookies for `nemar.org` | P10 | ADR 0119 rules 9 and 10 | NEMAR's side is enforced in code (`shared/partner-hosts.ts`, host-only `__Host-` cookies). The partner's hosting is checked. |
+| Serve interactive sessions so that their pages cannot set cookies for `nemar.org`; they should be served from a host outside `nemar.org` | P10 | ADR 0119 rules 9 and 10 | NEMAR's side is enforced in code (`shared/partner-hosts.ts`, host-only `__Host-` cookies). The partner's hosting is checked, and the other host is by agreement. |
 
 The words and numbers of the contract are `shared/contract/compute-partner.ts` and `shared/contract/compute-partner-request.ts`, and this ADR restates none of them (P4).
 A requirement marked "checked" or "by agreement" is still binding;
@@ -344,13 +353,15 @@ The differences are of form only:
 - The public page says "must" for both enforced and checked requirements and "should" for the rest; this ADR uses the four marks above.
   Submitted files and back-channel logout are "should" there and "by agreement" here.
 - Back-channel logout has its own row here; the gated table folds it into the token row.
+- The rule against a usage report to an allocation program is "must not" on the public page and "Checked" on the gated page; it is "by agreement" here, because NEMAR cannot see such a report.
+  The pages should say the same.
 - The gated page says the principles have no ADR of their own; that sentence and its tracker row are stale once this ADR is accepted.
 
 ## Consequences
 
 - A reviewer has ten tests to apply, and a design that fails one says which exception it takes.
 - The two documentation pages cite this ADR for the rationale and stop restating it, and keep the list of requirements, which a partner reads there (P4).
-  Until that edit lands in the documentation repository, the gated page's "no ADR of their own yet" is a known lag (P6).
+  Until that edit lands in the documentation repository, the gated page's "no ADR of their own yet", and the mark on the usage-report rule, are known lags (P6).
 - The partner requirements are binding by a ruling and no longer only by a page.
 - Eight of the fourteen requirements depend wholly or partly on a person's check or on the partner's word.
   That is stated, not hidden, and each one names the control NEMAR does hold.
@@ -386,6 +397,6 @@ The differences are of form only:
 
 - The public page `platform/compute-partner` and the gated page `admin/design/compute-gateway` of the documentation site, as merged on 2026-11-22.
 - `shared/contract/compute-partner.ts`, `shared/contract/compute-partner-request.ts`, `shared/partner-hosts.ts`, `shared/oidc.ts`.
-- `backend/src/routes/compute/partner.ts`, `backend/src/routes/compute/auth.ts`, and the services `compute-partner.ts`, `compute-report-verify.ts`, `compute-partner-excess.ts`, `compute-tenant-sweep.ts`, `compute-hold-reaper.ts`, `oidc-clients.ts` and `oidc-cascade.ts`.
+- `backend/src/routes/compute/partner.ts`, `backend/src/routes/compute/auth.ts`, and the services `compute-partner.ts`, `compute-report-verify.ts`, `compute-partner-excess.ts`, `compute-tenant-sweep.ts`, `compute-hold-reaper.ts`, `oidc-clients.ts`, `oidc-cascade.ts` and `oidc-logout.ts`.
 - `AGENTS.md` (the hard rules on switches, revocation and declared-once copy) and `.rules/testing.md`.
 - nemar-process: `launcher/schema/launch-spec.v1.json`, `tests/recipes/test_upstream_first.py`, `AGENTS.md`.
