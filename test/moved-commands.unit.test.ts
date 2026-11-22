@@ -21,6 +21,8 @@ import {
   isMovedCommandStub,
   movedCommandMessage,
   registerMovedCommands,
+  retiredCommandMessage,
+  stubMessage,
 } from "../src/lib/moved-commands";
 import { FIXTURE_STUB_PATHS, buildFixtureProgram } from "./fixtures/moved-commands/tree-def";
 
@@ -125,10 +127,7 @@ const ARGUMENT_SHAPES: readonly string[][] = [
 
 describe("every moved admin command fails at once, without a request", () => {
   for (const row of MOVED_COMMANDS) {
-    const expected = movedCommandMessage(
-      `nemar admin ${row.oldPath}`,
-      `nemar admin ${row.newPath}`,
-    );
+    const expected = stubMessage(row, "nemar admin");
 
     test.each(ARGUMENT_SHAPES.map((shape) => [shape.join(" ") || "(no arguments)", shape]))(
       `admin ${row.oldPath} %s`,
@@ -149,23 +148,30 @@ describe("every moved admin command fails at once, without a request", () => {
       expect(requests).toEqual([]);
     });
 
-    test(`the pointer for admin ${row.oldPath} names a live command`, async () => {
-      const result = await run(CLI_ENTRY, ["admin", ...row.newPath.split(" "), "--help"]);
-      expect(result.exitCode).toBe(0);
-      expect(requests).toEqual([]);
-    });
+    if ("newPath" in row) {
+      test(`the pointer for admin ${row.oldPath} names a live command`, async () => {
+        const result = await run(CLI_ENTRY, ["admin", ...row.newPath.split(" "), "--help"]);
+        expect(result.exitCode).toBe(0);
+        expect(requests).toEqual([]);
+      });
+    }
   }
 
-  test("the existing ADR 0125 stubs keep their wording", () => {
-    expect(
-      MOVED_COMMANDS.map((r) =>
-        movedCommandMessage(`nemar admin ${r.oldPath}`, `nemar admin ${r.newPath}`),
-      ),
-    ).toEqual([
-      "'nemar admin publish' moved to 'nemar admin repo publish'. Nothing was run.",
-      "'nemar admin withdraw' moved to 'nemar admin repo withdraw'. Nothing was run.",
-      "'nemar admin restore' moved to 'nemar admin repo restore'. Nothing was run.",
+  test("the ADR 0125 stubs keep their wording and point at the dataset group", () => {
+    expect(MOVED_COMMANDS.slice(0, 3).map((r) => stubMessage(r, "nemar admin"))).toEqual([
+      "'nemar admin publish' moved to 'nemar admin dataset publish'. Nothing was run.",
+      "'nemar admin withdraw' moved to 'nemar admin dataset withdraw'. Nothing was run.",
+      "'nemar admin restore' moved to 'nemar admin dataset restore'. Nothing was run.",
     ]);
+  });
+
+  test("a retired command's line says why it is gone", () => {
+    expect(
+      stubMessage({ oldPath: "regenerate-iam", retired: "Nothing replaces it." }, "nemar admin"),
+    ).toBe(retiredCommandMessage("nemar admin regenerate-iam", "Nothing replaces it."));
+    expect(retiredCommandMessage("nemar admin x", "Gone.")).toBe(
+      "'nemar admin x' was retired: Gone. Nothing was run.",
+    );
   });
 
   test("no stub is listed in admin --help", async () => {
@@ -185,6 +191,10 @@ describe("stubs under a live group and under a gone group", () => {
     [["s3", "credential-check"], "s3", "dataset s3"],
     [["fleet", "help", "annex-policy"], "fleet annex-policy", "rework annex policy"],
   ];
+  const retiredCases: string[][] = [
+    ["s3", "regenerate-iam"],
+    ["s3", "regenerate-iam", "bob", "--yes"],
+  ];
   const rootOptions: string[][] = [[], ["--version", "2.0.0"], ["-v"], ["--debug"]];
 
   test.each(
@@ -201,6 +211,19 @@ describe("stubs under a live group and under a gone group", () => {
     expect(result.exitCode).toBe(1);
     expect(stderrLines(result.stderr)).toEqual([
       movedCommandMessage(`nemar admin ${oldPath}`, `nemar admin ${newPath}`),
+    ]);
+    expect(result.stdout).toBe("");
+  });
+
+  test.each(
+    retiredCases.flatMap((args) =>
+      rootOptions.map((extra) => [[...args, ...extra].join(" "), [...args, ...extra]]),
+    ),
+  )("admin %s says the command was retired", async (_label, args) => {
+    const result = await run(TREE_FIXTURE, ["admin", ...(args as string[])]);
+    expect(result.exitCode).toBe(1);
+    expect(stderrLines(result.stderr)).toEqual([
+      retiredCommandMessage("nemar admin s3 regenerate-iam", "Nothing replaces it."),
     ]);
     expect(result.stdout).toBe("");
   });
@@ -296,6 +319,12 @@ describe("registerMovedCommands refuses a table that cannot be right", () => {
     expect(() =>
       registerMovedCommands(tree(), [{ oldPath: "s3 lock", newPath: "repo publish" }]),
     ).toThrow("add a row for 's3'");
+  });
+
+  test.each(["", "no period"])("a retired row whose reason is %p", (reason) => {
+    expect(() => registerMovedCommands(tree(), [{ oldPath: "gone", retired: reason }])).toThrow(
+      "needs a retirement reason ending in a period",
+    );
   });
 });
 

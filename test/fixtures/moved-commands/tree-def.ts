@@ -12,6 +12,7 @@ export const FIXTURE_ROWS: readonly MovedCommand[] = [
   { oldPath: "fleet annex-policy", newPath: "rework annex policy" },
   { oldPath: "s3", newPath: "dataset s3" },
   { oldPath: "s3 lock", newPath: "dataset s3 lock" },
+  { oldPath: "s3 regenerate-iam", retired: "Nothing replaces it." },
 ];
 
 /** The paths below `admin` that registration turns into stubs (one per first missing word). */

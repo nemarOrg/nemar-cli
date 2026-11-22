@@ -3,8 +3,10 @@
  *
  * A command that moves keeps its old path registered as a hidden stub that
  * accepts any arguments, runs nothing, makes no request, prints one line naming
- * the new path to stderr and exits 1. There is no forwarding: an unattended
- * workflow that still calls the old path has to fail where someone reads it.
+ * the new path to stderr and exits 1. A command retired with nothing to
+ * replace it gets the same stub; its line says why the command is gone.
+ * There is no forwarding: an unattended workflow that still calls the old path
+ * has to fail where someone reads it.
  *
  * Every stub is a row of {@link MOVED_COMMANDS}; a phase that moves a command
  * appends a row and nothing else here. Paths are written relative to the
@@ -16,12 +18,22 @@ import chalk from "chalk";
 import type { Command } from "commander";
 import { markReportedExit } from "./debug-log.js";
 
-export interface MovedCommand {
-  /** The path that no longer runs, below `nemar admin` (e.g. `publish`, `fleet annex-policy`). */
-  readonly oldPath: string;
-  /** Where the command lives now, below `nemar admin` (e.g. `dataset publish`). */
-  readonly newPath: string;
-}
+/**
+ * One row: an old path and either where the command lives now (`newPath`) or, for a command
+ * retired with nothing to replace it, the reason it is gone (`retired`).
+ */
+export type MovedCommand =
+  | {
+      /** The path that no longer runs, below `nemar admin` (e.g. `publish`, `fleet annex-policy`). */
+      readonly oldPath: string;
+      /** Where the command lives now, below `nemar admin` (e.g. `dataset publish`). */
+      readonly newPath: string;
+    }
+  | {
+      readonly oldPath: string;
+      /** Why the command is gone, one sentence ending in a period. */
+      readonly retired: string;
+    };
 
 /**
  * The one table of moved admin commands.
@@ -108,6 +120,18 @@ export function movedCommandMessage(oldFullPath: string, newFullPath: string): s
   return `'${oldFullPath}' moved to '${newFullPath}'. Nothing was run.`;
 }
 
+/** The one stderr line the stub of a retired command prints. */
+export function retiredCommandMessage(oldFullPath: string, reason: string): string {
+  return `'${oldFullPath}' was retired: ${reason} Nothing was run.`;
+}
+
+/** The line a row's stub prints, with `prefix` (`nemar admin`) before each path. */
+export function stubMessage(row: MovedCommand, prefix: string): string {
+  const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
+  if ("retired" in row) return retiredCommandMessage(oldFull, row.retired);
+  return movedCommandMessage(oldFull, `${prefix} ${words(row.newPath).join(" ")}`);
+}
+
 function words(path: string): string[] {
   const parts = path.trim().split(/\s+/);
   if (parts.length === 0 || parts[0] === "") throw new Error("moved-commands: empty path");
@@ -146,7 +170,13 @@ export function registerMovedCommands(
   const byOldPath = new Map<string, MovedCommand>();
   for (const row of rows) {
     const key = words(row.oldPath).join(" ");
-    words(row.newPath);
+    if ("retired" in row) {
+      if (!/\S.*\.$/.test(row.retired)) {
+        throw new Error(`moved-commands: '${key}' needs a retirement reason ending in a period`);
+      }
+    } else {
+      words(row.newPath);
+    }
     if (byOldPath.has(key)) throw new Error(`moved-commands: duplicate old path '${key}'`);
     byOldPath.set(key, row);
   }
@@ -183,10 +213,7 @@ export function registerMovedCommands(
         const candidate = byOldPath.get([...stubWords, ...args.slice(0, n)].join(" "));
         if (candidate) row = candidate;
       }
-      const prefix = fullName(root);
-      const oldFull = `${prefix} ${words(row.oldPath).join(" ")}`;
-      const newFull = `${prefix} ${words(row.newPath).join(" ")}`;
-      console.error(chalk.red(movedCommandMessage(oldFull, newFull)));
+      console.error(chalk.red(stubMessage(row, fullName(root))));
       markReportedExit();
       process.exit(1);
     };
