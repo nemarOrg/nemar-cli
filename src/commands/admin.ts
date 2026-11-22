@@ -340,7 +340,9 @@ function requireAuth(): boolean {
 
 const adminUsersCommand = adminCommand
   .command("users")
-  .description("List and search NEMAR users; 'show' and 'edit' work on one account")
+  .description(
+    "List and search NEMAR users; the subcommands work on accounts (approve, revoke, role, keys, ...)",
+  )
   // A stray word (`nemar admin users ada`) would otherwise be ignored and the
   // command would list EVERY account, which is the wrong answer to someone
   // looking for one person. Commander 12 allows excess arguments by default.
