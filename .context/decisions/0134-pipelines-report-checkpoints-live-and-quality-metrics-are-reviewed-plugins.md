@@ -33,14 +33,18 @@ Live progress (decision 3) is a view for operators, not a record: when a job com
 A checkpoint is a coarse stage an admin recognizes, not every step: `import`, `preprocess`, `ica`, `iclabel`, `quality` and `figures`, followed by `stored`, which the backend sets when the derivatives are copied (ADR 0123).
 A recipe maps each of its steps to one checkpoint in code beside its step order, and `nemar-recipe version` prints the map, so the backend's registry entry for a recipe version names the same checkpoints the image runs.
 For `nemar-floor`, `load` and `signal_channels` are `import`; flat line, drift, the line-noise steps, bad channels and bad windows are `preprocess`; `qc` is `quality`.
-For `nemar-ica`, the floor's steps it re-runs (its own `qc` included, which gates its input) and `asr` and `reref` are `preprocess`, then `ica` and `iclabel`, so `quality` always comes after the decomposition.
-A checkpoint is per recording: a recording passes it, fails it or is skipped, and a dataset's cell is the count of recordings that passed, failed, were skipped and remain.
+For `nemar-ica`, the floor steps it re-runs as preparation for the decomposition map as they do in the floor, except that its re-run `qc` is `preprocess`; `asr` and `reref` are `preprocess`; then `ica` and `iclabel`; so `import` is filled for both recipes and `quality` always comes after the decomposition.
+A checkpoint is per recording: a recording passes it, fails it or is skipped.
+A recording that failed or was skipped at an earlier checkpoint counts as skipped at every later one, keeping its first code, so each column sums to the same total.
+A dataset's cell is `passed/total`, where the total is the number of recordings the run discovered, beside the counts that failed, were skipped and remain.
 
 **3. Progress is reported live, through the paths each executor already has.**
 A runner's heartbeat gains an optional, closed `progress` object; a Tapis job posts the same object to a route authenticated by its job token (`X-Compute-Job-Token`).
 The object names the current checkpoint and, per checkpoint, the counts of recordings passed, failed, skipped and total, plus the most recent failures (relative path, failure code, step), capped in number;
 it carries no samples, no free text and no personal data.
-The launcher reads the counts from the recipe's own output (the recordings table it already flushes row by row), so a recipe adds no network code and the recipe's no-network fence is unchanged.
+The recordings table alone cannot supply this, because a recording gets its row only when it ends.
+So the shared recipe layer also writes a small local progress file: the recordings it discovered (which fixes the total) when discovery ends, and each running recording's current step as it starts it.
+The launcher reads that file and the recordings table and sends the object; the recipe opens no network connection, so its no-network fence is unchanged, and the change lives once in the shared layer, not in each recipe.
 Reports come at most once a minute.
 The object is a transport message, not metadata: it is declared in `shared/contract/` and pinned by nemar-process the way the launch specification is, and its counts reuse the shape of neuroschema's checkpoint counts, so live and final differ only in transport.
 
@@ -58,21 +62,21 @@ Both are admin-only.
 The people who build metrics are given admin roles, so they read the dashboard and the gated design page directly.
 
 **6. Quality metrics and figures are plugins, and NEMAR reviews every plugin its pipeline runs.**
-A plugin is a Python module with a manifest: its name, version, checkpoint, what it reads (the floor's or the decomposition's outputs, or the dataset itself), its parameters and the schema of what it writes.
+A plugin is a Python module with a manifest, a JavaScript Object Notation (JSON) document: its name, version, checkpoint, what it reads (the floor's or the decomposition's outputs, or the dataset itself), its parameters and the schema of what it writes.
 That output schema is the plugin's real contract, because signalJourney leaves a metric's value unshaped: each metric a plugin declares uses neuroschema's `dataQuality` metric definition (value, unit, description, optional bounds, and the plugin's name and version).
 A plugin adds a step to the signalJourney record with its metrics as `qualityMetrics`, headline numbers as `summaryMetrics`, and each figure as an `outputTargets` entry.
-Figures come from a fixed list of formats (Portable Network Graphics, Scalable Vector Graphics, WebP) under a size cap.
-A figure that draws a time series (a raw segment, component activations) is raster only, PNG or WebP, because a vector trace stores the samples as coordinates; vector graphics are for maps, histograms and charts of computed values.
+Figures come from a fixed list of formats (Portable Network Graphics (PNG), Scalable Vector Graphics (SVG), WebP) under a size cap.
+A figure that draws a time series (a data segment, component activations) is raster only, PNG or WebP, because a vector trace stores the samples as coordinates; vector graphics are for maps, histograms and charts of computed values.
 A plugin never writes samples, as no recipe does.
 A plugin reports a value the floor already measures from the floor's output rather than computing it again.
 The interface is general and public: NEMAR's team writes the first plugins, and anyone may write one against the same manifest and run it on their own machine or as their own compute job through the gateway.
 What runs in NEMAR's pipeline, and so what NEMAR shows for a dataset, is the set of plugins merged into nemar-process through reviewed pull requests, each pinned by version in the image; NEMAR never runs an unreviewed plugin under its own identity.
 A plugin in NEMAR's pipeline follows the recipe rule for numerics: every signal-processing call is an eegprep function, and a missing one goes into eegprep upstream.
-nemar-process's two guards change by exactly this much: the product-tree test accepts the declared figure formats under the plugins' output directory, and the upstream-first scan allows the image's plotting library inside plugin figure code only.
+nemar-process's guards change by exactly this much: the product-tree assertions (`tests/recipes/test_cli.py`, `tests/recipes/test_floor_input_zarr.py`) accept the declared figure formats under the plugins' output directory, and the upstream-first scan (`tests/recipes/test_upstream_first.py`) extends to the plugins directory and gains a ban on plotting libraries everywhere except plugin figure code.
 
 **7. The first plugins port the legacy set, then extend it.**
 From `eeg_nemar_dataqual.m`: the share of data kept, the share of channels kept and the line-noise magnitude (reported from the floor's values), and, new to this pipeline, the share of components ICLabel calls brain and the mutual information reduction (MIR) of the decomposition.
-From `nemar_plugins/`: the power spectrum with scalp maps at fixed frequencies, ICLabel component maps, the ICLabel class histogram, component activations, and a raw segment from the middle of the recording.
+From `nemar_plugins/`: the power spectrum with scalp maps at fixed frequencies, ICLabel component maps, the ICLabel class histogram, component activations, and a segment of cleaned data from the middle of the recording.
 The dataset summary adds the legacy per-dataset bounds (lowest and highest good channels, good data and brain components), which today's QC summary does not hold.
 Signal-to-noise measures and further scalp maps come next, each as its own plugin and version.
 
@@ -88,7 +92,7 @@ Nothing here enters neuroschema's core; it uses extension namespaces, which neur
 
 | Artifact | Home |
 |---|---|
-| Quality results per recording (typed metrics, figures with location, format, size, SHA-256 and caption) | neuroschema `dataQuality`, record level (replaces the placeholder fields) |
+| Quality results per recording (typed metrics, figures with location, format, size, Secure Hash Algorithm 256 (SHA-256) digest and caption) | neuroschema `dataQuality`, record level (replaces the placeholder fields) |
 | Dataset QC summary (counts, distributions, bounds, not-processed list, record digest) | neuroschema `dataQuality`, dataset level (needs a dataset key beside the record key) |
 | Checkpoint outcomes (per record and recipe: recipe version, each checkpoint's status, failure code and step; per dataset: the declared checkpoints and reconciled counts) | a new neuroschema namespace, `processing` |
 | Link to the signalJourney records (per recipe: location, SHA-256, signalJourney version; `processing_status` `in_progress` while reports arrive, then `completed` or `failed`) | neuroschema `signalJourney` |
@@ -97,7 +101,7 @@ Nothing here enters neuroschema's core; it uses extension namespaces, which neur
 | Step-to-checkpoint map | recipe code in nemar-process, printed by `nemar-recipe version`, held in nemar-cli's registry |
 | NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` extension namespace |
 
-nemar-cli already vendors neuroschema as one bundle in `shared/contract/neuroschema/`, and nemar-process validates against that bundle through its existing nemar-cli pin, so no third pin is added.
+nemar-cli already vendors neuroschema as one bundle in `shared/contract/neuroschema/`, rooted at the dataset document; the vendor script gains a record root (or validates extension objects by their `$id`), and nemar-process will validate against that bundle through its existing nemar-cli pin, so no third pin is added.
 neuroschema's extension-manager table is corrected so the NEMAR backend is the writer of `dataQuality`, `processing` and `signalJourney`.
 Proposed upstream to signalJourney, in order: checksum and size on output targets (signalJourney#7), the `nemar` namespace (signalJourney#8), a typed metric entry, and optionally a step `stage` label; none of these blocks the work here.
 
@@ -107,7 +111,7 @@ Proposed upstream to signalJourney, in order: checksum and size on output target
 - The progress object is a new contract between nemar-cli and nemar-process: a change to it needs a pin bump on both sides, and the heartbeat schema stops being phase-only.
 - The Tapis route is a new job-token surface; it accepts only the closed object and only for a job that is running, and it is revoked with the job token.
 - One more table, reconciled at completion, and one more admin page and card in the website.
-- Recipes gain a step-to-checkpoint map; a recipe version that changes it changes its registry entry.
+- Recipes gain a step-to-checkpoint map and the shared recipe layer a local progress file; a recipe version that changes the map changes its registry entry.
 - neuroschema gains a namespace (a minor version) and fills two placeholders (patch versions); `qc-summary.v1` is retired in favor of the `dataQuality` dataset document.
 - Adding a metric is writing a plugin against one manifest, for NEMAR's team and for outside experts alike.
 - A plugin reaches NEMAR's pages only through review and the upstream-first rule, which is slower than dropping in a script, and deliberately so: the numbers NEMAR shows for a dataset are NEMAR's claim.
@@ -117,7 +121,7 @@ Proposed upstream to signalJourney, in order: checksum and size on output target
 
 - **Report only at job end:** simplest, but a long job reads as "running" until it ends and a hung one is invisible; the Zarr experience and the legacy status file both showed admins need the in-between.
 - **Report every step instead of checkpoints:** exact but noisy, and it ties the dashboard's columns to each recipe's internal steps, which change with every recipe version; checkpoints stay stable across versions.
-- **Let the recipe post progress itself:** it would put network code inside the recipe and break its no-network fence; the launcher already reads the recipe's outputs.
+- **Let the recipe post progress itself:** it would put network code inside the recipe and break its no-network fence; writing a local file the launcher reads keeps the fence.
 - **A separate progress or results format beside signalJourney:** two records of the same run drift, and the process already writes signalJourney.
 - **Put the schemas in signalJourney:** signalJourney records what was done after the fact and changes rarely; a manifest, a checkpoint vocabulary and a transport message are NEMAR's runtime concerns, so only generic pieces go upstream.
 - **A core NEMAR schema, or neuroschema core:** core is frozen and shared across registries; extensions keep NEMAR's processing metadata out of it.
