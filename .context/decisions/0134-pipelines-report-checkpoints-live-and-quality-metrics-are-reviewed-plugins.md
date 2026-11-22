@@ -1,4 +1,4 @@
-# ADR 0134: Pipelines report checkpoints live, and quality metrics are plugins NEMAR reviews
+# ADR 0134: Pipelines report checkpoints live, quality metrics are plugins NEMAR reviews, and the same contract serves every compute job
 
 **Status:** proposed
 **Date:** 2026-11-21
@@ -67,6 +67,13 @@ Ported from `nemar_plugins/`: the power spectrum with scalp maps at fixed freque
 The dataset summary keeps the legacy bounds and distributions (the QC document's `distributions` already holds them).
 Signal-to-noise measures and further scalp maps come next, each as its own plugin and version.
 
+**8. The same contract is the platform for every compute job, not only NEMAR's pipeline.**
+A job that follows it (it runs in a nemar-process image or one built from it, under the launcher, declares its checkpoints, and writes signalJourney records and a recordings table) gets the same submission and the same reports wherever it runs.
+On a person's own machine, the launcher writes the progress and results reports locally from the same files, with no NEMAR service involved.
+On NEMAR's workstation runners and through Tapis on the supercomputer, the backend receives the same `progress` object and reconciles the same results, so the job's owner sees progress and a results report in their own job view, and admins see it in the dashboard.
+Third parties, whether researchers submitting their own jobs or partner sites, adopt the platform by following the contract: the launch specification, the plugin manifest and the progress object are public and versioned.
+A job that does not follow it still runs as it does today, with the job-level states only.
+
 ## Consequences
 
 - Admins can tell where a dataset stopped and which files broke without opening a job's outputs, and a silent job is flagged as stalled instead of looking busy.
@@ -76,6 +83,7 @@ Signal-to-noise measures and further scalp maps come next, each as its own plugi
 - Recipes gain a step-to-checkpoint map; a recipe version that changes it changes its registry entry.
 - Adding a metric is writing a plugin against one manifest, for NEMAR's team and for outside experts alike.
 - A plugin reaches NEMAR's pages only through review and the upstream-first rule, which is slower than dropping in a script, and deliberately so: the numbers NEMAR shows for a dataset are NEMAR's claim.
+- Job submission and reporting become one path across a person's machine, NEMAR's runners and the supercomputer, for NEMAR and for third parties; the cost is that the launch specification, the manifest and the progress object are public interfaces that must stay versioned and backward compatible.
 - The manifest is a public interface: changing it needs a version, and plugins written against the old one must keep working or be refused by name.
 
 ## Alternatives considered
