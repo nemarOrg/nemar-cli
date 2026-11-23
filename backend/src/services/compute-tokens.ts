@@ -12,7 +12,7 @@
  *                      A token in a URL reaches Worker logs, so it is bound to the nonce and expires
  *                      with it (the sweep clears the nonce one day after the job is terminal).
  *   `compute-job`      the launcher's `job_token`, sent in the `X-Compute-Job-Token` header (never a
- *                      URL) to the bundle, outputs and complete routes. It stops working the moment the
+ *                      URL) to the bundle, outputs, complete and progress routes. It stops working the moment the
  *                      job is terminal, whatever the nonce says (the routes read the state).
  *   `compute-observer` (phase A7) the observer's token for ONE run, in the header
  *                      `Authorization: Bearer <run id>.<digest>`. Here the "job id" field of the

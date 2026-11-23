@@ -4,6 +4,8 @@
  *   POST /compute/jobs/:id/bundle             the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs            the launcher, with its job token (no session)
  *   POST /compute/jobs/:id/outputs/complete   the launcher, with its job token (no session)
+ *   POST /compute/jobs/:id/progress           a NEMAR pipeline job on Tapis, with its job token: live
+ *                                             progress (ADR 0134, epic #2324 phase 2)
  *   POST /compute/jobs/:id/cancel             the job's owner, signed in: cancel it (a job that had already
  *                                             ended answers 200 with its state and `cancelled: false`)
  *   POST /compute/jobs/:id/links              the job's owner, signed in: 7-day links to the results,
