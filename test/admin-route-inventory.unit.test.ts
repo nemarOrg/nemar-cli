@@ -89,6 +89,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /compute/observer-runs": 1,
   "POST /compute/pipeline/run": 1,
   "GET /compute/pipeline/status": 1,
+  // Epic #2324 phase 4a (ADR 0134 decision 5): the grid, the coverage card and a run's drill-down; read only.
+  "GET /compute/pipeline/grid": 1,
+  "GET /compute/pipeline/coverage": 1,
+  "GET /compute/pipeline/runs/:stamp": 1,
   // Portable compute, card DM-05: the owner's runner registry. `requireOwner` then the handler, each.
   "POST /compute/runners": 2,
   "GET /compute/runners": 2,
@@ -401,7 +405,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(270);
+    expect(adminRoutes.routes.length).toBe(273);
   });
 
   // The count pin above can't see a SWAP of the router-level middleware

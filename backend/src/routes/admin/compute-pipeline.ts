@@ -4,6 +4,14 @@
  *   POST /admin/compute/pipeline/run      run a recipe over one dataset version, or over the next datasets
  *                                         it has not been run over; `dry_run` says what it would do
  *   GET  /admin/compute/pipeline/status   the stamps, filtered, newest first, after they were synced
+ *   GET  /admin/compute/pipeline/grid     datasets by checkpoints for one recipe (ADR 0134 decision 5)
+ *   GET  /admin/compute/pipeline/coverage each recipe's coverage and its daily failure trend
+ *   GET  /admin/compute/pipeline/runs/:stamp  one run's checkpoints and the failures each lists
+ *
+ * The grid, coverage and run routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
+ * never write, so a page the website renders costs a few statements. `grid?sync=1` brings the open stamps
+ * up to date first, as the status route always does; the CLI asks for it, the website never does. A run's
+ * status is still right without a sync (it reads the job's own end); only its reconciled counts wait.
  *
  * A run over the eligible datasets is bounded, for every actor, by its `limit`, the per-invocation bound
  * (`COMPUTE_PIPELINE_RUN_PER_INVOCATION`), what is left of `pipelines.dailyJobCap` and what is left of the
@@ -42,24 +50,36 @@ import {
   recipeRunsInput,
   recipeRunsOn,
 } from "../../../../shared/compute-recipes.js";
-import { COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
+import { COMPUTE_EXECUTORS, COMPUTE_ROUTE_SENTENCES } from "../../../../shared/compute-state.js";
 import {
   COMPUTE_ADMIN_ERROR_STATUS,
+  COMPUTE_PIPELINE_GRID_PAGE_DEFAULT,
+  COMPUTE_PIPELINE_GRID_PAGE_MAX,
+  COMPUTE_PIPELINE_GRID_STATUSES,
+  COMPUTE_PIPELINE_RECIPE_VERSION_RE,
   COMPUTE_PIPELINE_REFUSAL_STATUS,
   COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
+  COMPUTE_PIPELINE_TREND_DAYS_DEFAULT,
+  COMPUTE_PIPELINE_TREND_DAYS_MAX,
   type ComputePipelineRefusal,
   type ComputePipelineResult,
   type ComputePipelineStampView,
 } from "../../../../shared/contract/compute-admin.js";
+import { RUNNER_ID_RE } from "../../../../shared/contract/compute-runner.js";
 import {
   COMPUTE_DATASET_ID_RE,
   COMPUTE_DATASET_VERSION_RE,
 } from "../../../../shared/contract/compute.js";
 import { AUDIT_LOG_INSERT_SQL } from "../../db/audit-log.js";
 import { tapisSubmitConfigured } from "../../services/compute-lifecycle.js";
+import {
+  pipelineCoverage,
+  pipelineGrid,
+  pipelineRunDetail,
+} from "../../services/compute-pipeline-grid.js";
 import {
   type DispatchResult,
   type PipelineRefusal,
@@ -73,6 +93,7 @@ import {
 import { fieldPath } from "../../services/compute-policy.js";
 import { computeEnabled } from "../../services/compute-switches.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
+import { SENTENCES as ADMIN_SENTENCES } from "./compute.js";
 import type { AdminRouter } from "./shared.js";
 
 type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -220,6 +241,44 @@ const statusQuery = z.object({
   before: z.coerce.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   limit: z.coerce.number().int().min(1).max(COMPUTE_PIPELINE_STATUS_PAGE_MAX).default(50),
 });
+
+const gridQuery = z
+  .object({
+    recipe: RECIPE_NAME,
+    recipe_version: z.string().regex(COMPUTE_PIPELINE_RECIPE_VERSION_RE).optional(),
+    executor: z.enum(COMPUTE_EXECUTORS).optional(),
+    runner: z.string().regex(RUNNER_ID_RE).optional(),
+    status: z.enum(COMPUTE_PIPELINE_GRID_STATUSES).optional(),
+    dataset: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
+    after: z.string().regex(COMPUTE_DATASET_ID_RE).optional(),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(COMPUTE_PIPELINE_GRID_PAGE_MAX)
+      .default(COMPUTE_PIPELINE_GRID_PAGE_DEFAULT),
+    sync: z.enum(["0", "1"]).optional(),
+  })
+  .superRefine((q, ctx) => {
+    if (q.runner !== undefined && q.executor === "tapis") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["runner"],
+        message: "a runner's jobs are not Tapis jobs",
+      });
+    }
+  });
+
+const coverageQuery = z.object({
+  days: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(COMPUTE_PIPELINE_TREND_DAYS_MAX)
+    .default(COMPUTE_PIPELINE_TREND_DAYS_DEFAULT),
+});
+
+const STAMP_ID_RE = /^[1-9][0-9]{0,15}$/;
 
 async function readJson(c: Ctx): Promise<unknown | null> {
   try {
@@ -438,6 +497,76 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
         },
         run.dispatched > 0 ? 201 : 200,
       );
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/grid", async (c) => {
+    const query = gridQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    const q = query.data;
+    const recipe = findRecipe(q.recipe);
+    if (recipe === null) return refuse(c, "recipe_unknown");
+    try {
+      if (q.sync === "1") await syncPipelineStamps(c.env);
+      return c.json(
+        await pipelineGrid(c.env, {
+          recipe,
+          recipeVersion: q.recipe_version,
+          executor: q.executor,
+          runner: q.runner,
+          status: q.status,
+          dataset: q.dataset,
+          after: q.after,
+          limit: q.limit,
+        }),
+      );
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/coverage", async (c) => {
+    const query = coverageQuery.safeParse(c.req.query());
+    if (!query.success) return invalid(c, "invalid_query", query.error);
+    try {
+      return c.json(await pipelineCoverage(c.env, query.data.days));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  admin.get("/compute/pipeline/runs/:stamp", async (c) => {
+    const raw = c.req.param("stamp");
+    if (!STAMP_ID_RE.test(raw)) {
+      return invalid(
+        c,
+        "invalid_query",
+        new z.ZodError([
+          { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
+        ]),
+      );
+    }
+    const stampId = Number(raw);
+    if (!Number.isSafeInteger(stampId)) {
+      return invalid(
+        c,
+        "invalid_query",
+        new z.ZodError([
+          { code: z.ZodIssueCode.custom, path: ["stamp"], message: "a stamp id is a whole number" },
+        ]),
+      );
+    }
+    try {
+      const detail = await pipelineRunDetail(c.env.DB, stampId);
+      if (detail === null) {
+        return c.json(
+          { error: ADMIN_SENTENCES.stamp_not_found, code: "stamp_not_found" },
+          COMPUTE_ADMIN_ERROR_STATUS.stamp_not_found,
+        );
+      }
+      return c.json(detail);
     } catch (err) {
       return fail(c, err);
     }
