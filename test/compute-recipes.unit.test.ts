@@ -25,10 +25,15 @@ import {
   type RecipeInput,
   STAMP_INPUT_FIELDS,
   STAMP_REFUSAL_REASONS,
+  STANDARD_CHECKPOINTS,
+  STORED_CHECKPOINT,
+  checkpointOfStep,
+  declaredCheckpoints,
   defaultInput,
   findRecipe,
   readRecipeRecord,
   recipeArguments,
+  recipeCheckpointMap,
   recipeCommand,
   recipeImageDigestArg,
   recipeLabel,
@@ -643,5 +648,113 @@ describe("the module", () => {
       .replace(/\/\/.*$/gm, "");
     expect(src).not.toMatch(/^\s*import\b/m);
     expect(src).not.toMatch(/\bfetch\s*\(|Date\.now|Math\.random|process\./);
+  });
+});
+
+// ADR 0134 decision 2 (epic #2324 phase 2): each recipe version declares its checkpoints and the steps
+// that map to each. The step orders below are nemar-process's `STEP_ORDER` (nemar_floor/steps.py and,
+// for nemar-ica, the floor's steps it re-runs then nemar_ica/steps.py), written out a second time so a
+// change on either side is a change here.
+describe("checkpoint maps (ADR 0134)", () => {
+  const FLOOR_STEP_ORDER = [
+    "load",
+    "signal_channels",
+    "flatline",
+    "drift",
+    "line_noise_measure",
+    "line_noise_50",
+    "line_noise_60",
+    "bad_channels",
+    "bad_windows",
+    "qc",
+  ];
+  const ICA_STEP_ORDER = [...FLOOR_STEP_ORDER, "asr", "reref", "ica", "iclabel"];
+
+  test("the standard checkpoints and stored are the ADR's, in order", () => {
+    expect([...STANDARD_CHECKPOINTS]).toEqual([
+      "import",
+      "preprocess",
+      "ica",
+      "iclabel",
+      "quality",
+      "figures",
+      "stored",
+    ]);
+    expect(STORED_CHECKPOINT).toBe("stored");
+  });
+
+  test("nemar-floor maps exactly as the ADR says", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(floor?.checkpoints.map((c) => [c.checkpoint, [...c.steps]])).toEqual([
+      ["import", ["load", "signal_channels"]],
+      [
+        "preprocess",
+        [
+          "flatline",
+          "drift",
+          "line_noise_measure",
+          "line_noise_50",
+          "line_noise_60",
+          "bad_channels",
+          "bad_windows",
+        ],
+      ],
+      ["quality", ["qc"]],
+    ]);
+  });
+
+  test("nemar-ica maps its re-run qc to preprocess, then ica and iclabel", () => {
+    const ica = findRecipe("nemar-ica");
+    expect(ica?.checkpoints.map((c) => c.checkpoint)).toEqual([
+      "import",
+      "preprocess",
+      "ica",
+      "iclabel",
+    ]);
+    expect(ica && checkpointOfStep(ica, "qc")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "asr")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "iclabel")).toBe("iclabel");
+  });
+
+  test.each([
+    ["nemar-floor", FLOOR_STEP_ORDER],
+    ["nemar-ica", ICA_STEP_ORDER],
+  ])("every step of %s maps to exactly one checkpoint, in step order", (name, order) => {
+    const recipe = findRecipe(name);
+    if (!recipe) throw new Error(name);
+    const mapped = recipe.checkpoints.flatMap((c) => c.steps);
+    expect(mapped).toEqual(order);
+    expect(new Set(mapped).size).toBe(mapped.length);
+    for (const step of order) expect(checkpointOfStep(recipe, step)).not.toBeNull();
+    expect(checkpointOfStep(recipe, "no_such_step")).toBeNull();
+  });
+
+  test("checkpoints follow the standard order, never name stored, and each has a step", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      const names = recipe.checkpoints.map((c) => c.checkpoint);
+      expect(names).not.toContain(STORED_CHECKPOINT);
+      const positions = names.map((n) => (STANDARD_CHECKPOINTS as readonly string[]).indexOf(n));
+      expect(positions.every((p) => p >= 0)).toBe(true);
+      expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+      for (const c of recipe.checkpoints) expect(c.steps.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("declaredCheckpoints ends with stored", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(floor && declaredCheckpoints(floor)).toEqual([
+      "import",
+      "preprocess",
+      "quality",
+      "stored",
+    ]);
+  });
+
+  test("the map belongs to the registry's version only", () => {
+    const floor = findRecipe("nemar-floor");
+    expect(recipeCheckpointMap("nemar-floor", floor?.version)).toBe(floor?.checkpoints ?? null);
+    expect(recipeCheckpointMap("nemar-floor", "1.0.0-b1")).toBeNull();
+    expect(recipeCheckpointMap("no-such-recipe", "1.0.0")).toBeNull();
+    expect(recipeCheckpointMap(undefined, undefined)).toBeNull();
   });
 });
