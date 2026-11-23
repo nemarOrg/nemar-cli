@@ -149,7 +149,7 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     if (!job) return refused(c);
     let cap: number;
     try {
-      cap = await outputsBodyCap(c.env);
+      cap = await outputsBodyCap(c.env, job);
     } catch {
       // The cap comes from the owner's policy, read from the database: a failure here is a transient fault
       // of the Worker's own, not the platform being off. 503 as before, with its own word, so the launcher

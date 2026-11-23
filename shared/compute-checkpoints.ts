@@ -15,6 +15,7 @@
 
 import {
   type PipelineStampState,
+  RECIPE_PLUGIN_STEPS,
   RECORD_STEP,
   type RecipeCheckpoint,
   STORED_CHECKPOINT,
@@ -42,6 +43,22 @@ export type RecordingStatus = (typeof RECORDING_STATUSES)[number];
 /** The columns the counting rules read; the table has more, which are ignored. */
 export const RECORDINGS_TABLE_COLUMNS = ["path", "status", "code", "step"] as const;
 
+/**
+ * The optional column that names the steps a succeeded recording skipped, and why: nemar-process already
+ * writes it (`docs/recipes.md`, the recordings table), `step:reason` pairs joined by commas, empty or `n/a`
+ * when none. A plugin that fails is absorbed and recorded there like any skipped step (owner decision of
+ * 2026-11-23), e.g. `bad_windows:too_short,nemar-quality:plugin_failed`. The counting rules read only the
+ * pairs whose step is one of `RECIPE_PLUGIN_STEPS`; a step a rule skipped by design is not a checkpoint
+ * outcome. A table that predates the column reads as if every cell were empty.
+ */
+export const SKIPPED_STEPS_COLUMN = "skipped_steps";
+
+/** A plugin a succeeded recording skipped, and why. */
+export interface SkippedStep {
+  step: string;
+  code: string;
+}
+
 /** The code of a recording a killed run discovered but never wrote a row for. */
 export const NOT_RUN_CODE = "not_run";
 
@@ -51,6 +68,8 @@ export interface RecordingRow {
   status: RecordingStatus;
   code: string | null;
   step: string | null;
+  /** The plugins a succeeded recording skipped; absent or empty when none (never on another status). */
+  skipped_steps?: SkippedStep[];
 }
 
 /** Why a recordings table cannot be read. */
@@ -60,6 +79,7 @@ export type TableReadProblem =
   | "row_width"
   | "bad_status"
   | "missing_code"
+  | "bad_skipped_steps"
   | "too_many_rows";
 
 export type TableRead =
@@ -70,9 +90,32 @@ const NA = "n/a";
 const naToNull = (v: string): string | null => (v === NA || v === "" ? null : v);
 
 /**
+ * The plugin pairs of a `skipped_steps` cell, or null when one is malformed: a pair whose step is one of
+ * `RECIPE_PLUGIN_STEPS` must carry a reason that fits the failure-code pattern, and no plugin is named twice.
+ * Pairs of other steps are left alone (their reasons are the recipe's own words); an empty or `n/a` cell is [].
+ * Each step and reason is read with surrounding spaces trimmed (`a:b, nemar-quality :plugin_failed`).
+ */
+export function parseSkippedSteps(cell: string): SkippedStep[] | null {
+  if (cell === "" || cell === NA) return [];
+  const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
+  const out: SkippedStep[] = [];
+  for (const item of cell.split(",")) {
+    const at = item.indexOf(":");
+    const step = (at < 0 ? item : item.slice(0, at)).trim();
+    if (!plugins.includes(step)) continue;
+    const code = at < 0 ? "" : item.slice(at + 1).trim();
+    if (!PROGRESS_FAILURE_CODE_RE.test(code)) return null;
+    if (out.some((s) => s.step === step)) return null;
+    out.push({ step, code });
+  }
+  return out;
+}
+
+/**
  * Read a recordings table (tab-separated, a header row, `n/a` for an empty cell; CRLF tolerated). A
  * missing column, a row of the wrong width, a status that is not one of the three, a failed or skipped
- * row with no code, or more rows than `PROGRESS_MAX_RECORDINGS` is refused with a fixed reason.
+ * row with no code, a malformed plugin pair in `skipped_steps`, or more rows than `PROGRESS_MAX_RECORDINGS`
+ * is refused with a fixed reason. `skipped_steps` is optional and read only on a succeeded row.
  */
 export function parseRecordingsTable(text: string): TableRead {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -85,6 +128,7 @@ export function parseRecordingsTable(text: string): TableRead {
     if (i < 0) return { ok: false, reason: "missing_column" };
     index[column] = i;
   }
+  const skippedAt = header.indexOf(SKIPPED_STEPS_COLUMN);
   if (lines.length - 1 > PROGRESS_MAX_RECORDINGS) return { ok: false, reason: "too_many_rows" };
   const rows: RecordingRow[] = [];
   for (const line of lines.slice(1)) {
@@ -96,11 +140,15 @@ export function parseRecordingsTable(text: string): TableRead {
     }
     const code = naToNull(cells[index.code]);
     if (status !== "succeeded" && code === null) return { ok: false, reason: "missing_code" };
+    const skipped =
+      skippedAt < 0 || status !== "succeeded" ? [] : parseSkippedSteps(cells[skippedAt]);
+    if (skipped === null) return { ok: false, reason: "bad_skipped_steps" };
     rows.push({
       path: cells[index.path],
       status: status as RecordingStatus,
       code: status === "succeeded" ? null : code,
       step: naToNull(cells[index.step]),
+      ...(skipped.length > 0 ? { skipped_steps: skipped } : {}),
     });
   }
   return { ok: true, rows };
@@ -124,7 +172,11 @@ const fit = (value: string | null, re: RegExp): string | null =>
 /**
  * A recording's outcome at each checkpoint the recipe declares (without `stored`), in order.
  *
- * - succeeded: passed everywhere.
+ * - succeeded: passed everywhere, except a checkpoint one of whose steps the row lists in `skipped_steps` (a
+ *   plugin that failed and was absorbed, owner decision of 2026-11-23): that checkpoint is skipped with the
+ *   first such step (in the checkpoint's step order) and its code. A skipped plugin never makes a later
+ *   checkpoint skipped, so a recording can be skipped at one checkpoint and passed at the next; every
+ *   column still sums to the total. A listed step the map does not hold is ignored.
  * - failed at a mapped step: passed before that step's checkpoint, failed at it, skipped after it with
  *   the same code and step.
  * - failed with no step, or a step the map does not know: failed at the first checkpoint (nothing is
@@ -140,7 +192,22 @@ export function recordingOutcomes(
   checkpoints: readonly RecipeCheckpoint[],
 ): CheckpointOutcome[] {
   const passed: CheckpointOutcome = { status: "passed", code: null, step: null };
-  if (row.status === "succeeded") return checkpoints.map(() => ({ ...passed }));
+  if (row.status === "succeeded") {
+    const skipped = row.skipped_steps ?? [];
+    return checkpoints.map((c) => {
+      for (const step of c.steps) {
+        const hit = skipped.find((s) => s.step === step);
+        if (hit) {
+          return {
+            status: "skipped",
+            code: fit(hit.code, PROGRESS_FAILURE_CODE_RE),
+            step: fit(hit.step, PROGRESS_STEP_RE),
+          };
+        }
+      }
+      return { ...passed };
+    });
+  }
   const at =
     row.step === null
       ? -1
@@ -199,8 +266,9 @@ export function countRecordings(
 
 /**
  * The first {@link PROGRESS_MAX_FAILURES} failed or skipped recordings of each checkpoint, in table
- * order, each counted against the checkpoint it first did not pass. A path the progress contract cannot
- * carry is left out.
+ * order, each counted against the checkpoint it first did not pass; a succeeded recording that skipped
+ * plugins is listed at each checkpoint it was skipped at, with that checkpoint's first skipped step and its
+ * code. A path the progress contract cannot carry is left out.
  */
 export function failuresByCheckpoint(
   rows: readonly RecordingRow[],
@@ -209,7 +277,16 @@ export function failuresByCheckpoint(
   const out: Record<string, ProgressFailure[]> = {};
   for (const c of checkpoints) out[c.checkpoint] = [];
   for (const row of rows) {
-    if (row.status === "succeeded" || !PROGRESS_PATH_RE.test(row.path)) continue;
+    if (!PROGRESS_PATH_RE.test(row.path)) continue;
+    if (row.status === "succeeded") {
+      recordingOutcomes(row, checkpoints).forEach((o, i) => {
+        const name = checkpoints[i].checkpoint;
+        if (o.status !== "skipped" || o.code === null) return;
+        if (out[name].length >= PROGRESS_MAX_FAILURES) return;
+        out[name].push({ path: row.path, code: o.code, step: o.step, checkpoint: name });
+      });
+      continue;
+    }
     const outcomes = recordingOutcomes(row, checkpoints);
     const i = outcomes.findIndex((o) => o.status !== "passed");
     if (i < 0) continue;

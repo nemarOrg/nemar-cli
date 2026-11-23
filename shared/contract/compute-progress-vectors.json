@@ -72,6 +72,12 @@
           "steps": [
             "iclabel"
           ]
+        },
+        {
+          "checkpoint": "quality",
+          "steps": [
+            "nemar-quality"
+          ]
         }
       ]
     }
@@ -429,7 +435,7 @@
     {
       "name": "ica_mixed",
       "recipe": "nemar-ica",
-      "total": 8,
+      "total": 9,
       "rows": [
         {
           "path": "a.set",
@@ -478,6 +484,18 @@
           "status": "failed",
           "code": "step_failed",
           "step": "iclabel_locations"
+        },
+        {
+          "path": "i.set",
+          "status": "succeeded",
+          "code": null,
+          "step": null,
+          "skipped_steps": [
+            {
+              "step": "nemar-quality",
+              "code": "plugin_failed"
+            }
+          ]
         }
       ],
       "outcomes": [
@@ -501,6 +519,11 @@
             "status": "passed",
             "code": null,
             "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
           }
         ],
         [
@@ -511,6 +534,11 @@
           },
           {
             "status": "failed",
+            "code": "step_failed",
+            "step": "qc"
+          },
+          {
+            "status": "skipped",
             "code": "step_failed",
             "step": "qc"
           },
@@ -545,6 +573,11 @@
             "status": "skipped",
             "code": "ica_degenerate",
             "step": "ica"
+          },
+          {
+            "status": "skipped",
+            "code": "ica_degenerate",
+            "step": "ica"
           }
         ],
         [
@@ -552,6 +585,11 @@
             "status": "passed",
             "code": null,
             "step": null
+          },
+          {
+            "status": "skipped",
+            "code": "ica_ineligible",
+            "step": "ica_eligibility"
           },
           {
             "status": "skipped",
@@ -577,6 +615,11 @@
           },
           {
             "status": "failed",
+            "code": "out_of_memory",
+            "step": "asr"
+          },
+          {
+            "status": "skipped",
             "code": "out_of_memory",
             "step": "asr"
           },
@@ -611,9 +654,19 @@
             "status": "failed",
             "code": "step_failed",
             "step": "iclabel"
+          },
+          {
+            "status": "skipped",
+            "code": "step_failed",
+            "step": "iclabel"
           }
         ],
         [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
           {
             "status": "passed",
             "code": null,
@@ -655,33 +708,71 @@
             "status": "skipped",
             "code": "step_failed",
             "step": "iclabel_locations"
+          },
+          {
+            "status": "skipped",
+            "code": "step_failed",
+            "step": "iclabel_locations"
+          }
+        ],
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "skipped",
+            "code": "plugin_failed",
+            "step": "nemar-quality"
           }
         ]
       ],
       "counts": {
         "import": {
-          "passed": 8,
+          "passed": 9,
           "failed": 0,
           "skipped": 0,
-          "total": 8
+          "total": 9
         },
         "preprocess": {
-          "passed": 4,
+          "passed": 5,
           "failed": 3,
           "skipped": 1,
-          "total": 8
+          "total": 9
         },
         "ica": {
-          "passed": 3,
+          "passed": 4,
           "failed": 1,
           "skipped": 4,
-          "total": 8
+          "total": 9
         },
         "iclabel": {
-          "passed": 1,
-          "failed": 2,
+          "passed": 3,
+          "failed": 1,
           "skipped": 5,
-          "total": 8
+          "total": 9
+        },
+        "quality": {
+          "passed": 1,
+          "failed": 1,
+          "skipped": 7,
+          "total": 9
         }
       },
       "failures": {
@@ -726,12 +817,20 @@
             "code": "step_failed",
             "step": "iclabel",
             "checkpoint": "iclabel"
-          },
+          }
+        ],
+        "quality": [
           {
             "path": "g.set",
             "code": "internal_error",
             "step": "record",
-            "checkpoint": "iclabel"
+            "checkpoint": "quality"
+          },
+          {
+            "path": "i.set",
+            "code": "plugin_failed",
+            "step": "nemar-quality",
+            "checkpoint": "quality"
           }
         ]
       }

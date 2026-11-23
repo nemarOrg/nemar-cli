@@ -547,7 +547,7 @@ async function resolveRunnerFailure(
     const docs = await readLauncherDocs(
       env.COMPUTE_RESULTS,
       job.id,
-      await launcherDocumentLimit(env),
+      await launcherDocumentLimit(env, job),
     );
     if (docs.result.kind === "ok") {
       const result = docs.result.value;
@@ -593,7 +593,7 @@ async function verifiedPlan(
     env.COMPUTE_RECORDS,
     job,
     runnerRecord(exit),
-    await launcherDocumentLimit(env),
+    await launcherDocumentLimit(env, job),
   );
   if (verdict.ok) {
     return {

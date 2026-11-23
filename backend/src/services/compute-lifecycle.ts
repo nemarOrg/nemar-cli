@@ -108,6 +108,7 @@ import {
   outputsBodyLimitBytes,
   putRecordOnce,
   recordKey,
+  resultMaxFilesFor,
   sha256Hex,
 } from "./compute-records.js";
 import { sendComputeResultsReadyEmail } from "./compute-results.js";
@@ -826,10 +827,19 @@ export async function recordsRetentionYears(env: Bindings): Promise<number> {
   return (await getPolicy(env.DB)).policy.retention.recordsYears;
 }
 
-/** The byte bound for one launcher document: the outputs body's bound for the owner's `maxFiles`. */
-export async function launcherDocumentLimit(env: Bindings): Promise<number> {
+/**
+ * The byte bound for one launcher document of a job: the outputs body's bound for the `maxFiles` the job is
+ * held to (the owner's policy, or its pipeline recipe's own, `resultMaxFilesFor`).
+ */
+export async function launcherDocumentLimit(
+  env: Bindings,
+  job: { id: string; source: string },
+): Promise<number> {
   try {
-    return outputsBodyLimitBytes((await getPolicy(env.DB)).policy.resultLimits.maxFiles);
+    const { policy } = await getPolicy(env.DB);
+    return outputsBodyLimitBytes(
+      await resultMaxFilesFor(env.DB, job, policy.resultLimits.maxFiles),
+    );
   } catch {
     return OUTPUTS_BODY_CEILING_BYTES;
   }
@@ -860,7 +870,7 @@ async function resolveFailure(
     const docs = await readLauncherDocs(
       env.COMPUTE_RESULTS,
       job.id,
-      await launcherDocumentLimit(env),
+      await launcherDocumentLimit(env, job),
     );
     if (docs.result.kind === "ok") {
       const result = docs.result.value;
@@ -956,7 +966,7 @@ async function planFromTapis(
     env.COMPUTE_RECORDS,
     job,
     rec,
-    await launcherDocumentLimit(env),
+    await launcherDocumentLimit(env, job),
   );
   if (verdict.ok) return { ...base, to: "finished", verified: true };
   // A Worker-recorded refusal is the reason a launcher that was refused did not complete.
@@ -1166,7 +1176,7 @@ export async function copyResultRecords(env: Bindings, job: ComputeJobRow): Prom
     throw new Error("the compute buckets are not bound");
   }
   const results = env.COMPUTE_RESULTS;
-  const limit = await launcherDocumentLimit(env);
+  const limit = await launcherDocumentLimit(env, job);
   let written = 0;
 
   const files: Array<{ name: LauncherFileName; to: string; cap: number; truncate: boolean }> = [
