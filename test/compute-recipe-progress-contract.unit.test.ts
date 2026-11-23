@@ -96,3 +96,11 @@ describe("Ajv and zod give the launcher reader's verdicts", () => {
     });
   }
 });
+
+describe("the encoding rules no schema can state are named for Python readers", () => {
+  test("the schema's description names each one", () => {
+    for (const rule of ["UTF-8", "no duplicate key", "NaN", "Infinity", "never 1.0"]) {
+      expect(recipeSchema.description, rule).toContain(rule);
+    }
+  });
+});

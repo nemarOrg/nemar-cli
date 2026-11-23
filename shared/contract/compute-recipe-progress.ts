@@ -7,10 +7,13 @@
  * wants progress for their own job writes the same file.
  *
  * THE JSON SCHEMA NEXT TO THIS FILE (`compute-recipe-progress.schema.json`) IS COPIED BYTE FOR BYTE BY
- * `nemarOrg/nemar-process` (`launcher/schema/compute-recipe-progress.v1.json`). It describes exactly
- * what the launcher's reader (`check_recipe_progress`) accepts: `test/compute-recipe-progress-contract
- * .unit.test.ts` replays a corpus whose verdicts that reader gave, including files the recipe layer
- * itself wrote.
+ * `nemarOrg/nemar-process` (`launcher/schema/compute-recipe-progress.v1.json`). Together with the
+ * encoding rules below, it describes exactly what the launcher's reader (`check_recipe_progress`)
+ * accepts: `test/compute-recipe-progress-contract.unit.test.ts` replays a corpus whose verdicts that
+ * reader gave, including files the recipe layer itself wrote.
+ *
+ * The text is read under encoding rules no schema can state: UTF-8 JSON with no duplicate key, no
+ * `NaN`, `Infinity` or `-Infinity`, and every integer written without a fraction (`1`, never `1.0`).
  *
  * The file holds the recipe and its checkpoint map, where the recordings table is (relative to
  * `NEMAR_OUT`), how many recordings the run discovered (every one gets exactly one table row) and the
