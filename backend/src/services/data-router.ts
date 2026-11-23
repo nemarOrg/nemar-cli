@@ -635,13 +635,13 @@ export function toHttpDate(value: string): string {
 // ===========================================================================
 // metadata.json builders
 //
-// Composes a neuroschema v0.4.1 `dataset` document from the catalog row in
+// Composes a neuroschema v0.5.0 `dataset` document from the catalog row in
 // D1, the parsed nemar_metadata.json enrichment payload, the dataset_versions
 // list, and (optionally) the latest version's S3 manifest. All pure: no D1,
 // S3, or network access happens here; callers in routes/data.ts wire the I/O.
 //
 // The wire format mirrors `~/Documents/git/nemar/neuroschema/schema/core/dataset.schema.json`
-// (v0.4.1). NEMAR-specific aggregates that aren't part of the FAIR core
+// (v0.5.0). NEMAR-specific aggregates that aren't part of the FAIR core
 // (version DOI list, derived BIDS subjects/sessions/tasks/runs tree) sit in
 // `extensions.nemar` per `schema/extensions/nemar.schema.json` which already
 // declares `additionalProperties: true`.
@@ -895,7 +895,56 @@ export interface NeuroschemaDataset {
   signal_defaults: DatasetSignalDefaults | null;
   provenance: DatasetProvenance;
   external_links: DatasetExternalLinks;
-  extensions: { nemar: NemarExtensionBlock };
+  extensions: {
+    nemar: NemarExtensionBlock;
+    /** neuroschema `processing`, dataset level (ADR 0134): the reconciled counts of each recipe's latest run. */
+    processing?: { level: "dataset"; recipes: Record<string, unknown> };
+    /** neuroschema `signalJourney` (ADR 0134): a link to each recipe's latest signalJourney record. */
+    signalJourney?: { recipes: Record<string, unknown> };
+  };
+}
+
+/** A stored (final) dataset document of NEMAR's pipeline (migration 0150), as the route reads it. */
+export interface PipelineDocumentRow {
+  namespace: string;
+  recipe: string;
+  entry: string;
+}
+
+/**
+ * The neuroschema `processing` and `signalJourney` extensions of a dataset (ADR 0134, epic #2324 phase 2):
+ * the final entries of each recipe's latest ended run, and, for a recipe whose run is reporting now, the
+ * `in_progress` link worked out on read (`live`), which stands in front of the last final link without
+ * replacing it in storage. An entry that does not parse as a JSON object is left out. Each namespace is
+ * present only when it has an entry.
+ */
+export function pipelineExtensions(
+  rows: readonly PipelineDocumentRow[],
+  live: Readonly<Record<string, unknown>> = {},
+): {
+  processing?: { level: "dataset"; recipes: Record<string, unknown> };
+  signalJourney?: { recipes: Record<string, unknown> };
+} {
+  const processing: Record<string, unknown> = {};
+  const signalJourney: Record<string, unknown> = {};
+  for (const row of rows) {
+    let entry: unknown;
+    try {
+      entry = JSON.parse(row.entry);
+    } catch {
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    if (row.namespace === "processing") processing[row.recipe] = entry;
+    if (row.namespace === "signalJourney") signalJourney[row.recipe] = entry;
+  }
+  Object.assign(signalJourney, live);
+  return {
+    ...(Object.keys(processing).length > 0
+      ? { processing: { level: "dataset" as const, recipes: processing } }
+      : {}),
+    ...(Object.keys(signalJourney).length > 0 ? { signalJourney: { recipes: signalJourney } } : {}),
+  };
 }
 
 /**

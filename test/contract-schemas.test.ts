@@ -655,6 +655,13 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     // Their responses are in `compute-partner.ts`, open.
     "compute-partner-request.ts",
     "compute-runner.ts",
+    // The live progress object (ADR 0134, epic #2324 phase 2): validated by the Worker as it arrives
+    // in a heartbeat or on the job-token route; a mistyped key must be refused, not stripped. Its one
+    // response, ProgressReportResponseSchema, is open.
+    "compute-progress.ts",
+    // The quality plugin manifest (ADR 0134, epic #2324 phase 2): it describes software NEMAR reviews,
+    // and an unknown key is a bug to refuse. It has no response.
+    "plugin-manifest.ts",
   ]);
 
   const HEX = "a".repeat(64);
@@ -1100,12 +1107,23 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "RunnerCompleteRequestSchema",
   ];
 
+  /** The strict schemas of `compute-progress.ts` and `plugin-manifest.ts` (ADR 0134), not in CLASSIFIED. */
+  const PROGRESS_REQUEST_NAMES = [
+    "ProgressSchema",
+    "ProgressCheckpointCountsSchema",
+    "ProgressFailureSchema",
+    "PluginManifestSchema",
+    "PluginMetricSchema",
+    "PluginFigureSchema",
+  ];
+
   /** The names a response schema must never be built from. */
   const STRICT_NAMES = [
     ...Object.entries(CLASSIFIED)
       .filter(([, c]) => c.side === "strict")
       .map(([name]) => name),
     ...RUNNER_REQUEST_NAMES,
+    ...PROGRESS_REQUEST_NAMES,
   ];
 
   /**
@@ -1447,7 +1465,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   ];
 
   test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
-    expect(STRICT_NAMES).toHaveLength(15);
+    expect(STRICT_NAMES).toHaveLength(21);
     expect(IMPORT_PROBES.length).toBeGreaterThan(55);
     for (const [label, file, text, offends] of IMPORT_PROBES) {
       const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);
@@ -1535,10 +1553,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.4.1 envelope + required identity fields", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.4.1");
+  test("pins the v0.5.0 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.5.0");
     const ds = {
-      schema_version: "0.4.1",
+      schema_version: "0.5.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "Test",
@@ -1550,7 +1568,7 @@ describe("neuroschema dataset schema", () => {
 
   test("rejects a wrong schema_version or empty modality", () => {
     const base = {
-      schema_version: "0.4.1",
+      schema_version: "0.5.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "T",

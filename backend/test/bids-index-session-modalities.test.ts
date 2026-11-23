@@ -55,7 +55,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { NO_SESSION_KEY, bidsIndexSchema } from "../../shared/contract/index.js";
+import {
+  NEUROSCHEMA_VERSION,
+  NO_SESSION_KEY,
+  bidsIndexSchema,
+} from "../../shared/contract/index.js";
 import {
   BidsIndexBuilder,
   type BidsIndexSubjectNode,
@@ -498,7 +502,17 @@ describe("GET /<id>/metadata.json, through the real route", () => {
       };
       const index = parsed.extensions.nemar.bids_index;
       index.subjects = withoutSessionModalities(index.subjects);
-      expect(JSON.stringify(parsed)).toBe(PRE_CHANGE.metadata_json[fixture.id]);
+      // The one deliberate change since the snapshot: neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2)
+      // moved `schema_version` from 0.4.1. Nothing else differs, and no pipeline extension appears for a
+      // dataset with no pipeline documents.
+      const snapshot = PRE_CHANGE.metadata_json[fixture.id] as string;
+      expect(snapshot.startsWith('{"schema_version":"0.4.1",')).toBe(true);
+      expect(JSON.stringify(parsed)).toBe(
+        snapshot.replace(
+          '{"schema_version":"0.4.1",',
+          `{"schema_version":"${NEUROSCHEMA_VERSION}",`,
+        ),
+      );
     });
 
     test(`${fixture.id}: serves the pairing, parses against the contract, and round-trips`, () => {

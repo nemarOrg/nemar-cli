@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://api.nemar.org/schemas/compute-progress-v1.json",
+  "title": "NEMAR live progress, nemar.progress.v1",
+  "description": "The closed object a NEMAR pipeline job reports while it runs (ADR 0134 decision 3): in the runner heartbeat's progress field, or as the body of POST /compute/jobs/:id/progress under the job token. Copied byte for byte from nemarOrg/nemar-cli (shared/contract/compute-progress.schema.json) by nemarOrg/nemar-process. The root has no constraint; each shape is a member of $defs. Each checkpoint's counts have the shape of neuroschema definitions/checkpointCounts.schema.json. Rules a schema cannot state are the reader's: counts names exactly the recipe version's declared checkpoints except stored; passed + failed + skipped <= total in every column; every column has the same total; checkpoint is a key of counts; each failure names a key of counts, and no checkpoint lists more failures than it counts as failed or skipped. In a live report, passed, failed and skipped count only the recordings that have ended (that have a row in the recordings table), and total counts every recording the run discovered. The object serialized as compact UTF-8 JSON is at most 8192 bytes. Reports come at most once a minute; the Worker refuses a second report within 50 seconds.",
+  "$defs": {
+    "CheckpointName": {
+      "description": "A checkpoint a recipe declares (neuroschema processingTypes checkpointName).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}(?![\\s\\S])"
+    },
+    "FailureCode": {
+      "description": "A failure or skip word (neuroschema processingTypes failureCode).",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+    },
+    "StepId": {
+      "description": "A recipe step (neuroschema processingTypes stepId).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
+    },
+    "ProgressPath": {
+      "description": "A recording's relative path: printable ASCII without a backslash, no leading slash, no URI scheme, no .. segment.",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\\s\\S]*/)?\\.\\.(?:/|(?![\\s\\S])))[\\x20-\\x5B\\x5D-\\x7E]{1,256}(?![\\s\\S])"
+    },
+    "Count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "CheckpointCounts": {
+      "description": "One checkpoint's counts of recordings: the shape of neuroschema checkpointCounts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed", "skipped", "total"],
+      "properties": {
+        "passed": { "$ref": "#/$defs/Count" },
+        "failed": { "$ref": "#/$defs/Count" },
+        "skipped": { "$ref": "#/$defs/Count" },
+        "total": { "$ref": "#/$defs/Count" }
+      }
+    },
+    "ProgressFailure": {
+      "description": "One failed or skipped recording: its path, the failure word, the step (null when unknown) and the checkpoint it counts against.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "code", "step", "checkpoint"],
+      "properties": {
+        "path": { "$ref": "#/$defs/ProgressPath" },
+        "code": { "$ref": "#/$defs/FailureCode" },
+        "step": { "anyOf": [{ "$ref": "#/$defs/StepId" }, { "type": "null" }] },
+        "checkpoint": { "$ref": "#/$defs/CheckpointName" }
+      }
+    },
+    "Progress": {
+      "description": "The live progress object. Closed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "checkpoint", "counts", "failures"],
+      "properties": {
+        "format": { "const": "nemar.progress.v1" },
+        "checkpoint": { "$ref": "#/$defs/CheckpointName" },
+        "counts": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 8,
+          "propertyNames": { "$ref": "#/$defs/CheckpointName" },
+          "additionalProperties": { "$ref": "#/$defs/CheckpointCounts" }
+        },
+        "failures": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/ProgressFailure" }
+        }
+      }
+    },
+    "ProgressReportResponse": {
+      "description": "The answer to an accepted report. Open.",
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok": { "const": true }
+      }
+    }
+  }
+}

@@ -148,7 +148,59 @@ export interface ComputeRecipe {
    */
   placeholder?: boolean;
   eligibility: RecipeEligibility;
+  /**
+   * The checkpoints this recipe version declares, in order, each with the steps that map to it (ADR 0134
+   * decision 2). Every step of the recipe's step order maps to exactly one checkpoint; `stored` is never
+   * here, because the backend sets it when the derivatives are copied. `nemar-recipe version` prints
+   * the same map, and a recipe version that changes it changes this entry.
+   */
+  checkpoints: readonly RecipeCheckpoint[];
 }
+
+/** A checkpoint a recipe may declare: a standard checkpoint other than `stored`. */
+export type DeclarableCheckpoint = Exclude<(typeof STANDARD_CHECKPOINTS)[number], "stored">;
+
+/** One checkpoint a recipe version declares and the recipe steps that count against it. */
+export interface RecipeCheckpoint {
+  checkpoint: DeclarableCheckpoint;
+  steps: readonly string[];
+}
+
+/**
+ * The step a recipe's recordings table names when writing the recording's own record failed, after the
+ * last step: it counts against the last declared checkpoint (ADR 0134, owner decision of 2026-11-22).
+ */
+export const RECORD_STEP = "record";
+
+/**
+ * The standard checkpoints, in the order a recipe declares the ones it has (ADR 0134 decision 2), and
+ * `stored`, which only the backend sets.
+ */
+export const STANDARD_CHECKPOINTS = [
+  "import",
+  "preprocess",
+  "ica",
+  "iclabel",
+  "quality",
+  "figures",
+  "stored",
+] as const;
+
+/** The checkpoint the backend sets when a run's derivatives are copied (ADR 0123). */
+export const STORED_CHECKPOINT = "stored";
+
+const FLOOR_PREPROCESS_STEPS = Object.freeze([
+  "flatline",
+  "drift",
+  "line_noise_measure",
+  "line_noise_50",
+  "line_noise_60",
+  "bad_channels",
+  "bad_windows",
+] as const);
+
+const checkpoint = (name: DeclarableCheckpoint, steps: readonly string[]): RecipeCheckpoint =>
+  Object.freeze({ checkpoint: name, steps: Object.freeze([...steps]) });
 
 /**
  * The engine every recipe reports: `eegprep@<version>+<commit>`, the version and the resolved git commit of
@@ -192,6 +244,11 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     executors: Object.freeze(["tapis", "runner"] as const),
     autoDispatch: true,
     eligibility: "eeg",
+    checkpoints: Object.freeze([
+      checkpoint("import", ["load", "signal_channels"]),
+      checkpoint("preprocess", FLOOR_PREPROCESS_STEPS),
+      checkpoint("quality", ["qc"]),
+    ]),
   }),
   Object.freeze({
     name: "nemar-ica",
@@ -209,6 +266,13 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     autoDispatch: false,
     placeholder: true,
     eligibility: "eeg",
+    // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134).
+    checkpoints: Object.freeze([
+      checkpoint("import", ["load", "signal_channels"]),
+      checkpoint("preprocess", [...FLOOR_PREPROCESS_STEPS, "qc", "asr", "reref"]),
+      checkpoint("ica", ["ica"]),
+      checkpoint("iclabel", ["iclabel"]),
+    ]),
   }),
 ]) as readonly ComputeRecipe[];
 
@@ -216,6 +280,40 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
 export function findRecipe(name: unknown): ComputeRecipe | null {
   if (typeof name !== "string") return null;
   return COMPUTE_RECIPES.find((r) => r.name === name) ?? null;
+}
+
+/**
+ * The checkpoints a recipe declares, in order, followed by `stored`: the columns of its progress rows
+ * and the `declared_checkpoints` of its neuroschema `processing` entry.
+ */
+export function declaredCheckpoints(recipe: Pick<ComputeRecipe, "checkpoints">): string[] {
+  return [...recipe.checkpoints.map((c) => c.checkpoint), STORED_CHECKPOINT];
+}
+
+/**
+ * The checkpoint a step of a recipe counts against, or null for a step the recipe does not declare. The
+ * step `record` counts against the last declared checkpoint.
+ */
+export function checkpointOfStep(
+  recipe: Pick<ComputeRecipe, "checkpoints">,
+  step: string,
+): DeclarableCheckpoint | null {
+  if (step === RECORD_STEP)
+    return recipe.checkpoints[recipe.checkpoints.length - 1]?.checkpoint ?? null;
+  return recipe.checkpoints.find((c) => c.steps.includes(step))?.checkpoint ?? null;
+}
+
+/**
+ * The checkpoint map of a recipe at a version, or null when the recipe is unknown or the version is not
+ * the registry entry's (the map belongs to the version the registry names).
+ */
+export function recipeCheckpointMap(
+  name: unknown,
+  version: unknown,
+): readonly RecipeCheckpoint[] | null {
+  const recipe = findRecipe(name);
+  if (!recipe || recipe.version !== version) return null;
+  return recipe.checkpoints;
 }
 
 /** The label a recipe puts in its product file names: its name without hyphens (`nemarfloor`). */

@@ -2,7 +2,7 @@
  * Input contract of the Neurobagel transform: the three documents the NEMAR
  * data plane already serves for a dataset.
  *
- *   metadata.json       GET <data-host>/<id>/metadata.json (neuroschema 0.4.1 landing payload)
+ *   metadata.json       GET <data-host>/<id>/metadata.json (neuroschema 0.5.0 landing payload)
  *   participants.tsv    GET <data-host>/<id>/<latest>/participants.tsv   (may be absent)
  *   participants.json   GET <data-host>/<id>/<latest>/participants.json  (may be absent)
  *

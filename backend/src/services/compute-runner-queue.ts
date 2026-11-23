@@ -94,6 +94,7 @@ import {
   PIPELINE_ELIGIBLE_SQL,
   PIPELINE_ELIGIBLE_SQL_NONPROD,
 } from "./compute-pipeline-eligibility.js";
+import { recordHeartbeatProgress } from "./compute-pipeline-progress.js";
 import { recipeJobSpec } from "./compute-pipeline.js";
 import { sha256Hex } from "./compute-records.js";
 import {
@@ -465,6 +466,16 @@ export async function heartbeatRunnerJob(
     .bind(body.job_id)
     .first<{ lease_expires_at: string | null; cancel_requested_at: string | null }>();
   if (!row || row.lease_expires_at === null) return { ok: false, refusal: "lease_lost" };
+  // Live progress (ADR 0134) is stored after the renewal, in a batch of its own, and never at its cost.
+  if (body.progress) {
+    await recordHeartbeatProgress(db, {
+      jobId: body.job_id,
+      runnerId: runner.id,
+      leaseId: body.lease_id,
+      phase: body.phase,
+      progress: body.progress,
+    });
+  }
   return {
     ok: true,
     lease_expires_at: toProtocolTimestamp(row.lease_expires_at),

@@ -31,6 +31,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /jobs/:id/bundle": 1,
   "POST /jobs/:id/outputs": 1,
   "POST /jobs/:id/outputs/complete": 1,
+  // Live progress of a NEMAR pipeline job on Tapis (ADR 0134, epic #2324 phase 2): the same door.
+  "POST /jobs/:id/progress": 1,
   // The job's owner, signed in: `authMiddleware` (bearer first, then the session cookie), then
   // `cookieOriginGuard` (a write made with a session cookie must come from a NEMAR page), then the
   // handler. Any account that is not the owner is answered `job_not_found`.
@@ -80,7 +82,7 @@ describe("compute route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(computeRoutes.routes.length).toBe(39);
+    expect(computeRoutes.routes.length).toBe(40);
   });
 
   test("no router-level middleware exists: the launcher's callbacks have no session", () => {
@@ -112,6 +114,7 @@ describe("compute route inventory", () => {
       "/jobs/:id/bundle",
       "/jobs/:id/outputs",
       "/jobs/:id/outputs/complete",
+      "/jobs/:id/progress",
       "/observer",
     ]) {
       expect(handlersOf(path)).toHaveLength(1);

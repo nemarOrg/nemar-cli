@@ -1,0 +1,168 @@
+{
+  "schema_version": "0.5.0",
+  "doc_type": "record",
+  "dataset": "ds002718",
+  "bids_relpath": "sub-013/eeg/sub-013_task-FaceRecognition_eeg.set",
+  "modality": "EEG",
+  "extensions": {
+    "processing": {
+      "level": "record",
+      "recipes": {
+        "nemar-floor": {
+          "recipe_version": "1.0.0-b1",
+          "checkpoints": {
+            "import": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            },
+            "preprocess": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            },
+            "quality": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            },
+            "stored": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            }
+          }
+        },
+        "nemar-ica": {
+          "recipe_version": "1.0.0-b1",
+          "checkpoints": {
+            "import": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            },
+            "preprocess": {
+              "status": "passed",
+              "code": null,
+              "step": null
+            },
+            "ica": {
+              "status": "failed",
+              "code": "ica_degenerate",
+              "step": "ica"
+            },
+            "iclabel": {
+              "status": "skipped",
+              "code": "ica_degenerate",
+              "step": "ica"
+            },
+            "stored": {
+              "status": "skipped",
+              "code": "ica_degenerate",
+              "step": "ica"
+            }
+          }
+        }
+      }
+    },
+    "dataQuality": {
+      "level": "record",
+      "recipes": {
+        "nemar-floor": {
+          "recipe_version": "1.0.0-b1",
+          "input_kind": "zarr",
+          "profile": "serving",
+          "record_sha256": "2dcd32d355d847aa93dade05530634cb01eb0cd12a27d5c910456bf899da5efe",
+          "metrics": {
+            "percentGoodChannels": {
+              "value": 95.9,
+              "unit": "%",
+              "description": "Share of channels kept after bad-channel rejection.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            },
+            "percentGoodSamples": {
+              "value": 93.6,
+              "unit": "%",
+              "description": "Share of samples kept after bad-window rejection.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            },
+            "lineNoiseBeforeDb": {
+              "value": 14.2,
+              "unit": "dB",
+              "description": "Line-noise magnitude at the power-line frequency before line-noise removal.",
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            },
+            "lineNoiseAfterDb": {
+              "value": 2.8,
+              "unit": "dB",
+              "description": "Line-noise magnitude at the power-line frequency after line-noise removal.",
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            }
+          },
+          "figures": [
+            {
+              "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_spectrum.svg",
+              "format": "svg",
+              "size": 48213,
+              "sha256": "bdd77094eb665e171d71082dcc352473b0129ca4295c49c4de704f13d7997700",
+              "caption": "Power spectrum with scalp maps at 6, 10 and 22 Hz.",
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            },
+            {
+              "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_rawsegment.webp",
+              "format": "webp",
+              "size": 131072,
+              "sha256": "27000577533137a657e25f9af20a3fda776ee81b1c45028f9a805f84f19e8370",
+              "caption": "Ten seconds of cleaned data from the middle of the recording.",
+              "plugin": {
+                "name": "nemar-dataqual",
+                "version": "0.1.0"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "signalJourney": {
+      "recipes": {
+        "nemar-floor": {
+          "recipe_version": "1.0.0-b1",
+          "processing_status": "completed",
+          "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_signalJourney.json",
+          "sha256": "2dcd32d355d847aa93dade05530634cb01eb0cd12a27d5c910456bf899da5efe",
+          "sj_version": "0.1.0"
+        },
+        "nemar-ica": {
+          "recipe_version": "1.0.0-b1",
+          "processing_status": "failed",
+          "location": null,
+          "sha256": null,
+          "sj_version": null
+        }
+      }
+    }
+  }
+}

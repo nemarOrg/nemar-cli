@@ -421,11 +421,13 @@ describe("refusal codes", () => {
     ["storage_unavailable", 503],
     // Issue #2121, phase P2: NEMAR's tenant-wide ceiling on live jobs is full for the job's class.
     ["platform_busy", 409],
+    // ADR 0134 (epic #2324 phase 2): a progress report sooner than the floor.
+    ["report_too_soon", 429],
   ];
 
-  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one, the outputs route's, phase D3's nine and the tenant ceiling's", () => {
+  test("the list is the seven of section 6 plus the seventeen the phase names, the ledger's one, the outputs route's, phase D3's nine, the tenant ceiling's and the progress route's", () => {
     expect([...COMPUTE_REFUSAL_CODES] as string[]).toEqual(EXPECTED.map(([c]) => c));
-    expect(COMPUTE_REFUSAL_CODES).toHaveLength(37);
+    expect(COMPUTE_REFUSAL_CODES).toHaveLength(38);
     // The per-job limit refusal is `over_job_limit`; there is no second word for it.
     expect(COMPUTE_REFUSAL_CODES).not.toContain("over_ceiling");
   });
@@ -1012,10 +1014,12 @@ describe("the words the job routes and the lifecycle share", () => {
       "invalid_spec",
       "job_not_found",
       "policy_unavailable",
+      "report_too_soon",
       "results_expired",
       "results_incomplete",
       "results_quota_exceeded",
       "results_too_large",
+      "storage_unavailable",
       "too_many_outputs",
     ]);
     for (const [code, sentence] of Object.entries(COMPUTE_ROUTE_SENTENCES)) {

@@ -3,10 +3,14 @@
     "source": "https://github.com/nemarOrg/neuroschema",
     "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
     "note": "Do not hand-edit; regenerate from the neuroschema repo.",
-    "neuroschema_version": "0.4.1",
-    "source_commit": "062a988cc539e2b8fdedcc53286a7b6fd46848be"
+    "neuroschema_version": "0.5.0",
+    "source_commit": "98f2b0c8e1d11ac1038774b3e9b18a2d4cde996d"
   },
   "root": "nsc:/core/dataset.schema.json",
+  "roots": {
+    "dataset": "nsc:/core/dataset.schema.json",
+    "record": "nsc:/core/record.schema.json"
+  },
   "schemas": [
     {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1166,7 +1170,7 @@
           "$ref": "nsc:/extensions/eegdash.schema.json"
         },
         "signalJourney": {
-          "description": "Namespace for signalJourney processing pipeline metadata.",
+          "description": "Namespace for links to the signalJourney records of NEMAR recipe runs, one per recipe.",
           "$ref": "nsc:/extensions/signalJourney.schema.json"
         },
         "nemar": {
@@ -1174,8 +1178,12 @@
           "$ref": "nsc:/extensions/nemar.schema.json"
         },
         "dataQuality": {
-          "description": "Namespace for data quality metrics and indicators.",
+          "description": "Namespace for quality results (metrics and figures) projected from the signalJourney records of NEMAR recipe runs, per recording and per dataset.",
           "$ref": "nsc:/extensions/dataQuality.schema.json"
+        },
+        "processing": {
+          "description": "Namespace for checkpoint outcomes of NEMAR recipe runs (per recording and per dataset).",
+          "$ref": "nsc:/extensions/processing.schema.json"
         },
         "rawDetail": {
           "description": "Namespace for detailed per-channel arrays (channel names, types, TSV data). Separated from core to keep core documents lean.",
@@ -1201,7 +1209,7 @@
           "collection": "ext_eegdash"
         },
         "signalJourney": {
-          "manager": "signal-journey",
+          "manager": "nemar-api",
           "collection": "ext_signalJourney"
         },
         "nemar": {
@@ -1209,8 +1217,12 @@
           "collection": "ext_nemar"
         },
         "dataQuality": {
-          "manager": "nemar-pipeline",
+          "manager": "nemar-api",
           "collection": "ext_dataQuality"
+        },
+        "processing": {
+          "manager": "nemar-api",
+          "collection": "ext_processing"
         },
         "rawDetail": {
           "manager": "nemar-api",
@@ -1335,39 +1347,333 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "nsc:/extensions/signalJourney.schema.json",
       "title": "signalJourney Extension",
-      "description": "Namespace for linking to signalJourney processing pipeline records. References processing provenance tracked in signalJourney's own schema.",
+      "description": "Links from a dataset or recording to the signalJourney records of NEMAR recipe runs, one per recipe, written by the NEMAR backend. The same shape at both levels. A link describes the latest run: `in_progress` while reports arrive (no record yet), `completed` when the run wrote this record, `failed` when the run ended without writing it (the reason is in the processing extension). dataQuality keeps the last completed results.",
       "type": "object",
+      "required": [
+        "recipes"
+      ],
       "properties": {
-        "pipeline_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Identifier for the signalJourney pipeline associated with this record/dataset."
-        },
-        "processing_status": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Status of processing (e.g., 'pending', 'completed', 'failed').",
-          "enum": [
-            "pending",
-            "in_progress",
-            "completed",
-            "failed",
-            null
-          ]
-        },
-        "sj_version": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Version of the signalJourney specification used."
+        "recipes": {
+          "type": "object",
+          "description": "Record link per recipe, keyed by recipe id.",
+          "propertyNames": {
+            "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/recipeId"
+          },
+          "additionalProperties": {
+            "$ref": "nsc:/extensions/signalJourney.schema.json#/$defs/recordLink"
+          }
         }
       },
-      "additionalProperties": true
+      "additionalProperties": true,
+      "$defs": {
+        "recordLink": {
+          "type": "object",
+          "description": "Link to one recipe run's signalJourney record. location, sha256 and sj_version are set when completed and null otherwise: null while in_progress (no record yet) and null when failed (the run ended without writing this record).",
+          "required": [
+            "recipe_version",
+            "processing_status",
+            "location",
+            "sha256",
+            "sj_version"
+          ],
+          "properties": {
+            "recipe_version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Version of the recipe whose run this link describes."
+            },
+            "processing_status": {
+              "type": "string",
+              "enum": [
+                "in_progress",
+                "completed",
+                "failed"
+              ],
+              "description": "State of the latest run of this recipe."
+            },
+            "location": {
+              "anyOf": [
+                {
+                  "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/relativeLocation"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Path of the signalJourney record inside the run's product."
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "SHA-256 of the signalJourney record's bytes."
+            },
+            "sj_version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$(?!\n)",
+              "description": "Version of the signalJourney specification the record follows."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "processing_status": {
+                    "const": "completed"
+                  }
+                },
+                "required": [
+                  "processing_status"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "type": "string"
+                  },
+                  "sj_version": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "processing_status": {
+                    "const": "in_progress"
+                  }
+                },
+                "required": [
+                  "processing_status"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "null"
+                  },
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "sj_version": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "processing_status": {
+                    "const": "failed"
+                  }
+                },
+                "required": [
+                  "processing_status"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "null"
+                  },
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "sj_version": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/processingTypes.schema.json",
+      "title": "Processing Types",
+      "description": "Shared types for the dataQuality, processing and signalJourney extensions. A library of $defs; the root constrains nothing.",
+      "$defs": {
+        "recipeId": {
+          "type": "string",
+          "description": "Identifier of a NEMAR processing recipe (for example nemar-floor), lowercase letters, digits and hyphens.",
+          "pattern": "^[a-z0-9-]{1,64}$(?!\n)"
+        },
+        "version": {
+          "type": "string",
+          "description": "A version label (recipe, dataset or plugin version) of letters, digits and . _ + -.",
+          "pattern": "^[0-9A-Za-z._+-]{1,64}$(?!\n)"
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Lowercase hexadecimal SHA-256 digest of a file's bytes.",
+          "pattern": "^[0-9a-f]{64}$(?!\n)"
+        },
+        "checkpointName": {
+          "type": "string",
+          "description": "Name of a processing checkpoint: a coarse stage a recipe declares. Open vocabulary; the writer checks it against the checkpoints the recipe version declares.",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$(?!\n)",
+          "examples": [
+            "import",
+            "preprocess",
+            "ica",
+            "iclabel",
+            "quality",
+            "figures",
+            "stored"
+          ]
+        },
+        "stepId": {
+          "type": "string",
+          "description": "Identifier of a recipe step (the step names of a recipe's step order).",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$(?!\n)"
+        },
+        "failureCode": {
+          "type": "string",
+          "description": "Machine-readable failure or skip code, lowercase snake case.",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$(?!\n)"
+        },
+        "metricName": {
+          "type": "string",
+          "description": "Name of a quality metric. Safe as a document key (no . or $); allows namespaced names such as eeg:lineNoise. Naming rules live in signalJourney's nemar namespace.",
+          "pattern": "^[A-Za-z][A-Za-z0-9_:-]{0,127}$(?!\n)"
+        },
+        "relativeLocation": {
+          "type": "string",
+          "description": "Relative POSIX path inside a run's product: no leading slash, no .. segment, no URI scheme, no backslash, no control characters.",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:.*/)?\\.\\.(?:/|$))[^\\\\\\x00-\\x1f]+$(?!\n)"
+        },
+        "inputKind": {
+          "type": "string",
+          "description": "What a run read: a BIDS dataset directory or NEMAR's Zarr serving copy.",
+          "enum": [
+            "bids",
+            "zarr"
+          ]
+        },
+        "profile": {
+          "type": "string",
+          "description": "Which copy of the data a run's results describe: the archived recordings or the serving copy.",
+          "enum": [
+            "archive",
+            "serving"
+          ]
+        },
+        "inputProfilePairing": {
+          "description": "A zarr input always describes the serving copy and a bids input the archive.",
+          "allOf": [
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "input_kind": {
+                    "const": "zarr"
+                  }
+                },
+                "required": [
+                  "input_kind"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "profile": {
+                    "const": "serving"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "input_kind": {
+                    "const": "bids"
+                  }
+                },
+                "required": [
+                  "input_kind"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "profile": {
+                    "const": "archive"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "range": {
+          "type": "object",
+          "description": "A closed numeric range; either end may be null when unbounded or unknown.",
+          "required": [
+            "min",
+            "max"
+          ],
+          "properties": {
+            "min": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Lower end of the range."
+            },
+            "max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Upper end of the range."
+            }
+          },
+          "additionalProperties": false
+        },
+        "plugin": {
+          "type": "object",
+          "description": "The quality plugin, by name and version, that produced a value or figure.",
+          "required": [
+            "name",
+            "version"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Plugin name as declared in its manifest.",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$(?!\n)"
+            },
+            "version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Plugin version as declared in its manifest."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
     },
     {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1462,35 +1768,770 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "nsc:/extensions/dataQuality.schema.json",
       "title": "Data Quality Extension",
-      "description": "Namespace for data quality metrics and indicators. Placeholder for future data quality assessment projects.",
+      "description": "Quality results the NEMAR backend projects from the signalJourney records of its recipe runs. `level` selects the shape: `record` (one recording's metrics and figures per recipe) or `dataset` (the dataset quality control summary per recipe; replaces nemar-process qc-summary.v1). Each entry carries the SHA-256 of the signalJourney record it came from; the record stays the source.",
       "type": "object",
+      "required": [
+        "level"
+      ],
       "properties": {
-        "quality_score": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "record",
+            "dataset"
+          ],
+          "description": "Which document this entry belongs to: record (one recording) or dataset (the whole dataset)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "const": "record"
+              }
+            },
+            "required": [
+              "level"
+            ]
+          },
+          "then": {
+            "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/record"
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "const": "dataset"
+              }
+            },
+            "required": [
+              "level"
+            ]
+          },
+          "then": {
+            "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/dataset"
+          }
+        }
+      ],
+      "additionalProperties": true,
+      "$defs": {
+        "record": {
+          "type": "object",
+          "description": "Record-level shape.",
+          "required": [
+            "recipes"
+          ],
+          "properties": {
+            "recipes": {
+              "type": "object",
+              "description": "Results per recipe, keyed by recipe id.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/recipeId"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/recordRecipeResults"
+              }
+            }
+          }
+        },
+        "dataset": {
+          "type": "object",
+          "description": "Dataset-level shape.",
+          "required": [
+            "recipes"
+          ],
+          "properties": {
+            "recipes": {
+              "type": "object",
+              "description": "Quality control summary per recipe, keyed by recipe id.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/recipeId"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/datasetRecipeSummary"
+              }
+            }
+          }
+        },
+        "recordRecipeResults": {
+          "type": "object",
+          "description": "One recording's quality results from one recipe run.",
+          "required": [
+            "recipe_version",
+            "input_kind",
+            "profile",
+            "record_sha256",
+            "metrics",
+            "figures"
+          ],
+          "properties": {
+            "recipe_version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Version of the recipe that produced these results."
+            },
+            "input_kind": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/inputKind",
+              "description": "What the run read."
+            },
+            "profile": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/profile",
+              "description": "Which copy of the data the results describe."
+            },
+            "record_sha256": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/sha256",
+              "description": "SHA-256 of the bytes of the recording's signalJourney record these values were projected from."
+            },
+            "metrics": {
+              "type": "object",
+              "description": "Metrics keyed by metric name.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/metricName"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/definitions/qualityMetric.schema.json"
+              }
+            },
+            "figures": {
+              "type": "array",
+              "description": "Display figures for this recording.",
+              "items": {
+                "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/figure"
+              }
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/inputProfilePairing"
+            }
+          ],
+          "additionalProperties": false
+        },
+        "datasetRecipeSummary": {
+          "type": "object",
+          "description": "The dataset quality control summary from one recipe run.",
+          "required": [
+            "recipe_version",
+            "dataset_version",
+            "input_kind",
+            "profile",
+            "record_sha256",
+            "counts",
+            "distributions",
+            "observed_range",
+            "not_processed",
+            "not_processed_truncated"
+          ],
+          "properties": {
+            "recipe_version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Version of the recipe that produced this summary."
+            },
+            "dataset_version": {
+              "anyOf": [
+                {
+                  "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dataset version the run processed; null when unversioned."
+            },
+            "input_kind": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/inputKind",
+              "description": "What the run read."
+            },
+            "profile": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/profile",
+              "description": "Which copy of the data the summary describes."
+            },
+            "record_sha256": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/sha256",
+              "description": "SHA-256 of the bytes of the dataset-level signalJourney record this summary was derived from."
+            },
+            "counts": {
+              "$ref": "nsc:/definitions/checkpointCounts.schema.json",
+              "description": "Recordings passed, failed, skipped and discovered by the run."
+            },
+            "distributions": {
+              "type": "object",
+              "description": "Distribution of each metric over the recordings that passed, keyed by metric name. Bins are [e_i, e_i+1), the last bin closed.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/metricName"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/distribution"
+              }
+            },
+            "observed_range": {
+              "type": "object",
+              "description": "Lowest and highest value of each metric observed across the recordings that passed (for example good channels, good data, brain components), keyed by metric name. Not a metric's bounds, which is the valid range its plugin declares.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/metricName"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/range"
+              }
+            },
+            "not_processed": {
+              "type": "array",
+              "maxItems": 200,
+              "description": "Recordings that failed or were skipped, at most 200.",
+              "items": {
+                "$ref": "nsc:/extensions/dataQuality.schema.json#/$defs/notProcessed"
+              }
+            },
+            "not_processed_truncated": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of not-processed recordings left out of not_processed by its cap."
+            }
+          },
+          "allOf": [
+            {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/inputProfilePairing"
+            }
+          ],
+          "additionalProperties": false
+        },
+        "figure": {
+          "type": "object",
+          "description": "A display figure. Size caps and the rule that time-series figures are raster only are enforced by signalJourney's nemar namespace, not here.",
+          "required": [
+            "location",
+            "format",
+            "size",
+            "sha256",
+            "caption",
+            "plugin"
+          ],
+          "properties": {
+            "location": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/relativeLocation",
+              "description": "Path of the figure inside the run's product; the same string as its signalJourney outputTargets location."
+            },
+            "format": {
+              "type": "string",
+              "enum": [
+                "png",
+                "svg",
+                "webp"
+              ],
+              "description": "Image format; must match the location's extension."
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Size of the figure file in bytes."
+            },
+            "sha256": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/sha256",
+              "description": "SHA-256 of the figure file's bytes."
+            },
+            "caption": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "description": "Caption shown with the figure."
+            },
+            "plugin": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/plugin",
+              "description": "The plugin that produced the figure."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "format": {
+                    "const": "png"
+                  }
+                },
+                "required": [
+                  "format"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "string",
+                    "pattern": "\\.png$(?!\n)"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "format": {
+                    "const": "svg"
+                  }
+                },
+                "required": [
+                  "format"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "string",
+                    "pattern": "\\.svg$(?!\n)"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "type": "object",
+                "properties": {
+                  "format": {
+                    "const": "webp"
+                  }
+                },
+                "required": [
+                  "format"
+                ]
+              },
+              "then": {
+                "type": "object",
+                "properties": {
+                  "location": {
+                    "type": "string",
+                    "pattern": "\\.webp$(?!\n)"
+                  }
+                }
+              }
+            }
+          ],
+          "additionalProperties": false
+        },
+        "distribution": {
+          "type": "object",
+          "description": "Summary of one metric's values over the recordings that passed.",
+          "required": [
+            "n",
+            "min",
+            "median",
+            "max",
+            "histogram"
+          ],
+          "properties": {
+            "n": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of values summarized."
+            },
+            "min": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Smallest value; null when n is 0."
+            },
+            "median": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Median value; null when n is 0."
+            },
+            "max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Largest value; null when n is 0."
+            },
+            "histogram": {
+              "type": "object",
+              "description": "Fixed-edge histogram of the values.",
+              "required": [
+                "edges",
+                "counts",
+                "underflow",
+                "overflow"
+              ],
+              "properties": {
+                "edges": {
+                  "type": "array",
+                  "minItems": 2,
+                  "items": {
+                    "type": "number"
+                  },
+                  "description": "Bin edges, ascending."
+                },
+                "counts": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "description": "Count per bin; one fewer than the edges."
+                },
+                "underflow": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Values below the first edge."
+                },
+                "overflow": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Values above the last edge."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "notProcessed": {
+          "type": "object",
+          "description": "A recording the run did not process to the end.",
+          "required": [
+            "path",
+            "status",
+            "code"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/relativeLocation",
+              "description": "BIDS-relative path of the recording."
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "failed",
+                "skipped"
+              ],
+              "description": "Whether the recording failed or was skipped."
+            },
+            "code": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/failureCode",
+              "description": "The recording's first failure or skip code."
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/qualityMetric.schema.json",
+      "title": "Quality Metric",
+      "description": "One quality metric a plugin computed for a recording. Plugin manifests (nemar-cli shared/contract) declare each metric output with this shape.",
+      "type": "object",
+      "required": [
+        "value",
+        "unit",
+        "description",
+        "plugin"
+      ],
+      "properties": {
+        "value": {
           "type": [
             "number",
             "null"
           ],
-          "description": "Overall quality score (0-1 scale).",
-          "minimum": 0,
-          "maximum": 1
+          "description": "The metric's value; null when it could not be computed."
         },
-        "quality_flags": {
-          "type": "array",
-          "description": "List of quality flags or issues identified.",
-          "items": {
-            "type": "string"
-          }
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "description": "Unit of the value (for example %, dB, count)."
         },
-        "assessed_at": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "ISO 8601 timestamp of when the quality assessment was performed.",
-          "format": "date-time"
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "One-sentence description of what the metric measures."
+        },
+        "bounds": {
+          "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/range",
+          "description": "The valid range the plugin declares for this value (for example 0 to 100 for a percentage), not a quality threshold and not the range observed across recordings (that is the dataset summary's observed_range)."
+        },
+        "plugin": {
+          "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/plugin",
+          "description": "The plugin that produced this value."
         }
       },
-      "additionalProperties": true
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/checkpointCounts.schema.json",
+      "title": "Checkpoint Counts",
+      "description": "Counts of recordings at one processing checkpoint. While a run reports live, passed + failed + skipped <= total; once reconciled, passed + failed + skipped = total. Every checkpoint of one run has the same total (a recording that failed or was skipped earlier counts as skipped later). The writer enforces these invariants; the schema cannot. nemar-cli's live progress object reuses this shape.",
+      "type": "object",
+      "required": [
+        "passed",
+        "failed",
+        "skipped",
+        "total"
+      ],
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recordings that passed this checkpoint."
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recordings that failed at this checkpoint."
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recordings skipped at this checkpoint, including those that failed or were skipped at an earlier one."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recordings the run discovered."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/extensions/processing.schema.json",
+      "title": "Processing Extension",
+      "description": "Checkpoint outcomes of NEMAR recipe runs, written by the NEMAR backend. `level` selects the shape: `record` (per recipe, each checkpoint's outcome for one recording) or `dataset` (per recipe, the declared checkpoints and the reconciled counts). Not schema-enforced, enforced by the writer: after a recording's first non-passed checkpoint every later declared checkpoint is `skipped` with the same `code` and `step`; `declared_checkpoints` is the recipe version's registry list in order followed by `stored`, which the backend sets; the keys of `counts` equal `declared_checkpoints`; every checkpoint's counts sum to the same total.",
+      "type": "object",
+      "required": [
+        "level"
+      ],
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "record",
+            "dataset"
+          ],
+          "description": "Which document this entry belongs to: record (one recording) or dataset (the whole dataset)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "const": "record"
+              }
+            },
+            "required": [
+              "level"
+            ]
+          },
+          "then": {
+            "$ref": "nsc:/extensions/processing.schema.json#/$defs/record"
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "level": {
+                "const": "dataset"
+              }
+            },
+            "required": [
+              "level"
+            ]
+          },
+          "then": {
+            "$ref": "nsc:/extensions/processing.schema.json#/$defs/dataset"
+          }
+        }
+      ],
+      "additionalProperties": true,
+      "$defs": {
+        "record": {
+          "type": "object",
+          "description": "Record-level shape.",
+          "required": [
+            "recipes"
+          ],
+          "properties": {
+            "recipes": {
+              "type": "object",
+              "description": "Checkpoint outcomes per recipe, keyed by recipe id.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/recipeId"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/processing.schema.json#/$defs/recordRecipeOutcome"
+              }
+            }
+          }
+        },
+        "dataset": {
+          "type": "object",
+          "description": "Dataset-level shape.",
+          "required": [
+            "recipes"
+          ],
+          "properties": {
+            "recipes": {
+              "type": "object",
+              "description": "Declared checkpoints and reconciled counts per recipe, keyed by recipe id.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/recipeId"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/processing.schema.json#/$defs/datasetRecipeCounts"
+              }
+            }
+          }
+        },
+        "recordRecipeOutcome": {
+          "type": "object",
+          "description": "One recording's checkpoint outcomes from one recipe run.",
+          "required": [
+            "recipe_version",
+            "checkpoints"
+          ],
+          "properties": {
+            "recipe_version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Version of the recipe that ran."
+            },
+            "checkpoints": {
+              "type": "object",
+              "minProperties": 1,
+              "description": "Outcome per checkpoint, keyed by checkpoint name.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/checkpointName"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/extensions/processing.schema.json#/$defs/checkpointOutcome"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "checkpointOutcome": {
+          "type": "object",
+          "description": "A recording's outcome at one checkpoint. A passed checkpoint has no code or step; a failed or skipped one carries its code.",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "skipped"
+              ],
+              "description": "Whether the recording passed, failed or was skipped at this checkpoint."
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/failureCode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Failure or skip code (the recording's first code, carried to later skipped checkpoints); null when passed."
+            },
+            "step": {
+              "anyOf": [
+                {
+                  "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/stepId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The recipe step that failed; null when passed or unknown."
+            }
+          },
+          "if": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "null"
+              },
+              "step": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "datasetRecipeCounts": {
+          "type": "object",
+          "description": "A dataset's checkpoint counts from one recipe run, reconciled from the run's recordings table.",
+          "required": [
+            "recipe_version",
+            "declared_checkpoints",
+            "counts"
+          ],
+          "properties": {
+            "recipe_version": {
+              "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/version",
+              "description": "Version of the recipe that ran."
+            },
+            "declared_checkpoints": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "description": "The recipe version's checkpoints in order, followed by stored.",
+              "items": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/checkpointName"
+              }
+            },
+            "counts": {
+              "type": "object",
+              "minProperties": 1,
+              "description": "Reconciled counts per checkpoint, keyed by checkpoint name.",
+              "propertyNames": {
+                "$ref": "nsc:/definitions/processingTypes.schema.json#/$defs/checkpointName"
+              },
+              "additionalProperties": {
+                "$ref": "nsc:/definitions/checkpointCounts.schema.json"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
     },
     {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1949,6 +2990,215 @@
         }
       },
       "additionalProperties": true
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/core/record.schema.json",
+      "title": "Record Metadata",
+      "description": "Per-data-file metadata for an individual recording within a neuroimaging dataset. A data file is a primary recording (e.g., .set, .edf, .vhdr) along with its BIDS sidecar context. Each record has its own modality (required) and can override dataset-level signal properties via signal_properties.",
+      "type": "object",
+      "required": [
+        "dataset",
+        "bids_relpath",
+        "modality"
+      ],
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "description": "Envelope field: schema version (present when validated through root schema)."
+        },
+        "doc_type": {
+          "type": "string",
+          "description": "Envelope field: document type (present when validated through root schema)."
+        },
+        "dataset": {
+          "type": "string",
+          "description": "Parent dataset identifier (foreign key to dataset.dataset_id).",
+          "pattern": "^[a-z]{2}[0-9]+$"
+        },
+        "data_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Human-readable name for this data file (e.g., 'ds002718_sub-004_task-FaceRecognition_eeg.set')."
+        },
+        "bids_relpath": {
+          "type": "string",
+          "description": "BIDS-compliant relative path within the dataset (e.g., 'sub-004/eeg/sub-004_task-FaceRecognition_eeg.set')."
+        },
+        "modality": {
+          "type": "string",
+          "description": "Recording modality for this file (e.g., 'EEG', 'MEG', 'MRI', 'iEEG', 'EMG'). Required per record; not inherited from dataset."
+        },
+        "datatype": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "BIDS datatype directory (e.g., 'eeg', 'meg', 'anat', 'func')."
+        },
+        "suffix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "BIDS filename suffix (e.g., 'eeg', 'meg', 'bold', 'T1w')."
+        },
+        "file_extension": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "File extension including the leading dot (e.g., '.set', '.edf', '.vhdr', '.fif')."
+        },
+        "entities": {
+          "$ref": "nsc:/definitions/bidsEntities.schema.json"
+        },
+        "signal_properties": {
+          "$ref": "nsc:/definitions/inheritable.schema.json"
+        },
+        "signal_summary": {
+          "$ref": "nsc:/definitions/signalSummary.schema.json"
+        },
+        "provenance": {
+          "$ref": "nsc:/definitions/recordProvenance.schema.json"
+        },
+        "extensions": {
+          "$ref": "nsc:/extensions/extensionsContainer.schema.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/bidsEntities.schema.json",
+      "title": "BIDS Entities",
+      "description": "Standard Brain Imaging Data Structure (BIDS) entities parsed from the file path.",
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Subject label (e.g., '004', 'NDARAC589YMB')."
+        },
+        "session": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Session label (e.g., 'pre', '01')."
+        },
+        "task": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Task label (e.g., 'FaceRecognition', 'rest')."
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Run label (e.g., '1', '01')."
+        },
+        "acquisition": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Acquisition label (e.g., 'full', 'lowres')."
+        },
+        "space": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Space label (e.g., 'MNI152NLin2009cAsym', 'T1w')."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/signalSummary.schema.json",
+      "title": "Signal Summary",
+      "description": "Summary of the recording signal properties. Keeps only aggregate info in core; per-channel details go in extensions. Signal properties that follow BIDS inheritance (sampling_frequency, reference, power_line_frequency) are in inheritable.schema.json instead.",
+      "type": "object",
+      "properties": {
+        "nchans": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Total number of channels.",
+          "minimum": 0
+        },
+        "ntimes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Number of time points (samples) in the recording.",
+          "minimum": 0
+        },
+        "recording_duration": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Total recording duration in seconds.",
+          "minimum": 0
+        },
+        "channel_type_counts": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Count of channels by type (e.g., {'EEG': 64, 'EOG': 2, 'ECG': 1}).",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/recordProvenance.schema.json",
+      "title": "Record Provenance",
+      "description": "Record-level timestamps tracking when a record was digested, created, and last modified.",
+      "type": "object",
+      "properties": {
+        "digested_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ISO 8601 timestamp of when this record was ingested/digested into the system.",
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ISO 8601 timestamp of when this record was first created.",
+          "format": "date-time"
+        },
+        "modified_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ISO 8601 timestamp of last modification to this record.",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }

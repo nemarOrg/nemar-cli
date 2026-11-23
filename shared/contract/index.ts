@@ -6,7 +6,7 @@
  * this whole directory lifts verbatim into a standalone @nemar/contract package
  * (follow-up: publish to npm + emit OpenAPI/JSON-Schema at api.nemar.org).
  *
- * The dataset shape conforms to neuroschema v0.4.1 (NEUROSCHEMA_VERSION),
+ * The dataset shape conforms to neuroschema v0.5.0 (NEUROSCHEMA_VERSION),
  * enforced against the vendored JSON Schema in the contract tests.
  */
 
@@ -56,3 +56,9 @@ export * from "./compute-partner-request.js";
 // the request and response shapes a runner and the Worker exchange. Its JSON Schema is shared byte for
 // byte with nemarOrg/nemar-process; the words shared with the job model are in `../compute-state.ts`.
 export * from "./compute-runner.js";
+// The live progress object `nemar.progress.v1` a pipeline job reports while it runs (ADR 0134, epic
+// #2324 phase 2). Its JSON Schema is copied byte for byte by nemarOrg/nemar-process.
+export * from "./compute-progress.js";
+// The quality plugin manifest `nemar.plugin-manifest.v1` (ADR 0134, epic #2324 phase 2). Its JSON Schema
+// is copied byte for byte by nemarOrg/nemar-process.
+export * from "./plugin-manifest.js";

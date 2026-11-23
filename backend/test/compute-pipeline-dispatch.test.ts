@@ -507,7 +507,17 @@ describe("a result that does not carry the tuple it was dispatched with", () => 
 describe("the log line", () => {
   const base: PipelineCronResult = {
     outcome: "ran",
-    synced: { examined: 0, succeeded: 0, failed: 0, linked: 0, later: 0, errored: 0 },
+    synced: {
+      examined: 0,
+      succeeded: 0,
+      failed: 0,
+      linked: 0,
+      later: 0,
+      errored: 0,
+      reconciled: 0,
+      reconcile_later: 0,
+      reconcile_errored: 0,
+    },
     today: 0,
     dispatched: 0,
     recipes: [{ recipe: "nemar-floor", dispatched: 0, skipped: null, stopped_by: null }],
@@ -541,5 +551,19 @@ describe("the log line", () => {
     });
     expect(errored?.level).toBe("error");
     expect(errored?.line).toContain("synced_errored=1");
+  });
+
+  test("reconciliation that could not decide is a warning, and one that threw an error (MUTATION: leave either out)", () => {
+    const synced = base.synced as NonNullable<typeof base.synced>;
+    const later = pipelineDispatchLogLine({ ...base, synced: { ...synced, reconcile_later: 3 } });
+    expect(later?.level).toBe("warn");
+    expect(later?.line).toContain("synced_reconcile_later=3");
+    expect(later?.line).not.toContain("synced_reconcile_errored");
+    const errored = pipelineDispatchLogLine({
+      ...base,
+      synced: { ...synced, reconcile_errored: 2 },
+    });
+    expect(errored?.level).toBe("error");
+    expect(errored?.line).toContain("synced_reconcile_errored=2");
   });
 });

@@ -117,10 +117,10 @@ export const DERIVATIVE_PROMOTE_AUDIT_ACTION = "compute.derivative.promoted";
 export const DERIVATIVE_SYNC_AUDIT_ACTION = "compute.derivatives.sync";
 
 /** The recipe's dataset record is at most 256 KB; the read bound is the stamp sync's own. */
-const RECORD_READ_MAX_BYTES = 512 * 1024;
+export const RECORD_READ_MAX_BYTES = 512 * 1024;
 
 /** The recordings table of a dataset of 25,000 stores is a few megabytes; this is a bound, not a size. */
-const TABLE_READ_MAX_BYTES = 32 * 1024 * 1024;
+export const TABLE_READ_MAX_BYTES = 32 * 1024 * 1024;
 
 /** The most JSON the record's `process` block may be for the description to carry it. */
 const PROCESS_BLOCK_MAX_BYTES = 16 * 1024;

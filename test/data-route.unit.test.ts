@@ -941,7 +941,8 @@ describe("buildDatasetMetadata", () => {
       latestManifest: null,
       githubOrg: "nemarDatasets",
     });
-    expect(out.schema_version).toBe("0.4.1");
+    // neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2): the deliberate minor bump.
+    expect(out.schema_version).toBe("0.5.0");
     expect(out.doc_type).toBe("dataset");
     expect(out.dataset_id).toBe("nm099999");
     expect(out.source).toBe("nemar");

@@ -137,7 +137,7 @@ const URL_RE = /^https?:\/\/[^\s]+$/;
 const JOB_TOKEN_RE = /^[A-Za-z0-9_-]{16,256}$/;
 
 /**
- * The header the launcher sends its per-job token in, to the bundle, outputs and complete routes (never a
+ * The header the launcher sends its per-job token in, to the bundle, outputs, complete and progress routes (never a
  * URL). A WIRE CONTRACT with the launcher in nemar-process: changing the word breaks every launcher, so
  * it is declared once, here, and `compute-contract.unit.test.ts` pins its spelling.
  */
@@ -246,7 +246,7 @@ export const LaunchSpecSchema = z
     env: launchEnvSchema,
     resources: z.object({ gpus: safeInt(0, 8) }).strict(),
     limits: z.object({ max_files: safeInt(1, 1_000_000), max_total_bytes: safeInt(1) }).strict(),
-    /** The per-job token, sent in `X-Compute-Job-Token` to the bundle, outputs and complete routes. */
+    /** The per-job token, sent in `X-Compute-Job-Token` to the bundle, outputs, complete and progress routes. */
     job_token: z.string().regex(JOB_TOKEN_RE),
   })
   .strict()
