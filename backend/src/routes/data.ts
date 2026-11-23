@@ -30,6 +30,7 @@ import {
   type DatasetVersionRow,
   type ManifestDigest,
   PUBLIC_DATASET_VERSIONS_SQL,
+  type PipelineDocumentRow,
   type PublicManifestEntry,
   type ResolvedVersion,
   type VersionPickerEntry,
@@ -45,6 +46,7 @@ import {
   encodeBidsPath,
   findLastSeenVersionBy,
   pickResponseFormat,
+  pipelineExtensions,
   renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
@@ -1894,6 +1896,24 @@ async function metadataJsonHandler(
     manifestDigest,
     githubOrg: ORG_NAME,
   });
+
+  // The dataset-level neuroschema `processing` and `signalJourney` entries of NEMAR's pipeline (ADR 0134,
+  // epic #2324 phase 2), behind the same public gate as the rest of this document; never for a concealed
+  // deposit. A read that fails leaves them out and the document stands.
+  if (row.anonymous !== 1) {
+    try {
+      const docs = await env.DB.prepare(
+        "SELECT namespace, recipe, entry, final FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe",
+      )
+        .bind(datasetId)
+        .all<PipelineDocumentRow>();
+      Object.assign(payload.extensions, pipelineExtensions(docs.results ?? []));
+    } catch (err) {
+      console.warn(
+        `[data] metadata.json: pipeline documents unavailable dataset=${datasetId} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+    }
+  }
 
   return new Response(JSON.stringify(payload), {
     headers: {
