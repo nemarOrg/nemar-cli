@@ -76,7 +76,7 @@
     {
       "name": "floor_mixed",
       "recipe": "nemar-floor",
-      "total": 7,
+      "total": 8,
       "rows": [
         {
           "path": "sub-01/eeg/a.set",
@@ -119,6 +119,12 @@
           "status": "skipped",
           "code": "time_budget",
           "step": null
+        },
+        {
+          "path": "sub-08/eeg/h.set",
+          "status": "failed",
+          "code": "disk_error",
+          "step": "record"
         }
       ],
       "outcomes": [
@@ -240,26 +246,43 @@
             "code": "time_budget",
             "step": null
           }
+        ],
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "failed",
+            "code": "disk_error",
+            "step": "record"
+          }
         ]
       ],
       "counts": {
         "import": {
-          "passed": 3,
+          "passed": 4,
           "failed": 2,
           "skipped": 2,
-          "total": 7
+          "total": 8
         },
         "preprocess": {
-          "passed": 2,
+          "passed": 3,
           "failed": 1,
           "skipped": 4,
-          "total": 7
+          "total": 8
         },
         "quality": {
           "passed": 1,
-          "failed": 1,
+          "failed": 2,
           "skipped": 5,
-          "total": 7
+          "total": 8
         }
       },
       "failures": {
@@ -302,6 +325,12 @@
             "path": "sub-04/eeg/d.set",
             "code": "step_failed",
             "step": "qc",
+            "checkpoint": "quality"
+          },
+          {
+            "path": "sub-08/eeg/h.set",
+            "code": "disk_error",
+            "step": "record",
             "checkpoint": "quality"
           }
         ]
@@ -367,7 +396,7 @@
     {
       "name": "ica_mixed",
       "recipe": "nemar-ica",
-      "total": 6,
+      "total": 7,
       "rows": [
         {
           "path": "a.set",
@@ -404,6 +433,12 @@
           "status": "failed",
           "code": "step_failed",
           "step": "iclabel"
+        },
+        {
+          "path": "g.set",
+          "status": "failed",
+          "code": "internal_error",
+          "step": "record"
         }
       ],
       "outcomes": [
@@ -538,32 +573,54 @@
             "code": "step_failed",
             "step": "iclabel"
           }
+        ],
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "failed",
+            "code": "internal_error",
+            "step": "record"
+          }
         ]
       ],
       "counts": {
         "import": {
-          "passed": 6,
+          "passed": 7,
           "failed": 0,
           "skipped": 0,
-          "total": 6
+          "total": 7
         },
         "preprocess": {
-          "passed": 4,
+          "passed": 5,
           "failed": 2,
           "skipped": 0,
-          "total": 6
+          "total": 7
         },
         "ica": {
-          "passed": 2,
+          "passed": 3,
           "failed": 1,
           "skipped": 3,
-          "total": 6
+          "total": 7
         },
         "iclabel": {
           "passed": 1,
-          "failed": 1,
+          "failed": 2,
           "skipped": 4,
-          "total": 6
+          "total": 7
         }
       },
       "failures": {
@@ -602,8 +659,101 @@
             "code": "step_failed",
             "step": "iclabel",
             "checkpoint": "iclabel"
+          },
+          {
+            "path": "g.set",
+            "code": "internal_error",
+            "step": "record",
+            "checkpoint": "iclabel"
           }
         ]
+      }
+    },
+    {
+      "name": "floor_live_partial",
+      "recipe": "nemar-floor",
+      "total": 5,
+      "rows": [
+        {
+          "path": "sub-01/eeg/a.set",
+          "status": "succeeded",
+          "code": null,
+          "step": null
+        },
+        {
+          "path": "sub-02/eeg/b.set",
+          "status": "failed",
+          "code": "load_failed",
+          "step": "load"
+        }
+      ],
+      "outcomes": [
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          }
+        ],
+        [
+          {
+            "status": "failed",
+            "code": "load_failed",
+            "step": "load"
+          },
+          {
+            "status": "skipped",
+            "code": "load_failed",
+            "step": "load"
+          },
+          {
+            "status": "skipped",
+            "code": "load_failed",
+            "step": "load"
+          }
+        ]
+      ],
+      "counts": {
+        "import": {
+          "passed": 1,
+          "failed": 1,
+          "skipped": 3,
+          "total": 5
+        },
+        "preprocess": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 4,
+          "total": 5
+        },
+        "quality": {
+          "passed": 1,
+          "failed": 0,
+          "skipped": 4,
+          "total": 5
+        }
+      },
+      "failures": {
+        "import": [
+          {
+            "path": "sub-02/eeg/b.set",
+            "code": "load_failed",
+            "step": "load",
+            "checkpoint": "import"
+          }
+        ],
+        "preprocess": [],
+        "quality": []
       }
     }
   ]

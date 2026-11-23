@@ -157,11 +157,20 @@ export interface ComputeRecipe {
   checkpoints: readonly RecipeCheckpoint[];
 }
 
+/** A checkpoint a recipe may declare: a standard checkpoint other than `stored`. */
+export type DeclarableCheckpoint = Exclude<(typeof STANDARD_CHECKPOINTS)[number], "stored">;
+
 /** One checkpoint a recipe version declares and the recipe steps that count against it. */
 export interface RecipeCheckpoint {
-  checkpoint: string;
+  checkpoint: DeclarableCheckpoint;
   steps: readonly string[];
 }
+
+/**
+ * The step a recipe's recordings table names when writing the recording's own record failed, after the
+ * last step: it counts against the last declared checkpoint (ADR 0134, owner decision of 2026-11-22).
+ */
+export const RECORD_STEP = "record";
 
 /**
  * The standard checkpoints, in the order a recipe declares the ones it has (ADR 0134 decision 2), and
@@ -190,7 +199,7 @@ const FLOOR_PREPROCESS_STEPS = Object.freeze([
   "bad_windows",
 ] as const);
 
-const checkpoint = (name: string, steps: readonly string[]): RecipeCheckpoint =>
+const checkpoint = (name: DeclarableCheckpoint, steps: readonly string[]): RecipeCheckpoint =>
   Object.freeze({ checkpoint: name, steps: Object.freeze([...steps]) });
 
 /**
@@ -263,11 +272,16 @@ export function declaredCheckpoints(recipe: Pick<ComputeRecipe, "checkpoints">):
   return [...recipe.checkpoints.map((c) => c.checkpoint), STORED_CHECKPOINT];
 }
 
-/** The checkpoint a step of a recipe counts against, or null for a step the recipe does not declare. */
+/**
+ * The checkpoint a step of a recipe counts against, or null for a step the recipe does not declare. The
+ * step `record` counts against the last declared checkpoint.
+ */
 export function checkpointOfStep(
   recipe: Pick<ComputeRecipe, "checkpoints">,
   step: string,
-): string | null {
+): DeclarableCheckpoint | null {
+  if (step === RECORD_STEP)
+    return recipe.checkpoints[recipe.checkpoints.length - 1]?.checkpoint ?? null;
   return recipe.checkpoints.find((c) => c.steps.includes(step))?.checkpoint ?? null;
 }
 

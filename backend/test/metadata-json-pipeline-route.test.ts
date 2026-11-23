@@ -4,9 +4,10 @@
  * real bun:sqlite D1 carrying every production migration. The documents are seeded with SQL the table
  * accepts; the seeded datasets have no version row, so the handler reaches no bucket.
  *
- * What is pinned: a final `processing` entry and a `signalJourney` link are served under `extensions`,
- * and the document's extensions validate against the vendored neuroschema 0.5.0 extensions container; a `processing`
- * entry that is not final is not served; a dataset with no documents has neither key; a private dataset
+ * What is pinned: the stored (final) `processing` entry and `signalJourney` link are served under
+ * `extensions`; a run reporting now shows an `in_progress` link worked out on read, in front of the stored
+ * link, which is never replaced; the document's extensions validate against the vendored neuroschema 0.5.0
+ * extensions container; a dataset with no documents has neither key; a private dataset
  * and a concealed deposit get nothing new (404, and no pipeline keys); an entry that does not parse is
  * left out.
  */
@@ -40,16 +41,28 @@ function seed(id: string, over: { visibility?: string; anonymous?: number } = {}
   );
 }
 
-function document(
-  id: string,
-  namespace: string,
-  entry: unknown,
-  final = 1,
-  recipe = "nemar-floor",
-) {
+function document(id: string, namespace: string, entry: unknown, recipe = "nemar-floor") {
   db.run(
-    "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry, final) VALUES (?, ?, ?, 7, ?, ?)",
-    [id, namespace, recipe, typeof entry === "string" ? entry : JSON.stringify(entry), final],
+    "INSERT INTO compute_pipeline_documents (dataset_id, namespace, recipe, stamp_id, entry) VALUES (?, ?, ?, 7, ?)",
+    [id, namespace, recipe, typeof entry === "string" ? entry : JSON.stringify(entry)],
+  );
+}
+
+/** A dispatched stamp of a run that is reporting now (its run row, not reconciled), or one reconciled. */
+function reporting(id: string, recipeVersion = "1.0.0", reconciled = false) {
+  db.run(
+    `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, input)
+     VALUES (?, 'v1.0.0', 'nemar-floor', ?, 'eegprep@0.5.0', 1, 'dispatched', 'job_0123456789abcdef01234567', 'bids')`,
+    [id, recipeVersion],
+  );
+  const stamp = (
+    db.query("SELECT MAX(id) AS id FROM compute_pipeline_stamps").get() as { id: number }
+  ).id;
+  db.run(
+    reconciled
+      ? "INSERT INTO compute_pipeline_progress_runs (stamp_id, job_id, reports, reconciled_at, outcome) VALUES (?, 'job_0123456789abcdef01234567', 1, datetime('now'), 'reconciled')"
+      : "INSERT INTO compute_pipeline_progress_runs (stamp_id, job_id, reports, reported_at) VALUES (?, 'job_0123456789abcdef01234567', 1, datetime('now'))",
+    [stamp],
   );
 }
 
@@ -75,6 +88,7 @@ async function get(id: string) {
   const res = await app.request(`/${id}/metadata.json`, {}, env());
   return {
     status: res.status,
+    // biome-ignore lint/suspicious/noExplicitAny: the document is read field by field
     body: (res.status === 200 ? await res.json() : null) as Record<string, any> | null,
   };
 }
@@ -100,21 +114,35 @@ describe("pipeline extensions in metadata.json", () => {
     if (!validateExtensions(body?.extensions)) throw new Error(formatAjvErrors(validateExtensions));
   });
 
-  test("a processing entry that is not final is not served; an in_progress link is (MUTATION: serve any processing row)", async () => {
+  test("a reporting run shows in_progress in front of the last completed link, which stays stored (MUTATION: store live links)", async () => {
     seed("nm000502");
-    document("nm000502", "processing", PROCESSING, 0);
-    document(
-      "nm000502",
-      "signalJourney",
-      { ...LINK, processing_status: "in_progress", location: null, sha256: null, sj_version: null },
-      0,
-    );
+    document("nm000502", "processing", PROCESSING);
+    document("nm000502", "signalJourney", LINK);
+    reporting("nm000502", "1.0.1");
     const { body } = await get("nm000502");
-    expect(body?.extensions).not.toHaveProperty("processing");
-    expect(body?.extensions.signalJourney.recipes["nemar-floor"].processing_status).toBe(
-      "in_progress",
-    );
+    expect(body?.extensions.signalJourney.recipes["nemar-floor"]).toEqual({
+      recipe_version: "1.0.1",
+      processing_status: "in_progress",
+      location: null,
+      sha256: null,
+      sj_version: null,
+    });
+    expect(body?.extensions.processing.recipes["nemar-floor"]).toEqual(PROCESSING);
     if (!validateExtensions(body?.extensions)) throw new Error(formatAjvErrors(validateExtensions));
+    const stored = db
+      .query(
+        "SELECT entry FROM compute_pipeline_documents WHERE dataset_id = 'nm000502' AND namespace = 'signalJourney'",
+      )
+      .get() as { entry: string };
+    expect(JSON.parse(stored.entry)).toEqual(LINK);
+  });
+
+  test("a run that is no longer reporting (reconciled) shows its final link, not in_progress", async () => {
+    seed("nm000507");
+    document("nm000507", "signalJourney", LINK);
+    reporting("nm000507", "1.0.0", true);
+    const { body } = await get("nm000507");
+    expect(body?.extensions.signalJourney.recipes["nemar-floor"]).toEqual(LINK);
   });
 
   test("a dataset with no documents has neither key, and an entry that does not parse is left out", async () => {
@@ -123,7 +151,7 @@ describe("pipeline extensions in metadata.json", () => {
     expect(Object.keys(body?.extensions ?? {})).toEqual(["nemar"]);
     seed("nm000504");
     document("nm000504", "signalJourney", "{not json");
-    document("nm000504", "signalJourney", LINK, 1, "nemar-ica");
+    document("nm000504", "signalJourney", LINK, "nemar-ica");
     const second = await get("nm000504");
     expect(Object.keys(second.body?.extensions.signalJourney.recipes)).toEqual(["nemar-ica"]);
   });
@@ -135,6 +163,7 @@ describe("pipeline extensions in metadata.json", () => {
     seed("nm000506", { anonymous: 1 });
     document("nm000506", "processing", PROCESSING);
     document("nm000506", "signalJourney", LINK);
+    reporting("nm000506");
     const concealed = await get("nm000506");
     expect(concealed.status).toBe(200);
     expect(concealed.body?.extensions).not.toHaveProperty("processing");

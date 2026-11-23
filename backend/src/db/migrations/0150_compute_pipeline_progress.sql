@@ -7,7 +7,9 @@
 -- checkpoint, and, once the run ends, the counts reconciled from the recordings table it uploaded, which
 -- are what the backend writes into neuroschema (`compute_pipeline_documents`).
 --
--- `compute_pipeline_progress_runs`, one row per pipeline stamp that reported or was reconciled. It is the
+-- `compute_pipeline_progress_runs`, one row per pipeline stamp that reported or was reconciled. Several
+-- stamps can share a job (a `tuple_mismatch` hold stamp carries the job of the stamp it holds for), so
+-- the job index is not unique; reconciliation skips hold stamps. It is the
 -- GATE of every write: a report is one batch whose first statement upserts this row only when the job is
 -- in an accepted state, the run is not reconciled and the last report is at least 50 seconds old, and sets
 -- a fresh random `write_id`; every later statement of the batch is guarded on that `write_id`, so a refused
@@ -16,6 +18,9 @@
 -- when the run is reconciled (`reconciled`) or found unreconcilable (`table_missing`, `table_unreadable`,
 -- `no_checkpoint_map`, `recipe_unknown`); after that no report moves a count. `disagreement` is 1 when the
 -- last live counts ran ahead of, or did not total to, the reconciled ones (a broken reporter).
+-- `recipe_version` and `declared` (the declared checkpoints in order, `stored` last, as a JSON list) are
+-- written when the run is reconciled, so the `stored` row resolves from what the run declared and never
+-- from a registry that has moved on.
 --
 -- `compute_pipeline_progress`, one row per stamp and checkpoint: the four counts, the capped failure list
 -- (JSON, validated in code before it is written), the time of the last report, the last live counts once
@@ -23,11 +28,13 @@
 -- and whether its live counts disagreed. A reconciled row sums to its total; a live one never exceeds it.
 -- The `stored` row of a succeeded run waits (`reconciled` 0) until the derivative store decides its copy.
 --
--- `compute_pipeline_documents`, one row per dataset, namespace and recipe: the dataset-level neuroschema
--- `processing` and `signalJourney` entries the backend serves in `/<id>/metadata.json`. The entry is JSON
--- built only by shared/compute-checkpoints.ts from registry values and counts; no text a job wrote reaches
--- it. The row of the latest stamp wins (a link describes the latest run). `final` is 1 when the entry can
--- no longer change.
+-- `compute_pipeline_documents`, one row per dataset, namespace and recipe: the FINAL dataset-level
+-- neuroschema `processing` and `signalJourney` entries of the latest ended run, which `/<id>/metadata.json`
+-- serves. Nothing live is stored here: the `in_progress` link of a running job is worked out when the
+-- document is read, from its dispatched stamp and its run row, so a run that ends without a link never
+-- leaves one standing and a new run never erases the last completed link. The entry is JSON built only by
+-- shared/compute-checkpoints.ts from registry values and counts; no text a job wrote reaches it. The row of
+-- the newest stamp wins.
 --
 -- `stalled` is not stored: it is worked out on read (shared/compute-checkpoints.ts `pipelineRunStatus`),
 -- so no schedule writes it.
@@ -60,14 +67,19 @@ CREATE TABLE compute_pipeline_progress_runs (
       'no_checkpoint_map', 'recipe_unknown')),
   disagreement INTEGER NOT NULL DEFAULT 0 CONSTRAINT compute_pipeline_progress_runs_disagreement
     CHECK (typeof(disagreement) = 'integer' AND disagreement IN (0, 1)),
+  recipe_version TEXT CONSTRAINT compute_pipeline_progress_runs_recipe_version CHECK (
+    recipe_version IS NULL OR (length(recipe_version) BETWEEN 1 AND 64
+      AND recipe_version NOT GLOB '*[^0-9A-Za-z._+-]*')),
+  declared TEXT CONSTRAINT compute_pipeline_progress_runs_declared CHECK (
+    declared IS NULL OR (length(declared) BETWEEN 2 AND 512 AND substr(declared, 1, 1) = '[')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   -- A run is reconciled exactly when it has an outcome.
   CONSTRAINT compute_pipeline_progress_runs_outcome_iff CHECK (
     (reconciled_at IS NULL) = (outcome IS NULL))
 );
 
--- One run per job.
-CREATE UNIQUE INDEX compute_pipeline_progress_runs_job ON compute_pipeline_progress_runs (job_id);
+-- A run from its job (not unique: a hold stamp shares its job).
+CREATE INDEX compute_pipeline_progress_runs_job ON compute_pipeline_progress_runs (job_id);
 
 -- The runs reconciliation has not decided.
 CREATE INDEX compute_pipeline_progress_runs_open ON compute_pipeline_progress_runs (stamp_id)
@@ -132,8 +144,6 @@ CREATE TABLE compute_pipeline_documents (
     typeof(stamp_id) = 'integer' AND stamp_id > 0),
   entry TEXT NOT NULL CONSTRAINT compute_pipeline_documents_entry CHECK (
     length(entry) BETWEEN 2 AND 65536 AND substr(entry, 1, 1) = '{'),
-  final INTEGER NOT NULL DEFAULT 0 CONSTRAINT compute_pipeline_documents_final CHECK (
-    typeof(final) = 'integer' AND final IN (0, 1)),
   written_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (dataset_id, namespace, recipe)
 );

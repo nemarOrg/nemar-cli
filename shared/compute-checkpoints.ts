@@ -13,10 +13,17 @@
  * the registry and the counts give; no text from a job reaches one.
  */
 
-import { type RecipeCheckpoint, STORED_CHECKPOINT } from "./compute-recipes.js";
+import {
+  type PipelineStampState,
+  RECORD_STEP,
+  type RecipeCheckpoint,
+  STORED_CHECKPOINT,
+} from "./compute-recipes.js";
+import type { ComputeState } from "./compute-state.js";
 import {
   PROGRESS_FAILURE_CODE_RE,
   PROGRESS_MAX_FAILURES,
+  PROGRESS_MAX_RECORDINGS,
   PROGRESS_PATH_RE,
   PROGRESS_REPORT_SECONDS,
   PROGRESS_STALLED_CADENCES,
@@ -46,15 +53,26 @@ export interface RecordingRow {
   step: string | null;
 }
 
-export type TableRead = { ok: true; rows: RecordingRow[] } | { ok: false; reason: string };
+/** Why a recordings table cannot be read. */
+export type TableReadProblem =
+  | "empty_table"
+  | "missing_column"
+  | "row_width"
+  | "bad_status"
+  | "missing_code"
+  | "too_many_rows";
+
+export type TableRead =
+  | { ok: true; rows: RecordingRow[] }
+  | { ok: false; reason: TableReadProblem };
 
 const NA = "n/a";
 const naToNull = (v: string): string | null => (v === NA || v === "" ? null : v);
 
 /**
  * Read a recordings table (tab-separated, a header row, `n/a` for an empty cell; CRLF tolerated). A
- * missing column, a row of the wrong width, a status that is not one of the three, or a failed or
- * skipped row with no code is refused with a fixed reason.
+ * missing column, a row of the wrong width, a status that is not one of the three, a failed or skipped
+ * row with no code, or more rows than `PROGRESS_MAX_RECORDINGS` is refused with a fixed reason.
  */
 export function parseRecordingsTable(text: string): TableRead {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -67,6 +85,7 @@ export function parseRecordingsTable(text: string): TableRead {
     if (i < 0) return { ok: false, reason: "missing_column" };
     index[column] = i;
   }
+  if (lines.length - 1 > PROGRESS_MAX_RECORDINGS) return { ok: false, reason: "too_many_rows" };
   const rows: RecordingRow[] = [];
   for (const line of lines.slice(1)) {
     const cells = line.split("\t");
@@ -112,6 +131,9 @@ const fit = (value: string | null, re: RegExp): string | null =>
  *   claimed passed that the table does not support), skipped after it.
  * - skipped with no step (or an unknown one): skipped everywhere.
  * - skipped at a mapped step: passed before that step's checkpoint, skipped from it on.
+ *
+ * The step `record` (the recipe writing its own record after its last step) counts against the last
+ * declared checkpoint: everything before it passed.
  */
 export function recordingOutcomes(
   row: RecordingRow,
@@ -120,7 +142,11 @@ export function recordingOutcomes(
   const passed: CheckpointOutcome = { status: "passed", code: null, step: null };
   if (row.status === "succeeded") return checkpoints.map(() => ({ ...passed }));
   const at =
-    row.step === null ? -1 : checkpoints.findIndex((c) => c.steps.includes(row.step ?? ""));
+    row.step === null
+      ? -1
+      : row.step === RECORD_STEP
+        ? checkpoints.length - 1
+        : checkpoints.findIndex((c) => c.steps.includes(row.step ?? ""));
   const code = fit(row.code, PROGRESS_FAILURE_CODE_RE);
   const step = at >= 0 ? fit(row.step, PROGRESS_STEP_RE) : null;
   const first = row.status === "failed" ? Math.max(at, 0) : at;
@@ -218,7 +244,7 @@ export function progressProblem(
   progress: Progress,
   checkpoints: readonly RecipeCheckpoint[],
 ): ProgressProblem | null {
-  const declared = checkpoints.map((c) => c.checkpoint);
+  const declared: readonly string[] = checkpoints.map((c) => c.checkpoint);
   const keys = Object.keys(progress.counts);
   if (keys.length !== declared.length || !declared.every((d) => keys.includes(d))) {
     return "checkpoints_differ";
@@ -270,18 +296,25 @@ export type PipelineRunStatus = (typeof PIPELINE_RUN_STATUSES)[number];
 /** A run with no report for this long shows as stalled: three report cadences. */
 export const PIPELINE_STALLED_SECONDS = PROGRESS_STALLED_CADENCES * PROGRESS_REPORT_SECONDS;
 
-/** The job states in which a pipeline job has not started running (`../compute-state.ts`). */
-const WAITING_JOB_STATES: readonly string[] = ["created", "uploading", "submitted", "queued"];
+/** The job states in which a pipeline job has not started running (`./compute-state.ts`). */
+const WAITING_JOB_STATES: readonly ComputeState[] = ["created", "uploading", "submitted", "queued"];
+
+/** The job states in which a silent run counts as stalled. */
+export const STALLABLE_JOB_STATES: readonly ComputeState[] = ["submitted", "queued", "running"];
 
 /**
- * What a run shows, from its stamp, its job and its last report. `stalled` is a live job that is
- * `unreported`, or one whose last report is older than {@link PIPELINE_STALLED_SECONDS}; a job that
- * never reported is `waiting` or `running`, never stalled (it may not follow the contract, ADR 0134
- * decision 8). Never stored: it is worked out each time it is read.
+ * What a run shows, from its stamp, its job and its last report. Never stored: it is worked out each time
+ * it is read, and `PIPELINE_STALLED_SQL` in the backend states the same rule.
+ *
+ * - An ended stamp: `finished` or `failed`. A dispatched stamp whose job is terminal: the job's end.
+ * - `stalled`: an `unreported` job, or a `submitted`, `queued` or `running` job whose last report is
+ *   older than {@link PIPELINE_STALLED_SECONDS}. A job that never reported is never stalled (it may not
+ *   follow the contract, ADR 0134 decision 8), and an `archiving` job is uploading, so `running`.
+ * - `waiting`: a job that has not started and never reported; otherwise `running`.
  */
 export function pipelineRunStatus(input: {
-  stampState: string;
-  jobState: string | null;
+  stampState: PipelineStampState;
+  jobState: ComputeState | null;
   /** Seconds since the epoch of the last report, or null. */
   reportedAt: number | null;
   /** Seconds since the epoch. */
@@ -289,14 +322,19 @@ export function pipelineRunStatus(input: {
 }): PipelineRunStatus {
   if (input.stampState === "succeeded") return "finished";
   if (input.stampState === "failed" || input.stampState === "refused") return "failed";
-  if (input.jobState === "unreported") return "stalled";
-  if (input.reportedAt !== null && input.now - input.reportedAt > PIPELINE_STALLED_SECONDS) {
+  const job = input.jobState;
+  if (job === "finished") return "finished";
+  if (job === "failed" || job === "cancelled") return "failed";
+  if (job === "unreported") return "stalled";
+  if (
+    job !== null &&
+    STALLABLE_JOB_STATES.includes(job) &&
+    input.reportedAt !== null &&
+    input.now - input.reportedAt > PIPELINE_STALLED_SECONDS
+  ) {
     return "stalled";
   }
-  if (
-    input.reportedAt === null &&
-    (input.jobState === null || WAITING_JOB_STATES.includes(input.jobState))
-  ) {
+  if (input.reportedAt === null && (job === null || WAITING_JOB_STATES.includes(job))) {
     return "waiting";
   }
   return "running";
@@ -311,19 +349,22 @@ export interface ProcessingDatasetEntry {
   counts: Record<string, ProgressCheckpointCounts>;
 }
 
-/** Build the dataset-level `processing` entry of a recipe run from its reconciled counts. */
+/**
+ * Build the dataset-level `processing` entry of a recipe run from its reconciled counts, over the
+ * declared checkpoints in order (`stored` last), or null when a declared checkpoint has no counts.
+ */
 export function processingDatasetEntry(input: {
   recipeVersion: string;
-  checkpoints: readonly RecipeCheckpoint[];
-  counts: Record<string, ProgressCheckpointCounts>;
-}): ProcessingDatasetEntry {
-  const declared = [...input.checkpoints.map((c) => c.checkpoint), STORED_CHECKPOINT];
+  declared: readonly string[];
+  counts: Readonly<Record<string, ProgressCheckpointCounts | undefined>>;
+}): ProcessingDatasetEntry | null {
   const counts: Record<string, ProgressCheckpointCounts> = {};
-  for (const d of declared) {
+  for (const d of input.declared) {
     const c = input.counts[d];
+    if (!c) return null;
     counts[d] = { passed: c.passed, failed: c.failed, skipped: c.skipped, total: c.total };
   }
-  return { recipe_version: input.recipeVersion, declared_checkpoints: declared, counts };
+  return { recipe_version: input.recipeVersion, declared_checkpoints: [...input.declared], counts };
 }
 
 /** The words of {@link processingEntryProblem}. */

@@ -552,4 +552,18 @@ describe("the log line", () => {
     expect(errored?.level).toBe("error");
     expect(errored?.line).toContain("synced_errored=1");
   });
+
+  test("reconciliation that could not decide is a warning, and one that threw an error (MUTATION: leave either out)", () => {
+    const synced = base.synced as NonNullable<typeof base.synced>;
+    const later = pipelineDispatchLogLine({ ...base, synced: { ...synced, reconcile_later: 3 } });
+    expect(later?.level).toBe("warn");
+    expect(later?.line).toContain("synced_reconcile_later=3");
+    expect(later?.line).not.toContain("synced_reconcile_errored");
+    const errored = pipelineDispatchLogLine({
+      ...base,
+      synced: { ...synced, reconcile_errored: 2 },
+    });
+    expect(errored?.level).toBe("error");
+    expect(errored?.line).toContain("synced_reconcile_errored=2");
+  });
 });

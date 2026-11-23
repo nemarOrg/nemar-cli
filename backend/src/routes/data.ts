@@ -23,6 +23,7 @@ import {
   MAX_SERVABLE_CHUNKS,
   resolveAnnexDelivery,
 } from "../services/chunked-delivery";
+import { liveSignalJourneyLinks } from "../services/compute-pipeline-progress";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -1899,15 +1900,17 @@ async function metadataJsonHandler(
 
   // The dataset-level neuroschema `processing` and `signalJourney` entries of NEMAR's pipeline (ADR 0134,
   // epic #2324 phase 2), behind the same public gate as the rest of this document; never for a concealed
-  // deposit. A read that fails leaves them out and the document stands.
+  // deposit. The stored entries are final; a reporting run's `in_progress` link is worked out here. A read
+  // that fails leaves them out and the document stands.
   if (row.anonymous !== 1) {
     try {
       const docs = await env.DB.prepare(
-        "SELECT namespace, recipe, entry, final FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe",
+        "SELECT namespace, recipe, entry FROM compute_pipeline_documents WHERE dataset_id = ?1 ORDER BY recipe",
       )
         .bind(datasetId)
         .all<PipelineDocumentRow>();
-      Object.assign(payload.extensions, pipelineExtensions(docs.results ?? []));
+      const live = await liveSignalJourneyLinks(env.DB, datasetId);
+      Object.assign(payload.extensions, pipelineExtensions(docs.results ?? [], live));
     } catch (err) {
       console.warn(
         `[data] metadata.json: pipeline documents unavailable dataset=${datasetId} class=${err instanceof Error ? err.name : typeof err}`,

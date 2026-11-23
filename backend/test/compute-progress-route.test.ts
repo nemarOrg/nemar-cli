@@ -3,7 +3,7 @@
  * router over real migrations: a real `nemar-floor` pipeline job dispatched to the Tapis stand-in, and the
  * token read out of the launch specification Tapis RECEIVED, as the launcher reads it.
  *
- * What is pinned: an accepted report stores rows, the run row and an in_progress link; every refusal of the
+ * What is pinned: an accepted report stores rows and the run row and no document; every refusal of the
  * door is the same 404 and writes nothing; a job that is not a dispatched pipeline job on Tapis in an
  * accepted state is `bad_state`; a body over the cap is 413 and a body that breaks the schema or does not
  * fit the recipe is 400, none writing anything; a second report within the floor is 429 with Retry-After and
@@ -17,6 +17,7 @@ import type { Server } from "bun";
 import { PROGRESS_FORMAT, type Progress } from "../../shared/contract/compute-progress";
 import { submitComputeJob } from "../src/services/compute-lifecycle";
 import { dispatchPipelineJob } from "../src/services/compute-pipeline";
+import { liveSignalJourneyLinks } from "../src/services/compute-pipeline-progress";
 import type { Bindings } from "../src/types/bindings";
 import {
   type LifecycleFixture,
@@ -136,7 +137,7 @@ const setState = (jobId: string, state: string) =>
   env.DB.prepare("UPDATE compute_jobs SET state = ?1 WHERE id = ?2").bind(state, jobId).run();
 
 describe("an accepted report", () => {
-  test("stores the counts, the run row and an in_progress link", async () => {
+  test("stores the counts and the run row, and no document", async () => {
     const { jobId, token, stampId, datasetId } = await tapisJob();
     const res = await report(jobId, { token });
     expect(res.status).toBe(200);
@@ -152,12 +153,16 @@ describe("an accepted report", () => {
       .bind(stampId)
       .first<Loose>();
     expect(run).toMatchObject({ job_id: jobId, checkpoint: "import", reports: 1 });
-    const link = await env.DB.prepare(
-      "SELECT entry FROM compute_pipeline_documents WHERE dataset_id = ?1 AND namespace = 'signalJourney'",
+    // Nothing live is a document: the in_progress link is worked out on read.
+    const docs = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM compute_pipeline_documents WHERE dataset_id = ?1",
     )
       .bind(datasetId)
-      .first<{ entry: string }>();
-    expect(JSON.parse(link?.entry ?? "{}").processing_status).toBe("in_progress");
+      .first<{ n: number }>();
+    expect(docs?.n).toBe(0);
+    expect(await liveSignalJourneyLinks(env.DB, datasetId)).toMatchObject({
+      "nemar-floor": { processing_status: "in_progress" },
+    });
   });
 
   test("is accepted in submitted, queued and running, since D1 lags Tapis (MUTATION: running only)", async () => {
@@ -244,6 +249,20 @@ describe("refusals after the door", () => {
       expect([res.status, res.body.code]).toEqual([400, "invalid_spec"]);
     }
     expect(await anyRows()).toBe(0);
+  });
+
+  test("a database fault reading the stamp is 503 storage_unavailable with a fixed-word log (M3)", async () => {
+    const { jobId, token } = await tapisJob();
+    // A real fault, not a stand-in: the stamps table is moved away and back.
+    await env.DB.prepare("ALTER TABLE compute_pipeline_stamps RENAME TO stamps_away").run();
+    let res: Awaited<ReturnType<typeof report>> | undefined;
+    const lines = await logged(async () => {
+      res = await report(jobId, { token });
+    });
+    await env.DB.prepare("ALTER TABLE stamps_away RENAME TO compute_pipeline_stamps").run();
+    expect([res?.status, res?.body.code]).toEqual([503, "storage_unavailable"]);
+    expect(lines.some((l) => l.includes("progress_stamp_read_failed"))).toBe(true);
+    for (const line of lines) expect(line).not.toContain(token);
   });
 
   test("with compute off it is 503 and writes nothing", async () => {

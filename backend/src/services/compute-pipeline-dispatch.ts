@@ -43,8 +43,9 @@
  * 450. One dispatch is about 25 (the dataset and version reads, the claim, the job's batch and records, the
  * submit), and the tick dispatches at most 10, so 250, whatever the owner's daily cap says; the queue and
  * cap reads add about 10. The sync then reconciles live progress (ADR 0134): at most 10 ended runs at about 4
- * reads and one batch each, and at most 10 pending `stored` rows at about 3 each, so about 60 more. The bound
- * is therefore about 570 in the usual case and 770 at the worst, counting
+ * reads and one batch each, and at most 10 pending `stored` rows at about 3 each, with the candidate and
+ * pending reads, so about 80 more. The bound is therefore about 590 in the usual case and 790 at the worst,
+ * counting
  * every D1 and R2 binding call as a subrequest although whether they count is UNVERIFIED, against an
  * allowance of 1,000 that the other daily jobs share. The cap is a ceiling and not a rate, and the pilot of
  * twenty datasets takes two days. Raising the bound needs a measurement first.
@@ -228,7 +229,12 @@ export function pipelineDispatchLogLine(
 ): { level: "info" | "warn" | "error"; line: string } | null {
   if (r.outcome === "off") return null;
   const skipped = r.recipes.filter((x) => x.skipped !== null || x.stopped_by !== null);
-  const syncTrouble = r.synced !== null && (r.synced.later > 0 || r.synced.errored > 0);
+  const syncTrouble =
+    r.synced !== null &&
+    (r.synced.later > 0 ||
+      r.synced.errored > 0 ||
+      r.synced.reconcile_later > 0 ||
+      r.synced.reconcile_errored > 0);
   if (r.dispatched === 0 && r.errors.length === 0 && skipped.length === 0 && !syncTrouble) {
     return null;
   }
@@ -242,6 +248,13 @@ export function pipelineDispatchLogLine(
           // Only when there is something to say, so a clean run's line is unchanged.
           ...(r.synced.later > 0 ? [`synced_later=${r.synced.later}`] : []),
           ...(r.synced.errored > 0 ? [`synced_errored=${r.synced.errored}`] : []),
+          // Live progress reconciliation (ADR 0134): only when it could not decide or threw.
+          ...(r.synced.reconcile_later > 0
+            ? [`synced_reconcile_later=${r.synced.reconcile_later}`]
+            : []),
+          ...(r.synced.reconcile_errored > 0
+            ? [`synced_reconcile_errored=${r.synced.reconcile_errored}`]
+            : []),
         ]
       : []),
     ...r.recipes.flatMap((x) => [
@@ -253,7 +266,7 @@ export function pipelineDispatchLogLine(
   const drift = r.recipes.some((x) => x.skipped === "registry_drift");
   // A sync that threw is as loud as any other error; one that could not decide yet is a warning.
   const level =
-    r.errors.length > 0 || (r.synced?.errored ?? 0) > 0
+    r.errors.length > 0 || (r.synced?.errored ?? 0) > 0 || (r.synced?.reconcile_errored ?? 0) > 0
       ? "error"
       : drift || syncTrouble || r.recipes.some((x) => x.stopped_by)
         ? "warn"

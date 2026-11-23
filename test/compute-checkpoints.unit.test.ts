@@ -25,7 +25,7 @@ import {
   recordingOutcomes,
   signalJourneyLink,
 } from "../shared/compute-checkpoints";
-import { findRecipe } from "../shared/compute-recipes";
+import { RECORD_STEP, declaredCheckpoints, findRecipe } from "../shared/compute-recipes";
 import { PROGRESS_FORMAT, type Progress } from "../shared/contract/compute-progress";
 import { NEUROSCHEMA_VERSION } from "../shared/contract/index";
 import {
@@ -97,6 +97,12 @@ describe("parseRecordingsTable", () => {
     expect(parseRecordingsTable(`${header.join("\t")}\n`)).toEqual({ ok: true, rows: [] });
   });
 
+  test("refuses a table of more rows than PROGRESS_MAX_RECORDINGS", () => {
+    const head = "path\tstatus\tcode\tstep\n";
+    const text = head + "a\tsucceeded\tn/a\tn/a\n".repeat(1_000_001);
+    expect(parseRecordingsTable(text)).toEqual({ ok: false, reason: "too_many_rows" });
+  });
+
   test.each([
     ["empty_table", ""],
     ["missing_column", `${header.filter((c) => c !== "step").join("\t")}\n`],
@@ -142,6 +148,18 @@ describe("recordingOutcomes", () => {
     expect(
       recordingOutcomes(row("a", "skipped", "ica_ineligible", "ica"), I).map((o) => o.status),
     ).toEqual(["passed", "passed", "skipped", "skipped"]);
+  });
+
+  test("the step `record` counts against the last declared checkpoint; a step-less fault against the first", () => {
+    expect(RECORD_STEP).toBe("record");
+    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), F)).toBe("quality");
+    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), I)).toBe("iclabel");
+    expect(recordingOutcomes(row("a", "failed", "disk_error", "record"), F)).toEqual([
+      { status: "passed", code: null, step: null },
+      { status: "passed", code: null, step: null },
+      { status: "failed", code: "disk_error", step: "record" },
+    ]);
+    expect(firstCheckpointOf(row("a", "failed", "disk_error", null), I)).toBe("import");
   });
 
   test("nemar-ica's re-run qc counts against preprocess", () => {
@@ -283,46 +301,33 @@ describe("liveDisagrees", () => {
 
 describe("pipelineRunStatus", () => {
   const now = 1_800_000_000;
+  type In = Parameters<typeof pipelineRunStatus>[0];
+  const c = (stampState: In["stampState"], jobState: In["jobState"], age: number | null) => ({
+    stampState,
+    jobState,
+    reportedAt: age === null ? null : now - age,
+  });
   test.each([
-    [
-      "succeeded stamp",
-      { stampState: "succeeded", jobState: "finished", reportedAt: now - 9999 },
-      "finished",
-    ],
-    ["failed stamp", { stampState: "failed", jobState: "failed", reportedAt: null }, "failed"],
-    ["refused stamp", { stampState: "refused", jobState: null, reportedAt: null }, "failed"],
-    [
-      "unreported job",
-      { stampState: "dispatched", jobState: "unreported", reportedAt: now - 10 },
-      "stalled",
-    ],
-    [
-      "report 179 s old",
-      { stampState: "dispatched", jobState: "running", reportedAt: now - 179 },
-      "running",
-    ],
-    [
-      "report 180 s old",
-      { stampState: "dispatched", jobState: "running", reportedAt: now - 180 },
-      "running",
-    ],
-    [
-      "report 181 s old",
-      { stampState: "dispatched", jobState: "running", reportedAt: now - 181 },
-      "stalled",
-    ],
-    [
-      "never reported, queued",
-      { stampState: "dispatched", jobState: "queued", reportedAt: null },
-      "waiting",
-    ],
-    [
-      "never reported, running",
-      { stampState: "dispatched", jobState: "running", reportedAt: null },
-      "running",
-    ],
-    ["no job yet", { stampState: "dispatched", jobState: null, reportedAt: null }, "waiting"],
-  ])("%s", (_label, input, expected) => {
+    ["succeeded stamp", c("succeeded", "finished", 9999), "finished"],
+    ["failed stamp", c("failed", "failed", null), "failed"],
+    ["refused stamp", c("refused", null, null), "failed"],
+    ["dispatched stamp, finished job", c("dispatched", "finished", 9999), "finished"],
+    ["dispatched stamp, failed job", c("dispatched", "failed", 9999), "failed"],
+    ["dispatched stamp, cancelled job", c("dispatched", "cancelled", null), "failed"],
+    ["unreported job", c("dispatched", "unreported", 10), "stalled"],
+    ["running, report 179 s old", c("dispatched", "running", 179), "running"],
+    ["running, report 180 s old", c("dispatched", "running", 180), "running"],
+    ["running, report 181 s old", c("dispatched", "running", 181), "stalled"],
+    ["queued, report 181 s old", c("dispatched", "queued", 181), "stalled"],
+    ["submitted, report 181 s old", c("dispatched", "submitted", 181), "stalled"],
+    ["archiving, report 999 s old", c("dispatched", "archiving", 999), "running"],
+    ["created, report 999 s old", c("dispatched", "created", 999), "running"],
+    ["never reported, queued", c("dispatched", "queued", null), "waiting"],
+    ["never reported, created", c("dispatched", "created", null), "waiting"],
+    ["never reported, running", c("dispatched", "running", null), "running"],
+    ["never reported, archiving", c("dispatched", "archiving", null), "running"],
+    ["no job yet", c("dispatched", null, null), "waiting"],
+  ] as Array<[string, Omit<In, "now">, string]>)("%s", (_label, input, expected) => {
     expect(pipelineRunStatus({ ...input, now })).toBe(
       expected as ReturnType<typeof pipelineRunStatus>,
     );
@@ -343,17 +348,29 @@ describe("neuroschema entries, validated against the vendored 0.5.0 bundle", () 
   ];
   const counts = countRecordings(rows, F);
   const stored = { passed: 1, failed: 0, skipped: 2, total: 3 };
-  const entry = processingDatasetEntry({
+  const built = processingDatasetEntry({
     recipeVersion: floor.version,
-    checkpoints: F,
+    declared: declaredCheckpoints(floor),
     counts: { ...counts, stored },
   });
+  if (built === null) throw new Error("entry");
+  const entry = built;
 
   test("the processing entry lists the declared checkpoints with stored and holds the writer's rules", () => {
     expect(entry.declared_checkpoints).toEqual(["import", "preprocess", "quality", "stored"]);
     expect(processingEntryProblem(entry)).toBeNull();
     const doc = { level: "dataset", recipes: { "nemar-floor": entry } };
     if (!nscProcessing(doc)) throw new Error(formatAjvErrors(nscProcessing));
+  });
+
+  test("a declared checkpoint with no counts builds no entry, and nothing throws", () => {
+    expect(
+      processingDatasetEntry({
+        recipeVersion: floor.version,
+        declared: declaredCheckpoints(floor),
+        counts: { import: counts.import, quality: counts.quality, stored },
+      }),
+    ).toBeNull();
   });
 
   test("processingEntryProblem refuses each broken copy", () => {
@@ -470,6 +487,7 @@ describe("the progress vectors file", () => {
         row("sub-05/eeg/e.bdf", "skipped", "unsupported_format", null),
         row("sub-06/eeg/f.set", "failed", "disk_error", null),
         row("sub-07/eeg/g.set", "skipped", "time_budget", null),
+        row("sub-08/eeg/h.set", "failed", "disk_error", "record"),
       ],
     },
     {
@@ -488,7 +506,17 @@ describe("the progress vectors file", () => {
         row("d.set", "skipped", "ica_ineligible", "ica"),
         row("e.set", "failed", "out_of_memory", "asr"),
         row("f.set", "failed", "step_failed", "iclabel"),
+        row("g.set", "failed", "internal_error", "record"),
       ],
+    },
+    {
+      name: "floor_live_partial",
+      recipe: "nemar-floor",
+      rows: [
+        row("sub-01/eeg/a.set", "succeeded", null, null),
+        row("sub-02/eeg/b.set", "failed", "load_failed", "load"),
+      ],
+      total: 5,
     },
   ];
   const computed = {

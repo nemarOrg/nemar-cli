@@ -193,7 +193,15 @@ export function registerComputeJobCallbackRoutes(router: Router): void {
     if (!(PROGRESS_TAPIS_STATES as readonly string[]).includes(job.state)) {
       return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
     }
-    const lookup = await stampForJob(c.env.DB, job.id);
+    let lookup: Awaited<ReturnType<typeof stampForJob>>;
+    try {
+      lookup = await stampForJob(c.env.DB, job.id);
+    } catch (err) {
+      console.error(
+        `[compute-job-callbacks] progress_stamp_read_failed job=${job.id} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+      return answer(c, COMPUTE_REFUSAL_STATUS.storage_unavailable, "storage_unavailable");
+    }
     if (!lookup.ok) return answer(c, COMPUTE_REFUSAL_STATUS.bad_state, "bad_state");
     if (progressProblem(parsed.data, lookup.stamp.checkpoints) !== null) {
       return answer(c, 400, "invalid_spec");

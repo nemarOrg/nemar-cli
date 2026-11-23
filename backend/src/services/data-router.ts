@@ -904,22 +904,24 @@ export interface NeuroschemaDataset {
   };
 }
 
-/** A stored dataset document of NEMAR's pipeline (migration 0150), as the route reads it. */
+/** A stored (final) dataset document of NEMAR's pipeline (migration 0150), as the route reads it. */
 export interface PipelineDocumentRow {
   namespace: string;
   recipe: string;
   entry: string;
-  final: number;
 }
 
 /**
- * The neuroschema `processing` and `signalJourney` extensions of a dataset from its stored pipeline
- * documents (ADR 0134, epic #2324 phase 2). A `processing` entry is served only once it is final (its
- * counts sum to its totals); a `signalJourney` link is served as it stands (`in_progress` while a run
- * reports). An entry that does not parse as a JSON object is left out. Each namespace is present only
- * when it has an entry.
+ * The neuroschema `processing` and `signalJourney` extensions of a dataset (ADR 0134, epic #2324 phase 2):
+ * the final entries of each recipe's latest ended run, and, for a recipe whose run is reporting now, the
+ * `in_progress` link worked out on read (`live`), which stands in front of the last final link without
+ * replacing it in storage. An entry that does not parse as a JSON object is left out. Each namespace is
+ * present only when it has an entry.
  */
-export function pipelineExtensions(rows: readonly PipelineDocumentRow[]): {
+export function pipelineExtensions(
+  rows: readonly PipelineDocumentRow[],
+  live: Readonly<Record<string, unknown>> = {},
+): {
   processing?: { level: "dataset"; recipes: Record<string, unknown> };
   signalJourney?: { recipes: Record<string, unknown> };
 } {
@@ -933,9 +935,10 @@ export function pipelineExtensions(rows: readonly PipelineDocumentRow[]): {
       continue;
     }
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
-    if (row.namespace === "processing" && row.final === 1) processing[row.recipe] = entry;
+    if (row.namespace === "processing") processing[row.recipe] = entry;
     if (row.namespace === "signalJourney") signalJourney[row.recipe] = entry;
   }
+  Object.assign(signalJourney, live);
   return {
     ...(Object.keys(processing).length > 0
       ? { processing: { level: "dataset" as const, recipes: processing } }

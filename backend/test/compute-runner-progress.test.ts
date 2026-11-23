@@ -7,21 +7,18 @@
  * What is pinned: an accepted report stores one row per declared checkpoint, the run row and the
  * `in_progress` signalJourney link; a second report within the floor renews the lease and stores nothing;
  * a report after the floor is stored; a report that does not fit the recipe renews the lease and stores
- * nothing; a progress that breaks its schema is `invalid_body` and renews nothing; an `uploading`
- * heartbeat's progress is ignored; a heartbeat of another runner stores nothing; the heartbeat's body may
- * carry the largest progress object.
+ * nothing; a progress that breaks its schema is `invalid_body` and renews nothing; only a `started`
+ * heartbeat's progress is stored; a heartbeat of another runner stores nothing; a schema-valid heartbeat of
+ * 16 KiB is read and one byte more is refused.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import {
-  PROGRESS_FORMAT,
-  PROGRESS_MAX_FAILURES,
-  type Progress,
-} from "../../shared/contract/compute-progress";
+import { PROGRESS_FORMAT, type Progress } from "../../shared/contract/compute-progress";
 import { RUNNER_PROTOCOL, RunnerClaimResponseSchema } from "../../shared/contract/compute-runner";
 import { computeRunnerRoutes } from "../src/routes/compute-runners";
 import { dispatchPipelineJob } from "../src/services/compute-pipeline";
+import { liveSignalJourneyLinks } from "../src/services/compute-pipeline-progress";
 import {
   exchangeRunnerSecret,
   registerRunner,
@@ -222,7 +219,7 @@ const ageReport = (stampId: number, seconds: number) =>
     .run();
 
 describe("progress on the heartbeat", () => {
-  test("an accepted report stores each declared checkpoint, the run row and an in_progress link (MUTATION: drop the per-checkpoint upsert)", async () => {
+  test("an accepted report stores each declared checkpoint and the run row, and no document (MUTATION: drop the per-checkpoint upsert)", async () => {
     const { r, jobId, leaseId, stampId, datasetId } = await claimed();
     const res = await beat(r, jobId, leaseId, "started", progress());
     expect(res.status).toBe(200);
@@ -244,15 +241,15 @@ describe("progress on the heartbeat", () => {
       reports: 1,
       reconciled_at: null,
     });
-    const link = await env.DB.prepare(
-      "SELECT entry, final FROM compute_pipeline_documents WHERE dataset_id = ?1 AND namespace = 'signalJourney' AND recipe = 'nemar-floor'",
+    // Nothing live is a document: the in_progress link is worked out on read.
+    const stored = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM compute_pipeline_documents WHERE dataset_id = ?1",
     )
       .bind(datasetId)
-      .first<{ entry: string; final: number }>();
-    expect(link?.final).toBe(0);
-    expect(JSON.parse(link?.entry ?? "{}")).toMatchObject({
-      processing_status: "in_progress",
-      location: null,
+      .first<{ n: number }>();
+    expect(stored?.n).toBe(0);
+    expect(await liveSignalJourneyLinks(env.DB, datasetId)).toMatchObject({
+      "nemar-floor": { processing_status: "in_progress", location: null },
     });
   });
 
@@ -305,11 +302,24 @@ describe("progress on the heartbeat", () => {
     expect(await rows(stampId)).toEqual([]);
   });
 
-  test("an uploading heartbeat's progress is ignored (MUTATION: accept progress in any phase)", async () => {
+  test("only a started heartbeat's progress is stored: with a cancel pending, the phase is the only difference (MUTATION: accept progress in any phase)", async () => {
+    // A cancel request keeps an `uploading` heartbeat from moving the job to `archiving`, so the job is
+    // `running` for both heartbeats and the phase alone decides.
     const { r, jobId, leaseId, stampId } = await claimed();
     expect((await beat(r, jobId, leaseId, "started")).status).toBe(200);
+    await env.DB.prepare(
+      "UPDATE compute_jobs SET cancel_requested_at = datetime('now') WHERE id = ?1",
+    )
+      .bind(jobId)
+      .run();
     expect((await beat(r, jobId, leaseId, "uploading", progress())).status).toBe(200);
+    const state = await env.DB.prepare("SELECT state FROM compute_jobs WHERE id = ?1")
+      .bind(jobId)
+      .first<{ state: string }>();
+    expect(state?.state).toBe("running");
     expect(await rows(stampId)).toEqual([]);
+    expect((await beat(r, jobId, leaseId, "started", progress())).status).toBe(200);
+    expect(await rows(stampId)).toHaveLength(3);
   });
 
   test("another runner's heartbeat with this job's lease stores nothing", async () => {
@@ -321,40 +331,21 @@ describe("progress on the heartbeat", () => {
     expect(await rows(stampId)).toEqual([]);
   });
 
-  test("the heartbeat body may carry the largest progress object, and no more than 16 KiB", async () => {
+  test("a schema-valid heartbeat just under 16 KiB is read, and one just over is refused (MUTATION: keep the 8 KiB cap, or lift the cap)", async () => {
     const { r, jobId, leaseId, stampId } = await claimed();
-    const failures = Array.from({ length: PROGRESS_MAX_FAILURES }, (_, i) => ({
-      path: `${"a".repeat(250)}${i}.set`.slice(-256),
-      code: "load_failed",
-      step: "load",
-      checkpoint: "import",
-    }));
-    const big = progress({
-      counts: {
-        ...progress().counts,
-        import: { passed: 0, failed: 10, skipped: 0, total: 10 },
-        preprocess: { passed: 0, failed: 0, skipped: 10, total: 10 },
-        quality: { passed: 0, failed: 0, skipped: 10, total: 10 },
-      },
-      failures,
-    });
-    const body = JSON.stringify({
-      job_id: jobId,
-      lease_id: leaseId,
-      phase: "started",
-      progress: big,
-    });
-    expect(body.length).toBeGreaterThan(2500);
-    expect((await post("/compute/runners/heartbeat", r.token, body)).status).toBe(200);
-    expect((await rows(stampId)).find((x) => x.checkpoint === "import")?.failed).toBe(10);
-    const tooBig = JSON.stringify({
-      job_id: jobId,
-      lease_id: leaseId,
-      phase: "started",
-      pad: "x".repeat(17_000),
-    });
-    expect((await post("/compute/runners/heartbeat", r.token, tooBig)).body.error).toBe(
-      "invalid_body",
-    );
+    // Whitespace inside the progress object pads a schema-valid body to an exact size.
+    const sized = (bytes: number) => {
+      const head = `{"job_id":"${jobId}","lease_id":"${leaseId}","phase":"started","progress":{`;
+      const tail = `${JSON.stringify(progress()).slice(1)}}`;
+      return head + " ".repeat(bytes - head.length - tail.length) + tail;
+    };
+    const under = sized(16_384);
+    expect(new TextEncoder().encode(under).length).toBe(16_384);
+    expect(JSON.parse(under).progress).toEqual(progress());
+    expect((await post("/compute/runners/heartbeat", r.token, under)).status).toBe(200);
+    expect(await rows(stampId)).toHaveLength(3);
+    const over = sized(16_385);
+    const res = await post("/compute/runners/heartbeat", r.token, over);
+    expect([res.status, res.body.error]).toEqual([400, "invalid_body"]);
   });
 });

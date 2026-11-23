@@ -21,6 +21,7 @@ import {
   RECIPE_INPUTS,
   RECIPE_INPUT_EXECUTOR,
   RECIPE_PRODUCT_DIR,
+  RECORD_STEP,
   type RecipeExecutor,
   type RecipeInput,
   STAMP_INPUT_FIELDS,
@@ -727,6 +728,11 @@ describe("checkpoint maps (ADR 0134)", () => {
     expect(new Set(mapped).size).toBe(mapped.length);
     for (const step of order) expect(checkpointOfStep(recipe, step)).not.toBeNull();
     expect(checkpointOfStep(recipe, "no_such_step")).toBeNull();
+    // `record`, the recipe writing its own record, is a trailing pseudo-step: the last checkpoint.
+    expect(mapped).not.toContain(RECORD_STEP);
+    expect(checkpointOfStep(recipe, RECORD_STEP)).toBe(
+      recipe.checkpoints[recipe.checkpoints.length - 1]?.checkpoint,
+    );
   });
 
   test("checkpoints follow the standard order, never name stored, and each has a step", () => {
@@ -753,7 +759,7 @@ describe("checkpoint maps (ADR 0134)", () => {
   test("the map belongs to the registry's version only", () => {
     const floor = findRecipe("nemar-floor");
     expect(recipeCheckpointMap("nemar-floor", floor?.version)).toBe(floor?.checkpoints ?? null);
-    expect(recipeCheckpointMap("nemar-floor", "1.0.0-b1")).toBeNull();
+    expect(recipeCheckpointMap("nemar-floor", `${floor?.version}-other`)).toBeNull();
     expect(recipeCheckpointMap("no-such-recipe", "1.0.0")).toBeNull();
     expect(recipeCheckpointMap(undefined, undefined)).toBeNull();
   });

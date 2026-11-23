@@ -4,7 +4,7 @@
  * the first is not proven.
  *
  * What is pinned: every CHECK refuses its violating row by name and accepts its valid one; a run row has
- * an outcome exactly when it is reconciled; one run per job; a progress row never counts past its total
+ * an outcome exactly when it is reconciled; two stamps may share a job (a hold stamp does); a progress row never counts past its total
  * and a reconciled one sums to it; live counts are whole or absent; a document's namespace is one of the
  * two; the primary keys hold; no column is named for a person; no foreign key; every GLOB is within D1's
  * 50 characters.
@@ -122,6 +122,9 @@ describe("compute_pipeline_progress_runs", () => {
       ["compute_pipeline_progress_runs_disagreement", { disagreement: 2 }],
       ["compute_pipeline_progress_runs_outcome_iff", { outcome: "reconciled" }],
       ["compute_pipeline_progress_runs_outcome_iff", { reconciled_at: NOW }],
+      ["compute_pipeline_progress_runs_recipe_version", { recipe_version: "1 0" }],
+      ["compute_pipeline_progress_runs_declared", { declared: "{}" }],
+      ["compute_pipeline_progress_runs_declared", { declared: `[${"x".repeat(600)}]` }],
     ];
     for (const [name, over] of cases) {
       expect(await insert(e, "compute_pipeline_progress_runs", run(over)), name).toMatch(
@@ -130,26 +133,31 @@ describe("compute_pipeline_progress_runs", () => {
     }
   });
 
-  onEveryEngine("valid values pass, and one run per job", async (e) => {
-    expect(
-      await insert(
-        e,
-        "compute_pipeline_progress_runs",
-        run({
-          checkpoint: "preprocess",
-          write_id: "a".repeat(32),
-          reported_at: NOW,
-          reports: 3,
-          reconciled_at: NOW,
-          outcome: "table_missing",
-          disagreement: 1,
-        }),
-      ),
-    ).toBeNull();
-    const job = jobId();
-    expect(await insert(e, "compute_pipeline_progress_runs", run({ job_id: job }))).toBeNull();
-    expect(await insert(e, "compute_pipeline_progress_runs", run({ job_id: job }))).toMatch(UNIQUE);
-  });
+  onEveryEngine(
+    "valid values pass, and two stamps may share a job (MUTATION: make the job index unique)",
+    async (e) => {
+      expect(
+        await insert(
+          e,
+          "compute_pipeline_progress_runs",
+          run({
+            checkpoint: "preprocess",
+            write_id: "a".repeat(32),
+            reported_at: NOW,
+            reports: 3,
+            reconciled_at: NOW,
+            outcome: "table_missing",
+            disagreement: 1,
+            recipe_version: "1.0.0-b1",
+            declared: '["import","stored"]',
+          }),
+        ),
+      ).toBeNull();
+      const job = jobId();
+      expect(await insert(e, "compute_pipeline_progress_runs", run({ job_id: job }))).toBeNull();
+      expect(await insert(e, "compute_pipeline_progress_runs", run({ job_id: job }))).toBeNull();
+    },
+  );
 });
 
 describe("compute_pipeline_progress", () => {
@@ -228,14 +236,15 @@ describe("compute_pipeline_progress", () => {
 });
 
 describe("compute_pipeline_documents", () => {
-  onEveryEngine("a valid row has final 0 by default", async (e) => {
+  onEveryEngine("a valid row has a write time, and the table holds no live flag", async (e) => {
     const row = doc();
     expect(await insert(e, "compute_pipeline_documents", row)).toBeNull();
     const [got] = await e.all<Row>(
-      "SELECT final FROM compute_pipeline_documents WHERE dataset_id = ?",
+      "SELECT * FROM compute_pipeline_documents WHERE dataset_id = ?",
       row.dataset_id,
     );
-    expect(got).toEqual({ final: 0 });
+    expect(typeof got?.written_at).toBe("string");
+    expect(Object.keys(got ?? {})).not.toContain("final");
   });
 
   onEveryEngine("each CHECK refuses its bad value by name", async (e) => {
@@ -246,7 +255,6 @@ describe("compute_pipeline_documents", () => {
       ["compute_pipeline_documents_stamp", { stamp_id: 0 }],
       ["compute_pipeline_documents_entry", { entry: "[]" }],
       ["compute_pipeline_documents_entry", { entry: `{${"x".repeat(65536)}}` }],
-      ["compute_pipeline_documents_final", { final: 2 }],
     ];
     for (const [name, over] of cases) {
       expect(await insert(e, "compute_pipeline_documents", doc(over)), name).toMatch(NAMED(name));
