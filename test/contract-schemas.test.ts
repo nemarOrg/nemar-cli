@@ -666,6 +666,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     // specification, the recipe's progress file and the results report are read by the launcher as they
     // come in; a mistyped key must be refused, not stripped. They have no response.
     "compute-local-launch.ts",
+    "compute-recipe-progress.ts",
   ]);
 
   const HEX = "a".repeat(64);
@@ -1121,6 +1122,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "PluginFigureSchema",
     "LocalLaunchSpecSchema",
     "LocalLaunchDatasetSchema",
+    "RecipeProgressSchema",
+    "RecipeCheckpointMapItemSchema",
+    "RecipeCheckpointMapSchema",
+    "RecipeProgressRunningSchema",
   ];
 
   /** The names a response schema must never be built from. */
@@ -1471,7 +1476,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   ];
 
   test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
-    expect(STRICT_NAMES).toHaveLength(23);
+    expect(STRICT_NAMES).toHaveLength(27);
     expect(IMPORT_PROBES.length).toBeGreaterThan(55);
     for (const [label, file, text, offends] of IMPORT_PROBES) {
       const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);

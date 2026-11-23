@@ -67,3 +67,4 @@ export * from "./plugin-manifest.js";
 // results report `nemar.results-report.v1`. Their JSON Schemas are copied byte for byte by
 // nemarOrg/nemar-process.
 export * from "./compute-local-launch.js";
+export * from "./compute-recipe-progress.js";
