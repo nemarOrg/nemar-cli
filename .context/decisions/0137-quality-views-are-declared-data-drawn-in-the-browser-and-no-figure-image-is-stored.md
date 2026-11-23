@@ -4,11 +4,11 @@
 **Date:** 2026-11-23
 **Owner:** Seyed Yahya Shirazi
 
-Partially supersedes [ADR 0134](0134-pipelines-report-checkpoints-live-and-quality-metrics-are-reviewed-plugins.md) where it names figures:
+Partially supersedes [ADR 0134](0134-pipelines-report-checkpoints-live-and-quality-metrics-are-reviewed-plugins.md) where it names figures or a floor value:
 its decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and its rejected alternative of array outputs;
 the word "figures" in its decision 1 now reads "views".
 Every other part of ADR 0134 stands.
-Refines [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) with the one route that reads a derivative's bytes.
+Refines [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) with the first route that serves a derivative's product files.
 
 ## Context
 
@@ -32,7 +32,7 @@ No file of nemar-process imports a plotting library; matplotlib stays only as a 
 **2. neuroschema owns the view vocabulary (0.6.0, breaking).**
 The record-level `dataQuality` replaces `figures` with `views`.
 A view declaration has a key, a namespaced `kind` with its own `kind_version`, a caption, a source (a plugin or a recipe, by name and version), a scope, parameters, and stored `data[]` (each with role, location, format, size, Secure Hash Algorithm 256 (SHA-256) digest, columns and dimensions), or `inputs[]` with a named, versioned `transform`, or both.
-An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest (`content_sha256`), which may be null only for a store input whose profile is `archive`.
+An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest (`content_sha256`), which may be null only when the view's derivative has profile `archive` (its decomposition read the archive copy).
 Kinds have two layers: five generic kinds (`nemar.table`, `nemar.lines`, `nemar.heatmap`, `nemar.histogram`, `nemar.sensor-field`), each with one renderer and one parity suite, and specific kinds that are presets over one of them (`nemar.spectrum`, `nemar.ic-maps`, `nemar.ic-classes`, `nemar.ic-activity`, `nemar.signal-window`).
 A renderer that does not know a kind or a version draws its base if it knows that, and otherwise shows the data as a table with a download; an unknown kind is never an error.
 Dimensions are an open vocabulary, each with coordinates, a unit and a type; `time`, `epoch`, `recording`, `subject`, `contact` and `sensor` are reserved names with fixed meanings.
@@ -45,11 +45,11 @@ A `qualityMetric` names exactly one producer, a plugin or a recipe.
 signalJourney records the derivation: each view file is an `outputTargets` entry of the step that wrote it, and the declarations sit in the record's `extensions.nemar.views`, which the backend projects into `dataQuality`.
 nemar-cli keeps the plugin manifest and the serving route and vendors the rest; nemar-process and the website copy what they use by digest.
 
-**3. The scalp map is NEMAR's own algorithm, `nemar.sensor-field.v1`, with eegprep as its reference, and no position is guessed silently.**
+**3. The scalp map is NEMAR's own algorithm, `nemar.sensor-field.v1`, with eegprep as its reference, and no position is guessed silently in the viewer or in any sensor-field view without a layout role.**
 neuroschema states it: the layout's theta and radius, EEGLAB's plotting and interpolation radii and squeeze, a 67-by-67 grid masked at the head radius, the biharmonic Green's function d²(ln d − 1) solved in double precision by lower-upper (LU) decomposition with partial pivoting, six interior contour levels, and symmetric limits for a diverging map.
 It also states what eegprep leaves implicit: sensors closer than 10⁻³ layout units are merged and their values averaged, and fewer than three usable sensors draw no map.
 eegprep at a pinned commit is the reference implementation.
-The website's renderer and a Python reference renderer in neuroschema are held to the same vectors: every cell within 10⁻⁶ of the reference map's range, and the same masked cells.
+The website's renderer and a Python reference renderer in neuroschema are held to the same vectors: every cell within 10⁻⁶ times the reference map's range, and the same masked cells.
 Montages with duplicate positions and with rank-deficient interpolation matrices are among the vectors.
 `nemar.sensor-layout.v1` (positions to layout) and `nemar.ic-activity.v1` are specified and tested the same way.
 `nemar.sensor-layout.v1` turns measured positions into a layout only from a coordinate system it knows by its BIDS name, and it never assumes one.
@@ -65,11 +65,12 @@ inferred positions are `template` positions, and the view says that they were in
 on a refusal no map is drawn and the view gives the reason.
 This holds for the signal viewer's live scalp map, which moves onto the same code, and for any sensor-field view that carries no layout role;
 the pipeline does not use it, and ICLabel still needs declared positions.
+A recipe's layout role records its `coordinate_system` (which may be `n/a`) and its `position_source`, so a view drawn from it says where its positions came from.
 
 **4. A plugin returns data; the runner checks it and writes it.**
 The plugin manifest's `outputs.views` replaces `outputs.figures`; `nemar.plugin-manifest.v1` is edited in place, because it has never been published or pinned outside this epic.
 A plugin returns metrics and arrays or mappings, never a file or a drawing.
-The runner checks each role against its declared dimensions (`sensor` equals the good channels in layout order, `component` the rank, `class` ICLabel's classes, and a frequency axis rises strictly to a recorded upper bound), caps each dimension at 1,024 entries and each file at 4 mebibytes, checks a JavaScript Object Notation (JSON) role against its kind's schema, and writes the files with the recipes' deterministic writers.
+The runner checks each role against its declared dimensions (`sensor` equals the good channels in layout order, `component` the rank, `class` ICLabel's classes, and a frequency axis rises strictly to a recorded upper bound), caps each dimension at 1,024 entries, each role at 262,144 cells and each file at 4 mebibytes, checks a JavaScript Object Notation (JSON) role against its kind's schema, and writes the files with the recipes' deterministic writers.
 A plugin whose output fails a check is skipped (`plugin_failed`) and the recording is kept.
 A plugin declares at least one metric or view (`plugin_without_output`).
 A plugin's metric is named `<plugin>:<name>`, which the manifest contract enforces (`metric_not_prefixed`);
@@ -80,21 +81,22 @@ The plan hash holds each plugin's identity (name, version and `tree_sha256`, the
 **5. The first views replace ADR 0134's first figure plugins.**
 nemar-ica declares its own views: component maps from its mixing matrix and a new `_chanlocs.tsv`, activations computed in the browser (decision 9), and the two-second window of good samples nearest the middle of the recording, opened in the signal viewer.
 nemar-quality writes the ICLabel class summary behind the class histogram (`_icclasses.json`), and nemar-spectrum writes the power spectrum (`_spectrum.tsv`).
-The spectrum is Welch's method with two-second Hamming windows at 50% overlap, in decibels relative to 1 µV²/Hz, up to 125 Hz or the Nyquist frequency when that is lower;
-the method, window, overlap, unit and upper bound are recorded as the view's parameters, and the bound is the same for every run so that spectra compare.
+The spectrum is Welch's method with two-second Hamming windows at 50% overlap, in decibels relative to 1 µV²/Hz.
+The method, window, overlap, unit and upper bound are recorded as the view's parameters;
+the bound is 125 Hz unless the recording's Nyquist frequency is lower, and the recorded bound says which, so spectra compare where their bounds agree.
 nemar-ica runs its decomposition on the Zarr serving copy, the copy a browser reads, so that activations drawn from it show what was decomposed (nemarOrg/nemar-process#79).
 On that path the floor runs only for its decisions (good channels and bad windows), and the decomposition reads the store's digital values for the floor's good channels, rounded as `nemar.store-content.v1` rounds them (fl(fl(d·scale) + offset), each step in double precision), converted to eegprep's unit and average-referenced over those channels.
 It applies no ASR, no filter and no repair of bad windows.
 The record states this as `decomposition_input`: the source, the store with its content digest, the channels, the reference, the unit, and that no ASR or filter was applied;
-a decomposition of the archive copy records its own source, ASR and filters.
+a decomposition of the archive copy records its own source, channels, unit, reference, ASR and filters.
 
 **6. View files are checked by digest, and what that proves is stated.**
 View files live in the run's product in the derivatives store, never in the serving copy or a dataset repository.
-The record and the projection carry each file's size and SHA-256; the server hashes a file again before it serves it, and the browser checks the SHA-256 before it parses.
+The record and the projection carry each file's size and SHA-256; the server hashes a file again when it reads it from storage, and the browser checks the SHA-256 before it parses.
 These checks catch corruption in storage, cache or transit; they do not protect against a dishonest backend, which serves both the files and their digests.
 
 **7. One route serves view files, under the dataset's current read rule.**
-The server resolves the derivative to its dataset and checks that dataset's current visibility, status and concealment on every request, before any cache.
+The server resolves the derivative to its dataset and checks that dataset's current visibility, status and anonymity (ADR 0065) on every request, before any cache.
 Public pages read only `catalog` and `published` derivatives, and of those the newest by `stored_at`, with a note naming the dataset version it was computed on;
 `canary` is for administrators; a private dataset is read only through the caller's own authorization (ADR 0124).
 The route serves only files that a stored derivative's record declares for a view, at most 4 mebibytes each.
@@ -102,7 +104,7 @@ Public responses are cached in a browser for at most 300 seconds, carry a per-da
 private and administrator responses are not cached.
 An expired derivative or a missing file is answered with a fixed word, never a server error.
 No address into the derivatives bucket is signed and no file is copied to a public bucket.
-A view file is tens to hundreds of kilobytes, which keeps serving it through the Worker within principle 9 of ADR 0136.
+A view file is from tens of kilobytes to about 1.5 megabytes at 256 channels, under the 4 mebibyte cap, which keeps serving it through the Worker within principle 9 of ADR 0136.
 
 **8. A recording's quality is read when asked; D1 holds dataset summaries only.**
 The backend projects a recording's `dataQuality` document from its signalJourney record in the derivatives store on request, and caches it by the record's digest.
@@ -125,22 +127,24 @@ Exports are made only on request (PNG at two to four times in a light print pale
 Once its data arrive, one view at 128 channels draws within 100 milliseconds (its first maps within 50) and at 256 channels within 300, on a mid-range laptop;
 a miss is fixed in the renderer, and a binary format needs a new ADR and a measurement showing that text is the cause.
 
-**10. Homes.** These rows replace ADR 0134's figure rows; the rest of its table stands.
+**10. Homes.** These rows replace two rows of ADR 0134's table, "Quality results per recording" and "NEMAR's rules for signalJourney records"; the rest of its table stands.
+Of the second row, the figure formats and size caps are gone, metric naming moves to the plugin manifest, and the no-samples rule and NEMAR's other rules for signalJourney records stay in signalJourney's `nemar` namespace.
 
 | Artifact | Home |
 |---|---|
 | View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0, vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
 | A recording's views and metrics | neuroschema `dataQuality`, record level, projected on request from the signalJourney record |
 | The derivation of each view file | the signalJourney record: the writing step's `outputTargets` and `extensions.nemar.views` |
-| Plugin `outputs.views` and the metric prefix rule | nemar-cli `shared/contract/plugin-manifest.*` |
+| Plugin `outputs.views` and metric naming (`<plugin>:<name>`) | nemar-cli `shared/contract/plugin-manifest.*` |
 | The serving route's paths, words and bounds | nemar-cli `shared/contract/quality-route.ts` |
-| The renderer | the website, `src/lib/quality-views/` (website ADR 0035) |
+| The renderer | the website, `src/lib/quality-views/` (website ADR 0035, to be written in W1) |
+| The no-samples rule and NEMAR's other rules for signalJourney records | signalJourney's `nemar` extension namespace, unchanged from ADR 0134 |
 
 ## Why arrays may now leave a plugin
 
 ADR 0134 rejected "any output type a plugin declares, such as NumPy arrays", because derived signals could leave through plugins.
 This ADR does not admit any output type.
-An array leaves a plugin only as a role of a declared view of a known kind, in a registered format, with every dimension named, sized against the recording and capped at 1,024 entries, under a cap of 4 mebibytes per file, and with its derivation in the record: the plugin's step and parameters, and, for a computed view, its inputs by digest and a named transform.
+An array leaves a plugin only as a role of a declared view of a known kind, in a registered format, with every dimension named, sized against the recording and capped at 1,024 entries, under caps of 262,144 cells per role and 4 mebibytes per file, and with its derivation in the record: the plugin's step and parameters, and, for a computed view, its inputs by digest and a named transform.
 A sample axis is not banned by its name: a view with a `time` dimension must show in its declared derivation that it is a reduction, such as an average over epochs, and the caps bound what any one view can carry;
 whether a derivation is honest is decided in the plugin's review, as for every plugin in NEMAR's pipeline.
 NEMAR's own stored views carry no time axis; activations and the signal window, the only views over time, are drawn in the browser from the serving copy anyone can already read, and are never stored.
@@ -154,8 +158,8 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - The figure plugins nemar-components and nemar-segment, eegprep's static plotting work, and the plugin that would re-report the floor's values are cut;
   nemar-ica declares its own views and writes `_chanlocs.tsv`, nemar-quality writes `_icclasses.json`, and nemar-spectrum writes `_spectrum.tsv`.
 - nemar-ica's Zarr path decomposes the serving copy's own values, and nemar-ica is dispatched on it;
-  a run that read the archive copy keeps the archive caption, every Zarr run draws activations with the unchecked caption until the converter publishes per-store content digests, and the converter needs a follow-up that writes those digests at commit.
-- The derivatives store gains its only reading route; ADR 0123's private bucket and server-side copy stand.
+  a run that read the archive copy keeps the archive caption, every Zarr run draws activations with the unchecked caption until the converter publishes per-store content digests, and the converter needs a follow-up that writes those digests at commit (nemarOrg/nemar-cli#2343).
+- The derivatives store gains the first route that serves a derivative's product files; ADR 0123's private bucket and server-side copy stand.
 - The website owns a small renderer, a worker and its parity suites, and the signal viewer's scalp map changes from a thin-plate spline to EEGLAB's map.
 - The signal viewer stops assuming a coordinate frame: a recording whose positions are in an undeclared or unknown frame gets a map from its electrode names when `nemar.sensor-labels.v1` accepts them, and otherwise none, with the reason, so some maps the viewer draws today from as few as three matched labels disappear.
 - The montage coordinates come from other projects, so each montage's provenance and license are recorded with it and confirmed before neuroschema 0.6.0 is released.
@@ -186,7 +190,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - eegprep `functions/sigprocfunc/topoplot.py` and `griddata_v4` at edf694c8.
 - `sccn/NEMAR-pipeline` `nemar_plugins/`.
 - neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (0.6.0).
-- signalJourney `qualityMetricsObject`, `outputTarget`, `extensions/nemar` (issues #7 and #8).
+- signalJourney `qualityMetricsObject`, `outputTarget`, `extensions/nemar` (signalJourney#7 and #8).
 - nemar-cli `shared/contract/plugin-manifest.ts`, `shared/compute-recipes.ts`, `backend/src/services/compute-derivatives.ts`.
 - The website's `src/lib/eeg-viewer/{topo,gl-trace,store}.ts` and its ADRs 0007, 0009 and 0033.
 - ADRs 0123, 0124, 0125, 0134 and 0136.
