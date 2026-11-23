@@ -36,6 +36,10 @@ import {
   ComputeMoveChargeResponseSchema,
   type ComputeObserverRunResponse,
   ComputeObserverRunResponseSchema,
+  type ComputePipelineGridResponse,
+  ComputePipelineGridResponseSchema,
+  type ComputePipelineRunDetailResponse,
+  ComputePipelineRunDetailResponseSchema,
   type ComputePipelineRunRequest,
   type ComputePipelineRunResponse,
   ComputePipelineRunResponseSchema,
@@ -310,6 +314,60 @@ export async function getComputePipelineStatus(
     {},
     true,
     ComputePipelineStatusResponseSchema,
+  );
+}
+
+/** What `GET /admin/compute/pipeline/grid` filters by; `after` continues a page. */
+export interface ComputePipelineGridQuery {
+  recipe: string;
+  recipeVersion?: string;
+  /** `tapis` or `runner`. */
+  executor?: string;
+  /** A runner registration's id. */
+  runner?: string;
+  /** A grid status word. */
+  status?: string;
+  dataset?: string;
+  after?: string;
+  limit?: number;
+  /** Bring the open stamps up to date with their jobs first (the CLI asks; the website never does). */
+  sync?: boolean;
+}
+
+/**
+ * `GET /admin/compute/pipeline/grid` (admin; ADR 0134 decision 5, epic #2324 phase 4a): datasets by
+ * checkpoints for one recipe, a page by dataset id, with the totals over the whole filtered set.
+ */
+export async function getComputePipelineGrid(
+  q: ComputePipelineGridQuery,
+): Promise<ComputePipelineGridResponse> {
+  const params = new URLSearchParams();
+  params.set("recipe", q.recipe);
+  if (q.recipeVersion) params.set("recipe_version", q.recipeVersion);
+  if (q.executor) params.set("executor", q.executor);
+  if (q.runner) params.set("runner", q.runner);
+  if (q.status) params.set("status", q.status);
+  if (q.dataset) params.set("dataset", q.dataset);
+  if (q.after) params.set("after", q.after);
+  if (q.limit !== undefined) params.set("limit", String(q.limit));
+  if (q.sync) params.set("sync", "1");
+  return request(
+    `/admin/compute/pipeline/grid?${params.toString()}`,
+    {},
+    true,
+    ComputePipelineGridResponseSchema,
+  );
+}
+
+/** `GET /admin/compute/pipeline/runs/:stamp` (admin): one run's checkpoints and the failures each lists. */
+export async function getComputePipelineRun(
+  stampId: number,
+): Promise<ComputePipelineRunDetailResponse> {
+  return request(
+    `/admin/compute/pipeline/runs/${encodeURIComponent(String(stampId))}`,
+    {},
+    true,
+    ComputePipelineRunDetailResponseSchema,
   );
 }
 

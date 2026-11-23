@@ -118,6 +118,7 @@ export const SENTENCES: Record<ComputeAdminErrorCode, string> = {
     "This policy turns the partner contract off (freezing the open reservations counted in `open`) or changes what bound jobs are verified against (the jobs counted in `bound`). Send force_partner_off to do it anyway.",
   owner_not_proven:
     "That account is not the one the job's Tapis owner was attributed to; send the explicit confirmation to charge it anyway.",
+  stamp_not_found: "There is no such pipeline stamp.",
 };
 
 export function refuse(c: Ctx, code: ComputeAdminErrorCode, error?: string, extra: object = {}) {

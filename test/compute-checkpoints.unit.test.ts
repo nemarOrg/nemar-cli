@@ -11,13 +11,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   NOT_RUN_CODE,
+  PIPELINE_CELL_MARKS,
   PIPELINE_STALLED_SECONDS,
+  type PipelineCellMark,
+  type PipelineGridStatus,
   type RecordingRow,
   countRecordings,
   failuresByCheckpoint,
   firstCheckpointOf,
   liveDisagrees,
   parseRecordingsTable,
+  pipelineCellMark,
   pipelineRunStatus,
   processingDatasetEntry,
   processingEntryProblem,
@@ -553,5 +557,121 @@ describe("the progress vectors file", () => {
       writeFileSync(VECTORS_PATH, `${JSON.stringify(computed, null, 2)}\n`);
     }
     expect(JSON.parse(readFileSync(VECTORS_PATH, "utf8"))).toEqual(computed);
+  });
+});
+
+describe("pipelineCellMark: what a grid cell shows", () => {
+  const c = (passed: number, failed: number, skipped: number, total: number) => ({
+    passed,
+    failed,
+    skipped,
+    total,
+  });
+  const mark = (
+    status: PipelineGridStatus,
+    counts: ReturnType<typeof c> | null,
+    cellReconciled = false,
+    runReconciled = false,
+  ) => pipelineCellMark({ status, counts, cellReconciled, runReconciled });
+
+  test("the precedence table", () => {
+    const table: [
+      PipelineGridStatus,
+      ReturnType<typeof c> | null,
+      boolean,
+      boolean,
+      PipelineCellMark,
+    ][] = [
+      // 1. no run
+      ["not_started", c(3, 0, 0, 3), true, true, "not_started"],
+      ["not_started", null, false, false, "not_started"],
+      // 2. a complete cell, live or ended
+      ["running", c(3, 0, 0, 3), false, false, "passed"],
+      ["running", c(1, 1, 1, 3), false, false, "failed"],
+      ["running", c(2, 0, 1, 3), false, false, "skipped"],
+      ["finished", c(3, 0, 0, 3), true, true, "passed"],
+      ["finished", c(0, 0, 3, 3), true, true, "skipped"],
+      ["failed", c(2, 1, 0, 3), true, true, "failed"],
+      // a zero total is complete only once the run has ended
+      ["running", c(0, 0, 0, 0), false, false, "running"],
+      ["finished", c(0, 0, 0, 0), true, true, "passed"],
+      // 3. an incomplete or missing cell of a live run: the run's status
+      ["waiting", null, false, false, "waiting"],
+      ["running", c(1, 0, 0, 3), false, false, "running"],
+      ["stalled", c(1, 1, 0, 3), false, false, "stalled"],
+      // 4. an incomplete or missing cell of an ended run
+      ["finished", c(0, 0, 0, 3), false, true, "pending"], // `stored` waiting for the derivative store
+      ["finished", null, false, false, "pending"], // the sync has not reached the run
+      ["failed", c(1, 0, 0, 3), true, false, "pending"],
+      ["finished", null, false, true, "no_counts"], // an outcome without counts
+      ["failed", c(1, 0, 0, 3), true, true, "no_counts"],
+    ];
+    for (const [status, counts, cellReconciled, runReconciled, want] of table) {
+      expect([
+        status,
+        counts,
+        cellReconciled,
+        runReconciled,
+        mark(status, counts, cellReconciled, runReconciled),
+      ]).toEqual([status, counts, cellReconciled, runReconciled, want]);
+    }
+  });
+
+  test("a run that ended with no job has its outcome: its cells have no counts, never pending (MUTATION: ignore hasJob)", () => {
+    const jobless = (counts: ReturnType<typeof c> | null) =>
+      pipelineCellMark({
+        status: "failed",
+        counts,
+        cellReconciled: false,
+        runReconciled: false,
+        hasJob: false,
+      });
+    expect(jobless(null)).toBe("no_counts");
+    // With a job, the same unreconciled run waits for the sync.
+    expect(mark("failed", null, false, false)).toBe("pending");
+    // hasJob says nothing about a live run, which shows its status.
+    expect(
+      pipelineCellMark({
+        status: "waiting",
+        counts: null,
+        cellReconciled: false,
+        runReconciled: false,
+        hasJob: false,
+      }),
+    ).toBe("waiting");
+  });
+
+  test("failed wins over passed and skipped in a complete cell", () => {
+    expect(mark("finished", c(5, 1, 0, 6), true, true)).toBe("failed");
+    expect(mark("finished", c(0, 1, 5, 6), true, true)).toBe("failed");
+  });
+
+  test("every word the mark can give is a declared mark, and every declared mark is given", () => {
+    const seen = new Set<string>();
+    const statuses: PipelineGridStatus[] = [
+      "not_started",
+      "waiting",
+      "running",
+      "stalled",
+      "finished",
+      "failed",
+    ];
+    for (const status of statuses) {
+      for (const counts of [
+        null,
+        c(0, 0, 0, 0),
+        c(1, 0, 0, 1),
+        c(0, 1, 0, 1),
+        c(0, 0, 1, 1),
+        c(0, 0, 0, 1),
+      ]) {
+        for (const cellReconciled of [false, true]) {
+          for (const runReconciled of [false, true]) {
+            seen.add(mark(status, counts, cellReconciled, runReconciled));
+          }
+        }
+      }
+    }
+    expect([...seen].sort()).toEqual([...PIPELINE_CELL_MARKS].sort());
   });
 });
