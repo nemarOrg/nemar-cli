@@ -297,7 +297,12 @@ export type PipelineRunStatus = (typeof PIPELINE_RUN_STATUSES)[number];
 export const PIPELINE_STALLED_SECONDS = PROGRESS_STALLED_CADENCES * PROGRESS_REPORT_SECONDS;
 
 /** The job states in which a pipeline job has not started running (`./compute-state.ts`). */
-const WAITING_JOB_STATES: readonly ComputeState[] = ["created", "uploading", "submitted", "queued"];
+export const WAITING_JOB_STATES: readonly ComputeState[] = [
+  "created",
+  "uploading",
+  "submitted",
+  "queued",
+];
 
 /** The job states in which a silent run counts as stalled. */
 export const STALLABLE_JOB_STATES: readonly ComputeState[] = ["submitted", "queued", "running"];

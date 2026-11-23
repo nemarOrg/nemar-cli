@@ -27,6 +27,9 @@
  */
 
 import {
+  PIPELINE_STALLED_SECONDS,
+  STALLABLE_JOB_STATES,
+  WAITING_JOB_STATES,
   countRecordings,
   failuresByCheckpoint,
   liveDisagrees,
@@ -278,8 +281,31 @@ export async function recordHeartbeatProgress(
  * last report older than three minutes.
  */
 export const PIPELINE_STALLED_SQL = `(s.state = 'dispatched' AND (j.state = 'unreported'
-    OR (j.state IN ('submitted', 'queued', 'running') AND r.reported_at IS NOT NULL
-      AND r.reported_at < datetime('now', '-180 seconds'))))`;
+    OR (j.state IN (${quoted(STALLABLE_JOB_STATES)}) AND r.reported_at IS NOT NULL
+      AND r.reported_at < datetime('now', '-${PIPELINE_STALLED_SECONDS} seconds'))))`;
+
+/**
+ * What a run shows (`pipelineRunStatus`), as a SQL expression over a stamp `s`, its job `j` and its run row
+ * `r` (each may be absent: a LEFT JOIN), in exactly the order of the TypeScript rule: a missing stamp is
+ * `not_started`; an ended stamp is `finished` or `failed`; a terminal job is its end; an `unreported` job,
+ * or a `submitted`, `queued` or `running` job whose last report is older than {@link PIPELINE_STALLED_SECONDS},
+ * is `stalled`; a job that never reported and has not started (or has no job yet) is `waiting`; anything
+ * else is `running`. `compute-pipeline-grid.test.ts` holds it equal to `pipelineRunStatus` over every
+ * stamp state, job state and report age.
+ */
+export const PIPELINE_RUN_STATUS_SQL = `(CASE
+    WHEN s.id IS NULL THEN 'not_started'
+    WHEN s.state = 'succeeded' THEN 'finished'
+    WHEN s.state IN ('failed', 'refused') THEN 'failed'
+    WHEN j.state = 'finished' THEN 'finished'
+    WHEN j.state IN ('failed', 'cancelled') THEN 'failed'
+    WHEN j.state = 'unreported' THEN 'stalled'
+    WHEN j.state IN (${quoted(STALLABLE_JOB_STATES)}) AND r.reported_at IS NOT NULL
+      AND r.reported_at < datetime('now', '-${PIPELINE_STALLED_SECONDS} seconds') THEN 'stalled'
+    WHEN r.reported_at IS NULL AND (j.state IS NULL OR j.state IN (${quoted(WAITING_JOB_STATES)}))
+      THEN 'waiting'
+    ELSE 'running'
+  END)`;
 
 /** The job states of a run that is still under way, for the `in_progress` link (as `pipelineRunStatus`). */
 export const LIVE_LINK_JOB_STATES = ["submitted", "queued", "running", "archiving"] as const;
@@ -321,16 +347,26 @@ export async function liveSignalJourneyLinks(
  */
 export const HOLD_STAMP_WORD = "tuple_mismatch";
 
+/**
+ * A stamp (by its alias) that is NOT a hold stamp: a failed `tuple_mismatch` stamp whose job belongs to
+ * another stamp is a hold on a tuple, not a run of its own. Stated once, for reconciliation and the grid.
+ */
+export const NOT_HOLD_STAMP_SQL = (alias: string): string =>
+  `NOT (${alias}.refusal_code IS NOT NULL AND ${alias}.refusal_code = '${HOLD_STAMP_WORD}'
+      AND EXISTS (SELECT 1 FROM compute_pipeline_stamps o WHERE o.job_id = ${alias}.job_id AND o.id <> ${alias}.id))`;
+
 /** How many ended runs and pending `stored` rows one call reconciles (each is bounded subrequests). */
 export const RECONCILE_RUNS_PER_CALL = 10;
 
-/** What reconciliation decided for a run that ended. */
-export type ReconcileOutcome =
-  | "reconciled"
-  | "table_missing"
-  | "table_unreadable"
-  | "no_checkpoint_map"
-  | "recipe_unknown";
+/** What reconciliation decides for a run that ended (the words migration 0150's CHECK allows). */
+export const RECONCILE_OUTCOMES = [
+  "reconciled",
+  "table_missing",
+  "table_unreadable",
+  "no_checkpoint_map",
+  "recipe_unknown",
+] as const;
+export type ReconcileOutcome = (typeof RECONCILE_OUTCOMES)[number];
 
 export interface ReconcileResult {
   /** Ended runs given an outcome, and `stored` rows resolved, by this call. */
@@ -350,8 +386,7 @@ export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.recipe, s.
   LEFT JOIN compute_pipeline_progress_runs r ON r.stamp_id = s.id
   WHERE s.state IN ('succeeded', 'failed') AND s.job_id IS NOT NULL
     AND (r.stamp_id IS NULL OR r.reconciled_at IS NULL)
-    AND NOT (s.refusal_code IS NOT NULL AND s.refusal_code = '${HOLD_STAMP_WORD}'
-      AND EXISTS (SELECT 1 FROM compute_pipeline_stamps o WHERE o.job_id = s.job_id AND o.id <> s.id))
+    AND ${NOT_HOLD_STAMP_SQL("s")}
   ORDER BY s.updated_at ASC, s.id ASC LIMIT ?1`;
 
 /**
