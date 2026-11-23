@@ -595,6 +595,13 @@ describe("outputs refuses before it signs anything", () => {
     ).toBe(200);
   });
 
+  test("a recipe's own limit raises the policy, never lowers it: a policy above it still applies", async () => {
+    await policyOf({ maxFiles: 30_000 });
+    const pipe = await pipelineJob("nemar-ica");
+    expect(await outputsBodyCap(workerEnv, pipe.job)).toBe(outputsBodyLimitBytes(30_000));
+    expect(await launcherDocumentLimit(workerEnv, pipe.job)).toBe(outputsBodyLimitBytes(30_000));
+  });
+
   test("the outputs body cap and the launcher document bound follow the limit the job is held to", async () => {
     await policyOf({ maxFiles: 3 });
     const pipe = await pipelineJob("nemar-ica");

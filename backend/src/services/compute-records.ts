@@ -1082,6 +1082,31 @@ const OUTPUTS_BODY_FLOOR_BYTES = 1024 * 1024;
 /** What a Worker can read and parse as one JSON body: 64 MiB, under the platform's request limit. */
 export const OUTPUTS_BODY_CEILING_BYTES = 64 * 1024 * 1024;
 
+/** The recipe of the pipeline stamp that names a job, the newest when a hold shares it. */
+export const JOB_PIPELINE_RECIPE_SQL =
+  "SELECT recipe FROM compute_pipeline_stamps WHERE job_id = ?1 ORDER BY id DESC LIMIT 1";
+
+/**
+ * The most outputs a job may list (owner decision of 2026-11-23): a NEMAR pipeline job (source `pipeline`, named
+ * by a pipeline stamp) whose recipe declares its own `resultLimits` may list up to the recipe's `maxFiles`,
+ * which RAISES the limit and never lowers it (an owner's policy above the recipe's value still applies); every
+ * other job, a person's and a partner's included, is held to the owner's policy `maxFiles`. Never above
+ * `COMPUTE_MAX_OUTPUT_FILES`. A database fault throws, so the caller answers as it does for a policy it
+ * cannot read.
+ */
+export async function resultMaxFilesFor(
+  db: D1Database,
+  job: { id: string; source: string },
+  policyMaxFiles: number,
+): Promise<number> {
+  if (job.source !== "pipeline") return policyMaxFiles;
+  const row = await db.prepare(JOB_PIPELINE_RECIPE_SQL).bind(job.id).first<{ recipe: string }>();
+  const own = row ? findRecipe(row.recipe)?.resultLimits?.maxFiles : undefined;
+  return own === undefined
+    ? policyMaxFiles
+    : Math.max(policyMaxFiles, Math.min(own, COMPUTE_MAX_OUTPUT_FILES));
+}
+
 /**
  * The largest body the outputs route reads, derived from the owner's `resultLimits.maxFiles`.
  *
@@ -1095,28 +1120,6 @@ export const OUTPUTS_BODY_CEILING_BYTES = 64 * 1024 * 1024;
  * is refused `too_many_outputs`, a refusal the submitter caused and is charged for. The launcher's own
  * 1 MiB cap is the tighter bound today, and raising it is the launcher's change.
  */
-/** The recipe of the pipeline stamp that names a job, the newest when a hold shares it. */
-export const JOB_PIPELINE_RECIPE_SQL =
-  "SELECT recipe FROM compute_pipeline_stamps WHERE job_id = ?1 ORDER BY id DESC LIMIT 1";
-
-/**
- * The most outputs a job may list (owner decision of 2026-11-23): a NEMAR pipeline job (source `pipeline`, named
- * by a pipeline stamp) whose recipe declares its own `resultLimits` is held to the recipe's `maxFiles`; every
- * other job, a person's and a partner's included, to the owner's policy `maxFiles`. Never above
- * `COMPUTE_MAX_OUTPUT_FILES`. A database fault throws, so the caller answers as it does for a policy it
- * cannot read.
- */
-export async function resultMaxFilesFor(
-  db: D1Database,
-  job: { id: string; source: string },
-  policyMaxFiles: number,
-): Promise<number> {
-  if (job.source !== "pipeline") return policyMaxFiles;
-  const row = await db.prepare(JOB_PIPELINE_RECIPE_SQL).bind(job.id).first<{ recipe: string }>();
-  const own = row ? findRecipe(row.recipe)?.resultLimits?.maxFiles : undefined;
-  return own === undefined ? policyMaxFiles : Math.min(own, COMPUTE_MAX_OUTPUT_FILES);
-}
-
 export function outputsBodyLimitBytes(maxFiles: number): number {
   if (!Number.isSafeInteger(maxFiles) || maxFiles < 1 || maxFiles > COMPUTE_MAX_OUTPUT_FILES) {
     throw new RangeError("maxFiles is a whole number from 1 to 100000");
