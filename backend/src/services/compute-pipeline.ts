@@ -111,6 +111,7 @@ import {
   pickVersion,
   pipelineTermsFor,
 } from "./compute-pipeline-eligibility.js";
+import { reconcilePipelineProgress } from "./compute-pipeline-progress.js";
 import { getPolicy } from "./compute-policy.js";
 import { sha256Hex } from "./compute-records.js";
 import { readRuntimeImage } from "./compute-runtime-image.js";
@@ -899,6 +900,14 @@ export interface SyncResult {
   later: number;
   /** Stamps whose sync threw (a database fault, say): left as they were, and counted so the line is not blind to them. */
   errored: number;
+  /**
+   * Live progress reconciled after the stamps moved (ADR 0134 decision 4): ended runs given an outcome and
+   * `stored` rows resolved, runs left for a later call, and runs whose reconciliation threw. It never
+   * changes a stamp, and a fault in it never fails the sync.
+   */
+  reconciled: number;
+  reconcile_later: number;
+  reconcile_errored: number;
 }
 
 /** The open stamps, oldest update first: the partial index `compute_pipeline_stamps_open` serves it. */
@@ -1009,6 +1018,9 @@ export async function syncPipelineStamps(
     linked: 0,
     later: 0,
     errored: 0,
+    reconciled: 0,
+    reconcile_later: 0,
+    reconcile_errored: 0,
   };
   const open = (await db.prepare(OPEN_STAMPS_SQL).bind(limit).all<StampRow>()).results;
   for (const stamp of open) {
@@ -1151,6 +1163,19 @@ export async function syncPipelineStamps(
       );
       result.errored++;
     }
+  }
+  // Live progress rides the stamp sync (ADR 0134): every caller of the sync reconciles a bounded number of
+  // ended runs, and nothing it does can change a stamp or fail the sync.
+  try {
+    const reconciled = await reconcilePipelineProgress(env);
+    result.reconciled = reconciled.reconciled;
+    result.reconcile_later = reconciled.later;
+    result.reconcile_errored = reconciled.errored;
+  } catch (err) {
+    console.error(
+      `[compute-pipeline] reconcile_failed error=${err instanceof Error ? err.name : "unknown"}`,
+    );
+    result.reconcile_errored++;
   }
   return result;
 }

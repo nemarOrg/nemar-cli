@@ -507,7 +507,17 @@ describe("a result that does not carry the tuple it was dispatched with", () => 
 describe("the log line", () => {
   const base: PipelineCronResult = {
     outcome: "ran",
-    synced: { examined: 0, succeeded: 0, failed: 0, linked: 0, later: 0, errored: 0 },
+    synced: {
+      examined: 0,
+      succeeded: 0,
+      failed: 0,
+      linked: 0,
+      later: 0,
+      errored: 0,
+      reconciled: 0,
+      reconcile_later: 0,
+      reconcile_errored: 0,
+    },
     today: 0,
     dispatched: 0,
     recipes: [{ recipe: "nemar-floor", dispatched: 0, skipped: null, stopped_by: null }],

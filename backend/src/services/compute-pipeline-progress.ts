@@ -18,12 +18,32 @@
  * no other text from a job reaches a row.
  */
 
-import { progressProblem, signalJourneyLink } from "../../../shared/compute-checkpoints.js";
-import { type RecipeCheckpoint, recipeCheckpointMap } from "../../../shared/compute-recipes.js";
+import {
+  countRecordings,
+  failuresByCheckpoint,
+  liveDisagrees,
+  parseRecordingsTable,
+  processingDatasetEntry,
+  processingEntryProblem,
+  progressProblem,
+  signalJourneyLink,
+} from "../../../shared/compute-checkpoints.js";
+import {
+  RECIPE_PRODUCT_OUTPUT_PREFIX,
+  type RecipeCheckpoint,
+  STORED_CHECKPOINT,
+  findRecipe,
+  recipeCheckpointMap,
+  recipeRequiredOutputs,
+} from "../../../shared/compute-recipes.js";
+import { resultsOutputKey } from "../../../shared/contract/compute-launch.js";
 import {
   PROGRESS_MIN_INTERVAL_SECONDS,
   type Progress,
+  type ProgressCheckpointCounts,
 } from "../../../shared/contract/compute-progress.js";
+import type { Bindings } from "../types/bindings.js";
+import { RECORD_READ_MAX_BYTES, TABLE_READ_MAX_BYTES } from "./compute-derivatives.js";
 
 /** The job states in which a job on the supercomputer may report (its state in D1 lags Tapis). */
 export const PROGRESS_TAPIS_STATES = ["submitted", "queued", "running"] as const;
@@ -264,3 +284,427 @@ export async function recordHeartbeatProgress(
 /** The SQL predicate equal to `pipelineRunStatus` saying `stalled`, for a list read (r = run row, j = job). */
 export const PIPELINE_STALLED_SQL = `(j.state = 'unreported' OR (r.reported_at IS NOT NULL
     AND r.reported_at < datetime('now', '-180 seconds')))`;
+
+// --- Reconciliation ---------------------------------------------------------------------------------
+
+/** How many ended runs and pending `stored` rows one call reconciles (each is bounded subrequests). */
+export const RECONCILE_RUNS_PER_CALL = 10;
+
+/** What reconciliation decided for a run that ended. */
+export type ReconcileOutcome =
+  | "reconciled"
+  | "table_missing"
+  | "table_unreadable"
+  | "no_checkpoint_map"
+  | "recipe_unknown";
+
+export interface ReconcileResult {
+  /** Ended runs given an outcome, and `stored` rows resolved. */
+  reconciled: number;
+  /** Runs left for a later call: a bucket that is not bound or did not answer. */
+  later: number;
+  /** Runs whose reconciliation threw: left as they were. */
+  errored: number;
+}
+
+/** Ended stamps with a job whose run is not reconciled, oldest end first. */
+export const RECONCILE_CANDIDATES_SQL = `SELECT s.id, s.dataset_id, s.recipe, s.recipe_version, s.state, s.job_id
+  FROM compute_pipeline_stamps s
+  LEFT JOIN compute_pipeline_progress_runs r ON r.stamp_id = s.id
+  WHERE s.state IN ('succeeded', 'failed') AND s.job_id IS NOT NULL
+    AND (r.stamp_id IS NULL OR r.reconciled_at IS NULL)
+  ORDER BY s.updated_at ASC, s.id ASC LIMIT ?1`;
+
+/**
+ * THE RECONCILE GATE: the run row given its outcome, only while it has none. ?1 stamp, ?2 job, ?3 write id,
+ * ?4 outcome, ?5 disagreement. Every later statement of the batch writes only where the write id stands.
+ */
+export const RECONCILE_GATE_SQL = `INSERT INTO compute_pipeline_progress_runs
+    (stamp_id, job_id, write_id, reconciled_at, outcome, disagreement)
+  VALUES (?1, ?2, ?3, datetime('now'), ?4, ?5)
+  ON CONFLICT(stamp_id) DO UPDATE SET
+    write_id = excluded.write_id, reconciled_at = excluded.reconciled_at,
+    outcome = excluded.outcome, disagreement = excluded.disagreement
+   WHERE compute_pipeline_progress_runs.reconciled_at IS NULL`;
+
+const RECONCILE_WON = (stampParam: string, writeParam: string) => `EXISTS (SELECT 1
+    FROM compute_pipeline_progress_runs r
+   WHERE r.stamp_id = ${stampParam} AND r.write_id = ${writeParam})`;
+
+/**
+ * One checkpoint's reconciled row. ?1 stamp, ?2 checkpoint, ?3-?6 counts, ?7 failures, ?8-?11 the last live
+ * counts (or nulls), ?12 reconciled, ?13 disagreement, ?14 write id. The time of the last report is kept.
+ */
+export const RECONCILE_ROW_SQL = `INSERT INTO compute_pipeline_progress
+    (stamp_id, checkpoint, passed, failed, skipped, total, failures, reported_at,
+     live_passed, live_failed, live_skipped, live_total, reconciled, disagreement)
+  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), ?8, ?9, ?10, ?11, ?12, ?13
+   WHERE ${RECONCILE_WON("?1", "?14")}
+  ON CONFLICT(stamp_id, checkpoint) DO UPDATE SET
+    passed = excluded.passed, failed = excluded.failed, skipped = excluded.skipped,
+    total = excluded.total, failures = excluded.failures,
+    live_passed = excluded.live_passed, live_failed = excluded.live_failed,
+    live_skipped = excluded.live_skipped, live_total = excluded.live_total,
+    reconciled = excluded.reconciled, disagreement = excluded.disagreement`;
+
+/**
+ * A dataset's final document of one namespace and recipe: the newest stamp wins, the same stamp may write
+ * again. ?1 dataset, ?2 namespace, ?3 recipe, ?4 stamp, ?5 entry, ?6 final, ?7 write id.
+ */
+export const RECONCILE_DOCUMENT_SQL = `INSERT INTO compute_pipeline_documents
+    (dataset_id, namespace, recipe, stamp_id, entry, final, written_at)
+  SELECT ?1, ?2, ?3, ?4, ?5, ?6, datetime('now') WHERE ${RECONCILE_WON("?4", "?7")}
+  ON CONFLICT(dataset_id, namespace, recipe) DO UPDATE SET
+    stamp_id = excluded.stamp_id, entry = excluded.entry, final = excluded.final,
+    written_at = excluded.written_at
+   WHERE excluded.stamp_id >= compute_pipeline_documents.stamp_id`;
+
+interface CandidateRow {
+  id: number;
+  dataset_id: string;
+  recipe: string;
+  recipe_version: string;
+  state: "succeeded" | "failed";
+  job_id: string;
+}
+
+interface CountsRow {
+  checkpoint: string;
+  passed: number;
+  failed: number;
+  skipped: number;
+  total: number;
+}
+
+type TextRead = { kind: "ok"; text: string } | { kind: "absent" } | { kind: "too_large" };
+
+async function readBounded(bucket: R2Bucket, key: string, max: number): Promise<TextRead> {
+  const head = await bucket.head(key);
+  if (!head) return { kind: "absent" };
+  if (head.size > max) return { kind: "too_large" };
+  const object = await bucket.get(key);
+  if (!object) return { kind: "absent" };
+  return { kind: "ok", text: await object.text() };
+}
+
+async function sha256HexOf(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** The `sj_version` at the top of a signalJourney record, or null. */
+function sjVersionOf(text: string): string | null {
+  try {
+    const doc = JSON.parse(text) as unknown;
+    if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+    const v = (doc as Record<string, unknown>).sj_version;
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+const gateOnly = (db: D1Database, stamp: CandidateRow, outcome: ReconcileOutcome) =>
+  db.prepare(RECONCILE_GATE_SQL).bind(stamp.id, stamp.job_id, randomHex(16), outcome, 0).run();
+
+/**
+ * Reconcile the ended runs and the pending `stored` rows, at most {@link RECONCILE_RUNS_PER_CALL} of
+ * each. Never changes a stamp; once a run is reconciled no report moves a count. Idempotent: a second
+ * caller's gate finds the run reconciled and writes nothing.
+ */
+export async function reconcilePipelineProgress(
+  env: Bindings,
+  limit: number = RECONCILE_RUNS_PER_CALL,
+): Promise<ReconcileResult> {
+  const result: ReconcileResult = { reconciled: 0, later: 0, errored: 0 };
+  const db = env.DB;
+  const candidates = (await db.prepare(RECONCILE_CANDIDATES_SQL).bind(limit).all<CandidateRow>())
+    .results;
+  for (const stamp of candidates) {
+    try {
+      const outcome = await reconcileRun(env, stamp);
+      if (outcome === "later") result.later++;
+      else result.reconciled++;
+    } catch (err) {
+      console.error(
+        `[compute-pipeline-progress] reconcile_failed stamp=${stamp.id} class=${err instanceof Error ? err.name : typeof err}`,
+      );
+      result.errored++;
+    }
+  }
+  try {
+    result.reconciled += await resolveStored(db, limit);
+  } catch (err) {
+    console.error(
+      `[compute-pipeline-progress] stored_failed class=${err instanceof Error ? err.name : typeof err}`,
+    );
+    result.errored++;
+  }
+  return result;
+}
+
+/** Reconcile one ended run from its recordings table; `later` when the results bucket cannot be read. */
+async function reconcileRun(
+  env: Bindings,
+  stamp: CandidateRow,
+): Promise<ReconcileOutcome | "later"> {
+  const db = env.DB;
+  const recipe = findRecipe(stamp.recipe);
+  if (!recipe) {
+    await gateOnly(db, stamp, "recipe_unknown");
+    return "recipe_unknown";
+  }
+  const checkpoints = recipeCheckpointMap(stamp.recipe, stamp.recipe_version);
+  if (!checkpoints) {
+    await gateOnly(db, stamp, "no_checkpoint_map");
+    return "no_checkpoint_map";
+  }
+  const results = env.COMPUTE_RESULTS;
+  if (!results) return "later";
+  const wanted = recipeRequiredOutputs(recipe);
+  let table: TextRead;
+  try {
+    table = await readBounded(
+      results,
+      resultsOutputKey(stamp.job_id, wanted.table),
+      TABLE_READ_MAX_BYTES,
+    );
+  } catch {
+    return "later";
+  }
+  if (table.kind === "absent") {
+    await gateOnly(db, stamp, "table_missing");
+    return "table_missing";
+  }
+  const parsed = table.kind === "ok" ? parseRecordingsTable(table.text) : null;
+  if (!parsed || !parsed.ok) {
+    await gateOnly(db, stamp, "table_unreadable");
+    return "table_unreadable";
+  }
+  const rows = parsed.rows;
+
+  // The last live counts, kept beside the reconciled ones.
+  const liveRows = (
+    await db
+      .prepare(
+        "SELECT checkpoint, passed, failed, skipped, total FROM compute_pipeline_progress WHERE stamp_id = ?1",
+      )
+      .bind(stamp.id)
+      .all<CountsRow>()
+  ).results;
+  const live = new Map(liveRows.map((r) => [r.checkpoint, r]));
+  const liveTotal = liveRows.reduce((m, r) => Math.max(m, r.total), 0);
+  const total = stamp.state === "succeeded" ? rows.length : Math.max(rows.length, liveTotal);
+  const counts = countRecordings(rows, checkpoints, total);
+  const failures = failuresByCheckpoint(rows, checkpoints);
+
+  // `stored`: a failed run stored nothing; a succeeded run waits for the derivative store.
+  const last = counts[checkpoints[checkpoints.length - 1].checkpoint];
+  const storedFinal = stamp.state === "failed";
+  const stored: ProgressCheckpointCounts = storedFinal
+    ? { passed: 0, failed: 0, skipped: total, total }
+    : { passed: 0, failed: 0, skipped: total - last.passed, total };
+
+  let disagreement = 0;
+  const writeId = randomHex(16);
+  const statements: D1PreparedStatement[] = [];
+  const rowStatement = (
+    checkpoint: string,
+    c: ProgressCheckpointCounts,
+    reconciled: 0 | 1,
+    list: readonly unknown[],
+  ) => {
+    const l = live.get(checkpoint);
+    const disagrees = l !== undefined && liveDisagrees(l, c) ? 1 : 0;
+    if (disagrees) disagreement = 1;
+    return db
+      .prepare(RECONCILE_ROW_SQL)
+      .bind(
+        stamp.id,
+        checkpoint,
+        c.passed,
+        c.failed,
+        c.skipped,
+        c.total,
+        JSON.stringify(list),
+        l?.passed ?? null,
+        l?.failed ?? null,
+        l?.skipped ?? null,
+        l?.total ?? null,
+        reconciled,
+        disagrees,
+        writeId,
+      );
+  };
+  for (const c of checkpoints) {
+    statements.push(rowStatement(c.checkpoint, counts[c.checkpoint], 1, failures[c.checkpoint]));
+  }
+  statements.push(rowStatement(STORED_CHECKPOINT, stored, storedFinal ? 1 : 0, []));
+
+  // The signalJourney link: completed with the record's digest and version, or failed with none.
+  let link = signalJourneyLink({ recipeVersion: stamp.recipe_version, status: "failed" });
+  if (stamp.state === "succeeded") {
+    let record: TextRead;
+    try {
+      record = await readBounded(
+        results,
+        resultsOutputKey(stamp.job_id, wanted.record),
+        RECORD_READ_MAX_BYTES,
+      );
+    } catch {
+      return "later";
+    }
+    link =
+      record.kind === "ok"
+        ? signalJourneyLink({
+            recipeVersion: stamp.recipe_version,
+            status: "completed",
+            location: wanted.record.slice(RECIPE_PRODUCT_OUTPUT_PREFIX.length),
+            sha256: await sha256HexOf(record.text),
+            sjVersion: sjVersionOf(record.text),
+          })
+        : null;
+    if (link === null) {
+      console.log(`[compute-pipeline-progress] link_not_written stamp=${stamp.id} reason=record`);
+    }
+  }
+  if (link !== null) {
+    statements.push(
+      db
+        .prepare(RECONCILE_DOCUMENT_SQL)
+        .bind(
+          stamp.dataset_id,
+          "signalJourney",
+          stamp.recipe,
+          stamp.id,
+          JSON.stringify(link),
+          1,
+          writeId,
+        ),
+    );
+  }
+  if (storedFinal) {
+    const entry = processingDatasetEntry({
+      recipeVersion: stamp.recipe_version,
+      checkpoints,
+      counts: { ...counts, [STORED_CHECKPOINT]: stored },
+    });
+    if (processingEntryProblem(entry) === null) {
+      statements.push(
+        db
+          .prepare(RECONCILE_DOCUMENT_SQL)
+          .bind(
+            stamp.dataset_id,
+            "processing",
+            stamp.recipe,
+            stamp.id,
+            JSON.stringify(entry),
+            1,
+            writeId,
+          ),
+      );
+    }
+  }
+  // The gate goes first; its disagreement is known only now, so it is built last and put in front.
+  statements.unshift(
+    db
+      .prepare(RECONCILE_GATE_SQL)
+      .bind(stamp.id, stamp.job_id, writeId, "reconciled", disagreement),
+  );
+  await db.batch(statements);
+  return "reconciled";
+}
+
+/** The pending `stored` rows whose derivative is decided, with what decided it. */
+export const STORED_PENDING_SQL = `SELECT p.stamp_id, s.dataset_id, s.recipe, s.recipe_version,
+    d.state AS derivative_state, d.stored_at,
+    EXISTS (SELECT 1 FROM compute_derivative_skips k WHERE k.stamp_id = p.stamp_id) AS skipped
+  FROM compute_pipeline_progress p
+  JOIN compute_pipeline_stamps s ON s.id = p.stamp_id
+  LEFT JOIN compute_derivatives d ON d.stamp_id = p.stamp_id
+  WHERE p.checkpoint = 'stored' AND p.reconciled = 0
+    AND (d.state IN ('stored', 'failed', 'expired')
+      OR EXISTS (SELECT 1 FROM compute_derivative_skips k WHERE k.stamp_id = p.stamp_id))
+  ORDER BY p.stamp_id ASC LIMIT ?1`;
+
+/** The `stored` row reconciled, only while it is pending. ?1 stamp, ?2-?4 passed, failed, skipped. */
+export const STORED_RESOLVE_SQL = `UPDATE compute_pipeline_progress
+    SET passed = ?2, failed = ?3, skipped = ?4, reconciled = 1
+  WHERE stamp_id = ?1 AND checkpoint = 'stored' AND reconciled = 0`;
+
+/** The `processing` entry of a stamp, written once its `stored` row is reconciled. */
+export const STORED_DOCUMENT_SQL = `INSERT INTO compute_pipeline_documents
+    (dataset_id, namespace, recipe, stamp_id, entry, final, written_at)
+  SELECT ?1, 'processing', ?2, ?3, ?4, 1, datetime('now')
+   WHERE EXISTS (SELECT 1 FROM compute_pipeline_progress
+     WHERE stamp_id = ?3 AND checkpoint = 'stored' AND reconciled = 1)
+  ON CONFLICT(dataset_id, namespace, recipe) DO UPDATE SET
+    stamp_id = excluded.stamp_id, entry = excluded.entry, final = excluded.final,
+    written_at = excluded.written_at
+   WHERE excluded.stamp_id >= compute_pipeline_documents.stamp_id`;
+
+/** Resolve the pending `stored` rows from the derivative store, and write their `processing` entries. */
+async function resolveStored(db: D1Database, limit: number): Promise<number> {
+  const pending = (
+    await db.prepare(STORED_PENDING_SQL).bind(limit).all<{
+      stamp_id: number;
+      dataset_id: string;
+      recipe: string;
+      recipe_version: string;
+      derivative_state: string | null;
+      stored_at: string | null;
+      skipped: number;
+    }>()
+  ).results;
+  let resolved = 0;
+  for (const p of pending) {
+    const checkpoints = recipeCheckpointMap(p.recipe, p.recipe_version);
+    if (!checkpoints) continue;
+    const rows = (
+      await db
+        .prepare(
+          "SELECT checkpoint, passed, failed, skipped, total FROM compute_pipeline_progress WHERE stamp_id = ?1",
+        )
+        .bind(p.stamp_id)
+        .all<CountsRow>()
+    ).results;
+    const byName = new Map(rows.map((r) => [r.checkpoint, r]));
+    const last = byName.get(checkpoints[checkpoints.length - 1].checkpoint);
+    if (!last) continue;
+    const total = last.total;
+    const kept =
+      p.derivative_state === "stored" || (p.derivative_state === "expired" && p.stored_at !== null);
+    const lost = p.derivative_state === "failed";
+    const stored: ProgressCheckpointCounts = kept
+      ? { passed: last.passed, failed: 0, skipped: total - last.passed, total }
+      : lost
+        ? { passed: 0, failed: last.passed, skipped: total - last.passed, total }
+        : { passed: 0, failed: 0, skipped: total, total };
+    const counts: Record<string, ProgressCheckpointCounts> = {};
+    for (const c of checkpoints) {
+      const r = byName.get(c.checkpoint);
+      if (!r) break;
+      counts[c.checkpoint] = r;
+    }
+    counts[STORED_CHECKPOINT] = stored;
+    const entry = processingDatasetEntry({ recipeVersion: p.recipe_version, checkpoints, counts });
+    const problem = processingEntryProblem(entry);
+    const statements = [
+      db.prepare(STORED_RESOLVE_SQL).bind(p.stamp_id, stored.passed, stored.failed, stored.skipped),
+    ];
+    if (problem === null) {
+      statements.push(
+        db
+          .prepare(STORED_DOCUMENT_SQL)
+          .bind(p.dataset_id, p.recipe, p.stamp_id, JSON.stringify(entry)),
+      );
+    } else {
+      console.log(
+        `[compute-pipeline-progress] processing_not_written stamp=${p.stamp_id} reason=${problem}`,
+      );
+    }
+    const done = await db.batch(statements);
+    if ((done[0]?.meta?.changes ?? 0) === 1) resolved++;
+  }
+  return resolved;
+}
