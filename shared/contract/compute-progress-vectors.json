@@ -20,6 +20,7 @@
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows"
           ]
@@ -50,9 +51,12 @@
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows",
             "qc",
+            "ica_eligibility",
+            "iclabel_locations",
             "asr",
             "reref"
           ]

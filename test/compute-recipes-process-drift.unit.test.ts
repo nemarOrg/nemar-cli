@@ -22,7 +22,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COMPUTE_RECIPES, findRecipe } from "../shared/compute-recipes";
+import { COMPUTE_RECIPES, RECIPE_PRE_CHECKS, findRecipe } from "../shared/compute-recipes";
 
 /**
  * The value of `RECIPE_VERSION` in a recipe's `steps.py`, or null: an assignment at the start of a line, with
@@ -67,8 +67,8 @@ function expectedEngine(uvLock: string): string | null {
  * The names in a `STEP_ORDER = (...)` tuple of a `steps.py`, in order, or null: one assignment at the start
  * of a line, the tuple on one line or several, double or single quotes, comments ignored.
  */
-function stepOrderOf(stepsPy: string): string[] | null {
-  const m = /^STEP_ORDER\s*(?::[^=\n]+)?=\s*\(([^)]*)\)/m.exec(stepsPy);
+function stepOrderOf(stepsPy: string, name = "STEP_ORDER"): string[] | null {
+  const m = new RegExp(`^${name}\\s*(?::[^=\\n]+)?=\\s*\\(([^)]*)\\)`, "m").exec(stepsPy);
   if (m === null) return null;
   const body = (m[1] as string).replace(/#[^\n]*/g, "");
   return [...body.matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string);
@@ -182,9 +182,28 @@ describe("the registry matches the nemar-process sources", () => {
         "nemar-floor": floorOrder as string[],
         "nemar-ica": [...(floorOrder as string[]), ...(icaOwn as string[])],
       };
+      const pre: readonly string[] = RECIPE_PRE_CHECKS;
       for (const recipe of COMPUTE_RECIPES) {
-        const mapped = (findRecipe(recipe.name)?.checkpoints ?? []).flatMap((c) => [...c.steps]);
-        expect(mapped, `${recipe.name} checkpoint map`).toEqual(expected[recipe.name] ?? []);
+        const map = findRecipe(recipe.name)?.checkpoints ?? [];
+        const mapped = map.flatMap((c) => [...c.steps]);
+        // the pre-checks are step ids of the table, not of the record: STEP_ORDER does not list them
+        expect(
+          mapped.filter((s) => !pre.includes(s)),
+          `${recipe.name} checkpoint map`,
+        ).toEqual(expected[recipe.name] ?? []);
+        for (const step of mapped.filter((s) => pre.includes(s))) {
+          expect(
+            map.find((c) => c.steps.includes(step))?.checkpoint,
+            `${recipe.name} ${step}`,
+          ).toBe("preprocess");
+        }
+        // once nemar-process declares them, its PRE_CHECKS are exactly the ones this map holds
+        const declared = stepOrderOf(read(STEPS[recipe.name] as string), "PRE_CHECKS");
+        if (declared !== null) {
+          expect(declared, `${recipe.name} PRE_CHECKS`).toEqual(
+            mapped.filter((s) => pre.includes(s)),
+          );
+        }
       }
     },
   );

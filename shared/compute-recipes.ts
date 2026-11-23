@@ -189,12 +189,21 @@ export const STANDARD_CHECKPOINTS = [
 /** The checkpoint the backend sets when a run's derivatives are copied (ADR 0123). */
 export const STORED_CHECKPOINT = "stored";
 
+/**
+ * Step ids a recipe's recordings table can name that are not steps of its record: a measurement or a
+ * check made early, under its own id so a recording it refuses counts where it stopped and not at a
+ * later checkpoint that never ran (ADR 0134). Each counts at `preprocess`. nemar-process declares the
+ * same ids as `PRE_CHECKS` beside `STEP_ORDER` in each recipe's `steps.py`.
+ */
+export const RECIPE_PRE_CHECKS = ["qc_amplitude", "ica_eligibility", "iclabel_locations"] as const;
+
 const FLOOR_PREPROCESS_STEPS = Object.freeze([
   "flatline",
   "drift",
   "line_noise_measure",
   "line_noise_50",
   "line_noise_60",
+  "qc_amplitude",
   "bad_channels",
   "bad_windows",
 ] as const);
@@ -269,7 +278,14 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134).
     checkpoints: Object.freeze([
       checkpoint("import", ["load", "signal_channels"]),
-      checkpoint("preprocess", [...FLOOR_PREPROCESS_STEPS, "qc", "asr", "reref"]),
+      checkpoint("preprocess", [
+        ...FLOOR_PREPROCESS_STEPS,
+        "qc",
+        "ica_eligibility",
+        "iclabel_locations",
+        "asr",
+        "reref",
+      ]),
       checkpoint("ica", ["ica"]),
       checkpoint("iclabel", ["iclabel"]),
     ]),
