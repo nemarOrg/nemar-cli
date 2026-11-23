@@ -29,6 +29,7 @@ import {
   COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
   COMPUTE_PIPELINE_RUN_PER_INVOCATION,
+  COMPUTE_PIPELINE_STAMP_ID_RE,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
   type ComputePipelineCell,
@@ -531,7 +532,8 @@ dataset, a column per checkpoint the recipe declares (then stored, set when the 
 A row shows the dataset's newest run of the recipe (any of its versions; never a refusal or a hold) and
 what it shows: not_started (no run), waiting (dispatched, not started, no report yet), running, stalled
 (its last report is more than ${PIPELINE_STALLED_SECONDS / 60} minutes old while the job is submitted, queued or running,
-or the job is unreported; a job that never reported is never stalled), finished or failed. A cell is
+or the job's state is unreported; a submitted, queued or running job that never sent a progress report
+is never stalled), finished or failed. A cell is
 passed/total with a mark: F<n> n recordings failed there, x the rest were skipped (they failed
 earlier), R running, S stalled, W waiting, P pending (the run ended and its counts, or the stored
 checkpoint, are not reconciled yet), ? no counts (the run ended without a readable recordings table,
@@ -725,7 +727,7 @@ pipelineCommand
     const json = o.json === true;
     if (!requireSignedIn(json)) return;
     // The route's own bound: a whole number of up to 16 digits that is a safe integer.
-    const id = /^[1-9][0-9]{0,15}$/.test(stamp) ? Number(stamp) : Number.NaN;
+    const id = COMPUTE_PIPELINE_STAMP_ID_RE.test(stamp) ? Number(stamp) : Number.NaN;
     if (!Number.isSafeInteger(id)) {
       failMessage("<stamp-id> is a whole number from 1 (the run column of pipeline status).", {
         json,

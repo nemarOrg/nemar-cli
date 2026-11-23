@@ -582,8 +582,11 @@ export async function pipelineRunDetail(
           : counts;
     const stoppedHere =
       counts === null ? 0 : Math.max(0, counts.failed + counts.skipped - stoppedBefore);
-    if (counts !== null) stoppedBefore = counts.failed + counts.skipped;
+    // Never lower: a live checkpoint that lags its predecessor must not make the next one count twice.
+    if (counts !== null) stoppedBefore = Math.max(stoppedBefore, counts.failed + counts.skipped);
     // An unreconciled `stored` row is the derivative store's pending row, not a list of failures.
+    // Defensive: the row reconciliation writes (skipped = total - the last checkpoint's passed) already
+    // gives 0 here; the guard keeps any other pending row from reading as unlisted failures.
     const pendingStored = checkpoint === STORED_CHECKPOINT && r?.reconciled !== 1;
     const unlistedHere = pendingStored ? 0 : Math.max(0, stoppedHere - listed);
     return {

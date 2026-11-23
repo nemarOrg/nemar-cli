@@ -562,6 +562,45 @@ describe("the drill-down", () => {
     expect([byName.quality.listed, byName.quality.unlisted]).toEqual([0, 0]);
   });
 
+  test("a pending stored row never reads as unlisted failures, whatever its counts (MUTATION: drop the stored guard)", async () => {
+    await seedEegDataset(env, "nm000104");
+    const d = await finished("nm000104");
+    // A pending `stored` row that says more were skipped than stopped before it: without the guard its
+    // excess would read as recordings `stored` leaves out.
+    await env.DB.prepare(
+      "UPDATE compute_pipeline_progress SET passed = 0, failed = 0, skipped = total, reconciled = 0 WHERE stamp_id = ?1 AND checkpoint = 'stored'",
+    )
+      .bind(d.stampId)
+      .run();
+    const r = await get(`/compute/pipeline/runs/${d.stampId}`);
+    const stored = r.body.checkpoints.find((c: Loose) => c.checkpoint === "stored");
+    expect(stored.counts.skipped).toBe(4);
+    expect(stored.reconciled).toBe(false);
+    expect(stored.unlisted).toBe(0);
+  });
+
+  test("a live run counts only the recordings that stopped at each checkpoint, even when one lags (MUTATION: let the running total fall)", async () => {
+    await seedEegDataset(env, "nm000104");
+    const d = await reporting("nm000104");
+    const set = (checkpoint: string, p: number, f: number, s2: number) =>
+      env.DB.prepare(
+        "UPDATE compute_pipeline_progress SET passed = ?3, failed = ?4, skipped = ?5, total = 6 WHERE stamp_id = ?1 AND checkpoint = ?2",
+      )
+        .bind(d.stampId, checkpoint, p, f, s2)
+        .run();
+    // Import has one failure it does not list; preprocess has not caught up yet (its report lags); quality
+    // has the one recording skipped since it failed at import.
+    await set("import", 2, 1, 0);
+    await set("preprocess", 0, 0, 0);
+    await set("quality", 0, 0, 1);
+    const r = await get(`/compute/pipeline/runs/${d.stampId}`);
+    const byName = Object.fromEntries(r.body.checkpoints.map((c: Loose) => [c.checkpoint, c]));
+    expect(byName.import.reconciled).toBe(false);
+    expect([byName.import.unlisted, byName.preprocess.unlisted, byName.quality.unlisted]).toEqual([
+      1, 0, 0,
+    ]);
+  });
+
   test("a live run shows its last report; an unreadable list is said, not thrown", async () => {
     await seedEegDataset(env, "nm000104");
     const d = await reporting("nm000104");

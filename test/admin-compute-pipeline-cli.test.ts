@@ -697,6 +697,11 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
     expect(text.exitCode).toBe(0);
     expect(text.stdout).toContain(`stamp ${stamp}: nm000104 v1.0.0 nemar-floor`);
     expect(text.stdout).toMatch(/import: \w+, \d+ passed, \d+ failed, \d+ skipped of \d+/);
+    seen = [];
+    const big = await runCli("admin", ["failures", "1000000001"]);
+    expect(big.exitCode).toBe(1);
+    expect(seen).toEqual(["GET /admin/compute/pipeline/runs/1000000001"]);
+    expect(big.stdout + big.stderr).toContain("There is no such pipeline stamp.");
     const missing = await runCli("admin", ["failures", "999999"]);
     expect(missing.exitCode).toBe(1);
     expect(missing.stdout + missing.stderr).toContain("There is no such pipeline stamp.");

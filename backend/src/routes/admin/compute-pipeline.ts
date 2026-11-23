@@ -62,6 +62,7 @@ import {
   COMPUTE_PIPELINE_REFUSAL_STATUS,
   COMPUTE_PIPELINE_RUN_LIMIT_DEFAULT,
   COMPUTE_PIPELINE_RUN_LIMIT_MAX,
+  COMPUTE_PIPELINE_STAMP_ID_RE,
   COMPUTE_PIPELINE_STAMP_STATES,
   COMPUTE_PIPELINE_STATUS_PAGE_MAX,
   COMPUTE_PIPELINE_TREND_DAYS_DEFAULT,
@@ -279,8 +280,6 @@ const coverageQuery = z.object({
     .max(COMPUTE_PIPELINE_TREND_DAYS_MAX)
     .default(COMPUTE_PIPELINE_TREND_DAYS_DEFAULT),
 });
-
-const STAMP_ID_RE = /^[1-9][0-9]{0,15}$/;
 
 async function readJson(c: Ctx): Promise<unknown | null> {
   try {
@@ -541,7 +540,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
 
   admin.get("/compute/pipeline/runs/:stamp", async (c) => {
     const raw = c.req.param("stamp");
-    if (!STAMP_ID_RE.test(raw)) {
+    if (!COMPUTE_PIPELINE_STAMP_ID_RE.test(raw)) {
       return invalid(
         c,
         "invalid_query",
