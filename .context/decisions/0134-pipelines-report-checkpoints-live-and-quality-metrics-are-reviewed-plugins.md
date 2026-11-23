@@ -112,7 +112,7 @@ Proposed upstream to signalJourney, in order: checksum and size on output target
 - The Tapis route is a new job-token surface; it accepts only the closed object and only for a job that is running, and it is revoked with the job token.
 - One more table, reconciled at completion, and one more admin page and card in the website.
 - Recipes gain a step-to-checkpoint map and the shared recipe layer a local progress file; a recipe version that changes the map changes its registry entry.
-- neuroschema gains a namespace (a minor version) and fills two placeholders (patch versions); `qc-summary.v1` is retired in favor of the `dataQuality` dataset document.
+- neuroschema 0.5.0, one minor release, adds the `processing` namespace and fills the `dataQuality` and `signalJourney` placeholders; nemar-cli re-vendors it with a record root and moves `NEUROSCHEMA_VERSION` to 0.5.0, a minor bump the live checks see; `qc-summary.v1` is retired in favor of the `dataQuality` dataset document.
 - Adding a metric is writing a plugin against one manifest, for NEMAR's team and for outside experts alike.
 - A plugin reaches NEMAR's pages only through review and the upstream-first rule, which is slower than dropping in a script, and deliberately so: the numbers NEMAR shows for a dataset are NEMAR's claim.
 - Job submission and reporting become one path across a person's machine, NEMAR's runners and the supercomputer, for NEMAR and for third parties; the cost is that the launch specification, the manifest, the progress object and the neuroschema extensions are public interfaces that must stay versioned and backward compatible, and the launcher needs a standalone mode.
