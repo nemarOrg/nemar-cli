@@ -18,13 +18,24 @@
  * for `nemar-ica`, in that order; each pre-check at `preprocess`. A `steps.py` that declares `CHECKPOINTS`
  * must declare `PRE_CHECKS` too, and its `CHECKPOINTS` must be the registry's map, step for step.
  *
+ * A recipe's quality plugins (ADR 0134 decisions 6 and 7) are steps of the map too, at `quality` and
+ * `figures`, declared in nemar-process as `PLUGINS = (("name", "version"), ...)` beside `STEP_ORDER`, which does
+ * not list them. Until a `steps.py` declares `PLUGINS` (nemar-process `dev` and its epic branch before phase 5
+ * P4), the comparison leaves the registry's plugin steps out, and a checkpoint left empty by that; once it
+ * declares them, its plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
+ *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COMPUTE_RECIPES, RECIPE_PRE_CHECKS, findRecipe } from "../shared/compute-recipes";
+import {
+  COMPUTE_RECIPES,
+  RECIPE_PLUGIN_STEPS,
+  RECIPE_PRE_CHECKS,
+  findRecipe,
+} from "../shared/compute-recipes";
 
 /**
  * The value of `RECIPE_VERSION` in a recipe's `steps.py`, or null: an assignment at the start of a line, with
@@ -99,6 +110,37 @@ function checkpointsOf(stepsPy: string): [string, string[]][] | null {
   ]);
 }
 
+/**
+ * The plugin names of a `PLUGINS = (("name", "version"), ...)` literal of a `steps.py`, in order, or null when
+ * there is none: one assignment at the start of a line, on one line or several, comments ignored; `()` is an
+ * empty list. Each entry is a pair, and only its first string is a name.
+ */
+function pluginsOf(stepsPy: string): string[] | null {
+  const start = /^PLUGINS\s*(?::[^=\n]+)?=\s*\(/m.exec(stepsPy);
+  if (start === null) return null;
+  const text = stepsPy.slice(start.index + start[0].length).replace(/#[^\n]*/g, "");
+  let depth = 1;
+  let end = 0;
+  while (end < text.length && depth > 0) {
+    if (text[end] === "(") depth++;
+    else if (text[end] === ")") depth--;
+    end++;
+  }
+  const body = text.slice(0, end - 1);
+  const pair = /\(\s*["']([^"'\n]+)["']\s*,\s*["'][^"'\n]+["']\s*,?\s*\)/g;
+  return [...body.matchAll(pair)].map((m) => m[1] as string);
+}
+
+/** A checkpoint map with the given steps left out, and any checkpoint that leaves empty. */
+function withoutSteps(
+  map: readonly { checkpoint: string; steps: readonly string[] }[],
+  leave: readonly string[],
+): [string, string[]][] {
+  return map
+    .map((c): [string, string[]] => [c.checkpoint, c.steps.filter((s) => !leave.includes(s))])
+    .filter(([, steps]) => steps.length > 0);
+}
+
 const STEPS: Record<string, string> = {
   "nemar-floor": "recipes/nemar_process/nemar_floor/steps.py",
   "nemar-ica": "recipes/nemar_process/nemar_ica/steps.py",
@@ -154,6 +196,31 @@ describe("the parsing of the nemar-process sources", () => {
       ["quality", ["qc"]],
     ]);
     expect(checkpointsOf('STEP_ORDER = ("x",)\n# CHECKPOINTS = ()\n')).toBeNull();
+  });
+
+  test("PLUGINS is read as the first string of each pair, across lines, comments ignored, or null", () => {
+    expect(
+      pluginsOf('PLUGINS = (("nemar-quality", "1.0.0-b1"), ("nemar-spectrum", "1.0.0-b1"))\n'),
+    ).toEqual(["nemar-quality", "nemar-spectrum"]);
+    expect(
+      pluginsOf(
+        "PLUGINS = (\n    ('nemar-quality', '1.0.0-b1'),  # metrics\n    (\"nemar-segment\", \"2\"),\n)\n",
+      ),
+    ).toEqual(["nemar-quality", "nemar-segment"]);
+    expect(pluginsOf("PLUGINS = ()\n")).toEqual([]);
+    expect(pluginsOf('# PLUGINS = (("x", "1"),)\nSTEP_ORDER = ("a",)\n')).toBeNull();
+  });
+
+  test("withoutSteps leaves the named steps out, and a checkpoint that ends empty", () => {
+    const map = [
+      { checkpoint: "iclabel", steps: ["iclabel"] },
+      { checkpoint: "quality", steps: ["nemar-quality"] },
+      { checkpoint: "figures", steps: ["nemar-spectrum", "x"] },
+    ];
+    expect(withoutSteps(map, ["nemar-quality", "nemar-spectrum"])).toEqual([
+      ["iclabel", ["iclabel"]],
+      ["figures", ["x"]],
+    ]);
   });
 
   test("a [tool.uv.sources] style pin resolves through the lock, which names the branch's resolved commit", () => {
@@ -222,12 +289,14 @@ describe("the registry matches the nemar-process sources", () => {
         "nemar-ica": [...(floorOrder as string[]), ...(icaOwn as string[])],
       };
       const pre: readonly string[] = RECIPE_PRE_CHECKS;
+      const plugins: readonly string[] = RECIPE_PLUGIN_STEPS;
       for (const recipe of COMPUTE_RECIPES) {
         const map = findRecipe(recipe.name)?.checkpoints ?? [];
         const mapped = map.flatMap((c) => [...c.steps]);
-        // the pre-checks are step ids of the table, not of the record: STEP_ORDER does not list them
+        // the pre-checks are step ids of the table, not of the record, and the plugins are listed apart:
+        // STEP_ORDER lists neither
         expect(
-          mapped.filter((s) => !pre.includes(s)),
+          mapped.filter((s) => !pre.includes(s) && !plugins.includes(s)),
           `${recipe.name} checkpoint map`,
         ).toEqual(expected[recipe.name] ?? []);
         for (const step of mapped.filter((s) => pre.includes(s))) {
@@ -241,13 +310,20 @@ describe("the registry matches the nemar-process sources", () => {
         const stepsPy = read(STEPS[recipe.name] as string);
         const declaredMap = checkpointsOf(stepsPy);
         const declared = stepOrderOf(stepsPy, "PRE_CHECKS");
+        const declaredPlugins = pluginsOf(stepsPy);
+        const mappedPlugins = mapped.filter((s) => plugins.includes(s));
+        if (declaredPlugins !== null) {
+          // a steps.py that declares PLUGINS (phase 5 P4 on): its names, in order, are the map's plugin steps
+          expect(declaredPlugins, `${recipe.name} PLUGINS`).toEqual(mappedPlugins);
+        }
         if (declaredMap !== null) {
           expect(
             declared,
             `${recipe.name}: steps.py declares CHECKPOINTS without PRE_CHECKS`,
           ).not.toBeNull();
+          // before PLUGINS is declared, nemar-process's CHECKPOINTS do not hold the registry's plugin steps yet
           expect(declaredMap, `${recipe.name} CHECKPOINTS`).toEqual(
-            map.map((c) => [c.checkpoint, [...c.steps]]),
+            withoutSteps(map, declaredPlugins === null ? mappedPlugins : []),
           );
         }
         if (declared !== null) {
