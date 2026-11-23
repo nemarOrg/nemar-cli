@@ -68,3 +68,4 @@ export * from "./plugin-manifest.js";
 // nemarOrg/nemar-process.
 export * from "./compute-local-launch.js";
 export * from "./compute-recipe-progress.js";
+export * from "./compute-results-report.js";
