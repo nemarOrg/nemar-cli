@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { Ajv2020 } from "ajv/dist/2020";
+import { z } from "zod";
 import launchSchema from "../shared/contract/compute-launch.schema.json";
 import progressSchema from "../shared/contract/compute-progress.schema.json";
 import recipeSchema from "../shared/contract/compute-recipe-progress.schema.json";
@@ -22,6 +23,8 @@ import {
   RESULTS_REPORT_RECORD_LEVELS,
   RESULTS_REPORT_VERIFIED_KINDS,
   ResultsReportSchema,
+  refineResultsCheckpoints,
+  refineResultsReport,
 } from "../shared/contract/compute-results-report";
 import reportSchema from "../shared/contract/compute-results-report.schema.json";
 import * as contractIndex from "../shared/contract/index";
@@ -560,5 +563,56 @@ describe("each checkpoints rule is zod's own, by its message", () => {
       image: { ...d.image, uri: `ghcr.io/nemarorg/nemar-python@sha256:${"ef".repeat(32)}` },
     };
     expect(messages(doc)).toContain("the image reference is not pinned to the image digest");
+  });
+});
+
+describe("each cross rule is reported once, by one rule", () => {
+  /** The issues a refinement gives for a value, run by zod itself on a value it does not parse. */
+  const issuesOf = (refine: (v: never, ctx: z.RefinementCtx) => void, value: unknown) => {
+    const parsed = z
+      .any()
+      .superRefine((v, ctx) => refine(v as never, ctx))
+      .safeParse(value);
+    return parsed.success
+      ? []
+      : parsed.error.issues.map((i) => ({ path: i.path, message: i.message }));
+  };
+
+  test("a bad image digest is one issue, the digest's, not also the pin's", () => {
+    const d = valid();
+    const doc = { ...d, image: { ...d.image, digest: "sha256:XYZ" } };
+    const parsed = ResultsReportSchema.safeParse(doc);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.map((i) => i.path.join("."))).toEqual(["image.digest"]);
+    }
+    // The refinement alone, as zod would run it if the field issue did not stop it: no pin issue.
+    expect(issuesOf(refineResultsReport, doc)).toEqual([]);
+  });
+
+  test("an empty map does not reach the live progress rules", () => {
+    const d = valid();
+    const c = d.checkpoints as Record<string, unknown>;
+    expect(issuesOf(refineResultsCheckpoints, { ...c, map: [], failures: {} })).toEqual([]);
+  });
+
+  test("a failure naming a checkpoint the map lacks is one issue, failure_checkpoint_differs", () => {
+    const d = valid();
+    const c = d.checkpoints as { failures: { import: { checkpoint: string }[] } };
+    const stray = { ...c.failures.import[0], checkpoint: "validate" };
+    const doc = {
+      ...d,
+      checkpoints: { ...c, failures: { ...c.failures, import: [stray] } },
+    };
+    const parsed = ResultsReportSchema.safeParse(doc);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.map((i) => ({ path: i.path, message: i.message }))).toEqual([
+        {
+          path: ["checkpoints", "counts"],
+          message: "the counts do not hold together: failure_checkpoint_differs",
+        },
+      ]);
+    }
   });
 });

@@ -37,7 +37,9 @@ import {
   PROGRESS_MAX_CHECKPOINTS,
   PROGRESS_MAX_FAILURES,
   PROGRESS_MAX_RECORDINGS,
+  type ProgressCheckpointCounts,
   ProgressCheckpointCountsSchema,
+  type ProgressFailure,
   ProgressFailureSchema,
 } from "./compute-progress.js";
 import {
@@ -169,34 +171,50 @@ export const ResultsReportCheckpointsSchema = z
       ),
   })
   .strict()
-  .superRefine((c, ctx) => {
-    const refuse = (path: (string | number)[], message: string) =>
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
-    const declared = c.map.map((m) => m.checkpoint);
-    const keys = Object.keys(c.failures);
-    if (keys.length !== declared.length || !declared.every((d) => keys.includes(d))) {
-      refuse(["failures"], "failures names exactly the map's checkpoints");
-    }
-    for (const [key, list] of Object.entries(c.failures)) {
-      list.forEach((f, i) => {
-        if (f.checkpoint !== key) {
-          refuse(["failures", key, i, "checkpoint"], "a failure is listed under its checkpoint");
-        }
-      });
-    }
-    // The live progress object's rules, read over the same counts and the failures in one list: the
-    // counts name exactly the map's checkpoints (checkpoints_differ) and hold together.
-    const problem = progressProblem(
-      {
-        format: PROGRESS_FORMAT,
-        checkpoint: declared[0],
-        counts: c.counts,
-        failures: Object.values(c.failures).flat(),
-      },
-      c.map,
-    );
-    if (problem !== null) refuse(["counts"], `the counts do not hold together: ${problem}`);
-  });
+  .superRefine((c, ctx) => refineResultsCheckpoints(c, ctx));
+
+/**
+ * The rules of the checkpoints block no schema can state (see {@link ResultsReportCheckpointsSchema}).
+ * Zod runs it only on a block whose fields parsed; it is exported so its guards can be tested alone.
+ */
+export function refineResultsCheckpoints(
+  c: {
+    map: readonly { checkpoint: string }[];
+    counts: Record<string, ProgressCheckpointCounts>;
+    failures: Record<string, ProgressFailure[]>;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const refuse = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  const declared = c.map.map((m) => m.checkpoint);
+  const keys = Object.keys(c.failures);
+  if (keys.length !== declared.length || !declared.every((d) => keys.includes(d))) {
+    refuse(["failures"], "failures names exactly the map's checkpoints");
+  }
+  for (const [key, list] of Object.entries(c.failures)) {
+    list.forEach((f, i) => {
+      // A failure naming a checkpoint the map lacks is progressProblem's (failure_checkpoint_differs).
+      if (f.checkpoint !== key && declared.includes(f.checkpoint)) {
+        refuse(["failures", key, i, "checkpoint"], "a failure is listed under its checkpoint");
+      }
+    });
+  }
+  // The live progress object's rules, read over the same counts and the failures in one list: the
+  // counts name exactly the map's checkpoints (checkpoints_differ) and hold together. An empty map is
+  // the map's own issue, so the rules are not read over it.
+  if (declared.length === 0) return;
+  const problem = progressProblem(
+    {
+      format: PROGRESS_FORMAT,
+      checkpoint: declared[0],
+      counts: c.counts,
+      failures: Object.values(c.failures).flat(),
+    },
+    c.map,
+  );
+  if (problem !== null) refuse(["counts"], `the counts do not hold together: ${problem}`);
+}
 
 /** The results report. */
 export const ResultsReportSchema = z
@@ -246,37 +264,56 @@ export const ResultsReportSchema = z
       .max(COMPUTE_MAX_OUTPUT_FILES),
   })
   .strict()
-  .superRefine((report, ctx) => {
-    const refuse = (path: (string | number)[], message: string) =>
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
-    if ((report.checkpoints === null) === (report.checkpoints_reason === null)) {
-      refuse(["checkpoints_reason"], "a reason exactly when there are no checkpoint counts");
-    }
-    const unique = (names: string[], path: string) => {
-      const seen = new Set<string>();
-      names.forEach((n, i) => {
-        if (seen.has(n)) refuse([path, i, "name"], "a name is listed twice");
-        seen.add(n);
-      });
-    };
-    unique(
-      report.inputs.map((i) => i.name),
-      "inputs",
-    );
-    unique(
-      report.launcher_files.map((f) => f.name),
-      "launcher_files",
-    );
-    if (
-      COMPUTE_IMAGE_REF_RE.test(report.image.uri) &&
-      !report.image.uri.endsWith(report.image.digest)
-    ) {
-      refuse(["image", "uri"], "the image reference is not pinned to the image digest");
-    }
-    if (report.finished_utc < report.started_utc) {
-      refuse(["finished_utc"], "the run finished no earlier than it started");
-    }
-  });
+  .superRefine((report, ctx) => refineResultsReport(report, ctx));
+
+/**
+ * The rules of the report no schema can state (see the module's docblock). Zod runs it only on a report
+ * whose fields parsed; it is exported so its guards can be tested alone.
+ */
+export function refineResultsReport(
+  report: {
+    checkpoints: unknown;
+    checkpoints_reason: string | null;
+    inputs: readonly { name: string }[];
+    launcher_files: readonly { name: string }[];
+    image: { uri: string; digest: string };
+    started_utc: string;
+    finished_utc: string;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const refuse = (path: (string | number)[], message: string) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  if ((report.checkpoints === null) === (report.checkpoints_reason === null)) {
+    refuse(["checkpoints_reason"], "a reason exactly when there are no checkpoint counts");
+  }
+  const unique = (names: string[], path: string) => {
+    const seen = new Set<string>();
+    names.forEach((n, i) => {
+      if (seen.has(n)) refuse([path, i, "name"], "a name is listed twice");
+      seen.add(n);
+    });
+  };
+  unique(
+    report.inputs.map((i) => i.name),
+    "inputs",
+  );
+  unique(
+    report.launcher_files.map((f) => f.name),
+    "launcher_files",
+  );
+  // Only when both fields are well formed, as in refineRunnable, so a field issue is not doubled.
+  if (
+    COMPUTE_IMAGE_DIGEST_RE.test(report.image.digest) &&
+    COMPUTE_IMAGE_REF_RE.test(report.image.uri) &&
+    !report.image.uri.endsWith(report.image.digest)
+  ) {
+    refuse(["image", "uri"], "the image reference is not pinned to the image digest");
+  }
+  if (report.finished_utc < report.started_utc) {
+    refuse(["finished_utc"], "the run finished no earlier than it started");
+  }
+}
 
 export type ResultsReportVerification = z.infer<typeof ResultsReportVerificationSchema>;
 export type ResultsReportTable = z.infer<typeof ResultsReportTableSchema>;
