@@ -478,7 +478,7 @@
       }
     },
     "Checkpoints": {
-      "description": "The checkpoint counts of the job's recordings by the backend's reconcile rules: the recipe and its map from the recipe progress file, the table they were counted from, the counts per checkpoint and the first failures per checkpoint.",
+      "description": "The checkpoint counts of the job's recordings by the backend's reconcile rules: the recipe and its map from the recipe progress file, the table they were counted from, the counts per checkpoint and the first failures per checkpoint. Rules a schema cannot state, the reader's: counts and failures each name exactly the map's checkpoints; each failure's checkpoint is the key it is listed under; no column counts more than its total; every column has the same total; and no checkpoint lists more failures than it counts as failed or skipped (the live progress object's rules).",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -526,6 +526,7 @@
         },
         "failures": {
           "type": "object",
+          "maxProperties": 8,
           "propertyNames": {
             "$ref": "#/$defs/CheckpointName"
           },
@@ -540,7 +541,7 @@
       }
     },
     "ResultsReport": {
-      "description": "The results report. Closed. Rules a schema cannot state, the reader's: input names and launcher file names are unique, and finished_utc is not before started_utc.",
+      "description": "The results report. Closed. Rules a schema cannot state, the reader's: input names and launcher file names are unique; finished_utc is not before started_utc; the @sha256:<hex> image.uri ends with is image.digest; and the rules of $defs/Checkpoints.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -606,7 +607,7 @@
           ],
           "properties": {
             "uri": {
-              "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule, like the one for sif): the @sha256:<hex> it ends with must equal image.digest.",
+              "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule): the @sha256:<hex> it ends with must equal image.digest.",
               "type": "string",
               "maxLength": 512,
               "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"

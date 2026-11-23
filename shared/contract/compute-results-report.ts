@@ -9,14 +9,17 @@
  * `nemarOrg/nemar-process` (`launcher/schema/compute-results-report.v1.json`), whose launcher validates
  * the report against it before it writes it. `test/compute-results-report-contract.unit.test.ts` holds
  * the two to each other, and holds the definitions it shares with other schemas equal to them: a
- * checkpoint's counts and a failure are the live progress object's (`./compute-progress.ts`), the
- * checkpoint map is the recipe progress file's, and `result` is the launcher's `result.json`
- * (`LauncherResultSchema`).
+ * checkpoint's counts and a failure item are the live progress object's (`./compute-progress.ts`),
+ * arranged here per checkpoint, the checkpoint map is the recipe progress file's, and `result` is the
+ * launcher's `result.json` (`LauncherResultSchema`).
  *
  * Paths are relative to the job's output directory; no host path is ever in the report. A problem the
  * launcher met while building the report is a fixed word inside it, never a change of the job's exit.
- * Rules no schema can state (zod enforces them): input names and launcher file names are unique, and the
- * run finished no earlier than it started.
+ * Rules no schema can state (zod enforces them): input names and launcher file names are unique; the
+ * run finished no earlier than it started; the `@sha256:<hex>` the image reference ends with is
+ * `image.digest`; and in `checkpoints`, `counts` and `failures` each name exactly the map's checkpoints,
+ * each failure is listed under its own checkpoint, and the counts and failures hold together by the
+ * live progress object's rules (`progressProblem` in `../compute-checkpoints.ts`).
  *
  * It is closed at every level: the launcher writes it and a mistyped key is a bug. Like
  * `./compute-progress.ts`, this file is exempted by name in `test/contract-schemas.test.ts`.
@@ -25,10 +28,12 @@
  */
 
 import { z } from "zod";
+import { progressProblem } from "../compute-checkpoints.js";
 import { LOCAL_DATASET_NAME_RE, LOCAL_LAUNCH_MAX_DATASETS } from "./compute-local-launch.js";
 import {
   PROGRESS_CHECKPOINT_RE,
   PROGRESS_FAILURE_CODE_RE,
+  PROGRESS_FORMAT,
   PROGRESS_MAX_CHECKPOINTS,
   PROGRESS_MAX_FAILURES,
   PROGRESS_MAX_RECORDINGS,
@@ -128,7 +133,15 @@ export const ResultsReportTableSchema = z
   })
   .strict();
 
-/** The checkpoint counts of the job's recordings, by the backend's reconcile rules. */
+const checkpointCount = (o: object) => Object.keys(o).length;
+
+/**
+ * The checkpoint counts of the job's recordings, by the backend's reconcile rules. Rules no schema can
+ * state: `counts` and `failures` each name exactly the map's checkpoints; each failure's `checkpoint` is
+ * the key it is listed under; and the counts and failures hold together by the live progress object's
+ * rules (`progressProblem` in `../compute-checkpoints.ts`: no column counts more than its total, every
+ * column has the same total, and no checkpoint lists more failures than it counts as failed or skipped).
+ */
 export const ResultsReportCheckpointsSchema = z
   .object({
     recipe: z
@@ -142,15 +155,48 @@ export const ResultsReportCheckpointsSchema = z
     counts: z
       .record(z.string().regex(PROGRESS_CHECKPOINT_RE), ProgressCheckpointCountsSchema)
       .refine((o) => {
-        const n = Object.keys(o).length;
+        const n = checkpointCount(o);
         return n >= 1 && n <= PROGRESS_MAX_CHECKPOINTS;
       }, `counts holds 1 to ${PROGRESS_MAX_CHECKPOINTS} checkpoints`),
-    failures: z.record(
-      z.string().regex(PROGRESS_CHECKPOINT_RE),
-      z.array(ProgressFailureSchema).max(PROGRESS_MAX_FAILURES),
-    ),
+    failures: z
+      .record(
+        z.string().regex(PROGRESS_CHECKPOINT_RE),
+        z.array(ProgressFailureSchema).max(PROGRESS_MAX_FAILURES),
+      )
+      .refine(
+        (o) => checkpointCount(o) <= PROGRESS_MAX_CHECKPOINTS,
+        `failures holds at most ${PROGRESS_MAX_CHECKPOINTS} checkpoints`,
+      ),
   })
-  .strict();
+  .strict()
+  .superRefine((c, ctx) => {
+    const refuse = (path: (string | number)[], message: string) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+    const declared = c.map.map((m) => m.checkpoint);
+    const keys = Object.keys(c.failures);
+    if (keys.length !== declared.length || !declared.every((d) => keys.includes(d))) {
+      refuse(["failures"], "failures names exactly the map's checkpoints");
+    }
+    for (const [key, list] of Object.entries(c.failures)) {
+      list.forEach((f, i) => {
+        if (f.checkpoint !== key) {
+          refuse(["failures", key, i, "checkpoint"], "a failure is listed under its checkpoint");
+        }
+      });
+    }
+    // The live progress object's rules, read over the same counts and the failures in one list: the
+    // counts name exactly the map's checkpoints (checkpoints_differ) and hold together.
+    const problem = progressProblem(
+      {
+        format: PROGRESS_FORMAT,
+        checkpoint: declared[0],
+        counts: c.counts,
+        failures: Object.values(c.failures).flat(),
+      },
+      c.map,
+    );
+    if (problem !== null) refuse(["counts"], `the counts do not hold together: ${problem}`);
+  });
 
 /** The results report. */
 export const ResultsReportSchema = z
@@ -221,6 +267,12 @@ export const ResultsReportSchema = z
       report.launcher_files.map((f) => f.name),
       "launcher_files",
     );
+    if (
+      COMPUTE_IMAGE_REF_RE.test(report.image.uri) &&
+      !report.image.uri.endsWith(report.image.digest)
+    ) {
+      refuse(["image", "uri"], "the image reference is not pinned to the image digest");
+    }
     if (report.finished_utc < report.started_utc) {
       refuse(["finished_utc"], "the run finished no earlier than it started");
     }

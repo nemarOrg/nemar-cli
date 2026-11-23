@@ -27,7 +27,7 @@ import reportSchema from "../shared/contract/compute-results-report.schema.json"
 import * as contractIndex from "../shared/contract/index";
 import { compileNeuroschemaValidator } from "./contract/neuroschema-validator.js";
 
-const ajv = new Ajv2020({ allErrors: true, strict: false });
+const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
 ajv.addSchema(reportSchema);
 const ajvReport = ajv.getSchema(`${reportSchema.$id}#/$defs/ResultsReport`);
 if (!ajvReport) throw new Error("results report schema member not found");
@@ -174,10 +174,14 @@ describe("the definitions shared with other schemas are theirs, value for value"
     expect(defs.result).toEqual(launchSchema.$defs.result);
   });
 
-  test("the image reference is the launch specification's", () => {
-    expect(reportSchema.$defs.ResultsReport.properties.image.properties.uri).toEqual(
-      launchSchema.properties.image.properties.uri,
-    );
+  test("the image reference is the launch specification's, but for its description", () => {
+    const { description: reportText, ...reportUri } =
+      reportSchema.$defs.ResultsReport.properties.image.properties.uri;
+    const { description: _launchText, ...launchUri } = launchSchema.properties.image.properties.uri;
+    expect(reportUri).toEqual(launchUri);
+    // The report has no image file, so its description names only the rule it enforces.
+    expect(reportText).not.toContain("sif");
+    expect(reportText).toContain("must equal image.digest");
   });
 });
 
@@ -389,11 +393,108 @@ describe("Ajv and zod agree", () => {
       (d) => withCheckpoints(d, (c) => ({ ...c, table: "x.tsv" })),
       false,
     ],
+    [
+      "an image reference not pinned to the digest",
+      (d) => ({
+        ...d,
+        image: { ...d.image, uri: `ghcr.io/nemarorg/nemar-python@sha256:${"ef".repeat(32)}` },
+      }),
+      false,
+    ],
+    [
+      "failures at nine checkpoints",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          failures: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`c${i}`, []])),
+        })),
+      false,
+    ],
+    [
+      "counts missing a map checkpoint",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: { import: counts(2, 1, 0, 3), preprocess: counts(2, 0, 1, 3) },
+        })),
+      false,
+    ],
+    [
+      "counts naming a checkpoint the map does not",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: { ...(c.counts as object), validate: counts(3, 0, 0, 3) },
+        })),
+      false,
+    ],
+    [
+      "failures missing a map checkpoint",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          failures: { import: (c.failures as { import: unknown[] }).import, preprocess: [] },
+        })),
+      false,
+    ],
+    [
+      "a failure listed under another checkpoint",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: {
+            import: counts(2, 1, 0, 3),
+            preprocess: counts(1, 1, 1, 3),
+            quality: counts(1, 0, 2, 3),
+          },
+          failures: {
+            import: (c.failures as { import: unknown[] }).import,
+            preprocess: (c.failures as { import: unknown[] }).import,
+            quality: [],
+          },
+        })),
+      false,
+    ],
+    [
+      "a column counting past its total",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: { ...(c.counts as object), quality: counts(3, 0, 1, 3) },
+        })),
+      false,
+    ],
+    [
+      "columns with different totals",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: { ...(c.counts as object), quality: counts(2, 0, 1, 4) },
+        })),
+      false,
+    ],
+    [
+      "more failures listed than counted",
+      (d) =>
+        withCheckpoints(d, (c) => ({
+          ...c,
+          counts: { ...(c.counts as object), import: counts(3, 0, 0, 3) },
+        })),
+      false,
+    ],
   ];
   const zodOnly = new Set([
     "finished before started",
     "an input named twice",
     "a launcher file named twice",
+    "an image reference not pinned to the digest",
+    "counts missing a map checkpoint",
+    "counts naming a checkpoint the map does not",
+    "failures missing a map checkpoint",
+    "a failure listed under another checkpoint",
+    "a column counting past its total",
+    "columns with different totals",
+    "more failures listed than counted",
   ]);
   for (const [name, build, expected] of cases) {
     test(name, () => {
@@ -402,4 +503,62 @@ describe("Ajv and zod agree", () => {
       expect(verdict.ajv, "ajv").toBe(zodOnly.has(name) ? true : expected);
     });
   }
+});
+
+describe("each checkpoints rule is zod's own, by its message", () => {
+  const messages = (doc: unknown) => {
+    const parsed = ResultsReportSchema.safeParse(doc);
+    return parsed.success ? [] : parsed.error.issues.map((i) => i.message);
+  };
+  const withFailures = (failures: unknown) => {
+    const d = valid();
+    return { ...d, checkpoints: { ...(d.checkpoints as object), failures } };
+  };
+  test("failures at nine checkpoints names the key count", () => {
+    const failures = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`c${i}`, []]));
+    expect(messages(withFailures(failures))).toContain("failures holds at most 8 checkpoints");
+  });
+
+  test("failures missing a map checkpoint names the key rule", () => {
+    const d = valid();
+    const listed = (d.checkpoints as { failures: { import: unknown[] } }).failures.import;
+    expect(messages(withFailures({ import: listed, preprocess: [] }))).toContain(
+      "failures names exactly the map's checkpoints",
+    );
+  });
+
+  test("a failure under another key names the listing rule", () => {
+    const d = valid();
+    const listed = (d.checkpoints as { failures: { import: unknown[] } }).failures.import;
+    expect(messages(withFailures({ import: [], preprocess: listed, quality: [] }))).toContain(
+      "a failure is listed under its checkpoint",
+    );
+  });
+
+  test("counts missing a map checkpoint names the progress rule", () => {
+    const d = valid();
+    const c = d.checkpoints as { counts: Record<string, unknown> };
+    const { quality: _q, ...rest } = c.counts;
+    const doc = { ...d, checkpoints: { ...c, counts: rest } };
+    expect(messages(doc)).toContain("the counts do not hold together: checkpoints_differ");
+  });
+
+  test("more failures listed than counted names the progress rule", () => {
+    const d = valid();
+    const c = d.checkpoints as { counts: Record<string, unknown> };
+    const doc = {
+      ...d,
+      checkpoints: { ...c, counts: { ...c.counts, import: counts(3, 0, 0, 3) } },
+    };
+    expect(messages(doc)).toContain("the counts do not hold together: failures_over_count");
+  });
+
+  test("an unpinned image reference names the pin rule", () => {
+    const d = valid();
+    const doc = {
+      ...d,
+      image: { ...d.image, uri: `ghcr.io/nemarorg/nemar-python@sha256:${"ef".repeat(32)}` },
+    };
+    expect(messages(doc)).toContain("the image reference is not pinned to the image digest");
+  });
 });
