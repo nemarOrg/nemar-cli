@@ -155,6 +155,19 @@ export interface ComputeRecipe {
    * the same map, and a recipe version that changes it changes this entry.
    */
   checkpoints: readonly RecipeCheckpoint[];
+  /**
+   * The result limits of this recipe's pipeline jobs (owner decision of 2026-11-23): a NEMAR pipeline job,
+   * the one a pipeline stamp names, is held to these instead of the owner's policy `resultLimits`; a
+   * person's and a partner's job keep the policy. Absent: the policy applies to the recipe's jobs too.
+   * `maxFiles` is never above `COMPUTE_MAX_OUTPUT_FILES` (100,000, the launcher's own `MAX_OUTPUT_FILES`).
+   */
+  resultLimits?: RecipeResultLimits;
+}
+
+/** A recipe's own result limits (see {@link ComputeRecipe.resultLimits}). */
+export interface RecipeResultLimits {
+  /** The most outputs one job of the recipe lists, launcher files apart. */
+  maxFiles: number;
 }
 
 /** A checkpoint a recipe may declare: a standard checkpoint other than `stored`. */
@@ -206,12 +219,7 @@ export const RECIPE_PRE_CHECKS = ["qc_amplitude", "ica_eligibility", "iclabel_lo
  * recording still succeeds (owner decision of 2026-11-23), so a table row names a plugin step only if the
  * recording failed in it in a way the plugin runner does not absorb.
  */
-export const RECIPE_PLUGIN_STEPS = [
-  "nemar-quality",
-  "nemar-spectrum",
-  "nemar-components",
-  "nemar-segment",
-] as const;
+export const RECIPE_PLUGIN_STEPS = ["nemar-quality"] as const;
 
 const FLOOR_PREPROCESS_STEPS = Object.freeze([
   "flatline",
@@ -274,6 +282,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
       checkpoint("preprocess", FLOOR_PREPROCESS_STEPS),
       checkpoint("quality", ["qc"]),
     ]),
+    // Six files per recording (record, channels, bad segments, sample mask, filters, qc) and three for the
+    // dataset: the policy's 5,000 stops at about 830 recordings, and an auto-dispatched dataset can hold more.
+    // 25,000 admits about 4,160.
+    resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
   Object.freeze({
     name: "nemar-ica",
@@ -292,7 +304,7 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     placeholder: true,
     eligibility: "eeg",
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
-    // quality plugins follow the decomposition, metrics at `quality` and figures at `figures`.
+    // quality plugin follows the decomposition at `quality`.
     checkpoints: Object.freeze([
       checkpoint("import", ["load", "signal_channels"]),
       checkpoint("preprocess", [
@@ -306,8 +318,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
       checkpoint("ica", ["ica"]),
       checkpoint("iclabel", ["iclabel"]),
       checkpoint("quality", ["nemar-quality"]),
-      checkpoint("figures", ["nemar-spectrum", "nemar-components", "nemar-segment"]),
     ]),
+    // About 13 files per recording, plus the dataset's: the policy's 5,000 stops at about 384 recordings;
+    // 25,000 admits about 1,920, headroom over a 1,000-recording dataset and room for figure files later.
+    resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
 ]) as readonly ComputeRecipe[];
 

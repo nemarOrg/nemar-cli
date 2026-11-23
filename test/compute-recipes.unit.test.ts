@@ -46,6 +46,7 @@ import {
   stampInputFields,
 } from "../shared/compute-recipes";
 import {
+  COMPUTE_MAX_OUTPUT_FILES,
   JobSpecSchema,
   LAUNCHER_OUTPUTS_DIR,
   PARTITIONS,
@@ -682,9 +683,6 @@ describe("checkpoint maps (ADR 0134)", () => {
     "ica",
     "iclabel",
     "nemar-quality",
-    "nemar-spectrum",
-    "nemar-components",
-    "nemar-segment",
   ];
 
   test("the standard checkpoints and stored are the ADR's, in order", () => {
@@ -721,7 +719,7 @@ describe("checkpoint maps (ADR 0134)", () => {
     ]);
   });
 
-  test("nemar-ica maps its re-run qc to preprocess, then ica, iclabel, and its plugins at quality and figures", () => {
+  test("nemar-ica maps its re-run qc to preprocess, then ica, iclabel, and its quality plugin at quality", () => {
     const ica = findRecipe("nemar-ica");
     expect(ica?.checkpoints.map((c) => c.checkpoint)).toEqual([
       "import",
@@ -729,20 +727,28 @@ describe("checkpoint maps (ADR 0134)", () => {
       "ica",
       "iclabel",
       "quality",
-      "figures",
     ]);
     expect(ica && checkpointOfStep(ica, "qc")).toBe("preprocess");
     expect(ica && checkpointOfStep(ica, "asr")).toBe("preprocess");
     expect(ica && checkpointOfStep(ica, "iclabel")).toBe("iclabel");
     expect(ica && checkpointOfStep(ica, "nemar-quality")).toBe("quality");
-    for (const step of ["nemar-spectrum", "nemar-components", "nemar-segment"]) {
-      expect(ica && checkpointOfStep(ica, step), step).toBe("figures");
-    }
-    // the record is written after the plugins: its step counts at figures
-    expect(ica && checkpointOfStep(ica, RECORD_STEP)).toBe("figures");
+    // the record is written after the plugins: its step counts at quality
+    expect(ica && checkpointOfStep(ica, RECORD_STEP)).toBe("quality");
   });
 
-  test("every plugin step is a step word and a plugin name, mapped only in nemar-ica, at quality or figures", () => {
+  test("every recipe's own result limit is a whole number from 1 to the outputs ceiling (owner, 2026-11-23)", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      const max = recipe.resultLimits?.maxFiles;
+      if (max === undefined) continue;
+      expect(Number.isSafeInteger(max), recipe.name).toBe(true);
+      expect(max, recipe.name).toBeGreaterThanOrEqual(1);
+      expect(max, recipe.name).toBeLessThanOrEqual(COMPUTE_MAX_OUTPUT_FILES);
+    }
+    expect(findRecipe("nemar-ica")?.resultLimits?.maxFiles).toBe(25_000);
+    expect(findRecipe("nemar-floor")?.resultLimits?.maxFiles).toBe(25_000);
+  });
+
+  test("every plugin step is a step word and a plugin name, mapped only in nemar-ica, at quality", () => {
     const manifestName = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?![\s\S])/;
     for (const step of RECIPE_PLUGIN_STEPS) {
       expect(PROGRESS_STEP_RE.test(step), step).toBe(true);
@@ -758,7 +764,7 @@ describe("checkpoint maps (ADR 0134)", () => {
       [],
     );
     for (const step of RECIPE_PLUGIN_STEPS) {
-      expect(["quality", "figures"]).toContain(ica ? checkpointOfStep(ica, step) : null);
+      expect(ica ? checkpointOfStep(ica, step) : null).toBe("quality");
     }
   });
 
