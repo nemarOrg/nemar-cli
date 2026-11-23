@@ -968,14 +968,15 @@ jobs:
       # #2005 phase A7, ADR 0118 amendment of 2026-11-06). Without it that comparison found no checkout
       # and skipped: the drift claim was enforced on developer machines and nowhere else.
       #
-      # nemarOrg/nemar-process is PUBLIC, so no token is needed. Sparse, non-cone: one schema file and
-      # one fixture directory, a few kilobytes. It lands in process-copy/ at the repo root, which the
-      # unit-pure file glob does not reach.
+      # nemarOrg/nemar-process is PUBLIC, so no token is needed. Sparse, non-cone: one schema file, one
+      # fixture directory and the execution-system template, a few kilobytes. It lands in process-copy/
+      # at the repo root, which the unit-pure file glob does not reach.
       #
-      # `dev`, the integration branch of that repository, where its pull requests land (the epic
-      # branch this used to name is merged and will be deleted). If a path below is missing there, the
-      # test FAILS (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT below), which is deliberate: a broken checkout
-      # must not quietly disable the comparison.
+      # `dev`, not `main`: nemar-process releases by merging `dev` into `main` (docs/release.md there),
+      # so `main` lags every merged pull request, and a schema change made in both repositories would
+      # fail here until nemar-process released. If a path below is missing there, the drift tests FAIL
+      # (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT and NEMAR_REQUIRE_PROCESS_QUEUES below), which is
+      # deliberate: a broken checkout must not quietly disable the comparison.
       - name: Check out nemar-process's observation schema and fixtures
         uses: actions/checkout@v4
         with:

@@ -15,6 +15,12 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Changed
+
+- **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
+  `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
+  The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.
+
 ## 0.10.39 - 2026-11-22
 
 Release with the website: the website's compute tab (admin decision notice) is already on website `staging`, and a suspension or ending without a notice is refused by this Worker, so promote website `staging` to `main` in the same hour as this release.
