@@ -1,6 +1,6 @@
 /**
  * neuroschema conformance — the vendored bundle compiles and enforces the
- * v0.4.1 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
+ * v0.5.0 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
  * The live-response conformance check is in test/contract-live.test.ts.
  */
 
@@ -18,7 +18,10 @@ import type { VersionManifest } from "../backend/src/services/manifest";
 import { NEUROSCHEMA_VERSION, bidsIndexSchema } from "../shared/contract/index.js";
 import {
   NEUROSCHEMA_LINE_RE,
+  NEUROSCHEMA_TRANSITION_LINES,
   compileNeuroschemaDatasetValidator,
+  compileNeuroschemaRecordValidator,
+  compileNeuroschemaValidator,
   formatAjvErrors,
 } from "./contract/neuroschema-validator.js";
 
@@ -320,7 +323,9 @@ describe("data_papers field (v0.4.1, ADR 0077)", () => {
 });
 
 // The live checks (test/contract-live.test.ts, test/data-route.test.ts) accept a
-// deployed backend one PATCH behind the source, and nothing else.
+// deployed backend on the same MAJOR.MINOR (any PATCH), and, while a MINOR
+// release is being deployed, the previous MINOR named in
+// NEUROSCHEMA_TRANSITION_LINES (0.4 for the 0.5.0 release, ADR 0134).
 describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
   const [major, minor, patch] = NEUROSCHEMA_VERSION.split(".").map(Number);
 
@@ -330,10 +335,17 @@ describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
     }
   });
 
+  test("accepts the transition line 0.4.x while 0.5.0 deploys, and nothing older", () => {
+    expect(NEUROSCHEMA_TRANSITION_LINES).toEqual(["0.4"]);
+    for (const v of ["0.4.0", "0.4.1", "0.4.9"]) expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(true);
+    for (const v of ["0.3.9", "0.40.1", "0.4", "0.4.1-rc1"])
+      expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(false);
+  });
+
   test("rejects another MINOR or MAJOR, and anything that is not a plain x.y.z", () => {
     for (const v of [
       `${major}.${minor + 1}.0`,
-      `${major}.${minor - 1}.9`,
+      `${major}.${minor - 2}.9`,
       `${major + 1}.${minor}.${patch}`,
       `${major}.${minor}`,
       `${major}.${minor}0.0`,
@@ -343,6 +355,85 @@ describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
     ]) {
       expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(false);
     }
+  });
+});
+
+// neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2): the bundle carries a record
+// root beside the dataset root and the three processing extensions, and any
+// bundled schema can be compiled on its own by its nsc:/ id.
+describe("neuroschema 0.5.0 bundle: record root and processing extensions", () => {
+  const bundle = JSON.parse(
+    readFileSync(
+      join(import.meta.dir, "../shared/contract/neuroschema/dataset.bundle.json"),
+      "utf8",
+    ),
+  ) as {
+    _provenance: { neuroschema_version: string; source_commit: string };
+    root: string;
+    roots: { dataset: string; record: string };
+    schemas: { $id: string }[];
+  };
+  const fixture = (name: string) =>
+    JSON.parse(readFileSync(join(import.meta.dir, "fixtures/neuroschema", name), "utf8"));
+
+  test("is stamped 0.5.0 from neuroschema main 98f2b0c8", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.5.0");
+    expect(bundle._provenance.neuroschema_version).toBe("0.5.0");
+    expect(bundle._provenance.source_commit.startsWith("98f2b0c8")).toBe(true);
+  });
+
+  test("names both roots and keeps root as the dataset root", () => {
+    expect(bundle.root).toBe("nsc:/core/dataset.schema.json");
+    expect(bundle.roots).toEqual({
+      dataset: "nsc:/core/dataset.schema.json",
+      record: "nsc:/core/record.schema.json",
+    });
+  });
+
+  test("carries the processing extensions and their shared definitions", () => {
+    const ids = bundle.schemas.map((x) => x.$id);
+    for (const id of [
+      "nsc:/core/record.schema.json",
+      "nsc:/extensions/processing.schema.json",
+      "nsc:/extensions/dataQuality.schema.json",
+      "nsc:/extensions/signalJourney.schema.json",
+      "nsc:/definitions/checkpointCounts.schema.json",
+      "nsc:/definitions/qualityMetric.schema.json",
+      "nsc:/definitions/processingTypes.schema.json",
+    ]) {
+      expect(ids).toContain(id);
+    }
+  });
+
+  test("the neuroschema dataset example validates through the dataset root", () => {
+    const ok = validate(fixture("dataset-ds002718-processing.json"));
+    if (!ok) throw new Error(formatAjvErrors(validate));
+  });
+
+  test("the neuroschema record example validates through the record root", () => {
+    const record = compileNeuroschemaRecordValidator();
+    const doc = fixture("record-ds002718-processing.json");
+    if (!record(doc)) throw new Error(formatAjvErrors(record));
+    expect(record({ ...doc, modality: undefined })).toBe(false);
+  });
+
+  test("a single schema compiles by its id, and a fragment by id#pointer", () => {
+    const counts = compileNeuroschemaValidator("nsc:/definitions/checkpointCounts.schema.json");
+    expect(counts({ passed: 1, failed: 0, skipped: 0, total: 1 })).toBe(true);
+    expect(counts({ passed: 1, failed: 0, skipped: 0 })).toBe(false);
+    const link = compileNeuroschemaValidator(
+      "nsc:/extensions/signalJourney.schema.json#/$defs/recordLink",
+    );
+    expect(
+      link({
+        recipe_version: "1.0.0",
+        processing_status: "in_progress",
+        location: null,
+        sha256: null,
+        sj_version: null,
+      }),
+    ).toBe(true);
+    expect(() => compileNeuroschemaValidator("nsc:/extensions/none.schema.json")).toThrow();
   });
 });
 

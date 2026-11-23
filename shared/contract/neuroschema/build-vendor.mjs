@@ -14,6 +14,12 @@
  * resolves them against each schema's own $id). ajv then addSchema()s them all
  * and validates against the dataset root.
  *
+ * Two roots are walked (ADR 0134, epic #2324 phase 2): the dataset document and
+ * the record document, so the neuroschema extensions that only a record carries
+ * are bundled too. `roots` names both; `root` stays the dataset root for the
+ * readers that predate the record root. Any schema in the bundle can also be
+ * validated on its own by its `nsc:/` id (test/contract/neuroschema-validator.ts).
+ *
  * Usage (from the nemar-cli repo root, with the neuroschema repo checked out
  * as a sibling):
  *   bun shared/contract/neuroschema/build-vendor.mjs ../neuroschema
@@ -46,6 +52,7 @@ const nscCommit = execFileSync("git", ["-C", nscRepo, "rev-parse", "HEAD"], {
 }).trim();
 const schemaRoot = resolve(nscRepo, "schema");
 const ROOT_REL = "core/dataset.schema.json";
+const RECORD_ROOT_REL = "core/record.schema.json";
 const idFor = (relPath) => `nsc:/${relPath}`;
 
 const bundle = new Map(); // relPath -> rewritten schema
@@ -84,6 +91,7 @@ function walk(relPath) {
 }
 
 walk(ROOT_REL);
+walk(RECORD_ROOT_REL);
 
 const out = {
   _provenance: {
@@ -94,6 +102,7 @@ const out = {
     source_commit: nscCommit,
   },
   root: idFor(ROOT_REL),
+  roots: { dataset: idFor(ROOT_REL), record: idFor(RECORD_ROOT_REL) },
   schemas: [...bundle.values()],
 };
 const dest = join(import.meta.dir, "dataset.bundle.json");
