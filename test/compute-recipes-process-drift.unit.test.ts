@@ -12,9 +12,11 @@
  * with these files in its sparse list) makes a missing checkout or file FAIL, so a broken checkout cannot
  * quietly disable the comparison.
  *
- * The same checkout holds each recipe's `STEP_ORDER`, which the registry's step-to-checkpoint map copies
- * (ADR 0134 decision 2): every floor step for `nemar-floor`; the floor's steps it re-runs, then its own, for
- * `nemar-ica`. The map must name exactly those steps, in that order.
+ * The same checkout holds each recipe's `STEP_ORDER`, `PRE_CHECKS` and `CHECKPOINTS`, which the registry's
+ * step-to-checkpoint map copies (ADR 0134 decision 2). The map's steps are `STEP_ORDER` plus `PRE_CHECKS`:
+ * without the pre-checks, every floor step for `nemar-floor`, and the floor's steps it re-runs then its own
+ * for `nemar-ica`, in that order; each pre-check at `preprocess`. A `steps.py` that declares `CHECKPOINTS`
+ * must declare `PRE_CHECKS` too, and its `CHECKPOINTS` must be the registry's map, step for step.
  *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
@@ -74,6 +76,29 @@ function stepOrderOf(stepsPy: string, name = "STEP_ORDER"): string[] | null {
   return [...body.matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string);
 }
 
+/**
+ * The `CHECKPOINTS = (("name", ("step", ...)), ...)` literal of a `steps.py`, as [name, steps] pairs, or
+ * null when there is none: one assignment at the start of a line, comments ignored.
+ */
+function checkpointsOf(stepsPy: string): [string, string[]][] | null {
+  const start = /^CHECKPOINTS\s*(?::[^=\n]+)?=\s*\(/m.exec(stepsPy);
+  if (start === null) return null;
+  const text = stepsPy.slice(start.index + start[0].length).replace(/#[^\n]*/g, "");
+  let depth = 1;
+  let end = 0;
+  while (end < text.length && depth > 0) {
+    if (text[end] === "(") depth++;
+    else if (text[end] === ")") depth--;
+    end++;
+  }
+  const body = text.slice(0, end - 1);
+  const entry = /\(\s*["']([^"'\n]+)["']\s*,\s*\(([^()]*)\)\s*,?\s*\)/g;
+  return [...body.matchAll(entry)].map((m) => [
+    m[1] as string,
+    [...(m[2] as string).matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string),
+  ]);
+}
+
 const STEPS: Record<string, string> = {
   "nemar-floor": "recipes/nemar_process/nemar_floor/steps.py",
   "nemar-ica": "recipes/nemar_process/nemar_ica/steps.py",
@@ -115,6 +140,20 @@ describe("the parsing of the nemar-process sources", () => {
       "qc",
     ]);
     expect(stepOrderOf('# STEP_ORDER = ("x",)\n')).toBeNull();
+    expect(stepOrderOf('PRE_CHECKS = ("a", "b")\n', "PRE_CHECKS")).toEqual(["a", "b"]);
+  });
+
+  test("CHECKPOINTS is read as name and step pairs across lines, comments ignored, or null", () => {
+    const py =
+      'CHECKPOINTS = (\n    ("import", ("load", "signal_channels")),\n    (\n        "preprocess",\n' +
+      "        (\n            \"flatline\",  # (first)\n            'qc_amplitude',\n        ),\n    ),\n" +
+      '    ("quality", ("qc",)),\n)\nSTEP_ORDER = ("x",)\n';
+    expect(checkpointsOf(py)).toEqual([
+      ["import", ["load", "signal_channels"]],
+      ["preprocess", ["flatline", "qc_amplitude"]],
+      ["quality", ["qc"]],
+    ]);
+    expect(checkpointsOf('STEP_ORDER = ("x",)\n# CHECKPOINTS = ()\n')).toBeNull();
   });
 
   test("a [tool.uv.sources] style pin resolves through the lock, which names the branch's resolved commit", () => {
@@ -170,7 +209,7 @@ describe("the registry matches the nemar-process sources", () => {
   );
 
   test.skipIf(!required && !present)(
-    "every recipe's checkpoint map names exactly its STEP_ORDER, in order (ADR 0134)",
+    "every recipe's checkpoint map is its STEP_ORDER plus its PRE_CHECKS, and its CHECKPOINTS (ADR 0134)",
     () => {
       const dir = DIR as string;
       const read = (f: string) => readFileSync(join(dir, f), "utf8");
@@ -197,8 +236,20 @@ describe("the registry matches the nemar-process sources", () => {
             `${recipe.name} ${step}`,
           ).toBe("preprocess");
         }
-        // once nemar-process declares them, its PRE_CHECKS are exactly the ones this map holds
-        const declared = stepOrderOf(read(STEPS[recipe.name] as string), "PRE_CHECKS");
+        // a steps.py that declares CHECKPOINTS (nemar-process #74 on) declares PRE_CHECKS beside it, equal
+        // to the pre-checks this map holds, and its CHECKPOINTS are this map, step for step
+        const stepsPy = read(STEPS[recipe.name] as string);
+        const declaredMap = checkpointsOf(stepsPy);
+        const declared = stepOrderOf(stepsPy, "PRE_CHECKS");
+        if (declaredMap !== null) {
+          expect(
+            declared,
+            `${recipe.name}: steps.py declares CHECKPOINTS without PRE_CHECKS`,
+          ).not.toBeNull();
+          expect(declaredMap, `${recipe.name} CHECKPOINTS`).toEqual(
+            map.map((c) => [c.checkpoint, [...c.steps]]),
+          );
+        }
         if (declared !== null) {
           expect(declared, `${recipe.name} PRE_CHECKS`).toEqual(
             mapped.filter((s) => pre.includes(s)),

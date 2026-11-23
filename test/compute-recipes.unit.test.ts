@@ -654,9 +654,9 @@ describe("the module", () => {
 });
 
 // ADR 0134 decision 2 (epic #2324 phase 2): each recipe version declares its checkpoints and the steps
-// that map to each. The step orders below are nemar-process's `STEP_ORDER` (nemar_floor/steps.py and,
-// for nemar-ica, the floor's steps it re-runs then nemar_ica/steps.py), written out a second time so a
-// change on either side is a change here.
+// that map to each. The step lists below are nemar-process's `STEP_ORDER` plus its `PRE_CHECKS`, in map
+// order (nemar_floor/steps.py and, for nemar-ica, the floor's steps it re-runs then nemar_ica/steps.py),
+// written out a second time so a change on either side is a change here.
 describe("checkpoint maps (ADR 0134)", () => {
   const FLOOR_STEP_ORDER = [
     "load",
