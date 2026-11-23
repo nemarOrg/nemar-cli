@@ -99,6 +99,9 @@ Nothing here enters neuroschema's core; it uses extension namespaces, which neur
 | Link to the signalJourney records (per recipe: location, SHA-256, signalJourney version; `processing_status` `in_progress` while reports arrive, then `completed` or `failed`) | neuroschema `signalJourney` |
 | Plugin manifest | nemar-cli `shared/contract/`, pinned by nemar-process; it declares software before a run and has no dataset or record to attach to |
 | Live progress object | nemar-cli `shared/contract/`, closed, pinned by nemar-process |
+| Local launch specification (`nemar.local-launch.v1`, the standalone launcher's job file) | nemar-cli `shared/contract/compute-local-launch.*`, closed, pinned by nemar-process; it shares the launch specification's members for what runs |
+| Recipe progress file (`nemar.recipe-progress.v1`, what a job writes for the launcher to read) | nemar-cli `shared/contract/compute-recipe-progress.*`, closed, pinned by nemar-process |
+| Results report (`nemar.results-report.v1`, the standalone launcher's local report) | nemar-cli `shared/contract/compute-results-report.*`, closed, pinned by nemar-process; its counts and failure items are the live progress object's shapes, arranged per checkpoint and held together by the same rules |
 | Step-to-checkpoint map | recipe code in nemar-process, printed by `nemar-recipe version`, held in nemar-cli's registry |
 | NEMAR's rules for signalJourney records (figure formats, size caps, the no-samples rule, metric naming) | signalJourney's `nemar` extension namespace |
 

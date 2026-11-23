@@ -62,3 +62,10 @@ export * from "./compute-progress.js";
 // The quality plugin manifest `nemar.plugin-manifest.v1` (ADR 0134, epic #2324 phase 2). Its JSON Schema
 // is copied byte for byte by nemarOrg/nemar-process.
 export * from "./plugin-manifest.js";
+// The standalone launcher's documents (ADR 0134 decision 8, epic #2324 phase 6): the local launch
+// specification `nemar.local-launch.v1`, the recipe's progress file `nemar.recipe-progress.v1` and the
+// results report `nemar.results-report.v1`. Their JSON Schemas are copied byte for byte by
+// nemarOrg/nemar-process.
+export * from "./compute-local-launch.js";
+export * from "./compute-recipe-progress.js";
+export * from "./compute-results-report.js";

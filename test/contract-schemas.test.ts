@@ -662,6 +662,12 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     // The quality plugin manifest (ADR 0134, epic #2324 phase 2): it describes software NEMAR reviews,
     // and an unknown key is a bug to refuse. It has no response.
     "plugin-manifest.ts",
+    // The standalone launcher's documents (ADR 0134 decision 8, epic #2324 phase 6): the local launch
+    // specification, the recipe's progress file and the results report are read by the launcher as they
+    // come in; a mistyped key must be refused, not stripped. They have no response.
+    "compute-local-launch.ts",
+    "compute-recipe-progress.ts",
+    "compute-results-report.ts",
   ]);
 
   const HEX = "a".repeat(64);
@@ -1115,6 +1121,16 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "PluginManifestSchema",
     "PluginMetricSchema",
     "PluginFigureSchema",
+    "LocalLaunchSpecSchema",
+    "LocalLaunchDatasetSchema",
+    "RecipeProgressSchema",
+    "RecipeCheckpointMapItemSchema",
+    "RecipeCheckpointMapSchema",
+    "RecipeProgressRunningSchema",
+    "ResultsReportSchema",
+    "ResultsReportVerificationSchema",
+    "ResultsReportTableSchema",
+    "ResultsReportCheckpointsSchema",
   ];
 
   /** The names a response schema must never be built from. */
@@ -1465,7 +1481,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   ];
 
   test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
-    expect(STRICT_NAMES).toHaveLength(21);
+    expect(STRICT_NAMES).toHaveLength(31);
     expect(IMPORT_PROBES.length).toBeGreaterThan(55);
     for (const [label, file, text, offends] of IMPORT_PROBES) {
       const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);

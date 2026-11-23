@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nemarOrg/nemar-cli/shared/contract/compute-local-launch.schema.json",
+  "title": "nemar.local-launch.v1",
+  "description": "The local launch specification a person hands the launcher's standalone entry (nemar-launch-local --spec FILE) to run one job on their own machine with no NEMAR service involved (ADR 0134 decision 8). Copied byte for byte from nemarOrg/nemar-cli (shared/contract/compute-local-launch.schema.json) by nemarOrg/nemar-process (launcher/schema/compute-local-launch.v1.json). It is the launch specification without what only NEMAR's service gives (job_id, api_base, job_token, limits and NEMAR datasets): runtime, entry, command, args, bundle, image, env and resources are the launch specification's own members and rules, value for value, and it adds a required format word and datasets by name. The shared members keep the launch specification's descriptions, which describe the service path; standalone, the bundle is the archive given with --code FILE (no Worker is asked for it), and image.sif is relative to the directory given with --sif-root DIR, not NEMAR_SIF_ROOT. The text is read under the launch specification's encoding rules: printable ASCII JSON, at most 65536 bytes, no duplicate keys, no fractions; its digest is the SHA-256 of the file's bytes. Cross-field rules this schema cannot express, as in the launch specification: image.sif is the file named for image.digest, and image.uri ends with image.digest. Closed at every level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "runtime",
+    "args",
+    "datasets",
+    "image",
+    "env",
+    "resources"
+  ],
+  "properties": {
+    "format": {
+      "const": "nemar.local-launch.v1"
+    },
+    "runtime": {
+      "enum": [
+        "python",
+        "image"
+      ]
+    },
+    "entry": {
+      "description": "A path inside the bundle. With runtime python the launcher runs python /code/<entry> followed by args; with runtime image and an entry it runs /code/<entry> directly, followed by args, which needs the executable bit that the bundle packer must preserve. The runtime image must provide python on its PATH for the python runtime. A bundle archive's member names may carry a leading ./; absolute names, .. segments, links, devices and FIFOs are refused by the launcher. Exactly one of entry and command is present.",
+      "type": "string",
+      "maxLength": 240,
+      "pattern": "^(?:[^/\\\\\\u0000-\\u001f\\u007f]+/)*[^/\\\\\\u0000-\\u001f\\u007f]+(?![\\s\\S])",
+      "not": {
+        "pattern": "(?:^|/)\\.\\.?(?:/|$)"
+      }
+    },
+    "command": {
+      "description": "An argument vector, run as given, with args appended. Exactly one of entry and command is present.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "args": {
+      "description": "Arguments, each as one argument: after python /code/<entry> (runtime python with an entry), after /code/<entry> (runtime image with an entry) or after the command.",
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    },
+    "bundle": {
+      "description": "The code archive's own SHA-256 and size. There is no URL: the launcher asks the Worker for a presigned address. Required with entry.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "digest",
+        "sif"
+      ],
+      "properties": {
+        "uri": {
+          "description": "A digest-pinned reference, optionally docker://-prefixed and lowercase: no leading '-', no control character. Cross-field rule this schema cannot express (a zod-only rule, like the one for sif): the @sha256:<hex> it ends with must equal image.digest.",
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^(?:docker://)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+        },
+        "sif": {
+          "description": "The Singularity image file the launcher runs: exactly the basename <64 lowercase hex>.sif, the file name of the SIF built from the image's digest, relative to the directory in the environment variable NEMAR_SIF_ROOT. NEMAR_SIF_ROOT is required: the launcher has no fallback and ends image_missing when it is unset. Cross-field rule this schema cannot express (a zod-only rule): the 64 hex digits of image.digest followed by .sif must equal this value. The launcher does not verify the file's content hash: the name is all that ties the file to the digest.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}\\.sif(?![\\s\\S])"
+        }
+      }
+    },
+    "env": {
+      "description": "Environment for the container, from the allowlist only; each value is printable ASCII.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "OMP_NUM_THREADS": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        },
+        "MKL_NUM_THREADS": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        },
+        "OPENBLAS_NUM_THREADS": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        },
+        "NUMEXPR_NUM_THREADS": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        },
+        "PYTHONHASHSEED": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        },
+        "MPLBACKEND": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[ -~]*(?![\\s\\S])"
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gpus"
+      ],
+      "properties": {
+        "gpus": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        }
+      }
+    },
+    "datasets": {
+      "description": "The datasets the job reads, by name only: each is bound read-only at /data/<name>, and the person names its directory on their own machine on the command line (--data NAME=DIR), never here. Names are unique (uniqueItems: an item has the name only).",
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])"
+          }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "entry"
+      ]
+    },
+    {
+      "required": [
+        "command"
+      ]
+    }
+  ],
+  "if": {
+    "required": [
+      "entry"
+    ]
+  },
+  "then": {
+    "required": [
+      "bundle"
+    ]
+  }
+}

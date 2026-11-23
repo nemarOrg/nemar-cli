@@ -319,7 +319,7 @@ export type ProgressProblem = (typeof PROGRESS_PROBLEMS)[number];
  */
 export function progressProblem(
   progress: Progress,
-  checkpoints: readonly RecipeCheckpoint[],
+  checkpoints: readonly { readonly checkpoint: string }[],
 ): ProgressProblem | null {
   const declared: readonly string[] = checkpoints.map((c) => c.checkpoint);
   const keys = Object.keys(progress.counts);

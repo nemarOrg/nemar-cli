@@ -27,6 +27,8 @@ earlier releases are described only by their generated notes.
   `stalled` (no report for three minutes while `submitted`, `queued` or `running`, or `unreported`) is worked out on read; no schedule is added and no switch.
   The pipeline dispatcher's log line reports reconciliation that could not decide or threw.
 - **The quality plugin manifest contract `nemar.plugin-manifest.v1`** and the recipe registry's step-to-checkpoint maps.
+- **The standalone launcher's contracts (ADR 0134 decision 8, epic #2324 phase 6):** the local launch specification `nemar.local-launch.v1` (the launch specification's members for what runs, plus a format word and dataset names; no job id, token, API address or limits), the recipe progress file `nemar.recipe-progress.v1` a job writes for the launcher to read, and the results report `nemar.results-report.v1` the launcher writes on a person's own machine.
+  Each is a closed zod schema with a JSON Schema that nemar-process copies byte for byte; the recipe progress schema is held to the verdicts of nemar-process's own reader on files its recipe layer wrote.
 - **The admin pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a).**
   `GET /admin/compute/pipeline/grid` shows one recipe's runs over the eligible datasets, a row per dataset and a column per checkpoint, each cell `passed/total` with a mark, filtered by status, recipe version, executor, runner or dataset and paged by dataset id, with the counts over the whole filtered set.
   `GET /admin/compute/pipeline/coverage` gives each recipe's coverage (a succeeded run at the dataset's newest version with the registry's current recipe version; complete; at any recipe version) and a daily failure trend from the stamps (30 days by default, 90 at most).
