@@ -4,7 +4,7 @@
  *
  *   nemar admin compute pipeline run <recipe> --dataset <id>[@version] [--executor tapis|runner] [--input bids|zarr] [--dry-run]
  *   nemar admin compute pipeline run <recipe> --eligible [--limit <n>] [--dry-run]
- *   nemar admin compute pipeline status [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
+ *   nemar admin compute pipeline stamps [--recipe <name>] [--dataset <id>] [--state <state>] [--limit <n>]
  *
  * A run names a recipe and then ONE dataset (with an optional version) or the queue of eligible datasets
  * with a limit. Every run, whoever asks, is bounded by the owner's live and daily caps and by
@@ -231,7 +231,7 @@ Exit codes:
   0  the run was made, or the dry run answered (a queue run that dispatched nothing is still 0).
   1  the arguments are wrong, the dataset was refused, or the Worker refused or could not be reached.`;
 
-const STATUS_HELP = `
+const STAMPS_HELP = `
 Lists the stamps NEMAR's pipelines leave, newest first: one per dataset version, recipe, recipe version and
 engine, with the attempt, the state (dispatched, succeeded, failed, refused), the job, and a fixed word for
 a failure or a refusal. The Worker brings the open stamps up to date with their jobs before it answers.
@@ -350,8 +350,8 @@ pipelineCommand
   );
 
 pipelineCommand
-  .command("status")
-  .description("List the stamps of the pipeline runs")
+  .command("stamps")
+  .description("List the stamps of the pipeline runs, newest first")
   .option("--recipe <name>", "Only this recipe")
   .option("--dataset <id>", "Only this dataset")
   .option("--state <state>", `Only this state (${COMPUTE_PIPELINE_STAMP_STATES.join(", ")})`)
@@ -361,7 +361,7 @@ pipelineCommand
   )
   .option("--before <id>", "Continue after the page that ended at this stamp id")
   .option("--json", "Print the Worker's answer as JSON")
-  .addHelpText("after", STATUS_HELP)
+  .addHelpText("after", STAMPS_HELP)
   .action(
     async (o: {
       recipe?: string;

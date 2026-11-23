@@ -1,5 +1,5 @@
 /**
- * `nemar admin compute pipeline run|status` (epic #2005 phase A6, #2011; ADR 0118), driven through the
+ * `nemar admin compute pipeline run|stamps` (epic #2005 phase A6, #2011; ADR 0118), driven through the
  * real entry point against the REAL routes: the Worker's admin router behind its real authentication and
  * admin middleware, over real SQLite carrying every migration, Miniflare's R2 through the Worker's own
  * bindings and the Tapis stand-in behind it (which recorded nothing from a real tenant), served on a
@@ -10,7 +10,7 @@
  * has compute off; a live run against a Worker with compute off exits 1 with its word; a refused dataset
  * exits 1 with the word and the terms that block it; `--json` prints the Worker's answer and nothing else on
  * standard output; wrong arguments are refused before anything is sent; a member's key and no key exit 1;
- * `status` prints, filters and pages; an answer with keys the CLI does not know is shown, not refused; and
+ * `stamps` prints, filters and pages; an answer with keys the CLI does not know is shown, not refused; and
  * no token, address or identity is printed.
  *
  * CI TIER: integration, like the other CLI suites that start the binary against a local server.
@@ -439,11 +439,11 @@ describe("refusals before anything is sent", () => {
     ["a limit of 0", ["run", "nemar-floor", "--eligible", "--limit", "0"]],
     ["a limit over the maximum", ["run", "nemar-floor", "--eligible", "--limit", "101"]],
     ["a fractional limit", ["run", "nemar-floor", "--eligible", "--limit", "1.5"]],
-    ["a status state that is not one", ["status", "--state", "done"]],
-    ["a status dataset that is not one", ["status", "--dataset", "nope"]],
-    ["a status limit over the maximum", ["status", "--limit", "201"]],
-    ["a status cursor that is not a number", ["status", "--before", "x"]],
-    ["a status recipe that is not one", ["status", "--recipe", "A B"]],
+    ["a stamps state that is not one", ["stamps", "--state", "done"]],
+    ["a stamps dataset that is not one", ["stamps", "--dataset", "nope"]],
+    ["a stamps limit over the maximum", ["stamps", "--limit", "201"]],
+    ["a stamps cursor that is not a number", ["stamps", "--before", "x"]],
+    ["a stamps recipe that is not one", ["stamps", "--recipe", "A B"]],
   ];
   for (const [name, args] of bad) {
     test(`${name}: exit 1, and nothing is sent`, async () => {
@@ -455,7 +455,7 @@ describe("refusals before anything is sent", () => {
 
   test("a member's key and no key at all exit 1", async () => {
     await world(["nm000104"]);
-    for (const args of [["run", "nemar-floor", "--eligible", "--dry-run"], ["status"]]) {
+    for (const args of [["run", "nemar-floor", "--eligible", "--dry-run"], ["stamps"]]) {
       expect((await runCli("member", args)).exitCode).toBe(1);
       expect((await runCli(null, args)).exitCode).toBe(1);
     }
@@ -469,7 +469,7 @@ describe("refusals before anything is sent", () => {
   });
 });
 
-describe("status", () => {
+describe("stamps", () => {
   async function stamped() {
     const env = await world();
     await runCli("admin", ["run", "nemar-floor", "--eligible", "--limit", "3"]);
@@ -479,7 +479,7 @@ describe("status", () => {
 
   test("prints each stamp on a line, newest first, with its state and job", async () => {
     await stamped();
-    const r = await runCli("admin", ["status"]);
+    const r = await runCli("admin", ["stamps"]);
     expect(r.exitCode).toBe(0);
     const lines = r.stdout.trim().split("\n");
     expect(lines).toHaveLength(3);
@@ -491,16 +491,16 @@ describe("status", () => {
 
   test("filters are sent and applied, and a page says how to continue", async () => {
     await stamped();
-    const one = await runCli("admin", ["status", "--dataset", "nm000105"]);
+    const one = await runCli("admin", ["stamps", "--dataset", "nm000105"]);
     expect(one.stdout.trim().split("\n")).toHaveLength(1);
     expect(seen.at(-1)).toBe("GET /admin/compute/pipeline/status?dataset=nm000105");
-    expect((await runCli("admin", ["status", "--state", "succeeded"])).stdout).toContain(
+    expect((await runCli("admin", ["stamps", "--state", "succeeded"])).stdout).toContain(
       "no stamps",
     );
-    const page = await runCli("admin", ["status", "--limit", "2"]);
+    const page = await runCli("admin", ["stamps", "--limit", "2"]);
     expect(page.stdout).toMatch(/more: --before \d+/);
     const next = await runCli("admin", [
-      "status",
+      "stamps",
       "--limit",
       "2",
       "--before",
@@ -529,14 +529,14 @@ describe("status", () => {
         .first<{ tapis_uuid: string }>()
     )?.tapis_uuid as string;
     await drive(fx, env, failing, uuid, "FAILED", "JOB_LAUNCH_FAILURE");
-    const r = await runCli("admin", ["status"]);
+    const r = await runCli("admin", ["stamps"]);
     expect(r.stdout).toMatch(/nm000104 .*succeeded job job_/);
     expect(r.stdout).toMatch(/nm000105 .*failed launch_failed job job_/);
   });
 
   test("--json prints the Worker's answer, and only that", async () => {
     await stamped();
-    const r = await runCli("admin", ["status", "--json"]);
+    const r = await runCli("admin", ["stamps", "--json"]);
     expect(r.exitCode).toBe(0);
     const body = JSON.parse(r.stdout);
     expect(ComputePipelineStatusResponseSchema.safeParse(body).success).toBe(true);
@@ -552,7 +552,7 @@ describe("what is printed", () => {
     const run = await runCli("admin", ["run", "nemar-floor", "--eligible"]);
     expect(run.exitCode).toBe(0);
     expect(run.stdout).toContain("dispatched 1");
-    const status = await runCli("admin", ["status"]);
+    const status = await runCli("admin", ["stamps"]);
     expect(status.exitCode).toBe(0);
     expect(status.stdout).toContain("nm000104");
   });
@@ -561,7 +561,7 @@ describe("what is printed", () => {
     await world(["nm000104"]);
     const outs = [
       await runCli("admin", ["run", "nemar-floor", "--eligible"]),
-      await runCli("admin", ["status", "--json"]),
+      await runCli("admin", ["stamps", "--json"]),
     ];
     const user = fx.harness.db
       .query("SELECT username, email FROM users WHERE username = 'nemar-pipelines'")
@@ -840,7 +840,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
       dispatched: 1,
     });
     expect(await count(env, "compute_pipeline_stamps")).toBe(1);
-    const status = await runCli("admin", ["status", "--dataset", "nm000104"]);
+    const status = await runCli("admin", ["stamps", "--dataset", "nm000104"]);
     expect(status.stdout).toMatch(
       /nemar-floor 1\.0\.0-b1 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 zarr attempt 1\s+dispatched/,
     );
