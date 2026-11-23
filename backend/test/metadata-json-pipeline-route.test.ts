@@ -50,6 +50,14 @@ function document(id: string, namespace: string, entry: unknown, recipe = "nemar
 
 /** A dispatched stamp of a run that is reporting now (its run row, not reconciled), or one reconciled. */
 function reporting(id: string, recipeVersion = "1.0.0", reconciled = false) {
+  // The job the stamp names, running (a row the table accepts; nothing here reads the ledger).
+  db.run(
+    `INSERT OR IGNORE INTO compute_jobs (id, account_id, source, kind, app_id, app_version, spec_digest,
+                                         partition, pool, nodes, cores_per_node, minutes, state, held_milli)
+     VALUES ('job_0123456789abcdef01234567', 1, 'pipeline', 'batch', 'nemar-launch', '1.0.0', ?, 'shared',
+             'cpu', 1, 4, 60, 'running', 0)`,
+    ["d".repeat(64)],
+  );
   db.run(
     `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, attempt, state, job_id, input)
      VALUES (?, 'v1.0.0', 'nemar-floor', ?, 'eegprep@0.5.0', 1, 'dispatched', 'job_0123456789abcdef01234567', 'bids')`,

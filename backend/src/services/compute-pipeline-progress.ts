@@ -281,14 +281,19 @@ export const PIPELINE_STALLED_SQL = `(s.state = 'dispatched' AND (j.state = 'unr
     OR (j.state IN ('submitted', 'queued', 'running') AND r.reported_at IS NOT NULL
       AND r.reported_at < datetime('now', '-180 seconds'))))`;
 
+/** The job states of a run that is still under way, for the `in_progress` link (as `pipelineRunStatus`). */
+export const LIVE_LINK_JOB_STATES = ["submitted", "queued", "running", "archiving"] as const;
+
 /**
- * The `in_progress` links of a dataset's runs that are reporting now: a dispatched stamp whose run has
- * reported and is not reconciled. Worked out on read; never stored.
+ * The `in_progress` links of a dataset's runs that are reporting now: a dispatched stamp whose job is
+ * still under way and whose run has reported and is not reconciled. Worked out on read; never stored.
  */
 export const LIVE_LINKS_SQL = `SELECT s.recipe, s.recipe_version
   FROM compute_pipeline_stamps s
   JOIN compute_pipeline_progress_runs r ON r.stamp_id = s.id
+  JOIN compute_jobs j ON j.id = s.job_id
   WHERE s.dataset_id = ?1 AND s.state = 'dispatched' AND r.reconciled_at IS NULL
+    AND j.state IN (${quoted(LIVE_LINK_JOB_STATES)})
   ORDER BY s.id ASC`;
 
 export async function liveSignalJourneyLinks(
@@ -494,18 +499,82 @@ const failedLinkStatement = (db: D1Database, stamp: CandidateRow, writeId: strin
       writeId,
     );
 
-/** An outcome with no counts: the run row and a final failed link. */
+/**
+ * The final signalJourney link of an ended run, or null when none is written, or `later`:
+ *  - a failed stamp: a `failed` link (the run ended without a record NEMAR can point to);
+ *  - a succeeded stamp of a known recipe: the `completed` link built from its record, which needs no
+ *    checkpoint map; a record that cannot make one leaves the last final link standing
+ *    (`link_not_written reason=record_unlinkable`);
+ *  - a succeeded stamp of a recipe the registry does not know: nothing to read, the last final link stands
+ *    (`link_not_written reason=recipe_unknown`).
+ */
+async function finalLinkStatement(
+  env: Bindings,
+  stamp: CandidateRow,
+  writeId: string,
+): Promise<D1PreparedStatement | null | "later"> {
+  const db = env.DB;
+  if (stamp.state === "failed") return failedLinkStatement(db, stamp, writeId);
+  const recipe = findRecipe(stamp.recipe);
+  if (!recipe) {
+    console.log(`${LOG} link_not_written stamp=${stamp.id} reason=recipe_unknown`);
+    return null;
+  }
+  const results = env.COMPUTE_RESULTS;
+  if (!results) {
+    console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=results_unbound`);
+    return "later";
+  }
+  const location = recipeRequiredOutputs(recipe).record;
+  let record: TextRead;
+  try {
+    record = await readBounded(
+      results,
+      resultsOutputKey(stamp.job_id, location),
+      RECORD_READ_MAX_BYTES,
+    );
+  } catch {
+    console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
+    return "later";
+  }
+  const link =
+    record.kind === "ok"
+      ? signalJourneyLink({
+          recipeVersion: stamp.recipe_version,
+          status: "completed",
+          location: location.slice(RECIPE_PRODUCT_OUTPUT_PREFIX.length),
+          sha256: await sha256HexOf(record.text),
+          sjVersion: sjVersionOf(record.text),
+        })
+      : null;
+  if (link === null) {
+    console.log(`${LOG} link_not_written stamp=${stamp.id} reason=record_unlinkable`);
+    return null;
+  }
+  return db
+    .prepare(FINAL_DOCUMENT_SQL)
+    .bind(stamp.dataset_id, "signalJourney", stamp.recipe, stamp.id, JSON.stringify(link), writeId);
+}
+
+/**
+ * An outcome with no counts: the run row and the run's final link (`finalLinkStatement`): `failed` for a
+ * failed stamp, the record's `completed` link for a succeeded one, never a `failed` link over a completed
+ * run.
+ */
 async function outcomeOnly(
-  db: D1Database,
+  env: Bindings,
   stamp: CandidateRow,
   outcome: ReconcileOutcome,
-): Promise<{ outcome: ReconcileOutcome; won: boolean }> {
+): Promise<{ outcome: ReconcileOutcome; won: boolean } | "later"> {
+  const db = env.DB;
   const writeId = randomHex(16);
+  const link = await finalLinkStatement(env, stamp, writeId);
+  if (link === "later") return "later";
   const done = await db.batch([
     db
       .prepare(RECONCILE_GATE_SQL)
       .bind(stamp.id, stamp.job_id, writeId, outcome, 0, stamp.recipe_version, null),
-    failedLinkStatement(db, stamp, writeId),
+    ...(link === null ? [] : [link]),
   ]);
   return { outcome, won: (done[0]?.meta?.changes ?? 0) === 1 };
 }
@@ -517,9 +586,9 @@ async function reconcileRun(
 ): Promise<{ outcome: ReconcileOutcome; won: boolean } | "later"> {
   const db = env.DB;
   const recipe = findRecipe(stamp.recipe);
-  if (!recipe) return outcomeOnly(db, stamp, "recipe_unknown");
+  if (!recipe) return outcomeOnly(env, stamp, "recipe_unknown");
   const checkpoints = recipeCheckpointMap(stamp.recipe, stamp.recipe_version);
-  if (!checkpoints) return outcomeOnly(db, stamp, "no_checkpoint_map");
+  if (!checkpoints) return outcomeOnly(env, stamp, "no_checkpoint_map");
   const results = env.COMPUTE_RESULTS;
   if (!results) {
     console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=results_unbound`);
@@ -537,9 +606,9 @@ async function reconcileRun(
     console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
     return "later";
   }
-  if (table.kind === "absent") return outcomeOnly(db, stamp, "table_missing");
+  if (table.kind === "absent") return outcomeOnly(env, stamp, "table_missing");
   const parsed = table.kind === "ok" ? parseRecordingsTable(table.text) : null;
-  if (!parsed || !parsed.ok) return outcomeOnly(db, stamp, "table_unreadable");
+  if (!parsed || !parsed.ok) return outcomeOnly(env, stamp, "table_unreadable");
   const rows = parsed.rows;
 
   // The last live counts, kept beside the reconciled ones.
@@ -603,47 +672,9 @@ async function reconcileRun(
 
   // The signalJourney link: completed with the record's digest and version; failed for a failed run; for
   // a succeeded run whose link cannot be built, the last final link stands.
-  if (stamp.state === "failed") {
-    statements.push(failedLinkStatement(db, stamp, writeId));
-  } else {
-    let record: TextRead;
-    try {
-      record = await readBounded(
-        results,
-        resultsOutputKey(stamp.job_id, wanted.record),
-        RECORD_READ_MAX_BYTES,
-      );
-    } catch {
-      console.log(`${LOG} reconcile_later stamp=${stamp.id} reason=read_failed`);
-      return "later";
-    }
-    const link =
-      record.kind === "ok"
-        ? signalJourneyLink({
-            recipeVersion: stamp.recipe_version,
-            status: "completed",
-            location: wanted.record.slice(RECIPE_PRODUCT_OUTPUT_PREFIX.length),
-            sha256: await sha256HexOf(record.text),
-            sjVersion: sjVersionOf(record.text),
-          })
-        : null;
-    if (link === null) {
-      console.log(`${LOG} link_not_written stamp=${stamp.id} reason=record_unlinkable`);
-    } else {
-      statements.push(
-        db
-          .prepare(FINAL_DOCUMENT_SQL)
-          .bind(
-            stamp.dataset_id,
-            "signalJourney",
-            stamp.recipe,
-            stamp.id,
-            JSON.stringify(link),
-            writeId,
-          ),
-      );
-    }
-  }
+  const link = await finalLinkStatement(env, stamp, writeId);
+  if (link === "later") return "later";
+  if (link !== null) statements.push(link);
   if (storedFinal) {
     const entry = processingDatasetEntry({
       recipeVersion: stamp.recipe_version,
