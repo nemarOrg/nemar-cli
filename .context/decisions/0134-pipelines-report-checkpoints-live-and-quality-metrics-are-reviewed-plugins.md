@@ -53,6 +53,7 @@ A new table holds, per pipeline stamp and checkpoint, the four counts, the cappe
 A running job with no report for three cadences (or no heartbeat, which already ends a runner lease) shows as `stalled`, distinct from `failed`.
 At completion the row is reconciled from the uploaded recordings table, and a disagreement between the live counts and the table is itself recorded, so a broken reporter is visible.
 The reconciled counts are what the backend writes to neuroschema (decision 9); `stalled` and the failure list stay operator views.
+`stalled` is derived when a row is read, never stored, so no schedule is added; reconciliation rides the stamp sync.
 
 **5. Admins get one dashboard, built like the Zarr one.**
 The admin overview gains a coverage card per recipe (datasets whose current version passed, out of those eligible) with a failure trend, as the Zarr conversion card has.
