@@ -375,8 +375,8 @@ describe("the recipe registry", () => {
     const r = findRecipe("nemar-floor");
     expect(r).toMatchObject({
       name: "nemar-floor",
-      version: "1.0.0",
-      engine: "eegprep@0.5.0",
+      version: "1.0.0-b1",
+      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
       partition: "shared",
       nodes: 1,
       cores: 4,
@@ -855,7 +855,7 @@ describe("a runner job through the admin route", () => {
       state: "dispatched",
       job_id: job.id,
       recipe: "nemar-floor",
-      engine: "eegprep@0.5.0",
+      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
       input: "zarr",
     });
     expect(fx.tapis.log).toEqual([]);

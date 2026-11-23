@@ -150,20 +150,29 @@ export interface ComputeRecipe {
   eligibility: RecipeEligibility;
 }
 
+/** The engine every recipe reports: eegprep at the commit the nemar-process lock pins (see below). */
+const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
+
 /**
  * The recipes. `nemar-floor` annotates every EEG recording of a dataset and runs on a CPU partition: on
  * Tapis over the dataset's files (`bids`) and on a runner over its Zarr serving copy (`zarr`), one entry for
  * both (plan D12). On a runner the partition is a SIZING LABEL only (ADR 0121, decision 6): `shared`'s
  * ceilings apply, nothing is submitted to it and no service unit is estimated. `nemar-ica` needs a GPU and
  * stays out of the daily dispatcher until the 20-dataset pilot has run.
+ *
+ * The versions and the engine are what the nemar-process images report (its `docs/recipes.md`): each
+ * recipe's `RECIPE_VERSION` (a pre-release `1.0.0-b<N>` until that layer's first release) and eegprep as
+ * `<version>+<commit>` while the images install it from a pinned git commit. A value that differs from
+ * the record holds the tuple (`tuple_mismatch`, then `registry_drift`), so a move of either in nemar-process
+ * is a change here.
  */
 export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   Object.freeze({
     name: "nemar-floor",
-    version: "1.0.0",
+    version: "1.0.0-b1",
     appId: "nemar-launch",
     appVersion: "1.0.0",
-    engine: "eegprep@0.5.0",
+    engine: RECIPE_ENGINE,
     partition: "shared",
     nodes: 1,
     cores: 4,
@@ -177,10 +186,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   }),
   Object.freeze({
     name: "nemar-ica",
-    version: "1.0.0",
+    version: "1.0.0-b1",
     appId: "nemar-launch",
     appVersion: "1.0.0",
-    engine: "eegprep@0.5.0",
+    engine: RECIPE_ENGINE,
     partition: "gpu-shared",
     nodes: 1,
     cores: 10,
