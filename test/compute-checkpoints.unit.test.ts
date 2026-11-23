@@ -49,11 +49,13 @@ const row = (
   status: RecordingRow["status"],
   code: string | null,
   step: string | null,
-) => ({
+  skipped?: RecordingRow["skipped_steps"],
+): RecordingRow => ({
   path,
   status,
   code,
   step,
+  ...(skipped === undefined ? {} : { skipped_steps: skipped }),
 });
 
 describe("parseRecordingsTable", () => {
@@ -95,6 +97,47 @@ describe("parseRecordingsTable", () => {
     const text = `${header.join("\t")}\r\n${line("a.set", "skipped", "time_budget", "n/a")}\r\n\r\n`;
     const read = parseRecordingsTable(text);
     expect(read).toEqual({ ok: true, rows: [row("a.set", "skipped", "time_budget", null)] });
+  });
+
+  test("skipped_steps: the plugin pairs of a succeeded row are read, a rule's own skips left alone", () => {
+    const at = header.indexOf("skipped_steps");
+    const withSkips = (status: string, code: string, step: string, cell: string) => {
+      const cells = line("a.set", status, code, step).split("\t");
+      cells[at] = cell;
+      return cells.join("\t");
+    };
+    const read = (cell: string, status = "succeeded", code = "n/a", step = "n/a") =>
+      parseRecordingsTable(`${header.join("\t")}\n${withSkips(status, code, step, cell)}\n`);
+    expect(read("bad_windows:too_short,nemar-quality:plugin_failed")).toEqual({
+      ok: true,
+      rows: [
+        row("a.set", "succeeded", null, null, [{ step: "nemar-quality", code: "plugin_failed" }]),
+      ],
+    });
+    // a rule's skip only, an empty cell and n/a: no plugin pairs, the row as before
+    for (const cell of ["bad_windows:too_short", "", "n/a"]) {
+      expect(read(cell)).toEqual({ ok: true, rows: [row("a.set", "succeeded", null, null)] });
+    }
+    // a failed row's cell is not read
+    expect(read("nemar-quality:Bad Word", "failed", "load_failed", "load")).toEqual({
+      ok: true,
+      rows: [row("a.set", "failed", "load_failed", "load")],
+    });
+    // a malformed plugin pair is refused
+    for (const cell of [
+      "nemar-quality",
+      "nemar-quality:",
+      "nemar-quality:Bad Word",
+      "nemar-quality:a,nemar-quality:b",
+    ]) {
+      expect(read(cell), cell).toEqual({ ok: false, reason: "bad_skipped_steps" });
+    }
+    // a table without the column reads as before
+    const bare = "path\tstatus\tcode\tstep\na.set\tsucceeded\tn/a\tn/a\n";
+    expect(parseRecordingsTable(bare)).toEqual({
+      ok: true,
+      rows: [row("a.set", "succeeded", null, null)],
+    });
   });
 
   test("an empty table with only a header has no rows", () => {
@@ -151,19 +194,48 @@ describe("recordingOutcomes", () => {
     ).toEqual(["skipped", "skipped", "skipped"]);
     expect(
       recordingOutcomes(row("a", "skipped", "ica_ineligible", "ica"), I).map((o) => o.status),
-    ).toEqual(["passed", "passed", "skipped", "skipped", "skipped", "skipped"]);
+    ).toEqual(["passed", "passed", "skipped", "skipped", "skipped"]);
   });
 
   test("the step `record` counts against the last declared checkpoint; a step-less fault against the first", () => {
     expect(RECORD_STEP).toBe("record");
     expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), F)).toBe("quality");
-    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), I)).toBe("figures");
+    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), I)).toBe("quality");
     expect(recordingOutcomes(row("a", "failed", "disk_error", "record"), F)).toEqual([
       { status: "passed", code: null, step: null },
       { status: "passed", code: null, step: null },
       { status: "failed", code: "disk_error", step: "record" },
     ]);
     expect(firstCheckpointOf(row("a", "failed", "disk_error", null), I)).toBe("import");
+  });
+
+  test("a succeeded recording that skipped a plugin is skipped at that plugin's checkpoint only; totals still sum", () => {
+    const skippedQuality = row("a", "succeeded", null, null, [
+      { step: "nemar-quality", code: "plugin_failed" },
+    ]);
+    expect(recordingOutcomes(skippedQuality, I)).toEqual([
+      { status: "passed", code: null, step: null },
+      { status: "passed", code: null, step: null },
+      { status: "passed", code: null, step: null },
+      { status: "passed", code: null, step: null },
+      { status: "skipped", code: "plugin_failed", step: "nemar-quality" },
+    ]);
+    // a recipe that does not run the plugin ignores it
+    expect(recordingOutcomes(skippedQuality, F).map((o) => o.status)).toEqual([
+      "passed",
+      "passed",
+      "passed",
+    ]);
+    const rows = [row("b", "succeeded", null, null), skippedQuality];
+    const counts = countRecordings(rows, I);
+    for (const c of Object.values(counts)) expect(c.passed + c.failed + c.skipped).toBe(c.total);
+    expect(counts.quality).toEqual({ passed: 1, failed: 0, skipped: 1, total: 2 });
+    expect(counts.iclabel).toEqual({ passed: 2, failed: 0, skipped: 0, total: 2 });
+    expect(failuresByCheckpoint(rows, I).quality).toEqual([
+      { path: "a", code: "plugin_failed", step: "nemar-quality", checkpoint: "quality" },
+    ]);
+    // the grid's `complete` reads the last checkpoint: passed == total fails for a skipped plugin
+    expect(counts.quality.passed === counts.quality.total).toBe(false);
   });
 
   test("nemar-ica's re-run qc counts against preprocess", () => {
@@ -513,9 +585,7 @@ describe("the progress vectors file", () => {
         row("f.set", "failed", "step_failed", "iclabel"),
         row("g.set", "failed", "internal_error", "record"),
         row("h.set", "failed", "step_failed", "iclabel_locations"),
-        row("i.set", "failed", "step_failed", "nemar-quality"),
-        row("j.set", "skipped", "figure_too_large", "nemar-spectrum"),
-        row("k.set", "failed", "internal_error", "nemar-segment"),
+        row("i.set", "succeeded", null, null, [{ step: "nemar-quality", code: "plugin_failed" }]),
       ],
     },
     {
