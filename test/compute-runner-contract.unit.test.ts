@@ -37,6 +37,7 @@ import {
   decodeLaunchSpecEnv,
   encodeLaunchSpecEnv,
 } from "../shared/contract/compute-launch";
+import progressSchema from "../shared/contract/compute-progress.schema.json";
 import {
   LEASE_ID_RE,
   RUNNER_ACCESS_PREFIX,
@@ -549,7 +550,10 @@ describe("a registration, a claim and a completion", () => {
 // --- The JSON Schema, read back against the constants -------------------------------------------
 
 const AJV_OPTIONS = { strict: true, strictRequired: false, allErrors: true } as const;
+// The heartbeat's `progress` refers to the live progress schema (ADR 0134), which nemar-process copies
+// beside this one; both are added, as the runner adds both.
 const ajv = new Ajv2020(AJV_OPTIONS);
+ajv.addSchema(progressSchema);
 ajv.addSchema(runnerSchema);
 const SCHEMA_ID = (runnerSchema as { $id: string }).$id;
 // biome-ignore lint/suspicious/noExplicitAny: the schema is read as plain JSON, key by key.
@@ -582,7 +586,9 @@ describe("the JSON Schema is the contract the runner copies", () => {
       (c) => c.charCodeAt(0) > 0x7e || (c.charCodeAt(0) < 0x20 && c !== "\n"),
     );
     expect(nonAscii).toEqual([]);
-    expect(() => new Ajv2020(AJV_OPTIONS).compile(runnerSchema)).not.toThrow();
+    expect(() =>
+      new Ajv2020(AJV_OPTIONS).addSchema(progressSchema).compile(runnerSchema),
+    ).not.toThrow();
   });
 
   test("it has one $defs entry for each of the ten shapes, and for no other shape", () => {
@@ -608,10 +614,13 @@ describe("the JSON Schema is the contract the runner copies", () => {
   test("the keys and the required keys of each shape are zod's", () => {
     for (const s of SHAPES) {
       const def = DEFS[s.name] as Json;
-      const shape = (s.schema as z.AnyZodObject).shape;
+      const shape = (s.schema as z.AnyZodObject).shape as Record<string, z.ZodTypeAny>;
+      const required = Object.keys(shape).filter((k) => !shape[k].isOptional());
       expect(Object.keys(def.properties).sort(), s.name).toEqual(Object.keys(shape).sort());
-      expect([...def.required].sort(), s.name).toEqual(Object.keys(shape).sort());
+      expect([...def.required].sort(), s.name).toEqual(required.sort());
     }
+    // The one optional key of a request: the heartbeat's live progress (ADR 0134).
+    expect(DEFS.RunnerHeartbeatRequest?.required).not.toContain("progress");
     const jobDef = DEFS.RunnerClaimResponse?.properties.jobs.items as Json;
     expect(Object.keys(jobDef.properties).sort()).toEqual(
       Object.keys(RunnerClaimedJobSchema.shape).sort(),
@@ -629,6 +638,7 @@ describe("the JSON Schema is the contract the runner copies", () => {
     expect(DEFS.Runtimes?.maxItems).toBe(RUNNER_RUNTIMES.length);
     expect(DEFS.Arch?.enum).toEqual([...RUNNER_ARCHES]);
     expect(p("RunnerHeartbeatRequest").phase.enum).toEqual([...RUNNER_PHASES]);
+    expect(p("RunnerHeartbeatRequest").progress.$ref).toBe(`${progressSchema.$id}#/$defs/Progress`);
     expect(p("RunnerTokenRequest").protocol.const).toBe(RUNNER_PROTOCOL);
     expect(p("RunnerClaimRequest").protocol.const).toBe(RUNNER_PROTOCOL);
     expect(p("RunnerCompleteRequest").launcher_failure_code.enum).toEqual([
@@ -827,6 +837,42 @@ describe("zod and the JSON Schema agree", () => {
       const viaAjv = validatorFor(shape.name)(doc) as boolean;
       expect(viaZod, `zod: ${label}`).toBe(valid);
       expect(viaAjv, `JSON Schema: ${label}`).toBe(valid);
+    }
+  });
+});
+
+// ADR 0134 (epic #2324 phase 2): a heartbeat may carry the live progress object, judged by both.
+describe("a heartbeat with live progress", () => {
+  const heartbeat = validatorFor("RunnerHeartbeatRequest");
+  const progress = {
+    format: "nemar.progress.v1",
+    checkpoint: "import",
+    counts: { import: { passed: 1, failed: 0, skipped: 0, total: 3 } },
+    failures: [],
+  };
+  const base = { job_id: JOB_ID, lease_id: LEASE_ID, phase: "started" };
+  const both = (doc: unknown) => ({
+    ajv: heartbeat(doc) as boolean,
+    zod: RunnerHeartbeatRequestSchema.safeParse(doc).success,
+  });
+
+  test("is accepted with and without progress", () => {
+    expect(both(base)).toEqual({ ajv: true, zod: true });
+    expect(both({ ...base, progress })).toEqual({ ajv: true, zod: true });
+  });
+
+  test("is refused when the progress breaks its schema", () => {
+    for (const bad of [
+      { ...progress, extra: 1 },
+      { ...progress, format: "nemar.progress.v2" },
+      { ...progress, counts: {} },
+      null,
+      "progress",
+    ]) {
+      expect(both({ ...base, progress: bad }), JSON.stringify(bad)).toEqual({
+        ajv: false,
+        zod: false,
+      });
     }
   });
 });

@@ -111,14 +111,15 @@
       }
     },
     "RunnerHeartbeatRequest": {
-      "description": "Heartbeat: renews the lease of one job and reports its phase.",
+      "description": "Heartbeat: renews the lease of one job and reports its phase, and, for a pipeline job that follows ADR 0134, its live progress (the closed object of compute-progress.schema.json, nemar.progress.v1). A heartbeat whose progress breaks that schema is refused invalid_body and renews nothing, so a runner validates progress before it attaches it and retries without it on invalid_body. A progress object that is too soon or does not fit the recipe is ignored and the lease is still renewed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["job_id", "lease_id", "phase"],
       "properties": {
         "job_id": { "$ref": "#/$defs/JobId" },
         "lease_id": { "$ref": "#/$defs/LeaseId" },
-        "phase": { "enum": ["started", "uploading"] }
+        "phase": { "enum": ["started", "uploading"] },
+        "progress": { "$ref": "https://api.nemar.org/schemas/compute-progress-v1.json#/$defs/Progress" }
       }
     },
     "RunnerCompleteRequest": {
