@@ -150,7 +150,12 @@ export interface ComputeRecipe {
   eligibility: RecipeEligibility;
 }
 
-/** The engine every recipe reports: eegprep at the commit the nemar-process lock pins (see below). */
+/**
+ * The engine every recipe reports: `eegprep@<version>+<commit>`, the version `uv.lock` in nemar-process
+ * gives eegprep and the git revision its `pyproject.toml` pins (the suffix is added by
+ * `recipes/nemar_process/common/versions.py`). It moves with that pin, and the `+<commit>` suffix goes
+ * when the images move to an eegprep release installed from an index.
+ */
 const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
 
 /**
@@ -160,11 +165,15 @@ const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
  * ceilings apply, nothing is submitted to it and no service unit is estimated. `nemar-ica` needs a GPU and
  * stays out of the daily dispatcher until the 20-dataset pilot has run.
  *
- * The versions and the engine are what the nemar-process images report (its `docs/recipes.md`): each
- * recipe's `RECIPE_VERSION` (a pre-release `1.0.0-b<N>` until that layer's first release) and eegprep as
- * `<version>+<commit>` while the images install it from a pinned git commit. A value that differs from
- * the record holds the tuple (`tuple_mismatch`, then `registry_drift`), so a move of either in nemar-process
- * is a change here.
+ * THE VERSIONS AND THE ENGINE ARE COPIES. Their authoritative sources are in nemarOrg/nemar-process:
+ * each recipe's `RECIPE_VERSION` in `recipes/nemar_process/{nemar_floor,nemar_ica}/steps.py` (a
+ * pre-release `1.0.0-b<N>` until that layer's first release, `docs/recipes.md`), and for the engine the
+ * eegprep pin described at {@link RECIPE_ENGINE}. These values must match the image `COMPUTE_RUNTIME_IMAGE`
+ * pins: a record that differs holds the tuple (`tuple_mismatch`, then `registry_drift`), and a hold of a
+ * tuple the registry still declares never clears. For a future move, repin the image first, then change
+ * these values. `nemar-ica`'s version moves on its own pins (pamica, torch, `amica15`), independently of
+ * the floor's. `test/compute-recipes-process-drift.unit.test.ts` compares them with a nemar-process
+ * checkout.
  */
 export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   Object.freeze({
