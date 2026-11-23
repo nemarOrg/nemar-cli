@@ -12,13 +12,17 @@
  * with these files in its sparse list) makes a missing checkout or file FAIL, so a broken checkout cannot
  * quietly disable the comparison.
  *
+ * The same checkout holds each recipe's `STEP_ORDER`, which the registry's step-to-checkpoint map copies
+ * (ADR 0134 decision 2): every floor step for `nemar-floor`; the floor's steps it re-runs, then its own, for
+ * `nemar-ica`. The map must name exactly those steps, in that order.
+ *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COMPUTE_RECIPES } from "../shared/compute-recipes";
+import { COMPUTE_RECIPES, findRecipe } from "../shared/compute-recipes";
 
 /**
  * The value of `RECIPE_VERSION` in a recipe's `steps.py`, or null: an assignment at the start of a line, with
@@ -59,6 +63,17 @@ function expectedEngine(uvLock: string): string | null {
   return null;
 }
 
+/**
+ * The names in a `STEP_ORDER = (...)` tuple of a `steps.py`, in order, or null: one assignment at the start
+ * of a line, the tuple on one line or several, double or single quotes, comments ignored.
+ */
+function stepOrderOf(stepsPy: string): string[] | null {
+  const m = /^STEP_ORDER\s*(?::[^=\n]+)?=\s*\(([^)]*)\)/m.exec(stepsPy);
+  if (m === null) return null;
+  const body = (m[1] as string).replace(/#[^\n]*/g, "");
+  return [...body.matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string);
+}
+
 const STEPS: Record<string, string> = {
   "nemar-floor": "recipes/nemar_process/nemar_floor/steps.py",
   "nemar-ica": "recipes/nemar_process/nemar_ica/steps.py",
@@ -78,12 +93,7 @@ describe("the parsing of the nemar-process sources", () => {
 
   const REV = "edf694c8344b9c4c68672eac3acf9a819f1462a8";
   const OLD = "1".repeat(40);
-  const lean =
-    '[[package]]\nname = "eegprep-lean"\nversion = "0.3.1"\nsource = { git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=' +
-    OLD +
-    "#" +
-    OLD +
-    '" }\n\n';
+  const lean = `[[package]]\nname = "eegprep-lean"\nversion = "0.3.1"\nsource = { git = "https://github.com/sccn/eegprep?subdirectory=packages%2Feegprep-lean&rev=${OLD}#${OLD}" }\n\n`;
   const gitLock = `${lean}[[package]]\nname = "eegprep"\nversion = "0.5.0"\nsource = { git = "https://github.com/sccn/eegprep?rev=${REV}#${REV}" }\n`;
 
   test("the engine is the lock's version and resolved commit for a git source, and bare for an index", () => {
@@ -91,6 +101,20 @@ describe("the parsing of the nemar-process sources", () => {
     const indexLock = `${lean}[[package]]\nname = "eegprep"\nversion = "0.5.0"\nsource = { registry = "https://pypi.org/simple" }\n`;
     expect(expectedEngine(indexLock)).toBe("eegprep@0.5.0");
     expect(expectedEngine(lean)).toBeNull();
+  });
+
+  test("STEP_ORDER is read on one line or several, in either quote style, comments ignored", () => {
+    expect(stepOrderOf('STEP_ORDER = ("asr", "reref", "ica", "iclabel")\n')).toEqual([
+      "asr",
+      "reref",
+      "ica",
+      "iclabel",
+    ]);
+    expect(stepOrderOf("STEP_ORDER = (\n    'load',  # first\n    \"qc\",\n)\n")).toEqual([
+      "load",
+      "qc",
+    ]);
+    expect(stepOrderOf('# STEP_ORDER = ("x",)\n')).toBeNull();
   });
 
   test("a [tool.uv.sources] style pin resolves through the lock, which names the branch's resolved commit", () => {
@@ -141,6 +165,26 @@ describe("the registry matches the nemar-process sources", () => {
           recipeVersionOf(read(steps as string)) ?? "(no RECIPE_VERSION)",
         );
         expect(recipe.engine, `${recipe.name}.engine`).toBe(engine as string);
+      }
+    },
+  );
+
+  test.skipIf(!required && !present)(
+    "every recipe's checkpoint map names exactly its STEP_ORDER, in order (ADR 0134)",
+    () => {
+      const dir = DIR as string;
+      const read = (f: string) => readFileSync(join(dir, f), "utf8");
+      const floorOrder = stepOrderOf(read(STEPS["nemar-floor"] as string));
+      const icaOwn = stepOrderOf(read(STEPS["nemar-ica"] as string));
+      expect(floorOrder, "nemar_floor/steps.py has no STEP_ORDER").not.toBeNull();
+      expect(icaOwn, "nemar_ica/steps.py has no STEP_ORDER").not.toBeNull();
+      const expected: Record<string, string[]> = {
+        "nemar-floor": floorOrder as string[],
+        "nemar-ica": [...(floorOrder as string[]), ...(icaOwn as string[])],
+      };
+      for (const recipe of COMPUTE_RECIPES) {
+        const mapped = (findRecipe(recipe.name)?.checkpoints ?? []).flatMap((c) => [...c.steps]);
+        expect(mapped, `${recipe.name} checkpoint map`).toEqual(expected[recipe.name] ?? []);
       }
     },
   );
