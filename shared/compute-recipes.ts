@@ -151,10 +151,10 @@ export interface ComputeRecipe {
 }
 
 /**
- * The engine every recipe reports: `eegprep@<version>+<commit>`, the version `uv.lock` in nemar-process
- * gives eegprep and the git revision its `pyproject.toml` pins (the suffix is added by
- * `recipes/nemar_process/common/versions.py`). It moves with that pin, and the `+<commit>` suffix goes
- * when the images move to an eegprep release installed from an index.
+ * The engine every recipe reports: `eegprep@<version>+<commit>`, the version and the resolved git commit of
+ * eegprep's block in nemar-process `uv.lock`, which is what the image installs from the pin in its
+ * `pyproject.toml` (the suffix is added by `recipes/nemar_process/common/versions.py`). It moves with that
+ * pin, and the `+<commit>` suffix goes when the images move to an eegprep release installed from an index.
  */
 const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
 
