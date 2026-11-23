@@ -209,6 +209,8 @@ describe("the parsing of the nemar-process sources", () => {
     ).toEqual(["nemar-quality", "nemar-segment"]);
     expect(pluginsOf("PLUGINS = ()\n")).toEqual([]);
     expect(pluginsOf('# PLUGINS = (("x", "1"),)\nSTEP_ORDER = ("a",)\n')).toBeNull();
+    // a list is not the declared form: unread here, and refused by the comparison below
+    expect(pluginsOf('PLUGINS = [("nemar-quality", "1.0.0-b1")]\n')).toBeNull();
   });
 
   test("withoutSteps leaves the named steps out, and a checkpoint that ends empty", () => {
@@ -311,6 +313,11 @@ describe("the registry matches the nemar-process sources", () => {
         const declaredMap = checkpointsOf(stepsPy);
         const declared = stepOrderOf(stepsPy, "PRE_CHECKS");
         const declaredPlugins = pluginsOf(stepsPy);
+        // a PLUGINS assignment this test cannot read (a list, a name) must not pass as "not declared"
+        expect(
+          /^PLUGINS\b/m.test(stepsPy) && declaredPlugins === null,
+          `${recipe.name}: steps.py assigns PLUGINS in a form this test does not read (a tuple of pairs)`,
+        ).toBe(false);
         const mappedPlugins = mapped.filter((s) => plugins.includes(s));
         if (declaredPlugins !== null) {
           // a steps.py that declares PLUGINS (phase 5 P4 on): its names, in order, are the map's plugin steps
