@@ -972,11 +972,10 @@ jobs:
       # one fixture directory, a few kilobytes. It lands in process-copy/ at the repo root, which the
       # unit-pure file glob does not reach.
       #
-      # `feature/issue-1-epic-process`, the integration branch of that repository, where the copy lands
-      # through its own pull request. Move this to its `main` when that epic merges. Until the pull
-      # request that adds the schema there has merged, this step finds no such files and the test FAILS
-      # (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT below), which is deliberate: a broken checkout must not quietly
-      # disable the comparison.
+      # `dev`, the integration branch of that repository, where its pull requests land (the epic
+      # branch this used to name is merged and will be deleted). If a path below is missing there, the
+      # test FAILS (NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT below), which is deliberate: a broken checkout
+      # must not quietly disable the comparison.
       - name: Check out nemar-process's observation schema and fixtures
         uses: actions/checkout@v4
         with:
@@ -987,7 +986,7 @@ jobs:
             tests/observer/fixtures/
             deploy/tapis/systems/exec.json.tmpl
           sparse-checkout-cone-mode: false
-          ref: feature/issue-1-epic-process
+          ref: dev
 
       # The deployed copies of onboard-openneuro.yml, run-pr-review.yml,
       # run-publication-review.yml and run-upstream-repull.yml, for the same reason
