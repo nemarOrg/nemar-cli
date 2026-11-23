@@ -47,6 +47,8 @@ import {
 } from "../backend/test/helpers/github-compare-standin";
 import { DEFAULT_COMPUTE_POLICY } from "../shared/contract/compute";
 import {
+  ComputePipelineGridResponseSchema,
+  ComputePipelineRunDetailResponseSchema,
   ComputePipelineRunResponseSchema,
   ComputePipelineStatusResponseSchema,
 } from "../shared/contract/compute-admin";
@@ -75,6 +77,7 @@ const server = Bun.serve({
       body.future_top_level = { added: "by a newer worker" };
       for (const r of body.results ?? []) r.future_nested = 7;
       for (const s of body.stamps ?? []) s.future_nested = 7;
+      for (const r of body.rows ?? []) r.future_nested = 7;
       return Response.json(body, { status: res.status });
     }
     return res;
@@ -444,6 +447,20 @@ describe("refusals before anything is sent", () => {
     ["a stamps limit over the maximum", ["stamps", "--limit", "201"]],
     ["a stamps cursor that is not a number", ["stamps", "--before", "x"]],
     ["a stamps recipe that is not one", ["stamps", "--recipe", "A B"]],
+    ["a grid status that is not one", ["status", "--status", "sleeping"]],
+    ["a grid executor that is not one", ["status", "--executor", "ssh"]],
+    ["a grid runner that is not one", ["status", "--runner", "rnr_x"]],
+    [
+      "a grid runner with --executor tapis",
+      ["status", "--executor", "tapis", "--runner", `rnr_${"ab".repeat(12)}`],
+    ],
+    ["a grid limit over the maximum", ["status", "--limit", "501"]],
+    ["a grid cursor that is not a dataset", ["status", "--after", "nope"]],
+    ["a grid recipe version that is not one", ["status", "--recipe-version", "a/b"]],
+    ["the stamp list's --state on the grid", ["status", "--state", "failed"]],
+    ["the stamp list's --before on the grid", ["status", "--before", "3"]],
+    ["a stamp id that is not one", ["failures", "abc"]],
+    ["a stamp id of 0", ["failures", "0"]],
   ];
   for (const [name, args] of bad) {
     test(`${name}: exit 1, and nothing is sent`, async () => {
@@ -455,7 +472,12 @@ describe("refusals before anything is sent", () => {
 
   test("a member's key and no key at all exit 1", async () => {
     await world(["nm000104"]);
-    for (const args of [["run", "nemar-floor", "--eligible", "--dry-run"], ["stamps"]]) {
+    for (const args of [
+      ["run", "nemar-floor", "--eligible", "--dry-run"],
+      ["stamps"],
+      ["status"],
+      ["failures", "1"],
+    ]) {
       expect((await runCli("member", args)).exitCode).toBe(1);
       expect((await runCli(null, args)).exitCode).toBe(1);
     }
@@ -545,6 +567,119 @@ describe("stamps", () => {
   });
 });
 
+describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
+  async function finishedOne() {
+    const env = await world(["nm000104", "nm000105"]);
+    await runCli("admin", ["run", "nemar-floor", "--dataset", "nm000104"]);
+    const job = (
+      await env.DB.prepare(
+        "SELECT j.id FROM compute_pipeline_stamps s JOIN compute_jobs j ON j.id = s.job_id WHERE s.dataset_id = 'nm000104'",
+      ).first<{ id: string }>()
+    )?.id as string;
+    await finishAtTapis(fx, env, job, { outputs: floorOutputs() });
+    seen = [];
+    return env;
+  }
+
+  test("--json prints the Worker's answer and only that, and asks for a sync unless --no-sync", async () => {
+    await finishedOne();
+    const r = await runCli("admin", ["status", "--json"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stderr.trim()).toBe("");
+    const body = JSON.parse(r.stdout);
+    expect(ComputePipelineGridResponseSchema.safeParse(body).success).toBe(true);
+    expect(seen).toEqual(["GET /admin/compute/pipeline/grid?recipe=nemar-floor&sync=1"]);
+    // The sync reached the finished run, so its row shows its end.
+    expect(body.rows.find((x: Record<string, any>) => x.dataset_id === "nm000104").status).toBe(
+      "finished",
+    );
+    seen = [];
+    await runCli("admin", ["status", "--json", "--no-sync"]);
+    expect(seen).toEqual(["GET /admin/compute/pipeline/grid?recipe=nemar-floor"]);
+  });
+
+  test("every option is sent as its query parameter (MUTATION: drop one)", async () => {
+    await world(["nm000104"]);
+    const runner = `rnr_${"ab".repeat(12)}`;
+    const r = await runCli("admin", [
+      "status",
+      "--recipe",
+      "nemar-floor",
+      "--status",
+      "finished",
+      "--recipe-version",
+      "1.0.0-b1",
+      "--executor",
+      "runner",
+      "--runner",
+      runner,
+      "--dataset",
+      "nm000104",
+      "--limit",
+      "2",
+      "--after",
+      "nm000103",
+      "--no-sync",
+      "--json",
+    ]);
+    expect(r.exitCode).toBe(0);
+    expect(seen).toEqual([
+      `GET /admin/compute/pipeline/grid?recipe=nemar-floor&recipe_version=1.0.0-b1&executor=runner&runner=${runner}&status=finished&dataset=nm000104&after=nm000103&limit=2`,
+    ]);
+  });
+
+  test("the table has the coverage, the legend, a row per dataset and its cells", async () => {
+    await finishedOne();
+    const r = await runCli("admin", ["status"]);
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.trim().split("\n");
+    expect(lines[0]).toMatch(
+      /^nemar-floor 1\.0\.0-b1: covered 1 of 2 eligible \(50%\), complete [01], at any recipe version 1$/,
+    );
+    expect(r.stdout).toContain("cells: passed/total; F<n> n failed");
+    const header = lines.find((l) => l.startsWith("dataset")) as string;
+    expect(header).toMatch(
+      /dataset\s+version\s+run\s+exec\s+status\s+import\s+preprocess\s+quality\s+stored/,
+    );
+    expect(lines.find((l) => l.startsWith("nm000104"))).toMatch(
+      /nm000104\s+v1\.0\.0\s+#\d+\s+tapis\s+finished\s+\S/,
+    );
+    expect(lines.find((l) => l.startsWith("nm000105"))).toMatch(
+      /nm000105\s+1\.0\.0\s+-\s+-\s+not_started\s+-\s+-\s+-\s+-/,
+    );
+    const page = await runCli("admin", ["status", "--limit", "1"]);
+    expect(page.stdout).toContain("more: --after nm000104");
+  });
+
+  test("--state and --before point to the stamp list", async () => {
+    const r = await runCli("admin", ["status", "--state", "failed"]);
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout + r.stderr).toContain("pipeline stamps");
+  });
+
+  test("failures prints a run's checkpoints and failures, and --json the Worker's answer", async () => {
+    const env = await finishedOne();
+    const stamp = (
+      await env.DB.prepare(
+        "SELECT id FROM compute_pipeline_stamps WHERE dataset_id = 'nm000104'",
+      ).first<{ id: number }>()
+    )?.id as number;
+    await runCli("admin", ["status"]); // syncs, so the run is reconciled
+    const json = await runCli("admin", ["failures", String(stamp), "--json"]);
+    expect(json.exitCode).toBe(0);
+    expect(ComputePipelineRunDetailResponseSchema.safeParse(JSON.parse(json.stdout)).success).toBe(
+      true,
+    );
+    const text = await runCli("admin", ["failures", String(stamp)]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain(`stamp ${stamp}: nm000104 v1.0.0 nemar-floor`);
+    expect(text.stdout).toMatch(/import: \w+, \d+ passed, \d+ failed, \d+ skipped of \d+/);
+    const missing = await runCli("admin", ["failures", "999999"]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stdout + missing.stderr).toContain("There is no such pipeline stamp.");
+  });
+});
+
 describe("what is printed", () => {
   test("an answer with keys the CLI does not know is shown, not refused", async () => {
     await world(["nm000104"]);
@@ -555,6 +690,9 @@ describe("what is printed", () => {
     const status = await runCli("admin", ["stamps"]);
     expect(status.exitCode).toBe(0);
     expect(status.stdout).toContain("nm000104");
+    const grid = await runCli("admin", ["status"]);
+    expect(grid.exitCode).toBe(0);
+    expect(grid.stdout).toContain("nm000104");
   });
 
   test("no token, address, specification or identity is on standard output or standard error", async () => {
