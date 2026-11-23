@@ -40,7 +40,7 @@ earlier releases are described only by their generated notes.
   The progress vectors are regenerated, and `shared/contract/plugin-manifest-vectors.json` gives the manifest verdicts (schema and rule word) for nemar-process to replay.
   The recipe drift test reads nemar-process's `PLUGINS` literal once a `steps.py` declares it, leaves the plugin steps out of the comparison until then, and fails on a `PLUGINS` assignment it cannot read.
 - **A pipeline job is held to its recipe's own result limit (owner decision of 2026-11-23).**
-  A registry entry may declare `resultLimits.maxFiles` (never above 100,000); the outputs route, its body cap and the launcher-document bound use it for a NEMAR pipeline job a stamp names, and every other job keeps the owner's policy.
+  A registry entry may declare `resultLimits.maxFiles` (never above 100,000); the outputs route, its body cap and the launcher-document bound let it raise the limit (never lower it) for a NEMAR pipeline job a stamp names, and every other job keeps the owner's policy.
   `nemar-floor` and `nemar-ica` declare 25,000: about 6 and 13 files per recording, so the policy's 5,000 stopped at about 830 and 384 recordings.
   The launcher still caps its outputs request at 1 MiB (about 8,000 entries), so raising its cap is a nemar-process change before a job lists more.
 
