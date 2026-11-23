@@ -85,6 +85,9 @@ export const LAUNCH_SPEC_VERSION = "nemar.launch-spec.v1";
 /** The launcher reads at most this many bytes of the specification (the JSON text, decoded). */
 export const LAUNCH_SPEC_MAX_BYTES = 64 * 1024;
 
+/** The most datasets one launch specification names; the local launch specification's bound too. */
+export const LAUNCH_SPEC_MAX_DATASETS = 20;
+
 /**
  * The longest `NEMAR_LAUNCH_SPEC` value: base64url without padding spends `ceil(n * 4 / 3)`
  * characters on `n` bytes, so the JSON cap above becomes 87,382 (65,536 bytes is 21,845 groups of
@@ -218,7 +221,7 @@ export const LaunchSpecSchema = z
           })
           .strict(),
       )
-      .max(20),
+      .max(LAUNCH_SPEC_MAX_DATASETS),
     /** The NEMAR API the launcher calls with `job_token`: no query, no fragment. */
     api_base: z.string().max(512).regex(API_BASE_RE),
     image: z
@@ -250,38 +253,46 @@ export const LaunchSpecSchema = z
     job_token: z.string().regex(JOB_TOKEN_RE),
   })
   .strict()
-  .superRefine((spec, ctx) => {
-    const refuse = (path: string, message: string) =>
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
-    if ((spec.entry === undefined) === (spec.command === undefined)) {
-      refuse("entry", "exactly one of entry and command");
-    }
-    if (spec.entry !== undefined && spec.bundle === undefined) {
-      refuse("bundle", "an entry needs the bundle that holds it");
-    }
-    // Each cross rule only when both its fields are well formed, so the field issues are not doubled.
-    const named = sifFileNameForDigest(spec.image.digest);
-    if (named !== null && SIF_FILE_RE.test(spec.image.sif) && spec.image.sif !== named) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["image", "sif"],
-        message: SIF_NAMED_MESSAGE,
-      });
-    }
-    if (
-      named !== null &&
-      COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
-      !spec.image.uri.endsWith(spec.image.digest)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["image", "uri"],
-        message: IMAGE_REF_NAMED_MESSAGE,
-      });
-    }
-  });
+  .superRefine(refineRunnable);
 
 export type LaunchSpec = z.infer<typeof LaunchSpecSchema>;
+
+/** What {@link refineRunnable} reads: the members a launch and a local launch specification share. */
+export interface RunnableSpec {
+  entry?: string;
+  command?: string[];
+  bundle?: unknown;
+  image: { uri: string; digest: string; sif: string };
+}
+
+/**
+ * The rules of a runnable document no JSON Schema can state, declared once for the launch
+ * specification and the local one (`./compute-local-launch.ts`): exactly one of `entry` and `command`;
+ * an `entry` comes with the `bundle` that holds it; `image.sif` is the file named for `image.digest`;
+ * and `image.uri` is pinned to `image.digest`. Each image rule runs only when both its fields are well
+ * formed, so the field issues are not doubled.
+ */
+export function refineRunnable(spec: RunnableSpec, ctx: z.RefinementCtx): void {
+  const refuse = (path: string[], message: string) =>
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  if ((spec.entry === undefined) === (spec.command === undefined)) {
+    refuse(["entry"], "exactly one of entry and command");
+  }
+  if (spec.entry !== undefined && spec.bundle === undefined) {
+    refuse(["bundle"], "an entry needs the bundle that holds it");
+  }
+  const named = sifFileNameForDigest(spec.image.digest);
+  if (named !== null && SIF_FILE_RE.test(spec.image.sif) && spec.image.sif !== named) {
+    refuse(["image", "sif"], SIF_NAMED_MESSAGE);
+  }
+  if (
+    named !== null &&
+    COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
+    !spec.image.uri.endsWith(spec.image.digest)
+  ) {
+    refuse(["image", "uri"], IMAGE_REF_NAMED_MESSAGE);
+  }
+}
 
 /**
  * The file name of the SIF built from an image digest: `<the 64 hex of "sha256:<hex>">.sif`, or null

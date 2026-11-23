@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { Ajv2020 } from "ajv/dist/2020";
-import { LaunchSpecSchema } from "../shared/contract/compute-launch";
+import { LAUNCH_SPEC_MAX_DATASETS, LaunchSpecSchema } from "../shared/contract/compute-launch";
 import launchSchema from "../shared/contract/compute-launch.schema.json";
 import {
   LOCAL_DATASET_NAME_RE,
@@ -22,7 +22,7 @@ import {
 import localSchema from "../shared/contract/compute-local-launch.schema.json";
 import * as contractIndex from "../shared/contract/index";
 
-const ajv = new Ajv2020({ allErrors: true, strict: false });
+const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
 const ajvLocal = ajv.compile(localSchema);
 const ajvLaunch = ajv.compile(launchSchema);
 
@@ -69,6 +69,10 @@ describe("the words and numbers", () => {
     expect(LOCAL_DATASET_NAME_RE.source).toBe("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
     expect(localSchema.properties.format.const).toBe(LOCAL_LAUNCH_FORMAT);
     expect(localSchema.properties.datasets.maxItems).toBe(LOCAL_LAUNCH_MAX_DATASETS);
+    expect(localSchema.properties.datasets.maxItems).toBe(
+      launchSchema.properties.datasets.maxItems,
+    );
+    expect(LOCAL_LAUNCH_MAX_DATASETS).toBe(LAUNCH_SPEC_MAX_DATASETS);
     expect(localSchema.properties.datasets.items.properties.name.pattern).toBe(
       "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\\s\\S])",
     );
@@ -112,6 +116,14 @@ describe("the members shared with the launch specification", () => {
         launchShape[key as keyof typeof launchShape],
       );
     }
+  });
+});
+
+describe("the shared descriptions are read for the service path", () => {
+  test("the top-level description gives the standalone equivalents", () => {
+    expect(localSchema.description).toContain("describe the service path");
+    expect(localSchema.description).toContain("--code FILE");
+    expect(localSchema.description).toContain("--sif-root DIR");
   });
 });
 

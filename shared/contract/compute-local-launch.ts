@@ -19,6 +19,10 @@
  * file holds no host path. Because each document has a key the other refuses (`format` here, `job_id`
  * there), a launch specification and a local one can never be taken for each other.
  *
+ * The shared members keep the launch specification's descriptions, which describe the service path.
+ * Standalone, the bundle is the archive given with `--code FILE` (the launcher asks no Worker for it),
+ * and `image.sif` is relative to the directory given with `--sif-root DIR`, not `NEMAR_SIF_ROOT`.
+ *
  * The text is read under the launch specification's own encoding rules: printable ASCII JSON, at most
  * {@link LOCAL_LAUNCH_MAX_BYTES} bytes, no duplicate keys, no fractions. Its digest is the SHA-256 of
  * the file's bytes.
@@ -30,8 +34,12 @@
  */
 
 import { z } from "zod";
-import { LAUNCH_SPEC_MAX_BYTES, LaunchSpecSchema, sifFileNameForDigest } from "./compute-launch.js";
-import { COMPUTE_IMAGE_REF_RE } from "./compute.js";
+import {
+  LAUNCH_SPEC_MAX_BYTES,
+  LAUNCH_SPEC_MAX_DATASETS,
+  LaunchSpecSchema,
+  refineRunnable,
+} from "./compute-launch.js";
 
 /** The format word every local launch specification carries; a later version is refused by name. */
 export const LOCAL_LAUNCH_FORMAT = "nemar.local-launch.v1";
@@ -40,7 +48,7 @@ export const LOCAL_LAUNCH_FORMAT = "nemar.local-launch.v1";
 export const LOCAL_LAUNCH_MAX_BYTES = LAUNCH_SPEC_MAX_BYTES;
 
 /** The most datasets one local job names: the launch specification's own bound. */
-export const LOCAL_LAUNCH_MAX_DATASETS = 20;
+export const LOCAL_LAUNCH_MAX_DATASETS = LAUNCH_SPEC_MAX_DATASETS;
 
 /**
  * A dataset's name: the directory under `/data` the job reads it from, and the `NAME` of
@@ -77,31 +85,19 @@ export const LocalLaunchSpecSchema = z
   })
   .strict()
   .superRefine((spec, ctx) => {
-    const refuse = (path: (string | number)[], message: string) =>
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
-    if ((spec.entry === undefined) === (spec.command === undefined)) {
-      refuse(["entry"], "exactly one of entry and command");
-    }
-    if (spec.entry !== undefined && spec.bundle === undefined) {
-      refuse(["bundle"], "an entry needs the bundle that holds it");
-    }
+    // The launch specification's own rules (one of entry and command, the bundle, both image rules).
+    refineRunnable(spec, ctx);
     const seen = new Set<string>();
     spec.datasets.forEach((d, i) => {
-      if (seen.has(d.name)) refuse(["datasets", i, "name"], "a dataset name is given twice");
+      if (seen.has(d.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["datasets", i, "name"],
+          message: "a dataset name is given twice",
+        });
+      }
       seen.add(d.name);
     });
-    // The image rules of the launch specification, each only when both its fields are well formed.
-    const named = sifFileNameForDigest(spec.image.digest);
-    if (named !== null && /^[0-9a-f]{64}\.sif$/.test(spec.image.sif) && spec.image.sif !== named) {
-      refuse(["image", "sif"], "the image file is not the one named for the image digest");
-    }
-    if (
-      named !== null &&
-      COMPUTE_IMAGE_REF_RE.test(spec.image.uri) &&
-      !spec.image.uri.endsWith(spec.image.digest)
-    ) {
-      refuse(["image", "uri"], "the image reference is not pinned to the image digest");
-    }
   });
 
 export type LocalLaunchDataset = z.infer<typeof LocalLaunchDatasetSchema>;
