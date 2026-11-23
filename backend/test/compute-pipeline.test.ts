@@ -19,7 +19,7 @@
  *    found again by its key, and a deleted dataset loses its stamps and keeps its jobs.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { findRecipe, recipeImageDigestArg } from "../../shared/compute-recipes";
 import { LAUNCHER_FILES } from "../../shared/contract/compute";
 import { MAX_MANIFEST_JSON_ENTRIES } from "../src/routes/data";
@@ -1085,6 +1085,42 @@ describe("a result whose tuple is not the one claimed", () => {
     const { env } = await finishedWith({ engine: { package: "eegprep", version: "0.5.1" } });
     expect(await held(env)).toHaveLength(1);
     expect(await run(env, { datasetId: "nm000105" })).toMatchObject({ code: "registry_drift" });
+  });
+
+  // One world per test (the fixture seeds its accounts once), so one case per test.
+  const mismatchLines = async (record: Record<string, unknown>) => {
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await finishedWith(record);
+      return spy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.startsWith("[compute-pipeline] tuple_mismatch "));
+    } finally {
+      spy.mockRestore();
+    }
+  };
+
+  test("the mismatch log names a differing version by field name, never its value (MUTATION: drop version_differs)", async () => {
+    const lines = await mismatchLines({ recipe: { id: "nemar-floor", version: "9.9.9-zz" } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ job=\S+ version_differs$/);
+    expect(lines[0]).not.toContain("9.9.9-zz");
+  });
+
+  test("the mismatch log names a differing engine by field name, never its value (MUTATION: drop engine_differs)", async () => {
+    const lines = await mismatchLines({ engine: { package: "eegprep", version: "7.7.7" } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ job=\S+ engine_differs$/);
+    expect(lines[0]).not.toContain("7.7.7");
+  });
+
+  test("the mismatch log names both fields when both differ", async () => {
+    const lines = await mismatchLines({
+      recipe: { id: "nemar-floor", version: "9.9.9-zz" },
+      engine: { package: "eegprep", version: "7.7.7" },
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/ job=\S+ version_differs engine_differs$/);
   });
 
   test("a result with the tuple that was claimed holds nothing", async () => {
