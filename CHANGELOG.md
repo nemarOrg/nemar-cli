@@ -27,9 +27,18 @@ earlier releases are described only by their generated notes.
   `stalled` (no report for three minutes while `submitted`, `queued` or `running`, or `unreported`) is worked out on read; no schedule is added and no switch.
   The pipeline dispatcher's log line reports reconciliation that could not decide or threw.
 - **The quality plugin manifest contract `nemar.plugin-manifest.v1`** and the recipe registry's step-to-checkpoint maps.
+- **The admin pipeline grid (ADR 0134 decision 5, epic #2324 phase 4a).**
+  `GET /admin/compute/pipeline/grid` shows one recipe's runs over the eligible datasets, a row per dataset and a column per checkpoint, each cell `passed/total` with a mark, filtered by status, recipe version, executor, runner or dataset and paged by dataset id, with the counts over the whole filtered set.
+  `GET /admin/compute/pipeline/coverage` gives each recipe's coverage (a succeeded run at the dataset's newest version with the registry's current recipe version; complete; at any recipe version) and a daily failure trend from the stamps (30 days by default, 90 at most).
+  `GET /admin/compute/pipeline/runs/:stamp` lists one run's failures per checkpoint (at most ten each, from D1; `stamp_not_found` for none).
+  All three are admin-only and read only: the grid syncs the open stamps first only with `sync=1`.
+  `nemar admin compute pipeline status` now shows the grid (it syncs first unless `--no-sync`), and `nemar admin compute pipeline failures <stamp-id>` the drill-down.
+  Follow-ups: a coverage history in the observability snapshot (#2333) and paging the full recordings table (#2334).
 
 ### Changed
 
+- **`nemar admin compute pipeline status` is the grid; the stamp list it printed is now `nemar admin compute pipeline stamps`**, with the same options.
+  The route it read, `GET /admin/compute/pipeline/status`, is unchanged, so a released CLI keeps working.
 - **neuroschema 0.5.0 is vendored with a record root** (`NEUROSCHEMA_VERSION` 0.5.0, a minor bump). The live `schema_version` checks also accept 0.4.x until the backend that serves 0.5.0 is deployed.
 - **The compute recipe registry declares `nemar-floor` and `nemar-ica` `1.0.0-b1`, engine `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8` (#2329).**
   These are the values the nemar-process images report once its release carries them (the pre-release recipe version, and eegprep with the commit the image installs it from); before, the registry said `1.0.0` and `eegprep@0.5.0`.
