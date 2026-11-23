@@ -34,6 +34,10 @@ earlier releases are described only by their generated notes.
   All three are admin-only and read only: the grid syncs the open stamps first only with `sync=1`.
   `nemar admin compute pipeline status` now shows the grid (it syncs first unless `--no-sync`), and `nemar admin compute pipeline failures <stamp-id>` the drill-down.
   Follow-ups: a coverage history in the observability snapshot (#2333) and paging the full recordings table (#2334).
+- **`nemar-ica` declares its quality plugins' checkpoints (ADR 0134 decisions 6 and 7, epic #2324 phase 5 N1).**
+  Its map gains `quality` (`nemar-quality`) and `figures` (`nemar-spectrum`, `nemar-components`, `nemar-segment`) after `iclabel`, so the step `record` now counts at `figures`; `RECIPE_PLUGIN_STEPS` names the plugin steps, and only `nemar-ica` runs plugins.
+  The progress vectors are regenerated with a failure and a skip at a plugin step, and `shared/contract/plugin-manifest-vectors.json` gives the manifest verdicts (schema and rule word) for nemar-process to replay.
+  The recipe drift test reads nemar-process's `PLUGINS` literal once a `steps.py` declares it, and leaves the plugin steps out of the comparison until then.
 
 ### Changed
 
