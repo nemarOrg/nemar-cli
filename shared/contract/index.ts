@@ -56,3 +56,6 @@ export * from "./compute-partner-request.js";
 // the request and response shapes a runner and the Worker exchange. Its JSON Schema is shared byte for
 // byte with nemarOrg/nemar-process; the words shared with the job model are in `../compute-state.ts`.
 export * from "./compute-runner.js";
+// The live progress object `nemar.progress.v1` a pipeline job reports while it runs (ADR 0134, epic
+// #2324 phase 2). Its JSON Schema is copied byte for byte by nemarOrg/nemar-process.
+export * from "./compute-progress.js";
