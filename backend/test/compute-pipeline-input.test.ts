@@ -642,7 +642,7 @@ describe("the queue and the dry run read the input", () => {
         .prepare(
           `INSERT INTO compute_pipeline_stamps
              (dataset_id, version, recipe, recipe_version, engine, input, attempt, state, refusal_code, updated_at)
-           VALUES (?1, 'v1.0.0', 'nemar-floor', '1.0.0', 'eegprep@0.5.0', 'zarr', ?2, 'failed',
+           VALUES (?1, 'v1.0.0', 'nemar-floor', '1.0.0-b1', 'eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8', 'zarr', ?2, 'failed',
                    'outputs_missing', datetime('now', '-30 days'))`,
         )
         .bind(id, attempt)
@@ -769,8 +769,8 @@ describe("a succeeded stamp records what the run read", () => {
     expect((await stampsOf(w.d1, id))[0]).toMatchObject({
       state: "succeeded",
       input: "zarr",
-      recipe_version: "1.0.0",
-      engine: "eegprep@0.5.0",
+      recipe_version: "1.0.0-b1",
+      engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
       reader: READER,
       input_engine: "0.4.2",
       input_digest: DIGEST,

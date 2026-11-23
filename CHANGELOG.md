@@ -17,6 +17,13 @@ earlier releases are described only by their generated notes.
 
 ### Changed
 
+- **The compute recipe registry declares `nemar-floor` and `nemar-ica` `1.0.0-b1`, engine `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8` (#2329).**
+  These are the values the nemar-process images report once its release carries them (the pre-release recipe version, and eegprep with the commit the image installs it from); before, the registry said `1.0.0` and `eegprep@0.5.0`.
+  Deploy order: release nemar-process, publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE` wherever compute is or will be on, check the pinned digest's tuple with `nemar-recipe version`, and only then deploy this, at a moment with no open `nemar-floor` stamps.
+  Deployed before the image, the first finished run holds the new tuple (`tuple_mismatch`), and a hold of a tuple the registry still declares never clears.
+  Effects on existing rows: succeeded stamps on the old tuple stop blocking re-dispatch; failures on the old tuple stop counting toward the retry cooldown and cap; holds on the old tuple stop applying; an in-flight stamp on the old tuple does not block a claim of the new one, so a dataset can run twice, the second ending `tuple_already_stamped`.
+  No derivative key, migration or DOI changes.
+  CI now compares the registry with nemar-process `dev` (`test/compute-recipes-process-drift.unit.test.ts`).
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
   The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.
