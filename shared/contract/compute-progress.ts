@@ -9,6 +9,9 @@
  * .unit.test.ts` holds the two to each other, and holds each checkpoint's counts to neuroschema's
  * `definitions/checkpointCounts.schema.json`, so live and final counts differ only in transport.
  *
+ * In a live report, `passed`, `failed` and `skipped` count only the recordings that have ended (that have a
+ * row in the recordings table), and `total` counts every recording the run discovered.
+ *
  * The object is a transport message, not metadata. It carries counts and a capped list of recent
  * failures (a relative path, a failure word, the step and the checkpoint), never samples, free text or
  * personal data. It is closed (`.strict()`), because the Worker validates it as it arrives and a
@@ -56,7 +59,10 @@ export const PROGRESS_PATH_MAX = 256;
 /** The most recordings a count may hold. */
 export const PROGRESS_MAX_RECORDINGS = 1_000_000;
 
-/** The largest serialized progress object, in bytes (UTF-8); the largest valid object fits. */
+/**
+ * The largest progress object, in bytes of compact UTF-8 JSON (`JSON.stringify` with no spacing); the
+ * largest object the schema accepts fits, a path of 256 escaped quotes included.
+ */
 export const PROGRESS_MAX_BYTES = 8192;
 
 /** The largest request body the job-token progress route reads, in bytes. */

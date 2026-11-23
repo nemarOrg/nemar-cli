@@ -5,9 +5,13 @@
  * metrics and figures it writes. Declared once here; nemar-process (phase 5) loads plugins and copies
  * `plugin-manifest.schema.json` byte for byte.
  *
- * A declared metric, with a run's `value` (a number or null) and the plugin's `{name, version}`, is a
- * valid neuroschema `qualityMetric`: its `bounds` are the valid range the plugin declares for the value,
- * not a quality threshold. A figure is a display image in one of a fixed list of formats under a size
+ * A declared metric without `headline`, with a run's `value` (a number or null) and the plugin's
+ * `{name, version}`, is a valid neuroschema `qualityMetric`: its `bounds` are the valid range the plugin
+ * declares for the value, not a quality threshold. `headline` lives in the manifest only: it says the
+ * metric is also written to the record's `summaryMetrics`, and is never part of a `qualityMetric`.
+ *
+ * Every string cap counts code points, as JSON Schema does, so zod and Ajv agree on a string outside
+ * the Basic Multilingual Plane. A figure is a display image in one of a fixed list of formats under a size
  * cap; a figure that draws a time series is raster only (PNG or WebP), because a vector trace stores the
  * samples as coordinates. A plugin never writes samples.
  *
@@ -63,6 +67,13 @@ export const PLUGIN_METRIC_RE = /^[A-Za-z][A-Za-z0-9_:-]{0,127}(?![\s\S])/;
 /** A figure's or a parameter's name. */
 export const PLUGIN_KEY_RE = /^[a-z][a-z0-9_]{0,63}(?![\s\S])/;
 
+/** A string of `min` to `max` code points (JSON Schema counts code points; `.max` counts UTF-16 units). */
+const codePoints = (min: number, max: number) =>
+  z.string().refine((s) => {
+    const n = [...s].length;
+    return n >= min && n <= max;
+  }, `${min} to ${max} code points`);
+
 const keyCount = (min: number, max: number) => (o: Record<string, unknown>) => {
   const n = Object.keys(o).length;
   return n >= min && n <= max;
@@ -70,7 +81,7 @@ const keyCount = (min: number, max: number) => (o: Record<string, unknown>) => {
 
 const parameterValue = z.union([
   z.number(),
-  z.string().max(PLUGIN_PARAMETER_STRING_MAX),
+  codePoints(0, PLUGIN_PARAMETER_STRING_MAX),
   z.boolean(),
   z.null(),
   z.array(z.number()).max(PLUGIN_PARAMETER_LIST_MAX),
@@ -81,8 +92,8 @@ const rangeSchema = z.object({ min: z.number().nullable(), max: z.number().nulla
 /** One metric a plugin writes: neuroschema `qualityMetric` without the run's value and the plugin. */
 export const PluginMetricSchema = z
   .object({
-    unit: z.string().min(1).max(32),
-    description: z.string().min(1).max(500),
+    unit: codePoints(1, 32),
+    description: codePoints(1, 500),
     bounds: rangeSchema.optional(),
     headline: z.boolean().optional(),
   })
@@ -97,7 +108,7 @@ export const PluginFigureSchema = z
       .max(PLUGIN_FIGURE_FORMATS.length)
       .refine((a) => new Set(a).size === a.length, "formats repeat"),
     time_series: z.boolean(),
-    caption: z.string().min(1).max(500),
+    caption: codePoints(1, 500),
     max_bytes: z.number().int().min(1).max(PLUGIN_FIGURE_MAX_BYTES),
   })
   .strict()

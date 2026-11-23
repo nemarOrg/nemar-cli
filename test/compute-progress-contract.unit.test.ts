@@ -1,7 +1,7 @@
 /**
  * The live progress contract, `nemar.progress.v1` (ADR 0134 decision 3, epic #2324 phase 2).
  *
- * Pins: every word and number written out a second time. Behaviour: the object is closed at every
+ * Pins: every word and number written out a second time. Behavior: the object is closed at every
  * level and the response is open. Agreement: a corpus (a valid object, a key removed, a key of the wrong
  * type, an unknown key at each level, a value at and one past each bound, each pattern broken) is
  * judged by Ajv on the shared JSON Schema and by zod, and both must give the verdict the corpus names.
@@ -123,7 +123,7 @@ describe("the object", () => {
     expect(ajvResponse({ ok: false })).toBe(false);
   });
 
-  test("the largest object the schema accepts serializes within PROGRESS_MAX_BYTES", () => {
+  test("the largest object the schema accepts, a path of escaped quotes included, serializes within PROGRESS_MAX_BYTES", () => {
     const name = (i: number) => `c${String(i).padStart(31, "0")}`.slice(0, 32);
     const big: Record<string, unknown> = {
       format: PROGRESS_FORMAT,
@@ -140,7 +140,8 @@ describe("the object", () => {
         ]),
       ),
       failures: Array.from({ length: PROGRESS_MAX_FAILURES }, () => ({
-        path: "a".repeat(PROGRESS_PATH_MAX),
+        // The worst case for bytes: every character of the path is escaped in JSON.
+        path: '"'.repeat(PROGRESS_PATH_MAX),
         code: `a${"b".repeat(63)}`,
         step: `A${"b".repeat(63)}`,
         checkpoint: name(0),

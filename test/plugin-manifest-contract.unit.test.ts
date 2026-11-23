@@ -258,6 +258,27 @@ describe("agreement corpus", () => {
       false,
     ],
     [
+      "a caption of 500 astral code points (1,000 UTF-16 units)",
+      edit((m) => {
+        m.outputs.figures.spectrum.caption = "\u{1F600}".repeat(500);
+      }),
+      true,
+    ],
+    [
+      "a caption of 501 astral code points",
+      edit((m) => {
+        m.outputs.figures.spectrum.caption = "\u{1F600}".repeat(501);
+      }),
+      false,
+    ],
+    [
+      "a unit of 32 astral code points",
+      edit((m) => {
+        m.outputs.metrics.percentGoodChannels.unit = "\u{1D400}".repeat(32);
+      }),
+      true,
+    ],
+    [
       "a wrong format word",
       edit((m) => {
         (m as Record<string, unknown>).format = "nemar.plugin-manifest.v2";
