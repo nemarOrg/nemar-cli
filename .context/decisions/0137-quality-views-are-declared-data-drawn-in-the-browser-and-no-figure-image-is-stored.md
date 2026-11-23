@@ -32,7 +32,7 @@ No file of nemar-process imports a plotting library; matplotlib stays only as a 
 **2. neuroschema owns the view vocabulary (0.6.0, breaking).**
 The record-level `dataQuality` replaces `figures` with `views`.
 A view declaration has a key, a namespaced `kind` with its own `kind_version`, a caption, a source (a plugin or a recipe, by name and version), a scope, parameters, and stored `data[]` (each with role, location, format, size, Secure Hash Algorithm 256 (SHA-256) digest, columns and dimensions), or `inputs[]` with a named, versioned `transform`, or both.
-An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest.
+An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest (`content_sha256`), which may be null only for a store input whose profile is `archive`.
 Kinds have two layers: five generic kinds (`nemar.table`, `nemar.lines`, `nemar.heatmap`, `nemar.histogram`, `nemar.sensor-field`), each with one renderer and one parity suite, and specific kinds that are presets over one of them (`nemar.spectrum`, `nemar.ic-maps`, `nemar.ic-classes`, `nemar.ic-activity`, `nemar.signal-window`).
 A renderer that does not know a kind or a version draws its base if it knows that, and otherwise shows the data as a table with a download; an unknown kind is never an error.
 Dimensions are an open vocabulary, each with coordinates, a unit and a type; `time`, `epoch`, `recording`, `subject`, `contact` and `sensor` are reserved names with fixed meanings.
@@ -53,12 +53,18 @@ The website's renderer and a Python reference renderer in neuroschema are held t
 Montages with duplicate positions and with rank-deficient interpolation matrices are among the vectors.
 `nemar.sensor-layout.v1` (positions to layout) and `nemar.ic-activity.v1` are specified and tested the same way.
 `nemar.sensor-layout.v1` turns measured positions into a layout only from a coordinate system it knows by its BIDS name, and it never assumes one.
-When a recording has no measured positions, or their coordinate system is undeclared or unknown, positions are inferred from the electrode names:
-each label is normalized (case folded, and a modality prefix or reference suffix removed, as in `EEG Fp1-REF`), the old and new names of one site are aliases (T3 and T7, T4 and T8, T5 and P7, T6 and P8), and the result is matched against standard montages.
-An inferred layout is used only when it passes an explicit confidence rule: at least a stated share of the recording's channels matched, and no ambiguous match (a label that could name two electrodes, or two labels that name one).
-neuroschema states the rule, its aliases, montages and thresholds beside `nemar.sensor-layout.v1`, with vectors.
-Inferred positions are `template` positions and the view says so; when no inference passes, no map is drawn and the view says why.
-This holds for the signal viewer's live scalp map, which moves onto the same code, and for every sensor-field view without measured positions.
+When a recording has no measured positions, or their coordinate system is undeclared or unknown, positions are inferred from the electrode names by `nemar.sensor-labels.v1`, which neuroschema owns and holds to vectors like the others.
+It keeps channels typed as electroencephalography (EEG) or untyped, leaving out fiducials and untyped labels that name another signal;
+normalizes each label (case folded, and a modality prefix or reference suffix removed, as in `EEG Fp1-REF`);
+takes the old and new names of one site as aliases (T3 and T7, T4 and T8, T5 and P7, T6 and P8);
+and matches the result against standard montages, MNE-Python's at a pinned version, with each montage's provenance recorded.
+Its thresholds are stated defaults: at least 8 channels matched, and a matched share of at least 0.8.
+When no montage passes, it refuses with one reason: `duplicate_label`, `montage_ambiguous`, `too_few_matched`, `too_few_channels`, `bipolar_labels`, `labels_unrecognized` or `share_too_low`.
+Measured positions in a known coordinate system are used as they are;
+inferred positions are `template` positions, and the view says that they were inferred and why;
+on a refusal no map is drawn and the view gives the reason.
+This holds for the signal viewer's live scalp map, which moves onto the same code, and for any sensor-field view that carries no layout role;
+the pipeline does not use it, and ICLabel still needs declared positions.
 
 **4. A plugin returns data; the runner checks it and writes it.**
 The plugin manifest's `outputs.views` replaces `outputs.figures`; `nemar.plugin-manifest.v1` is edited in place, because it has never been published or pinned outside this epic.
@@ -76,8 +82,11 @@ nemar-ica declares its own views: component maps from its mixing matrix and a ne
 nemar-quality writes the ICLabel class summary behind the class histogram (`_icclasses.json`), and nemar-spectrum writes the power spectrum (`_spectrum.tsv`).
 The spectrum is Welch's method with two-second Hamming windows at 50% overlap, in decibels relative to 1 µV²/Hz, up to 125 Hz or the Nyquist frequency when that is lower;
 the method, window, overlap, unit and upper bound are recorded as the view's parameters, and the bound is the same for every run so that spectra compare.
-nemar-ica runs its decomposition on the Zarr serving copy, the copy a browser reads, so that activations drawn from it show the data the decomposition read.
-On that copy it removes the floor's bad channels and nothing else: it re-creates none of the floor's filters and no ASR, and the record and the activations caption say so.
+nemar-ica runs its decomposition on the Zarr serving copy, the copy a browser reads, so that activations drawn from it show what was decomposed (nemarOrg/nemar-process#79).
+On that path the floor runs only for its decisions (good channels and bad windows), and the decomposition reads the store's digital values for the floor's good channels, rounded as `nemar.store-content.v1` rounds them (fl(fl(d·scale) + offset), each step in double precision), converted to eegprep's unit and average-referenced over those channels.
+It applies no ASR, no filter and no repair of bad windows.
+The record states this as `decomposition_input`: the source, the store with its content digest, the channels, the reference, the unit, and that no ASR or filter was applied;
+a decomposition of the archive copy records its own source, ASR and filters.
 
 **6. View files are checked by digest, and what that proves is stated.**
 View files live in the run's product in the derivatives store, never in the serving copy or a dataset repository.
@@ -104,10 +113,12 @@ pages show the one from the derivative decision 7 picks, the newest promoted by 
 The dataset page gets a Quality panel (Spectrum, Components, Activations and Signal) and a dataset summary drawn on the server; administrators get a drill-down from the pipeline run page.
 There is no chart library, no new dependency and no change to the Content Security Policy.
 A number on screen comes from a stored row: a hover snaps to a stored row, and a map's readout is the sensor's stored value.
-Activations are computed in the browser from the serving copy and the decomposition's unmixing matrix, and are labeled as computed.
-Nothing is drawn when the store does not hold each of the decomposition's channels exactly once, or when the store publishes a content digest that differs from the one the record names.
-When there is no digest to compare (the decomposition read the archive copy, or the store publishes none yet), activations are drawn with a fixed caption saying that the serving copy was not checked against the decomposition's input.
-They shade the floor's bad segments, state the reference and any filter they apply, and say that they are on the serving copy without ASR.
+Activations are computed in the browser by `nemar.ic-activity.v1`, which reproduces exactly what was decomposed: the serving copy's values for the decomposition's channels with the same rounding, in the unit `decomposition_input` names, average-referenced over those channels, then multiplied by the unmixing matrix.
+They are labeled as computed, and they shade the floor's bad segments.
+A 1 Hz high-pass filter is a display filter only: the activation view declares it as a parameter, and it is not part of the decomposition's input.
+Nothing is drawn when the store does not hold each of the decomposition's channels exactly once, or when the store publishes a content digest that differs from the one `decomposition_input` names.
+When the store publishes no digest yet, activations are drawn with a fixed caption saying that the serving copy was not checked against the decomposition's input.
+A decomposition of the archive copy keeps a caption of its own, saying that it read the archive copy after the floor's filters and ASR, which the browser does not redo.
 Colors come from design tokens, with colorblind-safe diverging and sequential maps and a toggle to turbo.
 Every component map has a text row.
 Exports are made only on request (PNG at two to four times in a light print palette, SVG for the spectrum and the histogram, and the raw files), and each embeds the view's digest (`nemar.view-digest.v1`), its kind and kind version, and a permalink.
@@ -118,7 +129,7 @@ a miss is fixed in the renderer, and a binary format needs a new ADR and a measu
 
 | Artifact | Home |
 |---|---|
-| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1` and its electrode-name rule, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0, vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
+| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0, vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
 | A recording's views and metrics | neuroschema `dataQuality`, record level, projected on request from the signalJourney record |
 | The derivation of each view file | the signalJourney record: the writing step's `outputTargets` and `extensions.nemar.views` |
 | Plugin `outputs.views` and the metric prefix rule | nemar-cli `shared/contract/plugin-manifest.*` |
@@ -142,11 +153,12 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - The plugin manifest loses figure formats and caps, and all four copies of the standard checkpoints lose `figures` (nemar-cli, two in nemar-process, the website), each held by a drift test.
 - The figure plugins nemar-components and nemar-segment, eegprep's static plotting work, and the plugin that would re-report the floor's values are cut;
   nemar-ica declares its own views and writes `_chanlocs.tsv`, nemar-quality writes `_icclasses.json`, and nemar-spectrum writes `_spectrum.tsv`.
-- nemar-ica is dispatched on the Zarr serving copy, and its Zarr path stops re-creating the floor's filters and ASR, which needs its own nemar-process phase;
-  a run that read the archive copy, and every run until the converter publishes per-store content digests, draws activations with the unchecked caption, and the converter needs a follow-up that writes those digests at commit.
+- nemar-ica's Zarr path decomposes the serving copy's own values, and nemar-ica is dispatched on it;
+  a run that read the archive copy keeps the archive caption, every Zarr run draws activations with the unchecked caption until the converter publishes per-store content digests, and the converter needs a follow-up that writes those digests at commit.
 - The derivatives store gains its only reading route; ADR 0123's private bucket and server-side copy stand.
-- The website owns a small renderer, a worker and three parity suites, and the signal viewer's scalp map changes from a thin-plate spline to EEGLAB's map.
-- The signal viewer stops assuming a coordinate frame: a recording whose positions are in an undeclared or unknown frame gets a map from its electrode names when the confidence rule passes, and otherwise none, with the reason, so some maps the viewer draws today disappear.
+- The website owns a small renderer, a worker and its parity suites, and the signal viewer's scalp map changes from a thin-plate spline to EEGLAB's map.
+- The signal viewer stops assuming a coordinate frame: a recording whose positions are in an undeclared or unknown frame gets a map from its electrode names when `nemar.sensor-labels.v1` accepts them, and otherwise none, with the reason, so some maps the viewer draws today from as few as three matched labels disappear.
+- The montage coordinates come from other projects, so each montage's provenance and license are recorded with it and confirmed before neuroschema 0.6.0 is released.
 - A drawing bug is fixed once and every view redraws; no stored image goes stale.
 - Activations need the public serving copy, so a private dataset has none in the browser.
 - Public pages show quality only for promoted derivatives, so a run stays off the dataset page until an administrator promotes it.
