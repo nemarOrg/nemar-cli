@@ -218,3 +218,31 @@ describe("the cross-field image rules are zod's, as in the launch specification"
     expect(both(doc)).toEqual({ ajv: true, zod: false });
   });
 });
+
+describe("the runnable rules give the same path and message for both specifications", () => {
+  const ENTRY = { path: ["entry"], message: "exactly one of entry and command" };
+  const BUNDLE = { path: ["bundle"], message: "an entry needs the bundle that holds it" };
+  const issues = (schema: typeof LaunchSpecSchema | typeof LocalLaunchSpecSchema, doc: unknown) => {
+    const parsed = schema.safeParse(doc);
+    return parsed.success
+      ? []
+      : parsed.error.issues.map((i) => ({ path: i.path, message: i.message }));
+  };
+  const specs = [
+    ["the launch specification", LaunchSpecSchema, launch],
+    ["the local launch specification", LocalLaunchSpecSchema, valid],
+  ] as const;
+  for (const [name, schema, build] of specs) {
+    test(`${name}: both entry and command`, () => {
+      expect(issues(schema, { ...build(), command: ["python"] })).toEqual([ENTRY]);
+    });
+    test(`${name}: neither entry nor command`, () => {
+      const { entry: _e, ...doc } = build();
+      expect(issues(schema, doc)).toEqual([ENTRY]);
+    });
+    test(`${name}: an entry without its bundle`, () => {
+      const { bundle: _b, ...doc } = build();
+      expect(issues(schema, doc)).toEqual([BUNDLE]);
+    });
+  }
+});
