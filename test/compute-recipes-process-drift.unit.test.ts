@@ -12,9 +12,11 @@
  * with these files in its sparse list) makes a missing checkout or file FAIL, so a broken checkout cannot
  * quietly disable the comparison.
  *
- * The same checkout holds each recipe's `STEP_ORDER`, which the registry's step-to-checkpoint map copies
- * (ADR 0134 decision 2): every floor step for `nemar-floor`; the floor's steps it re-runs, then its own, for
- * `nemar-ica`. The map must name exactly those steps, in that order.
+ * The same checkout holds each recipe's `STEP_ORDER`, `PRE_CHECKS` and `CHECKPOINTS`, which the registry's
+ * step-to-checkpoint map copies (ADR 0134 decision 2). The map's steps are `STEP_ORDER` plus `PRE_CHECKS`:
+ * without the pre-checks, every floor step for `nemar-floor`, and the floor's steps it re-runs then its own
+ * for `nemar-ica`, in that order; each pre-check at `preprocess`. A `steps.py` that declares `CHECKPOINTS`
+ * must declare `PRE_CHECKS` too, and its `CHECKPOINTS` must be the registry's map, step for step.
  *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
@@ -22,7 +24,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { COMPUTE_RECIPES, findRecipe } from "../shared/compute-recipes";
+import { COMPUTE_RECIPES, RECIPE_PRE_CHECKS, findRecipe } from "../shared/compute-recipes";
 
 /**
  * The value of `RECIPE_VERSION` in a recipe's `steps.py`, or null: an assignment at the start of a line, with
@@ -67,11 +69,34 @@ function expectedEngine(uvLock: string): string | null {
  * The names in a `STEP_ORDER = (...)` tuple of a `steps.py`, in order, or null: one assignment at the start
  * of a line, the tuple on one line or several, double or single quotes, comments ignored.
  */
-function stepOrderOf(stepsPy: string): string[] | null {
-  const m = /^STEP_ORDER\s*(?::[^=\n]+)?=\s*\(([^)]*)\)/m.exec(stepsPy);
+function stepOrderOf(stepsPy: string, name = "STEP_ORDER"): string[] | null {
+  const m = new RegExp(`^${name}\\s*(?::[^=\\n]+)?=\\s*\\(([^)]*)\\)`, "m").exec(stepsPy);
   if (m === null) return null;
   const body = (m[1] as string).replace(/#[^\n]*/g, "");
   return [...body.matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string);
+}
+
+/**
+ * The `CHECKPOINTS = (("name", ("step", ...)), ...)` literal of a `steps.py`, as [name, steps] pairs, or
+ * null when there is none: one assignment at the start of a line, comments ignored.
+ */
+function checkpointsOf(stepsPy: string): [string, string[]][] | null {
+  const start = /^CHECKPOINTS\s*(?::[^=\n]+)?=\s*\(/m.exec(stepsPy);
+  if (start === null) return null;
+  const text = stepsPy.slice(start.index + start[0].length).replace(/#[^\n]*/g, "");
+  let depth = 1;
+  let end = 0;
+  while (end < text.length && depth > 0) {
+    if (text[end] === "(") depth++;
+    else if (text[end] === ")") depth--;
+    end++;
+  }
+  const body = text.slice(0, end - 1);
+  const entry = /\(\s*["']([^"'\n]+)["']\s*,\s*\(([^()]*)\)\s*,?\s*\)/g;
+  return [...body.matchAll(entry)].map((m) => [
+    m[1] as string,
+    [...(m[2] as string).matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)].map((x) => (x[1] ?? x[2]) as string),
+  ]);
 }
 
 const STEPS: Record<string, string> = {
@@ -115,6 +140,20 @@ describe("the parsing of the nemar-process sources", () => {
       "qc",
     ]);
     expect(stepOrderOf('# STEP_ORDER = ("x",)\n')).toBeNull();
+    expect(stepOrderOf('PRE_CHECKS = ("a", "b")\n', "PRE_CHECKS")).toEqual(["a", "b"]);
+  });
+
+  test("CHECKPOINTS is read as name and step pairs across lines, comments ignored, or null", () => {
+    const py =
+      'CHECKPOINTS = (\n    ("import", ("load", "signal_channels")),\n    (\n        "preprocess",\n' +
+      "        (\n            \"flatline\",  # (first)\n            'qc_amplitude',\n        ),\n    ),\n" +
+      '    ("quality", ("qc",)),\n)\nSTEP_ORDER = ("x",)\n';
+    expect(checkpointsOf(py)).toEqual([
+      ["import", ["load", "signal_channels"]],
+      ["preprocess", ["flatline", "qc_amplitude"]],
+      ["quality", ["qc"]],
+    ]);
+    expect(checkpointsOf('STEP_ORDER = ("x",)\n# CHECKPOINTS = ()\n')).toBeNull();
   });
 
   test("a [tool.uv.sources] style pin resolves through the lock, which names the branch's resolved commit", () => {
@@ -170,7 +209,7 @@ describe("the registry matches the nemar-process sources", () => {
   );
 
   test.skipIf(!required && !present)(
-    "every recipe's checkpoint map names exactly its STEP_ORDER, in order (ADR 0134)",
+    "every recipe's checkpoint map is its STEP_ORDER plus its PRE_CHECKS, and its CHECKPOINTS (ADR 0134)",
     () => {
       const dir = DIR as string;
       const read = (f: string) => readFileSync(join(dir, f), "utf8");
@@ -182,9 +221,40 @@ describe("the registry matches the nemar-process sources", () => {
         "nemar-floor": floorOrder as string[],
         "nemar-ica": [...(floorOrder as string[]), ...(icaOwn as string[])],
       };
+      const pre: readonly string[] = RECIPE_PRE_CHECKS;
       for (const recipe of COMPUTE_RECIPES) {
-        const mapped = (findRecipe(recipe.name)?.checkpoints ?? []).flatMap((c) => [...c.steps]);
-        expect(mapped, `${recipe.name} checkpoint map`).toEqual(expected[recipe.name] ?? []);
+        const map = findRecipe(recipe.name)?.checkpoints ?? [];
+        const mapped = map.flatMap((c) => [...c.steps]);
+        // the pre-checks are step ids of the table, not of the record: STEP_ORDER does not list them
+        expect(
+          mapped.filter((s) => !pre.includes(s)),
+          `${recipe.name} checkpoint map`,
+        ).toEqual(expected[recipe.name] ?? []);
+        for (const step of mapped.filter((s) => pre.includes(s))) {
+          expect(
+            map.find((c) => c.steps.includes(step))?.checkpoint,
+            `${recipe.name} ${step}`,
+          ).toBe("preprocess");
+        }
+        // a steps.py that declares CHECKPOINTS (nemar-process #74 on) declares PRE_CHECKS beside it, equal
+        // to the pre-checks this map holds, and its CHECKPOINTS are this map, step for step
+        const stepsPy = read(STEPS[recipe.name] as string);
+        const declaredMap = checkpointsOf(stepsPy);
+        const declared = stepOrderOf(stepsPy, "PRE_CHECKS");
+        if (declaredMap !== null) {
+          expect(
+            declared,
+            `${recipe.name}: steps.py declares CHECKPOINTS without PRE_CHECKS`,
+          ).not.toBeNull();
+          expect(declaredMap, `${recipe.name} CHECKPOINTS`).toEqual(
+            map.map((c) => [c.checkpoint, [...c.steps]]),
+          );
+        }
+        if (declared !== null) {
+          expect(declared, `${recipe.name} PRE_CHECKS`).toEqual(
+            mapped.filter((s) => pre.includes(s)),
+          );
+        }
       }
     },
   );

@@ -492,6 +492,7 @@ describe("the progress vectors file", () => {
         row("sub-06/eeg/f.set", "failed", "disk_error", null),
         row("sub-07/eeg/g.set", "skipped", "time_budget", null),
         row("sub-08/eeg/h.set", "failed", "disk_error", "record"),
+        row("sub-09/eeg/i.set", "failed", "step_failed", "qc_amplitude"),
       ],
     },
     {
@@ -507,10 +508,11 @@ describe("the progress vectors file", () => {
         row("a.set", "succeeded", null, null),
         row("b.set", "failed", "step_failed", "qc"),
         row("c.set", "failed", "ica_degenerate", "ica"),
-        row("d.set", "skipped", "ica_ineligible", "ica"),
+        row("d.set", "skipped", "ica_ineligible", "ica_eligibility"),
         row("e.set", "failed", "out_of_memory", "asr"),
         row("f.set", "failed", "step_failed", "iclabel"),
         row("g.set", "failed", "internal_error", "record"),
+        row("h.set", "failed", "step_failed", "iclabel_locations"),
       ],
     },
     {

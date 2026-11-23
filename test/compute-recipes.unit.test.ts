@@ -20,6 +20,7 @@ import {
   RECIPE_IMAGE_DIGEST_FLAG,
   RECIPE_INPUTS,
   RECIPE_INPUT_EXECUTOR,
+  RECIPE_PRE_CHECKS,
   RECIPE_PRODUCT_DIR,
   RECORD_STEP,
   type RecipeExecutor,
@@ -653,9 +654,9 @@ describe("the module", () => {
 });
 
 // ADR 0134 decision 2 (epic #2324 phase 2): each recipe version declares its checkpoints and the steps
-// that map to each. The step orders below are nemar-process's `STEP_ORDER` (nemar_floor/steps.py and,
-// for nemar-ica, the floor's steps it re-runs then nemar_ica/steps.py), written out a second time so a
-// change on either side is a change here.
+// that map to each. The step lists below are nemar-process's `STEP_ORDER` plus its `PRE_CHECKS`, in map
+// order (nemar_floor/steps.py and, for nemar-ica, the floor's steps it re-runs then nemar_ica/steps.py),
+// written out a second time so a change on either side is a change here.
 describe("checkpoint maps (ADR 0134)", () => {
   const FLOOR_STEP_ORDER = [
     "load",
@@ -665,11 +666,20 @@ describe("checkpoint maps (ADR 0134)", () => {
     "line_noise_measure",
     "line_noise_50",
     "line_noise_60",
+    "qc_amplitude",
     "bad_channels",
     "bad_windows",
     "qc",
   ];
-  const ICA_STEP_ORDER = [...FLOOR_STEP_ORDER, "asr", "reref", "ica", "iclabel"];
+  const ICA_STEP_ORDER = [
+    ...FLOOR_STEP_ORDER,
+    "ica_eligibility",
+    "iclabel_locations",
+    "asr",
+    "reref",
+    "ica",
+    "iclabel",
+  ];
 
   test("the standard checkpoints and stored are the ADR's, in order", () => {
     expect([...STANDARD_CHECKPOINTS]).toEqual([
@@ -696,6 +706,7 @@ describe("checkpoint maps (ADR 0134)", () => {
           "line_noise_measure",
           "line_noise_50",
           "line_noise_60",
+          "qc_amplitude",
           "bad_channels",
           "bad_windows",
         ],
@@ -715,6 +726,21 @@ describe("checkpoint maps (ADR 0134)", () => {
     expect(ica && checkpointOfStep(ica, "qc")).toBe("preprocess");
     expect(ica && checkpointOfStep(ica, "asr")).toBe("preprocess");
     expect(ica && checkpointOfStep(ica, "iclabel")).toBe("iclabel");
+  });
+
+  test("every pre-check counts at preprocess, so a recording it refuses never passed a later checkpoint", () => {
+    for (const recipe of COMPUTE_RECIPES) {
+      for (const step of recipe.checkpoints.flatMap((c) => c.steps)) {
+        if ((RECIPE_PRE_CHECKS as readonly string[]).includes(step)) {
+          expect(checkpointOfStep(recipe, step), `${recipe.name} ${step}`).toBe("preprocess");
+        }
+      }
+    }
+    const ica = findRecipe("nemar-ica");
+    expect(ica && checkpointOfStep(ica, "ica_eligibility")).toBe("preprocess");
+    expect(ica && checkpointOfStep(ica, "iclabel_locations")).toBe("preprocess");
+    const floor = findRecipe("nemar-floor");
+    expect(floor && checkpointOfStep(floor, "qc_amplitude")).toBe("preprocess");
   });
 
   test.each([

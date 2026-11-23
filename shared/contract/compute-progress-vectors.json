@@ -20,6 +20,7 @@
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows"
           ]
@@ -50,9 +51,12 @@
             "line_noise_measure",
             "line_noise_50",
             "line_noise_60",
+            "qc_amplitude",
             "bad_channels",
             "bad_windows",
             "qc",
+            "ica_eligibility",
+            "iclabel_locations",
             "asr",
             "reref"
           ]
@@ -76,7 +80,7 @@
     {
       "name": "floor_mixed",
       "recipe": "nemar-floor",
-      "total": 8,
+      "total": 9,
       "rows": [
         {
           "path": "sub-01/eeg/a.set",
@@ -125,6 +129,12 @@
           "status": "failed",
           "code": "disk_error",
           "step": "record"
+        },
+        {
+          "path": "sub-09/eeg/i.set",
+          "status": "failed",
+          "code": "step_failed",
+          "step": "qc_amplitude"
         }
       ],
       "outcomes": [
@@ -263,26 +273,43 @@
             "code": "disk_error",
             "step": "record"
           }
+        ],
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "failed",
+            "code": "step_failed",
+            "step": "qc_amplitude"
+          },
+          {
+            "status": "skipped",
+            "code": "step_failed",
+            "step": "qc_amplitude"
+          }
         ]
       ],
       "counts": {
         "import": {
-          "passed": 4,
+          "passed": 5,
           "failed": 2,
           "skipped": 2,
-          "total": 8
+          "total": 9
         },
         "preprocess": {
           "passed": 3,
-          "failed": 1,
+          "failed": 2,
           "skipped": 4,
-          "total": 8
+          "total": 9
         },
         "quality": {
           "passed": 1,
           "failed": 2,
-          "skipped": 5,
-          "total": 8
+          "skipped": 6,
+          "total": 9
         }
       },
       "failures": {
@@ -317,6 +344,12 @@
             "path": "sub-03/eeg/c.set",
             "code": "all_channels_flagged",
             "step": "bad_channels",
+            "checkpoint": "preprocess"
+          },
+          {
+            "path": "sub-09/eeg/i.set",
+            "code": "step_failed",
+            "step": "qc_amplitude",
             "checkpoint": "preprocess"
           }
         ],
@@ -396,7 +429,7 @@
     {
       "name": "ica_mixed",
       "recipe": "nemar-ica",
-      "total": 7,
+      "total": 8,
       "rows": [
         {
           "path": "a.set",
@@ -420,7 +453,7 @@
           "path": "d.set",
           "status": "skipped",
           "code": "ica_ineligible",
-          "step": "ica"
+          "step": "ica_eligibility"
         },
         {
           "path": "e.set",
@@ -439,6 +472,12 @@
           "status": "failed",
           "code": "internal_error",
           "step": "record"
+        },
+        {
+          "path": "h.set",
+          "status": "failed",
+          "code": "step_failed",
+          "step": "iclabel_locations"
         }
       ],
       "outcomes": [
@@ -515,19 +554,19 @@
             "step": null
           },
           {
-            "status": "passed",
-            "code": null,
-            "step": null
+            "status": "skipped",
+            "code": "ica_ineligible",
+            "step": "ica_eligibility"
           },
           {
             "status": "skipped",
             "code": "ica_ineligible",
-            "step": "ica"
+            "step": "ica_eligibility"
           },
           {
             "status": "skipped",
             "code": "ica_ineligible",
-            "step": "ica"
+            "step": "ica_eligibility"
           }
         ],
         [
@@ -595,32 +634,54 @@
             "code": "internal_error",
             "step": "record"
           }
+        ],
+        [
+          {
+            "status": "passed",
+            "code": null,
+            "step": null
+          },
+          {
+            "status": "failed",
+            "code": "step_failed",
+            "step": "iclabel_locations"
+          },
+          {
+            "status": "skipped",
+            "code": "step_failed",
+            "step": "iclabel_locations"
+          },
+          {
+            "status": "skipped",
+            "code": "step_failed",
+            "step": "iclabel_locations"
+          }
         ]
       ],
       "counts": {
         "import": {
-          "passed": 7,
+          "passed": 8,
           "failed": 0,
           "skipped": 0,
-          "total": 7
+          "total": 8
         },
         "preprocess": {
-          "passed": 5,
-          "failed": 2,
-          "skipped": 0,
-          "total": 7
+          "passed": 4,
+          "failed": 3,
+          "skipped": 1,
+          "total": 8
         },
         "ica": {
           "passed": 3,
           "failed": 1,
-          "skipped": 3,
-          "total": 7
+          "skipped": 4,
+          "total": 8
         },
         "iclabel": {
           "passed": 1,
           "failed": 2,
-          "skipped": 4,
-          "total": 7
+          "skipped": 5,
+          "total": 8
         }
       },
       "failures": {
@@ -633,9 +694,21 @@
             "checkpoint": "preprocess"
           },
           {
+            "path": "d.set",
+            "code": "ica_ineligible",
+            "step": "ica_eligibility",
+            "checkpoint": "preprocess"
+          },
+          {
             "path": "e.set",
             "code": "out_of_memory",
             "step": "asr",
+            "checkpoint": "preprocess"
+          },
+          {
+            "path": "h.set",
+            "code": "step_failed",
+            "step": "iclabel_locations",
             "checkpoint": "preprocess"
           }
         ],
@@ -643,12 +716,6 @@
           {
             "path": "c.set",
             "code": "ica_degenerate",
-            "step": "ica",
-            "checkpoint": "ica"
-          },
-          {
-            "path": "d.set",
-            "code": "ica_ineligible",
             "step": "ica",
             "checkpoint": "ica"
           }
