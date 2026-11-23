@@ -19,7 +19,7 @@ nemar-ica already writes most of them as exact text (`_mixing.tsv`, `_unmixing.t
 The three it lacks are small (`_chanlocs.tsv`, `_spectrum.tsv`, `_icclasses.json`): about a third of a megabyte per recording at 64 channels, nearly all of it the spectrum, computed from the formats and not measured.
 A stored image cannot follow the site's theme, be read by a screen reader, be checked against the numbers it shows, or be redrawn when a drawing is fixed, and it puts a plotting library in the pipeline.
 Two facts limit what a browser can draw honestly.
-nemar-ica is dispatched only on the dataset's archive copy today, and on either copy it decomposes the data after the floor's filters and artifact subspace reconstruction (ASR), so nothing ties its decomposition to the serving copy a browser reads.
+nemar-ica is dispatched only on the dataset's archive copy today, so no digest ties its decomposition to the serving copy a browser reads, and a browser cannot redo the filters and artifact subspace reconstruction (ASR) a decomposition needs.
 And the signal viewer's scalp map assumes a coordinate frame when a recording declares none or one it does not know, so a map can be drawn in the wrong orientation with nothing to say so.
 
 ## Decision
@@ -84,11 +84,10 @@ nemar-quality writes the ICLabel class summary behind the class histogram (`_icc
 The spectrum is Welch's method with two-second Hamming windows at 50% overlap, in decibels relative to 1 µV²/Hz.
 The method, window, overlap, unit and upper bound are recorded as the view's parameters;
 the bound is 125 Hz unless the recording's Nyquist frequency is lower, and the recorded bound says which, so spectra compare where their bounds agree.
-nemar-ica runs its decomposition on the Zarr serving copy, the copy a browser reads, so that activations drawn from it show what was decomposed (nemarOrg/nemar-process#79).
-On that path the floor runs only for its decisions (good channels and bad windows), and the decomposition reads the store's digital values for the floor's good channels, rounded as `nemar.store-content.v1` rounds them (fl(fl(d·scale) + offset), each step in double precision), converted to eegprep's unit and average-referenced over those channels.
-It applies no ASR, no filter and no repair of bad windows.
-The record states this as `decomposition_input`: the source, the store with its content digest, the channels, the reference, the unit, and that no ASR or filter was applied;
-a decomposition of the archive copy records its own source, channels, unit, reference, ASR and filters.
+nemar-ica reads the Zarr serving copy, the copy a browser reads, so that its record names that store by its content digest (nemarOrg/nemar-process#79).
+Its decomposition always reads preprocessed data, as the legacy NEMAR pipeline's did, whether its input is the Zarr serving copy or the BIDS archive copy:
+a high-pass filter, line-noise removal (CleanLine or Zapline-plus), ASR with a cutoff of 30 and the removal of bad channels, then the decomposition.
+The record states this as `decomposition_input`: the source (with the store's content digest when it is the serving copy), the kept channels, the unit, the reference, ASR and the filters.
 
 **6. View files are checked by digest, and what that proves is stated.**
 View files live in the run's product in the derivatives store, never in the serving copy or a dataset repository.
@@ -115,12 +114,15 @@ pages show the one from the derivative decision 7 picks, the newest promoted by 
 The dataset page gets a Quality panel (Spectrum, Components, Activations and Signal) and a dataset summary drawn on the server; administrators get a drill-down from the pipeline run page.
 There is no chart library, no new dependency and no change to the Content Security Policy.
 A number on screen comes from a stored row: a hover snaps to a stored row, and a map's readout is the sensor's stored value.
-Activations are computed in the browser by `nemar.ic-activity.v1`, which reproduces exactly what was decomposed: the serving copy's values for the decomposition's channels with the same rounding, in the unit `decomposition_input` names, average-referenced over those channels, then multiplied by the unmixing matrix.
+Activations are computed in the browser by `nemar.ic-activity.v1`, which applies no preprocessing:
+it multiplies the serving copy's kept channels by one weights matrix, the decomposition's unmixing matrix times its sphere matrix times the average-reference matrix over those channels, in store row order and with the store's unit folded in.
+They therefore approximate what was decomposed, by design, because the browser does not redo the high-pass filter, line-noise removal or ASR, and their caption says so.
 They are labeled as computed, and they shade the floor's bad segments.
 A 1 Hz high-pass filter is a display filter only: the activation view declares it as a parameter, and it is not part of the decomposition's input.
-Nothing is drawn when the store does not hold each of the decomposition's channels exactly once, or when the store publishes a content digest that differs from the one `decomposition_input` names.
-When the store publishes no digest yet, activations are drawn with a fixed caption saying that the serving copy was not checked against the decomposition's input.
-A decomposition of the archive copy keeps a caption of its own, saying that it read the archive copy after the floor's filters and ASR, which the browser does not redo.
+The store's content digest checks that the browser reads the channels and data the record names.
+Nothing is drawn when the store does not hold each kept channel exactly once, or when the store publishes a content digest that differs from the one `decomposition_input` names.
+When the store publishes no digest yet, activations are drawn with a fixed caption saying that the serving copy was not checked against the record.
+A decomposition of the archive copy keeps a caption of its own, saying that it read the archive copy, which no digest ties to the serving copy.
 Colors come from design tokens, with colorblind-safe diverging and sequential maps and a toggle to turbo.
 Every component map has a text row.
 Exports are made only on request (PNG at two to four times in a light print palette, SVG for the spectrum and the histogram, and the raw files), and each embeds the view's digest (`nemar.view-digest.v1`), its kind and kind version, and a permalink.
@@ -157,7 +159,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - The plugin manifest loses figure formats and caps, and all four copies of the standard checkpoints lose `figures` (nemar-cli, two in nemar-process, the website), each held by a drift test.
 - The figure plugins nemar-components and nemar-segment, eegprep's static plotting work, and the plugin that would re-report the floor's values are cut;
   nemar-ica declares its own views and writes `_chanlocs.tsv`, nemar-quality writes `_icclasses.json`, and nemar-spectrum writes `_spectrum.tsv`.
-- nemar-ica's Zarr path decomposes the serving copy's own values, and nemar-ica is dispatched on it;
+- nemar-ica is dispatched on the Zarr serving copy with the same preprocessing as on the archive copy;
   a run that read the archive copy keeps the archive caption, every Zarr run draws activations with the unchecked caption until the converter publishes per-store content digests, and the converter needs a follow-up that writes those digests at commit (nemarOrg/nemar-cli#2343).
 - The derivatives store gains the first route that serves a derivative's product files; ADR 0123's private bucket and server-side copy stand.
 - The website owns a small renderer, a worker and its parity suites, and the signal viewer's scalp map changes from a thin-plate spline to EEGLAB's map.
@@ -165,13 +167,16 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - The montage coordinates come from other projects, so each montage's provenance and license are recorded with it and confirmed before neuroschema 0.6.0 is released.
 - A drawing bug is fixed once and every view redraws; no stored image goes stale.
 - Activations need the public serving copy, so a private dataset has none in the browser.
+- Activations approximate the decomposition's input by design: the browser's single multiply leaves out the high-pass filter, line-noise removal and ASR, and the caption says so; a test holds the folding (the weights matrix times the data equals the unmixing matrix times the sphere matrix times the average-referenced data).
+- On the Zarr input, a channel is not typed as electrocardiography (ECG) until eegprep-lean reads each channel's type from the store (sccn/eegprep#668); nemar-process re-pins eegprep once that lands, and until then this is a known limitation.
 - Public pages show quality only for promoted derivatives, so a run stays off the dataset page until an administrator promotes it.
 
 ## Alternatives considered
 
 - **Store images, as ADR 0134 decided:** they cannot be themed, checked, read aloud or redrawn, and they need a plotting library in the pipeline.
 - **Compute the spectrum in the browser:** it fetches the whole recording (about 19 megabytes for ten minutes at 64 channels) to draw a few hundred rows per sensor that a run computes once.
-- **Keep decomposing the floor's cleaned data:** a browser cannot redo the floor's filters and ASR, so activations drawn from the serving copy would not be what the decomposition read.
+- **Decompose the raw serving copy so activations are exact:** the decomposition's quality drops; on one fixture, the components ICLabel calls brain fell from 11 to 7 of 18 and line-noise components rose from 3 to 6.
+- **Redo the preprocessing in the browser so activations are exact:** the high-pass filter, line-noise removal and ASR would each need a browser implementation held to parity with eegprep, for a view that is a display.
 - **Assume a coordinate frame when none is declared, as the viewer does today:** a wrong frame draws a plausible map in the wrong orientation that no reader can catch; a map inferred from names under a stated rule, or no map with a reason, is honest.
 - **Binary or Zarr view data now:** text is enough at these sizes; binary waits for a measured miss.
 - **A chart library:** website ADRs 0007 and 0033 keep the site's own drawing code.
