@@ -151,13 +151,13 @@ describe("recordingOutcomes", () => {
     ).toEqual(["skipped", "skipped", "skipped"]);
     expect(
       recordingOutcomes(row("a", "skipped", "ica_ineligible", "ica"), I).map((o) => o.status),
-    ).toEqual(["passed", "passed", "skipped", "skipped"]);
+    ).toEqual(["passed", "passed", "skipped", "skipped", "skipped", "skipped"]);
   });
 
   test("the step `record` counts against the last declared checkpoint; a step-less fault against the first", () => {
     expect(RECORD_STEP).toBe("record");
     expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), F)).toBe("quality");
-    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), I)).toBe("iclabel");
+    expect(firstCheckpointOf(row("a", "failed", "disk_error", "record"), I)).toBe("figures");
     expect(recordingOutcomes(row("a", "failed", "disk_error", "record"), F)).toEqual([
       { status: "passed", code: null, step: null },
       { status: "passed", code: null, step: null },
@@ -513,6 +513,9 @@ describe("the progress vectors file", () => {
         row("f.set", "failed", "step_failed", "iclabel"),
         row("g.set", "failed", "internal_error", "record"),
         row("h.set", "failed", "step_failed", "iclabel_locations"),
+        row("i.set", "failed", "step_failed", "nemar-quality"),
+        row("j.set", "skipped", "figure_too_large", "nemar-spectrum"),
+        row("k.set", "failed", "internal_error", "nemar-segment"),
       ],
     },
     {
