@@ -278,6 +278,29 @@ describe("what a row and its cells show", () => {
     expect(after.cells.import.mark).toBe("no_counts");
   });
 
+  test("a run that ended with no job is failed and its cells have no counts, not pending forever", async () => {
+    await seedEegDataset(env, "nm000104");
+    const ins = await env.DB.prepare(
+      `INSERT INTO compute_pipeline_stamps (dataset_id, version, recipe, recipe_version, engine, input, attempt, state, refusal_code)
+       VALUES ('nm000104', 'v1.0.0', 'nemar-floor', ?1, ?2, 'bids', 1, 'failed', 'create_failed')`,
+    )
+      .bind(floor.version, floor.engine)
+      .run();
+    const row = rowOf((await grid()).body, "nm000104");
+    expect(row.status).toBe("failed");
+    expect(row.run.job_id).toBeNull();
+    for (const col of ["import", "preprocess", "quality", "stored"]) {
+      expect([col, row.cells[col].mark]).toEqual([col, "no_counts"]);
+    }
+    const detail = await get(`/compute/pipeline/runs/${ins.meta.last_row_id}`);
+    expect(detail.body.checkpoints.map((c: Loose) => c.mark)).toEqual([
+      "no_counts",
+      "no_counts",
+      "no_counts",
+      "no_counts",
+    ]);
+  });
+
   test("a hold stamp and a refused stamp are never a row's run", async () => {
     await seedEegDataset(env, "nm000104");
     const d = await finished("nm000104");
@@ -507,13 +530,36 @@ describe("the drill-down", () => {
     ]);
     expect(byName.import.unlisted).toBe(0);
     expect(byName.preprocess.failures.map((f: Loose) => f.code)).toEqual(["step_failed"]);
-    // Two recordings are skipped at quality (they failed earlier) and quality lists neither.
-    expect(byName.quality.unlisted).toBe(2);
+    expect(byName.preprocess.unlisted).toBe(0);
+    // Two recordings are skipped at quality, but both stopped earlier and are listed there: none is
+    // quality's to list, so none is unlisted here (MUTATION: count every failed and skipped recording).
+    expect(byName.quality.counts.skipped).toBe(2);
+    expect(byName.quality.unlisted).toBe(0);
     expect(byName.stored.mark).toBe("pending");
     expect(r.body.listed_codes).toEqual([
       { checkpoint: "import", code: "load_failed", count: 1 },
       { checkpoint: "preprocess", code: "step_failed", count: 1 },
     ]);
+  });
+
+  test("a checkpoint with more failures than its list holds says how many it leaves out", async () => {
+    await seedEegDataset(env, "nm000104");
+    const many = floorTable([
+      ...Array.from({ length: 12 }, (_, i) => [
+        `sub-${String(i + 1).padStart(2, "0")}/eeg/x.edf`,
+        "failed",
+        "load_failed",
+        "load",
+      ]),
+      ["sub-20/eeg/y.edf", "failed", "step_failed", "bad_channels"],
+      ["sub-21/eeg/z.edf", "succeeded", null, null],
+    ] as Parameters<typeof floorTable>[0]);
+    const d = await finished("nm000104", many);
+    const r = await get(`/compute/pipeline/runs/${d.stampId}`);
+    const byName = Object.fromEntries(r.body.checkpoints.map((c: Loose) => [c.checkpoint, c]));
+    expect([byName.import.listed, byName.import.unlisted]).toEqual([10, 2]);
+    expect([byName.preprocess.listed, byName.preprocess.unlisted]).toEqual([1, 0]);
+    expect([byName.quality.listed, byName.quality.unlisted]).toEqual([0, 0]);
   });
 
   test("a live run shows its last report; an unreadable list is said, not thrown", async () => {

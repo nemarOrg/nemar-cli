@@ -993,7 +993,10 @@ export const ComputePipelineRunDetailResponseSchema = z
             z.object({ path: z.string(), code: z.string(), step: nullableString }).passthrough(),
           ),
           listed: z.number().int(),
-          /** Failed and skipped recordings the list leaves out. */
+          /**
+           * Recordings that first stopped at this checkpoint (failed or skipped here, not at an earlier one)
+           * and that the list leaves out; a recording stopped earlier is another checkpoint's to list.
+           */
           unlisted: z.number().int(),
           failures_unreadable: z.boolean(),
         })

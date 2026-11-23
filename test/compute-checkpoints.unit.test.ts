@@ -617,6 +617,30 @@ describe("pipelineCellMark: what a grid cell shows", () => {
     }
   });
 
+  test("a run that ended with no job has its outcome: its cells have no counts, never pending (MUTATION: ignore hasJob)", () => {
+    const jobless = (counts: ReturnType<typeof c> | null) =>
+      pipelineCellMark({
+        status: "failed",
+        counts,
+        cellReconciled: false,
+        runReconciled: false,
+        hasJob: false,
+      });
+    expect(jobless(null)).toBe("no_counts");
+    // With a job, the same unreconciled run waits for the sync.
+    expect(mark("failed", null, false, false)).toBe("pending");
+    // hasJob says nothing about a live run, which shows its status.
+    expect(
+      pipelineCellMark({
+        status: "waiting",
+        counts: null,
+        cellReconciled: false,
+        runReconciled: false,
+        hasJob: false,
+      }),
+    ).toBe("waiting");
+  });
+
   test("failed wins over passed and skipped in a complete cell", () => {
     expect(mark("finished", c(5, 1, 0, 6), true, true)).toBe("failed");
     expect(mark("finished", c(0, 1, 5, 6), true, true)).toBe("failed");

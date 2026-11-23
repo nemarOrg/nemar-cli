@@ -27,6 +27,7 @@ import {
   COMPUTE_RECIPES,
   type ComputeRecipe,
   STANDARD_CHECKPOINTS,
+  STORED_CHECKPOINT,
   declaredCheckpoints,
 } from "../../../shared/compute-recipes.js";
 import {
@@ -187,8 +188,7 @@ export const RUN_DETAIL_SQL = `SELECT s.id AS stamp_id, s.dataset_id AS dataset_
        s.version AS version, s.recipe_version AS recipe_version, s.engine AS engine, s.input AS input,
        s.attempt AS attempt, s.state AS stamp_state, s.refusal_code AS code, s.job_id AS job_id,
        s.created_at AS created_at, s.updated_at AS updated_at,
-       (SELECT dv.version FROM dataset_versions dv WHERE dv.dataset_id = s.dataset_id
-         ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1) AS newest_version,
+       (${NEWEST_VERSION_SQL("s")}) AS newest_version,
        CASE WHEN s.version = ${VERSION_TAG_SQL(`(${NEWEST_VERSION_SQL("s")})`)} THEN 1 ELSE 0 END
          AS current_version,
        j.state AS job_state, j.executor AS executor, j.runner_id AS runner_id, rn.name AS runner_name,
@@ -428,6 +428,7 @@ export async function pipelineGrid(
             counts,
             cellReconciled: c?.reconciled === 1,
             runReconciled,
+            hasJob: r.job_id !== null,
           }),
           counts,
           reconciled: c?.reconciled === 1,
@@ -549,6 +550,10 @@ export async function pipelineRunDetail(
   for (const r of rows) if (!order.includes(r.checkpoint)) order.push(r.checkpoint);
   const runReconciled = run.reconciled_at !== null;
   const codes = new Map<string, { checkpoint: string; code: string; count: number }>();
+  // A recording is counted failed or skipped at its first non-passed checkpoint and skipped at every one
+  // after it, so the recordings that FIRST stopped at a checkpoint are its failed and skipped less the
+  // previous checkpoint's: those are the ones its list could name, and `unlisted` counts only them.
+  let stoppedBefore = 0;
   const checkpoints = order.map((checkpoint) => {
     const r = byCheckpoint.get(checkpoint);
     const counts = r
@@ -575,6 +580,12 @@ export async function pipelineRunDetail(
                 total: r.live_total,
               }
           : counts;
+    const stoppedHere =
+      counts === null ? 0 : Math.max(0, counts.failed + counts.skipped - stoppedBefore);
+    if (counts !== null) stoppedBefore = counts.failed + counts.skipped;
+    // An unreconciled `stored` row is the derivative store's pending row, not a list of failures.
+    const pendingStored = checkpoint === STORED_CHECKPOINT && r?.reconciled !== 1;
+    const unlistedHere = pendingStored ? 0 : Math.max(0, stoppedHere - listed);
     return {
       checkpoint,
       mark: pipelineCellMark({
@@ -582,6 +593,7 @@ export async function pipelineRunDetail(
         counts,
         cellReconciled: r?.reconciled === 1,
         runReconciled,
+        hasJob: run.job_id !== null,
       }),
       counts,
       live,
@@ -590,7 +602,7 @@ export async function pipelineRunDetail(
       reported_at: r?.reported_at ?? null,
       failures: (failures ?? []).map((f) => ({ path: f.path, code: f.code, step: f.step })),
       listed,
-      unlisted: counts ? Math.max(0, counts.failed + counts.skipped - listed) : 0,
+      unlisted: unlistedHere,
       failures_unreadable: r !== undefined && failures === null,
     };
   });

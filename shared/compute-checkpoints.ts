@@ -376,7 +376,8 @@ export type PipelineCellMark = (typeof PIPELINE_CELL_MARKS)[number];
  * 3. an incomplete or missing cell of a live run (`waiting`, `running`, `stalled`): the run's status;
  * 4. an incomplete or missing cell of an ended run: `pending` while its row or the run is not reconciled
  *    yet (the `stored` cell waiting for the derivative store, a run the sync has not reached), otherwise
- *    `no_counts` (a run that ended without a readable table, or a job that never reported).
+ *    `no_counts` (a run that ended without a readable table, a job that never reported, or a run that
+ *    ended with no job at all, which is never reconciled and so has its outcome already).
  */
 export function pipelineCellMark(input: {
   status: PipelineGridStatus;
@@ -385,6 +386,11 @@ export function pipelineCellMark(input: {
   cellReconciled: boolean;
   /** The run has an outcome (its run row's `reconciled_at` is set). */
   runReconciled: boolean;
+  /**
+   * The run has a job. A run that ended with none (`create_failed`, `no_job`) never reports and is never
+   * reconciled, so it has its outcome already: its cells have no counts. True when absent.
+   */
+  hasJob?: boolean;
 }): PipelineCellMark {
   const { status, counts } = input;
   if (status === "not_started") return "not_started";
@@ -399,7 +405,8 @@ export function pipelineCellMark(input: {
     return "skipped";
   }
   if (!ended) return status;
-  if ((counts !== null && !input.cellReconciled) || !input.runReconciled) return "pending";
+  const decided = input.runReconciled || input.hasJob === false;
+  if ((counts !== null && !input.cellReconciled) || !decided) return "pending";
   return "no_counts";
 }
 
