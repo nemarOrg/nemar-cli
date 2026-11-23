@@ -107,6 +107,25 @@ const CASES: Array<[string, unknown]> = [
     }),
   ],
   [
+    "bounds_equal",
+    edit(quality, (m) => {
+      m.outputs.metrics.percentGoodChannels = {
+        unit: "%",
+        description: "x",
+        bounds: { min: 50, max: 50 },
+      };
+    }),
+  ],
+  [
+    "bounds_reversed_before_figures_without_figure",
+    edit(figures, (m) => {
+      m.outputs.figures = {};
+      m.outputs.metrics = {
+        share: { unit: "%", description: "x", bounds: { min: 1, max: 0 } },
+      };
+    }),
+  ],
+  [
     "quality_without_metric",
     edit(quality, (m) => {
       m.outputs.metrics = {};
@@ -214,6 +233,19 @@ describe("plugin manifest vectors", () => {
     }
     expect(v.find((c) => c.name === "time_series_svg")?.schema_valid).toBe(false);
     expect(v.find((c) => c.name === "map_svg")?.schema_valid).toBe(true);
+  });
+
+  test("rule precedence and the bounds boundary", () => {
+    const v = (name: string) => computed.vectors.find((c) => c.name === name);
+    expect(v("bounds_reversed_before_figures_without_figure")?.problem).toBe("bounds_reversed");
+    expect(v("bounds_equal")).toMatchObject({ schema_valid: true, problem: null });
+  });
+
+  test("a manifest is judged by #/$defs/PluginManifest: the document root accepts what it refuses", () => {
+    const root = new Ajv2020({ strict: true }).compile(manifestSchema);
+    const iclabel = CASES.find(([name]) => name === "checkpoint_iclabel")?.[1];
+    expect(root(iclabel)).toBe(true);
+    expect(ajvManifest(iclabel) as boolean).toBe(false);
   });
 
   test("the file equals what the code computes", () => {

@@ -164,6 +164,83 @@
       "problem": null
     },
     {
+      "name": "bounds_equal",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-floor",
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "percentGoodChannels": {
+              "unit": "%",
+              "description": "x",
+              "bounds": {
+                "min": 50,
+                "max": 50
+              }
+            },
+            "percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "figures": {}
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "bounds_reversed_before_figures_without_figure",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-segment",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_segment",
+        "checkpoint": "figures",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-floor",
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "seconds": 2
+        },
+        "outputs": {
+          "metrics": {
+            "share": {
+              "unit": "%",
+              "description": "x",
+              "bounds": {
+                "min": 1,
+                "max": 0
+              }
+            }
+          },
+          "figures": {}
+        }
+      },
+      "schema_valid": true,
+      "problem": "bounds_reversed"
+    },
+    {
       "name": "quality_without_metric",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
