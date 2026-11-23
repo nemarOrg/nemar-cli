@@ -135,8 +135,60 @@ export function recipeRecord(over: Record<string, unknown> = {}): string {
   });
 }
 
+/**
+ * The columns of the floor's recordings table, as nemar-process's docs/recipes.md names them ("The
+ * recordings table and the dataset record"), in order.
+ */
+export const FLOOR_TABLE_COLUMNS = [
+  "path",
+  "datatype",
+  "status",
+  "code",
+  "step",
+  "detail",
+  "n_channels",
+  "n_signal_channels",
+  "duration_s",
+  "srate_hz",
+  "plan_hash",
+  "pct_good_channels",
+  "pct_good_samples",
+  "line_hz",
+  "line_db_before",
+  "line_db_after",
+  "n_bad_channels",
+  "n_not_assessed",
+  "n_bad_segments",
+  "skipped_steps",
+  "record_content_sha256",
+] as const;
+
+/**
+ * A floor recordings table: the real header and one row per recording, `n/a` in every column the
+ * counting rules do not read. A row is `[path, status, code, step]`; `n/a` is written for a null.
+ */
+export function floorTable(
+  rows: Array<[path: string, status: string, code: string | null, step: string | null]> = [
+    ["sub-01/eeg/sub-01_eeg.edf", "succeeded", null, null],
+  ],
+): string {
+  const line = ([path, status, code, step]: (typeof rows)[number]) =>
+    [
+      path,
+      "eeg",
+      status,
+      code ?? "n/a",
+      step ?? "n/a",
+      ...Array(FLOOR_TABLE_COLUMNS.length - 5).fill("n/a"),
+    ].join("\t");
+  return `${FLOOR_TABLE_COLUMNS.join("\t")}\n${rows.map(line).join("\n")}${rows.length > 0 ? "\n" : ""}`;
+}
+
 /** The product a successful floor run uploads: the dataset record and the recordings table. */
-export function floorOutputs(recordText: string = recipeRecord()): Array<{
+export function floorOutputs(
+  recordText: string = recipeRecord(),
+  table: string = floorTable(),
+): Array<{
   path: string;
   content: string;
 }> {
@@ -145,7 +197,7 @@ export function floorOutputs(recordText: string = recipeRecord()): Array<{
   const wanted = recipeRequiredOutputs(floor);
   return [
     { path: wanted.record, content: recordText },
-    { path: wanted.table, content: "path\tstatus\nsub-01/eeg/sub-01_eeg.edf\tsucceeded\n" },
+    { path: wanted.table, content: table },
   ];
 }
 

@@ -204,7 +204,6 @@ export const COMPUTE_SUBMIT_SENTENCES = {
   idempotency_conflict: "That Idempotency-Key was already used for a different request.",
   logs_not_available: "The job has no log yet.",
   upload_expired: "The upload window closed and the job was ended; submit it again.",
-  storage_unavailable: "Compute storage could not be reached just now; ask again shortly.",
 } as const satisfies Partial<Record<ComputeRefusalCode, string>>;
 
 export type ComputeSubmitSentenceCode = keyof typeof COMPUTE_SUBMIT_SENTENCES;
