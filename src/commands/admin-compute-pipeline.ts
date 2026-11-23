@@ -469,7 +469,9 @@ export function cellText(raw: unknown): string {
   const mark =
     cell.mark === "failed"
       ? `F${cell.counts?.failed ?? 0}`
-      : (MARK_SUFFIX[cell.mark] ?? word(cell.mark));
+      : Object.hasOwn(MARK_SUFFIX, cell.mark)
+        ? (MARK_SUFFIX[cell.mark] as string)
+        : word(cell.mark);
   if (counts === "") return mark === "" ? "-" : mark;
   return mark === "" ? counts : `${counts} ${mark}`;
 }
@@ -528,15 +530,17 @@ dataset, a column per checkpoint the recipe declares (then stored, set when the 
 
 A row shows the dataset's newest run of the recipe (any of its versions; never a refusal or a hold) and
 what it shows: not_started (no run), waiting (dispatched, not started, no report yet), running, stalled
-(no report for ${PIPELINE_STALLED_SECONDS / 60} minutes while the job is submitted, queued or running, or the job is unreported),
-finished or failed. A cell is passed/total with a mark: F<n> n recordings failed there, x the rest were
-skipped (they failed earlier), R running, S stalled, W waiting, P pending (the run ended and its counts,
-or the stored checkpoint, are not reconciled yet), ? no counts (the run ended without a readable
-recordings table), - not started.
+(its last report is more than ${PIPELINE_STALLED_SECONDS / 60} minutes old while the job is submitted, queued or running,
+or the job is unreported; a job that never reported is never stalled), finished or failed. A cell is
+passed/total with a mark: F<n> n recordings failed there, x the rest were skipped (they failed
+earlier), R running, S stalled, W waiting, P pending (the run ended and its counts, or the stored
+checkpoint, are not reconciled yet), ? no counts (the run ended without a readable recordings table,
+its job never reported, or it ended with no job), - not started.
 
 The first line is the recipe's coverage: datasets whose newest version has a succeeded run of the
 registry's current recipe version, out of the eligible ones; complete is covered with every recording
-passed at the recipe's last checkpoint; "at any recipe version" counts older recipe versions too.
+passed at the recipe's last checkpoint before stored; "at any recipe version" counts older recipe
+versions too. Coverage counts a finished run once a sync has recorded its end.
 
   --recipe <name>          the recipe (default ${DEFAULT_GRID_RECIPE})
   --status <word>          only rows that show this (${COMPUTE_PIPELINE_GRID_STATUSES.join(", ")})
@@ -545,8 +549,10 @@ passed at the recipe's last checkpoint; "at any recipe version" counts older rec
   --dataset <id>           one dataset
   --limit <n>, --after <id>  a page of n rows (default ${COMPUTE_PIPELINE_GRID_PAGE_DEFAULT}, at most ${COMPUTE_PIPELINE_GRID_PAGE_MAX}), after a dataset id
   --no-sync                read only: do not bring the open stamps up to date with their jobs first.
-                           Without it the Worker syncs before it answers (a run's status is right
-                           either way; a sync lets ended runs be reconciled)
+                           Without it the Worker syncs before it answers. A run's status is right
+                           either way; without a sync, ended runs are not reconciled yet and the
+                           coverage line can lag until a sync records them. Also works while the
+                           Worker is in read-only maintenance mode
 
 The stamp list this command used to print is "pipeline stamps"; one run's failures are "pipeline failures".
 
@@ -691,7 +697,9 @@ function printRunDetail(res: ComputePipelineRunDetailResponse): void {
     for (const f of c.failures) {
       say(`    ${word(f.path)}  ${word(f.code)}${f.step ? ` at ${word(f.step)}` : ""}`);
     }
-    if (c.unlisted > 0) say(`    and ${c.unlisted} more failed or skipped recordings not listed`);
+    if (c.unlisted > 0) {
+      say(`    and ${c.unlisted} more recordings that stopped here are not listed`);
+    }
   }
 }
 
@@ -699,7 +707,8 @@ const FAILURES_HELP = `
 Shows one pipeline run (by its stamp id, the run column of "pipeline status"): each checkpoint's counts
 and mark, and the failed recordings it lists with their codes and steps. A checkpoint lists at most
 ${PROGRESS_MAX_FAILURES} (the first ones of the recordings table once the run is reconciled, the most recent ones while it
-reports); "more" says how many failed or skipped recordings are not listed. Read only.
+reports); "more" says how many of the recordings that stopped at that checkpoint (failed or skipped
+there, not earlier) are not listed. Read only.
 
 Admin or owner. --json prints the Worker's answer as it is.
 
@@ -715,8 +724,15 @@ pipelineCommand
   .action(async (stamp: string, o: { json?: boolean }) => {
     const json = o.json === true;
     if (!requireSignedIn(json)) return;
-    const id = wholeNumber(stamp, "<stamp-id>", 1, 999_999_999, json);
-    if (id === null) return;
+    // The route's own bound: a whole number of up to 16 digits that is a safe integer.
+    const id = /^[1-9][0-9]{0,15}$/.test(stamp) ? Number(stamp) : Number.NaN;
+    if (!Number.isSafeInteger(id)) {
+      failMessage("<stamp-id> is a whole number from 1 (the run column of pipeline status).", {
+        json,
+        answered: true,
+      });
+      return;
+    }
     try {
       const res = await getComputePipelineRun(id);
       if (json) {

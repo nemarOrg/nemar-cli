@@ -52,6 +52,7 @@ import {
   ComputePipelineRunResponseSchema,
   ComputePipelineStatusResponseSchema,
 } from "../shared/contract/compute-admin";
+import { cellText } from "../src/commands/admin-compute-pipeline";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -649,6 +650,28 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
     );
     const page = await runCli("admin", ["status", "--limit", "1"]);
     expect(page.stdout).toContain("more: --after nm000104");
+  });
+
+  test("a cell's mark that is an Object prototype word is printed as the word, not looked up (MUTATION: index the table)", () => {
+    for (const mark of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      const text = cellText({
+        mark,
+        counts: { passed: 1, failed: 0, skipped: 0, total: 2 },
+        reconciled: false,
+        disagreement: false,
+        listed: 0,
+      });
+      expect([mark, text]).toEqual([mark, `1/2 ${mark}`]);
+    }
+    expect(
+      cellText({
+        mark: "failed",
+        counts: { passed: 1, failed: 1, skipped: 0, total: 2 },
+        reconciled: true,
+        disagreement: false,
+        listed: 1,
+      }),
+    ).toBe("1/2 F1");
   });
 
   test("--state and --before point to the stamp list", async () => {

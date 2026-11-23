@@ -11,7 +11,9 @@
  * The grid, coverage and run routes READ ONLY (epic #2324 phase 4a): they never sync, never reconcile and
  * never write, so a page the website renders costs a few statements. `grid?sync=1` brings the open stamps
  * up to date first, as the status route always does; the CLI asks for it, the website never does. A run's
- * status is still right without a sync (it reads the job's own end); only its reconciled counts wait.
+ * status is still right without a sync (it reads the job's own end); its reconciled counts wait, and the
+ * coverage counts a finished run only once a sync has recorded its end, so a read-only view can lag. Like
+ * the status route, they work while the Worker is in read-only maintenance mode.
  *
  * A run over the eligible datasets is bounded, for every actor, by its `limit`, the per-invocation bound
  * (`COMPUTE_PIPELINE_RUN_PER_INVOCATION`), what is left of `pipelines.dailyJobCap` and what is left of the
@@ -93,7 +95,7 @@ import {
 import { fieldPath } from "../../services/compute-policy.js";
 import { computeEnabled } from "../../services/compute-switches.js";
 import type { Bindings, Variables } from "../../types/bindings.js";
-import { SENTENCES as ADMIN_SENTENCES } from "./compute.js";
+import { refuse as refuseAdmin } from "./compute.js";
 import type { AdminRouter } from "./shared.js";
 
 type Ctx = Context<{ Bindings: Bindings; Variables: Variables }>;
@@ -560,12 +562,7 @@ export function registerComputePipelineAdminRoutes(admin: AdminRouter): void {
     }
     try {
       const detail = await pipelineRunDetail(c.env.DB, stampId);
-      if (detail === null) {
-        return c.json(
-          { error: ADMIN_SENTENCES.stamp_not_found, code: "stamp_not_found" },
-          COMPUTE_ADMIN_ERROR_STATUS.stamp_not_found,
-        );
-      }
+      if (detail === null) return refuseAdmin(c, "stamp_not_found");
       return c.json(detail);
     } catch (err) {
       return fail(c, err);
