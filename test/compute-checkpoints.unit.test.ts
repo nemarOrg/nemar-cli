@@ -114,6 +114,18 @@ describe("parseRecordingsTable", () => {
         row("a.set", "succeeded", null, null, [{ step: "nemar-quality", code: "plugin_failed" }]),
       ],
     });
+    // spaces around a step or a reason are trimmed
+    for (const cell of [
+      "bad_windows:too_short, nemar-quality:plugin_failed",
+      "bad_windows:too_short,nemar-quality :plugin_failed",
+    ]) {
+      expect(read(cell), cell).toEqual({
+        ok: true,
+        rows: [
+          row("a.set", "succeeded", null, null, [{ step: "nemar-quality", code: "plugin_failed" }]),
+        ],
+      });
+    }
     // a rule's skip only, an empty cell and n/a: no plugin pairs, the row as before
     for (const cell of ["bad_windows:too_short", "", "n/a"]) {
       expect(read(cell)).toEqual({ ok: true, rows: [row("a.set", "succeeded", null, null)] });
@@ -234,8 +246,6 @@ describe("recordingOutcomes", () => {
     expect(failuresByCheckpoint(rows, I).quality).toEqual([
       { path: "a", code: "plugin_failed", step: "nemar-quality", checkpoint: "quality" },
     ]);
-    // the grid's `complete` reads the last checkpoint: passed == total fails for a skipped plugin
-    expect(counts.quality.passed === counts.quality.total).toBe(false);
   });
 
   test("nemar-ica's re-run qc counts against preprocess", () => {

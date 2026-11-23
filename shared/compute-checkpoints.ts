@@ -93,6 +93,7 @@ const naToNull = (v: string): string | null => (v === NA || v === "" ? null : v)
  * The plugin pairs of a `skipped_steps` cell, or null when one is malformed: a pair whose step is one of
  * `RECIPE_PLUGIN_STEPS` must carry a reason that fits the failure-code pattern, and no plugin is named twice.
  * Pairs of other steps are left alone (their reasons are the recipe's own words); an empty or `n/a` cell is [].
+ * Each step and reason is read with surrounding spaces trimmed (`a:b, nemar-quality :plugin_failed`).
  */
 export function parseSkippedSteps(cell: string): SkippedStep[] | null {
   if (cell === "" || cell === NA) return [];
@@ -100,9 +101,9 @@ export function parseSkippedSteps(cell: string): SkippedStep[] | null {
   const out: SkippedStep[] = [];
   for (const item of cell.split(",")) {
     const at = item.indexOf(":");
-    const step = at < 0 ? item : item.slice(0, at);
+    const step = (at < 0 ? item : item.slice(0, at)).trim();
     if (!plugins.includes(step)) continue;
-    const code = at < 0 ? "" : item.slice(at + 1);
+    const code = at < 0 ? "" : item.slice(at + 1).trim();
     if (!PROGRESS_FAILURE_CODE_RE.test(code)) return null;
     if (out.some((s) => s.step === step)) return null;
     out.push({ step, code });
