@@ -1098,8 +1098,13 @@ export async function syncPipelineStamps(
             stamp.input,
           )
           .run();
+        // Which of the two differs, by field name only: the values are the record's words and stay out of the log.
+        const differs = [
+          ...(read.version !== stamp.recipe_version ? ["version_differs"] : []),
+          ...(read.engine !== stamp.engine ? ["engine_differs"] : []),
+        ].join(" ");
         console.error(
-          `[compute-pipeline] tuple_mismatch stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id}`,
+          `[compute-pipeline] tuple_mismatch stamp=${stamp.id} dataset=${stamp.dataset_id} job=${job.id} ${differs}`,
         );
       }
       // What the run read: each value is stored only in the shape of its column, and a value that is not (or
