@@ -345,6 +345,64 @@ export function pipelineRunStatus(input: {
   return "running";
 }
 
+// --- The admin grid ----------------------------------------------------------------------------------
+
+/** What a dataset's row in the admin grid shows: its run's status, or `not_started` when it has none. */
+export type PipelineGridStatus = "not_started" | PipelineRunStatus;
+
+/**
+ * The mark of one cell of the admin grid (a dataset's run at one checkpoint), declared once so the CLI and
+ * the website show the same thing. The words are the contract's `COMPUTE_PIPELINE_CELL_MARKS`.
+ */
+export const PIPELINE_CELL_MARKS = [
+  "not_started",
+  "waiting",
+  "running",
+  "stalled",
+  "pending",
+  "no_counts",
+  "passed",
+  "failed",
+  "skipped",
+] as const;
+export type PipelineCellMark = (typeof PIPELINE_CELL_MARKS)[number];
+
+/**
+ * The mark of a cell, in this order:
+ *
+ * 1. a dataset with no run: `not_started`;
+ * 2. a COMPLETE cell (its counts sum to its total, and the total is above zero or the run has ended):
+ *    `failed` when any recording failed there, `passed` when all passed, otherwise `skipped`;
+ * 3. an incomplete or missing cell of a live run (`waiting`, `running`, `stalled`): the run's status;
+ * 4. an incomplete or missing cell of an ended run: `pending` while its row or the run is not reconciled
+ *    yet (the `stored` cell waiting for the derivative store, a run the sync has not reached), otherwise
+ *    `no_counts` (a run that ended without a readable table, or a job that never reported).
+ */
+export function pipelineCellMark(input: {
+  status: PipelineGridStatus;
+  counts: ProgressCheckpointCounts | null;
+  /** The cell's progress row is reconciled. */
+  cellReconciled: boolean;
+  /** The run has an outcome (its run row's `reconciled_at` is set). */
+  runReconciled: boolean;
+}): PipelineCellMark {
+  const { status, counts } = input;
+  if (status === "not_started") return "not_started";
+  const ended = status === "finished" || status === "failed";
+  if (
+    counts !== null &&
+    counts.passed + counts.failed + counts.skipped === counts.total &&
+    (counts.total > 0 || ended)
+  ) {
+    if (counts.failed > 0) return "failed";
+    if (counts.passed === counts.total) return "passed";
+    return "skipped";
+  }
+  if (!ended) return status;
+  if ((counts !== null && !input.cellReconciled) || !input.runReconciled) return "pending";
+  return "no_counts";
+}
+
 // --- The neuroschema entries ----------------------------------------------------------------------
 
 /** A dataset-level neuroschema `processing` entry for one recipe. */
