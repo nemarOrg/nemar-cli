@@ -15,7 +15,19 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Added
+
+- **Live progress of NEMAR's pipeline runs (ADR 0134, epic #2324 phase 2).**
+  A pipeline job reports a closed `nemar.progress.v1` object (counts per checkpoint and up to ten recent failures) at most once a minute: a runner in its heartbeat, a job on the supercomputer on the new job-token route `POST /compute/jobs/:id/progress`.
+  A report sooner than 50 seconds after the last is refused `report_too_soon` (429) and stores nothing; a heartbeat's progress never costs its lease.
+  Migration 0150 adds `compute_pipeline_progress_runs`, `compute_pipeline_progress` and `compute_pipeline_documents`.
+  When a run ends, the stamp sync reconciles its counts from the recordings table it uploaded (a disagreement with the live counts is recorded), resolves `stored` from the derivative store, and writes the dataset-level neuroschema `processing` and `signalJourney` entries, which `/<id>/metadata.json` now serves for public datasets.
+  `stalled` (no report for three minutes) is worked out on read; no schedule is added and no switch.
+- **The quality plugin manifest contract `nemar.plugin-manifest.v1`** and the recipe registry's step-to-checkpoint maps.
+
 ### Changed
+
+- **neuroschema 0.5.0 is vendored with a record root** (`NEUROSCHEMA_VERSION` 0.5.0, a minor bump). The live `schema_version` checks also accept 0.4.x until the backend that serves 0.5.0 is deployed.
 
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
