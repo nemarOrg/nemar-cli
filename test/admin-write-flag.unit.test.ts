@@ -49,7 +49,8 @@ function walk(root: Command = adminCommand): Node[] {
 const GROUP_CAP = 12;
 
 /**
- * Groups allowed past the cap, each with its reason. Adding a line here is a decision, not a fix.
+ * Groups allowed past the cap, each with its reason: ADR 0135's amendment of 2026-11-23 names
+ * them, and a new one needs a line there before it is added here.
  * Measured when this test was written: `admin` itself has 14 (the fourteen groups of decision 1),
  * `mail` has 14 (support tickets, left unchanged by the restructure on the owner's answer of
  * 2026-11-22), and `users` and `dataset` sit exactly at 12.
