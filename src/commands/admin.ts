@@ -6973,10 +6973,10 @@ datasetGroupCommand.addCommand(reindexCommand);
 const availabilityReportCommand = addApplyOption(
   new Command("availability-report")
     .description(
-      "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
+      "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). One dataset: a preview unless --apply. --all runs the sweep and WRITES: it backfills a report for every non-sandbox dataset that has a version and no report yet, with or without --apply (#1001).",
     )
     .argument("[dataset-id]", "Dataset ID (e.g., nm000103)"),
-  "Commit the report to .nemar/availability-report.json on main (default: preview only)",
+  "One dataset: commit the report to .nemar/availability-report.json on main (default: preview only). --all always writes",
   ["--write"],
 )
   .option(
@@ -7169,7 +7169,7 @@ const availabilityReportCommand = addApplyOption(
 
 fleetSweepCommand.addCommand(availabilityReportCommand.name("availability"));
 
-/** Batch response shape every `nemar admin *-sweep` command shares (PR
+/** Batch response shape every `nemar admin fleet sweep <name>` command shares (PR
  *  #1223 review, suggestion 5). */
 interface SweepBatchLike {
   remaining: number | null;
@@ -7177,8 +7177,8 @@ interface SweepBatchLike {
 }
 
 /**
- * Shared do-while loop for hed-sweep / recording-stats-sweep /
- * signal-defaults-sweep: calls `runBatch()` until `remaining` reaches 0,
+ * Shared do-while loop for `fleet sweep hed`, `recording-stats` and
+ * `signal-defaults`: calls `runBatch()` until `remaining` reaches 0,
  * paces GitHub-heavy batches, and bails with a warning if `remaining`
  * stops strictly decreasing (persistent write errors leave rows
  * unstamped). `onBatch` owns everything sweep-specific -- totals
