@@ -28,7 +28,7 @@ And the signal viewer's scalp map assumes a coordinate frame when a recording de
 A quality view is data that a browser draws.
 A view refuses rather than mislead: a position guess that is not confident draws no map and says why, and a declared bad-segment table that is missing or damaged refuses the view.
 An activation view whose record says ASR repaired a span is refused (`label_unmatched`) when it declares no bad-segment table or no row of it carries the repaired spans' label;
-otherwise an activation or signal-window view is drawn and says what it did not shade, with the note `no_bad_segment_table` or `no_shaded_rows`;
+otherwise the view is drawn and says what it did not shade: `no_bad_segment_table` when it has no table, and, for an activation view whose table has no labeled row, `no_shaded_rows`;
 neuroschema's view specifications hold the details.
 `figures` leaves the standard checkpoints; plugins run at `quality`.
 No file of nemar-process imports a plotting library; matplotlib stays only as a dependency of eegprep.
@@ -219,9 +219,10 @@ Each word, when it refuses, takes every map's place, and the view's other parts 
 - `positions_partial`: measured positions that cover too little of the head, or fix its center too unstably (below).
 - After `frame_unknown`, `positions_flat` or `positions_partial`, the sensors are placed by name when every drawn row is typed EEG, and the reason is kept in `unused_positions` so the map says why its positions were not used;
   otherwise the projection's word takes every map's place.
-- The label algorithm's nine refusal reasons also take every map's place, among them two new ones:
-  `cap_model_unknown`, when names number an Electrical Geodesics, Inc. (EGI) net and the recording's cap model does not name the HydroCel net they point to;
-  and `net_coverage_low`, when names match fewer than 90% of a numbered net's electrodes, so they may come from another cap with the same numbering.
+- The label algorithm's nine refusal reasons also take every map's place, among them `cap_model_unknown`, new in the review,
+  when names number an Electrical Geodesics, Inc. (EGI) net and the recording's cap model does not name the HydroCel net they point to;
+  and `net_coverage_low`, which decision 3 had left out,
+  when names match fewer than 90% of a numbered net's electrodes, so they may come from another cap with the same numbering.
 
 **Position rules.**
 - Measured positions (a layout or positions role) must declare `sensor_type`, because only rows typed EEG are drawn;
