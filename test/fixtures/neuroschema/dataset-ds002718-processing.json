@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.5.0",
+  "schema_version": "0.6.0",
   "doc_type": "dataset",
   "dataset_id": "ds002718",
   "name": "Face processing EEG dataset for EEGLAB",
@@ -108,6 +108,8 @@
           "distributions": {
             "percentGoodChannels": {
               "n": 17,
+              "unit": "%",
+              "description": "Share of channels kept after bad-channel rejection.",
               "min": 85.1,
               "median": 97.3,
               "max": 100.0,
@@ -143,6 +145,8 @@
             },
             "percentGoodSamples": {
               "n": 17,
+              "unit": "%",
+              "description": "Share of samples kept after bad-window rejection.",
               "min": 81.5,
               "median": 94.9,
               "max": 99.1,
@@ -178,6 +182,8 @@
             },
             "lineNoiseBeforeDb": {
               "n": 17,
+              "unit": "dB",
+              "description": "Line-noise magnitude at the power-line frequency before line-noise removal.",
               "min": 7.5,
               "median": 14.2,
               "max": 26.4,
@@ -209,6 +215,8 @@
             },
             "lineNoiseAfterDb": {
               "n": 17,
+              "unit": "dB",
+              "description": "Line-noise magnitude at the power-line frequency after line-noise removal.",
               "min": -2.6,
               "median": 2.1,
               "max": 6.3,
@@ -273,6 +281,8 @@
           "distributions": {
             "icaRank": {
               "n": 16,
+              "unit": "count",
+              "description": "Rank of the data the decomposition ran on.",
               "min": 55,
               "median": 62.0,
               "max": 64,
@@ -304,6 +314,8 @@
             },
             "icaIterations": {
               "n": 16,
+              "unit": "count",
+              "description": "Iterations the decomposition took to converge.",
               "min": 388,
               "median": 473.0,
               "max": 1000,

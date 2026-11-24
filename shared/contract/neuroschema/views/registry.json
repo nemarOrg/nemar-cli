@@ -1,0 +1,325 @@
+{
+  "format": "neuroschema.views-registry.v1",
+  "description": "The view vocabulary neuroschema defines: kinds (each with its base, roles, dimensions and schema, and for a computed kind its inputs), transforms and algorithms (each with its specification and vectors), data formats, reserved dimension names and size caps. A kind or format not listed here is still valid in a declaration; docs/views.md gives the renderer rule for it.",
+  "kinds": [
+    {
+      "kind": "nemar.table",
+      "kind_version": 1,
+      "base": null,
+      "base_version": null,
+      "schema": "schema/views/kind.nemar.table.v1.schema.json",
+      "roles": {
+        "table": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": []
+        }
+      }
+    },
+    {
+      "kind": "nemar.lines",
+      "kind_version": 1,
+      "base": null,
+      "base_version": null,
+      "schema": "schema/views/kind.nemar.lines.v1.schema.json",
+      "roles": {
+        "values": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": null
+        }
+      }
+    },
+    {
+      "kind": "nemar.heatmap",
+      "kind_version": 1,
+      "base": null,
+      "base_version": null,
+      "schema": "schema/views/kind.nemar.heatmap.v1.schema.json",
+      "roles": {
+        "values": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": null
+        }
+      }
+    },
+    {
+      "kind": "nemar.histogram",
+      "kind_version": 1,
+      "base": null,
+      "base_version": null,
+      "schema": "schema/views/kind.nemar.histogram.v1.schema.json",
+      "roles": {
+        "histogram": {
+          "formats": [
+            "json"
+          ],
+          "dims": [],
+          "content": "schema/views/content.nemar.histogram.v1.schema.json"
+        }
+      }
+    },
+    {
+      "kind": "nemar.sensor-field",
+      "kind_version": 1,
+      "base": null,
+      "base_version": null,
+      "schema": "schema/views/kind.nemar.sensor-field.v1.schema.json",
+      "roles": {
+        "values": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": null
+        },
+        "layout": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "sensor"
+          ]
+        },
+        "positions": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "sensor"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "nemar.spectrum",
+      "kind_version": 1,
+      "base": "nemar.lines",
+      "base_version": 1,
+      "schema": "schema/views/kind.nemar.spectrum.v1.schema.json",
+      "roles": {
+        "values": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "freq",
+            "sensor"
+          ]
+        },
+        "layout": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "sensor"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "nemar.ic-maps",
+      "kind_version": 1,
+      "base": "nemar.sensor-field",
+      "base_version": 1,
+      "schema": "schema/views/kind.nemar.ic-maps.v1.schema.json",
+      "roles": {
+        "values": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "sensor",
+            "component"
+          ]
+        },
+        "layout": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "sensor"
+          ]
+        },
+        "components": {
+          "formats": [
+            "tsv"
+          ],
+          "dims": [
+            "component"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "nemar.ic-classes",
+      "kind_version": 1,
+      "base": "nemar.histogram",
+      "base_version": 1,
+      "schema": "schema/views/kind.nemar.ic-classes.v1.schema.json",
+      "roles": {
+        "histogram": {
+          "formats": [
+            "json"
+          ],
+          "dims": [],
+          "content": "schema/views/content.nemar.ic-classes.v1.schema.json"
+        }
+      }
+    },
+    {
+      "kind": "nemar.ic-activity",
+      "kind_version": 1,
+      "base": "nemar.lines",
+      "base_version": 1,
+      "schema": "schema/views/kind.nemar.ic-activity.v1.schema.json",
+      "roles": {},
+      "inputs": {
+        "unmixing": {
+          "source": "file",
+          "formats": [
+            "tsv"
+          ]
+        },
+        "signal": {
+          "source": "store"
+        },
+        "components": {
+          "source": "file",
+          "formats": [
+            "tsv"
+          ]
+        },
+        "badsegments": {
+          "source": "file",
+          "formats": [
+            "tsv"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "nemar.signal-window",
+      "kind_version": 1,
+      "base": "nemar.lines",
+      "base_version": 1,
+      "schema": "schema/views/kind.nemar.signal-window.v1.schema.json",
+      "roles": {},
+      "inputs": {
+        "signal": {
+          "source": "store"
+        },
+        "channels": {
+          "source": "file",
+          "formats": [
+            "tsv"
+          ]
+        },
+        "badsegments": {
+          "source": "file",
+          "formats": [
+            "tsv"
+          ]
+        }
+      }
+    }
+  ],
+  "transforms": [
+    {
+      "name": "nemar.sensor-layout.v1",
+      "spec": "docs/views/sensor-layout.md",
+      "vectors": "views/vectors/sensor-layout.v1.json",
+      "schema": "schema/views/transform.nemar.sensor-layout.v1.schema.json"
+    },
+    {
+      "name": "nemar.ic-activity.v1",
+      "spec": "docs/views/ic-activity.md",
+      "vectors": "views/vectors/ic-activity.v1.json",
+      "schema": "schema/views/transform.nemar.ic-activity.v1.schema.json"
+    }
+  ],
+  "algorithms": [
+    {
+      "name": "nemar.view-digest.v1",
+      "spec": "docs/views/view-digest.md",
+      "vectors": "views/vectors/view-digest.v1.json"
+    },
+    {
+      "name": "nemar.kinds-models.v1",
+      "spec": "docs/views/generic-kinds.md",
+      "vectors": "views/vectors/kinds-models.v1.json"
+    },
+    {
+      "name": "nemar.kinds-verdicts.v1",
+      "spec": "docs/views/generic-kinds.md",
+      "vectors": "views/vectors/kinds-verdicts.v1.json"
+    },
+    {
+      "name": "nemar.sensor-labels.v1",
+      "spec": "docs/views/sensor-labels.md",
+      "vectors": "views/vectors/sensor-labels.v1.json",
+      "montages": "views/montages/PROVENANCE.json"
+    },
+    {
+      "name": "nemar.sensor-field.v1",
+      "spec": "docs/views/sensor-field.md",
+      "vectors": "views/vectors/sensor-field.v1.json"
+    },
+    {
+      "name": "nemar.preset-checks.v1",
+      "spec": "docs/views/presets.md",
+      "vectors": "views/vectors/preset-checks.v1.json"
+    },
+    {
+      "name": "nemar.record-checks.v1",
+      "spec": "docs/processing-extensions.md",
+      "vectors": "views/vectors/record-checks.v1.json"
+    }
+  ],
+  "formats": {
+    "tsv": {
+      "extension": ".tsv",
+      "media_type": "text/tab-separated-values",
+      "grammar": "docs/views.md#tsv"
+    },
+    "json": {
+      "extension": ".json",
+      "media_type": "application/json",
+      "grammar": "docs/views.md#json"
+    }
+  },
+  "reserved_dims": {
+    "time": {
+      "unit": "s",
+      "meaning": "Time, in seconds."
+    },
+    "epoch": {
+      "unit": null,
+      "meaning": "An epoch of the recording, by its index."
+    },
+    "recording": {
+      "unit": null,
+      "meaning": "A recording, by its BIDS path."
+    },
+    "subject": {
+      "unit": null,
+      "meaning": "A participant, by BIDS subject label."
+    },
+    "contact": {
+      "unit": null,
+      "meaning": "An intracranial electrode contact, by its name."
+    },
+    "sensor": {
+      "unit": null,
+      "meaning": "A sensor, by its name; with a layout or positions role, that role's name column in row order; with neither, names placed by nemar.sensor-labels.v1."
+    }
+  },
+  "caps": {
+    "bytes_per_role": 4194304,
+    "entries_per_dim": 1024,
+    "cells_per_role": 262144
+  }
+}

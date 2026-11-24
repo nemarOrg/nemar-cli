@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.5.0",
+  "schema_version": "0.6.0",
   "doc_type": "record",
   "dataset": "ds002718",
   "bids_relpath": "sub-013/eeg/sub-013_task-FaceRecognition_eeg.set",
@@ -82,9 +82,9 @@
                 "min": 0,
                 "max": 100
               },
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
+              "recipe": {
+                "name": "nemar-floor",
+                "version": "1.0.0-b1"
               }
             },
             "percentGoodSamples": {
@@ -95,52 +95,69 @@
                 "min": 0,
                 "max": 100
               },
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
+              "recipe": {
+                "name": "nemar-floor",
+                "version": "1.0.0-b1"
               }
             },
             "lineNoiseBeforeDb": {
               "value": 14.2,
               "unit": "dB",
               "description": "Line-noise magnitude at the power-line frequency before line-noise removal.",
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
+              "recipe": {
+                "name": "nemar-floor",
+                "version": "1.0.0-b1"
               }
             },
             "lineNoiseAfterDb": {
               "value": 2.8,
               "unit": "dB",
               "description": "Line-noise magnitude at the power-line frequency after line-noise removal.",
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
+              "recipe": {
+                "name": "nemar-floor",
+                "version": "1.0.0-b1"
               }
             }
           },
-          "figures": [
+          "views": [
             {
-              "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_spectrum.svg",
-              "format": "svg",
-              "size": 48213,
-              "sha256": "bdd77094eb665e171d71082dcc352473b0129ca4295c49c4de704f13d7997700",
-              "caption": "Power spectrum with scalp maps at 6, 10 and 22 Hz.",
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
-              }
-            },
-            {
-              "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_rawsegment.webp",
-              "format": "webp",
-              "size": 131072,
-              "sha256": "27000577533137a657e25f9af20a3fda776ee81b1c45028f9a805f84f19e8370",
-              "caption": "Ten seconds of cleaned data from the middle of the recording.",
-              "plugin": {
-                "name": "nemar-dataqual",
-                "version": "0.1.0"
-              }
+              "key": "channels",
+              "kind": "nemar.table",
+              "kind_version": 1,
+              "caption": "Channels of the recording and the floor's bad-channel decisions.",
+              "source": {
+                "recipe": {
+                  "name": "nemar-floor",
+                  "version": "1.0.0-b1"
+                }
+              },
+              "data": [
+                {
+                  "role": "table",
+                  "location": "sub-013/eeg/sub-013_task-FaceRecognition_desc-nemarfloor_channels.tsv",
+                  "format": "tsv",
+                  "size": 2214,
+                  "sha256": "bc9fc20021eb36877de1bc72931fe9b0684c1e386c11fa812c050637f08d3ac1",
+                  "columns": [
+                    {
+                      "name": "name",
+                      "type": "string"
+                    },
+                    {
+                      "name": "type",
+                      "type": "string"
+                    },
+                    {
+                      "name": "status",
+                      "type": "string"
+                    },
+                    {
+                      "name": "status_description",
+                      "type": "string"
+                    }
+                  ]
+                }
+              ]
             }
           ]
         }

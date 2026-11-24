@@ -6,7 +6,7 @@
  *
  * What is pinned: the stored (final) `processing` entry and `signalJourney` link are served under
  * `extensions`; a run reporting now shows an `in_progress` link worked out on read, in front of the stored
- * link, which is never replaced; the document's extensions validate against the vendored neuroschema 0.5.0
+ * link, which is never replaced; the document's extensions validate against the vendored neuroschema
  * extensions container; a dataset with no documents has neither key; a private dataset
  * and a concealed deposit get nothing new (404, and no pipeline keys); an entry that does not parse is
  * left out.
@@ -20,7 +20,7 @@ import {
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
 
-/** The document's `extensions`, judged by neuroschema 0.5.0's extensions container. */
+/** The document's `extensions`, judged by the vendored neuroschema extensions container. */
 const validateExtensions = compileNeuroschemaValidator(
   "nsc:/extensions/extensionsContainer.schema.json",
 );
@@ -108,7 +108,7 @@ beforeEach(() => {
 });
 
 describe("pipeline extensions in metadata.json", () => {
-  test("a final processing entry and a link are served, and the extensions validate against neuroschema 0.5.0", async () => {
+  test("a final processing entry and a link are served, and the extensions validate against the vendored neuroschema", async () => {
     seed("nm000501");
     document("nm000501", "processing", PROCESSING);
     document("nm000501", "signalJourney", LINK);

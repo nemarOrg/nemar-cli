@@ -78,9 +78,9 @@ export function formatAjvErrors(validate: ValidateFunction): string {
  * difference that is harmless by definition. A PATCH is always accepted. A MINOR
  * (a breaking change or a new extension namespace) is accepted only for the
  * previous line named in `NEUROSCHEMA_TRANSITION_LINES`, which exists only until
- * the backend that serves the new MINOR is deployed: neuroschema 0.5.0 (ADR 0134,
- * epic #2324 phase 2) keeps "0.4" there, and the follow-up after the deploy
- * empties it. The exact version is pinned by the pure tests
+ * the backend that serves the new MINOR is deployed: the deployed backend serves
+ * 0.4.1, and epic #2324 moves it to 0.6.0 (ADR 0137; its 0.5.0 step was never
+ * deployed), so "0.4" stays there until that deploy and the follow-up empties it. The exact version is pinned by the pure tests
  * (`test/contract-schemas.test.ts` and the bundle stamp check in
  * `test/contract-neuroschema.test.ts`).
  */

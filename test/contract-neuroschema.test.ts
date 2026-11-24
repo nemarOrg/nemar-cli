@@ -1,12 +1,13 @@
 /**
  * neuroschema conformance — the vendored bundle compiles and enforces the
- * v0.5.0 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
+ * v0.6.0 dataset schema (epic #896, #898). Pure: validates fixtures, no backend.
  * The live-response conformance check is in test/contract-live.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import {
   DATA_PAPER_STRING_CAPS,
   MAX_DATA_PAPER_YEAR,
@@ -15,6 +16,7 @@ import {
 } from "../backend/src/services/data-papers";
 import { digestManifest } from "../backend/src/services/data-router";
 import type { VersionManifest } from "../backend/src/services/manifest";
+import { COMPUTE_RECIPES } from "../shared/compute-recipes";
 import { NEUROSCHEMA_VERSION, bidsIndexSchema } from "../shared/contract/index.js";
 import {
   NEUROSCHEMA_LINE_RE,
@@ -325,7 +327,8 @@ describe("data_papers field (v0.4.1, ADR 0077)", () => {
 // The live checks (test/contract-live.test.ts, test/data-route.test.ts) accept a
 // deployed backend on the same MAJOR.MINOR (any PATCH), and, while a MINOR
 // release is being deployed, the previous MINOR named in
-// NEUROSCHEMA_TRANSITION_LINES (0.4 for the 0.5.0 release, ADR 0134).
+// NEUROSCHEMA_TRANSITION_LINES (0.4, the deployed line, for the 0.6.0 release:
+// ADR 0137; the epic's 0.5.0 step was never deployed).
 describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
   const [major, minor, patch] = NEUROSCHEMA_VERSION.split(".").map(Number);
 
@@ -335,17 +338,18 @@ describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
     }
   });
 
-  test("accepts the transition line 0.4.x while 0.5.0 deploys, and nothing older", () => {
+  test("accepts the transition line 0.4.x while 0.6.0 deploys, and not the undeployed 0.5.x", () => {
     expect(NEUROSCHEMA_TRANSITION_LINES).toEqual(["0.4"]);
     for (const v of ["0.4.0", "0.4.1", "0.4.9"]) expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(true);
-    for (const v of ["0.3.9", "0.40.1", "0.4", "0.4.1-rc1"])
+    for (const v of ["0.3.9", "0.5.0", "0.5.9", "0.40.1", "0.4", "0.4.1-rc1"])
       expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(false);
   });
 
   test("rejects another MINOR or MAJOR, and anything that is not a plain x.y.z", () => {
     for (const v of [
       `${major}.${minor + 1}.0`,
-      `${major}.${minor - 2}.9`,
+      `${major}.${minor - 1}.9`,
+      `${major}.${minor - 3}.9`,
       `${major + 1}.${minor}.${patch}`,
       `${major}.${minor}`,
       `${major}.${minor}0.0`,
@@ -358,10 +362,10 @@ describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
   });
 });
 
-// neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2): the bundle carries a record
-// root beside the dataset root and the three processing extensions, and any
-// bundled schema can be compiled on its own by its nsc:/ id.
-describe("neuroschema 0.5.0 bundle: record root and processing extensions", () => {
+// Since neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2): the bundle carries a
+// record root beside the dataset root and the three processing extensions, and
+// any bundled schema can be compiled on its own by its nsc:/ id.
+describe("neuroschema bundle: record root and processing extensions", () => {
   const bundle = JSON.parse(
     readFileSync(
       join(import.meta.dir, "../shared/contract/neuroschema/dataset.bundle.json"),
@@ -375,12 +379,6 @@ describe("neuroschema 0.5.0 bundle: record root and processing extensions", () =
   };
   const fixture = (name: string) =>
     JSON.parse(readFileSync(join(import.meta.dir, "fixtures/neuroschema", name), "utf8"));
-
-  test("is stamped 0.5.0 from neuroschema main 98f2b0c8", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.5.0");
-    expect(bundle._provenance.neuroschema_version).toBe("0.5.0");
-    expect(bundle._provenance.source_commit.startsWith("98f2b0c8")).toBe(true);
-  });
 
   test("names both roots and keeps root as the dataset root", () => {
     expect(bundle.root).toBe("nsc:/core/dataset.schema.json");
@@ -434,6 +432,129 @@ describe("neuroschema 0.5.0 bundle: record root and processing extensions", () =
       }),
     ).toBe(true);
     expect(() => compileNeuroschemaValidator("nsc:/extensions/none.schema.json")).toThrow();
+  });
+});
+
+// neuroschema 0.6.0 (ADR 0137, epic #2324 phase N1a): the release that names
+// views. The bundle reaches the view schemas through dataQuality, and the view
+// vocabulary's data files (registry, parity vectors, montages, the example
+// product) are vendored beside it in views/, each held to views/SHA256SUMS.json.
+describe("neuroschema 0.6.0: views and the vendored view files", () => {
+  const VENDOR_DIR = join(import.meta.dir, "../shared/contract/neuroschema");
+  const VIEWS_DIR = join(VENDOR_DIR, "views");
+  const RELEASE_COMMIT = "e09ed40791b68c35d9698f3b663bfc4a998f3986";
+  const bundle = JSON.parse(readFileSync(join(VENDOR_DIR, "dataset.bundle.json"), "utf8")) as {
+    _provenance: { neuroschema_version: string; source_commit: string };
+    schemas: { $id: string }[];
+  };
+  const sums = JSON.parse(readFileSync(join(VIEWS_DIR, "SHA256SUMS.json"), "utf8")) as {
+    format: string;
+    neuroschema_version: string;
+    source_commit: string;
+    files: { path: string; source: string; size: number; sha256: string }[];
+  };
+  const fixture = (name: string) =>
+    JSON.parse(readFileSync(join(import.meta.dir, "fixtures/neuroschema", name), "utf8"));
+  const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+  test("the bundle and the view files are stamped 0.6.0 at the release commit (tag v0.6.0)", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.6.0");
+    expect(bundle._provenance.neuroschema_version).toBe("0.6.0");
+    expect(bundle._provenance.source_commit).toBe(RELEASE_COMMIT);
+    expect(sums.format).toBe("nemar.vendored-files.v1");
+    expect(sums.neuroschema_version).toBe("0.6.0");
+    expect(sums.source_commit).toBe(RELEASE_COMMIT);
+  });
+
+  test("the bundle carries the view declaration and every view kind and transform", () => {
+    const ids = bundle.schemas.map((x) => x.$id);
+    expect(ids).toContain("nsc:/definitions/view.schema.json");
+    const registry = JSON.parse(readFileSync(join(VIEWS_DIR, "registry.json"), "utf8")) as {
+      kinds: { kind: string; schema: string }[];
+    };
+    expect(registry.kinds.length).toBeGreaterThanOrEqual(10);
+    for (const k of registry.kinds) {
+      expect(ids, k.kind).toContain(`nsc:/${k.schema.replace(/^schema\//, "")}`);
+    }
+  });
+
+  test("every vendored view file matches SHA256SUMS, and SHA256SUMS lists every file", () => {
+    const onDisk = (readdirSync(VIEWS_DIR, { recursive: true }) as string[])
+      .map((p) => p.split(sep).join("/"))
+      .filter((p) => p !== "SHA256SUMS.json" && statSync(join(VIEWS_DIR, p)).isFile())
+      .sort();
+    expect(onDisk).toEqual(sums.files.map((f) => f.path));
+    // Guards the guard: the four groups ADR 0137 vendors are all there.
+    for (const prefix of ["registry.json", "vectors/", "montages/PROVENANCE.json", "examples/"]) {
+      expect(
+        onDisk.some((p) => p.startsWith(prefix)),
+        prefix,
+      ).toBe(true);
+    }
+    for (const f of sums.files) {
+      const bytes = readFileSync(join(VIEWS_DIR, f.path));
+      expect(bytes.length, f.path).toBe(f.size);
+      expect(sha256(bytes), f.path).toBe(f.sha256);
+    }
+  });
+
+  test("the eegprep commit the vectors were made with is the recipes' engine commit", () => {
+    const commits = new Set<string>();
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) node.forEach(visit);
+      else if (node && typeof node === "object") {
+        const o = node as Record<string, unknown>;
+        if (o.implementation === "eegprep" && typeof o.commit === "string") commits.add(o.commit);
+        Object.values(o).forEach(visit);
+      }
+    };
+    const vectors = sums.files.filter((f) => f.path.startsWith("vectors/"));
+    for (const f of vectors) visit(JSON.parse(readFileSync(join(VIEWS_DIR, f.path), "utf8")));
+    const engines = new Set(COMPUTE_RECIPES.map((r) => r.engine.split("+")[1]));
+    expect(engines.size).toBe(1);
+    expect(commits.size).toBe(1);
+    expect([...commits]).toEqual([...engines]);
+  });
+
+  test("the record example validates with views and is refused with figures", () => {
+    const record = compileNeuroschemaRecordValidator();
+    const doc = fixture("record-ds002718-processing.json");
+    if (!record(doc)) throw new Error(formatAjvErrors(record));
+    type Recipes = Record<string, Record<string, unknown>>;
+    const names = Object.entries(doc.extensions.dataQuality.recipes as Recipes)
+      .filter(([, r]) => Array.isArray(r.views))
+      .map(([name]) => name);
+    expect(names.length).toBeGreaterThan(0);
+    // `figures` in place of `views` (the 0.5.0 shape), and `figures` beside `views`: both refused.
+    const renamed = structuredClone(doc);
+    const added = structuredClone(doc);
+    for (const name of names) {
+      const { views, ...rest } = renamed.extensions.dataQuality.recipes[name];
+      renamed.extensions.dataQuality.recipes[name] = { ...rest, figures: views };
+      added.extensions.dataQuality.recipes[name].figures = [];
+    }
+    expect(Object.keys(renamed.extensions.dataQuality.recipes[names[0]])).not.toContain("views");
+    expect(record(renamed)).toBe(false);
+    expect(record(added)).toBe(false);
+  });
+
+  test("the example product's record validates, and its declared files are the product's bytes", () => {
+    const validateQuality = compileNeuroschemaValidator("nsc:/extensions/dataQuality.schema.json");
+    const doc = JSON.parse(
+      readFileSync(join(VIEWS_DIR, "examples/dataquality-record-nemar-ica.json"), "utf8"),
+    );
+    if (!validateQuality(doc)) throw new Error(formatAjvErrors(validateQuality));
+    const declared = (
+      doc.recipes["nemar-ica"].views as {
+        data?: { location: string; size: number; sha256: string }[];
+      }[]
+    ).flatMap((v) => v.data ?? []);
+    expect(declared.length).toBeGreaterThan(0);
+    for (const d of declared) {
+      const bytes = readFileSync(join(VIEWS_DIR, "examples/product", d.location));
+      expect(bytes.length, d.location).toBe(d.size);
+      expect(sha256(bytes), d.location).toBe(d.sha256);
+    }
   });
 });
 
