@@ -1,5 +1,5 @@
 /**
- * `nemar admin import-openneuro --tag` (epic #1046 Phase 3, ADR 0111 decision 10): where a tag is
+ * `nemar admin import openneuro --tag` (epic #1046 Phase 3, ADR 0111 decision 10): where a tag is
  * allowed, and the shape of the workflow dispatch with and without one.
  *
  * The help text is read from the real CLI entry point, because the onboard workflow decides
@@ -55,7 +55,7 @@ describe("the dispatch carries the tag only when one is given", () => {
 });
 
 describe("the help text the workflow looks for", () => {
-  test("`import-openneuro --help` lists `--tag <tag>`", async () => {
+  test("`import openneuro --help` lists `--tag <tag>`", async () => {
     const configDir = mkdtempSync(join(tmpdir(), "nemar-tag-help-"));
     try {
       const proc = Bun.spawn(
@@ -63,7 +63,8 @@ describe("the help text the workflow looks for", () => {
           "bun",
           join(import.meta.dir, "..", "src", "index.ts"),
           "admin",
-          "import-openneuro",
+          "import",
+          "openneuro",
           "--help",
         ],
         {

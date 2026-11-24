@@ -11,7 +11,7 @@
  * the signal-defaults-sweep / availability-report backfill sweeps, issue
  * #1168, and by the catalog-fact sweeps in routes/admin/datasets-lifecycle.ts,
  * issue #1496; the inline catalog/search/data predicates write the literal for
- * readability). Note the `nemar admin summary` coverage query
+ * readability). Note the `nemar admin fleet summary` coverage query
  * (manifest-coverage.ts) is the one xx filter deliberately left broad; it is
  * an internal report, not a gate.
  *

@@ -50,7 +50,7 @@ Each line below was read on 2026-11-20; paths are on `origin/dev` unless another
 - An owner may edit another account's preferences, an admin only their own (`resolveEmailPrefsTarget`, `routes/admin/users.ts:778-797`); an edit of another account writes an `email_preferences_updated` audit row (`:2019-2028`).
 - Deleting an account clears `email_preferences` (`backend/src/db/user-tombstone.ts:82`).
 - Every `users` column is classified in `USER_COLUMN_ROLES`, and a test compares it with `PRAGMA table_info(users)` in both directions (`backend/src/services/user-search.ts:60-110`).
-- The CLI shows and edits the six keys with `nemar admin email-preferences show|update`, including `--announcements <bool>` (`src/commands/admin.ts:8415-8560`).
+- The CLI shows and edits the six keys with `nemar admin users email-preferences show|update`, including `--announcements <bool>` (`src/commands/admin.ts:8415-8560`).
 
 ### 2.2 Today's broadcast path
 
@@ -318,7 +318,7 @@ Admin commands:
 
 - `nemar admin notify --to <all|members|admins> --category <news|rfcs|maintenance|recall> --subject ... --body-file ...`; `--recall-ref <reference>` and `--confirm-recall <reference>` for a recall (owner only); `--allow-repeat`; `--dry-run` prints counts.
 - `nemar admin notify --status <id>` shows category, skipped and the rest as today.
-- `nemar admin email-preferences show|update` gains `--news`, `--rfcs`, `--maintenance`; `--announcements` is removed and an old flag prints which flags replace it.
+- `nemar admin users email-preferences show|update` gains `--news`, `--rfcs`, `--maintenance`; `--announcements` is removed and an old flag prints which flags replace it.
   With `--user`, only `false` is accepted for community categories.
 
 ### 4.9 Website
@@ -435,7 +435,7 @@ Every link sent before P5 keeps working after it, because the URL in each messag
 ### 6.2 If the slice is not in production when RFC-0001 opens
 
 Send through today's path (`nemar admin notify --to all`, approved accounts with `announcements` on), as the RFC plan's O5 already says, and add one sentence to the body: "To stop receiving NEMAR announcements, reply to this message with the word unsubscribe."
-Replies arrive as support tickets (ADR 0112), and an owner turns `announcements` off with `nemar admin email-preferences update --user <name> --announcements false`; the migration then carries that choice into all three categories.
+Replies arrive as support tickets (ADR 0112), and an owner turns `announcements` off with `nemar admin users email-preferences update --user <name> --announcements false`; the migration then carries that choice into all three categories.
 Either way, the RFC program's N1 drafts and its O5 sentence should name the path actually used; that edit belongs to epic #2239, not this one.
 
 ## 7. Owner decisions

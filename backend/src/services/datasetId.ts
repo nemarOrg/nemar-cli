@@ -160,7 +160,7 @@ export const DEV_OWNED_FIXTURE_IDS: ReadonlySet<string> = Object.freeze(
  *
  * Note the reset endpoint itself is not environment-fenced and already deletes
  * and recreates that repository from whichever worker serves the request, which
- * is how `nemar admin e2e-test` works against staging. The cascade fence still
+ * is how `nemar admin fleet e2e-test` works against staging. The cascade fence still
  * prevents the unrecoverable variant, row plus S3 plus repo with no recreate,
  * so keeping `nm099999` out of the set remains right; it just protects less
  * than "dev can never touch it".

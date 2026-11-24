@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin approve` success output (ADR 0040, #1251), driven through
+ * CLI `nemar admin users approve` success output (ADR 0040, #1251), driven through
  * the real entry point (`bun run src/index.ts admin approve ...`).
  *
  * The Tier line is read off the RESPONSE, not hardcoded. That is the whole
@@ -143,12 +143,12 @@ async function runCli(args: string[], testApiUrl: string) {
   return { stdout, stderr, exitCode };
 }
 
-describe("nemar admin approve: the Tier line", () => {
+describe("nemar admin users approve: the Tier line", () => {
   test("a confirmed grant prints Tier: upload", async () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(GRANTED_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toContain("/admin/approve/halloway");
       expect(result.stdout).toContain("Tier: upload");
@@ -165,7 +165,7 @@ describe("nemar admin approve: the Tier line", () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(NO_GRANT_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Tier: grant not confirmed by server");
       expect(result.stdout).toContain("verify with 'nemar admin users'");
@@ -184,7 +184,7 @@ describe("nemar admin approve: the Tier line", () => {
       user: { ...GRANTED_BODY.user, service_access: false },
     });
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.stdout).toContain("Tier: grant not confirmed by server");
       expect(result.stdout).not.toContain("Tier: upload");
     } finally {
@@ -193,12 +193,12 @@ describe("nemar admin approve: the Tier line", () => {
   });
 });
 
-describe("nemar admin approve: the repair note", () => {
+describe("nemar admin users approve: the repair note", () => {
   test("the server's note is surfaced verbatim alongside Tier: upload", async () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(REPAIR_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Tier: upload");
       expect(result.stdout).toContain("Only the upload grant was written");
@@ -215,7 +215,7 @@ describe("nemar admin approve: the repair note", () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(REPAIR_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).not.toContain("Notification email failed to send");
       expect(result.stdout).not.toContain("notify the user manually");
@@ -231,7 +231,7 @@ describe("nemar admin approve: the repair note", () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(GRANTED_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.stdout).toContain("Notification email failed to send");
     } finally {
       server.stop();
@@ -242,7 +242,7 @@ describe("nemar admin approve: the repair note", () => {
     seedAuthenticatedConfig();
     const server = startApproveServer(GRANTED_BODY);
     try {
-      const result = await runCli(["admin", "approve", "halloway", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "halloway", "--yes"], server.url);
       expect(result.stdout).not.toContain("Only the upload grant was written");
     } finally {
       server.stop();
@@ -256,7 +256,7 @@ describe("nemar admin approve: the repair note", () => {
       user: { ...GRANTED_BODY.user, username: null },
     });
     try {
-      const result = await runCli(["admin", "approve", "--id", "31", "--yes"], server.url);
+      const result = await runCli(["admin", "users", "approve", "--id", "31", "--yes"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toContain("/admin/approve/by-id/31");
       expect(result.stdout).toContain("Tier: upload");

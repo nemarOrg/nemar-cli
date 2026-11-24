@@ -236,7 +236,7 @@ describe("parseExemplarFleet", () => {
   });
 
   test("the checked-in fleet has no unfinalized placeholder sources", async () => {
-    // `nemar admin exemplar create --all` SKIPS any entry still set to the
+    // `nemar admin dataset exemplar create --all` SKIPS any entry still set to the
     // nm000000 placeholder, so a stale placeholder silently shrinks the fleet
     // instead of failing (epic #923 Phase 7).
     const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();

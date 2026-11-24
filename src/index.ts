@@ -53,6 +53,7 @@ import {
 } from "./lib/debug-log.js";
 import { isGitCredentialInvocation } from "./lib/git-credential.js";
 import { printMaintenanceBanner } from "./lib/maintenance-banner.js";
+import { exitIfMovedCommand, isMovedCommandStub } from "./lib/moved-commands.js";
 import { fetchAndDisplayNotices } from "./lib/notices.js";
 import { installAutomaticQuiet, isAutomaticInvocation } from "./lib/repull/execute/automatic.js";
 import { initUpdateCheck, printUpdateBanner } from "./lib/update-check.js";
@@ -311,8 +312,14 @@ function markCommanderExitsRecursively(cmd: Command): void {
 }
 markCommanderExitsRecursively(program);
 
+// A moved command fails at once (ADR 0135): before any root option, the update check and banner,
+// the notices request or Commander's own parse can act on it.
+exitIfMovedCommand(program, rawArgs);
+
 // Display system notices before command execution
-program.hook("preAction", async () => {
+program.hook("preAction", async (_root, actionCommand) => {
+  // A moved-command stub runs nothing and makes no request, not even this one (ADR 0135).
+  if (isMovedCommandStub(actionCommand)) return;
   // An automatic re-pull run asks for no notice: the request carries the NEMAR key, and the run
   // checks where its API is before it sends anything there (lib/repull/execute/automatic.ts).
   if (isAutomaticInvocation(rawArgs)) return;

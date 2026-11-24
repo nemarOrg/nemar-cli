@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin keys create|list|revoke` (epic #1272 phase 4, #1284;
+ * CLI `nemar admin users keys create|list|revoke` (epic #1272 phase 4, #1284;
  * ADR 0048), driven through the real entry point
  * (`bun run src/index.ts admin keys ...`).
  *
@@ -82,7 +82,7 @@ async function runCli(args: string[], testApiUrl: string) {
   return { stdout, stderr, exitCode, combined: `${stdout}${stderr}` };
 }
 
-describe("nemar admin keys create", () => {
+describe("nemar admin users keys create", () => {
   test("prints the minted key once and the sign-in hint", async () => {
     seedAuthenticatedConfig();
     const server = startServer({
@@ -98,7 +98,7 @@ describe("nemar admin keys create", () => {
     });
     try {
       const result = await runCli(
-        ["admin", "keys", "create", "svc-account", "svc-job"],
+        ["admin", "users", "keys", "create", "svc-account", "svc-job"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -125,7 +125,10 @@ describe("nemar admin keys create", () => {
       403,
     );
     try {
-      const result = await runCli(["admin", "keys", "create", "a-person", "x"], server.url);
+      const result = await runCli(
+        ["admin", "users", "keys", "create", "a-person", "x"],
+        server.url,
+      );
       expect(result.combined).toContain("person_account");
     } finally {
       server.stop();
@@ -141,16 +144,16 @@ describe("nemar admin keys create", () => {
     // test/auth-status-upload-access.test.ts's offline cases).
     seedAuthenticatedConfig();
     const result = await runCli(
-      ["admin", "keys", "create", "svc-account", "svc-job"],
+      ["admin", "users", "keys", "create", "svc-account", "svc-job"],
       "http://127.0.0.1:1",
     );
     expect(result.combined).toContain("Network error");
     expect(result.combined).toContain("The key may have been minted before the connection dropped");
-    expect(result.combined).toContain("nemar admin keys list svc-account");
+    expect(result.combined).toContain("nemar admin users keys list svc-account");
   });
 });
 
-describe("nemar admin keys list", () => {
+describe("nemar admin users keys list", () => {
   test("lists the target account's keys", async () => {
     seedAuthenticatedConfig();
     const server = startServer({
@@ -166,7 +169,7 @@ describe("nemar admin keys list", () => {
       ],
     });
     try {
-      const result = await runCli(["admin", "keys", "list", "svc-account"], server.url);
+      const result = await runCli(["admin", "users", "keys", "list", "svc-account"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("svc-job");
       expect(result.stdout).toContain("nm_abcd...");
@@ -184,7 +187,7 @@ describe("nemar admin keys list", () => {
     seedAuthenticatedConfig();
     const server = startServer({ keys: [] });
     try {
-      const result = await runCli(["admin", "keys", "list", "svc-account"], server.url);
+      const result = await runCli(["admin", "users", "keys", "list", "svc-account"], server.url);
       expect(result.stdout).toContain("No live keys");
     } finally {
       server.stop();
@@ -192,12 +195,15 @@ describe("nemar admin keys list", () => {
   });
 });
 
-describe("nemar admin keys revoke", () => {
+describe("nemar admin users keys revoke", () => {
   test("revokes by id and confirms", async () => {
     seedAuthenticatedConfig();
     const server = startServer({ ok: true });
     try {
-      const result = await runCli(["admin", "keys", "revoke", "svc-account", "5"], server.url);
+      const result = await runCli(
+        ["admin", "users", "keys", "revoke", "svc-account", "5"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(result.combined).toContain("revoked");
       expect(
@@ -215,7 +221,7 @@ describe("nemar admin keys revoke", () => {
     const server = startServer({ ok: true });
     try {
       const result = await runCli(
-        ["admin", "keys", "revoke", "svc-account", "notanumber"],
+        ["admin", "users", "keys", "revoke", "svc-account", "notanumber"],
         server.url,
       );
       expect(result.exitCode).not.toBe(0);
@@ -230,7 +236,10 @@ describe("nemar admin keys revoke", () => {
     seedAuthenticatedConfig();
     const server = startServer({ error: "key_not_found", message: "not found" }, 404);
     try {
-      const result = await runCli(["admin", "keys", "revoke", "svc-account", "999"], server.url);
+      const result = await runCli(
+        ["admin", "users", "keys", "revoke", "svc-account", "999"],
+        server.url,
+      );
       expect(result.combined).toContain("User or key not found");
     } finally {
       server.stop();

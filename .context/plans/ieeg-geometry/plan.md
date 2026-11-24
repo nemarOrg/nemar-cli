@@ -59,7 +59,7 @@ D1 (the ADRs) runs alongside L1; no track PR merges into `dev` before D1 is acce
 | B2 | SPM deformation path: invert `y_` (MNI to native) by lookup, written as `space-IXI549Space`, verified | L1 | nemar-cli | worker-hard |
 | A1 | Subject surfaces to `brain-mesh v1` plus `geometry/index.json`, with frame verification and c_ras | L1 | nemar-cli | worker |
 | A2 | Brain panel reads `geometry/index.json` and offers "This subject's anatomy" | A1 format frozen | website, staging | worker |
-| P1 | CLI entry `nemar admin ieeg-geometry plan|run <id>`: dry run prints what would be written per subject with distances; run writes a branch and opens the dataset PR | C1, B1, B2, A1 | nemar-cli | worker |
+| P1 | CLI entry `nemar admin rework ieeg-geometry plan|run <id>` (ADR 0135 decision 3 puts it in `rework`): dry run prints what would be written per subject with distances; run writes a branch and opens the dataset PR | C1, B1, B2, A1 | nemar-cli | worker |
 | P2 | Re-pull integration: N.0.1 regenerates pipeline-owned paths | P1, D1 accepted | nemar-cli | worker-hard |
 | P3 | `run-ieeg-geometry.yml` in `nemarDatasets/.github` plus Worker dispatch on electrodes, coordsystem or surface changes (raw paths and the surface paths only) | P1 | both | worker |
 | R1 | Dry run over all 167 datasets on staging data; report per dataset; owner reviews before any dataset PR | P1 | none (report) | worker |

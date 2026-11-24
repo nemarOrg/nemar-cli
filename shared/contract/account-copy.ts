@@ -626,6 +626,12 @@ export const ACCOUNT_COPY = {
   "cli.upload.preflight.gaps_unknown":
     "Could not determine what is still missing; run `nemar auth profile` for the list.",
   "cli.upload.preflight.dry_run": "Continuing anyway: --dry-run uploads nothing.",
+  // What an administrator tells a dataset owner who has no researcher name on file. Conditional on
+  // purpose: a verified ORCID iD owns the name, so `PATCH /auth/profile` refuses that owner's edit
+  // (`name_is_orcid_canonical`) and Settings is only the way for an owner with no such link. Read
+  // by the CLI hints and by the backend's admin-facing skip messages, so it is one sentence.
+  "cli.admin.owner_name_missing.fix":
+    "An ORCID-linked owner makes the name public on their ORCID record and signs in again; an owner with no verified ORCID link types it into Settings on nemar.org.",
 } as const;
 
 export type AccountCopyKey = keyof typeof ACCOUNT_COPY;
