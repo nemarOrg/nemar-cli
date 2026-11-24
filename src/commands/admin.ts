@@ -6777,6 +6777,13 @@ Examples:
 
 adminCommand.addCommand(fleetCommand);
 
+// `admin fleet sweep`: the sweeps that refresh or report derived metadata across the catalog
+// (ADR 0135 decision 3; no separate maintenance group, owner 2026-11-22).
+const fleetSweepCommand = new Command("sweep").description(
+  "Sweeps that refresh or report derived metadata across all datasets",
+);
+fleetCommand.addCommand(fleetSweepCommand);
+
 const reindexCommand = new Command("reindex").description(
   "Refresh dataset metadata: enrichment + first-class D1 columns",
 );
@@ -7158,7 +7165,7 @@ const availabilityReportCommand = new Command("availability-report")
     },
   );
 
-adminCommand.addCommand(availabilityReportCommand);
+fleetSweepCommand.addCommand(availabilityReportCommand.name("availability"));
 
 /** Batch response shape every `nemar admin *-sweep` command shares (PR
  *  #1223 review, suggestion 5). */
@@ -7292,7 +7299,7 @@ hedSweepCommand
     },
   );
 
-adminCommand.addCommand(hedSweepCommand);
+fleetSweepCommand.addCommand(hedSweepCommand.name("hed"));
 
 const recordingStatsSweepCommand = new Command("recording-stats-sweep").description(
   "Backfill dataset-level recording duration/count/channel-range stats from each dataset's zarr index (migration 0070, #1146)",
@@ -7374,7 +7381,7 @@ recordingStatsSweepCommand
     },
   );
 
-adminCommand.addCommand(recordingStatsSweepCommand);
+fleetSweepCommand.addCommand(recordingStatsSweepCommand.name("recording-stats"));
 
 const signalDefaultsSweepCommand = new Command("signal-defaults-sweep").description(
   "Backfill BIDS signal defaults (sampling frequency, power line frequency, EEG reference, placement scheme) from each dataset's exemplar sidecar (migrations 0072/0073, #1153)",
@@ -7456,7 +7463,7 @@ signalDefaultsSweepCommand
     },
   );
 
-adminCommand.addCommand(signalDefaultsSweepCommand);
+fleetSweepCommand.addCommand(signalDefaultsSweepCommand.name("signal-defaults"));
 
 /** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
 export interface ReauditBatchResult {
@@ -7678,7 +7685,7 @@ dataIntegritySweepCommand
     },
   );
 
-adminCommand.addCommand(dataIntegritySweepCommand);
+fleetSweepCommand.addCommand(dataIntegritySweepCommand.name("data-integrity"));
 
 // ============================================================================
 // Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
@@ -7752,7 +7759,7 @@ zarrFidelitySweepCommand
     }
   });
 
-adminCommand.addCommand(zarrFidelitySweepCommand);
+fleetSweepCommand.addCommand(zarrFidelitySweepCommand.name("zarr-fidelity"));
 
 // ============================================================================
 // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
@@ -8017,7 +8024,7 @@ anonymitySweepCommand
     }
   });
 
-adminCommand.addCommand(anonymitySweepCommand);
+fleetSweepCommand.addCommand(anonymitySweepCommand.name("anonymity"));
 
 // ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)

@@ -132,6 +132,14 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "import-weekly", newPath: "import weekly" },
   { oldPath: "upstream-status", newPath: "repull upstream-status" },
   { oldPath: "upstream-backfill", newPath: "repull upstream-backfill" },
+  // ADR 0135, phase P5: the catalog-wide sweeps and checks gather under `admin fleet`.
+  { oldPath: "hed-sweep", newPath: "fleet sweep hed" },
+  { oldPath: "recording-stats-sweep", newPath: "fleet sweep recording-stats" },
+  { oldPath: "signal-defaults-sweep", newPath: "fleet sweep signal-defaults" },
+  { oldPath: "data-integrity-sweep", newPath: "fleet sweep data-integrity" },
+  { oldPath: "zarr-fidelity-sweep", newPath: "fleet sweep zarr-fidelity" },
+  { oldPath: "anonymity-sweep", newPath: "fleet sweep anonymity" },
+  { oldPath: "availability-report", newPath: "fleet sweep availability" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
