@@ -62,6 +62,11 @@
  *    that would pass the ceiling or take a floor another class is owed is refused `platform_busy`. A refusal
  *    is worded after the batch by asking each guard again in order (`guardRefusal`): the class's own cap
  *    first, then the tenant. Whoever merges another branch into the `guards` block keeps both.
+ *  - THE COMPUTE SWITCH STOPS NEW HOLDS (ADR 0118, amendment of 2026-11-22). `createJob` refuses
+ *    `compute_disabled` unless `computeEnabled(env)`, after the pure argument check and before anything of
+ *    its own is read or written, for every source: a person's, a partner's and a pipeline's job, a runner
+ *    job, and a replay of an idempotency key. It is the one place a hold is taken, so it is the one place
+ *    the switch stops one. A caller may answer an earlier refusal of its own before it calls this.
  *  - A RUNNER JOB HAS NO HOLD (portable compute, ADR 0121). `executor: "runner"` (a `pipeline` job only) takes the
  *    runner branch (`createRunnerJob`): the same validation, records and idempotency, then ONE statement,
  *    `RUNNER_JOB_INSERT_SQL`, gated on the runners' live cap (`RUNNER_LIVE_JOBS_GUARD_SQL`, the owner's
@@ -104,6 +109,7 @@ import {
   runnersPolicyOf,
   tenantPolicyOf,
 } from "../../../shared/contract/compute.js";
+import type { Bindings } from "../types/bindings.js";
 import {
   type HoldGuard,
   POOL_BY_HOLDER_SQL,
@@ -126,6 +132,7 @@ import {
   TAPIS_REPORTING_STATES_SQL,
   TERMINAL_STATES_SQL,
 } from "./compute-state-sql.js";
+import { computeEnabled } from "./compute-switches.js";
 import { tenantClassOf, tenantGuard } from "./compute-tenant.js";
 
 // --- Errors and shapes ---------------------------------------------------------------------------
@@ -258,7 +265,11 @@ export interface ComputeJobRow {
   runner_max_rss_mb: number | null;
 }
 
-export type ComputeJobsEnv = ComputeRecordsEnv;
+/**
+ * What `createJob` reads: the records (and the database), and the compute switch, which it reads FIRST,
+ * so the switch is the one place that stops new holds for every source (ADR 0118, amendment of 2026-11-22).
+ */
+export type ComputeJobsEnv = ComputeRecordsEnv & Pick<Bindings, "ENVIRONMENT" | "COMPUTE_ENABLED">;
 
 interface JobInputBase {
   /** The person the job is attributed to; null for a partner's job that no NEMAR account owns (a partner pool pays). */
@@ -997,6 +1008,10 @@ export async function createJob(
   input: CreateJobInput,
 ): Promise<CreateJobResult | PartnerCreateResult> {
   const args = checkInput(input);
+  // THE COMPUTE SWITCH STOPS NEW HOLDS, for every source (a person, a partner, a pipeline, a runner job),
+  // after the pure argument check and before anything is read or written: a replay of a key is refused
+  // too, so nothing moves while it is off.
+  if (!computeEnabled(env)) return refusal("compute_disabled");
   if (!env.COMPUTE_RECORDS) return refusal("compute_disabled");
 
   // What was asked for, as text and as the few fields a hold needs. A person's or a pipeline's job is

@@ -134,6 +134,22 @@ describe("ADR index", () => {
     expect(bad).toEqual([]);
   });
 
+  test("an Accepted line is a real date and appears only on an accepted ADR", () => {
+    const bad: string[] = [];
+    for (const f of onDisk) {
+      const body = readFileSync(join(DECISIONS_DIR, f), "utf8");
+      const accepted = /^\*\*Accepted:\*\*\s*(.+)$/m.exec(body)?.[1]?.trim();
+      if (accepted === undefined) continue;
+      const status = /^\*\*Status:\*\*\s*(.+)$/m.exec(body)?.[1]?.trim() ?? "";
+      const time = /^\d{4}-\d{2}-\d{2}$/.test(accepted)
+        ? Date.parse(`${accepted}T00:00:00Z`)
+        : Number.NaN;
+      const real = !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === accepted;
+      if (status !== "accepted" || !real) bad.push(`${f}: Status ${status}, Accepted ${accepted}`);
+    }
+    expect(bad).toEqual([]);
+  });
+
   test("a superseded ADR names a target that exists", () => {
     const dangling: string[] = [];
     for (const f of onDisk) {

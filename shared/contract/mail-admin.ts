@@ -374,7 +374,7 @@ export interface ListQueuesResponse {
 
 /**
  * Every field is optional and merges into the stored queue; a tag with no queue is created.
- * Rules: `security` and `conduct` stay restricted; `*` is never restricted; the restricted flag
+ * Rules: `security`, `conduct` and `legal-process` stay restricted; `*` is never restricted; the restricted flag
  * of a queue with tickets that are not closed cannot change (`restricted_flag_busy`, close or
  * move them first); every person named on a restricted queue must be an owner, and on any other
  * an admin or owner (`ineligible_assignee`). Changing `rr_members` restarts the rotation.

@@ -19,9 +19,10 @@
  * person's job id. They need compute access only to START a job (submit); a person can always finalize,
  * cancel, read the log of and fetch the results of what is theirs (a suspension cancels the live jobs).
  *
- * NO ROUTE HERE READS THE COMPUTE SWITCH (`compute-source-scan.test.ts` pins that): a submission made
- * while compute is off takes its hold and waits for the reservation wait, and the log, the results and
- * the finalize work as they always do.
+ * NO ROUTE HERE READS THE COMPUTE SWITCH (`compute-source-scan.test.ts` pins that): `createJob` reads it,
+ * so a submission made while compute is off is refused `compute_disabled` and takes no hold (ADR 0118,
+ * amendment of 2026-11-22). A job held while compute was on waits for the reservation wait, and the log,
+ * the results and the finalize work as they always do.
  *
  * EVERY RESPONSE IS `Cache-Control: no-store`: an upload address and a results link are bearer secrets.
  * Nothing a person chose is logged: a log line carries a job id and a fixed word.

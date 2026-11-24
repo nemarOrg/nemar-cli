@@ -84,7 +84,9 @@ export async function buildPartnerWorld(
   } = {},
 ): Promise<PartnerWorld> {
   const base = fx.env({
-    ENVIRONMENT: "test",
+    // A compute environment (exactly `production` or `development`): `createJob` refuses every hold
+    // elsewhere (ADR 0118, amendment of 2026-11-22). The fixture sets `COMPUTE_ENABLED` to "1".
+    ENVIRONMENT: "development",
     API_BASE_URL: ISSUER,
     APP_BASE_URL: "https://app.nemar.org",
     OIDC_SECRET: OIDC_TEST_SECRET,

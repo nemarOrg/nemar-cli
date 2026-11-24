@@ -626,8 +626,8 @@ describe("a finished Zarr job becomes a stored derivative", () => {
         dataset: made.id,
         version: "v1.0.0",
         recipe: "nemar-floor",
-        recipe_version: "1.0.0",
-        engine: "eegprep@0.5.0",
+        recipe_version: "1.0.0-b1",
+        engine: "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8",
         input: "zarr",
         profile: "serving",
         input_digest: row.input_digest,
@@ -635,7 +635,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
     );
     expect(description.GeneratedBy).toMatchObject({
       recipe: "nemar-floor",
-      recipe_version: "1.0.0",
+      recipe_version: "1.0.0-b1",
       image_digest: row.image_digest,
       job_id: made.jobId,
       process: { build: "nemar-process-test", image_tag: "test" },
@@ -646,7 +646,7 @@ describe("a finished Zarr job becomes a stored derivative", () => {
     expect(description.Profile).toBe("serving");
     expect(description.Description).toBe(SERVING_PROFILE_SENTENCE);
     expect(description.Citation).toBe(
-      `Derived from ${made.id} version v1.0.0 (DOI 10.82901/nemar.${made.id}.v1.0.0) by NEMAR's nemar-floor 1.0.0.`,
+      `Derived from ${made.id} version v1.0.0 (DOI 10.82901/nemar.${made.id}.v1.0.0) by NEMAR's nemar-floor 1.0.0-b1.`,
     );
     expect(description.files).toHaveLength(5);
     // It never states an archived recording's rate.
@@ -1340,7 +1340,7 @@ describe("every keying check of the ADR, each failed alone", () => {
     expect(description.Profile).toBe("archive");
     expect(description.Description).toBeUndefined();
     expect(JSON.stringify(description)).not.toContain(SERVING_PROFILE_SENTENCE);
-    expect(description.Citation).toContain("by NEMAR's nemar-floor 1.0.0.");
+    expect(description.Citation).toContain("by NEMAR's nemar-floor 1.0.0-b1.");
   });
 
   test("a row whose content_sha256 has 63 digits is undigestable, not stores_differ or digest_mismatch, and a keyable stamp after it is still stored (MUTATION: remove the catch that turns an inputDigestV2 throw into undigestable)", async () => {

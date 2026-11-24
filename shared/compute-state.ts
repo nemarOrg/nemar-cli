@@ -702,7 +702,7 @@ export const COMPUTE_ROUTE_SENTENCES = {
   job_not_found: "No such job.",
   bad_state: "The job is not in a state that accepts this.",
   results_expired: "The results of this job have expired.",
-  compute_disabled: "Compute storage is not configured.",
+  compute_disabled: "Compute is not available.",
   invalid_spec: "The request is not valid.",
   too_many_outputs: "The job declared more output files than the owner's limit allows.",
   results_too_large: "The job's results are over the size limit.",

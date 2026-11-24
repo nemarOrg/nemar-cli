@@ -8,7 +8,7 @@
  * and the seeded cases below are re-run there by hand; see the phase PR.
  *
  * What the migration must do: carry each live row's `announcements` value into `news`, `rfcs` and
- * `maintenance` explicitly, drop the retired key, leave every other key and every deleted row
+ * `maintenance` explicitly, keep the retired key (0148 drops it a release later), leave every other key and every deleted row
  * alone, write ONE summary audit row, tolerate every shape the column can hold, and be safe to
  * run twice. It must also leave legacy broadcast rows readable as uncategorized and let the
  * outcome table record `skipped`.

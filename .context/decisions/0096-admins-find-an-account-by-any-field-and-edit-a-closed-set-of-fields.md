@@ -1,7 +1,8 @@
 # ADR 0096: Admins find an account by any field and edit a closed set of fields
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-10-09
+**Accepted:** 2026-10-09
 **Owner:** Seyed Yahya Shirazi
 
 Partially superseded by [ADR 0106](0106-an-owner-attests-an-orcid-id-that-the-person-has-not-proven.md),

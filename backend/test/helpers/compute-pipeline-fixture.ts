@@ -121,13 +121,19 @@ export function setTapisExit(fx: LifecycleFixture, uuid: string, exit: number): 
   if (record) record.remoteResultInfo = String(exit);
 }
 
-/** The record a `nemar-floor` run writes, in the shape `readRecipeRecord` reads. */
+/**
+ * The record a `nemar-floor` run writes, in the shape `readRecipeRecord` reads: the version and the engine
+ * the nemar-process image reports (its `RECIPE_VERSION`, and eegprep with the commit the lock pins). This
+ * is a COPY of the image's record, so it catches the registry drifting from this copy (the suites that
+ * finish a run then see a `tuple_mismatch`), not from nemar-process itself: that comparison is
+ * `test/compute-recipes-process-drift.unit.test.ts`, against a nemar-process checkout.
+ */
 export function recipeRecord(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
     extensions: {
       nemar: {
-        recipe: { id: "nemar-floor", version: "1.0.0" },
-        engine: { package: "eegprep", version: "0.5.0" },
+        recipe: { id: "nemar-floor", version: "1.0.0-b1" },
+        engine: { package: "eegprep", version: "0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8" },
         counts: { discovered: 2, succeeded: 2, failed: 0, skipped: 0 },
         ...over,
       },

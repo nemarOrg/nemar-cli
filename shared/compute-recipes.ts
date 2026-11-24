@@ -151,19 +151,37 @@ export interface ComputeRecipe {
 }
 
 /**
+ * The engine every recipe reports: `eegprep@<version>+<commit>`, the version and the resolved git commit of
+ * eegprep's block in nemar-process `uv.lock`, which is what the image installs from the pin in its
+ * `pyproject.toml` (the suffix is added by `recipes/nemar_process/common/versions.py`). It moves with that
+ * pin, and the `+<commit>` suffix goes when the images move to an eegprep release installed from an index.
+ */
+const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
+
+/**
  * The recipes. `nemar-floor` annotates every EEG recording of a dataset and runs on a CPU partition: on
  * Tapis over the dataset's files (`bids`) and on a runner over its Zarr serving copy (`zarr`), one entry for
  * both (plan D12). On a runner the partition is a SIZING LABEL only (ADR 0121, decision 6): `shared`'s
  * ceilings apply, nothing is submitted to it and no service unit is estimated. `nemar-ica` needs a GPU and
  * stays out of the daily dispatcher until the 20-dataset pilot has run.
+ *
+ * THE VERSIONS AND THE ENGINE ARE COPIES. Their authoritative sources are in nemarOrg/nemar-process:
+ * each recipe's `RECIPE_VERSION` in `recipes/nemar_process/{nemar_floor,nemar_ica}/steps.py` (a
+ * pre-release `1.0.0-b<N>` until that layer's first release, `docs/recipes.md`), and for the engine the
+ * eegprep pin described at {@link RECIPE_ENGINE}. These values must match the image `COMPUTE_RUNTIME_IMAGE`
+ * pins: a record that differs holds the tuple (`tuple_mismatch`, then `registry_drift`), and a hold of a
+ * tuple the registry still declares never clears. For a future move, repin the image first, then change
+ * these values. `nemar-ica`'s version moves on its own pins (pamica, torch, `amica15`), independently of
+ * the floor's. `test/compute-recipes-process-drift.unit.test.ts` compares them with a nemar-process
+ * checkout.
  */
 export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   Object.freeze({
     name: "nemar-floor",
-    version: "1.0.0",
+    version: "1.0.0-b1",
     appId: "nemar-launch",
     appVersion: "1.0.0",
-    engine: "eegprep@0.5.0",
+    engine: RECIPE_ENGINE,
     partition: "shared",
     nodes: 1,
     cores: 4,
@@ -177,10 +195,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   }),
   Object.freeze({
     name: "nemar-ica",
-    version: "1.0.0",
+    version: "1.0.0-b1",
     appId: "nemar-launch",
     appVersion: "1.0.0",
-    engine: "eegprep@0.5.0",
+    engine: RECIPE_ENGINE,
     partition: "gpu-shared",
     nodes: 1,
     cores: 10,

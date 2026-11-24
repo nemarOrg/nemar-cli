@@ -19,15 +19,57 @@
  *
  * A missing or invalid `MAIL_RETENTION_DAYS` deletes nothing: there is no default that deletes.
  * A re-run finds nothing, because only tickets with `purged_at IS NULL` are selected.
+ *
+ * Some queues keep their tickets longer (`QUEUE_RETENTION_DAYS`, ADR 0112 amendment of 2026-11-22):
+ * a ticket in one of them is purged only once BOTH `MAIL_RETENTION_DAYS` and its queue's period have
+ * passed. The governing queue is the ticket's `queue_tag`, which no code path changes after the
+ * ticket is created, so it is the queue the ticket was filed in and the queue it is in at purge time.
+ * Tags (`mail_ticket_tags`) are written by whoever composed the address and are never read here.
  */
 
 import type { Bindings } from "../types/bindings";
+import { LEGAL_PROCESS_QUEUE_TAG } from "./ticket-assignment";
+
+/**
+ * Queues whose tickets are kept longer than `MAIL_RETENTION_DAYS`, in days, declared once here and
+ * not on the queue row: a row is data an operator can edit or delete, and a deleted row must not
+ * shorten a legal record (the same reasoning as RESTRICTED_TAGS). The figure is a floor, never a
+ * shortening: a queue's tickets are kept for the longer of this and `MAIL_RETENTION_DAYS`.
+ *
+ * `legal-process` holds official requests for compute records and is kept 2557 days, seven years
+ * (7 x 365 plus the at most two leap days seven years can hold), the period the compute records keep.
+ */
+export const QUEUE_RETENTION_DAYS: ReadonlyMap<string, number> = new Map([
+  [LEGAL_PROCESS_QUEUE_TAG, 2557],
+]);
+
+for (const [tag, days] of QUEUE_RETENTION_DAYS) {
+  // Both are spliced into SQL below as literals, so hold them to a shape that cannot quote out.
+  if (!/^[a-z0-9._-]{1,64}$/.test(tag) || !Number.isInteger(days) || days < 1 || days > 36_500) {
+    throw new Error(`ticket-retention: bad QUEUE_RETENTION_DAYS entry ${tag}`);
+  }
+}
+
+/**
+ * The SQL that keeps a ticket whose queue's own period has not passed, measured back from the
+ * run's stamp (a `YYYY-MM-DD HH:MM:SS` parameter, so `datetime` writes the same form). It is ANDed
+ * onto the general cutoff test, so a queue's period only ever adds to `MAIL_RETENTION_DAYS`.
+ */
+function queueRetentionSql(stampParam: string): string {
+  return [...QUEUE_RETENTION_DAYS]
+    .map(
+      ([tag, days]) =>
+        ` AND NOT (queue_tag = '${tag}' AND last_activity_at >= datetime(${stampParam}, '-${days} days'))`,
+    )
+    .join("");
+}
 
 export type PurgeOutcome =
   | { status: "skipped"; reason: "retention_not_configured" }
   | {
       status: "ok";
-      /** The cutoff used: tickets whose last message is strictly older were purged. */
+      /** The cutoff used: tickets whose last activity is strictly older were purged, except those
+       *  of a queue in `QUEUE_RETENTION_DAYS` whose own longer period had not passed. */
       cutoff: string;
       purged: number;
       /** Of `purged`, how many were not closed or spam when purged. */
@@ -60,8 +102,9 @@ function sqlDate(d: Date): string {
 
 /**
  * The statements that purge one ticket, in ONE batch (a transaction). The first is the guarded
- * UPDATE that claims it: it applies only while the ticket is not purged and its last activity is
- * still older than `cutoff`, so a message, note or action that arrived after the page was read
+ * UPDATE that claims it: it applies only while the ticket is not purged, its last activity is
+ * still older than `cutoff` and its queue's own period (`QUEUE_RETENTION_DAYS`, measured back from
+ * `stamp`) has passed, so a message, note or action that arrived after the page was read
  * cancels this ticket's purge. Every later statement is gated on that claim (`purged_at` equal to
  * this run's stamp), so a lost claim changes nothing.
  */
@@ -79,7 +122,7 @@ export function purgeStatements(
             assignee_user_id = NULL,
             status = CASE WHEN status IN ('open', 'pending', 'escalated') THEN 'closed' ELSE status END,
             purged_at = ?2, updated_at = ?2
-          WHERE id = ?1 AND purged_at IS NULL AND last_activity_at < ?3`,
+          WHERE id = ?1 AND purged_at IS NULL AND last_activity_at < ?3${queueRetentionSql("?2")}`,
       )
       .bind(id, stamp, cutoff),
     // Chained on the claim: one row only if this run is the one that purged it.
@@ -151,11 +194,11 @@ export async function purgeExpiredTickets(
   for (let page = 0; page < maxPages && !outOfTime; page++) {
     const rows = await env.DB.prepare(
       `SELECT id, status, last_activity_at FROM mail_tickets
-        WHERE purged_at IS NULL AND last_activity_at < ?1
+        WHERE purged_at IS NULL AND last_activity_at < ?1${queueRetentionSql("?5")}
           AND (last_activity_at > ?2 OR (last_activity_at = ?2 AND id > ?3))
         ORDER BY last_activity_at, id LIMIT ?4`,
     )
-      .bind(cutoff, lastActivity, lastId, pageSize)
+      .bind(cutoff, lastActivity, lastId, pageSize, stamp)
       .all<{ id: number; status: string; last_activity_at: string }>();
     const tickets = rows.results ?? [];
     if (tickets.length === 0) break;

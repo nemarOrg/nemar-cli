@@ -1,7 +1,8 @@
 # ADR 0119: NEMAR is an OpenID Connect provider, and ORCID stays the upstream identity
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-03
+**Accepted:** 2026-11-22
 **Owner:** Seyed Yahya Shirazi
 
 Epic #2014, phase #2015.

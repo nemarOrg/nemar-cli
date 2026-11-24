@@ -84,7 +84,8 @@ export type ComputeUpload = z.infer<typeof ComputeUploadSchema>;
 /**
  * `POST /compute/jobs`, 201. `state` is `uploading` for a bundle (with `upload`) and `submitted` for a
  * job that went to the cluster at once; `created` when the Worker could not submit it just now and the
- * 30-minute tick will (compute off, or Tapis unreachable), with no `upload`. `replayed` is present
+ * 30-minute tick will (Tapis unreachable, or compute switched off after the job was held), with no
+ * `upload`. With compute off a new submission is refused `compute_disabled` and makes no job. `replayed` is present
  * (true) on an answer to a repeated `Idempotency-Key`: the job is the original, `state` is its current
  * state, and `upload` is a fresh address while the job is still `uploading`.
  */

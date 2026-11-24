@@ -12,7 +12,7 @@
  *    fixtures are compared with that checkout's copies byte for byte. Without one the comparison skips
  *    with its reason; with `NEMAR_REQUIRE_PROCESS_OBSERVATION_DRIFT=1` a missing checkout is a failure. CI
  *    (`.github/workflows/test.yml`, the unit-pure shards) checks out nemar-process's integration branch
- *    `feature/issue-1-epic-process` (public, sparse, no token) and sets both variables, so the
+ *    `dev` (public, sparse, no token) and sets both variables, so the
  *    comparison runs there against that branch's HEAD, not against a pinned commit. What CI does NOT
  *    check: that nemar-process's CI is green, or that its pin names this repository's current commit
  *    (that is nemar-process's own test and advisory job). nemar-process runs the mirror of this test
