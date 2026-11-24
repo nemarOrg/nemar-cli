@@ -26,7 +26,7 @@ And the signal viewer's scalp map assumes a coordinate frame when a recording de
 
 **1. NEMAR stores no figure image, and no NEMAR code draws one.**
 A quality view is data that a browser draws.
-A view refuses rather than mislead: a position guess that is not confident draws no map and says why, a missing or damaged shading table refuses the view, and a view without a table says so on the page;
+A view refuses rather than mislead: a position guess that is not confident draws no map and says why, a missing or damaged shading table refuses the view, and an activation or signal-window view that has no bad-segment table says so on the page;
 neuroschema's view specifications hold the details.
 `figures` leaves the standard checkpoints; plugins run at `quality`.
 No file of nemar-process imports a plotting library; matplotlib stays only as a dependency of eegprep.
