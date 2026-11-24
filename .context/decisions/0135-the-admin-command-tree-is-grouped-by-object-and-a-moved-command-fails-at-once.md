@@ -61,6 +61,17 @@ Its old path is a retired-command stub that says a bare visibility flip that ski
 it does not point at `dataset publish` as its new home, because that is the request, screen and approve workflow, not a bare flip.
 The backend route `POST /datasets/:id/publish` stays, and no break-glass flag is added to the approval path.
 
+## Amendment 2026-11-23: the exceptions to the cap of twelve
+
+Decision 2 aims each group at about twelve visible children and makes a sub-group past that.
+Two groups are over it when the restructure ends, and both stay as they are:
+
+- **The top level of `admin`** has fourteen entries, because it is exactly the fourteen groups decision 1 names.
+- **`mail`** (support tickets) keeps its fourteen children; the epic left that group as it was.
+
+Any other group past twelve needs a line here (or a superseding ADR) before it ships.
+`test/admin-write-flag.unit.test.ts` holds the list and fails on a group that is not on it.
+
 ## Receipts
 
 - Owner decisions of 2026-11-21 on the admin tree.

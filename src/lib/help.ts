@@ -118,9 +118,9 @@ const colorFormatHelp = {
      * Commander's own `padWidth` is the maximum over EVERY visible term in the
      * command, which is wrong for us in two ways.
      *
-     * It counts terms we are not showing: the nine admin commands in the lead
-     * block get indented to fit the widest of all 43, most of which are folded
-     * onto the overflow line.
+     * It counts terms we are not showing: the lead block of a folded group (the
+     * six `nemar dataset` commands) gets indented to fit the widest of all its
+     * subcommands, most of which are folded onto the overflow line.
      *
      * Worse, one long term pushes the description column right for everything.
      * Registering `download [options] <dataset-id>` at the root moved the root
@@ -139,11 +139,11 @@ const colorFormatHelp = {
      * least MIN_DESCRIPTION_WIDTH -- below which Commander's `wrap` stops
      * wrapping at all and lines simply overflow.
      *
-     * Capping rather than flipping the whole section matters: `nemar admin`
-     * has 43 subcommands and one of them
-     * (`import-openneuro [options] <openneuro-ids>`) is long enough to push
-     * every other description off the right edge. Only the over-long terms pay
-     * for their length; see formatItem.
+     * Capping rather than flipping the whole section matters: one long term
+     * (`openneuro [options] <openneuro-ids>` under `nemar admin import`, or
+     * `download [options] <dataset-id>` at the root) is enough to push every
+     * other description off the right edge. Only the over-long terms pay for
+     * their length; see formatItem.
      */
     const padCap = Math.max(
       8,

@@ -10291,8 +10291,8 @@ adminUsersCommand.addCommand(duplicatesCommand);
 // ============================================================================
 // Neurobagel federation artifacts (epic #1586 phase 4, ADR 0084)
 //
-// `regenerate` is a DRY RUN unless --execute is given, and the server refuses
-// --execute unless the writer is enabled (NEUROBAGEL_WRITER_ENABLED=1). `status`
+// `regenerate` is a DRY RUN unless --apply is given (`--execute` is its hidden alias, ADR 0135),
+// and the server refuses a write unless the writer is enabled (NEUROBAGEL_WRITER_ENABLED=1). `status`
 // is a read: what is eligible, written, stale, and waiting on a person. A null
 // count in either means "unknown", and is printed as unknown, never as zero.
 // ============================================================================
@@ -10331,7 +10331,7 @@ function printNeurobagelVerification(v: NeurobagelVerification): void {
 function printNeurobagelRun(res: NeurobagelRunResult): void {
   console.log();
   if (res.dry_run) {
-    console.log(chalk.yellow("DRY RUN: nothing was written. Re-run with --execute to write."));
+    console.log(chalk.yellow("DRY RUN: nothing was written. Re-run with --apply to write."));
   }
   if (res.status !== "ok") {
     const why =
@@ -10409,12 +10409,15 @@ function printNeurobagelRun(res: NeurobagelRunResult): void {
   }
 }
 
-neurobagelCommand
-  .command("regenerate")
-  .description(
-    "Examine datasets and write what changed to the Neurobagel artifact store (dry run unless --execute)",
-  )
-  .option("--execute", "Write to the store (without it, only report what would change)")
+addApplyOption(
+  neurobagelCommand
+    .command("regenerate")
+    .description(
+      "Examine datasets and write what changed to the Neurobagel artifact store (dry run unless --apply)",
+    ),
+  "Write to the store (without it, only report what would change)",
+  ["--execute"],
+)
   .option("--dataset <ids...>", "Examine exactly these dataset ids instead of the next ones due")
   .option(
     "--limit <n>",
@@ -10424,7 +10427,7 @@ neurobagelCommand
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
     async (options: {
-      execute?: boolean;
+      apply?: boolean;
       dataset?: string[];
       limit?: string;
       force?: boolean;
@@ -10455,7 +10458,8 @@ neurobagelCommand
         process.exit(1);
         return;
       }
-      const execute = options.execute === true;
+      // The request field is still `execute`; only the flag is `--apply`.
+      const execute = options.apply === true;
       const spinner = ora(
         execute ? "Regenerating Neurobagel artifacts..." : "Checking what would change...",
       ).start();
@@ -10471,7 +10475,7 @@ neurobagelCommand
         spinner.stop();
       } catch (err) {
         handleCommandError(err, spinner, "Neurobagel regenerate failed", {
-          409: "Set NEUROBAGEL_WRITER_ENABLED=1 (and bind the bucket) to write. A dry run needs neither the switch nor --execute.",
+          409: "Set NEUROBAGEL_WRITER_ENABLED=1 (and bind the bucket) to write. A dry run needs neither the switch nor --apply.",
         });
         process.exit(1);
         return;
