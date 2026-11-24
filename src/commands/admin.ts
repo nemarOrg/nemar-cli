@@ -6968,15 +6968,15 @@ reindexCommand
 
 datasetGroupCommand.addCommand(reindexCommand);
 
-const availabilityReportCommand = new Command("availability-report")
-  .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
-  )
-  .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
-  .option(
-    "--write",
-    "Commit the report to .nemar/availability-report.json on main (default: preview only)",
-  )
+const availabilityReportCommand = addApplyOption(
+  new Command("availability-report")
+    .description(
+      "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
+    )
+    .argument("[dataset-id]", "Dataset ID (e.g., nm000103)"),
+  "Commit the report to .nemar/availability-report.json on main (default: preview only)",
+  ["--write"],
+)
   .option(
     "--all",
     "Backfill every non-sandbox dataset that has a version and no report yet, instead of a single one (#1001)",
@@ -6993,7 +6993,7 @@ const availabilityReportCommand = new Command("availability-report")
     async (
       datasetId: string | undefined,
       options: {
-        write?: boolean;
+        apply?: boolean;
         all?: boolean;
         missingOnly?: boolean;
         limit?: string;
@@ -7018,13 +7018,13 @@ const availabilityReportCommand = new Command("availability-report")
       // Single-dataset path (Phase 1, #1000)
       if (datasetId) {
         const spinner = ora(
-          options.write
+          options.apply
             ? `Generating and writing availability report for ${datasetId}...`
             : `Previewing availability report for ${datasetId}...`,
         ).start();
         let result: AvailabilityReportResult;
         try {
-          result = await availabilityReport(datasetId, { write: options.write === true });
+          result = await availabilityReport(datasetId, { write: options.apply === true });
         } catch (err) {
           spinner.fail(`Failed to generate availability report for ${datasetId}`);
           console.error(chalk.red(errorDetail(err)));
@@ -9136,10 +9136,13 @@ const summaryCommand = new Command("summary").description(
   "summary.json coverage across published dataset versions",
 );
 
-summaryCommand
-  .command("check")
-  .description("Report which (dataset_id, version) pairs have stale or missing summary.json")
-  .option("--fix", "Dispatch generate-manifest for every stale/missing version")
+addApplyOption(
+  summaryCommand
+    .command("check")
+    .description("Report which (dataset_id, version) pairs have stale or missing summary.json"),
+  "Dispatch generate-manifest for every stale/missing version",
+  ["--fix"],
+)
   .option("--id <id>", "Limit to a single dataset_id (exact match)")
   .option(
     "--match <glob>",
@@ -9152,7 +9155,7 @@ summaryCommand
   .action(
     async (
       options: {
-        fix?: boolean;
+        apply?: boolean;
         id?: string;
         match?: string;
         onlyStale?: boolean;
@@ -9229,11 +9232,11 @@ summaryCommand
           `${chalk.red(`error=${totals.error}`)}`,
       );
 
-      if (!options.fix) {
+      if (!options.apply) {
         if (totals.stale + totals.missing > 0) {
           console.log(
             chalk.dim(
-              `\nRun with --fix to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
+              `\nRun with --apply to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
             ),
           );
         }
