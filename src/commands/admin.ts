@@ -9302,7 +9302,7 @@ function recomputeTotals(rows: SummaryVersionCoverage[]) {
   };
 }
 
-adminCommand.addCommand(summaryCommand);
+fleetCommand.addCommand(summaryCommand);
 
 // ============================================================================
 // Zarr catalog (issue #1062, epic #1181 phase 2): on-demand refresh of the
@@ -9333,7 +9333,7 @@ zarrCatalogCommand
     }
   });
 
-adminCommand.addCommand(zarrCatalogCommand);
+fleetCommand.addCommand(zarrCatalogCommand);
 
 // ============================================================================
 // Import-failure issue triage (#1310, epic #1306)
