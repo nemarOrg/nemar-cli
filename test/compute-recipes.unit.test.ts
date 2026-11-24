@@ -55,6 +55,7 @@ import {
 } from "../shared/contract/compute";
 import { launchSpecFits } from "../shared/contract/compute-launch";
 import { PROGRESS_STEP_RE } from "../shared/contract/compute-progress";
+import { PLUGIN_CHECKPOINTS, PLUGIN_NAME_RE } from "../shared/contract/plugin-manifest";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 const IMAGE = `ghcr.io/example/nemar-python@${DIGEST}`;
@@ -683,19 +684,27 @@ describe("checkpoint maps (ADR 0134)", () => {
     "ica",
     "iclabel",
     "nemar-quality",
+    "nemar-spectrum",
   ];
 
-  test("the standard checkpoints and stored are the ADR's, in order", () => {
+  test("the standard checkpoints and stored are the ADR's, in order, with no figures (ADR 0137)", () => {
     expect([...STANDARD_CHECKPOINTS]).toEqual([
       "import",
       "preprocess",
       "ica",
       "iclabel",
       "quality",
-      "figures",
       "stored",
     ]);
+    expect(STANDARD_CHECKPOINTS as readonly string[]).not.toContain("figures");
     expect(STORED_CHECKPOINT).toBe("stored");
+  });
+
+  test("the plugin steps are nemar-quality then nemar-spectrum, and every plugin checkpoint is a standard one", () => {
+    expect([...RECIPE_PLUGIN_STEPS]).toEqual(["nemar-quality", "nemar-spectrum"]);
+    for (const c of PLUGIN_CHECKPOINTS) {
+      expect(STANDARD_CHECKPOINTS as readonly string[], c).toContain(c);
+    }
   });
 
   test("nemar-floor maps exactly as the ADR says", () => {
@@ -719,7 +728,7 @@ describe("checkpoint maps (ADR 0134)", () => {
     ]);
   });
 
-  test("nemar-ica maps its re-run qc to preprocess, then ica, iclabel, and its quality plugin at quality", () => {
+  test("nemar-ica maps its re-run qc to preprocess, then ica, iclabel, and its quality plugins at quality", () => {
     const ica = findRecipe("nemar-ica");
     expect(ica?.checkpoints.map((c) => c.checkpoint)).toEqual([
       "import",
@@ -732,6 +741,11 @@ describe("checkpoint maps (ADR 0134)", () => {
     expect(ica && checkpointOfStep(ica, "asr")).toBe("preprocess");
     expect(ica && checkpointOfStep(ica, "iclabel")).toBe("iclabel");
     expect(ica && checkpointOfStep(ica, "nemar-quality")).toBe("quality");
+    expect(ica && checkpointOfStep(ica, "nemar-spectrum")).toBe("quality");
+    expect(ica?.checkpoints.find((c) => c.checkpoint === "quality")?.steps).toEqual([
+      "nemar-quality",
+      "nemar-spectrum",
+    ]);
     // the record is written after the plugins: its step counts at quality
     expect(ica && checkpointOfStep(ica, RECORD_STEP)).toBe("quality");
   });
@@ -749,10 +763,9 @@ describe("checkpoint maps (ADR 0134)", () => {
   });
 
   test("every plugin step is a step word and a plugin name, mapped only in nemar-ica, at quality", () => {
-    const manifestName = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}(?![\s\S])/;
     for (const step of RECIPE_PLUGIN_STEPS) {
       expect(PROGRESS_STEP_RE.test(step), step).toBe(true);
-      expect(manifestName.test(step), step).toBe(true);
+      expect(PLUGIN_NAME_RE.test(step), step).toBe(true);
     }
     const ica = findRecipe("nemar-ica");
     const floor = findRecipe("nemar-floor");

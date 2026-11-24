@@ -1120,7 +1120,11 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "ProgressFailureSchema",
     "PluginManifestSchema",
     "PluginMetricSchema",
-    "PluginFigureSchema",
+    "PluginViewSchema",
+    "PluginViewRoleSchema",
+    "PluginViewProducedRoleSchema",
+    "PluginViewRecipeRoleSchema",
+    "PluginViewColumnSchema",
     "LocalLaunchSpecSchema",
     "LocalLaunchDatasetSchema",
     "RecipeProgressSchema",
@@ -1132,6 +1136,13 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
     "ResultsReportTableSchema",
     "ResultsReportCheckpointsSchema",
   ];
+
+  test("every listed strict request name is a schema exported by shared/contract/index", async () => {
+    const index = (await import("../shared/contract/index")) as Record<string, unknown>;
+    for (const name of [...RUNNER_REQUEST_NAMES, ...PROGRESS_REQUEST_NAMES]) {
+      expect(index[name], name).toBeInstanceOf(z.ZodType);
+    }
+  });
 
   /** The names a response schema must never be built from. */
   const STRICT_NAMES = [
@@ -1481,7 +1492,7 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
   ];
 
   test("the import guard flags every shape of taking a strict compute schema, and only those", () => {
-    expect(STRICT_NAMES).toHaveLength(31);
+    expect(STRICT_NAMES).toHaveLength(35);
     expect(IMPORT_PROBES.length).toBeGreaterThan(55);
     for (const [label, file, text, offends] of IMPORT_PROBES) {
       const found = strictComputeTakes(CONTRACT_DIR, file, text, STRICT_NAMES);

@@ -76,7 +76,8 @@
         {
           "checkpoint": "quality",
           "steps": [
-            "nemar-quality"
+            "nemar-quality",
+            "nemar-spectrum"
           ]
         }
       ]

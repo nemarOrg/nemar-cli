@@ -175,6 +175,13 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 - **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
   nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
   The engine and the checkpoint maps are unchanged and the progress vectors are regenerated; the deploy order and the effects on existing rows are the same as for `1.0.0-b1` above.
+- **Plugins write views, not figures; plugin metrics are `<plugin>:<name>` (ADR 0137, epic #2324 N1b).**
+  `nemar.plugin-manifest.v1` is edited in place (never published or pinned outside the epic): `outputs.views` replaces `outputs.figures`, a view being a neuroschema kind and `kind_version`, a caption and one to eight roles, each produced by the plugin (a format, at most 4,194,304 bytes, at most two dimension names, optional columns) or provided by the host recipe (`{"from": "recipe"}`), at most 16 views.
+  A plugin's checkpoint is `quality` only; its name follows neuroschema 0.6.0 `plugin.name` (a letter, then letters, digits, `_` and `-`, at most 64), and a metric name its `metricName`.
+  The rule words are `bounds_reversed`, `plugin_without_output` (a plugin declares at least one metric or view) and `metric_not_prefixed` (every metric is `<plugin>:<name>` with its own name), checked in that order; `quality_without_metric` and `figures_without_figure` are gone, and so are the figure formats and caps.
+  The standard checkpoints lose `figures`, and `nemar-ica` runs `nemar-quality` then `nemar-spectrum` at `quality`; the progress and manifest vectors are regenerated.
+  `shared/compute-naming.ts` ports nemar-process `naming.py` (product and dataset file names), with `shared/contract/compute-naming-vectors.json` for nemar-process to replay.
+  nemar-process re-copies the manifest schema and the vectors at this commit (its phase P2); until then its loader still reads the 0.5-era manifest.
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
   The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.

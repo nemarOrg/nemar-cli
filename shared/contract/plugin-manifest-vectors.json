@@ -13,22 +13,13 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
-              "unit": "%",
-              "description": "Share of channels kept by the floor.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              }
-            },
-            "percentBrainComponents": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "Share of components ICLabel calls brain.",
               "bounds": {
@@ -38,42 +29,99 @@
               "headline": true
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         }
       },
       "schema_valid": true,
       "problem": null
     },
     {
-      "name": "figures_valid",
+      "name": "views_only_valid",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
+        "name": "nemar-spectrum",
         "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {
-          "seconds": 2
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
         },
         "outputs": {
           "metrics": {},
-          "figures": {
-            "midsegment": {
-              "formats": [
-                "png"
-              ],
-              "time_series": true,
-              "caption": "Two seconds of cleaned data from the middle of the recording.",
-              "max_bytes": 400000
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
             }
           }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "metrics_only_valid",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "views": {}
         }
       },
       "schema_valid": true,
@@ -90,32 +138,35 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "x",
               "bounds": {
                 "min": 100,
                 "max": 0
               }
-            },
-            "percentBrainComponents": {
-              "unit": "%",
-              "description": "Share of components ICLabel calls brain.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              },
-              "headline": true
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         }
       },
       "schema_valid": true,
@@ -132,32 +183,35 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "x",
               "bounds": {
                 "min": 0,
                 "max": null
               }
-            },
-            "percentBrainComponents": {
-              "unit": "%",
-              "description": "Share of components ICLabel calls brain.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              },
-              "headline": true
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         }
       },
       "schema_valid": true,
@@ -174,55 +228,201 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "x",
               "bounds": {
                 "min": 50,
                 "max": 50
               }
-            },
-            "percentBrainComponents": {
-              "unit": "%",
-              "description": "Share of components ICLabel calls brain.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              },
-              "headline": true
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         }
       },
       "schema_valid": true,
       "problem": null
     },
     {
-      "name": "bounds_reversed_before_figures_without_figure",
+      "name": "plugin_without_output",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
+        "name": "nemar-quality",
         "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
-        "parameters": {
-          "seconds": 2
+        "parameters": {},
+        "outputs": {
+          "metrics": {},
+          "views": {}
+        }
+      },
+      "schema_valid": true,
+      "problem": "plugin_without_output"
+    },
+    {
+      "name": "metric_not_prefixed",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
         },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "percentBrainComponents": {
+              "unit": "%",
+              "description": "x"
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": "metric_not_prefixed"
+    },
+    {
+      "name": "metric_prefixed_by_another_plugin",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-spectrum:alphaPeak": {
+              "unit": "Hz",
+              "description": "x"
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": "metric_not_prefixed"
+    },
+    {
+      "name": "metric_prefix_extends_the_name",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-qualityx:share": {
+              "unit": "%",
+              "description": "x"
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": "metric_not_prefixed"
+    },
+    {
+      "name": "bounds_reversed_before_metric_not_prefixed",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
         "outputs": {
           "metrics": {
             "share": {
@@ -234,14 +434,27 @@
               }
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         }
       },
       "schema_valid": true,
       "problem": "bounds_reversed"
     },
     {
-      "name": "quality_without_metric",
+      "name": "metric_suffix_starts_with_a_digit",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
         "name": "nemar-quality",
@@ -251,73 +464,29 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
-          "metrics": {},
-          "figures": {}
-        }
-      },
-      "schema_valid": true,
-      "problem": "quality_without_metric"
-    },
-    {
-      "name": "figures_without_figure",
-      "manifest": {
-        "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
-        "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
-        "reads": {
-          "dataset": false,
-          "recipes": [
-            "nemar-floor",
-            "nemar-ica"
-          ]
-        },
-        "parameters": {
-          "seconds": 2
-        },
-        "outputs": {
-          "metrics": {},
-          "figures": {}
-        }
-      },
-      "schema_valid": true,
-      "problem": "figures_without_figure"
-    },
-    {
-      "name": "time_series_svg",
-      "manifest": {
-        "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
-        "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
-        "reads": {
-          "dataset": false,
-          "recipes": [
-            "nemar-floor",
-            "nemar-ica"
-          ]
-        },
-        "parameters": {
-          "seconds": 2
-        },
-        "outputs": {
-          "metrics": {},
-          "figures": {
-            "midsegment": {
-              "formats": [
-                "svg"
-              ],
-              "time_series": true,
-              "caption": "Two seconds of cleaned data from the middle of the recording.",
-              "max_bytes": 400000
+          "metrics": {
+            "nemar-quality:9x": {
+              "unit": "%",
+              "description": "x"
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
             }
           }
         }
@@ -326,74 +495,145 @@
       "problem": null
     },
     {
-      "name": "time_series_png_and_webp",
+      "name": "metric_name_with_a_dot",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
+        "name": "nemar-quality",
         "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
-        "parameters": {
-          "seconds": 2
-        },
+        "parameters": {},
         "outputs": {
-          "metrics": {},
-          "figures": {
-            "midsegment": {
-              "formats": [
-                "png",
-                "webp"
-              ],
-              "time_series": true,
-              "caption": "Two seconds of cleaned data from the middle of the recording.",
-              "max_bytes": 400000
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            },
+            "nemar-quality:line.noise": {
+              "unit": "dB",
+              "description": "x"
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
             }
           }
         }
       },
-      "schema_valid": true,
+      "schema_valid": false,
       "problem": null
     },
     {
-      "name": "map_svg",
+      "name": "plugin_name_with_a_dot",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
+        "name": "nemar.quality",
         "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
-        "parameters": {
-          "seconds": 2
-        },
+        "parameters": {},
         "outputs": {
-          "metrics": {},
-          "figures": {
-            "midsegment": {
-              "formats": [
-                "svg"
-              ],
-              "time_series": false,
-              "caption": "Class histogram.",
-              "max_bytes": 200000
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
             }
           }
         }
       },
-      "schema_valid": true,
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "plugin_name_starts_with_a_digit",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "9quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
       "problem": null
     },
     {
@@ -407,22 +647,13 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
-              "unit": "%",
-              "description": "Share of channels kept by the floor.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              }
-            },
-            "percentBrainComponents": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "Share of components ICLabel calls brain.",
               "bounds": {
@@ -432,9 +663,68 @@
               "headline": true
             }
           },
-          "figures": {}
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
         },
         "extra": 1
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "checkpoint_figures",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "figures",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
       },
       "schema_valid": false,
       "problem": null
@@ -450,22 +740,13 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
-              "unit": "%",
-              "description": "Share of channels kept by the floor.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              }
-            },
-            "percentBrainComponents": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "Share of components ICLabel calls brain.",
               "bounds": {
@@ -475,6 +756,66 @@
               "headline": true
             }
           },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "outputs_figures",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-quality",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_quality",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {},
+        "outputs": {
+          "metrics": {
+            "nemar-quality:percentBrainComponents": {
+              "unit": "%",
+              "description": "Share of components ICLabel calls brain.",
+              "bounds": {
+                "min": 0,
+                "max": 100
+              },
+              "headline": true
+            }
+          },
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
+              }
+            }
+          },
           "figures": {}
         }
       },
@@ -482,33 +823,309 @@
       "problem": null
     },
     {
-      "name": "figure_over_cap",
+      "name": "view_role_over_cap",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-segment",
+        "name": "nemar-spectrum",
         "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_segment",
-        "checkpoint": "figures",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {
-          "seconds": 2
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
         },
         "outputs": {
           "metrics": {},
-          "figures": {
-            "midsegment": {
-              "formats": [
-                "png"
-              ],
-              "time_series": true,
-              "caption": "Two seconds of cleaned data from the middle of the recording.",
-              "max_bytes": 1048577
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 4194305,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_role_at_cap",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 4194304,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "view_without_roles",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {}
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_kind_not_namespaced",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_kind_unregistered",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "acme.ridgeline",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "view_recipe_role_from_plugin",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "plugin"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_role_three_dims",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor",
+                    "epoch"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
             }
           }
         }
@@ -527,22 +1144,13 @@
         "reads": {
           "dataset": false,
           "recipes": [
-            "nemar-floor",
             "nemar-ica"
           ]
         },
         "parameters": {},
         "outputs": {
           "metrics": {
-            "percentGoodChannels": {
-              "unit": "%",
-              "description": "Share of channels kept by the floor.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              }
-            },
-            "percentBrainComponents": {
+            "nemar-quality:percentBrainComponents": {
               "unit": "%",
               "description": "Share of components ICLabel calls brain.",
               "bounds": {
@@ -552,53 +1160,20 @@
               "headline": true
             }
           },
-          "figures": {}
-        }
-      },
-      "schema_valid": false,
-      "problem": null
-    },
-    {
-      "name": "metric_name_with_a_dot",
-      "manifest": {
-        "format": "nemar.plugin-manifest.v1",
-        "name": "nemar-quality",
-        "version": "1.0.0-b1",
-        "entry": "nemar_process.plugins.nemar_quality",
-        "checkpoint": "quality",
-        "reads": {
-          "dataset": false,
-          "recipes": [
-            "nemar-floor",
-            "nemar-ica"
-          ]
-        },
-        "parameters": {},
-        "outputs": {
-          "metrics": {
-            "percentGoodChannels": {
-              "unit": "%",
-              "description": "Share of channels kept by the floor.",
-              "bounds": {
-                "min": 0,
-                "max": 100
+          "views": {
+            "icclasses": {
+              "kind": "nemar.ic-classes",
+              "kind_version": 1,
+              "caption": "Components by ICLabel class.",
+              "roles": {
+                "histogram": {
+                  "format": "json",
+                  "max_bytes": 65536,
+                  "dims": []
+                }
               }
-            },
-            "percentBrainComponents": {
-              "unit": "%",
-              "description": "Share of components ICLabel calls brain.",
-              "bounds": {
-                "min": 0,
-                "max": 100
-              },
-              "headline": true
-            },
-            "line.noise": {
-              "unit": "dB",
-              "description": "x"
             }
-          },
-          "figures": {}
+          }
         }
       },
       "schema_valid": false,
