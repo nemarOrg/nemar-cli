@@ -4,6 +4,11 @@
 **Date:** 2026-11-21
 **Owner:** Seyed Yahya Shirazi
 
+Partially superseded by [ADR 0137](0137-quality-views-are-declared-data-drawn-in-the-browser-and-no-figure-image-is-stored.md) (proposed) where this record names figures or a floor value:
+decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and the rejected alternative of array outputs.
+NEMAR stores no figure image: a quality view is declared data that a browser draws, and the word "figures" in decision 1 now reads "views".
+Every other part of this record stands, and its text below is unchanged.
+
 ## Context
 
 nemar-process runs NEMAR's own processing in containers, on workstation runners (ADR 0121) and on the supercomputer through Tapis (ADR 0118).
