@@ -33,7 +33,7 @@ neuroschema's view specifications hold the details.
 `figures` leaves the standard checkpoints; plugins run at `quality`.
 No file of nemar-process imports a plotting library; matplotlib stays only as a dependency of eegprep.
 
-**2. neuroschema owns the view vocabulary, from neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21), a breaking release.**
+**2. neuroschema owns the view vocabulary, from neuroschema 0.6.0 (tag `v0.6.0`, nemarOrg/neuroschema#21), a breaking release.**
 The record-level `dataQuality` replaces `figures` with `views`.
 A view declaration has a key, a namespaced `kind` with its own `kind_version`, a caption, a source (a plugin or a recipe, by name and version), a scope, parameters, and stored `data[]` (each with role, location, format, size, Secure Hash Algorithm 256 (SHA-256) digest, columns and dimensions), or `inputs[]` with a named, versioned `transform`, or both.
 An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest (`content_sha256`), which may be null only when the view's derivative has profile `archive` (its decomposition read the archive copy).
@@ -145,7 +145,7 @@ Of the second row, the figure formats and size caps are gone, metric naming move
 
 | Artifact | Home |
 |---|---|
-| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21), vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
+| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0 (tag `v0.6.0`, nemarOrg/neuroschema#21), vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
 | A recording's views and metrics | neuroschema `dataQuality`, record level, projected on request from the signalJourney record |
 | The derivation of each view file | the signalJourney record: the writing step's `outputTargets` and `extensions.nemar.views` |
 | Plugin `outputs.views` and metric naming (`<plugin>:<name>`) | nemar-cli `shared/contract/plugin-manifest.*` |
@@ -166,7 +166,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 
 ## Consequences
 
-- neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21) is a breaking release; once it is released, nemar-cli moves `NEUROSCHEMA_VERSION` to 0.6.0 and re-vendors it.
+- neuroschema 0.6.0 (released 2026-11-24 as tag `v0.6.0`, commit e09ed407, nemarOrg/neuroschema#21) is a breaking release; nemar-cli moves `NEUROSCHEMA_VERSION` to 0.6.0 and re-vendors it, with the view files beside the bundle in `shared/contract/neuroschema/views/` and their digests in its `SHA256SUMS.json`.
 - The plugin manifest loses figure formats and caps, and all four copies of the standard checkpoints lose `figures` (nemar-cli, two in nemar-process, the website), each held by a drift test.
 - The figure plugins nemar-components and nemar-segment, eegprep's static plotting work, and the plugin that would re-report the floor's values are cut;
   nemar-ica declares its own views and writes `_chanlocs.tsv`, nemar-quality writes `_icclasses.json`, and nemar-spectrum writes `_spectrum.tsv`.
@@ -308,7 +308,7 @@ because no value may be drawn at another sensor's place.
 - nemarOrg/nemar-process#76 (`figures_on_hold`, `plugin_failed`, plugin identity in the plan hash).
 - eegprep `functions/sigprocfunc/topoplot.py` and `griddata_v4` at edf694c8.
 - `sccn/NEMAR-pipeline` `nemar_plugins/`.
-- neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21)).
+- neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (neuroschema 0.6.0, tag `v0.6.0`, nemarOrg/neuroschema#21).
 - signalJourney `qualityMetricsObject`, `outputTarget`, `extensions/nemar` (signalJourney#7 and #8).
 - nemar-cli `shared/contract/plugin-manifest.ts`, `shared/compute-recipes.ts`, `backend/src/services/compute-derivatives.ts`.
 - The website's `src/lib/eeg-viewer/{topo,gl-trace,store}.ts` and its ADRs 0007, 0009 and 0033.
