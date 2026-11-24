@@ -1134,6 +1134,299 @@
       "problem": null
     },
     {
+      "name": "view_role_unit_without_columns",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ],
+                  "unit": "dB"
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "view_role_unit_at_cap",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ],
+                  "unit": "𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀"
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "view_role_unit_over_cap",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ],
+                  "unit": "𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀𝐀"
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_role_unit_empty",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ],
+                  "unit": ""
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
+      "name": "view_role_unit_beside_column_units",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ],
+                  "unit": "dB",
+                  "columns": [
+                    {
+                      "name": "freq_hz",
+                      "type": "number",
+                      "unit": "Hz"
+                    },
+                    {
+                      "name": "Cz",
+                      "type": "number"
+                    }
+                  ]
+                },
+                "layout": {
+                  "from": "recipe"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": true,
+      "problem": null
+    },
+    {
+      "name": "view_recipe_role_with_unit",
+      "manifest": {
+        "format": "nemar.plugin-manifest.v1",
+        "name": "nemar-spectrum",
+        "version": "1.0.0-b1",
+        "entry": "nemar_process.plugins.nemar_spectrum",
+        "checkpoint": "quality",
+        "reads": {
+          "dataset": false,
+          "recipes": [
+            "nemar-ica"
+          ]
+        },
+        "parameters": {
+          "window_s": 2,
+          "overlap": 0.5,
+          "upper_hz": 125
+        },
+        "outputs": {
+          "metrics": {},
+          "views": {
+            "spectrum": {
+              "kind": "nemar.spectrum",
+              "kind_version": 1,
+              "caption": "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+              "roles": {
+                "values": {
+                  "format": "tsv",
+                  "max_bytes": 1048576,
+                  "dims": [
+                    "freq",
+                    "sensor"
+                  ]
+                },
+                "layout": {
+                  "from": "recipe",
+                  "unit": "mm"
+                }
+              }
+            }
+          }
+        }
+      },
+      "schema_valid": false,
+      "problem": null
+    },
+    {
       "name": "entry_not_a_module_path",
       "manifest": {
         "format": "nemar.plugin-manifest.v1",

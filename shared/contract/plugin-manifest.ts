@@ -16,7 +16,8 @@
  *
  * A view is data a browser draws, never an image (ADR 0137): a kind and its version from the neuroschema
  * view registry, a caption, and its roles. A role is either produced by the plugin (a format, a byte cap
- * of at most 4 MiB, its dimensions in row-then-column order, and optionally its columns) or
+ * of at most 4 MiB, its dimensions in row-then-column order, and optionally its value unit and its
+ * columns, a column's own unit overriding the role's) or
  * `{from: "recipe"}`, which the runner fills with the host recipe's file for that role. Whether the kind,
  * the format and a recipe role exist is the loader's check against the registry and the host recipe
  * (nemar-process), not this schema's: an unknown kind is still valid neuroschema.
@@ -136,7 +137,13 @@ export const PluginViewColumnSchema = z
   })
   .strict();
 
-/** A role the plugin produces: the runner checks the plugin's array or mapping against it and writes it. */
+/**
+ * A role the plugin produces: the runner checks the plugin's array or mapping against it and writes it.
+ * `unit` is the role's value unit, with the grammar and cap of a neuroschema column `unit` (#2358): a role
+ * without `columns` has nowhere else to state one. A column's own `unit` overrides it for that column.
+ * Whether a generic kind's role must carry a unit (a role `unit` or `columns` with units) is the loader's
+ * check per kind (nemar-process), not this schema's.
+ */
 export const PluginViewProducedRoleSchema = z
   .object({
     format: z.string().regex(PLUGIN_VIEW_FORMAT_RE),
@@ -145,6 +152,7 @@ export const PluginViewProducedRoleSchema = z
       .array(z.string().regex(PLUGIN_KEY_RE))
       .max(PLUGIN_MAX_VIEW_DIMS)
       .refine((a) => new Set(a).size === a.length, "dims repeat"),
+    unit: codePoints(1, 32).optional(),
     columns: z.array(PluginViewColumnSchema).min(1).max(PLUGIN_MAX_VIEW_COLUMNS).optional(),
   })
   .strict();
