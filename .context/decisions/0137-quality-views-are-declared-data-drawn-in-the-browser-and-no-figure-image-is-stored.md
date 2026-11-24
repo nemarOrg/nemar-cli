@@ -8,7 +8,7 @@ Partially supersedes [ADR 0134](0134-pipelines-report-checkpoints-live-and-quali
 its decisions 2, 6, 7 and 9 (the `figures` checkpoint, figure formats and caps, the first figure plugins, a plugin that re-reports a floor value, and the homes of figure rules), and its rejected alternative of array outputs;
 the word "figures" in its decision 1 now reads "views".
 Every other part of ADR 0134 stands.
-Refines [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) with the first route that serves a derivative's product files.
+Refines [ADR 0123](0123-derivatives-live-in-a-keyed-store-named-by-what-they-read.md) with the first route that serves a derivative's product files, and by adding channel types to what a derivative is keyed by.
 
 ## Context
 
@@ -26,10 +26,12 @@ And the signal viewer's scalp map assumes a coordinate frame when a recording de
 
 **1. NEMAR stores no figure image, and no NEMAR code draws one.**
 A quality view is data that a browser draws.
+A view refuses rather than mislead: a position guess that is not confident draws no map and says why, a missing or damaged shading table refuses the view, and a view without a table says so on the page;
+neuroschema's view specifications hold the details.
 `figures` leaves the standard checkpoints; plugins run at `quality`.
 No file of nemar-process imports a plotting library; matplotlib stays only as a dependency of eegprep.
 
-**2. neuroschema owns the view vocabulary (0.6.0, breaking).**
+**2. neuroschema owns the view vocabulary, from neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21), a breaking release.**
 The record-level `dataQuality` replaces `figures` with `views`.
 A view declaration has a key, a namespaced `kind` with its own `kind_version`, a caption, a source (a plugin or a recipe, by name and version), a scope, parameters, and stored `data[]` (each with role, location, format, size, Secure Hash Algorithm 256 (SHA-256) digest, columns and dimensions), or `inputs[]` with a named, versioned `transform`, or both.
 An input is a derivative file named by its SHA-256 or a serving store named by its `nemar.store-content.v1` digest (`content_sha256`), which may be null only when the view's derivative has profile `archive` (its decomposition read the archive copy).
@@ -86,7 +88,13 @@ The method, window, overlap, unit and upper bound are recorded as the view's par
 the bound is 125 Hz unless the recording's Nyquist frequency is lower, and the recorded bound says which, so spectra compare where their bounds agree.
 nemar-ica reads the Zarr serving copy, the copy a browser reads, so that its record names that store by its content digest (nemarOrg/nemar-process#79).
 Its decomposition always reads preprocessed data, as the legacy NEMAR pipeline's did, whether its input is the Zarr serving copy or the BIDS archive copy:
-a high-pass filter, line-noise removal (CleanLine or Zapline-plus), ASR with a cutoff of 30 and the removal of bad channels, then the decomposition.
+a high-pass filter, line-noise removal, ASR with a cutoff of 30 and the removal of bad channels, then the decomposition.
+Line-noise removal is a conditional band-stop at 50 or 60 Hz today;
+ZapLine-plus comes later as an eegprep extension under the GNU General Public License version 3 (GPL-3.0), `eegprep-ext-zapline-plus`, and becomes the default once its parity with the MATLAB implementation is measured.
+ASR repairs bursts and cuts nothing;
+the share of samples its reconstruction changed is recorded per recording as the quality metric `asrBurstFraction`, and ASR's lack of a mask of repaired samples is tracked upstream (sccn/eegprep#684).
+Channel types are kept per row, so a typed lead that is not EEG never enters the decomposition (sccn/eegprep#669),
+and the channel types are part of what a derivative is keyed by (nemarOrg/nemar-cli#2344).
 The record states this as `decomposition_input`: the source (with the store's content digest when it is the serving copy), the kept channels, the unit, the reference, ASR and the filters.
 
 **6. View files are checked by digest, and what that proves is stated.**
@@ -134,7 +142,7 @@ Of the second row, the figure formats and size caps are gone, metric naming move
 
 | Artifact | Home |
 |---|---|
-| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0, vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
+| View vocabulary (declaration, kinds, dimensions, formats, transforms, `nemar.sensor-field.v1`, `nemar.sensor-layout.v1`, `nemar.sensor-labels.v1` and its montages, `nemar.view-digest.v1`, parity vectors, the Python reference renderer) | neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21), vendored by nemar-cli in `shared/contract/neuroschema/`, copied by digest into nemar-process and the website |
 | A recording's views and metrics | neuroschema `dataQuality`, record level, projected on request from the signalJourney record |
 | The derivation of each view file | the signalJourney record: the writing step's `outputTargets` and `extensions.nemar.views` |
 | Plugin `outputs.views` and metric naming (`<plugin>:<name>`) | nemar-cli `shared/contract/plugin-manifest.*` |
@@ -155,7 +163,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 
 ## Consequences
 
-- neuroschema 0.6.0 is a breaking release; nemar-cli moves `NEUROSCHEMA_VERSION` to 0.6.0 and re-vendors it.
+- neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21) is a breaking release; once it is released, nemar-cli moves `NEUROSCHEMA_VERSION` to 0.6.0 and re-vendors it.
 - The plugin manifest loses figure formats and caps, and all four copies of the standard checkpoints lose `figures` (nemar-cli, two in nemar-process, the website), each held by a drift test.
 - The figure plugins nemar-components and nemar-segment, eegprep's static plotting work, and the plugin that would re-report the floor's values are cut;
   nemar-ica declares its own views and writes `_chanlocs.tsv`, nemar-quality writes `_icclasses.json`, and nemar-spectrum writes `_spectrum.tsv`.
@@ -164,7 +172,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - The derivatives store gains the first route that serves a derivative's product files; ADR 0123's private bucket and server-side copy stand.
 - The website owns a small renderer, a worker and its parity suites, and the signal viewer's scalp map changes from a thin-plate spline to EEGLAB's map.
 - The signal viewer stops assuming a coordinate frame: a recording whose positions are in an undeclared or unknown frame gets a map from its electrode names when `nemar.sensor-labels.v1` accepts them, and otherwise none, with the reason, so some maps the viewer draws today from as few as three matched labels disappear.
-- The montage coordinates come from other projects, so each montage's provenance and license are recorded with it and confirmed before neuroschema 0.6.0 is released.
+- The montage coordinates come from other projects, so each montage's provenance and license are recorded with it, and confirming them is a precondition of the neuroschema 0.6.0 release.
 - A drawing bug is fixed once and every view redraws; no stored image goes stale.
 - Activations need the public serving copy, so a private dataset has none in the browser.
 - Activations approximate the decomposition's input by design: the browser's single multiply leaves out the high-pass filter, line-noise removal and ASR, and the caption says so; a test holds the folding (the weights matrix times the data equals the unmixing matrix times the sphere matrix times the average-referenced data).
@@ -194,7 +202,7 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - nemarOrg/nemar-process#76 (`figures_on_hold`, `plugin_failed`, plugin identity in the plan hash).
 - eegprep `functions/sigprocfunc/topoplot.py` and `griddata_v4` at edf694c8.
 - `sccn/NEMAR-pipeline` `nemar_plugins/`.
-- neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (0.6.0).
+- neuroschema `schema/extensions/dataQuality.schema.json` (0.5.0) and `docs/views.md` (neuroschema 0.6.0 (in preparation, nemarOrg/neuroschema#21)).
 - signalJourney `qualityMetricsObject`, `outputTarget`, `extensions/nemar` (signalJourney#7 and #8).
 - nemar-cli `shared/contract/plugin-manifest.ts`, `shared/compute-recipes.ts`, `backend/src/services/compute-derivatives.ts`.
 - The website's `src/lib/eeg-viewer/{topo,gl-trace,store}.ts` and its ADRs 0007, 0009 and 0033.
