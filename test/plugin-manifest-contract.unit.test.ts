@@ -143,6 +143,18 @@ describe("the words and numbers", () => {
     for (const [where, pattern, re] of pairs) expect(pattern, where).toBe(re.source);
   });
 
+  test("a produced role's unit has the grammar and cap of a column unit (#2358)", () => {
+    const d = manifestSchema.$defs;
+    expect(d.ViewProducedRole.properties.unit).toEqual(d.ViewColumn.properties.unit);
+    expect(d.ViewProducedRole.properties.unit).toEqual({
+      type: "string",
+      minLength: 1,
+      maxLength: 32,
+    });
+    expect(d.ViewProducedRole.required).not.toContain("unit");
+    expect(Object.keys(d.ViewRecipeRole.properties)).toEqual(["from"]);
+  });
+
   test("the index re-exports the module", () => {
     expect(contractIndex.PluginManifestSchema).toBe(PluginManifestSchema);
   });
@@ -470,6 +482,54 @@ describe("agreement corpus", () => {
       "an empty column unit",
       edit((m) => {
         valuesRole(m).columns = [{ name: "x", type: "number", unit: "" }];
+      }),
+      false,
+    ],
+    [
+      "a role unit of 32 astral code points on a role without columns",
+      edit((m) => {
+        const { columns: _columns, ...bare } = valuesRole(m);
+        (spectrum(m).roles as Loose).values = { ...bare, unit: "\u{1D400}".repeat(32) };
+      }),
+      true,
+    ],
+    [
+      "a role unit of 33 astral code points",
+      edit((m) => {
+        const { columns: _columns, ...bare } = valuesRole(m);
+        (spectrum(m).roles as Loose).values = { ...bare, unit: "\u{1D400}".repeat(33) };
+      }),
+      false,
+    ],
+    [
+      "an empty role unit",
+      edit((m) => {
+        valuesRole(m).unit = "";
+      }),
+      false,
+    ],
+    [
+      "a role unit that is not a string",
+      edit((m) => {
+        valuesRole(m).unit = 1;
+      }),
+      false,
+    ],
+    [
+      "a role unit beside column units (the column's overrides it)",
+      edit((m) => {
+        valuesRole(m).unit = "dB";
+        valuesRole(m).columns = [
+          { name: "freq_hz", type: "number", unit: "Hz" },
+          { name: "Cz", type: "number" },
+        ];
+      }),
+      true,
+    ],
+    [
+      "a recipe role with a unit",
+      edit((m) => {
+        (spectrum(m).roles as Loose).layout = { from: "recipe", unit: "mm" };
       }),
       false,
     ],

@@ -77,6 +77,9 @@ The plugin manifest's `outputs.views` replaces `outputs.figures`; `nemar.plugin-
 A plugin returns metrics and arrays or mappings, never a file or a drawing.
 The runner checks each role against its declared dimensions (`sensor` equals the good channels in layout order, `component` the rank, `class` ICLabel's classes, and a frequency axis rises strictly to a recorded upper bound), caps each dimension at 1,024 entries, each role at 262,144 cells and each file at 4 mebibytes, checks a JavaScript Object Notation (JSON) role against its kind's schema, and writes the files with the recipes' deterministic writers.
 A plugin whose output fails a check is skipped (`plugin_failed`) and the recording is kept.
+A produced role may state its value `unit`, with the grammar and cap of a neuroschema column `unit` (at most 32 code points, not empty), so a role without `columns` still has one (#2358);
+a column's own `unit` overrides the role's for that column, a `{from: "recipe"}` role never carries one,
+and the loader requires a role `unit` or `columns` with units on a role of a generic kind that needs a value unit.
 A plugin declares at least one metric or view (`plugin_without_output`).
 A plugin's metric is named `<plugin>:<name>`, which the manifest contract enforces (`metric_not_prefixed`);
 a recipe's own metrics are bare names declared as literals in the recipe.

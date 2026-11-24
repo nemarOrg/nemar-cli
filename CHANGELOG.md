@@ -182,6 +182,10 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
   The standard checkpoints lose `figures`, and `nemar-ica` runs `nemar-quality` then `nemar-spectrum` at `quality`; the progress and manifest vectors are regenerated.
   `shared/compute-naming.ts` ports nemar-process `naming.py` (product and dataset file names), with `shared/contract/compute-naming-vectors.json` for nemar-process to replay.
   nemar-process re-copies the manifest schema and the vectors at this commit (its phase P2); until then its loader still reads the 0.5-era manifest.
+- **A produced view role may state its value `unit` (#2358, epic #2324).**
+  `ViewProducedRole` in `nemar.plugin-manifest.v1` gains an optional `unit`, with the grammar and cap of a neuroschema 0.6.0 column `unit` (1 to 32 code points), so a role without `columns` still has a unit; a column's own `unit` overrides it for that column, and a `{"from": "recipe"}` role never carries one.
+  Whether a generic kind's role must carry a unit (a role `unit` or `columns` with units) is the nemar-process loader's check per kind, not the schema's.
+  Six manifest vectors are added and none changes; nemar-process re-copies the manifest schema and the vectors at its next pin (its phase P3).
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
   The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.

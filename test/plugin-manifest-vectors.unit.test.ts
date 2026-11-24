@@ -259,6 +259,47 @@ const CASES: Array<[string, unknown]> = [
     }),
   ],
   [
+    "view_role_unit_without_columns",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).unit = "dB";
+    }),
+  ],
+  [
+    "view_role_unit_at_cap",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).unit = "\u{1D400}".repeat(32);
+    }),
+  ],
+  [
+    "view_role_unit_over_cap",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).unit = "\u{1D400}".repeat(33);
+    }),
+  ],
+  [
+    "view_role_unit_empty",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).unit = "";
+    }),
+  ],
+  [
+    "view_role_unit_beside_column_units",
+    edit(spectrum, (m) => {
+      const values = (m.outputs.views.spectrum?.roles as Loose).values as Loose;
+      values.unit = "dB";
+      values.columns = [
+        { name: "freq_hz", type: "number", unit: "Hz" },
+        { name: "Cz", type: "number" },
+      ];
+    }),
+  ],
+  [
+    "view_recipe_role_with_unit",
+    edit(spectrum, (m) => {
+      (m.outputs.views.spectrum?.roles as Loose).layout = { from: "recipe", unit: "mm" };
+    }),
+  ],
+  [
     "entry_not_a_module_path",
     edit(quality, (m) => {
       m.entry = "nemar_process/plugins";
@@ -310,6 +351,26 @@ describe("plugin manifest vectors", () => {
       "view_role_over_cap",
     ]) {
       expect(v.find((c) => c.name === refused)?.schema_valid, refused).toBe(false);
+    }
+    for (const refused of [
+      "view_role_unit_over_cap",
+      "view_role_unit_empty",
+      "view_recipe_role_with_unit",
+    ]) {
+      expect(v.find((c) => c.name === refused)?.schema_valid, refused).toBe(false);
+    }
+    for (const accepted of [
+      "view_role_unit_without_columns",
+      "view_role_unit_at_cap",
+      "view_role_unit_beside_column_units",
+    ]) {
+      expect(
+        v.find((c) => c.name === accepted),
+        accepted,
+      ).toMatchObject({
+        schema_valid: true,
+        problem: null,
+      });
     }
     expect(v.find((c) => c.name === "view_role_at_cap")).toMatchObject({
       schema_valid: true,
