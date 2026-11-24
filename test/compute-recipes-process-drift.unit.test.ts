@@ -21,8 +21,9 @@
  * A recipe's quality plugins (ADR 0134 decisions 6 and 7) are steps of the map too, at `quality` and
  * `figures`, declared in nemar-process as `PLUGINS = (("name", "version"), ...)` beside `STEP_ORDER`, which does
  * not list them. Until a `steps.py` declares `PLUGINS` (nemar-process `dev` and its epic branch before phase 5
- * P4), the comparison leaves the registry's plugin steps out, and a checkpoint left empty by that; once it
- * declares them, its plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
+ * P4), its `CHECKPOINTS` may hold all of the registry's plugin steps (nemar-process #78 lists `quality`) or
+ * none, the comparison then leaving them out, and a checkpoint left empty by that; once it declares them, its
+ * plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
  *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
@@ -328,9 +329,12 @@ describe("the registry matches the nemar-process sources", () => {
             declared,
             `${recipe.name}: steps.py declares CHECKPOINTS without PRE_CHECKS`,
           ).not.toBeNull();
-          // before PLUGINS is declared, nemar-process's CHECKPOINTS do not hold the registry's plugin steps yet
+          // once PLUGINS is declared, CHECKPOINTS are the whole map; before, they hold either none of the
+          // registry's plugin steps or all of them (nemar-process #78 lists `quality` ahead of PLUGINS)
+          const whole = withoutSteps(map, []);
+          const holdsAll = JSON.stringify(declaredMap) === JSON.stringify(whole);
           expect(declaredMap, `${recipe.name} CHECKPOINTS`).toEqual(
-            withoutSteps(map, declaredPlugins === null ? mappedPlugins : []),
+            declaredPlugins !== null || holdsAll ? whole : withoutSteps(map, mappedPlugins),
           );
         }
         if (declared !== null) {
