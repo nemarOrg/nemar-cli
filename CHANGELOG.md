@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Admin command tree: the import group and the upstream commands (epic #2307, ADR 0135)
+
+- **The import commands moved under `nemar admin import`**, beside its `status`, `rollback`, `retry` and `verify`.
+  `import-openneuro` is `admin import openneuro`; `import-coverage`, `import-weekly` and `import-issue-triage` are `admin import coverage`, `weekly` and `triage`.
+- **The upstream snapshot commands moved under `nemar admin repull`**, which starts from that snapshot: `upstream-status` and `upstream-backfill` are `admin repull upstream-status` and `upstream-backfill`.
+  Each old path runs nothing, prints one line naming the new path and exits 1.
+- **`--apply` is the write flag of `admin repull upstream-backfill`**; `--execute` is still accepted as a hidden alias. The request still sends `execute=1`.
+- **The OpenNeuro onboarding workflow asks the installed CLI which import path it has.** Each of its prepare, copy and finalize steps probes `nemar admin import openneuro --help` and falls back to `admin import-openneuro`, so it works with a CLI from before and after this release. It ships with the matching nemarDatasets/.github change, which has to merge first (`test/dataset-workflow-parity.test.ts` compares the two copies).
+
 ### Admin command tree: the `rework` group (epic #2307, ADR 0135)
 
 - **Repairs that change an existing dataset moved under `nemar admin rework`.**

@@ -312,7 +312,8 @@ Dataset Management:
                       delete, reindex, doi, ci, s3, exemplar, doctor
   rework            - Change an existing dataset: revert (via PR), recover, and
                       annex normalize, policy, key-registration, content-recovery
-  import-openneuro  - Import an OpenNeuro dataset into NEMAR
+  import            - OpenNeuro imports: openneuro (import a dataset), status, rollback,
+                      retry, verify, coverage, weekly, triage
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -4012,7 +4013,7 @@ export function importTagOptionError(
 /**
  * Dispatch the onboard-openneuro.yml workflow (nemarDatasets/.github) for a
  * batch of OpenNeuro `ds######` ids -- the prepare/copy/finalize matrix
- * hardened in epic #967 Phases 1-3. Shared by `import-openneuro`'s default
+ * hardened in epic #967 Phases 1-3. Shared by `import openneuro`'s default
  * (non---local) branch, a brand-new import, and `rework recover --apply` (Phase
  * 5, #972), a re-copy of an existing import whose S3 content was found
  * empty; both dispatch the SAME workflow, one gh run per batch.
@@ -4247,8 +4248,7 @@ Examples:
     },
   );
 
-adminCommand
-  .command("import-openneuro")
+const importOpenneuroCommand = new Command("openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
   .option("--local", "Run import locally instead of dispatching GitHub Actions workflow")
@@ -4532,7 +4532,9 @@ Examples:
 // Import jobs (issue #754)
 // ============================================================================
 
-const importCommand = new Command("import").description("View and recover OpenNeuro import jobs");
+const importCommand = new Command("import").description(
+  "OpenNeuro imports: import a dataset, follow and recover its job, and the coverage, weekly and triage reports",
+);
 
 importCommand
   .command("status")
@@ -4717,6 +4719,7 @@ importCommand
   });
 
 adminCommand.addCommand(importCommand);
+importCommand.addCommand(importOpenneuroCommand);
 
 // ============================================================================
 // Dataset recovery (epic #967 phase 5, #972)
@@ -7758,18 +7761,19 @@ adminCommand.addCommand(zarrFidelitySweepCommand);
 const BACKFILL_PAUSE_MS = 250;
 
 const upstreamBackfillCommand = new Command("upstream-backfill").description(
-  "Record which upstream snapshot each mirrored version came from (dry run unless --execute)",
+  "Record which upstream snapshot each mirrored version came from (dry run unless --apply)",
 );
 
-upstreamBackfillCommand
-  .option("--execute", "Write the results; without it nothing is recorded")
+addApplyOption(upstreamBackfillCommand, "Write the results; without it nothing is recorded", [
+  "--execute",
+])
   .option("--limit <n>", "Version rows per batch (server clamps to [1,50])", "25")
   .option("--after <cursor>", "Resume after this key, e.g. on000123@1.0.0 (skips a stuck row)")
   .option("--max-batches <n>", "Stop after this many batches", "200")
   .option("--json", "Output one JSON summary instead of progress lines")
   .action(
     async (options: {
-      execute?: boolean;
+      apply?: boolean;
       limit?: string;
       after?: string;
       maxBatches?: string;
@@ -7779,11 +7783,12 @@ upstreamBackfillCommand
 
       const limit = Number.parseInt(options.limit ?? "25", 10) || 25;
       const maxBatches = Number.parseInt(options.maxBatches ?? "200", 10) || 200;
-      const execute = options.execute === true;
+      // The wire field is still `execute`; only the flag is `--apply` (ADR 0135 decision 4).
+      const execute = options.apply === true;
       const say = (line: string) => {
         if (!options.json) console.log(line);
       };
-      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --execute to record."));
+      if (!execute) say(chalk.yellow("Dry run: nothing is written. Pass --apply to record."));
       say(
         chalk.dim(
           "A recorded 'unknown' is final: it is never examined again. A read that fails or whose 404 a control read does not confirm is not recorded.",
@@ -7904,7 +7909,7 @@ upstreamBackfillCommand
             ),
           );
         }
-        if (!execute) console.log(chalk.yellow("Dry run, pass --execute to record."));
+        if (!execute) console.log(chalk.yellow("Dry run, pass --apply to record."));
       }
 
       // Non-zero on any error, any failed batch, and any pass that did not finish, so a
@@ -7913,8 +7918,8 @@ upstreamBackfillCommand
     },
   );
 
-adminCommand.addCommand(upstreamBackfillCommand);
-adminCommand.addCommand(upstreamStatusCommand);
+repullCommand.addCommand(upstreamBackfillCommand);
+repullCommand.addCommand(upstreamStatusCommand);
 
 // ============================================================================
 // Anonymity verification sweep (issue #1409, epic #1406)
@@ -9572,7 +9577,7 @@ importIssueTriageCommand
     }
   });
 
-adminCommand.addCommand(importIssueTriageCommand);
+importCommand.addCommand(importIssueTriageCommand.name("triage"));
 
 // ============================================================================
 // Import coverage (#1311, epic #1306 phase 3)
@@ -9766,7 +9771,7 @@ importCoverageCommand
     }
   });
 
-adminCommand.addCommand(importCoverageCommand);
+importCommand.addCommand(importCoverageCommand.name("coverage"));
 
 // ============================================================================
 // Weekly import summary (#1312, epic #1306 phase 4)
@@ -9825,7 +9830,7 @@ importWeeklyCommand
 
     const f = res.facts;
 
-    // Exit codes mirror `nemar admin import-coverage`, so one rule works across the
+    // Exit codes mirror `nemar admin import coverage`, so one rule works across the
     // family: 2 = could not determine, 1 = determined and not healthy, 0 = healthy.
     // An earlier version set 1 only when a section failed to READ, so a week with
     // auto-import switched off exited 0 -- the exact condition this epic exists to
@@ -9980,7 +9985,7 @@ importWeeklyCommand
     }
   });
 
-adminCommand.addCommand(importWeeklyCommand);
+importCommand.addCommand(importWeeklyCommand.name("weekly"));
 
 // ============================================================================
 // Username backfill (ADR 0042, #1253, epic #1250)

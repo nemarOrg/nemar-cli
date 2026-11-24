@@ -121,7 +121,7 @@ export interface RepullWeekFacts extends RepullWeek {
   /**
    * Why this part of the week needs a person, one phrase each, in the order the headline lists
    * them. Fixed phrases and counts only. The shared attention rule adds them to the headline and
-   * to `nemar admin import-weekly`'s exit code, so the two cannot disagree about a week.
+   * to `nemar admin import weekly`'s exit code, so the two cannot disagree about a week.
    */
   attention: string[];
 }
