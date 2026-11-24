@@ -179,6 +179,77 @@ declared arrays are the narrower channel, because a runner and a reviewer can ch
 - On the Zarr input, a channel is not typed as electrocardiography (ECG) until eegprep-lean reads each channel's type from the store (sccn/eegprep#668); nemar-process re-pins eegprep once that lands, and until then this is a known limitation.
 - Public pages show quality only for promoted derivatives, so a run stays off the dataset page until an administrator promotes it.
 
+## Amendment 2026-11-24: what the neuroschema 0.6.0 release review settled
+
+The adversarial review of neuroschema 0.6.0 (nemarOrg/neuroschema#22 to #30, merged into `feature/issue-21-views-0.6.0` at 68c549cd) settled the rules below.
+neuroschema's `docs/views/` and `docs/processing-extensions.md` state them in full and hold them to vectors;
+where this amendment and decisions 3 and 9 differ, this amendment holds.
+
+**Scalp maps (`nemar.sensor-field.v1`).**
+- Parity is with EEGLAB's `topoplot` and its v4 interpolation, with one change:
+  the map interpolates each value's deviation from the mean and adds the mean back, z = m + spline(v − m).
+  The biharmonic spline has no constant term, so a large shared offset (a spectrum's decibels) would otherwise ripple across the color axis with structure the sensors do not have.
+- The `minmax` color axis widens by 5% of the range on each side.
+  EEGLAB's rule moves each limit away from zero, which clips a map of one sign.
+  The `absmax` axis stays EEGLAB's.
+- A map needs at least 8 interpolated sensors (`too_few_sensors`), replacing the three of decision 3:
+  a spline through fewer shows the spline more than the field, and 8 is what `nemar.sensor-labels.v1` needs to place sensors by name.
+- A field whose usable sensors share one value is that value in every cell, with the note `flat_field`;
+  one whose range is at most 10⁻⁹ of its magnitude is one color at the mean, with the note `near_flat`.
+  A spline over differences in the last digits would fill the color axis with noise.
+- Merged values and the mean are computed as `first + sum(x − first) / k`,
+  so equal values give themselves exactly and values near the binary64 limit do not overflow.
+
+**Placement words.**
+Each takes a map's place and says why no map is drawn.
+- `frame_not_scalp`: positions in an intracranial frame (`Pixels`, `ACPC`, `ScanRAS`) draw no scalp map, by place or by name.
+- `no_eeg_sensors`: no drawn sensor is typed EEG; a scalp map draws EEG sensors only.
+- `positions_flat`: measured positions too flat or too few to locate the head's center.
+- `positions_partial`: measured positions that cover too little of the head, or fix its center too unstably (below).
+  After either of these two, sensors are placed by name only when every drawn row is typed EEG.
+- `template_name_unknown`: a row of template positions names no electrode of the montage it declares.
+- `montage_unknown`: a template layout names a montage neuroschema does not hold, so nothing else would stop it being drawn.
+- `net_coverage_low`: names match fewer than 90% of a numbered net's electrodes, so they may come from another cap with the same numbering.
+- `cap_model_unknown`: names number an Electrical Geodesics, Inc. (EGI) net, and the recording's cap model does not name the HydroCel net they point to.
+
+**Position rules.**
+- Measured positions (a layout or positions role) must declare `sensor_type`, because only rows typed EEG are drawn and a fiducial must never be fitted.
+  Template positions and names may be untyped.
+- `positions_partial` refuses when any of four bounds fails:
+  the dilution of the fitted center D > 4.5;
+  the leave-one-out move of the center L > 0.12 of its radius;
+  the whole-head coverage C > 38° (some quadrant has no position within 38° of the equator);
+  or the azimuth gap G > 120°.
+  Each bound is calibrated between the sparse whole-head montages it keeps and the regional sets it refuses.
+- The residual is documented, not closed: at 8 mm of per-axis noise about 1.3% of motor-imagery-16 draws (and 0.1% of P300-8 draws) still pass,
+  and no angular bound removes them without refusing sleep montages.
+  A head-size bound for positions that declare units is tracked in nemarOrg/neuroschema#31.
+
+**Labels.**
+- A recording is placed by name on a HydroCel net only when its `CapManufacturersModelName` names that net from an exact list;
+  `ManufacturersModelName` is not read.
+  Older EGI nets number their electrodes alike on other positions, so a name alone never decides between them.
+- The older EGI nets are never reached by names;
+  a sensor role reaches one only as template positions that name it exactly.
+- The channel `EEGReference` names is reported as the reference and kept:
+  a map leaves it out of the interpolation only when all its values are exactly zero, since after re-referencing it carries data.
+- A sensor role may carry `cap_model` and `reference` (BIDS `CapManufacturersModelName` and `EEGReference`), which a placement by name passes to `nemar.sensor-labels.v1`.
+
+**`sensors_mismatch`.**
+One definition serves a scalp map's model and `nemar.spectrum`: the value columns, in declared order, are not the sensor role's names.
+A spectrum whose sensors mismatch shows as the fallback's tables, with no lines and no maps,
+because lines labeled by the wrong sensors would mislead as much as a wrong map.
+
+**Envelope rules.**
+- Every JSON text is read as Internet JSON (I-JSON, RFC 7493): no duplicate member names, at most 64 levels of nesting, and every schema integer capped at 2^53 − 1, so Python and a browser read one document alike.
+- Every schema's `$id` is absolute and pinned to `v0.6.0`, so relative references resolve the same in every engine, and validation fetches nothing.
+- Schema patterns use explicit character classes, never `.` or the shorthand classes, which Python and JavaScript read apart; a test guards every pattern.
+- Every table a preset reads is the recording's, at the stem nemar-process gives its products under the label of the view's recipe (`table_location_mismatch`),
+  so a view cannot be pointed at a decoy table of another recording or recipe.
+- A plugin's name has the grammar of a metric name's prefix, so each plugin metric is `<plugin>:<name>` and stays a safe document key.
+- `nemar.record-checks.v1` holds the cross-field rules of a recording's entry, which the backend and a renderer both run:
+  `metric_producer_mismatch`, `view_source_mismatch` and `view_key_repeated`.
+
 ## Alternatives considered
 
 - **Store images, as ADR 0134 decided:** they cannot be themed, checked, read aloud or redrawn, and they need a plotting library in the pipeline.
