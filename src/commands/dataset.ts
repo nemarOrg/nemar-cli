@@ -2094,7 +2094,7 @@ Examples:
       console.log(
         datasetInfo.withdrawn_at
           ? `  Data:        ${chalk.dim("removed as part of the withdrawal")}`
-          : `  Data:        ${chalk.red("incomplete")} ${chalk.dim("(some files failed to upload; see `nemar admin data-integrity-sweep`)")}`,
+          : `  Data:        ${chalk.red("incomplete")} ${chalk.dim("(some files failed to upload; see `nemar admin fleet sweep data-integrity`)")}`,
       );
     }
 

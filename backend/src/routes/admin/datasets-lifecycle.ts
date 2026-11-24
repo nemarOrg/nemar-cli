@@ -2110,7 +2110,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    *
    * Reports which published (dataset_id, version) pairs have summary.json
    * at the current target schema (1.1) vs which are stale or missing.
-   * Powers `nemar admin summary check` and the weekly drift cron.
+   * Powers `nemar admin fleet summary check` and the weekly drift cron.
    *
    * Read-only: walks the version table and probes data.nemar.org for the
    * schema string. Bounded parallelism keeps us within data.nemar.org's

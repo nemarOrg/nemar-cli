@@ -891,7 +891,7 @@ The manifest job regenerates `D/version/<tag>.json` and `<tag>-summary.json` (th
 
 **Manifests.**
 A dispatch for a **private** dataset must carry `skip_canary: true`: the job's canary makes an unauthenticated request to `raw.githubusercontent.com`, which cannot serve a private repository.
-The CLI's `nemar admin summary check --fix` does not pass it, so call the admin route's client with it, as the signed-in admin.
+The CLI's `nemar admin fleet summary check --apply` does not pass it, so call the admin route's client with it, as the signed-in admin.
 The route (`POST /admin/manifest/dispatch`) dispatches `generate-manifest.yml` with `skip_canary` as asked, always with `skip_callback: true` (there is no in-flight `manifest_jobs` row to call back to), and with the version's `doi` and `concept_doi` read from D1, so the regenerated manifest keeps its DOIs.
 It looks the version up by its exact spelling, and the publish flow stores it without the `v` (`normalizeVersion`; the manifest's own `version` field is bare too), so pass `${tag#v}`:
 

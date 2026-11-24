@@ -1751,7 +1751,7 @@ export default {
       // It drains up to 30/day and stamps only on success, so failures are
       // retried on the next pass (see AVAILABILITY_REPORT_SWEEP_BASE_WHERE for
       // rows the write refuses). A large backlog is meant to be cleared with
-      // `nemar admin availability-report --all`, not by waiting on this.
+      // `nemar admin fleet sweep availability --all`, not by waiting on this.
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
           .then((r) => {

@@ -61,7 +61,7 @@ active API URL first); do not rely on an environment 403 to catch a mistaken tar
 
 5. **Acceptance audit.**
    ```
-   nemar admin data-integrity-sweep --older-than 0
+   nemar admin fleet sweep data-integrity --older-than 0
    ```
    Forces a re-check of every row already stamped by the incident-discovery sweep
    (including the 45 just recovered), so a dataset that reports `data_complete=1` via

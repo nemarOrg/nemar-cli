@@ -314,6 +314,8 @@ Dataset Management:
                       annex normalize, policy, key-registration, content-recovery
   import            - OpenNeuro imports: openneuro (import a dataset), status, rollback,
                       retry, verify, coverage, weekly, triage
+  fleet             - Across all datasets: drift, enforce, require-review, revalidate,
+                      sweep, summary, zarr-catalog, e2e-test
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -4454,8 +4456,7 @@ const importOpenneuroCommand = new Command("openneuro")
 // E2E Test
 // ============================================================================
 
-adminCommand
-  .command("e2e-test")
+const e2eTestCommand = new Command("e2e-test")
   .description("Run end-to-end test against nm099999 (admin only)")
   .option("--verbose", "Show detailed output for each step")
   .option("--skip-reset", "Use existing nm099999 state (skip reset)")
@@ -4481,10 +4482,10 @@ Requirements:
   - Active nemar auth session
 
 Examples:
-  $ nemar admin e2e-test                    # Full test
-  $ nemar admin e2e-test --verbose          # With detailed output
-  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
-  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  $ nemar admin fleet e2e-test                 # Full test
+  $ nemar admin fleet e2e-test --verbose       # With detailed output
+  $ nemar admin fleet e2e-test --skip-cleanup  # Keep temp dirs for inspection
+  $ nemar admin fleet e2e-test --skip-reset    # Reuse existing nm099999 state`,
   )
   .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
     if (!requireAuth()) return;
@@ -4788,7 +4789,7 @@ Description:
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
-  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  'nemar admin fleet sweep data-integrity --reaudit' after the batch lands
   (--older-than 0 does NOT converge here -- its cutoff is relative to an
   ever-advancing now(), so a just-stamped row re-qualifies on the very next
   batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
@@ -4996,7 +4997,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin rework recover status  /  nemar admin data-integrity-sweep --reaudit",
+            "  Watch progress with: nemar admin rework recover status  /  nemar admin fleet sweep data-integrity --reaudit",
           ),
         );
 
@@ -5406,7 +5407,7 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
 // ============================================================================
 
 const fleetCommand = new Command("fleet").description(
-  "Governance drift reporting and enforcement (epic #713)",
+  "Across all datasets: governance drift and enforcement, sweeps, summary and Zarr catalog checks, the end-to-end test",
 );
 
 fleetCommand
@@ -6777,6 +6778,14 @@ Examples:
 
 adminCommand.addCommand(fleetCommand);
 
+// `admin fleet sweep`: the sweeps that refresh or report derived metadata across the catalog
+// (ADR 0135 decision 3; no separate maintenance group, owner 2026-11-22).
+const fleetSweepCommand = new Command("sweep").description(
+  "Sweeps that refresh or report derived metadata across all datasets",
+);
+fleetCommand.addCommand(fleetSweepCommand);
+fleetCommand.addCommand(e2eTestCommand);
+
 const reindexCommand = new Command("reindex").description(
   "Refresh dataset metadata: enrichment + first-class D1 columns",
 );
@@ -6961,15 +6970,15 @@ reindexCommand
 
 datasetGroupCommand.addCommand(reindexCommand);
 
-const availabilityReportCommand = new Command("availability-report")
-  .description(
-    "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). Dry-run by default. --all backfills every non-sandbox dataset that has a version and no report yet (#1001).",
-  )
-  .argument("[dataset-id]", "Dataset ID (e.g., nm000103)")
-  .option(
-    "--write",
-    "Commit the report to .nemar/availability-report.json on main (default: preview only)",
-  )
+const availabilityReportCommand = addApplyOption(
+  new Command("availability-report")
+    .description(
+      "Report how much of a dataset's declared data is present in S3, and exactly which files are missing + why (#1000). One dataset: a preview unless --apply. --all runs the sweep and WRITES: it backfills a report for every non-sandbox dataset that has a version and no report yet, with or without --apply (#1001).",
+    )
+    .argument("[dataset-id]", "Dataset ID (e.g., nm000103)"),
+  "One dataset: commit the report to .nemar/availability-report.json on main (default: preview only). --all always writes",
+  ["--write"],
+)
   .option(
     "--all",
     "Backfill every non-sandbox dataset that has a version and no report yet, instead of a single one (#1001)",
@@ -6986,7 +6995,7 @@ const availabilityReportCommand = new Command("availability-report")
     async (
       datasetId: string | undefined,
       options: {
-        write?: boolean;
+        apply?: boolean;
         all?: boolean;
         missingOnly?: boolean;
         limit?: string;
@@ -7011,13 +7020,13 @@ const availabilityReportCommand = new Command("availability-report")
       // Single-dataset path (Phase 1, #1000)
       if (datasetId) {
         const spinner = ora(
-          options.write
+          options.apply
             ? `Generating and writing availability report for ${datasetId}...`
             : `Previewing availability report for ${datasetId}...`,
         ).start();
         let result: AvailabilityReportResult;
         try {
-          result = await availabilityReport(datasetId, { write: options.write === true });
+          result = await availabilityReport(datasetId, { write: options.apply === true });
         } catch (err) {
           spinner.fail(`Failed to generate availability report for ${datasetId}`);
           console.error(chalk.red(errorDetail(err)));
@@ -7158,9 +7167,9 @@ const availabilityReportCommand = new Command("availability-report")
     },
   );
 
-adminCommand.addCommand(availabilityReportCommand);
+fleetSweepCommand.addCommand(availabilityReportCommand.name("availability"));
 
-/** Batch response shape every `nemar admin *-sweep` command shares (PR
+/** Batch response shape every `nemar admin fleet sweep <name>` command shares (PR
  *  #1223 review, suggestion 5). */
 interface SweepBatchLike {
   remaining: number | null;
@@ -7168,8 +7177,8 @@ interface SweepBatchLike {
 }
 
 /**
- * Shared do-while loop for hed-sweep / recording-stats-sweep /
- * signal-defaults-sweep: calls `runBatch()` until `remaining` reaches 0,
+ * Shared do-while loop for `fleet sweep hed`, `recording-stats` and
+ * `signal-defaults`: calls `runBatch()` until `remaining` reaches 0,
  * paces GitHub-heavy batches, and bails with a warning if `remaining`
  * stops strictly decreasing (persistent write errors leave rows
  * unstamped). `onBatch` owns everything sweep-specific -- totals
@@ -7292,7 +7301,7 @@ hedSweepCommand
     },
   );
 
-adminCommand.addCommand(hedSweepCommand);
+fleetSweepCommand.addCommand(hedSweepCommand.name("hed"));
 
 const recordingStatsSweepCommand = new Command("recording-stats-sweep").description(
   "Backfill dataset-level recording duration/count/channel-range stats from each dataset's zarr index (migration 0070, #1146)",
@@ -7374,7 +7383,7 @@ recordingStatsSweepCommand
     },
   );
 
-adminCommand.addCommand(recordingStatsSweepCommand);
+fleetSweepCommand.addCommand(recordingStatsSweepCommand.name("recording-stats"));
 
 const signalDefaultsSweepCommand = new Command("signal-defaults-sweep").description(
   "Backfill BIDS signal defaults (sampling frequency, power line frequency, EEG reference, placement scheme) from each dataset's exemplar sidecar (migrations 0072/0073, #1153)",
@@ -7456,7 +7465,7 @@ signalDefaultsSweepCommand
     },
   );
 
-adminCommand.addCommand(signalDefaultsSweepCommand);
+fleetSweepCommand.addCommand(signalDefaultsSweepCommand.name("signal-defaults"));
 
 /** One data-integrity-sweep batch, as consumed by {@link runReauditLoop}. */
 export interface ReauditBatchResult {
@@ -7483,7 +7492,7 @@ export interface ReauditLoopResult {
 }
 
 /**
- * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * Pure convergence loop driving `nemar admin fleet sweep data-integrity --reaudit`
  * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
  * `fetchBatch` call, and that single captured value is threaded UNCHANGED
  * into every subsequent `fetchBatch(before)` call -- this is the convergence
@@ -7678,7 +7687,7 @@ dataIntegritySweepCommand
     },
   );
 
-adminCommand.addCommand(dataIntegritySweepCommand);
+fleetSweepCommand.addCommand(dataIntegritySweepCommand.name("data-integrity"));
 
 // ============================================================================
 // Zarr fidelity verification sweep (issue #1068, epic #1181 phase 8)
@@ -7752,7 +7761,7 @@ zarrFidelitySweepCommand
     }
   });
 
-adminCommand.addCommand(zarrFidelitySweepCommand);
+fleetSweepCommand.addCommand(zarrFidelitySweepCommand.name("zarr-fidelity"));
 
 // ============================================================================
 // Upstream snapshot backfill (epic #1046 phase 2, #1908; ADR 0111)
@@ -8017,7 +8026,7 @@ anonymitySweepCommand
     }
   });
 
-adminCommand.addCommand(anonymitySweepCommand);
+fleetSweepCommand.addCommand(anonymitySweepCommand.name("anonymity"));
 
 // ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
@@ -9072,7 +9081,7 @@ adminCommand
   );
 
 // ============================================================================
-// nemar admin summary check  (epic #618 / phase 2 #620)
+// nemar admin fleet summary check  (epic #618 / phase 2 #620)
 // ============================================================================
 
 /**
@@ -9129,10 +9138,13 @@ const summaryCommand = new Command("summary").description(
   "summary.json coverage across published dataset versions",
 );
 
-summaryCommand
-  .command("check")
-  .description("Report which (dataset_id, version) pairs have stale or missing summary.json")
-  .option("--fix", "Dispatch generate-manifest for every stale/missing version")
+addApplyOption(
+  summaryCommand
+    .command("check")
+    .description("Report which (dataset_id, version) pairs have stale or missing summary.json"),
+  "Dispatch generate-manifest for every stale/missing version",
+  ["--fix"],
+)
   .option("--id <id>", "Limit to a single dataset_id (exact match)")
   .option(
     "--match <glob>",
@@ -9145,7 +9157,7 @@ summaryCommand
   .action(
     async (
       options: {
-        fix?: boolean;
+        apply?: boolean;
         id?: string;
         match?: string;
         onlyStale?: boolean;
@@ -9222,11 +9234,11 @@ summaryCommand
           `${chalk.red(`error=${totals.error}`)}`,
       );
 
-      if (!options.fix) {
+      if (!options.apply) {
         if (totals.stale + totals.missing > 0) {
           console.log(
             chalk.dim(
-              `\nRun with --fix to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
+              `\nRun with --apply to dispatch generate-manifest for the ${totals.stale + totals.missing} drifted version(s).`,
             ),
           );
         }
@@ -9278,7 +9290,7 @@ summaryCommand
       );
       console.log(
         chalk.dim(
-          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin summary check` once they complete to verify drift cleared.",
+          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin fleet summary check` once they complete to verify drift cleared.",
         ),
       );
       if (failed > 0) process.exitCode = 1;
@@ -9295,7 +9307,7 @@ function recomputeTotals(rows: SummaryVersionCoverage[]) {
   };
 }
 
-adminCommand.addCommand(summaryCommand);
+fleetCommand.addCommand(summaryCommand);
 
 // ============================================================================
 // Zarr catalog (issue #1062, epic #1181 phase 2): on-demand refresh of the
@@ -9326,7 +9338,7 @@ zarrCatalogCommand
     }
   });
 
-adminCommand.addCommand(zarrCatalogCommand);
+fleetCommand.addCommand(zarrCatalogCommand);
 
 // ============================================================================
 // Import-failure issue triage (#1310, epic #1306)

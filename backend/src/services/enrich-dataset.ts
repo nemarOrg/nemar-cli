@@ -1145,7 +1145,7 @@ export async function enrichDataset(
     // Leaving file_size/total_files/bytes_present/data_complete unset here lets
     // COALESCE preserve whatever refreshDatasetMetadata (dataset-reindex.ts,
     // which runs right after every version-DOI mint and DOES verify the
-    // manifest) or the `admin data-integrity-sweep` backfill last wrote,
+    // manifest) or the `admin fleet sweep data-integrity` backfill last wrote,
     // instead of this run clobbering the honest value back to the S3 sum on
     // every re-enrichment. s3Stats itself stays in use above for the
     // human-readable `seeded.sizes` LLM-prompt field, unrelated to these columns.
