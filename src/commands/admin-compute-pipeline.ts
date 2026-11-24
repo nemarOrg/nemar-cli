@@ -1,6 +1,6 @@
 /**
  * `nemar admin compute pipeline`: an administrator runs NEMAR's own processing recipes through the compute
- * gateway and reads the stamps they leave (epic #2005 phase A6, #2011; ADR 0118; design section 10).
+ * gateway and reads their progress grid, failures and stamps (epic #2005 phase A6, #2011; ADR 0118; design section 10).
  *
  *   nemar admin compute pipeline run <recipe> --dataset <id>[@version] [--executor tapis|runner] [--input bids|zarr] [--dry-run]
  *   nemar admin compute pipeline run <recipe> --eligible [--limit <n>] [--dry-run]
