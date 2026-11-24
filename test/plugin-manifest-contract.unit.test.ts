@@ -12,16 +12,20 @@ import { Ajv2020 } from "ajv/dist/2020";
 import * as contractIndex from "../shared/contract/index";
 import {
   PLUGIN_CHECKPOINTS,
+  PLUGIN_ENTRY_RE,
   PLUGIN_KEY_RE,
   PLUGIN_MANIFEST_FORMAT,
   PLUGIN_MANIFEST_MAX_BYTES,
   PLUGIN_MANIFEST_PROBLEMS,
   PLUGIN_MAX_METRICS,
   PLUGIN_MAX_VIEWS,
+  PLUGIN_MAX_VIEW_COLUMNS,
+  PLUGIN_MAX_VIEW_DIMS,
   PLUGIN_MAX_VIEW_ROLES,
   PLUGIN_METRIC_NAME_MAX,
   PLUGIN_METRIC_RE,
   PLUGIN_NAME_RE,
+  PLUGIN_RECIPE_RE,
   PLUGIN_VERSION_RE,
   PLUGIN_VIEW_COLUMN_RE,
   PLUGIN_VIEW_FORMAT_RE,
@@ -101,6 +105,8 @@ describe("the words and numbers", () => {
     expect(PLUGIN_MAX_METRICS).toBe(64);
     expect(PLUGIN_MAX_VIEWS).toBe(16);
     expect(PLUGIN_MAX_VIEW_ROLES).toBe(8);
+    expect(PLUGIN_MAX_VIEW_DIMS).toBe(2);
+    expect(PLUGIN_MAX_VIEW_COLUMNS).toBe(64);
     expect(PLUGIN_METRIC_NAME_MAX).toBe(128);
     expect([...PLUGIN_MANIFEST_PROBLEMS]).toEqual([
       "bounds_reversed",
@@ -113,6 +119,28 @@ describe("the words and numbers", () => {
     const words = Object.keys(contractIndex).filter((k) => /FIGURE|RASTER|PluginFigure/.test(k));
     expect(words).toEqual([]);
     expect(JSON.stringify(manifestSchema)).not.toMatch(/figure/i);
+  });
+
+  test("each JSON Schema pattern is the source of its TypeScript regex", () => {
+    const d = manifestSchema.$defs;
+    const m = d.PluginManifest.properties;
+    const view = d.View.properties;
+    const role = d.ViewProducedRole.properties;
+    const pairs: Array<[string, string, RegExp]> = [
+      ["name", m.name.pattern, PLUGIN_NAME_RE],
+      ["version", m.version.pattern, PLUGIN_VERSION_RE],
+      ["entry", m.entry.pattern, PLUGIN_ENTRY_RE],
+      ["recipes", m.reads.properties.recipes.items.pattern, PLUGIN_RECIPE_RE],
+      ["parameters", m.parameters.propertyNames.pattern, PLUGIN_KEY_RE],
+      ["metrics", m.outputs.properties.metrics.propertyNames.pattern, PLUGIN_METRIC_RE],
+      ["views", m.outputs.properties.views.propertyNames.pattern, PLUGIN_KEY_RE],
+      ["kind", view.kind.pattern, PLUGIN_VIEW_KIND_RE],
+      ["roles", view.roles.propertyNames.pattern, PLUGIN_KEY_RE],
+      ["format", role.format.pattern, PLUGIN_VIEW_FORMAT_RE],
+      ["dims", role.dims.items.pattern, PLUGIN_KEY_RE],
+      ["column name", d.ViewColumn.properties.name.pattern, PLUGIN_VIEW_COLUMN_RE],
+    ];
+    for (const [where, pattern, re] of pairs) expect(pattern, where).toBe(re.source);
   });
 
   test("the index re-exports the module", () => {
@@ -403,6 +431,89 @@ describe("agreement corpus", () => {
         valuesRole(m).columns = [{ name: "\u{1F600}".repeat(129), type: "string" }];
       }),
       false,
+    ],
+    [
+      "64 columns",
+      edit((m) => {
+        valuesRole(m).columns = Array.from({ length: 64 }, (_, i) => ({
+          name: `c${i}`,
+          type: "number",
+        }));
+      }),
+      true,
+    ],
+    [
+      "65 columns",
+      edit((m) => {
+        valuesRole(m).columns = Array.from({ length: 65 }, (_, i) => ({
+          name: `c${i}`,
+          type: "number",
+        }));
+      }),
+      false,
+    ],
+    [
+      "a column unit of 32 astral code points",
+      edit((m) => {
+        valuesRole(m).columns = [{ name: "x", type: "number", unit: "\u{1D400}".repeat(32) }];
+      }),
+      true,
+    ],
+    [
+      "a column unit of 33 astral code points",
+      edit((m) => {
+        valuesRole(m).columns = [{ name: "x", type: "number", unit: "\u{1D400}".repeat(33) }];
+      }),
+      false,
+    ],
+    [
+      "an empty column unit",
+      edit((m) => {
+        valuesRole(m).columns = [{ name: "x", type: "number", unit: "" }];
+      }),
+      false,
+    ],
+    [
+      "a column with an unknown key",
+      edit((m) => {
+        valuesRole(m).columns = [{ name: "x", type: "number", extra: 1 }];
+      }),
+      false,
+    ],
+    [
+      "a format of 16 characters",
+      edit((m) => {
+        valuesRole(m).format = `t${"s".repeat(15)}`;
+      }),
+      true,
+    ],
+    [
+      "a format of 17 characters",
+      edit((m) => {
+        valuesRole(m).format = `t${"s".repeat(16)}`;
+      }),
+      false,
+    ],
+    [
+      "a role name with a capital",
+      edit((m) => {
+        (spectrum(m).roles as Loose).Layout = { from: "recipe" };
+      }),
+      false,
+    ],
+    [
+      "a role name with a hyphen",
+      edit((m) => {
+        (spectrum(m).roles as Loose)["sensor-layout"] = { from: "recipe" };
+      }),
+      false,
+    ],
+    [
+      "a role name with an underscore",
+      edit((m) => {
+        (spectrum(m).roles as Loose).sensor_layout = { from: "recipe" };
+      }),
+      true,
     ],
     [
       "a recipe role from elsewhere",

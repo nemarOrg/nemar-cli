@@ -50,6 +50,7 @@ export const PLUGIN_MAX_VIEWS = 16;
 export const PLUGIN_MAX_VIEW_ROLES = 8;
 /** At most two dimensions, rows then columns: a role is a table or a JSON document. */
 export const PLUGIN_MAX_VIEW_DIMS = 2;
+/** NEMAR's own cap on a produced role's `columns`; neuroschema sets none. */
 export const PLUGIN_MAX_VIEW_COLUMNS = 64;
 export const PLUGIN_MAX_PARAMETERS = 32;
 export const PLUGIN_MAX_RECIPES = 8;
