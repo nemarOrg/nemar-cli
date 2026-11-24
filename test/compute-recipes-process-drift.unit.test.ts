@@ -223,9 +223,9 @@ describe("the parsing of the nemar-process sources", () => {
     ).toEqual(["nemar-quality", "nemar-spectrum"]);
     expect(
       pluginsOf(
-        "PLUGINS = (\n    ('nemar-quality', '1.0.0-b1'),  # metrics\n    (\"nemar-segment\", \"2\"),\n)\n",
+        "PLUGINS = (\n    ('nemar-quality', '1.0.0-b1'),  # metrics\n    (\"nemar-spectrum\", \"2\"),\n)\n",
       ),
-    ).toEqual(["nemar-quality", "nemar-segment"]);
+    ).toEqual(["nemar-quality", "nemar-spectrum"]);
     expect(pluginsOf("PLUGINS = ()\n")).toEqual([]);
     expect(pluginsOf('# PLUGINS = (("x", "1"),)\nSTEP_ORDER = ("a",)\n')).toBeNull();
     // a list is not the declared form: unread here, and refused by the comparison below
