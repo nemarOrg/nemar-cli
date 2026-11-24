@@ -40,6 +40,7 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
    Membership of the `docker` group is root-equivalent on its host, whoever the user is.
    Podman is unsupported until it is verified on a real host: its site-wide `containers.conf` volumes and devices and its `mounts.conf` entries reach every container, and the launcher can neither disable nor detect them.
    The launcher refuses it.
+   Amended 2026-11-24: rootless Podman runs through one verified path; see the amendment below.
    On a shared host, where only rootless engines are allowed, Apptainer is therefore the only engine today.
 7. **An operator-built image is unsigned and must say so.**
    Its source commit and image id are written into a label, a result that used it is labeled "operator-built, unsigned", and it is never presented as built in CI.
@@ -54,6 +55,31 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
 - Two engines double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is not `docker`, and the Apptainer path stays.
 - Lifting the Podman refusal is a later step: inspect a container's mounts and devices against the declared binds on a real rootless Podman host.
   A Docker-only demo machine is unaffected.
+  (Amended 2026-11-24: `container inspect` alone was not enough; see the amendment.)
+
+## Amendment 2026-11-24 (nemarOrg/nemar-process#85): rootless Podman through a shut-out configuration and a verified OCI configuration
+
+1. Podman is supported rootless only, and only through the path below.
+   Every other Podman path is refused as `runtime_unusable` before anything runs.
+2. Prevention: every Podman call the launcher and the runner make runs with `CONTAINERS_CONF` naming an empty file the caller owns,
+   `--default-mounts-file=/dev/null` and `--hooks-dir` naming an empty directory the caller owns,
+   and never with `CONTAINERS_CONF_OVERRIDE`,
+   so no site or user `containers.conf`, `mounts.conf` or OCI hook applies.
+   The container is also created with `--systemd=false`,
+   so a command named like an init system cannot turn on systemd mode and the tmpfs mounts it adds.
+3. Verification: after `podman init` and before the container starts, the launcher reads the OCI configuration the runtime was given;
+   its mounts must be exactly the declared binds plus a fixed allowlist of engine defaults written in the launcher docs, and its devices must be empty;
+   config.json may carry no hooks at all;
+   Podman's own precreate and poststop hooks are not written there, and only the prevention excludes them;
+   anything else removes the container and fails the job as `runtime_unusable` before any user code runs.
+   `podman container inspect` alone is not enough: on rootless Podman 4.9.3 it omits configured devices, tmpfs mounts and `mounts.conf` entries, which the OCI configuration holds.
+4. A host with `/etc/system-fips` is refused for Podman jobs:
+   Podman 4.9.3 adds FIPS mounts that no setting removes, and the verification refuses them.
+5. No GPU is handed over under Podman: a Podman launch that would hand one over is refused as `runtime_unusable` before any engine call,
+   while a runner's `cpu` decision for a GPU job still runs on the CPU.
+   `/dev/shm` is read-only under the launcher's flags.
+6. On a shared host, where only rootless engines are allowed, Apptainer and rootless Podman through this path are the engines;
+   the rootful Docker rule is unchanged.
 
 ## Alternatives considered
 
