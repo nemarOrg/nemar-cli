@@ -1569,10 +1569,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.5.0 envelope + required identity fields", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.5.0");
+  test("pins the v0.6.0 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.6.0");
     const ds = {
-      schema_version: "0.5.0",
+      schema_version: "0.6.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "Test",
@@ -1584,7 +1584,7 @@ describe("neuroschema dataset schema", () => {
 
   test("rejects a wrong schema_version or empty modality", () => {
     const base = {
-      schema_version: "0.5.0",
+      schema_version: "0.6.0",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "T",
@@ -1592,8 +1592,9 @@ describe("neuroschema dataset schema", () => {
       recording_modality: ["EEG"],
     };
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.2.0" })).toThrow();
-    // The previous release: the literal moved with the vendored bundle.
+    // The previous releases: the literal moved with the vendored bundle.
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.4.0" })).toThrow();
+    expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.5.0" })).toThrow();
     expect(() => neuroschemaDatasetSchema.parse({ ...base, recording_modality: [] })).toThrow();
   });
 });

@@ -2,7 +2,7 @@
  * The checkpoint counting rules (ADR 0134 decisions 2 to 4, epic #2324 phase 2): the table reader, the
  * outcome of each row at each checkpoint, the counts, the failure lists, the live progress rules, the
  * disagreement rule, what a run shows, and the neuroschema entries, validated against the vendored
- * neuroschema 0.5.0 bundle. The vectors file nemar-process replays (phase 3) is held equal to what this
+ * neuroschema bundle. The vectors file nemar-process replays (phase 3) is held equal to what this
  * module computes; `NEMAR_WRITE_PROGRESS_VECTORS=1` rewrites it.
  */
 
@@ -298,6 +298,15 @@ describe("countRecordings and failuresByCheckpoint", () => {
       failuresByCheckpoint([row("/abs.set", "failed", "load_failed", "load")], F).import,
     ).toEqual([]);
   });
+
+  test("a path neuroschema 0.6.0 relativeLocation refuses is left out of the failure lists", () => {
+    for (const path of ["./a.set", "sub-01//a.set", "sub-01/./a.set", "a%2e.set", "a.set "]) {
+      expect(
+        failuresByCheckpoint([row(path, "failed", "load_failed", "load")], F).import,
+        path,
+      ).toEqual([]);
+    }
+  });
 });
 
 describe("progressProblem", () => {
@@ -424,7 +433,7 @@ describe("pipelineRunStatus", () => {
   });
 });
 
-describe("neuroschema entries, validated against the vendored 0.5.0 bundle", () => {
+describe("neuroschema entries, validated against the vendored bundle", () => {
   const nscProcessing = compileNeuroschemaValidator("nsc:/extensions/processing.schema.json");
   const nscSignalJourney = compileNeuroschemaValidator("nsc:/extensions/signalJourney.schema.json");
   const rows = [
@@ -529,6 +538,27 @@ describe("neuroschema entries, validated against the vendored 0.5.0 bundle", () 
         sjVersion: "0.1.0",
       }),
     ).toBeNull();
+    // neuroschema 0.6.0 relativeLocation: no . segment, no empty segment, none of % ? #.
+    for (const location of ["./x.json", "a//x.json", "x.json/", "x%2ejson", "x.json#y"]) {
+      const link = {
+        recipe_version: "1.0.0",
+        processing_status: "completed",
+        location,
+        sha256: "a".repeat(64),
+        sj_version: "0.1.0",
+      };
+      expect(nscSignalJourney({ recipes: { "nemar-floor": link } }), location).toBe(false);
+      expect(
+        signalJourneyLink({
+          recipeVersion: "1.0.0",
+          status: "completed",
+          location,
+          sha256: "a".repeat(64),
+          sjVersion: "0.1.0",
+        }),
+        location,
+      ).toBeNull();
+    }
   });
 
   test("both entries validate inside a whole dataset document through the dataset root", () => {

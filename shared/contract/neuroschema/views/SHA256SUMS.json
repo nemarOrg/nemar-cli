@@ -1,0 +1,238 @@
+{
+  "format": "nemar.vendored-files.v1",
+  "description": "The neuroschema view files vendored beside dataset.bundle.json, byte for byte: each copy's path under views/, its path in the neuroschema repository at source_commit, its size and its SHA-256.",
+  "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
+  "note": "Do not hand-edit; regenerate from the neuroschema repo.",
+  "neuroschema_version": "0.6.0",
+  "source_commit": "e09ed40791b68c35d9698f3b663bfc4a998f3986",
+  "files": [
+    {
+      "path": "examples/dataquality-record-nemar-ica.json",
+      "source": "examples/views/dataquality-record-nemar-ica.json",
+      "size": 22378,
+      "sha256": "8b9109c89b36688b4e61cc5be193708470ca8afe9703f322b8a8bf53608d702e"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_chanlocs.tsv",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_chanlocs.tsv",
+      "size": 357,
+      "sha256": "2fdca00cc2f6c1e83475a84a9b6f50670fe999347d8cf9da51469d8584c7f90a"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_components.tsv",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_components.tsv",
+      "size": 896,
+      "sha256": "43e3f64443d5b7483c86a08ae12d6c0f7e7204815f4d866d7e1bf3d621394685"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_icclasses.json",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_icclasses.json",
+      "size": 346,
+      "sha256": "8bcc3c2a856ab48c31a9d7b8d2a9c892da945eacaaa455155929145cd4452a61"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_mixing.tsv",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_mixing.tsv",
+      "size": 1799,
+      "sha256": "2c154b01fdc257195de2a465a33a5be0fa901e27b2eff63ef27b2227afedc8ee"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_servingunmixing.tsv",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_servingunmixing.tsv",
+      "size": 1749,
+      "sha256": "6fe8ac33c979303849a332bfaca110cb5e2bbcf2e40b9d4ac2d6595d44e00b03"
+    },
+    {
+      "path": "examples/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_spectrum.tsv",
+      "source": "examples/views/product/sub-01/eeg/sub-01_task-rest_desc-nemarica_spectrum.tsv",
+      "size": 28751,
+      "sha256": "c8dd4ddaa56be273b4695f412217fe8954d1027559389ac6771ad8e00eaeacc6"
+    },
+    {
+      "path": "montages/GSN-HydroCel-128.json",
+      "source": "views/montages/GSN-HydroCel-128.json",
+      "size": 7102,
+      "sha256": "9aa0b938a5af370328c1e2657939a3fa81f9df86ded15e2ae933d72d0ccc0680"
+    },
+    {
+      "path": "montages/GSN-HydroCel-129.json",
+      "source": "views/montages/GSN-HydroCel-129.json",
+      "size": 7136,
+      "sha256": "54e48e489ed996043ae18bb8d5714625d9882171f7242833b8b881bb07da292d"
+    },
+    {
+      "path": "montages/GSN-HydroCel-256.json",
+      "source": "views/montages/GSN-HydroCel-256.json",
+      "size": 13518,
+      "sha256": "a995a4a97db9486d8089baaaa368f1c9d4edfbd857dbdf423d3c7fe88f556f6c"
+    },
+    {
+      "path": "montages/GSN-HydroCel-257.json",
+      "source": "views/montages/GSN-HydroCel-257.json",
+      "size": 13553,
+      "sha256": "a098e70cf9fd39ed5bbeb4c6a21ce92a7e9961feffd9a7102ba2397b06e1d501"
+    },
+    {
+      "path": "montages/GSN-HydroCel-32.json",
+      "source": "views/montages/GSN-HydroCel-32.json",
+      "size": 2035,
+      "sha256": "24eb05a1af2b4d07f9200c7c6cdf3c490e07bdaab526fcab71dc3e72f07afb20"
+    },
+    {
+      "path": "montages/GSN-HydroCel-64_1.0.json",
+      "source": "views/montages/GSN-HydroCel-64_1.0.json",
+      "size": 3592,
+      "sha256": "529083ff4140b9f5076360a9c35255fa928c962598b059fbdc31e6fcc04137b0"
+    },
+    {
+      "path": "montages/GSN-HydroCel-65_1.0.json",
+      "source": "views/montages/GSN-HydroCel-65_1.0.json",
+      "size": 3629,
+      "sha256": "76e9e3f25d2ffae8305d36eb1d87fdebcb3e8b6c43a99a69c19d41d088704cfb"
+    },
+    {
+      "path": "montages/GSN128.json",
+      "source": "views/montages/GSN128.json",
+      "size": 6837,
+      "sha256": "c4cf2420a5954a7e10ab301ecdd1d88990d028706ff5b10eadabaee2a48c70eb"
+    },
+    {
+      "path": "montages/GSN129.json",
+      "source": "views/montages/GSN129.json",
+      "size": 6872,
+      "sha256": "04b09f15536a8e3082294c49324fb24d0db05413e3d2f046f74df1432ee3566f"
+    },
+    {
+      "path": "montages/GSN256.json",
+      "source": "views/montages/GSN256.json",
+      "size": 13584,
+      "sha256": "0863de3144b4552656befe51e07dd96ffbfde7bc477cfdda22f36b16f6358943"
+    },
+    {
+      "path": "montages/GSN257.json",
+      "source": "views/montages/GSN257.json",
+      "size": 13620,
+      "sha256": "06cf337ed7e3164871ec5490b5fae2d323277961e7dca48b6cdd24f555d50446"
+    },
+    {
+      "path": "montages/GSN64v2_0.json",
+      "source": "views/montages/GSN64v2_0.json",
+      "size": 3558,
+      "sha256": "dee98bd698e0df8f440caa2ae86c3a54e8ec6f8c50a3ba7aa05996554783c8c1"
+    },
+    {
+      "path": "montages/GSN65v2_0.json",
+      "source": "views/montages/GSN65v2_0.json",
+      "size": 3593,
+      "sha256": "0fcbf1da718b9c3a2e5e3af501c04a7618e12b908eb3d0d76b38c2bdcd151115"
+    },
+    {
+      "path": "montages/PROVENANCE.json",
+      "source": "views/montages/PROVENANCE.json",
+      "size": 49736,
+      "sha256": "c95e66407692be157eacb663b32ffcc51a2b211cfdbc9da0c1b44a3c308cef52"
+    },
+    {
+      "path": "montages/biosemi128.json",
+      "source": "views/montages/biosemi128.json",
+      "size": 6800,
+      "sha256": "2e4c901666ddae73bb5739d2bbfe0d3f0038dbaff0e45bda31de10dfb4f31e8b"
+    },
+    {
+      "path": "montages/biosemi16.json",
+      "source": "views/montages/biosemi16.json",
+      "size": 1068,
+      "sha256": "bce3736f131c3b469d42bc8d7664b126c6ab71c0ca0ec16237de422a65a7c1cb"
+    },
+    {
+      "path": "montages/biosemi160.json",
+      "source": "views/montages/biosemi160.json",
+      "size": 8465,
+      "sha256": "9befce6988429f9ec91087c11f50c8b9137a96b1f5ff2b4ceb3d98504505fa20"
+    },
+    {
+      "path": "montages/biosemi256.json",
+      "source": "views/montages/biosemi256.json",
+      "size": 13530,
+      "sha256": "a40abd1cc9f099dab48f873d356599cd3d0a4c05fce25899bf57223dfb1b8621"
+    },
+    {
+      "path": "montages/biosemi32.json",
+      "source": "views/montages/biosemi32.json",
+      "size": 1920,
+      "sha256": "c3774f6cda6df731e09ce463e8876b48792632929599b80d6593a3818388eac4"
+    },
+    {
+      "path": "montages/biosemi64.json",
+      "source": "views/montages/biosemi64.json",
+      "size": 3526,
+      "sha256": "b807cc2e0f407d9e44214f1755ad86e31411bb9e5ab6048b3d4de26c7776186e"
+    },
+    {
+      "path": "montages/standard_1005.json",
+      "source": "views/montages/standard_1005.json",
+      "size": 16381,
+      "sha256": "2232d1a904f80e5f0825449bd15693d0b5b640db716dc462ccb1e3c5f10bb52b"
+    },
+    {
+      "path": "registry.json",
+      "source": "views/registry.json",
+      "size": 7872,
+      "sha256": "039bc17fc2d88d3c5f99f5037c916821082535e7ef554aa0355f88c991066974"
+    },
+    {
+      "path": "vectors/ic-activity.v1.json",
+      "source": "views/vectors/ic-activity.v1.json",
+      "size": 1247782,
+      "sha256": "05a8a4cea72def73ab7c2891a451f6669877d47aad7d3cd95f763c9b1e564e3e"
+    },
+    {
+      "path": "vectors/kinds-models.v1.json",
+      "source": "views/vectors/kinds-models.v1.json",
+      "size": 1519411,
+      "sha256": "93e7646c9964dd7b5f49fa8aa9b28decb5ada59014629663894272684d63d9c2"
+    },
+    {
+      "path": "vectors/kinds-verdicts.v1.json",
+      "source": "views/vectors/kinds-verdicts.v1.json",
+      "size": 771435,
+      "sha256": "456bed1287ef76bea291b71ce19698085949463b574e76c90ba09723d15b33d5"
+    },
+    {
+      "path": "vectors/preset-checks.v1.json",
+      "source": "views/vectors/preset-checks.v1.json",
+      "size": 311507,
+      "sha256": "a4517dda1546f7213823ada152a4284ae7e9d5df57604ad1f9df147a4301d67e"
+    },
+    {
+      "path": "vectors/record-checks.v1.json",
+      "source": "views/vectors/record-checks.v1.json",
+      "size": 196899,
+      "sha256": "4d9e641606037d351a93621c8eeef588f3862cf4981187fc366c504c15c28905"
+    },
+    {
+      "path": "vectors/sensor-field.v1.json",
+      "source": "views/vectors/sensor-field.v1.json",
+      "size": 2338544,
+      "sha256": "4b17295f7671b672cc0b7501aba22449568f47e0d680d2b4292b6d9ad6a73daf"
+    },
+    {
+      "path": "vectors/sensor-labels.v1.json",
+      "source": "views/vectors/sensor-labels.v1.json",
+      "size": 599931,
+      "sha256": "513585425329f948c76b36c79abffc06be0ab95efe8ebce267695fc3898d4ebf"
+    },
+    {
+      "path": "vectors/sensor-layout.v1.json",
+      "source": "views/vectors/sensor-layout.v1.json",
+      "size": 273484,
+      "sha256": "93afc886806cfdbdac51ec9fd989d90ac69944d57f1eb275ec3e8b91e5d804e0"
+    },
+    {
+      "path": "vectors/view-digest.v1.json",
+      "source": "views/vectors/view-digest.v1.json",
+      "size": 22145,
+      "sha256": "ddc048c896b098302300eabaedfd289f596df2df3a03a3e40450cbc87ac07b70"
+    }
+  ]
+}

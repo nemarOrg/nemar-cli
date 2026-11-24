@@ -502,7 +502,7 @@ describe("GET /<id>/metadata.json, through the real route", () => {
       };
       const index = parsed.extensions.nemar.bids_index;
       index.subjects = withoutSessionModalities(index.subjects);
-      // The one deliberate change since the snapshot: neuroschema 0.5.0 (ADR 0134, epic #2324 phase 2)
+      // The one deliberate change since the snapshot: neuroschema 0.6.0 (ADR 0137, epic #2324)
       // moved `schema_version` from 0.4.1. Nothing else differs, and no pipeline extension appears for a
       // dataset with no pipeline documents.
       const snapshot = PRE_CHANGE.metadata_json[fixture.id] as string;

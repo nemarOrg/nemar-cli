@@ -217,6 +217,16 @@ describe("agreement corpus: Ajv and zod give the named verdict", () => {
     ["path with a newline", f0("path", "a\nb"), false],
     ["path with a trailing newline", f0("path", "a.set\n"), false],
     ["path with dots in a name", f0("path", "a/..b/c...set"), true],
+    ["path with a . segment", f0("path", "./a.set"), false],
+    ["path with an inner . segment", f0("path", "sub-01/./a.set"), false],
+    ["path with an empty segment", f0("path", "sub-01//a.set"), false],
+    ["path with a trailing slash", f0("path", "sub-01/"), false],
+    ["path with a leading space", f0("path", " a.set"), false],
+    ["path with a trailing space", f0("path", "a.set "), false],
+    ["path with a percent sign", f0("path", "a%2e.set"), false],
+    ["path with a question mark", f0("path", "a.set?x"), false],
+    ["path with a hash", f0("path", "a.set#x"), false],
+    ["path with an inner space", f0("path", "a b.set"), true],
     ["code capitalized", f0("code", "Load_failed"), false],
     ["code missing", f0("code", DROP), false],
     ["step null", f0("step", null), true],
@@ -236,7 +246,7 @@ describe("agreement corpus: Ajv and zod give the named verdict", () => {
   });
 });
 
-describe("agreement with neuroschema 0.5.0", () => {
+describe("agreement with the vendored neuroschema", () => {
   const nscCounts = compileNeuroschemaValidator("nsc:/definitions/checkpointCounts.schema.json");
   const nscTypes = (def: string) =>
     compileNeuroschemaValidator(`nsc:/definitions/processingTypes.schema.json#/$defs/${def}`);
@@ -299,9 +309,66 @@ describe("agreement with neuroschema 0.5.0", () => {
 
   test("every path the contract accepts, neuroschema relativeLocation accepts", () => {
     const nsc = nscTypes("relativeLocation");
-    for (const s of ["a.set", "sub-01/eeg/a.set", "a/..b", "./a", "a//b", "a b.set", "~x/y"]) {
+    for (const s of [
+      "a.set",
+      "sub-01/eeg/a.set",
+      "a/..b",
+      "a/.b/c..",
+      "a b.set",
+      "~x/y",
+      'a"b',
+      "a&b=c;d",
+      "a".repeat(PROGRESS_PATH_MAX),
+    ]) {
       expect(PROGRESS_PATH_RE.test(s), s).toBe(true);
       expect(nsc(s), s).toBe(true);
     }
+  });
+
+  test("every path neuroschema 0.6.0 relativeLocation refuses, the contract refuses", () => {
+    const nsc = nscTypes("relativeLocation");
+    for (const s of [
+      "./a",
+      "a/./b",
+      "a/.",
+      ".",
+      "..",
+      "a/../b",
+      "a//b",
+      "//a",
+      "a/",
+      " a",
+      "a ",
+      "a%20b",
+      "a?b",
+      "a#b",
+      "a\\b",
+      "/a",
+      "https:a",
+      "a\nb",
+      "a\u2028b",
+      "",
+    ]) {
+      expect(nsc(s), JSON.stringify(s)).toBe(false);
+      expect(PROGRESS_PATH_RE.test(s), JSON.stringify(s)).toBe(false);
+    }
+  });
+
+  test("the contract is narrower only by ASCII: a path neuroschema accepts with a non-ASCII letter is refused", () => {
+    const nsc = nscTypes("relativeLocation");
+    for (const s of ["sub-01/\u00e9.set", "\u00e9"]) {
+      expect(nsc(s), s).toBe(true);
+      expect(PROGRESS_PATH_RE.test(s), s).toBe(false);
+    }
+  });
+});
+
+describe("the JSON Schema path pattern is the regular expression zod uses", () => {
+  test("in the progress schema (the results report holds its ProgressPath equal to this one)", () => {
+    const fromSchema = new RegExp(
+      (progressSchema.$defs.ProgressPath as { pattern: string }).pattern,
+    ).source;
+    expect(fromSchema).toBe(PROGRESS_PATH_RE.source);
+    expect(progressSchema.$defs.ProgressPath.maxLength).toBe(PROGRESS_PATH_MAX);
   });
 });
