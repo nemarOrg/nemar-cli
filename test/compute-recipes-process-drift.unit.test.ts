@@ -18,9 +18,9 @@
  * for `nemar-ica`, in that order; each pre-check at `preprocess`. A `steps.py` that declares `CHECKPOINTS`
  * must declare `PRE_CHECKS` too, and its `CHECKPOINTS` must be the registry's map, step for step.
  *
- * A recipe's quality plugins (ADR 0134 decisions 6 and 7) are steps of the map too, at `quality` and
- * `figures`, declared in nemar-process as `PLUGINS = (("name", "version"), ...)` beside `STEP_ORDER`, which does
- * not list them. Until a `steps.py` declares `PLUGINS` (nemar-process `dev` and its epic branch before phase 5
+ * A recipe's quality plugins (ADR 0134 decisions 6 and 7) are steps of the map too, all at `quality` (ADR 0137
+ * removed the `figures` checkpoint), declared in nemar-process as `PLUGINS = (("name", "version"), ...)` beside
+ * `STEP_ORDER`, which does not list them. Until a `steps.py` declares `PLUGINS` (nemar-process `dev` and its epic branch before phase 5
  * P4), its `CHECKPOINTS` may hold all of the registry's plugin steps (nemar-process #78 lists `quality`) or
  * none, the comparison then leaving them out, and a checkpoint left empty by that; once it declares them, its
  * plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
@@ -235,26 +235,26 @@ describe("the parsing of the nemar-process sources", () => {
   test("withoutSteps leaves the named steps out, and a checkpoint that ends empty", () => {
     const map = [
       { checkpoint: "iclabel", steps: ["iclabel"] },
-      { checkpoint: "quality", steps: ["nemar-quality"] },
-      { checkpoint: "figures", steps: ["nemar-spectrum", "x"] },
+      { checkpoint: "quality", steps: ["nemar-quality", "nemar-spectrum"] },
     ];
     expect(withoutSteps(map, ["nemar-quality", "nemar-spectrum"])).toEqual([
       ["iclabel", ["iclabel"]],
-      ["figures", ["x"]],
+    ]);
+    expect(withoutSteps(map, ["nemar-spectrum"])).toEqual([
+      ["iclabel", ["iclabel"]],
+      ["quality", ["nemar-quality"]],
     ]);
   });
 
   describe("expectedCheckpoints: none of the plugin steps or all of them before PLUGINS, all after", () => {
     const map = [
       { checkpoint: "ica", steps: ["ica"] },
-      { checkpoint: "quality", steps: ["nemar-quality"] },
-      { checkpoint: "figures", steps: ["nemar-spectrum"] },
+      { checkpoint: "quality", steps: ["nemar-quality", "nemar-spectrum"] },
     ];
     const plugins = ["nemar-quality", "nemar-spectrum"];
     const whole: [string, string[]][] = [
       ["ica", ["ica"]],
-      ["quality", ["nemar-quality"]],
-      ["figures", ["nemar-spectrum"]],
+      ["quality", ["nemar-quality", "nemar-spectrum"]],
     ];
     const bare: [string, string[]][] = [["ica", ["ica"]]];
 
@@ -279,7 +279,7 @@ describe("the parsing of the nemar-process sources", () => {
     test("wrong checkpoint: a plugin step under another checkpoint is held to the whole map, and fails", () => {
       const misplaced: [string, string[]][] = [
         ["ica", ["ica"]],
-        ["figures", ["nemar-quality", "nemar-spectrum"]],
+        ["iclabel", ["nemar-quality", "nemar-spectrum"]],
       ];
       const expected = expectedCheckpoints(map, misplaced, null, plugins);
       expect(expected).toEqual(whole);

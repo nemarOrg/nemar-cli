@@ -187,7 +187,8 @@ export const RECORD_STEP = "record";
 
 /**
  * The standard checkpoints, in the order a recipe declares the ones it has (ADR 0134 decision 2), and
- * `stored`, which only the backend sets.
+ * `stored`, which only the backend sets. There is no `figures` checkpoint: views are written at `quality`
+ * (ADR 0137 decision 1).
  */
 export const STANDARD_CHECKPOINTS = [
   "import",
@@ -195,7 +196,6 @@ export const STANDARD_CHECKPOINTS = [
   "ica",
   "iclabel",
   "quality",
-  "figures",
   "stored",
 ] as const;
 
@@ -211,15 +211,16 @@ export const STORED_CHECKPOINT = "stored";
 export const RECIPE_PRE_CHECKS = ["qc_amplitude", "ica_eligibility", "iclabel_locations"] as const;
 
 /**
- * The quality plugins a recipe runs (ADR 0134 decisions 6 and 7): each is a step of the recipe's record and of
- * its recordings table, named by the plugin, at the checkpoint its manifest declares (`quality` for metrics,
- * `figures` for figures). Only `nemar-ica` runs plugins today (owner decision of 2026-11-23). nemar-process
- * declares the same names, with their pinned versions, as `PLUGINS` beside `STEP_ORDER` in the recipe's
- * `steps.py`; `STEP_ORDER` does not list them. A plugin that fails is recorded as skipped in the record and the
+ * The quality plugins a recipe runs (ADR 0134 decisions 6 and 7, ADR 0137 decisions 4 and 5): each is a step of
+ * the recipe's record and of its recordings table, named by the plugin, at the checkpoint its manifest declares,
+ * which is always `quality` (metrics and views alike). Only `nemar-ica` runs plugins today (owner decision of
+ * 2026-11-23): `nemar-quality` (metrics and the ICLabel class view) and `nemar-spectrum` (the spectrum view).
+ * nemar-process declares the same names, with their pinned versions, as `PLUGINS` beside `STEP_ORDER` in the
+ * recipe's `steps.py`; `STEP_ORDER` does not list them. A plugin that fails is recorded as skipped in the record and the
  * recording still succeeds (owner decision of 2026-11-23), so a table row names a plugin step only if the
  * recording failed in it in a way the plugin runner does not absorb.
  */
-export const RECIPE_PLUGIN_STEPS = ["nemar-quality"] as const;
+export const RECIPE_PLUGIN_STEPS = ["nemar-quality", "nemar-spectrum"] as const;
 
 const FLOOR_PREPROCESS_STEPS = Object.freeze([
   "flatline",
@@ -304,7 +305,7 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
     placeholder: true,
     eligibility: "eeg",
     // The floor steps it re-runs as preparation map as in the floor, except its re-run `qc` (ADR 0134); its
-    // quality plugin follows the decomposition at `quality`.
+    // quality plugins follow the decomposition at `quality` (ADR 0137).
     checkpoints: Object.freeze([
       checkpoint("import", ["load", "signal_channels"]),
       checkpoint("preprocess", [
@@ -317,10 +318,11 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
       ]),
       checkpoint("ica", ["ica"]),
       checkpoint("iclabel", ["iclabel"]),
-      checkpoint("quality", ["nemar-quality"]),
+      checkpoint("quality", ["nemar-quality", "nemar-spectrum"]),
     ]),
-    // About 13 files per recording, plus the dataset's: the policy's 5,000 stops at about 384 recordings;
-    // 25,000 admits about 1,920, headroom over a 1,000-recording dataset and room for figure files later.
+    // About 16 files per recording with its views (ADR 0137: `_chanlocs.tsv`, `_icclasses.json` and
+    // `_spectrum.tsv` beside the 13 it wrote), plus the dataset's: the policy's 5,000 stops at about 312
+    // recordings; 25,000 admits about 1,560, headroom over a 1,000-recording dataset.
     resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
 ]) as readonly ComputeRecipe[];
