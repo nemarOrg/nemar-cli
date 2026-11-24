@@ -46,6 +46,14 @@ describe("common-command tiering", () => {
     });
   }
 
+  test("nemar admin --help lists all fourteen groups and folds nothing (ADR 0135)", async () => {
+    const out = await help(["admin", "--help"]);
+    expect(out).not.toContain("More commands");
+    expect(describedCommands(out).filter((name) => name !== "help")).toHaveLength(14);
+    expect(describedCommands(out)).toContain("rework");
+    expect(describedCommands(out)).toContain("fleet");
+  });
+
   test("a group with no declared table is untouched", async () => {
     const out = await help(["auth", "--help"]);
     expect(out).not.toContain("More commands");
