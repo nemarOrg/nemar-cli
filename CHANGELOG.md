@@ -55,6 +55,9 @@ earlier releases are described only by their generated notes.
   These are the values the nemar-process images report once its release carries them (the pre-release recipe version, and eegprep with the commit the image installs it from); before, the registry said `1.0.0` and `eegprep@0.5.0`.
   Deploy order: release nemar-process, publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE` wherever compute is or will be on, check the pinned digest's tuple with `nemar-recipe version`, and only then deploy this, at a moment with no open `nemar-floor` stamps.
   Deployed before the image, the first finished run holds the new tuple (`tuple_mismatch`), and a hold of a tuple the registry still declares never clears.
+- **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
+  nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
+  The engine and the checkpoint maps are unchanged, the progress vectors are regenerated, and the same deploy order as `1.0.0-b1` applies.
   Effects on existing rows: succeeded stamps on the old tuple stop blocking re-dispatch; failures on the old tuple stop counting toward the retry cooldown and cap; holds on the old tuple stop applying; an in-flight stamp on the old tuple does not block a claim of the new one, so a dataset can run twice, the second ending `tuple_already_stamped`.
   No derivative key, migration or DOI changes.
   CI now compares the registry with nemar-process `dev` (`test/compute-recipes-process-drift.unit.test.ts`).
