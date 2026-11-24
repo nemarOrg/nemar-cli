@@ -263,7 +263,7 @@ const RECIPE_ENGINE = "eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8";
 export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   Object.freeze({
     name: "nemar-floor",
-    version: "1.0.0-b1",
+    version: "1.0.0-b2",
     appId: "nemar-launch",
     appVersion: "1.0.0",
     engine: RECIPE_ENGINE,
@@ -289,7 +289,7 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
   }),
   Object.freeze({
     name: "nemar-ica",
-    version: "1.0.0-b1",
+    version: "1.0.0-b2",
     appId: "nemar-launch",
     appVersion: "1.0.0",
     engine: RECIPE_ENGINE,

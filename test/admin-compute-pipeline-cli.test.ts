@@ -507,7 +507,7 @@ describe("stamps", () => {
     const lines = r.stdout.trim().split("\n");
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(
-      /nm000106 v1\.0\.0\s+nemar-floor 1\.0\.0-b1 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 bids attempt 1\s+dispatched job job_[0-9a-f]{24}/,
+      /nm000106 v1\.0\.0\s+nemar-floor 1\.0\.0-b2 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 bids attempt 1\s+dispatched job job_[0-9a-f]{24}/,
     );
     expect(lines[2]).toContain("nm000104");
   });
@@ -609,7 +609,7 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
       "--status",
       "finished",
       "--recipe-version",
-      "1.0.0-b1",
+      "1.0.0-b2",
       "--executor",
       "runner",
       "--runner",
@@ -625,7 +625,7 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
     ]);
     expect(r.exitCode).toBe(0);
     expect(seen).toEqual([
-      `GET /admin/compute/pipeline/grid?recipe=nemar-floor&recipe_version=1.0.0-b1&executor=runner&runner=${runner}&status=finished&dataset=nm000104&after=nm000103&limit=2`,
+      `GET /admin/compute/pipeline/grid?recipe=nemar-floor&recipe_version=1.0.0-b2&executor=runner&runner=${runner}&status=finished&dataset=nm000104&after=nm000103&limit=2`,
     ]);
   });
 
@@ -635,7 +635,7 @@ describe("status: the grid (ADR 0134 decision 5, epic #2324 phase 4a)", () => {
     expect(r.exitCode).toBe(0);
     const lines = r.stdout.trim().split("\n");
     expect(lines[0]).toMatch(
-      /^nemar-floor 1\.0\.0-b1: covered 1 of 2 eligible \(50%\), complete [01], at any recipe version 1$/,
+      /^nemar-floor 1\.0\.0-b2: covered 1 of 2 eligible \(50%\), complete [01], at any recipe version 1$/,
     );
     expect(r.stdout).toContain("cells: passed/total; F<n> n failed");
     const header = lines.find((l) => l.startsWith("dataset")) as string;
@@ -1008,7 +1008,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
     expect(await count(env, "compute_pipeline_stamps")).toBe(1);
     const status = await runCli("admin", ["stamps", "--dataset", "nm000104"]);
     expect(status.stdout).toMatch(
-      /nemar-floor 1\.0\.0-b1 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 zarr attempt 1\s+dispatched/,
+      /nemar-floor 1\.0\.0-b2 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 zarr attempt 1\s+dispatched/,
     );
   });
 

@@ -58,6 +58,9 @@ earlier releases are described only by their generated notes.
   Effects on existing rows: succeeded stamps on the old tuple stop blocking re-dispatch; failures on the old tuple stop counting toward the retry cooldown and cap; holds on the old tuple stop applying; an in-flight stamp on the old tuple does not block a claim of the new one, so a dataset can run twice, the second ending `tuple_already_stamped`.
   No derivative key, migration or DOI changes.
   CI now compares the registry with nemar-process `dev` (`test/compute-recipes-process-drift.unit.test.ts`).
+- **`nemar-floor` and `nemar-ica` move to `1.0.0-b2` (epic #2324, nemarOrg/nemar-process#81).**
+  nemar-process `v0.1.1`, a source release, already carries `1.0.0-b1` with the old decisions; `1.0.0-b2` names full ICA preprocessing, typed channel rows, the ASR burst fraction and the AMICA settings.
+  The engine and the checkpoint maps are unchanged and the progress vectors are regenerated; the deploy order and the effects on existing rows are the same as for `1.0.0-b1` above.
 - **CI: the test workflow checks out `nemarOrg/nemar-process` at `dev`, not its epic branch.**
   `dev` rather than `main`, because nemar-process's `main` moves only at its releases and lags every merged pull request.
   The epic branch `feature/issue-1-epic-process` must not be deleted until this change is on nemar-cli `main`: until then, `main`'s copy of the workflow still names it.
