@@ -1,5 +1,5 @@
 /**
- * The real `nemar` binary against the real NEMAR API, for the tests of `nemar admin repo publish`.
+ * The real `nemar` binary against the real NEMAR API, for the tests of `nemar admin dataset publish`.
  *
  * What is real: the command (`bun run src/index.ts ...` as a child process, with its own
  * configuration directory), and the NEMAR API, which is the backend's own admin, dataset and
@@ -23,7 +23,7 @@
  *     seedScreenedRequest(h.db, { datasetId: "nm000460" });
  *   });
  *   test("...", async () => {
- *     const r = await h.cli(["admin", "repo", "publish", "list"]);
+ *     const r = await h.cli(["admin", "dataset", "publish", "list"]);
  *     expect(r.exitCode).toBe(0);
  *   });
  *

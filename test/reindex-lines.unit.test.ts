@@ -1,5 +1,5 @@
 /**
- * What `nemar admin reindex` prints for one dataset (#1549 follow-up): the
+ * What `nemar admin dataset reindex` prints for one dataset (#1549 follow-up): the
  * warnings the backend attaches to a successful run, and DOIs past the
  * per-run lookup cap, must reach an operator who did not ask for --json.
  */

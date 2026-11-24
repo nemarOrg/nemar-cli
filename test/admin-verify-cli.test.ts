@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin verify <id>` (owner force verify), driven through the real
+ * CLI `nemar admin users verify <id>` (owner force verify), driven through the real
  * entry point against a real local HTTP server via TEST_API_URL, isolated
  * NEMAR_CONFIG_DIR, no mocks. Harness mirrors test/admin-kind-cli.test.ts.
  */
@@ -69,14 +69,14 @@ async function runCli(args: string[], testApiUrl: string) {
   return { stdout, stderr, exitCode };
 }
 
-describe("nemar admin verify", () => {
+describe("nemar admin users verify", () => {
   test("posts to the id-keyed verify route and reports the server's message", async () => {
     const server = startServer({
       message: "User id 80 verified",
       user: { id: 80, status: "verified" },
     });
     try {
-      const result = await runCli(["admin", "verify", "80", "-y"], server.url);
+      const result = await runCli(["admin", "users", "verify", "80", "-y"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests).toContainEqual({
         method: "POST",
@@ -91,7 +91,7 @@ describe("nemar admin verify", () => {
   test("a non-numeric id exits 1 without any request", async () => {
     const server = startServer({});
     try {
-      const result = await runCli(["admin", "verify", "80abc", "-y"], server.url);
+      const result = await runCli(["admin", "users", "verify", "80abc", "-y"], server.url);
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("invalid user id");
       expect(server.requests.some((r) => r.path.includes("/verify"))).toBe(false);
@@ -103,7 +103,7 @@ describe("nemar admin verify", () => {
   test("a 409 refusal is reported with its hint and exits 1", async () => {
     const server = startServer({ error: "User is not pending" }, 409);
     try {
-      const result = await runCli(["admin", "verify", "80", "-y"], server.url);
+      const result = await runCli(["admin", "users", "verify", "80", "-y"], server.url);
       const output = result.stdout + result.stderr;
       expect(output).toContain("User is not pending");
       expect(output).toContain("Only a pending account can be force-verified");
@@ -118,7 +118,7 @@ describe("nemar admin verify", () => {
   test("a 403 refusal exits 1 too", async () => {
     const server = startServer({ error: "Owner access required" }, 403);
     try {
-      const result = await runCli(["admin", "verify", "80", "-y"], server.url);
+      const result = await runCli(["admin", "users", "verify", "80", "-y"], server.url);
       expect(result.stdout + result.stderr).toContain("Owner access required");
       expect(result.exitCode).toBe(1);
     } finally {

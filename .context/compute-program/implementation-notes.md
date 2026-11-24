@@ -93,7 +93,7 @@ Those live in the gated docs page `admin/design/compute-gateway` and in secrets.
 - **ORCID.** `users.orcid` and `users.orcid_verified` exist, but ADR 0106 lets an owner set `orcid_verified` without a sign-in.
   "Proven by an ORCID sign-in" means an `oauth_identities` row for provider ORCID.
 - **Location.** `users.city`, `users.country` (free text), `users.affiliation` (migration `0052`).
-- **Kinds.** `users.account_kind` is `person|service|test` (ADR 0048); only an owner sets it; service accounts get owner-minted keys (`nemar admin keys create`).
+- **Kinds.** `users.account_kind` is `person|service|test` (ADR 0048); only an owner sets it; service accounts get owner-minted keys (`nemar admin users keys create`).
 - **Cascades.** Credential-ending paths: `finalizeRevocation`, the owner soft delete (`tombstoneUserCascade` in `backend/src/db/user-tombstone.ts`), role demotion, key revocation (`revokeDocsCredentials` in `services/docs-auth.ts`).
   An account's OpenID Connect grants are a third set: `oidcEndStatements` (`services/oidc-cascade.ts`) is added to the batch of every path that ends a credential for good, `OIDC_END_CALLERS` lists them and a test holds the list to the code; role demotion, key revocation and sign-out leave them alone on purpose (ADR 0119 rule 12). A compute suspension or revocation ends only grants that carry a `compute.` scope: `oidcEndStatements(userId, "compute_suspended", { scopePrefix: OIDC_COMPUTE_SCOPE_PREFIX })`, and its caller is `endComputeStatements` (phase D1).
   `DOCS_GRANTS_PURGE_SQL` and `PRIVATE_GRANTS_PURGE_SQL` name their callers in docblocks, and those counts are load-bearing: add a line for every new path.

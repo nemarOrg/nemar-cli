@@ -158,7 +158,7 @@ function checkMailPreferenceBody(body: unknown): MailPreferenceBodyCheck {
         ok: false,
         error: "admin_alert_not_self_service",
         field: key,
-        message: `${key} is an admin alert, not a mail category. Admins change their alerts with nemar admin email-preferences.`,
+        message: `${key} is an admin alert, not a mail category. Admins change their alerts with nemar admin users email-preferences.`,
       };
     }
     if (!isCommunityMailCategory(key)) {
