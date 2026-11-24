@@ -7,7 +7,7 @@
  *   2. Which ones are missing summary.json entirely?
  *
  * The reports feed `GET /admin/summary/coverage` (used by
- * `nemar admin summary check` and the weekly cron) and inform which
+ * `nemar admin fleet summary check` and the weekly cron) and inform which
  * versions need a backfill dispatch.
  *
  * Why read S3 directly (via loadSummary) instead of fetching through
