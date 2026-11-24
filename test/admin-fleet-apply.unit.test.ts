@@ -37,6 +37,9 @@ const COVERAGE = {
 
 const cli = startIsolatedCli(({ path }) => {
   if (path === "/admin/summary/coverage") return Response.json(COVERAGE);
+  if (path === "/admin/datasets/availability-report-sweep") {
+    return Response.json({ processed: 1, written: 1, errors: [], remaining: 0 });
+  }
   if (path === "/admin/manifest/dispatch") {
     return Response.json({ dispatched: true, dataset_id: "nm000902", version: "1.0.0" });
   }
@@ -68,6 +71,21 @@ describe("admin fleet sweep availability", () => {
     expect(r.stdout).toContain("--apply");
     expect(r.stdout).not.toContain("--write");
   });
+
+  // ADR 0135 decision 4 keeps each command's default: the bulk sweep always wrote, so it still does,
+  // and the help has to say so rather than "dry-run by default".
+  test("--all writes without --apply, and the help says so", async () => {
+    await cli.run(["admin", "fleet", "sweep", "availability", "--all"]);
+    expect(cli.requests.map((q) => `${q.method} ${q.path}`)).toEqual([
+      "POST /admin/datasets/availability-report-sweep",
+    ]);
+    expect(cli.requests[0].query).not.toContain("dry_run");
+    const help = await cli.run(["admin", "fleet", "sweep", "availability", "--help"]);
+    const text = help.stdout.replace(/\s+/g, " ");
+    expect(text).toContain("One dataset: a preview unless --apply.");
+    expect(text).toContain("--all runs the sweep and WRITES");
+    expect(text).not.toContain("Dry-run by default");
+  });
 });
 
 describe("admin fleet summary check", () => {
@@ -75,6 +93,13 @@ describe("admin fleet summary check", () => {
     const r = await cli.run(["admin", "fleet", "summary", "check"]);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("Run with --apply to dispatch generate-manifest for the 1");
+    expect(dispatches()).toEqual([]);
+  });
+
+  test("--yes alone, without a write flag, is still a report", async () => {
+    const r = await cli.run(["admin", "fleet", "summary", "check", "--yes"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("Run with --apply to dispatch");
     expect(dispatches()).toEqual([]);
   });
 
