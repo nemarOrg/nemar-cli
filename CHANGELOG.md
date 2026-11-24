@@ -15,6 +15,15 @@ earlier releases are described only by their generated notes.
 
 ## Unreleased
 
+### Admin command tree: sweeps and checks into `fleet` (epic #2307, ADR 0135)
+
+- **What runs across all datasets moved under `nemar admin fleet`** (there is no separate maintenance group).
+  The sweeps are `admin fleet sweep hed`, `recording-stats`, `signal-defaults`, `data-integrity`, `zarr-fidelity` and `anonymity` (formerly `<name>-sweep`), and `availability-report` is `admin fleet sweep availability`.
+  `summary check` is `admin fleet summary check`, `zarr-catalog publish` is `admin fleet zarr-catalog publish`, and `e2e-test` is `admin fleet e2e-test`.
+  Each old path runs nothing, prints one line naming the new path and exits 1.
+- **`--apply` is the write flag** of `admin fleet sweep availability` (formerly `--write`) and `admin fleet summary check` (formerly `--fix`, still with `--yes` to skip the prompt); the old spellings are hidden aliases.
+- The weekly summary drift issue (`check-summary-drift.yml`) names `nemar admin fleet summary check --apply --yes`. No workflow, script or cron runs any of the moved commands unattended.
+
 ### Admin command tree: the import group and the upstream commands (epic #2307, ADR 0135)
 
 - **The import commands moved under `nemar admin import`**, beside its `status`, `rollback`, `retry` and `verify`.

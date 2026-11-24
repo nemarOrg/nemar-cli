@@ -13,8 +13,8 @@ An earlier version of this rule said they were kept private during dev; that has
 For end-to-end testing use `nm099999`, created on demand via `POST /admin/datasets/nm099999/reset` (lazily created if missing):
 
 ```bash
-nemar admin e2e-test --verbose      # reset, upload, clone, download, update cycle
-nemar admin e2e-test --skip-reset   # reuse existing nm099999 state
+nemar admin fleet e2e-test --verbose      # reset, upload, clone, download, update cycle
+nemar admin fleet e2e-test --skip-reset   # reuse existing nm099999 state
 ```
 
 The 10-step pipeline lives in `src/lib/e2e-test.ts` and sources `test/fixtures/bids-minimal/`.
