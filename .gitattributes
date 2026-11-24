@@ -8,3 +8,6 @@ test/neurobagel/golden/** -text linguist-generated
 test/neurobagel/oracle/** linguist-generated
 shared/neurobagel/vocab/** linguist-generated
 scripts/neurobagel/*.py.lock linguist-generated
+# The neuroschema view files are vendored byte for byte and held to their SHA256SUMS.json
+# (shared/contract/neuroschema/build-vendor.mjs), so git must never normalize them.
+shared/contract/neuroschema/views/** -text linguist-generated
