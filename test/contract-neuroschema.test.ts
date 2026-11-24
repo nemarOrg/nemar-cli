@@ -12,6 +12,7 @@ import {
   DATA_PAPER_STRING_CAPS,
   MAX_DATA_PAPER_YEAR,
   MIN_DATA_PAPER_YEAR,
+  normalizeDataPaper,
   validateDataPapers,
 } from "../backend/src/services/data-papers";
 import { digestManifest } from "../backend/src/services/data-router";
@@ -285,6 +286,42 @@ describe("data_papers field (v0.4.1, ADR 0077)", () => {
     ["an empty string", ""],
   ])("rejects a malformed doi: %s", (_label, doi) => {
     expect(validate(withPapers([{ ...SCI_DATA, doi }]))).toBe(false);
+  });
+
+  test.each([
+    ["a non-ASCII letter in the suffix", "10.1038/caf\u00e9"],
+    ["a non-breaking space in the suffix", "10.1038/a\u00a0b"],
+    ["a tab in the suffix", "10.1038/a\tb"],
+    ["a trailing newline", "10.1038/abc\n"],
+    ["non-ASCII digits in the registrant", "10.\u0661\u0662\u0663\u0664/abc"],
+    ["a registrant of ten digits", "10.1234567890/abc"],
+  ])("rejects a doi outside printable ASCII or the registrant bounds: %s", (_label, doi) => {
+    expect(validate(withPapers([{ ...SCI_DATA, doi }]))).toBe(false);
+  });
+
+  test("the writer's doi rule is neuroschema 0.6.0 dataPaper.doi, case for case", () => {
+    // normalizeDataPaper trims, so the corpus holds no surrounding whitespace: what it judges is the
+    // pattern itself, which must give the schema's verdict for every case.
+    for (const doi of [
+      "10.1038/s41597-019-0027-4",
+      "10.5524/100542",
+      "10.6084/m9.figshare.6427334.v5",
+      "10.1000/<x>",
+      "10.1000/!~",
+      "10.123456789/a",
+      "10.1234567890/a",
+      "10.123/a",
+      "10.1038/caf\u00e9",
+      "10.1038/a\u00a0b",
+      "10.1038/a\u2028b",
+      "10.1038/a b",
+      "10.\u0661\u0662\u0663\u0664/abc",
+      "10.1038/",
+      "https://doi.org/10.1038/abc",
+    ]) {
+      const schema = validate(withPapers([{ doi }])) as boolean;
+      expect(normalizeDataPaper({ doi }) !== null, JSON.stringify(doi)).toBe(schema);
+    }
   });
 
   test("rejects a wrong-typed detail", () => {
