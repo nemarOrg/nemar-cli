@@ -314,6 +314,8 @@ Dataset Management:
                       annex normalize, policy, key-registration, content-recovery
   import            - OpenNeuro imports: openneuro (import a dataset), status, rollback,
                       retry, verify, coverage, weekly, triage
+  fleet             - Across all datasets: drift, enforce, require-review, revalidate,
+                      sweep, summary, zarr-catalog, e2e-test
 
 Examples:
   $ nemar admin users --verified           # List users awaiting approval
@@ -4480,10 +4482,10 @@ Requirements:
   - Active nemar auth session
 
 Examples:
-  $ nemar admin e2e-test                    # Full test
-  $ nemar admin e2e-test --verbose          # With detailed output
-  $ nemar admin e2e-test --skip-cleanup     # Keep temp dirs for inspection
-  $ nemar admin e2e-test --skip-reset       # Reuse existing nm099999 state`,
+  $ nemar admin fleet e2e-test                 # Full test
+  $ nemar admin fleet e2e-test --verbose       # With detailed output
+  $ nemar admin fleet e2e-test --skip-cleanup  # Keep temp dirs for inspection
+  $ nemar admin fleet e2e-test --skip-reset    # Reuse existing nm099999 state`,
   )
   .action(async (options: { verbose?: boolean; skipReset?: boolean; skipCleanup?: boolean }) => {
     if (!requireAuth()) return;
@@ -4787,7 +4789,7 @@ Description:
   quarantined/blocklisted by the Phase 2 retry engine is not un-stuck by
   this reclassify (which only flips complete -> incomplete); trust
   datasets.data_complete, not import_jobs.status. Acceptance audit: run
-  'nemar admin data-integrity-sweep --reaudit' after the batch lands
+  'nemar admin fleet sweep data-integrity --reaudit' after the batch lands
   (--older-than 0 does NOT converge here -- its cutoff is relative to an
   ever-advancing now(), so a just-stamped row re-qualifies on the very next
   batch; --reaudit anchors the cutoff once so remaining reaches 0, #980).`,
@@ -4995,7 +4997,7 @@ Description:
         console.log(chalk.dim("  Or run: gh run list --repo nemarDatasets/.github --limit 5"));
         console.log(
           chalk.dim(
-            "  Watch progress with: nemar admin rework recover status  /  nemar admin data-integrity-sweep --reaudit",
+            "  Watch progress with: nemar admin rework recover status  /  nemar admin fleet sweep data-integrity --reaudit",
           ),
         );
 
@@ -5405,7 +5407,7 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
 // ============================================================================
 
 const fleetCommand = new Command("fleet").description(
-  "Governance drift reporting and enforcement (epic #713)",
+  "Across all datasets: governance drift and enforcement, sweeps, summary and Zarr catalog checks, the end-to-end test",
 );
 
 fleetCommand
@@ -7490,7 +7492,7 @@ export interface ReauditLoopResult {
 }
 
 /**
- * Pure convergence loop driving `nemar admin data-integrity-sweep --reaudit`
+ * Pure convergence loop driving `nemar admin fleet sweep data-integrity --reaudit`
  * (#980 review fix). `getBefore()` is called EXACTLY ONCE, before the first
  * `fetchBatch` call, and that single captured value is threaded UNCHANGED
  * into every subsequent `fetchBatch(before)` call -- this is the convergence
@@ -9079,7 +9081,7 @@ adminCommand
   );
 
 // ============================================================================
-// nemar admin summary check  (epic #618 / phase 2 #620)
+// nemar admin fleet summary check  (epic #618 / phase 2 #620)
 // ============================================================================
 
 /**
@@ -9288,7 +9290,7 @@ addApplyOption(
       );
       console.log(
         chalk.dim(
-          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin summary check` once they complete to verify drift cleared.",
+          "Workflow runs will appear on https://github.com/nemarDatasets/.github/actions. Re-run `nemar admin fleet summary check` once they complete to verify drift cleared.",
         ),
       );
       if (failed > 0) process.exitCode = 1;
