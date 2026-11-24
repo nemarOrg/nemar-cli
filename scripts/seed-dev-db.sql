@@ -15,7 +15,7 @@
 -- authenticate and be refused by the upload gate rather than by the
 -- middleware. It deliberately holds no token row. Its account_kind is 'test'
 -- (set further down), which the device flow refuses, so a key for it is minted
--- by an owner with `nemar admin keys create`; the first-key-from-'verified'
+-- by an owner with `nemar admin users keys create`; the first-key-from-'verified'
 -- path of the device flow itself is covered by backend/test/device-auth-routes
 -- .test.ts, not by this fixture.
 --

@@ -402,10 +402,27 @@ nemar admin dataset doi create <id>        # Create concept DOI
 nemar admin dataset doi info <id>          # Get DOI info
 nemar admin dataset doi update <id>        # Update DOI metadata
 nemar admin dataset doi enrich <id>        # Enrich DOI metadata
+
+# Changes to an existing dataset
+nemar admin rework revert <id>             # Revert a dataset to a previous version (via PR)
+nemar admin rework annex normalize <id>    # Move data kept in git into the annex; --apply makes the change
+
+# Imports and upstream re-pulls
+nemar admin import openneuro <ds-ids>      # Import an OpenNeuro dataset
+nemar admin import status [id]             # Follow an import job
+nemar admin repull plan <id>               # Plan a re-pull of a newer upstream snapshot
+nemar admin repull upstream-status         # Which mirrors are behind upstream
+
+# Across all datasets
+nemar admin fleet drift                    # Repositories off the governance spec
+nemar admin fleet sweep hed                # A metadata sweep (also recording-stats, signal-defaults, ...)
+nemar admin fleet summary check            # summary.json coverage; --apply dispatches repairs
+nemar admin fleet e2e-test                 # End-to-end test against nm099999
 ```
 
-`unpublish`, `withdraw` and `restore` are dry runs until `--apply` (`--execute` still works).
-A moved admin command, such as `nemar admin ci check`, exits 1 and names its new path (ADR 0135).
+`nemar admin --help` lists the fourteen groups (ADR 0135).
+`--apply` is the one flag that makes a dry-run-by-default command write; the spellings commands had before (`--execute`, `--write`, `--fix`) still work as hidden aliases.
+A moved admin command, such as `nemar admin ci check`, exits 1 and names its new path; the CHANGELOG lists every one.
 
 ## Access Control
 
