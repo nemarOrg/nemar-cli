@@ -4454,8 +4454,7 @@ const importOpenneuroCommand = new Command("openneuro")
 // E2E Test
 // ============================================================================
 
-adminCommand
-  .command("e2e-test")
+const e2eTestCommand = new Command("e2e-test")
   .description("Run end-to-end test against nm099999 (admin only)")
   .option("--verbose", "Show detailed output for each step")
   .option("--skip-reset", "Use existing nm099999 state (skip reset)")
@@ -6783,6 +6782,7 @@ const fleetSweepCommand = new Command("sweep").description(
   "Sweeps that refresh or report derived metadata across all datasets",
 );
 fleetCommand.addCommand(fleetSweepCommand);
+fleetCommand.addCommand(e2eTestCommand);
 
 const reindexCommand = new Command("reindex").description(
   "Refresh dataset metadata: enrichment + first-class D1 columns",

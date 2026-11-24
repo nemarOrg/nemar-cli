@@ -144,6 +144,7 @@ export const MOVED_COMMANDS: readonly MovedCommand[] = [
   { oldPath: "summary check", newPath: "fleet summary check" },
   { oldPath: "zarr-catalog", newPath: "fleet zarr-catalog" },
   { oldPath: "zarr-catalog publish", newPath: "fleet zarr-catalog publish" },
+  { oldPath: "e2e-test", newPath: "fleet e2e-test" },
 ];
 
 /** Each registered stub, with what it does when addressed: print its pointer and exit 1. */
