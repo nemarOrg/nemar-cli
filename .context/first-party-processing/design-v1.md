@@ -720,7 +720,7 @@ The website viewer already has the pieces (topomap, span renderer, channel marks
 
 `nemar dataset derived list <id>`, `… cite <id> --recipe <r>`, `… download <id> --recipe <r> [--version]` (fetches the product tree by manifest, verifies sha256, writes both citations);
 `nemar admin process status|requeue|preview-bump|publish <id> --recipe <r>` (admin, mirrors the Zarr admin verbs);
-`nemar admin e2e-test` gains an optional derived step on nm099999.
+`nemar admin fleet e2e-test` gains an optional derived step on nm099999.
 
 ### G.5 Website
 

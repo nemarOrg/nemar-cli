@@ -1,5 +1,5 @@
 /**
- * `nemar admin email-preferences` and the community mail categories (epic #2260 phase 1, ADR 0132),
+ * `nemar admin users email-preferences` and the community mail categories (epic #2260 phase 1, ADR 0132),
  * driven through the real CLI entry point.
  *
  * Same harness as test/identifier-sweep-cli.test.ts: a real subprocess (`bun run src/index.ts ...`)
@@ -114,7 +114,7 @@ describe("show", () => {
   test("lists the three categories with their state, and a recall as always on with why", async () => {
     const server = startServer();
     try {
-      const r = await runCli(["admin", "email-preferences", "show"], server.url);
+      const r = await runCli(["admin", "users", "email-preferences", "show"], server.url);
       const out = `${r.stdout}${r.stderr}`;
       expect(r.exitCode).toBe(0);
       expect(out).toMatch(/News\s+enabled/);
@@ -134,7 +134,7 @@ describe("show", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "show", "--user", "someone"],
+        ["admin", "users", "email-preferences", "show", "--user", "someone"],
         server.url,
       );
       const out = `${r.stdout}${r.stderr}`;
@@ -153,7 +153,10 @@ describe("update", () => {
   test("--news off changes that one category and nothing else", async () => {
     const server = startServer();
     try {
-      const r = await runCli(["admin", "email-preferences", "update", "--news", "off"], server.url);
+      const r = await runCli(
+        ["admin", "users", "email-preferences", "update", "--news", "off"],
+        server.url,
+      );
       expect(r.exitCode).toBe(0);
       expect(server.puts().map((p) => p.body)).toEqual([{ news: false }]);
       expect(`${r.stdout}${r.stderr}`).toMatch(/News:\s+disabled/);
@@ -166,7 +169,7 @@ describe("update", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--rfcs", "on", "--maintenance", "false"],
+        ["admin", "users", "email-preferences", "update", "--rfcs", "on", "--maintenance", "false"],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -180,7 +183,7 @@ describe("update", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--all", "false"],
+        ["admin", "users", "email-preferences", "update", "--all", "false"],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -206,7 +209,7 @@ describe("update", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--announcements", "false"],
+        ["admin", "users", "email-preferences", "update", "--announcements", "false"],
         server.url,
       );
       expect(r.exitCode).toBe(1);
@@ -221,7 +224,7 @@ describe("update", () => {
     const server = startServer();
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--user", "someone", "--news", "on"],
+        ["admin", "users", "email-preferences", "update", "--user", "someone", "--news", "on"],
         server.url,
       );
       expect(r.exitCode).toBe(0);
@@ -238,7 +241,7 @@ describe("update", () => {
     const server = startServer({ refuseAlertsForOther: true });
     try {
       const r = await runCli(
-        ["admin", "email-preferences", "update", "--all", "false", "--user", "someone"],
+        ["admin", "users", "email-preferences", "update", "--all", "false", "--user", "someone"],
         server.url,
       );
       // --all names the admin alerts, which an admin may not change on another account.
@@ -253,7 +256,7 @@ describe("update", () => {
   test("no flag at all is refused with the list, including the new ones", async () => {
     const server = startServer();
     try {
-      const r = await runCli(["admin", "email-preferences", "update"], server.url);
+      const r = await runCli(["admin", "users", "email-preferences", "update"], server.url);
       expect(r.exitCode).toBe(1);
       const out = `${r.stdout}${r.stderr}`;
       expect(out).toContain("--news <bool>");

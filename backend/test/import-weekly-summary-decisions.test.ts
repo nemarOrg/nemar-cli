@@ -865,7 +865,7 @@ describe("the Neurobagel section", () => {
   });
 
   test("the headline and the command's exit code are one function", () => {
-    // `nemar admin import-weekly` calls weeklyAttention itself; this holds the headline to it, so
+    // `nemar admin import weekly` calls weeklyAttention itself; this holds the headline to it, so
     // a rule changed in one place and not the other cannot pass.
     for (const w of [
       {},
@@ -902,7 +902,7 @@ describe("the upstream freshness section (epic #1046 phase 4b)", () => {
     expect(text).toContain("| Could not be compared (OpenNeuro unavailable) | 0 |");
     expect(text).toContain("Stale in total: 3.");
     expect(text).toContain("Tag unknown and probably stale by date: 0");
-    expect(text).toContain("Names and reasons: `nemar admin upstream-status`.");
+    expect(text).toContain("Names and reasons: `nemar admin repull upstream-status`.");
     expect(text).toContain(
       "Mirrors with an unknown tag, never examined, with no version yet, with an import running or parked, and those whose source id does not match were not compared.",
     );

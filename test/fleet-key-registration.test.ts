@@ -581,7 +581,7 @@ describe("dataAvailability (ADR 0064)", () => {
     // entry basis always reports the SMALLER shortfall and makes a dataset look
     // less damaged than it is -- the exact error the ADR was written to forbid.
     //
-    // Re-measured 2026-09-16 with `nemar admin fleet key-registration on004212`.
+    // Re-measured 2026-09-16 with `nemar admin rework annex key-registration on004212`.
     const keys = Array.from({ length: 19220 }, (_, i) => `on004212-key-${i}`);
     const availability = dataAvailability({ annexed: keys, missingContent: keys.slice(0, 7495) });
 
@@ -602,7 +602,7 @@ describe("dataAvailability (ADR 0064)", () => {
     // on scripts/withdrawn-datasets.json are a different five.
     //
     // on006159's denominator is its DISTINCT KEYS (480), re-measured against the
-    // live dataset with `nemar admin fleet key-registration on006159`, which
+    // live dataset with `nemar admin rework annex key-registration on006159`, which
     // reports "222 of 480". It read 606 here, which is neither its key count nor
     // its tree-entry count, and pinned 36.6% -- the superseded figure the ADR
     // exists to disown.

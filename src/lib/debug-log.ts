@@ -95,7 +95,7 @@ export function wasUsageExit(): boolean {
 /**
  * Marks that this command's non-zero exit code IS its answer, not a failure.
  *
- * `nemar admin import-coverage` and `import-weekly` exit 1 for "unhealthy" and 2 for
+ * `nemar admin import coverage` and `import weekly` exit 1 for "unhealthy" and 2 for
  * "could not determine": a monitoring caller reads those, and both are successful
  * RUNS reporting an unhealthy or unknown STATE. Without this the exit hook printed
  * "Run again with --debug and attach the log to a new issue" underneath a correct

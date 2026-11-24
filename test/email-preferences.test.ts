@@ -315,28 +315,29 @@ beforeEach(async () => {
 
 describe("admin email-preferences show", () => {
   test("shows help text", async () => {
-    const { stdout } = await runCli(["admin", "email-preferences", "show", "--help"]);
+    const { stdout } = await runCli(["admin", "users", "email-preferences", "show", "--help"]);
     expect(stdout).toContain("email");
   });
 
   test("requires authentication", async () => {
     const ctx = createTestContext();
-    const { stderr, exitCode } = await runCli(["admin", "email-preferences", "show"], ctx);
-    const output = stderr + (await runCli(["admin", "email-preferences", "show"], ctx)).stdout;
+    const { stderr, exitCode } = await runCli(["admin", "users", "email-preferences", "show"], ctx);
+    const output =
+      stderr + (await runCli(["admin", "users", "email-preferences", "show"], ctx)).stdout;
     expect(exitCode).not.toBe(0);
   });
 });
 
 describe("admin email-preferences update", () => {
   test("shows help text", async () => {
-    const { stdout } = await runCli(["admin", "email-preferences", "update", "--help"]);
+    const { stdout } = await runCli(["admin", "users", "email-preferences", "update", "--help"]);
     expect(stdout).toContain("email");
   });
 
   test("requires authentication", async () => {
     const ctx = createTestContext();
     const { exitCode } = await runCli(
-      ["admin", "email-preferences", "update", "--user-approval", "true"],
+      ["admin", "users", "email-preferences", "update", "--user-approval", "true"],
       ctx,
     );
     expect(exitCode).not.toBe(0);

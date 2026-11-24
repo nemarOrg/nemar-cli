@@ -1,5 +1,5 @@
 /**
- * What `nemar admin repo publish` decides from a list row and prints for a review, as the pure
+ * What `nemar admin dataset publish` decides from a list row and prints for a review, as the pure
  * functions it is made of (ADR 0102, section 8).
  *
  * The queue predicates (`needsAdministrator`, `startAllCandidates`) are the two places the CLI
@@ -376,7 +376,7 @@ describe("shownLine and withheldLine", () => {
 describe("approveEvidenceLines", () => {
   const review = (evidence: unknown) => ({ id: 1, evidence }) as unknown as PublicationReviewRecord;
   const POINTER =
-    "The whole review, with the model's questions and findings: nemar admin repo publish show nm000480";
+    "The whole review, with the model's questions and findings: nemar admin dataset publish show nm000480";
   const full = () =>
     evidenceOf({
       documents: {
@@ -455,7 +455,7 @@ describe("approveEvidenceLines", () => {
   test("the dataset id in the pointer is reduced to plain text", () => {
     const pointer = approveEvidenceLines(review(evidenceOf()), `nm000480${HOSTILE}`).at(-1) ?? "";
     expect(pointer).not.toMatch(DANGEROUS);
-    expect(pointer).toContain("nemar admin repo publish show nm000480");
+    expect(pointer).toContain("nemar admin dataset publish show nm000480");
   });
 });
 

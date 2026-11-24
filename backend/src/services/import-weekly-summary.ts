@@ -264,7 +264,7 @@ export interface WeeklySummaryFacts {
  * that found nothing.
  */
 export function weeklyHeadline(f: WeeklySummaryFacts): { attention: boolean; line: string } {
-  // ONE rule, in shared/contract: `nemar admin import-weekly` takes its exit code from the same
+  // ONE rule, in shared/contract: `nemar admin import weekly` takes its exit code from the same
   // function, so the issue and the command cannot disagree about a week.
   const { attention, problems, notChecked } = weeklyAttention(f);
   if (!attention) {
@@ -454,7 +454,7 @@ function upstreamSection(u: UpstreamFleetSummary | null): string[] {
     "",
     'How the three "Behind upstream" rows divide depends on the 25 GitHub checks one weekly pass makes; it is not a fleet-wide proportion.',
     "",
-    "Names and reasons: `nemar admin upstream-status`.",
+    "Names and reasons: `nemar admin repull upstream-status`.",
   ];
 }
 

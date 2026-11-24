@@ -85,7 +85,7 @@ export async function deleteDatasetCascade(
   //
   // scheduledCleanup already fences its automated path by ID band; this is the
   // same fence at the single choke point every manual caller shares
-  // (admin delete-dataset, admin bulk-delete, draft delete, import rollback,
+  // (admin dataset delete, admin dataset bulk-delete, draft delete, import rollback,
   // and services/import-recovery.ts's auto-rollback, which is automated rather
   // than manual -- widening this fence widens it there too).
   // Non-production may only cascade ids it OWNS: the dev sandbox partition

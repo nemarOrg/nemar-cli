@@ -463,7 +463,7 @@ describe("upload-access request: success", () => {
     expect(html).toContain(WHY.replace("'", "&#39;"));
     // The command an admin runs next, keyed on the username the request
     // guarantees exists.
-    expect(html).toContain("nemar admin approve");
+    expect(html).toContain("nemar admin users approve");
   });
 
   test("nothing is sent to the requester", async () => {

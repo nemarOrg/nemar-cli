@@ -2095,7 +2095,7 @@ Description:
   what you set here applies once it is.
 
   Admin alerts (approvals, publication requests, ...) are not here: admins
-  change them with 'nemar admin email-preferences'.
+  change them with 'nemar admin users email-preferences'.
 
 Examples:
   $ nemar auth mail                       # Show (default action)
@@ -2562,7 +2562,7 @@ addVerboseHelp(
   profileSetUsernameCmd,
   `
 Description:
-  Your NEMAR handle: what 'nemar admin approve <username>' addresses and what
+  Your NEMAR handle: what 'nemar admin users approve <username>' addresses and what
   the dataset repositories you own are attributed to.
 
   It can be set while it is empty at any time, and CHANGED until an admin

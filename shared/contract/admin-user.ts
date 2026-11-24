@@ -104,11 +104,11 @@ export type AdminUserEditBody = z.infer<typeof adminUserEditBodySchema>;
 const NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
   orcid_verified:
     "the flag is set by attesting the iD with --orcid (owners only, ADR 0106) or by the person linking it with ORCID sign-in",
-  role: "use 'nemar admin role <username> <role>' (owner only)",
-  status: "use 'nemar admin approve' or 'nemar admin revoke'",
-  service_access: "upload access is granted only by 'nemar admin approve' (ADR 0040)",
-  account_kind: "use 'nemar admin kind <username> <kind>' (owner only)",
-  identity_conflict: "use 'nemar admin duplicates --clear <id>'",
+  role: "use 'nemar admin users role <username> <role>' (owner only)",
+  status: "use 'nemar admin users approve' or 'nemar admin users revoke'",
+  service_access: "upload access is granted only by 'nemar admin users approve' (ADR 0040)",
+  account_kind: "use 'nemar admin users kind <username> <kind>' (owner only)",
+  identity_conflict: "use 'nemar admin users duplicates --clear <id>'",
   email_verified:
     "set when the person proves their inbox; changing the email address resets it for you",
   description: "that is the person's own statement, and an admin does not rewrite it",
