@@ -1,7 +1,7 @@
 /**
  * `shared/contract/plugin-manifest-vectors.json`: plugin manifests and the verdicts nemar-cli gives them, for
  * nemar-process to replay against its byte copy of `plugin-manifest.schema.json` and its port of
- * `pluginManifestProblem` (ADR 0134 decision 6, epic #2324 phase 5 N1).
+ * `pluginManifestProblem` (ADR 0134 decision 6, ADR 0137 decision 4, epic #2324 phases 5 N1 and N1b).
  *
  * The file is what this test computes from the cases below: the schema verdict (Ajv on the shared JSON
  * Schema and zod must agree) and, for a manifest the schema accepts, the rule word of
@@ -32,42 +32,47 @@ const quality = (): PluginManifest => ({
   version: "1.0.0-b1",
   entry: "nemar_process.plugins.nemar_quality",
   checkpoint: "quality",
-  reads: { dataset: false, recipes: ["nemar-floor", "nemar-ica"] },
+  reads: { dataset: false, recipes: ["nemar-ica"] },
   parameters: {},
   outputs: {
     metrics: {
-      percentGoodChannels: {
-        unit: "%",
-        description: "Share of channels kept by the floor.",
-        bounds: { min: 0, max: 100 },
-      },
-      percentBrainComponents: {
+      "nemar-quality:percentBrainComponents": {
         unit: "%",
         description: "Share of components ICLabel calls brain.",
         bounds: { min: 0, max: 100 },
         headline: true,
       },
     },
-    figures: {},
+    views: {
+      icclasses: {
+        kind: "nemar.ic-classes",
+        kind_version: 1,
+        caption: "Components by ICLabel class.",
+        roles: { histogram: { format: "json", max_bytes: 65_536, dims: [] } },
+      },
+    },
   },
 });
 
-const figures = (): PluginManifest => ({
+const spectrum = (): PluginManifest => ({
   format: PLUGIN_MANIFEST_FORMAT,
-  name: "nemar-segment",
+  name: "nemar-spectrum",
   version: "1.0.0-b1",
-  entry: "nemar_process.plugins.nemar_segment",
-  checkpoint: "figures",
-  reads: { dataset: false, recipes: ["nemar-floor", "nemar-ica"] },
-  parameters: { seconds: 2 },
+  entry: "nemar_process.plugins.nemar_spectrum",
+  checkpoint: "quality",
+  reads: { dataset: false, recipes: ["nemar-ica"] },
+  parameters: { window_s: 2, overlap: 0.5, upper_hz: 125 },
   outputs: {
     metrics: {},
-    figures: {
-      midsegment: {
-        formats: ["png"],
-        time_series: true,
-        caption: "Two seconds of cleaned data from the middle of the recording.",
-        max_bytes: 400_000,
+    views: {
+      spectrum: {
+        kind: "nemar.spectrum",
+        kind_version: 1,
+        caption: "Power spectrum of each channel, in dB re 1 uV^2/Hz.",
+        roles: {
+          values: { format: "tsv", max_bytes: 1_048_576, dims: ["freq", "sensor"] },
+          layout: { from: "recipe" },
+        },
       },
     },
   },
@@ -83,13 +88,21 @@ const edit = (
   return m;
 };
 
+type Loose = Record<string, unknown>;
+
 const CASES: Array<[string, unknown]> = [
   ["quality_valid", quality()],
-  ["figures_valid", figures()],
+  ["views_only_valid", spectrum()],
+  [
+    "metrics_only_valid",
+    edit(quality, (m) => {
+      m.outputs.views = {};
+    }),
+  ],
   [
     "bounds_reversed",
     edit(quality, (m) => {
-      m.outputs.metrics.percentGoodChannels = {
+      m.outputs.metrics["nemar-quality:percentBrainComponents"] = {
         unit: "%",
         description: "x",
         bounds: { min: 100, max: 0 },
@@ -99,7 +112,7 @@ const CASES: Array<[string, unknown]> = [
   [
     "bounds_open_ended",
     edit(quality, (m) => {
-      m.outputs.metrics.percentGoodChannels = {
+      m.outputs.metrics["nemar-quality:percentBrainComponents"] = {
         unit: "%",
         description: "x",
         bounds: { min: 0, max: null },
@@ -109,7 +122,7 @@ const CASES: Array<[string, unknown]> = [
   [
     "bounds_equal",
     edit(quality, (m) => {
-      m.outputs.metrics.percentGoodChannels = {
+      m.outputs.metrics["nemar-quality:percentBrainComponents"] = {
         unit: "%",
         description: "x",
         bounds: { min: 50, max: 50 },
@@ -117,47 +130,62 @@ const CASES: Array<[string, unknown]> = [
     }),
   ],
   [
-    "bounds_reversed_before_figures_without_figure",
-    edit(figures, (m) => {
-      m.outputs.figures = {};
+    "plugin_without_output",
+    edit(quality, (m) => {
+      m.outputs = { metrics: {}, views: {} };
+    }),
+  ],
+  [
+    "metric_not_prefixed",
+    edit(quality, (m) => {
+      m.outputs.metrics = { percentBrainComponents: { unit: "%", description: "x" } };
+    }),
+  ],
+  [
+    "metric_prefixed_by_another_plugin",
+    edit(quality, (m) => {
+      m.outputs.metrics = { "nemar-spectrum:alphaPeak": { unit: "Hz", description: "x" } };
+    }),
+  ],
+  [
+    "metric_prefix_extends_the_name",
+    edit(quality, (m) => {
+      m.outputs.metrics = { "nemar-qualityx:share": { unit: "%", description: "x" } };
+    }),
+  ],
+  [
+    "bounds_reversed_before_metric_not_prefixed",
+    edit(quality, (m) => {
       m.outputs.metrics = {
         share: { unit: "%", description: "x", bounds: { min: 1, max: 0 } },
       };
     }),
   ],
   [
-    "quality_without_metric",
+    "metric_suffix_starts_with_a_digit",
     edit(quality, (m) => {
-      m.outputs.metrics = {};
+      m.outputs.metrics = { "nemar-quality:9x": { unit: "%", description: "x" } };
     }),
   ],
   [
-    "figures_without_figure",
-    edit(figures, (m) => {
-      m.outputs.figures = {};
-    }),
-  ],
-  [
-    "time_series_svg",
-    edit(figures, (m) => {
-      m.outputs.figures.midsegment.formats = ["svg"];
-    }),
-  ],
-  [
-    "time_series_png_and_webp",
-    edit(figures, (m) => {
-      m.outputs.figures.midsegment.formats = ["png", "webp"];
-    }),
-  ],
-  [
-    "map_svg",
-    edit(figures, (m) => {
-      m.outputs.figures.midsegment = {
-        formats: ["svg"],
-        time_series: false,
-        caption: "Class histogram.",
-        max_bytes: 200_000,
+    "metric_name_with_a_dot",
+    edit(quality, (m) => {
+      (m.outputs.metrics as Loose)["nemar-quality:line.noise"] = {
+        unit: "dB",
+        description: "x",
       };
+    }),
+  ],
+  [
+    "plugin_name_with_a_dot",
+    edit(quality, (m) => {
+      m.name = "nemar.quality";
+    }),
+  ],
+  [
+    "plugin_name_starts_with_a_digit",
+    edit(quality, (m) => {
+      m.name = "9quality";
     }),
   ],
   [
@@ -167,30 +195,73 @@ const CASES: Array<[string, unknown]> = [
     }),
   ],
   [
-    "checkpoint_iclabel",
+    "checkpoint_figures",
     edit(quality, (m) => {
-      (m as Record<string, unknown>).checkpoint = "iclabel";
+      (m as Loose).checkpoint = "figures";
     }),
   ],
   [
-    "figure_over_cap",
-    edit(figures, (m) => {
-      m.outputs.figures.midsegment.max_bytes = 1_048_577;
+    "checkpoint_iclabel",
+    edit(quality, (m) => {
+      (m as Loose).checkpoint = "iclabel";
+    }),
+  ],
+  [
+    "outputs_figures",
+    edit(quality, (m) => {
+      (m.outputs as Loose).figures = {};
+    }),
+  ],
+  [
+    "view_role_over_cap",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).max_bytes = 4_194_305;
+    }),
+  ],
+  [
+    "view_role_at_cap",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).max_bytes = 4_194_304;
+    }),
+  ],
+  [
+    "view_without_roles",
+    edit(spectrum, (m) => {
+      (m.outputs.views.spectrum as unknown as Loose).roles = {};
+    }),
+  ],
+  [
+    "view_kind_not_namespaced",
+    edit(spectrum, (m) => {
+      (m.outputs.views.spectrum as unknown as Loose).kind = "spectrum";
+    }),
+  ],
+  [
+    "view_kind_unregistered",
+    edit(spectrum, (m) => {
+      (m.outputs.views.spectrum as unknown as Loose).kind = "acme.ridgeline";
+    }),
+  ],
+  [
+    "view_recipe_role_from_plugin",
+    edit(spectrum, (m) => {
+      (m.outputs.views.spectrum?.roles as Loose).layout = { from: "plugin" };
+    }),
+  ],
+  [
+    "view_role_three_dims",
+    edit(spectrum, (m) => {
+      ((m.outputs.views.spectrum?.roles as Loose).values as Loose).dims = [
+        "freq",
+        "sensor",
+        "epoch",
+      ];
     }),
   ],
   [
     "entry_not_a_module_path",
     edit(quality, (m) => {
       m.entry = "nemar_process/plugins";
-    }),
-  ],
-  [
-    "metric_name_with_a_dot",
-    edit(quality, (m) => {
-      (m.outputs.metrics as Record<string, unknown>)["line.noise"] = {
-        unit: "dB",
-        description: "x",
-      };
     }),
   ],
 ];
@@ -220,10 +291,10 @@ describe("plugin manifest vectors", () => {
     }
   });
 
-  test("the cases cover a valid manifest of each checkpoint, every problem word and a schema refusal", () => {
+  test("the cases cover valid manifests, every problem word and the schema refusals", () => {
     const v = computed.vectors;
     expect(v.filter((c) => c.schema_valid && c.problem === null).map((c) => c.name)).toEqual(
-      expect.arrayContaining(["quality_valid", "figures_valid"]),
+      expect.arrayContaining(["quality_valid", "views_only_valid", "metrics_only_valid"]),
     );
     for (const word of PLUGIN_MANIFEST_PROBLEMS) {
       expect(
@@ -231,13 +302,36 @@ describe("plugin manifest vectors", () => {
         word,
       ).toBe(true);
     }
-    expect(v.find((c) => c.name === "time_series_svg")?.schema_valid).toBe(false);
-    expect(v.find((c) => c.name === "map_svg")?.schema_valid).toBe(true);
+    for (const refused of [
+      "checkpoint_figures",
+      "outputs_figures",
+      "metric_suffix_starts_with_a_digit",
+      "plugin_name_with_a_dot",
+      "view_role_over_cap",
+    ]) {
+      expect(v.find((c) => c.name === refused)?.schema_valid, refused).toBe(false);
+    }
+    expect(v.find((c) => c.name === "view_role_at_cap")).toMatchObject({
+      schema_valid: true,
+      problem: null,
+    });
+    // the registry is the loader's check (kind_unregistered), not the schema's
+    expect(v.find((c) => c.name === "view_kind_unregistered")).toMatchObject({
+      schema_valid: true,
+      problem: null,
+    });
+    // the figure vectors are gone: no valid figures manifest, no figures_without_figure word
+    expect(v.map((c) => c.name)).not.toContain("figures_valid");
+    expect(v.map((c) => c.problem)).not.toContain("figures_without_figure");
   });
 
   test("rule precedence and the bounds boundary", () => {
     const v = (name: string) => computed.vectors.find((c) => c.name === name);
-    expect(v("bounds_reversed_before_figures_without_figure")?.problem).toBe("bounds_reversed");
+    expect(v("bounds_reversed_before_metric_not_prefixed")?.problem).toBe("bounds_reversed");
+    expect(v("metric_not_prefixed")?.problem).toBe("metric_not_prefixed");
+    expect(v("metric_prefixed_by_another_plugin")?.problem).toBe("metric_not_prefixed");
+    expect(v("metric_prefix_extends_the_name")?.problem).toBe("metric_not_prefixed");
+    expect(v("plugin_without_output")?.problem).toBe("plugin_without_output");
     expect(v("bounds_equal")).toMatchObject({ schema_valid: true, problem: null });
   });
 
