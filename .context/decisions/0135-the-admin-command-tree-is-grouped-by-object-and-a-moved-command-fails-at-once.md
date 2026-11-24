@@ -70,6 +70,9 @@ Two groups are over it when the restructure ends, and both stay as they are:
 - **`mail`** (support tickets) keeps its fourteen children; the epic left that group as it was.
 
 Any other group past twelve needs a line here (or a superseding ADR) before it ships.
+
+The `repo` alias of `dataset` is load-bearing: the nemarDatasets/.github `approve-publication.yml` probe matches `nemar admin repo --help`, the website's publication queue builds `nemar admin repo publish approve <id>`, and docs.nemar.org pages name `nemar admin repo publish ...`.
+The alias may be removed only after all three name `dataset`.
 `test/admin-write-flag.unit.test.ts` holds the list and fails on a group that is not on it.
 
 ## Receipts

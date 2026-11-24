@@ -118,8 +118,8 @@ export async function listAllPublishedVersions(env: Bindings): Promise<VersionRo
   // E2E test id (`nm099999`). Both `nm*` and `on*` prefixes are included —
   // on* are OpenNeuro-mirrored datasets that ARE served via data.nemar.org
   // and SHOULD have summary.json (see memory note feedback_catalog_includes_on_prefix).
-  // Do NOT tighten this to `nm` only, even if a sibling sync (e.g.
-  // `nemar admin sync run`, which skips on*) suggests otherwise.
+  // Do NOT tighten this to `nm` only, even if a sibling sync that skips on*
+  // suggests otherwise.
   //
   // `visibility='public'` is load-bearing: the probe path below fetches
   // `data.nemar.org/<id>/<v>/summary.json`, and that route gates on
