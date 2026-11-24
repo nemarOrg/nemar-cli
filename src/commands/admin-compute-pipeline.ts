@@ -260,7 +260,7 @@ Exit codes:
   1  an option is wrong, or the Worker refused or could not be reached.`;
 
 export const pipelineCommand = new Command("pipeline").description(
-  "Run NEMAR's own processing recipes and read their stamps (admin)",
+  "Run NEMAR's recipes and show their progress grid, failures and stamps (admin)",
 );
 
 pipelineCommand
