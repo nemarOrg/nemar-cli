@@ -21,8 +21,9 @@
  * A recipe's quality plugins (ADR 0134 decisions 6 and 7) are steps of the map too, at `quality` and
  * `figures`, declared in nemar-process as `PLUGINS = (("name", "version"), ...)` beside `STEP_ORDER`, which does
  * not list them. Until a `steps.py` declares `PLUGINS` (nemar-process `dev` and its epic branch before phase 5
- * P4), the comparison leaves the registry's plugin steps out, and a checkpoint left empty by that; once it
- * declares them, its plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
+ * P4), its `CHECKPOINTS` may hold all of the registry's plugin steps (nemar-process #78 lists `quality`) or
+ * none, the comparison then leaving them out, and a checkpoint left empty by that; once it declares them, its
+ * plugin names, in order, must be the map's plugin steps and its `CHECKPOINTS` the whole map.
  *
  * The parsing helpers are pinned on literal text by the first cases below.
  */
@@ -141,6 +142,24 @@ function withoutSteps(
     .filter(([, steps]) => steps.length > 0);
 }
 
+/**
+ * The map a steps.py's `CHECKPOINTS` must equal. Once it declares `PLUGINS`, or its `CHECKPOINTS` name any of
+ * the registry's plugin steps (nemar-process #78 lists `quality` ahead of `PLUGINS`), the whole map; else the
+ * map without the plugin steps. Choosing on a mention, not on equality, keeps a partial or misplaced plugin
+ * step failing against the whole map, so the diff shows what is missing.
+ */
+function expectedCheckpoints(
+  map: readonly { checkpoint: string; steps: readonly string[] }[],
+  declaredMap: readonly [string, readonly string[]][],
+  declaredPlugins: readonly string[] | null,
+  pluginSteps: readonly string[],
+): [string, string[]][] {
+  const mentionsPlugin = declaredMap.some(([, steps]) =>
+    steps.some((s) => pluginSteps.includes(s)),
+  );
+  return withoutSteps(map, declaredPlugins !== null || mentionsPlugin ? [] : pluginSteps);
+}
+
 const STEPS: Record<string, string> = {
   "nemar-floor": "recipes/nemar_process/nemar_floor/steps.py",
   "nemar-ica": "recipes/nemar_process/nemar_ica/steps.py",
@@ -223,6 +242,55 @@ describe("the parsing of the nemar-process sources", () => {
       ["iclabel", ["iclabel"]],
       ["figures", ["x"]],
     ]);
+  });
+
+  describe("expectedCheckpoints: none of the plugin steps or all of them before PLUGINS, all after", () => {
+    const map = [
+      { checkpoint: "ica", steps: ["ica"] },
+      { checkpoint: "quality", steps: ["nemar-quality"] },
+      { checkpoint: "figures", steps: ["nemar-spectrum"] },
+    ];
+    const plugins = ["nemar-quality", "nemar-spectrum"];
+    const whole: [string, string[]][] = [
+      ["ica", ["ica"]],
+      ["quality", ["nemar-quality"]],
+      ["figures", ["nemar-spectrum"]],
+    ];
+    const bare: [string, string[]][] = [["ica", ["ica"]]];
+
+    test("none: CHECKPOINTS without plugin steps and no PLUGINS are held to the map without them", () => {
+      expect(expectedCheckpoints(map, bare, null, plugins)).toEqual(bare);
+    });
+
+    test("whole: CHECKPOINTS with every plugin step and no PLUGINS are held to the whole map", () => {
+      expect(expectedCheckpoints(map, whole, null, plugins)).toEqual(whole);
+    });
+
+    test("partial: one of two plugin steps is held to the whole map, and fails", () => {
+      const partial: [string, string[]][] = [
+        ["ica", ["ica"]],
+        ["quality", ["nemar-quality"]],
+      ];
+      const expected = expectedCheckpoints(map, partial, null, plugins);
+      expect(expected).toEqual(whole);
+      expect(partial).not.toEqual(expected);
+    });
+
+    test("wrong checkpoint: a plugin step under another checkpoint is held to the whole map, and fails", () => {
+      const misplaced: [string, string[]][] = [
+        ["ica", ["ica"]],
+        ["figures", ["nemar-quality", "nemar-spectrum"]],
+      ];
+      const expected = expectedCheckpoints(map, misplaced, null, plugins);
+      expect(expected).toEqual(whole);
+      expect(misplaced).not.toEqual(expected);
+    });
+
+    test("PLUGINS declared without the steps in CHECKPOINTS is held to the whole map, and fails", () => {
+      const expected = expectedCheckpoints(map, bare, plugins, plugins);
+      expect(expected).toEqual(whole);
+      expect(bare).not.toEqual(expected);
+    });
   });
 
   test("a [tool.uv.sources] style pin resolves through the lock, which names the branch's resolved commit", () => {
@@ -328,9 +396,8 @@ describe("the registry matches the nemar-process sources", () => {
             declared,
             `${recipe.name}: steps.py declares CHECKPOINTS without PRE_CHECKS`,
           ).not.toBeNull();
-          // before PLUGINS is declared, nemar-process's CHECKPOINTS do not hold the registry's plugin steps yet
           expect(declaredMap, `${recipe.name} CHECKPOINTS`).toEqual(
-            withoutSteps(map, declaredPlugins === null ? mappedPlugins : []),
+            expectedCheckpoints(map, declaredMap, declaredPlugins, mappedPlugins),
           );
         }
         if (declared !== null) {
