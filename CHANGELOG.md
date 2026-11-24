@@ -159,7 +159,11 @@ The request fields on the wire are unchanged (`execute=1`, `dry_run`).
 
 - **`nemar admin compute pipeline status` is the grid; the stamp list it printed is now `nemar admin compute pipeline stamps`**, with the same options.
   The route it read, `GET /admin/compute/pipeline/status`, is unchanged, so a released CLI keeps working.
-- **neuroschema 0.5.0 is vendored with a record root** (`NEUROSCHEMA_VERSION` 0.5.0, a minor bump). The live `schema_version` checks also accept 0.4.x until the backend that serves 0.5.0 is deployed.
+- **neuroschema 0.6.0 is vendored with a record root and the view files** (`NEUROSCHEMA_VERSION` 0.6.0, a minor bump over the deployed 0.4.1; ADR 0134 and 0137, epic #2324).
+  The epic's earlier 0.5.0 step was never deployed. The live `schema_version` checks also accept 0.4.x, not 0.5.x, until the backend that serves 0.6.0 is deployed.
+  neuroschema's view registry, parity vectors, montages (with their provenance) and example product are copied byte for byte into `shared/contract/neuroschema/views/`, each held to `views/SHA256SUMS.json` by the contract tests.
+  Two rules narrow to 0.6.0's: a live progress failure's path and a signalJourney link's `location` follow `relativeLocation` (no `.` segment, no empty segment, no leading or trailing space, none of `%`, `?` or `#`): a progress report that carries such a path is refused, the failure lists built from a recordings table leave its row out, and such a link is not written; and a `data_papers` DOI must be printable ASCII (`^10\.[0-9]{4,9}/[!-~]+$`): the sync refuses a list that holds any other DOI, and `metadata.json` serves no `data_papers` for a stored list that holds one.
+  `compute-progress.schema.json` and `compute-results-report.schema.json` change with the path rule; nemar-process re-copies them.
 - **The compute recipe registry declares `nemar-floor` and `nemar-ica` `1.0.0-b1`, engine `eegprep@0.5.0+edf694c8344b9c4c68672eac3acf9a819f1462a8` (#2329).**
   These are the values the nemar-process images report once its release carries them (the pre-release recipe version, and eegprep with the commit the image installs it from); before, the registry said `1.0.0` and `eegprep@0.5.0`.
   Deploy order: release nemar-process, publish the runtime image from its `main`, repin `COMPUTE_RUNTIME_IMAGE` wherever compute is or will be on, check the pinned digest's tuple with `nemar-recipe version`, and only then deploy this, at a moment with no open `nemar-floor` stamps.
