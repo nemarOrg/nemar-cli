@@ -20,10 +20,10 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
     },
     "ProgressPath": {
-      "description": "A recording's relative path: printable ASCII without a backslash, no leading slash, no URI scheme, no .. segment.",
+      "description": "A recording's relative path: neuroschema relativeLocation narrowed to printable ASCII. No leading or trailing space, no leading slash, no URI scheme, no . or .. segment, no empty segment (no // and no trailing /), and none of \\ % ? #.",
       "type": "string",
       "maxLength": 256,
-      "pattern": "^(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\\s\\S]*/)?\\.\\.(?:/|(?![\\s\\S])))[\\x20-\\x5B\\x5D-\\x7E]{1,256}(?![\\s\\S])"
+      "pattern": "^(?! )(?![\\s\\S]* (?![\\s\\S]))(?!/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\\s\\S]*/)?\\.\\.?(?:/|(?![\\s\\S])))(?![\\s\\S]*//)(?![\\s\\S]*/(?![\\s\\S]))[\\x20-\\x22\\x24\\x26-\\x3E\\x40-\\x5B\\x5D-\\x7E]{1,256}(?![\\s\\S])"
     },
     "Count": {
       "type": "integer",

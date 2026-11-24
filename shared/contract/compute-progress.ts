@@ -78,12 +78,14 @@ export const PROGRESS_FAILURE_CODE_RE = /^[a-z][a-z0-9_]{0,63}(?![\s\S])/;
 export const PROGRESS_STEP_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\s\S])/;
 
 /**
- * A recording's relative path: printable ASCII without a backslash, no leading slash, no URI scheme
- * and no `..` segment (neuroschema `relativeLocation`, narrowed to ASCII so every validator counts its
- * length alike). A launcher leaves out a failure whose path it cannot write this way.
+ * A recording's relative path: neuroschema 0.6.0 `relativeLocation` narrowed to printable ASCII, so
+ * every validator counts its length alike. No leading or trailing space, no leading slash, no URI
+ * scheme, no `.` or `..` segment, no empty segment (no `//`, no trailing `/`), and none of `\`, `%`,
+ * `?` or `#`. A launcher leaves out a failure whose path it cannot write this way, and the same rule
+ * holds a signalJourney link's `location` (shared/compute-checkpoints.ts).
  */
 export const PROGRESS_PATH_RE =
-  /^(?!\/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\s\S]*\/)?\.\.(?:\/|(?![\s\S])))[\x20-\x5B\x5D-\x7E]{1,256}(?![\s\S])/;
+  /^(?! )(?![\s\S]* (?![\s\S]))(?!\/)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!(?:[\s\S]*\/)?\.\.?(?:\/|(?![\s\S])))(?![\s\S]*\/\/)(?![\s\S]*\/(?![\s\S]))[\x20-\x22\x24\x26-\x3E\x40-\x5B\x5D-\x7E]{1,256}(?![\s\S])/;
 
 const count = z.number().int().min(0).max(PROGRESS_MAX_RECORDINGS);
 
