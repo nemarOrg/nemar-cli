@@ -37,12 +37,12 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
    The flags (dropped capabilities, no new privileges, a read-only root, the invoking user's ids, exactly the four binds) are in the launcher docs.
    Docker gets `--cpus` and `--memory` on every run.
    Apptainer gets them only when the runner's `doctor` has proved cgroup delegation (`NEMAR_ENFORCE_LIMITS=1`); otherwise the runner's own watchdog enforces wall time and resident memory and reports that mode.
-6. **Docker is rootful only on a single-tenant lab machine recorded in the gated systems inventory.**
+6. **Docker is rootful only on a single-tenant lab machine recorded in the gated systems inventory, and Podman is unsupported.**
    Membership of the `docker` group is root-equivalent on its host, whoever the user is.
-   **Superseded in part by ADR 0138.**
-   This decision's Podman clause (Podman unsupported until verified on a real host, and the launcher refusing it) is replaced by [ADR 0138](0138-rootless-podman-runs-through-prevention-and-a-verified-oci-configuration.md):
-   rootless Podman runs through one path, with site and user configuration shut out and its `config.json` verified before the container starts.
-   On a shared host, where only rootless engines are allowed, Apptainer and that Podman path are the engines.
+   Podman is unsupported until it is verified on a real host: its site-wide `containers.conf` volumes and devices and its `mounts.conf` entries reach every container, and the launcher can neither disable nor detect them.
+   The launcher refuses it.
+   On a shared host, where only rootless engines are allowed, Apptainer is therefore the only engine today.
+   **Superseded in part by ADR 0138.** Its Podman clause (unsupported until verified, refused by the launcher, Apptainer the only shared-host engine) is replaced by [ADR 0138](0138-rootless-podman-runs-through-prevention-and-a-verified-oci-configuration.md); the rootful Docker rule stands unchanged.
 7. **An operator-built image is unsigned and must say so.**
    Its source commit and image id are written into a label, a result that used it is labeled "operator-built, unsigned", and it is never presented as built in CI.
    Verifying a signature before first use is a runner feature added later; until then a runner runs the digest the Worker names, unverified.
@@ -54,8 +54,9 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
 - A rootful daemon's group is the only guard on its host, so a new machine needs an owner decision and an inventory record, not a configuration change.
 - Signing only from `main` or a tag means a pre-merge image cannot verify; a demo before a merge uses the labeled operator-built path.
 - Two engines double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is not `docker`, and the Apptainer path stays.
-- The Podman refusal was lifted by [ADR 0138](0138-rootless-podman-runs-through-prevention-and-a-verified-oci-configuration.md), which found that inspecting a container is not enough and verifies the runtime's `config.json` instead.
+- Lifting the Podman refusal is a later step: inspect a container's mounts and devices against the declared binds on a real rootless Podman host.
   A Docker-only demo machine is unaffected.
+  (Superseded by ADR 0138, which found inspection not enough and verifies `config.json`.)
 
 ## Alternatives considered
 

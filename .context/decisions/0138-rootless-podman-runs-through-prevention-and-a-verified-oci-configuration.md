@@ -16,7 +16,7 @@ because a site-wide `containers.conf` and `mounts.conf` reach every container an
 Its Consequences named the planned check: inspect a container's mounts and devices against the declared binds.
 That check alone does not work.
 On rootless Podman 4.9.3, `podman container inspect` omits configured devices, tmpfs mounts and `mounts.conf` entries;
-only the OCI configuration the runtime is given, `config.json`, holds all of them.
+only the Open Container Initiative (OCI) configuration the runtime is given, `config.json`, holds all of them.
 On a shared host, where only rootless engines are allowed, the refusal left Apptainer as the only engine.
 
 ## Decision
@@ -32,7 +32,7 @@ On a shared host, where only rootless engines are allowed, the refusal left Appt
    so a command named like an init system cannot turn on systemd mode and the tmpfs mounts it adds.
 3. **Verification reads `config.json` before the container starts.**
    After `podman init`, the container's state must be `initialized`,
-   because `start` writes `config.json` again for a container in any other state, and what was read would then not be what runs.
+   because `start` writes `config.json` again for a configured, stopped or exited container, and what was read would then not be what runs.
    The launcher then reads the `config.json` the runtime was given;
    its mounts must be exactly the declared binds plus a fixed allowlist of engine defaults written in the launcher docs, and its devices must be empty.
    Anything else removes the container and fails the job as `runtime_unusable` before any user code runs.
@@ -57,7 +57,7 @@ The path was verified in continuous integration (CI), on GitHub's hosted Ubuntu 
 That counts as the real host decision 6 named: it is a real rootless engine, not a stand-in.
 The job runs the launcher end to end, shows that the prevention holds against planted site and user configuration,
 and shows that the verification refuses each planted mount, device and hook when the prevention is bypassed.
-A lab host repeats the verification later.
+A lab host has not yet repeated the verification.
 Other distributions' defaults are unexercised; an engine default outside the allowlist fails closed, as `runtime_unusable`.
 
 ## Consequences
