@@ -22,6 +22,7 @@ Every administrator relearns the admin paths once: `nemar admin` is now fourteen
 A moved path is not forwarded: it runs nothing, prints one line naming its new path, and exits 1, so a script or cron that still calls it fails where someone reads it.
 - Announce the release a week ahead with `nemar admin notice set`, naming this section.
 - Update the CLI before following new mail or refusal text: the backend names the new paths (for example `nemar admin users approve <username>` in the approval mail), which an older CLI does not have.
+- The stubs stay until the second minor version after this release (0.11 or 0.12, whichever comes second), and are then removed in one change with its own release note.
 - Callers outside this repository ship in the same release: docs.nemar.org, the website, nemar-observability and nemarDatasets/.github.
   The OpenNeuro onboarding workflow already probes for `admin import openneuro` and falls back to `admin import-openneuro`; that fallback is removed from both copies after this release has reached npm.
 
