@@ -68,19 +68,18 @@ export function formatAjvErrors(validate: ValidateFunction): string {
 }
 
 /**
- * The `schema_version` a LIVE response may carry: the same MAJOR.MINOR as
- * `NEUROSCHEMA_VERSION`, any PATCH, plus the MINOR lines in
- * `NEUROSCHEMA_TRANSITION_LINES` while a MINOR release is being deployed.
+ * The `schema_version` a LIVE response may carry: the same MAJOR.MINOR as `NEUROSCHEMA_VERSION`,
+ * any PATCH, plus the MINOR lines in `NEUROSCHEMA_TRANSITION_LINES` while a MINOR release is being
+ * deployed.
  *
  * The live checks run against a deployed backend, and a pull request that bumps
- * `NEUROSCHEMA_VERSION` cannot be deployed before its own CI runs. Pinning the
- * exact string there turns every such release red until the deploy lands, for a
- * difference that is harmless by definition. A PATCH is always accepted. A MINOR
- * (a breaking change or a new extension namespace) is accepted only for the
- * previous line named in `NEUROSCHEMA_TRANSITION_LINES`, which exists only until
- * the backend that serves the new MINOR is deployed: the deployed backend serves
- * 0.4.1, and epic #2324 moves it to 0.6.0 (ADR 0137; its 0.5.0 step was never
- * deployed), so "0.4" stays there until that deploy and the follow-up empties it. The exact version is pinned by the pure tests
+ * `NEUROSCHEMA_VERSION` cannot be deployed before its own CI runs. Pinning the exact string there
+ * turns every such release red until the deploy lands, for a difference that is harmless by
+ * definition. A PATCH is always accepted. A MINOR (a breaking change or a new extension namespace)
+ * is accepted only for the previous line named in `NEUROSCHEMA_TRANSITION_LINES`, which exists only
+ * until the backend that serves the new MINOR is deployed: the deployed backend serves 0.4.1, and
+ * epic #2324 moves it to 0.6.0 (ADR 0137; its 0.5.0 step was never deployed), so "0.4" stays there
+ * until that deploy and the follow-up empties it. The exact version is pinned by the pure tests
  * (`test/contract-schemas.test.ts` and the bundle stamp check in
  * `test/contract-neuroschema.test.ts`).
  */
