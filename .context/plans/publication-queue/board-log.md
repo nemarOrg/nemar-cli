@@ -1,4 +1,4 @@
-# Publication queue (epic #2182): log
+# Publication queue (epic #2182): decide + evidence: log
 
 <!--
 Append-only history for the board beside this file.

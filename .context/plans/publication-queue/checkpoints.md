@@ -2,16 +2,36 @@
 
 | ID | Trigger | Lead reads | Produces |
 | --- | --- | --- | --- |
-| CP1 | A7 merged and the owner answered Q-A8; or A2, A4, A5, A6 and A9 merged | The A7 report and the merged copy tables | Card A8 (the image and document policy), and card A10 (docs pages generated from the copy tables in nemarOrg/docs, each with reproduce and remedy) |
-| CP2 | Every A step done | The epic diff | A `seam` review of track A. The epic PR into `dev` goes to the owner for the merge, and the owner releases. Then the owner command list O2 is handed over (below). |
-| CP3 | B2 approved | The ADR | Cards B3, B4 and B5 |
-| CP4 | B5 merged | Calibration results | Card C1, then the C2 hand-over: release 2 and the #1732 production enablement |
+| CP-D1 | D2 merged | `d2-blockers-report.md` | The owner question on acknowledgment groups (which are harmless, which need individual looks), then card D3 |
+| CP-D2 | The owner approves ADR 0139 | The ADR | ADR 0139 accepted and indexed; cards B3, B4 and B5 |
+| CP-D3 | D1, D3, D4 and B3 to B5 merged | The decide branch's diff | A `seam` review (`project:pr-review-toolkit`, lens `seam`, mode `epic`); the manager opens the decide epic PR into `dev`; the owner merges and releases; then C1 in shadow mode |
+| CP-E1 | A2, A4, A5, A6 and A9 merged | The copy tables | Card A10: docs in nemarOrg/docs, live before release |
+| CP-E2 | Every lane E step done and A10 live | The evidence branch's diff | A `seam` review; the evidence epic PR into `dev`; the owner releases (the Worker parses v2 in the same release); then O2 |
 
-## O2: owner commands after Release 1
+## O1: the three clean requests (owner, now)
 
-The manager hands these over as exact commands; it never runs them.
+```bash
+nemar admin repo publish show nm000630
+nemar admin repo publish approve nm000630
+nemar admin repo publish show nm000566
+nemar admin repo publish approve nm000566
+nemar admin repo publish show nm000979
+nemar admin repo publish approve nm000979
+```
 
-1. Re-run the screen on every queued request.
-   Use `nemar admin repo publish screen` with the request selection its help offers; the exact form is to be read from `--help` at that time.
-2. For the requests whose screen never ran, start the screen the same way.
-3. Run `nemar admin repo publish list --json`, and read the before-and-after counts by status.
+## O3: the 37 requests blocked on minimum requirements (owner, now)
+
+All 37 lack an ethics approval statement.
+The depositor, our group, adds the `EthicsApprovals` field to `dataset_description.json` (or an ethics statement to the README), pushes, and requests publication again.
+For converted datasets, the statement is the upstream dataset's approval, cited.
+
+## O2: after Release E (owner)
+
+With D4 released, re-screen the queue quietly:
+
+```bash
+nemar admin repo publish screen-batch --all-active            # dry run: read the count
+nemar admin repo publish screen-batch --all-active --per-minute 4 --apply
+```
+
+Wait for the digest, then compare it with the counts in plan.md.

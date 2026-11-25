@@ -1,4 +1,4 @@
-# Publication queue (epic #2182)
+# Publication queue (epic #2182): decide + evidence
 
 <!--
 manager-loop board: state only, history goes to the -log file beside it, specs to the plan and cards.
@@ -15,14 +15,14 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|
 | Plan | /Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-publication-queue/.context/plans/publication-queue/plan.md |
 | Repo | nemarOrg/nemar-cli |
-| Integration branch | feature/issue-2182-epic-publication-queue |
+| Integration branch | feature/issue-2182-epic-pq-decide, feature/issue-2182-epic-pq-evidence |
 | Manager id | - |
 | State | paused |
 | Cadence | 30m with workers running, 60m waiting on people |
 | Last tick | - |
 | Next tick | - |
 | Stop when | every step done, or all remaining work waits on the owner |
-| Created | 2026-11-25T10:55-08:00 |
+| Created | 2026-11-25T11:07-08:00 |
 
 ## Parity
 
@@ -30,16 +30,17 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 |---|---|---|---|---|
 | worker-light | Haiku max | gpt-6-luna max | cost-efficient coding model | clear, repeatable cards from a fully specified brief |
 | worker | Sonnet 5.5 xhigh | gpt-6-luna max | balanced coding model | owner rule: Sonnet implements from an approved plan |
-| worker-hard | Opus 5.5 high | gpt-6.1-terra xhigh | balanced reasoning model | parsers of untrusted input, contracts, auto-deny |
+| worker-hard | Opus 5.5 high | gpt-6.1-terra xhigh | balanced reasoning model | untrusted-input parsers, contracts, auto-deny |
 | lead | Opus 5.5 xhigh (this session) | gpt-6.2-sol xhigh | strong reasoning model | default for planning, design, first-level advice |
 | frontier | Fable | gpt-6.2-astra xhigh | strongest model | only when the owner asks, for long-horizon planning, or a frontier trigger the plan lists |
 | reviewer | Sonnet 5.5 | gpt-6-luna max | balanced coding model | owner rule: Sonnet for PR review agents |
+| owner | person |  |  | owner actions; never dispatched |
 
 ## Slots
 
 | Slot | Platform | Tiers | Max | Can | Notes |
 |---|---|---|---|---|---|
-| claude-worker | Claude | worker-light, worker, worker-hard | 3 | gui, browser | graphical user interface (GUI) or computer use only with the owner's announced consent |
+| claude-worker | Claude | worker-light, worker, worker-hard, reviewer | 3 |  | graphical user interface (GUI) or computer use only with the owner's announced consent |
 | claude-opus | Claude | lead | 1 | gui, browser | |
 | codex | Codex | worker-light, worker, worker-hard, lead | 0 | | owner opens this slot; never computer use or visible runs |
 
@@ -60,25 +61,28 @@ In Steps and Questions, the first column holds each row's identifier (ID); in St
 
 | ID | Title | Wave | Tier | Needs | Slot | State | Depends | PR | Review | Started | Timebox | Next |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| O1 | Owner approves the 3 clean requests (nm000630 nm000566 nm000979) |  | owner |  |  | owner |  |  |  |  |  | owner reads each screen and approves |
-| A1 | [Coverage contract and reader registry](cards/A1.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
+| O1 | Approve the 3 clean requests (checkpoints.md O1) |  | owner |  |  | owner |  |  |  |  |  | owner runs the O1 commands |
+| O3 | 37 blocked on ethics statement: depositor remedy (O3) |  | owner |  |  | owner |  |  |  |  |  | owner tells the depositor |
+| D1 | [License lineage](cards/D1.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
+| D2 | [Measure every blocker, HEAD+history](cards/D2.md) |  | worker |  |  | todo |  |  |  |  | 1d | dispatch |
+| A1 | [Coverage contract and registry](cards/A1.md) |  | worker-hard |  |  | todo |  |  |  |  | 3d | dispatch |
+| D4 | [Quiet paced re-screen](cards/D4.md) |  | worker |  |  | todo |  |  |  |  | 1d | dispatch |
 | A3 | [Pure-TS HDF5 metadata reader](cards/A3.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
-| B1 | [Upstream license lineage](cards/B1.md) |  | worker-hard |  |  | todo |  |  |  |  | 2d | dispatch |
-| A7 | [Measure image-or-document blockers](cards/A7.md) |  | worker |  |  | todo |  |  |  |  | 4h | dispatch |
-| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  |  | todo | A1, A3 |  |  |  | 1.5d | after A1 and A3 |
-| A2 | [BrainVision and NIRx text headers](cards/A2.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
-| A5 | [MAT v5, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A3 |  |  |  | 2d | after A1 and A3 |
-| A6 | [ZIP archives](cards/A6.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
-| A9 | [nemar dataset screen, local reproduction](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
-| A8 | Image and document policy change |  | worker |  |  | outline | A7, A1 |  |  |  |  | CP1 after owner answers Q-A8 |
-| A10 | docs.nemar.org pages generated from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP1 |
-| CP2 | Seam review of track A; epic to dev; Release 1; O2 re-screen |  | lead |  |  | owner | A2, A4, A5, A6, A8, A9, A10 |  |  |  |  | owner merges and releases |
-| B2 | ADR: auto-deny, model inputs, resubmission note, ready mail |  | lead |  |  | todo |  |  |  |  | 4h | lead drafts; owner approves |
-| B3 | Resubmission note on the publication request |  | worker |  |  | outline | B2 |  |  |  |  | CP3 |
-| B4 | Review inputs and reproducibility fields |  | worker-hard |  |  | outline | B1, B2 |  |  |  |  | CP3 |
-| B5 | Auto-deny as nemarAdmin; ready-to-approve mail |  | worker-hard |  |  | outline | B2, B3, B4 |  |  |  |  | CP3 |
-| C1 | Calibration on a labeled queue sample (dev) |  | lead |  |  | outline | B5 |  |  |  |  | CP4 |
-| C2 | Release 2; owner enables review in prod (#1732) |  | owner |  |  | outline | C1 |  |  |  |  | owner |
+| D0 | [Review in prod, shadow 20](cards/D0.md) |  | lead |  |  | todo |  |  |  |  | 4h | lead after plan approval |
+| B2 | ADR 0139 auto-deny (draft on decide branch) |  | lead |  |  | owner |  |  |  |  |  | owner approves the ADR |
+| A2 | [BrainVision and NIRx](cards/A2.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
+| A4 | [SNIRF and generic HDF5](cards/A4.md) |  | worker-hard |  |  | todo | A1, A3 |  |  |  | 1.5d | after A1, A3 |
+| A6 | [ZIP archives](cards/A6.md) |  | worker-hard |  |  | todo | A1 |  |  |  | 1d | after A1 |
+| A9 | [nemar dataset screen](cards/A9.md) |  | worker |  |  | todo | A1 |  |  |  | 1d | after A1 |
+| A5 | [MAT, EEGLAB, Homer .nirs](cards/A5.md) |  | worker-hard |  |  | todo | A1, A4 |  |  |  | 2d | after A4 |
+| D3 | Batch acknowledgment by documented group |  | worker-hard |  |  | outline | D2 |  |  |  |  | CP-D1 |
+| B3 | Resubmission note |  | worker |  |  | outline | B2 |  |  |  |  | CP-D2 |
+| B4 | Review inputs widened; review record |  | worker-hard |  |  | outline | D1, B2 |  |  |  |  | CP-D2 |
+| B5 | Auto-deny (shadow, then on); ready-to-approve mail |  | worker-hard |  |  | outline | B2, B3, B4, D4 |  |  |  |  | CP-D2 |
+| CPD3 | Seam review; decide epic to dev; release D |  | lead |  |  | outline | D1, D3, D4, B3, B4, B5 |  |  |  |  | CP-D3 |
+| C1 | Calibration in prod shadow mode |  | owner |  |  | outline | CPD3, D0 |  |  |  |  | owner labels |
+| A10 | docs.nemar.org pages from copy tables |  | worker |  |  | outline | A2, A4, A5, A6, A9 |  |  |  |  | CP-E1 |
+| CPE2 | Seam review; evidence epic to dev; release E; O2 |  | lead |  |  | outline | A10 |  |  |  |  | CP-E2 |
 
 ## Questions
 

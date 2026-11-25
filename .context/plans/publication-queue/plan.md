@@ -1,119 +1,148 @@
 # Plan: clear the publication queue (epic #2182, re-sequenced)
 
-Status: DRAFT for owner approval, 2026-11-25.
-Lead: Claude Opus 5.5 (this session).
-Epic: nemarOrg/nemar-cli#2182, branch `feature/issue-2182-epic-publication-queue` from `origin/dev`.
+Status: DRAFT v2 for owner approval, 2026-11-25.
+It folds in the executability and design reviews (appendix) and the owner's second round of decisions.
+Lead: Claude Opus 5.5 (this session); manager: the same session (owner to confirm).
+Epic: nemarOrg/nemar-cli#2182.
+There are two epic branches from `origin/dev`:
+
+- `feature/issue-2182-epic-pq-decide` (lane D), whose worktree is `/Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-pq-decide`.
+- `feature/issue-2182-epic-pq-evidence` (lane E), whose worktree is `/Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-publication-queue`.
+  It holds this plan pack.
 
 ## Goal
 
 Every publication request in the queue reaches a decision the depositor can understand, check and act on.
 That means a published dataset, a denial with reasons, or a block with a remedy.
-Each decision is backed by evidence that the depositor can reproduce on their own machine.
+Each decision is backed by evidence that the depositor can reproduce.
 
-Measured 2026-11-25 (read-only, `nemar admin repo publish list --json`):
+## Measured 2026-11-25
+
+These were read with `nemar admin repo publish list --json`, read-only.
 
 | Fact | Count |
 | --- | --- |
-| Active requests | 363 (323 requested, 40 blocked) |
-| From one depositor | 351 |
-| Screen "needs review" | 234, of which 196 only for `image-or-document-file` |
-| Screen "recordings NOT screened" | 60 |
-| Screen never run for the request | 57 (40 blocked before the screen, 17 requested) |
-| Screen clean | 3 (nm000630, nm000566, nm000979) |
+| Active requests | 363: 323 requested, 40 blocked (37 `min_requirements_failed`) |
+| From one account | 351, from `bruaristimunha` (our group's batch conversions) |
+| Screen states | 234 needs review, 60 recordings not screened, 57 never screened (40 of them blocked), 7 EDF-only clean, 3 clean, 1 incomplete, 1 error |
 | Publication reviews run in production | 0 (`PUBLICATION_REVIEW_ENABLED` is dev only, #1732) |
-| Unscreened formats, by datasets | .snirf 204, .zip 129, .mat 104, BrainVision 86, .nirs 24, NIRx about 20, .set 12, .fif 7 |
+| Requests with no blocker left (of 306 screened and requested), as steps land | none: 3; images only: 4; BrainVision/NIRx only: 21; SNIRF, MAT or ZIP alone: 4, 5 or 5; **all five: 154** |
+| Formats nobody would read even then, by datasets | files with no extension 59, .other 26, .rar, .fig, .npy, .nev, .avg and others |
+
+**Conclusion (owner, 2026-11-25): two lanes.**
+Readers alone cannot clear the queue: most requests carry several blockers, and about half keep an unread format.
+So lane D makes a documented decision possible for every request now, and lane E improves the evidence behind those decisions.
 
 ## Principle: transparent, documented, reproducible
 
-The owner's rule (2026-11-25) is the product's advantage, and it binds every step:
+This is the owner's rule of 2026-11-25, and every step is bound by it.
 
 1. **One vocabulary.**
-   Every finding kind, screen status, review reason and license outcome has one entry in a typed table.
-   The entry holds a plain statement of what was found, what was read, the remedy, and a docs.nemar.org anchor.
-   The typecheck fails if an entry is missing.
-   Mails, the CLI, the web page and the docs all print from that table (ADR 0045's pattern).
+   Every finding kind, screen status, incomplete reason, review reason, license outcome and acknowledgment group has one entry in a typed table.
+   The entry holds a plain statement, what was read, the remedy and a docs anchor, and a missing entry fails the typecheck.
+   Mails, the CLI, the web page and the docs print from these tables (ADR 0045's pattern).
 2. **Reproducible.**
-   A depositor can run `nemar dataset screen <path>` on their own copy and get the same report the server got, from the same scanner version.
-   License lineage is reproduced by `nemar dataset license-check <path>`, which uses the same resolver and the same registry calls.
-   Every report names its scanner commit, its reader versions and, for a review, the model, the prompt version and the digest of the inputs.
+   - `nemar dataset screen` recomputes the screen, and says exactly what a local run cannot see.
+   - `nemar dataset license-check` recomputes the license lineage with the same resolver.
+   - A review shows its inputs' digest, its prompt version and its models.
+   - A model verdict is not claimed to be repeatable; its inputs are.
 3. **Honest coverage.**
-   A file that was not read, was read only partly, or failed to read is said to be so; it is never counted as clean (ADR 0086).
-   A missing companion file is a coverage problem, not an identifier finding.
-4. **The automated decision says it is automated.**
-   A denial says an automated agent decided it, gives each reason with its remedy and reproduce command, and tells the depositor how to resubmit with a note.
+   Not read, partly read and failed are each said as such and never counted as clean (ADR 0086).
+   A missing companion file is a coverage gap, not an identifier finding.
+4. **An automated decision says it is automated** (ADR 0139, proposed).
+5. **A batch acknowledgment is a documented act.**
+   Each acknowledgment group has a published page saying what the group is, why it is acceptable, and who acknowledged it when.
+   The recorded reason links to that page.
 
-## Owner decisions (2026-11-25)
+## Owner decisions
 
-- The queue comes first.
-  Naming policy (#2183) waits.
-  The preflight (#2184) and the documentation (#2189) move into the queue track as A9 and A10, because they carry the reproducibility rule.
-- Readers are pure TypeScript in nemar-cli.
-  No package-registry code runs next to the screen's storage credentials.
-- Model input is metadata, never data.
-  It may include enrichment, the structural summary, upstream registry records and the screen's coverage counts.
-  ADR 0102 §2 stays in force.
-- Automatic denial happens as nemarAdmin, only on a real `fail` verdict with reasons.
-  It never happens when the model did not run, errored, or returned unknown.
-  The mail says the decision was automated and invites a resubmission.
-  A resubmission carries a note field: whether the agent was wrong, and what changed since the last submission.
-  This supersedes part of ADR 0102 through a new ADR (B2).
-- On a pass, the admin is mailed a summary: identifier checks passed, license lineage confirmed, ready to approve.
-  Approval stays the administrator's own act (ADR 0093, ADR 0102).
-- License: confirm the upstream license through DataCite, Crossref and OpenAlex.
-  NC is accepted; ND, all rights reserved, or no license found needs explicit permission.
+Round 1 is in memory and in ADR 0139.
+Round 2, 2026-11-25:
+- two lanes;
+- enable the existing review in production in shadow first, on a batch of 20;
+- measure images and documents in HEAD and in history, batch-acknowledge the harmless groups with a documented reason, and look at the risky groups one by one;
+- build a quiet re-screen mode with a digest before any queue re-screen.
 
-## Two releases
-
-The screen workflow checks out nemar-cli `main`, so a new reader starts working only after a production release.
-
-- **Release 1 (track A): screening.**
-  New readers, the coverage contract, local reproduction and the docs.
-  The epic branch merges into `dev` at checkpoint CP2; the owner releases.
-  Then the owner re-runs the screen on the queue (O2).
-- **Release 2 (track B): review and decisions.**
-  License lineage, the ADR, the review extension, automatic denial, the resubmission note and the ready-to-approve mail.
-  It runs on a second epic branch from `dev` under the same epic issue.
-  The owner enables the review in production per #1732.
-
-## Steps
-
-Tiers: `lead` (this session), `worker-hard`, `worker`; see the board's Parity table.
-Every code step lands as one PR into the epic branch and gets its own `project:pr-review-toolkit` review.
+## Lane D: decide
 
 | ID | Goal | Depends | Tier | Card |
 | --- | --- | --- | --- | --- |
-| O1 | Owner approves the three clean requests after reading their screen | none | owner | none (owner action) |
-| A1 | Coverage contract: per-format reader registry, report v2, honest per-format counts, remedy and docs per kind and status | none | worker-hard | cards/A1.md |
-| A3 | Bounded pure-TS HDF5 metadata reader, checked against h5py on real files | none | worker-hard | cards/A3.md |
-| A7 | Measure what trips `image-or-document-file` across the queue; propose policies | none | worker | cards/A7.md |
-| B1 | Upstream license lineage resolver (DataCite, Crossref, OpenAlex), compatibility rule, local `license-check` | none | worker-hard | cards/B1.md |
-| A2 | BrainVision (.vhdr, .vmrk) and NIRx text headers (.hdr, .inf) readers | A1 | worker | cards/A2.md |
-| A4 | SNIRF screening (multiple nirs groups, metaDataTags, labels) and generic HDF5 string scan | A1, A3 | worker-hard | cards/A4.md |
-| A5 | MAT v5 reader, EEGLAB .set (classic and v7.3), Homer .nirs, generic .mat, .fdt companion check | A1, A3 | worker-hard | cards/A5.md |
-| A6 | ZIP central directory: entry names scanned, small inner recordings read by the registry | A1 | worker | cards/A6.md |
-| A9 | `nemar dataset screen <path>`: the server's report, reproduced locally and without mutation | A1 | worker | cards/A9.md |
-| A8 | Image and document rule change, per the owner's policy from A7 | A7, A1 | worker | outline, completed at CP1 |
-| A10 | docs.nemar.org: one page per vocabulary table, generated from it, with reproduce and remedy | A2, A4, A5, A6, A9 | worker | outline, completed at CP1 |
-| CP2 | Seam review of track A, epic into `dev`, owner releases, owner re-screens the queue (O2) | A2, A4, A5, A6, A8, A9, A10 | lead + owner | checkpoints.md |
-| B2 | ADR: automatic denial, model inputs, resubmission note, ready-to-approve mail, review reproducibility | none | lead | written by the lead, approved by the owner |
-| B3 | Resubmission note on the publication request (migration, route, CLI, web form copy) | B2 | worker | outline, completed after B2 |
-| B4 | Review inputs: enrichment, registry records, coverage counts, license lineage; report reproducibility fields | B1, B2 | worker-hard | outline, completed after B2 |
-| B5 | Automatic deny as nemarAdmin on a real fail; ready-to-approve admin mail on pass | B2, B3, B4 | worker-hard | outline, completed after B2 |
-| C1 | Calibration on a labeled sample of the queue (dev only), with zero false automatic denials | B5 | lead + worker | outline |
-| C2 | Release 2, then the owner enables the review in production per #1732 | C1 | owner | checkpoints.md |
+| O1 | The owner approves the three clean requests | none | owner | the commands are in checkpoints.md |
+| D0 | Review in production, shadow: a PR adds `PUBLICATION_REVIEW_ENABLED` to production `[vars]`, with ADR 0102 item 7's staging evidence; the owner merges and releases, then starts reviews on 20 requests and compares them with their judgment | none | lead, then owner | cards/D0.md |
+| D1 | Upstream license lineage resolver, compatibility rule, `nemar dataset license-check`, read-only admin view | none | worker-hard | cards/D1.md |
+| D2 | Measure every blocker in the queue, in HEAD and history: image and document groups, files with no extension, unknown formats | none | worker | cards/D2.md |
+| D3 | Batch acknowledgment: documented groups, one admin act per group with a recorded reason that links to the group's page | D2 | worker-hard | outline; completed at CP-D1 after the owner picks groups from D2 |
+| D4 | Quiet re-screen: an admin batch re-screen, paced, with no per-request mail and one digest | none | worker | cards/D4.md |
+| B2 | ADR 0139: automatic denial (off, shadow or on), model inputs, resubmission note, ready-to-approve mail, review record | none | lead, then owner | the draft is on the decide branch |
+| B3 | Resubmission note on the publication request | B2 | worker | outline; CP-D2 |
+| B4 | Review inputs widened to metadata (enrichment, registry records, lineage, coverage counts), and the review record | D1, B2 | worker-hard | outline; CP-D2 |
+| B5 | Automatic deny in shadow mode, then on; the pass mail "Ready to approve" | B2, B3, B4 | worker-hard | outline; CP-D2 |
+| C1 | Calibration in production shadow mode: zero false would-denies on the owner-labeled sample | B5, D0 | owner + lead | outline |
 
-Later, outside this plan: #2183 naming policy; .fif and .nwb readers; filing recommendations as issues.
+Lane D releases go through `dev`: D1, D4 and B2 to B5 merge into the decide branch.
+The epic PR into `dev` is opened at CP-D3 and merged by the owner.
+
+## Lane E: evidence
+
+| ID | Goal | Depends | Tier | Card |
+| --- | --- | --- | --- | --- |
+| A1 | Coverage contract: reader registry, `RangeSource` with per-reader limits and a page cache, report v2 (accepted by the Worker), the door's new keys, superseded recordings for every reader, copy tables with remedies, and a shared report builder | none | worker-hard | cards/A1.md |
+| A3 | Bounded pure-TS HDF5 metadata reader, checked against h5py | none | worker-hard | cards/A3.md |
+| A4 | SNIRF and generic HDF5 readers | A1, A3 | worker-hard | cards/A4.md |
+| A2 | BrainVision and NIRx text headers | A1 | worker-hard | cards/A2.md |
+| A5 | MAT v5, EEGLAB `.set` (classic and v7.3), Homer `.nirs`, generic `.mat` | A1, A4 | worker-hard | cards/A5.md |
+| A6 | ZIP archives | A1 | worker-hard | cards/A6.md |
+| A9 | `nemar dataset screen`: local reproduction, stating its gaps | A1 | worker | cards/A9.md |
+| A10 | docs.nemar.org pages generated from the copy tables, live before release | A2, A4, A5, A6, A9 | worker | outline; CP-E1 |
+
+**Reader merge gate (the owner's rule: false positives measured).**
+Each reader card runs its reader over public copies of upstream data that the queue converts: OpenNeuro's public S3 and PhysioNet open data.
+It reports the findings per kind per 100 files.
+- Identifier-severity findings on these public datasets must be 0, or each one is explained.
+- Review-severity findings must be at most 5 per 100 files.
+
+Lane E's release order: the Worker parses report v2 before any screen emits it.
+A1 makes the Worker accept v2 in the same release that switches the emitter.
+A screen that runs in the deploy window is re-run with D4.
 
 ## Section 0: how the manager uses this plan
 
-1. Start prompt: see `runbook.md`.
+1. Start prompt: `runbook.md`.
    Pacing: 30 minutes while workers run, 60 minutes while waiting on people.
 2. The tick is the `project:manager-loop` tick, as `runbook.md` adapts it.
-3. Precedence: the owner's later instructions override this plan and are logged with `decide`.
-   `AGENTS.md` overrides this plan everywhere: no edits in the primary checkout, no version bump, no production commands by agents, no owner switches.
-4. Merge authority: the manager squash-merges step PRs into the epic branch after the merge gate.
-   It never merges the epic into `dev`, `dev` into `main`, anything in `nemarDatasets/*`, or the docs repo's production branch.
-   It never runs a production command; it hands each one to the owner as an exact command.
+3. **Precedence.**
+   - The owner's later instructions override this plan and are logged with `decide`.
+   - `AGENTS.md` overrides this plan, with one exception the owner approves with this plan: manager-loop drives the epic in place of a hand-run `/project:epic-dev`.
+     `.claude/epic.local.md` records both branches and points here.
+4. **Merge authority.**
+   - The manager squash-merges step PRs into their lane's epic branch after the merge gate in `runbook.md`.
+     The phase-PR gate is local, per the owner's rule of 2026-10-26: typecheck, lint, biome on the touched files, the targeted tests, and the pure unit tier.
+     The remote live tier is not awaited, and its skip is noted on the PR.
+   - It never merges an epic into `dev`, anything into `main`, anything in `nemarDatasets/*`, or the docs repository.
+   - It never runs a production or staging command; it hands each one to the owner as an exact command.
 5. Question classes that may take a default at their deadline: none.
-6. Routing: lead tier for design and contested findings; frontier tier only when the owner asks.
-   The lead and the manager are this one session (owner to confirm at approval); every judgment call is recorded with `decide`.
+6. **Routing.**
+   - Lead tier for design and contested findings.
+   - Frontier tier only when the owner asks.
+   - Implementers on Sonnet 5.5 for `worker` cards and on Opus 5.5 for `worker-hard` cards.
+   - Reviewers on Sonnet 5.5 (owner rule).
+
+## Appendix: pack review dispositions
+
+- **Design review (13 findings).**
+  - 1: fixed by the measurement above and the two lanes.
+  - 2: fixed in D2 (history).
+  - 3, 4, 6, 9 and 10: fixed in A1, D1 and A9.
+  - 5: fixed by the A2/A4/A5 severity rules and the reader merge gate.
+  - 7: fixed by D4.
+  - 8: fixed by D2 (blocked requests are classified), D3 (batch acknowledgment) and a throughput note in risks.md.
+  - 11: fixed in risks.md.
+  - 12: fixed in ADR 0139.
+  - 13: fixed in ADR 0139 decision 8 (the pass mail requires the gate to be `clear`).
+- **Executability review (32 findings).**
+  - 1 and 2: fixed (the branches are pushed at setup; B2 is `owner`).
+  - 3: fixed (local phase gate).
+  - 4: fixed (`*.integration.test.ts` naming; CLI-spawn tests in their own files).
+  - 5: fixed (two lanes).
+  - 6 to 29: fixed in the cards and the runbook.
+  - 30 to 32: fixed.

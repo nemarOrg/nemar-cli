@@ -3,8 +3,9 @@
 You are implementing one card of the publication-queue plan (epic nemarOrg/nemar-cli#2182).
 Plan: `/Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-publication-queue/.context/plans/publication-queue/plan.md`.
 
-- One card, one branch, one PR into `feature/issue-2182-epic-publication-queue`, in the worktree the card names.
-  Create the worktree yourself: `git -C /Users/yahya/Documents/git/nemar/nemar-cli worktree add <worktree> -b <branch> origin/feature/issue-2182-epic-publication-queue`.
+- One card, one branch, one PR into the base the card's Branch line names (`feature/issue-2182-epic-pq-decide` or `feature/issue-2182-epic-pq-evidence`), in the worktree the card names.
+  Create the worktree yourself: `git -C /Users/yahya/Documents/git/nemar/nemar-cli worktree add <worktree> -b <branch> origin/<base>`.
+  If git-annex breaks the worktree's `.git` file, restore it to a `gitdir:` file (memory `annex-worktree-git-symlink`).
   Then run `bun install` at the worktree root and in `backend/` before any gate (a fresh worktree otherwise runs the wrong biome).
   Use absolute paths.
 - Read `AGENTS.md` and the ADRs the card names before editing.
@@ -14,6 +15,8 @@ Plan: `/Users/yahya/Documents/git/nemar/nemar-cli-worktrees/epic-publication-que
   That means no `nemar` CLI against a real server, no wrangler, no `gh workflow run`, no writes to `nemarDatasets/*`.
   Read-only `gh api` reads of public metadata and of `nemarDatasets` repository trees are allowed only where the card says so.
   A spawned CLI in a test gets an environment built from nothing, with an isolated `NEMAR_CONFIG_DIR`.
+- The PR body references `#2182` and the phase issue the manager gives you.
+  Push with the `neuromechanist` gh account (`gh auth status` shows it active).
 - Only the manager merges, and only after the PR's own `project:pr-review-toolkit` review.
   Push once per review round; never force-push or rebase a pushed branch.
   To take in the base, merge it.
