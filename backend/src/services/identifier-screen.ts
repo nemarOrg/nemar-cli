@@ -969,6 +969,11 @@ export async function verifyScreenHead(
  * Record an admin's acknowledgment of a screen that needed one, and audit it.
  * Conditional on the state the gate read, so an acknowledgment can only attach
  * to the result the admin was shown. Returns false when the state moved.
+ *
+ * `shown` narrows the condition further, for a caller that acknowledges without
+ * approving (the batch acknowledgment, card D3): the exact stored report the
+ * administrator was shown, a request still `requested`, and no acknowledgment
+ * already recorded. `details` is added to the audit row's details.
  */
 export async function recordScreenAcknowledgment(
   db: D1Database,
@@ -978,16 +983,23 @@ export async function recordScreenAcknowledgment(
     adminUserId: number;
     reason: string;
     state: string;
+    shown?: { report: string };
+    details?: Record<string, unknown>;
   },
 ): Promise<boolean> {
+  const guard = args.shown
+    ? ` AND identifier_screen_report = ? AND status = 'requested' AND identifier_screen_ack_at IS NULL`
+    : "";
+  const binds: unknown[] = [args.adminUserId, args.reason, args.requestId, args.state];
+  if (args.shown) binds.push(args.shown.report);
   const res = await db
     .prepare(
       `UPDATE publication_requests
           SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
               identifier_screen_ack_at = datetime('now')
-        WHERE id = ? AND identifier_screen_status = ?`,
+        WHERE id = ? AND identifier_screen_status = ?${guard}`,
     )
-    .bind(args.adminUserId, args.reason, args.requestId, args.state)
+    .bind(...binds)
     .run();
   if ((res.meta.changes ?? 0) !== 1) return false;
   try {
@@ -997,6 +1009,7 @@ export async function recordScreenAcknowledgment(
       resourceType: "dataset",
       resourceId: args.datasetId,
       details: JSON.stringify({
+        ...args.details,
         request_id: args.requestId,
         screen_state: args.state,
         reason: args.reason,
