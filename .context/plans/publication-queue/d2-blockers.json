@@ -180,192 +180,32 @@
     ".snirf": 248,
     ".bz2": 1,
     ".npy": 6,
-    ".z01": 1,
-    ".z02": 1,
-    ".z03": 1,
-    ".z04": 1,
-    ".z05": 1,
+    "(unusual extension)": 118,
     ".zip": 150,
     ".nii": 10,
     ".tsv.gz": 8,
-    ".npz": 2,
-    ".pkl": 3,
-    ".fig": 8,
-    ".ai": 1,
-    ".asv": 3,
-    ".c": 2,
-    ".mexa64": 2,
-    "(unusual extension)": 44,
-    ".mexw32": 2,
-    ".mexw64": 3,
-    ".h": 4,
-    ".lut": 1,
-    ".sfp": 2,
-    ".gii": 3,
-    ".man": 1,
-    ".m": 1,
-    ".cpp": 3,
-    ".class": 2,
-    ".java": 3,
-    ".p": 1,
-    ".tpl": 8,
-    ".u3d": 1,
-    ".dia": 1,
-    ".sty": 1,
-    ".var": 1,
-    ".wav": 4,
-    ".db": 1,
     ".eps": 5,
     ".fif": 8,
-    ".name": 1,
-    ".cmd": 2,
-    ".bin": 3,
-    ".gradle": 1,
-    ".jar": 1,
-    ".xyz": 2,
     ".lay": 3,
-    ".matlab": 1,
-    ".ui": 1,
-    ".dll": 2,
-    ".annot": 3,
-    ".mgz": 4,
     ".nii.gz": 10,
-    ".xfm": 2,
     ".dat": 12,
-    ".area": 2,
-    ".mid": 2,
-    ".pial": 3,
-    ".curv": 3,
-    ".reg": 2,
-    ".k": 2,
-    ".nofix": 2,
-    ".orig": 2,
-    ".t1": 1,
-    ".crv": 2,
-    ".sphere": 2,
-    ".sulc": 2,
-    ".volume": 2,
-    ".mgh": 3,
-    ".white": 3,
     ".mef": 1,
-    ".bval": 1,
-    ".bvec": 1,
-    ".jsonl": 1,
     ".h5": 4,
     ".smr": 1,
-    ".doxy": 1,
-    ".hpp": 1,
-    ".lta": 2,
-    ".ctab": 2,
-    ".label": 2,
     ".tar": 3,
-    ".niml": 1,
-    ".1d": 1,
-    ".lt": 1,
-    ".brik": 1,
-    ".head": 1,
-    ".spec": 1,
-    ".cmap": 1,
-    ".roi": 1,
-    ".dset": 1,
-    ".asc": 1,
-    ".alt": 1,
-    ".m2m": 1,
-    ".info": 1,
-    ".readme": 1,
-    ".done": 1,
-    ".env": 1,
-    ".bak": 1,
-    ".3d": 1,
-    ".flat": 1,
-    ".avg": 5,
-    ".touch": 1,
-    ".old": 1,
-    ".param": 1,
-    ".sum": 1,
-    ".ct": 1,
-    ".inf": 7,
-    ".lepto": 1,
-    ".mgrid": 1,
-    ".m3z": 1,
-    ".stats": 1,
-    ".node": 1,
-    ".nv": 1,
-    ".odp": 1,
-    ".vox": 1,
-    ".hdr": 23,
     ".gz": 1,
-    ".center": 1,
-    ".mexglx": 1,
-    ".exe": 1,
-    ".win": 1,
-    ".prj": 1,
     ".fdt": 3,
-    ".cnd": 1,
-    ".msh": 1,
-    ".ccf": 3,
     ".nev": 4,
-    ".sbin": 1,
-    ".nex5": 2,
     ".xdf": 2,
-    ".meta": 1,
-    ".mov": 1,
-    ".lab": 1,
-    ".0": 1,
-    ".img": 2,
-    ".in": 1,
-    ".phn": 1,
-    ".nirs": 26,
-    ".tri": 15,
-    ".wl1": 21,
-    ".wl2": 21,
     ".rar": 8,
-    ".cmp": 4,
-    ".prt": 3,
-    ".evt": 7,
     ".tif": 7,
-    ".ldr": 1,
-    ".psydat": 1,
-    ".qsf": 1,
-    ".xsl": 1,
     ".tiff": 2,
-    ".glb": 1,
-    ".gltf": 1,
-    ".psyexp": 2,
-    ".sps": 1,
-    ".rdata": 1,
-    ".mlx": 1,
-    ".edat3": 4,
-    ".es2": 1,
     ".bmp": 1,
-    ".acc": 1,
-    ".pos": 1,
     ".cdt": 1,
-    ".ceo": 1,
-    ".dpa": 1,
     ".7z": 2,
-    ".md": 1,
-    ".emrg3": 1,
-    ".py": 2,
-    ".txt": 3,
-    ".sd": 3,
-    ".sav": 5,
     ".xlsx": 2,
-    ".ced": 2,
-    ".omm": 1,
-    ".jasp": 2,
-    ".pickle": 1,
-    ".mtl": 1,
-    ".obj": 1,
-    ".oxy4": 1,
-    ".oxy5": 1,
     ".tgz": 2,
-    ".tar.gz": 1,
-    ".sqlite": 1,
-    ".dot": 1,
-    ".exp": 1,
-    ".sce": 1,
-    ".hea": 1
+    ".tar.gz": 1
   },
   "imageGroups": {
     "byLocation": [
@@ -1017,23 +857,15 @@
       "historyOnlyPaths": 2,
       "blockers": [
         "unscreened:(no extension)",
+        "unscreened:(unusual extension)",
         "unscreened:.nii",
         "unscreened:.npy",
-        "unscreened:.z01",
-        "unscreened:.z02",
-        "unscreened:.z03",
-        "unscreened:.z04",
-        "unscreened:.z05",
         "unscreened:.zip"
       ],
       "flaggedPaths": {},
       "unscreened": {
         ".npy": 646,
-        ".z01": 1,
-        ".z02": 1,
-        ".z03": 1,
-        ".z04": 1,
-        ".z05": 1,
+        "(unusual extension)": 5,
         ".zip": 1,
         "(no extension)": 1,
         ".nii": 36
@@ -1120,9 +952,8 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.npy",
-        "unscreened:.npz",
-        "unscreened:.pkl"
+        "unscreened:(unusual extension)",
+        "unscreened:.npy"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -1130,9 +961,8 @@
         }
       },
       "unscreened": {
-        ".npz": 1,
-        ".npy": 1,
-        ".pkl": 1
+        "(unusual extension)": 2,
+        ".npy": 1
       },
       "images": {
         "total": 1,
@@ -1249,34 +1079,11 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.ai",
-        "unscreened:.asv",
-        "unscreened:.c",
-        "unscreened:.class",
-        "unscreened:.cpp",
-        "unscreened:.dia",
         "unscreened:.eeg",
-        "unscreened:.fig",
-        "unscreened:.gii",
-        "unscreened:.h",
-        "unscreened:.java",
-        "unscreened:.lut",
-        "unscreened:.m",
-        "unscreened:.man",
         "unscreened:.mat",
-        "unscreened:.mexa64",
-        "unscreened:.mexw32",
-        "unscreened:.mexw64",
         "unscreened:.nii",
-        "unscreened:.p",
-        "unscreened:.sfp",
-        "unscreened:.sty",
-        "unscreened:.tpl",
-        "unscreened:.u3d",
-        "unscreened:.var",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.wav"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -1284,33 +1091,10 @@
         }
       },
       "unscreened": {
-        ".fig": 623,
+        "(unusual extension)": 1162,
         ".mat": 1166,
-        ".ai": 1,
-        ".asv": 3,
         "(no extension)": 20,
-        ".c": 114,
-        ".mexa64": 79,
-        "(unusual extension)": 80,
-        ".mexw32": 74,
-        ".mexw64": 79,
-        ".h": 23,
-        ".lut": 13,
-        ".sfp": 13,
         ".nii": 37,
-        ".gii": 6,
-        ".man": 5,
-        ".m": 9,
-        ".cpp": 4,
-        ".class": 1,
-        ".java": 1,
-        ".p": 26,
-        ".tpl": 2,
-        ".u3d": 1,
-        ".dia": 1,
-        ".sty": 2,
-        ".var": 1,
-        ".wav": 1,
         ".eeg": 504,
         ".vhdr": 504,
         ".vmrk": 504
@@ -1395,27 +1179,13 @@
         "finding:tooling-debris",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.bin",
-        "unscreened:.cmd",
-        "unscreened:.db",
-        "unscreened:.dll",
         "unscreened:.eeg",
         "unscreened:.eps",
         "unscreened:.fif",
-        "unscreened:.fig",
-        "unscreened:.gradle",
-        "unscreened:.h",
-        "unscreened:.jar",
-        "unscreened:.java",
         "unscreened:.lay",
         "unscreened:.mat",
-        "unscreened:.matlab",
-        "unscreened:.name",
-        "unscreened:.pkl",
-        "unscreened:.ui",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.xyz"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -1427,25 +1197,11 @@
       },
       "unscreened": {
         ".mat": 641,
-        ".fig": 169,
-        ".db": 3,
+        "(unusual extension)": 363,
         ".eps": 16,
-        ".pkl": 139,
         ".fif": 11,
-        ".name": 1,
         "(no extension)": 4,
-        ".cmd": 27,
-        "(unusual extension)": 3,
-        ".bin": 4,
-        ".gradle": 3,
-        ".java": 2,
-        ".jar": 1,
-        ".xyz": 1,
         ".lay": 2,
-        ".h": 1,
-        ".matlab": 2,
-        ".ui": 1,
-        ".dll": 6,
         ".eeg": 7,
         ".vhdr": 7,
         ".vmrk": 7
@@ -1483,35 +1239,13 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.annot",
-        "unscreened:.area",
-        "unscreened:.bval",
-        "unscreened:.bvec",
-        "unscreened:.crv",
-        "unscreened:.curv",
         "unscreened:.dat",
         "unscreened:.eeg",
-        "unscreened:.h",
-        "unscreened:.jsonl",
-        "unscreened:.k",
         "unscreened:.mat",
         "unscreened:.mef",
-        "unscreened:.mgh",
-        "unscreened:.mgz",
-        "unscreened:.mid",
         "unscreened:.nii.gz",
-        "unscreened:.nofix",
-        "unscreened:.orig",
-        "unscreened:.pial",
-        "unscreened:.reg",
-        "unscreened:.sphere",
-        "unscreened:.sulc",
-        "unscreened:.t1",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.volume",
-        "unscreened:.white",
-        "unscreened:.xfm"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -1519,33 +1253,11 @@
         }
       },
       "unscreened": {
-        ".annot": 1264,
-        ".mgz": 2146,
+        "(unusual extension)": 4573,
         ".nii.gz": 27399,
-        ".xfm": 79,
         ".dat": 2,
-        ".area": 2,
-        ".mid": 2,
-        ".pial": 162,
-        "(unusual extension)": 268,
-        ".curv": 2,
-        ".reg": 4,
-        ".h": 6,
-        ".k": 6,
-        ".nofix": 8,
-        ".orig": 2,
-        ".t1": 2,
-        ".crv": 16,
-        ".sphere": 2,
-        ".sulc": 2,
-        ".volume": 2,
-        ".mgh": 2,
-        ".white": 158,
         ".mat": 90,
         ".mef": 15192,
-        ".bval": 4,
-        ".bvec": 3,
-        ".jsonl": 431,
         ".eeg": 2779,
         ".vhdr": 2779,
         ".vmrk": 2779
@@ -1728,10 +1440,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
-        "unscreened:.cpp",
-        "unscreened:.doxy",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.hpp",
         "unscreened:.mat",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
@@ -1743,9 +1453,7 @@
       },
       "unscreened": {
         ".mat": 126,
-        ".cpp": 2,
-        ".doxy": 1,
-        ".hpp": 2,
+        "(unusual extension)": 5,
         "(no extension)": 2,
         ".eeg": 26,
         ".vhdr": 26,
@@ -1937,21 +1645,12 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.annot",
-        "unscreened:.ctab",
-        "unscreened:.curv",
         "unscreened:.dat",
         "unscreened:.eeg",
         "unscreened:.eps",
-        "unscreened:.label",
-        "unscreened:.lta",
         "unscreened:.mat",
-        "unscreened:.mgh",
-        "unscreened:.mgz",
-        "unscreened:.pial",
         "unscreened:.vhdr",
         "unscreened:.vmrk",
-        "unscreened:.white",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -1962,16 +1661,7 @@
       "unscreened": {
         ".dat": 920,
         ".mat": 190,
-        ".mgz": 35,
-        ".lta": 1,
-        ".pial": 22,
-        ".mgh": 8,
-        ".white": 22,
-        ".curv": 2,
-        "(unusual extension)": 4,
-        ".ctab": 3,
-        ".annot": 6,
-        ".label": 62,
+        "(unusual extension)": 165,
         ".eps": 13,
         ".zip": 2,
         ".eeg": 63,
@@ -2041,86 +1731,14 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.1d",
-        "unscreened:.3d",
-        "unscreened:.alt",
-        "unscreened:.annot",
-        "unscreened:.area",
-        "unscreened:.asc",
-        "unscreened:.avg",
-        "unscreened:.bak",
-        "unscreened:.brik",
-        "unscreened:.c",
-        "unscreened:.center",
-        "unscreened:.class",
-        "unscreened:.cmap",
-        "unscreened:.cmd",
-        "unscreened:.cpp",
-        "unscreened:.crv",
-        "unscreened:.ct",
-        "unscreened:.ctab",
-        "unscreened:.curv",
         "unscreened:.dat",
-        "unscreened:.dll",
-        "unscreened:.done",
-        "unscreened:.dset",
-        "unscreened:.env",
         "unscreened:.eps",
-        "unscreened:.exe",
         "unscreened:.fdt",
-        "unscreened:.fig",
-        "unscreened:.flat",
-        "unscreened:.gii",
         "unscreened:.gz",
-        "unscreened:.h",
-        "unscreened:.hdr",
-        "unscreened:.head",
-        "unscreened:.inf",
-        "unscreened:.info",
-        "unscreened:.java",
-        "unscreened:.k",
-        "unscreened:.label",
-        "unscreened:.lepto",
-        "unscreened:.lt",
-        "unscreened:.lta",
-        "unscreened:.m2m",
-        "unscreened:.m3z",
         "unscreened:.mat",
-        "unscreened:.mexa64",
-        "unscreened:.mexglx",
-        "unscreened:.mexw32",
-        "unscreened:.mexw64",
-        "unscreened:.mgh",
-        "unscreened:.mgrid",
-        "unscreened:.mgz",
-        "unscreened:.mid",
         "unscreened:.nii",
         "unscreened:.nii.gz",
-        "unscreened:.niml",
-        "unscreened:.node",
-        "unscreened:.nofix",
-        "unscreened:.nv",
-        "unscreened:.odp",
-        "unscreened:.old",
-        "unscreened:.orig",
-        "unscreened:.param",
-        "unscreened:.pial",
-        "unscreened:.prj",
-        "unscreened:.readme",
-        "unscreened:.reg",
-        "unscreened:.roi",
         "unscreened:.set",
-        "unscreened:.spec",
-        "unscreened:.sphere",
-        "unscreened:.stats",
-        "unscreened:.sulc",
-        "unscreened:.sum",
-        "unscreened:.touch",
-        "unscreened:.volume",
-        "unscreened:.vox",
-        "unscreened:.white",
-        "unscreened:.win",
-        "unscreened:.xfm",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -2130,85 +1748,13 @@
       },
       "unscreened": {
         ".mat": 1165,
-        "(unusual extension)": 621,
-        ".niml": 3,
+        "(unusual extension)": 8607,
         ".nii": 65,
-        ".1d": 54,
         ".nii.gz": 593,
-        ".lt": 6,
-        ".brik": 3,
-        ".head": 3,
-        ".spec": 27,
-        ".cmap": 20,
-        ".roi": 20,
-        ".dset": 114,
-        ".asc": 128,
-        ".alt": 10,
-        ".m2m": 12,
         "(no extension)": 293,
-        ".label": 1474,
-        ".gii": 2,
-        ".annot": 265,
-        ".mgz": 699,
         ".dat": 304,
-        ".info": 1,
-        ".readme": 1,
-        ".xfm": 45,
-        ".cmd": 23,
-        ".done": 23,
-        ".env": 23,
-        ".bak": 27,
-        ".area": 46,
-        ".3d": 2,
-        ".flat": 4,
-        ".curv": 46,
-        ".reg": 48,
-        ".h": 87,
-        ".k": 86,
-        ".orig": 46,
-        ".mgh": 48,
-        ".pial": 157,
-        ".sphere": 46,
-        ".avg": 2,
-        ".sulc": 46,
-        ".white": 46,
-        ".touch": 1463,
-        ".fig": 76,
-        ".old": 23,
-        ".param": 2,
-        ".sum": 2,
-        ".ct": 27,
-        ".inf": 27,
-        ".lepto": 27,
-        ".mgrid": 61,
-        ".ctab": 105,
-        ".lta": 84,
-        ".m3z": 21,
-        ".stats": 378,
-        ".mid": 42,
-        ".nofix": 168,
-        ".crv": 336,
-        ".volume": 42,
-        ".node": 3,
-        ".nv": 1,
-        ".odp": 2,
-        ".vox": 4,
-        ".hdr": 3,
         ".gz": 3,
-        ".center": 1360,
         ".zip": 1,
-        ".cpp": 2,
-        ".c": 10,
-        ".dll": 3,
-        ".mexa64": 4,
-        ".mexglx": 4,
-        ".exe": 1,
-        ".win": 2,
-        ".mexw32": 2,
-        ".mexw64": 5,
-        ".prj": 1,
-        ".class": 1,
-        ".java": 1,
         ".eps": 1,
         ".fdt": 80,
         ".set": 80
@@ -2271,11 +1817,10 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.cnd",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.eps",
         "unscreened:.mat",
-        "unscreened:.msh",
         "unscreened:.npy",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
@@ -2289,9 +1834,8 @@
         ".vhdr": 6,
         ".vmrk": 6,
         ".eps": 6,
-        ".cnd": 3,
+        "(unusual extension)": 21,
         ".mat": 132,
-        ".msh": 18,
         ".npy": 50,
         ".eeg": 3
       },
@@ -2365,7 +1909,7 @@
       "historyPaths": 94,
       "historyOnlyPaths": 0,
       "blockers": [
-        "unscreened:.ccf",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.nev",
         "unscreened:.vhdr",
@@ -2373,7 +1917,7 @@
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".ccf": 8,
+        "(unusual extension)": 8,
         ".nev": 8,
         ".eeg": 8,
         ".vhdr": 8,
@@ -2397,23 +1941,17 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "unscreened:(unusual extension)",
-        "unscreened:.ccf",
         "unscreened:.eeg",
         "unscreened:.mat",
         "unscreened:.nev",
-        "unscreened:.nex5",
-        "unscreened:.sbin",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".sbin": 20,
-        ".ccf": 5,
+        "(unusual extension)": 53,
         ".mat": 7,
         ".nev": 8,
-        ".nex5": 8,
-        "(unusual extension)": 20,
         ".eeg": 11,
         ".vhdr": 11,
         ".vmrk": 11
@@ -2469,8 +2007,8 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.fig",
         "unscreened:.mat",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
@@ -2481,7 +2019,7 @@
         }
       },
       "unscreened": {
-        ".fig": 21,
+        "(unusual extension)": 21,
         ".mat": 262,
         ".eeg": 170,
         ".vhdr": 170,
@@ -2612,14 +2150,14 @@
       "historyPaths": 165,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.meta",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".meta": 21,
+        "(unusual extension)": 21,
         ".eeg": 21,
         ".vhdr": 21,
         ".vmrk": 21
@@ -2641,16 +2179,16 @@
       "historyPaths": 39,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.mat",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.wav"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
         ".mat": 1,
-        ".wav": 1,
+        "(unusual extension)": 1,
         ".eeg": 1,
         ".vhdr": 1,
         ".vmrk": 1
@@ -2702,9 +2240,9 @@
       "historyOnlyPaths": 2,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.mat",
-        "unscreened:.mov",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
@@ -2714,7 +2252,7 @@
         }
       },
       "unscreened": {
-        ".mov": 1,
+        "(unusual extension)": 1,
         ".mat": 111,
         ".eeg": 1,
         ".vhdr": 1,
@@ -2803,14 +2341,14 @@
       "historyPaths": 366,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.wav"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".wav": 20,
+        "(unusual extension)": 20,
         ".eeg": 40,
         ".vhdr": 40,
         ".vmrk": 40
@@ -2832,18 +2370,16 @@
       "historyPaths": 487,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.lab",
         "unscreened:.mat",
         "unscreened:.vhdr",
-        "unscreened:.vmrk",
-        "unscreened:.wav"
+        "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
         ".mat": 44,
-        ".wav": 31,
-        ".lab": 31,
+        "(unusual extension)": 62,
         ".eeg": 44,
         ".vhdr": 44,
         ".vmrk": 44
@@ -2867,15 +2403,9 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.0",
-        "unscreened:.asv",
         "unscreened:.dat",
         "unscreened:.eeg",
-        "unscreened:.fig",
-        "unscreened:.hdr",
-        "unscreened:.img",
         "unscreened:.mat",
-        "unscreened:.mgz",
         "unscreened:.nii",
         "unscreened:.vhdr",
         "unscreened:.vmrk",
@@ -2888,16 +2418,10 @@
       },
       "unscreened": {
         ".mat": 51,
-        ".0": 1,
-        ".asv": 12,
-        ".fig": 1,
-        ".hdr": 2,
-        ".img": 2,
+        "(unusual extension)": 24,
         ".nii": 1,
         ".zip": 2,
-        "(unusual extension)": 1,
         ".dat": 48,
-        ".mgz": 5,
         ".eeg": 10,
         ".vhdr": 10,
         ".vmrk": 10
@@ -3078,8 +2602,8 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.fig",
         "unscreened:.mat",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
@@ -3091,7 +2615,7 @@
       },
       "unscreened": {
         ".mat": 59,
-        ".fig": 5,
+        "(unusual extension)": 5,
         ".eeg": 171,
         ".vhdr": 171,
         ".vmrk": 171
@@ -3281,11 +2805,10 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.h5",
-        "unscreened:.in",
         "unscreened:.mat",
-        "unscreened:.phn",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
@@ -3295,10 +2818,9 @@
         }
       },
       "unscreened": {
-        ".in": 1,
+        "(unusual extension)": 500,
         "(no extension)": 4,
         ".mat": 84,
-        ".phn": 499,
         ".h5": 1,
         ".eeg": 80,
         ".vhdr": 80,
@@ -3329,10 +2851,10 @@
       "historyPaths": 461,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.mat",
         "unscreened:.nev",
-        "unscreened:.nex5",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
@@ -3340,7 +2862,7 @@
       "unscreened": {
         ".mat": 25,
         ".nev": 32,
-        ".nex5": 19,
+        "(unusual extension)": 19,
         ".eeg": 64,
         ".vhdr": 64,
         ".vmrk": 64
@@ -3454,7 +2976,7 @@
       "historyPaths": 253,
       "historyOnlyPaths": 0,
       "blockers": [
-        "unscreened:.ccf",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.nev",
         "unscreened:.vhdr",
@@ -3462,7 +2984,7 @@
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".ccf": 27,
+        "(unusual extension)": 27,
         ".nev": 27,
         ".eeg": 27,
         ".vhdr": 27,
@@ -3980,14 +3502,14 @@
       "historyPaths": 67,
       "historyOnlyPaths": 0,
       "blockers": [
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.npz",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
       "flaggedPaths": {},
       "unscreened": {
-        ".npz": 1,
+        "(unusual extension)": 1,
         ".eeg": 6,
         ".vhdr": 6,
         ".vmrk": 6
@@ -4230,8 +3752,8 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
-        "unscreened:.pkl",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
       ],
@@ -4241,7 +3763,7 @@
         }
       },
       "unscreened": {
-        ".pkl": 87,
+        "(unusual extension)": 87,
         ".eeg": 22,
         ".vhdr": 22,
         ".vmrk": 22
@@ -4588,13 +4110,9 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -4603,13 +4121,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 21,
+        "(unusual extension)": 105,
         ".snirf": 62,
-        ".tri": 21,
-        ".wl1": 21,
-        ".wl2": 21,
         ".zip": 21,
-        ".hdr": 21,
         ".mat": 21
       },
       "images": {
@@ -4678,13 +4192,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -4693,13 +4203,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 46,
+        "(unusual extension)": 230,
         ".snirf": 88,
-        ".tri": 46,
-        ".wl1": 46,
-        ".wl2": 46,
         ".zip": 46,
-        ".hdr": 46,
         ".mat": 52
       },
       "images": {
@@ -4730,13 +4236,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -4745,13 +4247,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 72,
+        "(unusual extension)": 360,
         ".snirf": 144,
-        ".tri": 72,
-        ".wl1": 72,
-        ".wl2": 72,
         ".zip": 72,
-        ".hdr": 72,
         ".mat": 73
       },
       "images": {
@@ -4821,15 +4319,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.cmp",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
-        "unscreened:.prt",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -4838,16 +4330,10 @@
         }
       },
       "unscreened": {
-        ".nirs": 13,
+        "(unusual extension)": 68,
         ".snirf": 39,
-        ".wl1": 13,
-        ".wl2": 13,
         ".zip": 13,
-        ".hdr": 13,
-        ".tri": 11,
-        ".mat": 13,
-        ".cmp": 4,
-        ".prt": 1
+        ".mat": 13
       },
       "images": {
         "total": 6,
@@ -4878,15 +4364,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.cmp",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
-        "unscreened:.prt",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -4895,16 +4375,10 @@
         }
       },
       "unscreened": {
-        ".nirs": 12,
+        "(unusual extension)": 64,
         ".snirf": 36,
-        ".wl1": 12,
-        ".wl2": 12,
         ".zip": 12,
-        ".cmp": 4,
-        ".hdr": 12,
-        ".tri": 11,
-        ".mat": 12,
-        ".prt": 1
+        ".mat": 12
       },
       "images": {
         "total": 5,
@@ -4935,15 +4409,10 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -4951,13 +4420,8 @@
         }
       },
       "unscreened": {
-        ".evt": 12,
-        ".hdr": 12,
-        ".inf": 12,
+        "(unusual extension)": 72,
         ".set": 12,
-        ".tpl": 12,
-        ".wl1": 12,
-        ".wl2": 12,
         ".mat": 12,
         ".snirf": 24
       },
@@ -5194,9 +4658,7 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.ldr",
         "unscreened:.mat",
-        "unscreened:.psydat",
         "unscreened:.snirf",
         "unscreened:.tif",
         "unscreened:.zip"
@@ -5209,10 +4671,8 @@
       "unscreened": {
         ".mat": 2,
         ".tif": 12,
-        "(unusual extension)": 4,
+        "(unusual extension)": 98,
         ".zip": 2,
-        ".ldr": 53,
-        ".psydat": 41,
         ".snirf": 28
       },
       "images": {
@@ -5360,7 +4820,7 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.fig",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.snirf",
         "unscreened:.zip"
@@ -5373,7 +4833,7 @@
       "unscreened": {
         ".zip": 1,
         ".mat": 1,
-        ".fig": 1,
+        "(unusual extension)": 1,
         ".snirf": 62
       },
       "images": {
@@ -5444,9 +4904,7 @@
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.qsf",
         "unscreened:.snirf",
-        "unscreened:.xsl",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -5455,11 +4913,9 @@
         }
       },
       "unscreened": {
-        "(unusual extension)": 1,
+        "(unusual extension)": 5,
         ".mat": 136,
-        ".qsf": 3,
         ".zip": 2,
-        ".xsl": 1,
         ".snirf": 260
       },
       "images": {
@@ -5613,13 +5069,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -5628,13 +5080,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 10,
+        "(unusual extension)": 50,
         ".snirf": 30,
-        ".tri": 10,
-        ".wl1": 10,
-        ".wl2": 10,
         ".zip": 10,
-        ".hdr": 10,
         ".mat": 50
       },
       "images": {
@@ -5743,15 +5191,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.cmp",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
-        "unscreened:.prt",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -5760,16 +5202,10 @@
         }
       },
       "unscreened": {
-        ".nirs": 12,
+        "(unusual extension)": 61,
         ".snirf": 36,
-        ".wl1": 12,
-        ".wl2": 12,
         ".zip": 12,
-        ".hdr": 12,
-        ".tri": 11,
-        ".mat": 12,
-        ".cmp": 1,
-        ".prt": 1
+        ".mat": 12
       },
       "images": {
         "total": 4,
@@ -5799,13 +5235,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -5814,13 +5246,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 12,
+        "(unusual extension)": 59,
         ".snirf": 36,
-        ".wl1": 12,
-        ".wl2": 12,
         ".zip": 12,
-        ".hdr": 12,
-        ".tri": 11,
         ".mat": 12
       },
       "images": {
@@ -5967,13 +5395,9 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -5982,13 +5406,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 30,
+        "(unusual extension)": 150,
         ".snirf": 89,
-        ".tri": 30,
-        ".wl1": 30,
-        ".wl2": 30,
         ".zip": 30,
-        ".hdr": 30,
         ".mat": 30
       },
       "images": {
@@ -6057,10 +5477,10 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.snirf",
         "unscreened:.tiff",
-        "unscreened:.tpl",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -6069,7 +5489,7 @@
         }
       },
       "unscreened": {
-        ".tpl": 1,
+        "(unusual extension)": 1,
         ".mat": 1,
         ".zip": 1,
         ".tiff": 72,
@@ -6107,10 +5527,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.bin",
-        "unscreened:.glb",
-        "unscreened:.gltf",
-        "unscreened:.psyexp",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -6121,10 +5538,7 @@
       },
       "unscreened": {
         ".zip": 1,
-        ".glb": 1,
-        ".bin": 1,
-        ".gltf": 1,
-        ".psyexp": 1,
+        "(unusual extension)": 4,
         ".snirf": 88
       },
       "images": {
@@ -6312,7 +5726,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.nirs",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -6321,7 +5735,7 @@
         }
       },
       "unscreened": {
-        ".nirs": 30,
+        "(unusual extension)": 30,
         ".snirf": 30
       },
       "images": {
@@ -6350,7 +5764,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.nirs",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -6359,7 +5773,7 @@
         }
       },
       "unscreened": {
-        ".nirs": 30,
+        "(unusual extension)": 30,
         ".snirf": 30
       },
       "images": {
@@ -6388,8 +5802,8 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.snirf",
-        "unscreened:.sps"
+        "unscreened:(unusual extension)",
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -6397,7 +5811,7 @@
         }
       },
       "unscreened": {
-        ".sps": 2,
+        "(unusual extension)": 2,
         ".snirf": 61
       },
       "images": {
@@ -6432,9 +5846,6 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.cmp",
-        "unscreened:.mlx",
-        "unscreened:.rdata",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -6444,11 +5855,8 @@
         }
       },
       "unscreened": {
-        ".rdata": 1,
-        "(unusual extension)": 1,
-        ".cmp": 102,
+        "(unusual extension)": 106,
         ".zip": 4,
-        ".mlx": 2,
         ".snirf": 102
       },
       "images": {
@@ -6518,7 +5926,7 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.edat3",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -6528,7 +5936,7 @@
         }
       },
       "unscreened": {
-        ".edat3": 51,
+        "(unusual extension)": 51,
         ".zip": 1,
         ".snirf": 51
       },
@@ -6912,7 +6320,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.nirs",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -6921,7 +6329,7 @@
         }
       },
       "unscreened": {
-        ".nirs": 18,
+        "(unusual extension)": 18,
         ".snirf": 18
       },
       "images": {
@@ -7066,7 +6474,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.nirs",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -7076,7 +6484,7 @@
       },
       "unscreened": {
         ".snirf": 256,
-        ".nirs": 128
+        "(unusual extension)": 128
       },
       "images": {
         "total": 7,
@@ -7342,18 +6750,12 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.bmp",
         "unscreened:.dat",
-        "unscreened:.edat3",
-        "unscreened:.es2",
-        "unscreened:.evt",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.set",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -7362,16 +6764,10 @@
         }
       },
       "unscreened": {
-        ".edat3": 31,
+        "(unusual extension)": 218,
         ".mat": 98,
-        ".es2": 1,
         ".bmp": 9,
-        ".evt": 62,
-        ".nirs": 31,
         ".set": 31,
-        ".tri": 31,
-        ".wl1": 31,
-        ".wl2": 31,
         ".zip": 31,
         ".dat": 126,
         ".snirf": 31
@@ -7404,8 +6800,8 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -7415,7 +6811,7 @@
       },
       "unscreened": {
         ".mat": 72,
-        ".nirs": 72,
+        "(unusual extension)": 72,
         ".snirf": 143
       },
       "images": {
@@ -7448,14 +6844,10 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
         "unscreened:.tif",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -7464,13 +6856,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 31,
+        "(unusual extension)": 155,
         ".snirf": 62,
-        ".tri": 31,
-        ".wl1": 31,
-        ".wl2": 31,
         ".zip": 31,
-        ".hdr": 31,
         ".mat": 31,
         ".tif": 62
       },
@@ -7542,14 +6930,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.acc",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -7558,15 +6941,10 @@
         }
       },
       "unscreened": {
-        ".nirs": 56,
+        "(unusual extension)": 280,
         ".snirf": 111,
-        ".wl1": 56,
-        ".wl2": 56,
         ".zip": 56,
-        ".hdr": 56,
-        ".tri": 55,
-        ".mat": 56,
-        ".acc": 1
+        ".mat": 56
       },
       "images": {
         "total": 6,
@@ -7598,7 +6976,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.fig",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.nii",
         "unscreened:.snirf",
@@ -7611,7 +6989,7 @@
       },
       "unscreened": {
         ".zip": 1,
-        ".fig": 43,
+        "(unusual extension)": 43,
         ".mat": 4,
         ".nii": 8,
         ".snirf": 15
@@ -7768,17 +7146,10 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.avg",
         "unscreened:.dat",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
         "unscreened:.mat",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -7786,16 +7157,9 @@
         }
       },
       "unscreened": {
-        ".avg": 39,
+        "(unusual extension)": 301,
         ".dat": 39,
-        ".evt": 39,
-        ".hdr": 39,
-        ".inf": 39,
-        "(unusual extension)": 28,
         ".set": 39,
-        ".tpl": 39,
-        ".wl1": 39,
-        ".wl2": 39,
         ".mat": 39,
         ".snirf": 39
       },
@@ -7828,17 +7192,10 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(unusual extension)",
-        "unscreened:.avg",
         "unscreened:.dat",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
         "unscreened:.mat",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -7846,16 +7203,9 @@
         }
       },
       "unscreened": {
-        ".avg": 67,
+        "(unusual extension)": 539,
         ".dat": 67,
-        ".evt": 67,
-        ".hdr": 67,
-        ".inf": 67,
-        "(unusual extension)": 70,
         ".set": 67,
-        ".tpl": 67,
-        ".wl1": 67,
-        ".wl2": 67,
         ".mat": 63,
         ".snirf": 66
       },
@@ -8248,7 +7598,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.pos",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -8257,7 +7607,7 @@
         }
       },
       "unscreened": {
-        ".pos": 30,
+        "(unusual extension)": 30,
         ".snirf": 30
       },
       "images": {
@@ -8290,9 +7640,8 @@
       "historyOnlyPaths": 2,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.cdt",
-        "unscreened:.ceo",
-        "unscreened:.dpa",
         "unscreened:.mat",
         "unscreened:.snirf",
         "unscreened:.zip"
@@ -8306,8 +7655,7 @@
         ".zip": 9,
         ".mat": 96,
         ".cdt": 48,
-        ".ceo": 49,
-        ".dpa": 49,
+        "(unusual extension)": 98,
         ".snirf": 50
       },
       "images": {
@@ -8338,7 +7686,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.psyexp",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.tiff",
         "unscreened:.zip"
@@ -8349,7 +7697,7 @@
         }
       },
       "unscreened": {
-        ".psyexp": 3,
+        "(unusual extension)": 3,
         ".tiff": 4,
         ".zip": 2,
         ".snirf": 90
@@ -8536,8 +7884,8 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -8549,7 +7897,7 @@
       "unscreened": {
         ".zip": 3,
         ".mat": 99,
-        ".nirs": 104,
+        "(unusual extension)": 104,
         ".snirf": 104
       },
       "images": {
@@ -8661,13 +8009,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -8676,13 +8020,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 12,
+        "(unusual extension)": 59,
         ".snirf": 37,
-        ".wl1": 12,
-        ".wl2": 12,
         ".zip": 12,
-        ".hdr": 12,
-        ".tri": 11,
         ".mat": 12
       },
       "images": {
@@ -8713,13 +8053,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -8728,13 +8064,9 @@
         }
       },
       "unscreened": {
-        ".nirs": 12,
+        "(unusual extension)": 59,
         ".snirf": 36,
-        ".wl1": 12,
-        ".wl2": 12,
         ".zip": 12,
-        ".hdr": 12,
-        ".tri": 11,
         ".mat": 12
       },
       "images": {
@@ -8765,9 +8097,9 @@
       "historyOnlyPaths": 4,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.7z",
         "unscreened:.mat",
-        "unscreened:.mexw64",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -8778,7 +8110,7 @@
       },
       "unscreened": {
         ".7z": 2,
-        ".mexw64": 1,
+        "(unusual extension)": 1,
         ".mat": 1,
         ".zip": 1,
         ".snirf": 282
@@ -8811,7 +8143,7 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.nirs",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -8820,7 +8152,7 @@
         }
       },
       "unscreened": {
-        ".nirs": 38,
+        "(unusual extension)": 38,
         ".snirf": 38
       },
       "images": {
@@ -8889,9 +8221,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.lay",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -8901,7 +8233,7 @@
       },
       "unscreened": {
         ".lay": 1,
-        ".nirs": 35,
+        "(unusual extension)": 35,
         ".mat": 2,
         ".snirf": 35
       },
@@ -8931,7 +8263,7 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.md",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -8941,7 +8273,7 @@
         }
       },
       "unscreened": {
-        ".md": 3,
+        "(unusual extension)": 3,
         ".zip": 28,
         ".snirf": 234
       },
@@ -9013,19 +8345,11 @@
       "historyOnlyPaths": 11,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.avg",
+        "unscreened:(unusual extension)",
         "unscreened:.dat",
-        "unscreened:.edat3",
-        "unscreened:.emrg3",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
         "unscreened:.mat",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -9033,17 +8357,9 @@
         }
       },
       "unscreened": {
-        ".emrg3": 2,
-        ".edat3": 25,
+        "(unusual extension)": 209,
         ".dat": 30,
-        ".avg": 26,
-        ".evt": 26,
-        ".hdr": 26,
-        ".inf": 26,
         ".set": 26,
-        ".tpl": 26,
-        ".wl1": 26,
-        ".wl2": 26,
         ".mat": 30,
         ".snirf": 26
       },
@@ -9149,9 +8465,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.7z",
         "unscreened:.fif",
-        "unscreened:.py",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -9161,7 +8477,7 @@
         }
       },
       "unscreened": {
-        ".py": 1,
+        "(unusual extension)": 1,
         ".zip": 22,
         ".7z": 24,
         ".fif": 92,
@@ -9353,15 +8669,10 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -9370,13 +8681,8 @@
       },
       "unscreened": {
         ".mat": 593,
-        ".evt": 197,
-        ".hdr": 197,
-        ".inf": 197,
+        "(unusual extension)": 1182,
         ".set": 197,
-        ".tpl": 197,
-        ".wl1": 197,
-        ".wl2": 197,
         ".snirf": 197
       },
       "images": {
@@ -9495,8 +8801,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "finding:tooling-debris",
-        "unscreened:.snirf",
-        "unscreened:.txt"
+        "unscreened:(unusual extension)",
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -9507,7 +8813,7 @@
         }
       },
       "unscreened": {
-        ".txt": 10,
+        "(unusual extension)": 10,
         ".snirf": 10
       },
       "images": {
@@ -9614,8 +8920,8 @@
       "historyOnlyPaths": 1,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.sd",
         "unscreened:.snirf",
         "unscreened:.tif",
         "unscreened:.zip"
@@ -9626,7 +8932,7 @@
         }
       },
       "unscreened": {
-        ".sd": 1,
+        "(unusual extension)": 1,
         ".mat": 140,
         ".zip": 1,
         ".tif": 5,
@@ -9829,7 +9135,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.py",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -9840,7 +9146,7 @@
       },
       "unscreened": {
         ".zip": 2,
-        ".py": 1,
+        "(unusual extension)": 1,
         ".snirf": 110
       },
       "images": {
@@ -10199,9 +9505,8 @@
       "historyOnlyPaths": 2,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.asv",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.sav",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -10211,9 +9516,8 @@
         }
       },
       "unscreened": {
-        ".sav": 1,
+        "(unusual extension)": 2,
         ".zip": 1,
-        ".asv": 1,
         ".mat": 9,
         ".snirf": 43
       },
@@ -10283,9 +9587,9 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.rar",
-        "unscreened:.sav",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -10294,7 +9598,7 @@
         }
       },
       "unscreened": {
-        ".sav": 2,
+        "(unusual extension)": 2,
         ".rar": 2,
         ".mat": 2,
         ".snirf": 552
@@ -10793,7 +10097,7 @@
       "historyOnlyPaths": 2,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.ced",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -10802,7 +10106,7 @@
         }
       },
       "unscreened": {
-        ".ced": 1,
+        "(unusual extension)": 1,
         ".snirf": 39
       },
       "images": {
@@ -11179,10 +10483,8 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.hdr",
-        "unscreened:.img",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.omm",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -11191,9 +10493,7 @@
         }
       },
       "unscreened": {
-        ".omm": 60,
-        ".hdr": 12,
-        ".img": 12,
+        "(unusual extension)": 84,
         ".mat": 4,
         ".snirf": 62
       },
@@ -11301,7 +10601,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.jasp",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.xlsx",
         "unscreened:.zip"
@@ -11314,7 +10614,7 @@
       "unscreened": {
         ".xlsx": 1,
         ".zip": 1,
-        ".jasp": 6,
+        "(unusual extension)": 6,
         ".snirf": 42
       },
       "images": {
@@ -11387,9 +10687,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "finding:tooling-debris",
-        "unscreened:.pickle",
-        "unscreened:.snirf",
-        "unscreened:.txt"
+        "unscreened:(unusual extension)",
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -11400,8 +10699,7 @@
         }
       },
       "unscreened": {
-        ".txt": 18,
-        ".pickle": 1,
+        "(unusual extension)": 19,
         ".snirf": 18
       },
       "images": {
@@ -11471,9 +10769,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.mtl",
-        "unscreened:.obj",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -11482,8 +10779,7 @@
         }
       },
       "unscreened": {
-        ".mtl": 40,
-        ".obj": 40,
+        "(unusual extension)": 80,
         ".mat": 38,
         "(no extension)": 170,
         ".snirf": 152
@@ -11518,7 +10814,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.ced",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
         "unscreened:.snirf"
       ],
@@ -11529,7 +10825,7 @@
       },
       "unscreened": {
         ".mat": 33,
-        ".ced": 1,
+        "(unusual extension)": 1,
         ".snirf": 28
       },
       "images": {
@@ -11600,11 +10896,10 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
+        "unscreened:(unusual extension)",
         "unscreened:.eeg",
         "unscreened:.mat",
-        "unscreened:.oxy4",
         "unscreened:.set",
-        "unscreened:.sfp",
         "unscreened:.snirf",
         "unscreened:.vhdr",
         "unscreened:.vmrk"
@@ -11615,8 +10910,7 @@
         }
       },
       "unscreened": {
-        ".oxy4": 1,
-        ".sfp": 1,
+        "(unusual extension)": 2,
         ".set": 50,
         ".mat": 51,
         ".eeg": 1,
@@ -11652,8 +10946,7 @@
         "finding:image-or-document-file",
         "finding:tooling-debris",
         "unscreened:(unusual extension)",
-        "unscreened:.snirf",
-        "unscreened:.txt"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -11664,8 +10957,7 @@
         }
       },
       "unscreened": {
-        ".txt": 14,
-        "(unusual extension)": 1,
+        "(unusual extension)": 15,
         ".snirf": 14
       },
       "images": {
@@ -11694,7 +10986,7 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.oxy5",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -11703,7 +10995,7 @@
         }
       },
       "unscreened": {
-        ".oxy5": 31,
+        "(unusual extension)": 31,
         ".snirf": 31
       },
       "images": {
@@ -11810,8 +11102,8 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.snirf",
-        "unscreened:.xyz"
+        "unscreened:(unusual extension)",
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -11819,7 +11111,7 @@
         }
       },
       "unscreened": {
-        ".xyz": 2,
+        "(unusual extension)": 2,
         ".snirf": 35
       },
       "images": {
@@ -12008,20 +11300,11 @@
       "historyOnlyPaths": 0,
       "blockers": [
         "finding:image-or-document-file",
-        "unscreened:.avg",
+        "unscreened:(unusual extension)",
         "unscreened:.dat",
-        "unscreened:.edat3",
-        "unscreened:.evt",
-        "unscreened:.hdr",
-        "unscreened:.inf",
         "unscreened:.mat",
-        "unscreened:.nirs",
-        "unscreened:.sav",
         "unscreened:.set",
-        "unscreened:.snirf",
-        "unscreened:.tpl",
-        "unscreened:.wl1",
-        "unscreened:.wl2"
+        "unscreened:.snirf"
       ],
       "flaggedPaths": {
         "image-or-document-file": {
@@ -12029,19 +11312,10 @@
         }
       },
       "unscreened": {
-        ".edat3": 46,
-        ".evt": 97,
+        "(unusual extension)": 483,
         ".dat": 250,
         ".mat": 486,
-        ".avg": 48,
-        ".hdr": 49,
-        ".inf": 49,
-        ".nirs": 48,
         ".set": 49,
-        ".tpl": 49,
-        ".wl1": 48,
-        ".wl2": 48,
-        ".sav": 1,
         ".snirf": 45
       },
       "images": {
@@ -12274,7 +11548,6 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.sd",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -12284,8 +11557,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        "(unusual extension)": 1,
-        ".sd": 1,
+        "(unusual extension)": 2,
         ".snirf": 14
       },
       "images": {
@@ -12605,12 +11877,10 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.gii",
         "unscreened:.mat",
         "unscreened:.nii",
         "unscreened:.nii.gz",
         "unscreened:.snirf",
-        "unscreened:.sqlite",
         "unscreened:.tsv.gz"
       ],
       "flaggedPaths": {
@@ -12619,13 +11889,11 @@
         }
       },
       "unscreened": {
-        "(unusual extension)": 2,
+        "(unusual extension)": 79,
         "(no extension)": 61,
-        ".gii": 76,
         ".mat": 26,
         ".nii": 13,
         ".nii.gz": 75,
-        ".sqlite": 1,
         ".tsv.gz": 50,
         ".snirf": 52
       },
@@ -12702,7 +11970,6 @@
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -12712,8 +11979,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        "(unusual extension)": 1,
-        ".nirs": 20,
+        "(unusual extension)": 21,
         ".mat": 65,
         ".snirf": 28
       },
@@ -12830,7 +12096,6 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.sd",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -12840,8 +12105,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        "(unusual extension)": 1,
-        ".sd": 1,
+        "(unusual extension)": 2,
         ".snirf": 120
       },
       "images": {
@@ -13076,7 +12340,6 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.bin",
         "unscreened:.mat",
         "unscreened:.snirf"
       ],
@@ -13087,8 +12350,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        "(unusual extension)": 1,
-        ".bin": 1024,
+        "(unusual extension)": 1025,
         ".mat": 103,
         ".snirf": 134
       },
@@ -13492,8 +12754,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.sav",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -13503,7 +12765,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        ".sav": 2,
+        "(unusual extension)": 2,
         ".mat": 1,
         ".snirf": 35
       },
@@ -13536,8 +12798,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.sav",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -13547,7 +12809,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        ".sav": 2,
+        "(unusual extension)": 2,
         ".mat": 1,
         ".snirf": 31
       },
@@ -13580,7 +12842,7 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
-        "unscreened:.jasp",
+        "unscreened:(unusual extension)",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -13591,7 +12853,7 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        ".jasp": 16,
+        "(unusual extension)": 16,
         ".zip": 2,
         ".snirf": 148
       },
@@ -14422,7 +13684,6 @@
         "finding:image-or-document-file",
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
-        "unscreened:.dot",
         "unscreened:.h5",
         "unscreened:.mat",
         "unscreened:.nii",
@@ -14436,10 +13697,9 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        "(unusual extension)": 1,
+        "(unusual extension)": 2,
         ".mat": 208,
         ".h5": 8,
-        ".dot": 1,
         ".nii": 12,
         ".nii.gz": 24,
         ".snirf": 356
@@ -14473,13 +13733,9 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
-        "unscreened:.hdr",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
         "unscreened:.snirf",
-        "unscreened:.tri",
-        "unscreened:.wl1",
-        "unscreened:.wl2",
         "unscreened:.zip"
       ],
       "flaggedPaths": {
@@ -14489,13 +13745,9 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        ".nirs": 18,
+        "(unusual extension)": 89,
         ".snirf": 54,
-        ".tri": 19,
-        ".wl1": 17,
-        ".wl2": 17,
         ".zip": 18,
-        ".hdr": 18,
         ".mat": 18
       },
       "images": {
@@ -14525,10 +13777,8 @@
       "blockers": [
         "finding:image-or-document-file",
         "unscreened:(no extension)",
-        "unscreened:.exp",
+        "unscreened:(unusual extension)",
         "unscreened:.mat",
-        "unscreened:.nirs",
-        "unscreened:.sce",
         "unscreened:.snirf"
       ],
       "flaggedPaths": {
@@ -14538,10 +13788,8 @@
       },
       "unscreened": {
         "(no extension)": 1,
-        ".nirs": 85,
+        "(unusual extension)": 91,
         ".mat": 2,
-        ".exp": 1,
-        ".sce": 5,
         ".snirf": 78
       },
       "images": {
@@ -14697,7 +13945,6 @@
         "unscreened:(no extension)",
         "unscreened:(unusual extension)",
         "unscreened:.dat",
-        "unscreened:.hea",
         "unscreened:.snirf",
         "unscreened:.zip"
       ],
@@ -14710,8 +13957,7 @@
         "(no extension)": 2,
         ".zip": 2,
         ".dat": 32,
-        ".hea": 32,
-        "(unusual extension)": 32,
+        "(unusual extension)": 64,
         ".snirf": 9
       },
       "images": {

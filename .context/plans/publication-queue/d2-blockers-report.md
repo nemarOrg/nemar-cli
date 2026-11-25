@@ -20,7 +20,7 @@ Findings that need file content (EDF headers, participants tables, JSON keys, te
 | same, restricted to the a7 list (screen measured 196) | 225 |
 | same, blocked requests | 30 |
 | with only the image kind, and no unscreened format | 1 |
-| peak single clone on disk (KiB) | 34280 |
+| peak single clone on disk (KiB) | 34268 |
 
 Image-finding count versus the screen's 229: 275 measured (difference 46).
 Present here and not in the a7 list: 46 (30 blocked, 16 requested).
@@ -28,11 +28,11 @@ In the a7 list and not measured here: none.
 
 Reading the difference:
 
-- The a7 list is a subset of what is measured here, so no screen finding is missed by the path rebuild.
+- Measured: the a7 list is a subset of what is measured here, so no screen finding is missed by the path rebuild.
 - Blocked requests are not screened, and 30 of them have an image path, which accounts for 30 of the surplus.
 - 16 requested requests have an image path and are not in the a7 list: nm000649, nm000683, nm000788, nm000815, nm000871, nm000878, nm000883, nm000889, nm000893, nm000901, nm000917, nm000923, nm000931, nm000937, nm000957, nm000969.
-  This script reads paths only, so it cannot say whether a screen record exists for them; the likely cause is no screen record when the a7 list was made.
-- The screen's "only image findings" figure (196) counts image findings among ALL kinds, content kinds included (EDF headers, participants tables, JSON keys, text files); this measurement sees path kinds only, so its count restricted to the a7 list (225) is an upper bound on it, and the gap is requests whose other findings are content kinds.
+  Inference, confirmed by the lead: this script reads paths only and cannot see screen records. The a7 list was built from requests whose stored screen held an image finding; blocked requests and requested ones whose screen never ran had no record, which matches the blocked and requested surplus above.
+- Inference: the screen's "only image findings" figure (196) counts image findings among ALL kinds, content kinds included (EDF headers, participants tables, JSON keys, text files); this measurement sees path kinds only, so its count restricted to the a7 list (225) is an upper bound on it, and the gap is requests whose other findings are content kinds.
 
 Unreadable requests:
 
@@ -56,35 +56,33 @@ Name-like subject labels: 2901 paths carry one (counted, never shown).
 | .snirf | 248 |
 | .zip | 150 |
 | .mat | 119 |
+| (unusual extension) | 118 |
 | .eeg | 97 |
 | .vhdr | 97 |
 | .vmrk | 97 |
 | (no extension) | 73 |
-| (unusual extension) | 44 |
-| .nirs | 26 |
-| .hdr | 23 |
-| .wl1 | 21 |
-| .wl2 | 21 |
-| .tri | 15 |
 | .set | 13 |
 | .dat | 12 |
 | .nii | 10 |
 | .nii.gz | 10 |
 | .tsv.gz | 8 |
-| .fig | 8 |
-| .tpl | 8 |
 | .fif | 8 |
 | .rar | 8 |
-| .inf | 7 |
-| .evt | 7 |
 | .tif | 7 |
 | .npy | 6 |
 | .eps | 5 |
-| .avg | 5 |
-| .sav | 5 |
-| .h | 4 |
+| .h5 | 4 |
+| .nev | 4 |
+| .lay | 3 |
+| .tar | 3 |
+| .fdt | 3 |
+| .xdf | 2 |
+| .tiff | 2 |
+| .7z | 2 |
+| .xlsx | 2 |
+| .tgz | 2 |
 
-166 further formats, each held by one or two requests, are in the JSON; an extension that is not a plausible format word is counted as `(unusual extension)`.
+8 further formats, each held by one or two requests, are in the JSON; an extension outside the known-format allowlist is counted as `(unusual extension)`.
 
 ### Blocker-set shapes
 
@@ -160,6 +158,8 @@ Files are counted over HEAD plus history paths; requests are the distinct reques
 | --- | --- | --- |
 | both | 6908 | 272 |
 | history-only | 4 | 4 |
+
+Presence classes are not exclusive: a request with files of more than one class counts under each, so the requests column sums to 276 against 275 requests with an image finding.
 
 ### Files by location and name class
 
