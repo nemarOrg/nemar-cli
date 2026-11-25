@@ -63,6 +63,7 @@ import {
   readTree,
   structuralSummary,
 } from "./publication-review-evidence";
+import { presendInputs } from "./publication-review-presend";
 import {
   PUBLICATION_OUTPUT_SCHEMA,
   PUBLICATION_REVIEW_MODEL,
@@ -70,7 +71,6 @@ import {
   buildPublicationReviewMessages,
   publicationInputDigest,
 } from "./publication-review-prompt";
-import { presendInputs } from "./publication-review-presend";
 
 // RunFailure, mapError, describeError, the callback poster, flag and need, and CALLBACK_ORIGINS
 // below are copies of the ones in pr-review.ts, on purpose: the live pull-request review stays
