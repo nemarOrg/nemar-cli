@@ -18,11 +18,15 @@ import {
   CANARY_DAYS,
   type ChannelText,
   DERIVATIVE_KEY_FIELDS,
+  DERIVATIVE_KEY_FORMAT,
+  DERIVATIVE_KEY_FORMAT_V2,
+  DERIVATIVE_KEY_SERVING_INDEX_FIELD,
   DerivativeContractError,
   type DerivativeKeyFields,
   INPUT_DIGEST_V2_FORMAT,
   LOCATIONS_NONE,
   RETENTION_CLASSES,
+  SERVING_INDEX_NONE,
   SERVING_PROFILE_SENTENCE,
   STORE_CONTENT_FORMAT,
   STORE_LOCATIONS_FORMAT,
@@ -176,7 +180,17 @@ describe("the vector file", () => {
       "two roundings, never fused",
     ]);
     expect(vectors.input_digest.map((v) => v.name)).toEqual(["one store", "code point order"]);
-    expect(vectors.derivative_key.map((v) => v.name)).toEqual(["zarr serving", "bids archive"]);
+    expect(vectors.derivative_key.map((v) => v.name)).toEqual([
+      "zarr serving",
+      "bids archive",
+      "bids archive, no serving index",
+      "bids archive, a serving index",
+    ]);
+    expect(vectors.refused.derivative_key.map((v) => v.name)).toEqual([
+      "a trailing line feed in version",
+      "a serving index on the zarr input",
+      "a serving index in upper case",
+    ]);
     expect(Object.keys(vectors.refused)).toEqual([
       "store_content",
       "input_digest",
@@ -1370,6 +1384,68 @@ describe("derivative key (vectors 6 and 7)", () => {
     const checked = validateDerivativeKeyFields(extra);
     expect(checked.ok).toBe(true);
     if (checked.ok) expect(Object.keys(checked.fields)).toEqual([...DERIVATIVE_KEY_FIELDS]);
+  });
+});
+
+describe("the serving index of a version 2 key (ADR 0138, owner ruling of 2026-11-25)", () => {
+  const NONE = vectors.derivative_key[2].fields;
+  const INDEXED = vectors.derivative_key[3].fields;
+  const WITHOUT = Object.fromEntries(
+    DERIVATIVE_KEY_FIELDS.map((name) => [name, NONE[name]]),
+  ) as DerivativeKeyFields;
+
+  test("a key with the field is version 2: the version 1 lines, then serving_index", () => {
+    expect(NONE.serving_index).toBe(SERVING_INDEX_NONE);
+    expect(derivativeKeyText(NONE).split("\n")).toEqual([
+      DERIVATIVE_KEY_FORMAT_V2,
+      ...DERIVATIVE_KEY_FIELDS.map((name) => `${name} ${NONE[name]}`),
+      `${DERIVATIVE_KEY_SERVING_INDEX_FIELD} none`,
+      "",
+    ]);
+    expect(DERIVATIVE_KEY_FORMAT_V2).toBe("nemar.derivative-key.v2");
+  });
+
+  test("runs with no index, with an index and with another index never share a key, nor a version 1 key", async () => {
+    const other = { ...INDEXED, serving_index: `sha256:${"0".repeat(64)}` };
+    const keys = [
+      await derivativeKey(WITHOUT),
+      await derivativeKey(NONE),
+      await derivativeKey(INDEXED),
+      await derivativeKey(other),
+    ];
+    expect(new Set(keys).size).toBe(4);
+    // The eight-line key of the same fields is version 1, byte for byte.
+    expect(derivativeKeyText(WITHOUT).split("\n")[0]).toBe(DERIVATIVE_KEY_FORMAT);
+  });
+
+  test("a key without the field is unchanged: both version 1 vectors still hold", async () => {
+    for (const vector of vectors.derivative_key.slice(0, 2)) {
+      expect("serving_index" in vector.fields).toBe(false);
+      expect(await derivativeKey(vector.fields)).toBe(vector.key);
+    }
+  });
+
+  test("the validator keeps the field, and refuses a bad value or the zarr input, naming the field", () => {
+    const checked = validateDerivativeKeyFields(INDEXED);
+    expect(checked.ok && checked.fields.serving_index).toBe(INDEXED.serving_index as string);
+    for (const value of [
+      "",
+      "null",
+      "NONE",
+      `sha256:${"a".repeat(63)}`,
+      `sha256:${"A".repeat(64)}`,
+      `${"a".repeat(64)}`,
+      "none\n",
+      7,
+      null,
+    ]) {
+      const got = validateDerivativeKeyFields({ ...NONE, serving_index: value });
+      expect(got.ok ? "accepted" : got.field).toBe(DERIVATIVE_KEY_SERVING_INDEX_FIELD);
+    }
+    const zarr = { ...vectors.derivative_key[0].fields, serving_index: "none" };
+    const got = validateDerivativeKeyFields(zarr);
+    expect(got.ok ? "accepted" : got.field).toBe(DERIVATIVE_KEY_SERVING_INDEX_FIELD);
+    expect(refused(() => derivativeKeyText(zarr)).field).toBe(DERIVATIVE_KEY_SERVING_INDEX_FIELD);
   });
 });
 

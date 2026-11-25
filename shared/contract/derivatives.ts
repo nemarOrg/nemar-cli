@@ -68,6 +68,13 @@ export const LOCATIONS_NONE = "none";
 export const DERIVATIVE_KEY_FORMAT = "nemar.derivative-key.v1";
 
 /**
+ * The first line of a version 2 key (ADR 0138): the eight lines of version 1 and a ninth,
+ * `serving_index`. Only a key whose fields carry `serving_index` is version 2; every other key is
+ * version 1, byte for byte, so no key made before version 2 existed changes.
+ */
+export const DERIVATIVE_KEY_FORMAT_V2 = "nemar.derivative-key.v2";
+
+/**
  * The retention classes. `canary` expires `CANARY_DAYS` after it is stored; `catalog` is kept until a
  * later `catalog` derivative of the same dataset, recipe, input and profile is promoted, then expires
  * `SUPERSEDED_GRACE_DAYS` after that; `published` never expires and only the owner sets it. Every
@@ -657,7 +664,25 @@ export const DERIVATIVE_KEY_FIELDS = Object.freeze([
 
 export type DerivativeKeyField = (typeof DERIVATIVE_KEY_FIELDS)[number];
 
-export type DerivativeKeyFields = Record<DerivativeKeyField, string>;
+/**
+ * The ninth field of a version 2 key (ADR 0138), given only for a recipe that reads the serving copy's
+ * index on the archive input (`recipeKeysServingIndex` in `../compute-recipes.ts`: nemar-ica, owner
+ * ruling of 2026-11-25, nemar-cli #2341): the serving index the run was handed changes its product (the
+ * views of the serving copy are declared or skipped, and the record names the index), so it is part of
+ * what the derivative is. Its value is `sha256:` and the 64 hexadecimal digits of the index file's bytes,
+ * or {@link SERVING_INDEX_NONE} when the run was given no index.
+ */
+export const DERIVATIVE_KEY_SERVING_INDEX_FIELD = "serving_index";
+
+/** The `serving_index` of a run that was given no serving index. */
+export const SERVING_INDEX_NONE = "none";
+
+const SERVING_INDEX_RE = /^(none|sha256:[0-9a-f]{64})$/;
+
+export type DerivativeKeyFields = Record<DerivativeKeyField, string> & {
+  /** Only for a recipe that keys the serving index: `none` or `sha256:<64 hex>`, and only with input `bids`. */
+  serving_index?: string;
+};
 
 /** Each field's rule, anchored on the whole value. `input`, `profile` and `input_digest` pair up below. */
 const KEY_FIELD_RULES: Readonly<Record<string, RegExp>> = Object.freeze({
@@ -682,8 +707,9 @@ export type DerivativeKeyFieldsCheck =
  * Whether the eight key fields are inside their rules, and the validated copy when they are.
  * dataset `^[a-z]{2}[0-9]{6}$`; version and recipe_version `^[0-9A-Za-z._+-]{1,64}$`; recipe
  * `^[a-z0-9-]{1,64}$`; engine `^[0-9A-Za-z._+@-]{1,64}$`; input `zarr` with profile `serving` and a
- * `sha256:` digest, or input `bids` with profile `archive` and a `git:` digest. Any other value or
- * pairing is refused, and the refusal names the first field that fails.
+ * `sha256:` digest, or input `bids` with profile `archive` and a `git:` digest; and, when it is given,
+ * `serving_index` `none` or `sha256:<64 hex>`, with input `bids` only. Any other value or pairing is
+ * refused, and the refusal names the first field that fails.
  */
 export function validateDerivativeKeyFields(fields: unknown): DerivativeKeyFieldsCheck {
   if (typeof fields !== "object" || fields === null) {
@@ -722,19 +748,42 @@ export function validateDerivativeKeyFields(fields: unknown): DerivativeKeyField
   }
   const checked = {} as DerivativeKeyFields;
   for (const name of DERIVATIVE_KEY_FIELDS) checked[name] = given[name] as string;
+  const servingIndex = given[DERIVATIVE_KEY_SERVING_INDEX_FIELD];
+  if (servingIndex !== undefined) {
+    if (typeof servingIndex !== "string" || !SERVING_INDEX_RE.test(servingIndex)) {
+      return {
+        ok: false,
+        field: DERIVATIVE_KEY_SERVING_INDEX_FIELD,
+        reason: `serving_index takes ${SERVING_INDEX_NONE} or a digest of the shape ${SERVING_INDEX_RE.source}`,
+      };
+    }
+    if (given.input !== "bids") {
+      return {
+        ok: false,
+        field: DERIVATIVE_KEY_SERVING_INDEX_FIELD,
+        reason: "serving_index is a field of the bids input only",
+      };
+    }
+    checked.serving_index = servingIndex;
+  }
   return { ok: true, fields: checked };
 }
 
 /**
  * The text a derivative key hashes: `nemar.derivative-key.v1`, then the eight fields each as
- * `name SPACE value LF`, in order. The image digest is recorded with a derivative and is never part
+ * `name SPACE value LF`, in order; or, when `serving_index` is given, `nemar.derivative-key.v2`, the
+ * same eight lines and `serving_index SPACE value LF` (ADR 0138). The image digest is recorded with a derivative and is never part
  * of its key. A field outside its rule throws `DerivativeContractError`.
  */
 export function derivativeKeyText(fields: DerivativeKeyFields): string {
   const checked = validateDerivativeKeyFields(fields);
   if (!checked.ok) throw new DerivativeContractError(checked.reason, checked.field);
-  const lines = [DERIVATIVE_KEY_FORMAT];
+  const v2 = checked.fields.serving_index !== undefined;
+  const lines = [v2 ? DERIVATIVE_KEY_FORMAT_V2 : DERIVATIVE_KEY_FORMAT];
   for (const name of DERIVATIVE_KEY_FIELDS) lines.push(`${name} ${checked.fields[name]}`);
+  if (v2) {
+    lines.push(`${DERIVATIVE_KEY_SERVING_INDEX_FIELD} ${checked.fields.serving_index}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 

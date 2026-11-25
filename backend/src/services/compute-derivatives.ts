@@ -39,9 +39,11 @@
 
 import {
   RECIPE_PRODUCT_OUTPUT_PREFIX,
+  RECIPE_SERVING_INDEX_FLAG,
   type RecipeInput,
   findRecipe,
   recipeImageDigestArg,
+  recipeKeysServingIndex,
   recipeRequiredOutputs,
 } from "../../../shared/compute-recipes.js";
 import { resultsLauncherKey, resultsOutputKey } from "../../../shared/contract/compute-launch.js";
@@ -51,6 +53,7 @@ import {
   DerivativeContractError,
   type DerivativeKeyFields,
   type RetentionClass,
+  SERVING_INDEX_NONE,
   SERVING_PROFILE_SENTENCE,
   SUPERSEDED_GRACE_DAYS,
   type StoreRowV2,
@@ -159,6 +162,7 @@ export const UNKEYABLE_WORDS = [
   "derivative_name_taken",
   "recipe_unknown",
   "dataset_gone",
+  "serving_index_unattested",
 ] as const;
 
 export type UnkeyableWord = (typeof UNKEYABLE_WORDS)[number];
@@ -183,6 +187,11 @@ export interface DerivativeRow {
   input: RecipeInput;
   profile: "serving" | "archive";
   input_digest: string;
+  /**
+   * The ninth field of a version 2 key (ADR 0138): `none` or `sha256:<64 hex>` for a recipe that keys the
+   * serving index on the archive input, null for every other row (whose key is version 1).
+   */
+  serving_index: string | null;
   image_digest: string;
   job_id: string;
   stamp_id: number;
@@ -203,7 +212,7 @@ export interface DerivativeRow {
 }
 
 export const DERIVATIVE_COLUMNS = `key, dataset_id, version, recipe, recipe_version, engine, input, profile,
-  input_digest, image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
+  input_digest, serving_index, image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
   attempts, last_attempt_at, ended_at, created_at, stored_at, superseded_at, expires_at, doi`;
 
 // --- Availability -------------------------------------------------------------------------------------------
@@ -403,6 +412,20 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
     }
     const imageDigest = recipeImageDigestArg(spec.args);
     if (imageDigest === null) return unkeyable("spec_unreadable");
+    // A recipe that keys the serving index on this input (ADR 0138): a run handed none is keyed `none`. The
+    // dispatcher stages no index yet (nemar-cli #2341), so nothing records the digest of one a run was
+    // handed; such a run is not keyed, rather than keyed as if it had none and colliding with one that had.
+    let servingIndex: string | undefined;
+    if (recipeKeysServingIndex(recipe, stamp.input)) {
+      if (
+        argv.some(
+          (a) => a === RECIPE_SERVING_INDEX_FLAG || a.startsWith(`${RECIPE_SERVING_INDEX_FLAG}=`),
+        )
+      ) {
+        return unkeyable("serving_index_unattested");
+      }
+      servingIndex = SERVING_INDEX_NONE;
+    }
 
     // 2. The recordings table, every row: a rerun under the same key could differ on a transient code.
     const wanted = recipeRequiredOutputs(recipe);
@@ -474,6 +497,7 @@ export async function keyStamp(stores: Stores, stamp: CandidateStamp): Promise<K
       input: stamp.input,
       profile: stamp.input === "zarr" ? "serving" : "archive",
       input_digest: stamp.input_digest,
+      ...(servingIndex === undefined ? {} : { serving_index: servingIndex }),
     };
     const checked = validateDerivativeKeyFields(fields);
     if (!checked.ok) return unkeyable("key_invalid", checked.field);
@@ -538,14 +562,14 @@ export const CANDIDATE_STAMPS_SQL = candidateStampsSql(PIPELINE_ELIGIBLE_SQL);
 /**
  * Make a derivative's row: `?1` key, `?2` dataset, `?3` version, `?4` recipe, `?5` recipe version, `?6` engine,
  * `?7` input, `?8` profile, `?9` input digest, `?10` image digest, `?11` job, `?12` stamp, `?13` file count,
- * `?14` bytes. A second job with the same key adds nothing: the first derivative stands. And nothing is made
+ * `?14` bytes, `?15` the serving index of a version 2 key (null for a version 1 key). A second job with the same key adds nothing: the first derivative stands. And nothing is made
  * for a dataset that is gone or no longer eligible (a deletion or an unpublish between the scan and the insert): a derivative of a deleted dataset
  * must not outlive the deletion's dating of its rows.
  */
 const insertDerivativeSql = (eligible: string): string => `INSERT INTO compute_derivatives
   (key, dataset_id, version, recipe, recipe_version, engine, input, profile, input_digest, image_digest,
-   job_id, stamp_id, object_count, bytes)
-  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+   job_id, stamp_id, object_count, bytes, serving_index)
+  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
    WHERE EXISTS (SELECT 1 FROM datasets d WHERE d.dataset_id = ?2 AND ${eligible})
   ON CONFLICT(key) DO NOTHING`;
 
@@ -864,6 +888,7 @@ async function keyNewStamps(
             stamp.id,
             decision.objectCount,
             decision.bytes,
+            f.serving_index ?? null,
           )
           .run();
       } catch (err) {
@@ -1003,6 +1028,7 @@ async function describe(
     input: row.input,
     profile: row.profile,
     input_digest: row.input_digest,
+    ...(row.serving_index === null ? {} : { serving_index: row.serving_index }),
   };
   const citation = `Derived from ${row.dataset_id} version ${row.version}${
     doi === null ? "" : ` (DOI ${doi})`

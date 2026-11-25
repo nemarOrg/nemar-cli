@@ -1,6 +1,7 @@
 {
   "format": "nemar.derivative-vectors.v1",
   "note": "Test vectors for the derivative store contract (ADR 0123), byte-exact and language-neutral: Python and TypeScript must both reproduce every one. Computed from the definition with Python struct, hashlib and NumPy, and again with Bun node:crypto, all equal; computed, not measured on any NEMAR data. Never change a vector to make code pass: the maintainer decides whether the vector or the code is wrong. The key fields are full-string matches, so a Python consumer must use re.fullmatch (its $ also matches before a trailing line feed). In `refused`, the JSON string NaN stands for a NaN number, which JSON cannot hold.",
+  "note_serving_index": "The derivative_key vectors named bids archive, no serving index and bids archive, a serving index, and the refused derivative_key vectors on the serving index (owner ruling of 2026-11-25, nemar-cli #2341): a recipe that reads the serving copy's index on the archive input is keyed under nemar.derivative-key.v2 (ADR 0138): the header nemar.derivative-key.v2, the eight lines of version 1, and a ninth, serving_index and none or sha256: and the 64 hexadecimal digits of the index file. Every other key is version 1, unchanged. Computed with Python hashlib and again with Bun, both equal.",
   "note_locations": "Vectors store_locations and input_digest_v2 (ADR 0123, amendment 2026-11-16), added to the version 1 vectors above, which are unchanged. Computed from the definition with Python json, struct, hashlib and math, and again with Bun, all equal; computed, not measured on any NEMAR data. Read this file with JSON.parse or json.loads, never through an object literal: __proto__ is an own key in the vector named inherited names, and the integer in the vector named an integer too large for binary64 has 400 digits (JSON.parse reads it as Infinity, Python as an int). In each vector the text is exactly what is hashed (the digest of an input digest vector is sha256: and the SHA-256 of its text), and a vector with also_equal_to has the digest of the vector it names. A vector with also_with lists variants that a reader applies as a shallow merge over the case (a variant's labels or attributes replace the case's) and that give the same text. In refused, the field of an input_digest_v2 entry is the DerivativeContractError field.",
   "store_content": [
     {
@@ -259,6 +260,38 @@
       },
       "text": "nemar.derivative-key.v1\ndataset xx099999\nversion v1.0.0\nrecipe nemar-floor\nrecipe_version 1.0.0\nengine eegprep@0.5.0\ninput bids\nprofile archive\ninput_digest git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
       "key": "da56eaa8eb746589c8bd6cb98114ceb5555db6d14a1092707869526d9aba15e1"
+    },
+    {
+      "name": "bids archive, no serving index",
+      "fields": {
+        "dataset": "xx099999",
+        "version": "v1.0.0",
+        "recipe": "nemar-ica",
+        "recipe_version": "1.0.0-b2",
+        "engine": "eegprep@0.5.0",
+        "input": "bids",
+        "profile": "archive",
+        "input_digest": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "serving_index": "none"
+      },
+      "text": "nemar.derivative-key.v2\ndataset xx099999\nversion v1.0.0\nrecipe nemar-ica\nrecipe_version 1.0.0-b2\nengine eegprep@0.5.0\ninput bids\nprofile archive\ninput_digest git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nserving_index none\n",
+      "key": "3f787ebb9a84af285e1414f053929e5450efabdf3164b19200a1b077c96e929c"
+    },
+    {
+      "name": "bids archive, a serving index",
+      "fields": {
+        "dataset": "xx099999",
+        "version": "v1.0.0",
+        "recipe": "nemar-ica",
+        "recipe_version": "1.0.0-b2",
+        "engine": "eegprep@0.5.0",
+        "input": "bids",
+        "profile": "archive",
+        "input_digest": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "serving_index": "sha256:fb030cb42dbf97a3e76f3bd890991c95e703fd5a42198b9d0d7adda0e6efcf0c"
+      },
+      "text": "nemar.derivative-key.v2\ndataset xx099999\nversion v1.0.0\nrecipe nemar-ica\nrecipe_version 1.0.0-b2\nengine eegprep@0.5.0\ninput bids\nprofile archive\ninput_digest git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nserving_index sha256:fb030cb42dbf97a3e76f3bd890991c95e703fd5a42198b9d0d7adda0e6efcf0c\n",
+      "key": "df1ac023be51ab73b837310521ed26b3ff3a995bf9d70f1451f1f17b4d5c10ed"
     }
   ],
   "refused": {
@@ -368,6 +401,34 @@
           "input": "zarr",
           "profile": "serving",
           "input_digest": "sha256:bea77ea8a233ae2507f192e48548af37b8acf01c8abb0e65143ac3178e44bc0b"
+        }
+      },
+      {
+        "name": "a serving index on the zarr input",
+        "fields": {
+          "dataset": "xx099999",
+          "version": "v1.0.0",
+          "recipe": "nemar-ica",
+          "recipe_version": "1.0.0-b2",
+          "engine": "eegprep@0.5.0",
+          "input": "zarr",
+          "profile": "serving",
+          "input_digest": "sha256:bea77ea8a233ae2507f192e48548af37b8acf01c8abb0e65143ac3178e44bc0b",
+          "serving_index": "none"
+        }
+      },
+      {
+        "name": "a serving index in upper case",
+        "fields": {
+          "dataset": "xx099999",
+          "version": "v1.0.0",
+          "recipe": "nemar-ica",
+          "recipe_version": "1.0.0-b2",
+          "engine": "eegprep@0.5.0",
+          "input": "bids",
+          "profile": "archive",
+          "input_digest": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "serving_index": "sha256:FBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFBFB"
         }
       }
     ]
