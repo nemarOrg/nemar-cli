@@ -18,6 +18,7 @@ import {
   type FormatReader,
   LimitExceeded,
   READERS,
+  READER_IDS,
   type RangeSource,
   type ReaderId,
   cachedSource,
@@ -141,10 +142,15 @@ export interface RecordingReadOptions<E extends RecordingEntry> {
 
 export interface RecordingsOutcome {
   findings: Finding[];
-  /** Per reader: files (absent superseded ones excluded), and how each read ended. */
-  tallies: Partial<Record<ReaderId, ReaderTally>>;
+  /**
+   * Per reader, every id in {@link READER_IDS}: files (absent superseded ones excluded), and how
+   * each read ended. A reader with no file has zeros; `present` says which had any.
+   */
+  tallies: Record<ReaderId, ReaderTally>;
+  /** Readers that had at least one file, superseded ones included. */
+  present: Set<ReaderId>;
   /** Per reader: files selected for reading. */
-  selected: Partial<Record<ReaderId, number>>;
+  selected: Record<ReaderId, number>;
   failures: Record<string, number>;
   reasons: Set<IncompleteReason>;
   companionMissing: number;
@@ -162,7 +168,7 @@ export interface RecordingsOutcome {
 }
 
 /** A read ran out of its reader's time. */
-class ReadTimedOut extends Error {
+export class ReadTimedOut extends Error {
   constructor() {
     super("time");
     this.name = "ReadTimedOut";
@@ -191,8 +197,20 @@ async function pool<T>(items: readonly T[], size: number, fn: (item: T) => Promi
 }
 
 /**
- * Read every recording a registered reader parses, and count how each read ended. Findings of a
- * partial read are kept: a finding already made is never hidden.
+ * Read every recording a registered reader parses, and count how each read ended.
+ *
+ * - `complete`: the reader said so, from a source that never refused a read, with every
+ *   companion present.
+ * - `partial`: the reader returned `partial` (its findings are kept, with its reason); or it
+ *   returned `complete` although its source refused a read past the limits (reason `limit`, its
+ *   findings kept); or a companion is missing (`companion-missing`); or it threw
+ *   {@link LimitExceeded} or ran out of its time (`limit`, `time`), which keeps no finding; or
+ *   the dataset's time was spent before it started (`time`).
+ * - `failed`: any other throw, including the source's read failures. Never a clean read.
+ *
+ * Superseded recordings are read as headers only: their companions are checked against the
+ * current tree alone, by design (history keeps headers, and a companion's absence there is not a
+ * recording the tree publishes).
  */
 export async function readRecordings<E extends RecordingEntry>(
   options: RecordingReadOptions<E>,
@@ -202,10 +220,24 @@ export async function readRecordings<E extends RecordingEntry>(
   const all = [...options.entries, ...superseded];
   const { missing } = companionsOf(options.paths ?? options.entries.map((e) => e.path), readers);
 
+  // One entry per reader id, written out: a `Record` literal, so an id added to the union and
+  // missing here fails the typecheck.
+  const zeros = <T>(make: () => T): Record<ReaderId, T> => ({
+    edf: make(),
+    brainvision: make(),
+    nirx: make(),
+    snirf: make(),
+    hdf5: make(),
+    eeglab: make(),
+    "homer-nirs": make(),
+    mat: make(),
+    zip: make(),
+  });
   const out: RecordingsOutcome = {
     findings: [],
-    tallies: {},
-    selected: {},
+    tallies: zeros(() => ({ files: 0, read: 0, partial: 0, failed: 0 })),
+    present: new Set(),
+    selected: zeros(() => 0),
     failures: {},
     reasons: new Set(),
     companionMissing: 0,
@@ -229,32 +261,39 @@ export async function readRecordings<E extends RecordingEntry>(
   const work: { entry: E; reader: FormatReader }[] = [];
   for (const [reader, entries] of byReader) {
     const chosen = options.select ? options.select(reader, entries) : entries;
-    out.tallies[reader.id] = { files: entries.length, read: 0, partial: 0, failed: 0 };
+    out.tallies[reader.id].files = entries.length;
+    out.present.add(reader.id);
     out.selected[reader.id] = chosen.length;
     for (const entry of chosen) work.push({ entry, reader });
   }
-  const tally = (id: ReaderId) => out.tallies[id] as ReaderTally;
   const fail = (key: string) => {
     out.failures[key] = (out.failures[key] ?? 0) + 1;
   };
   const started = options.now();
 
   await pool(work, options.concurrency, async ({ entry, reader }) => {
-    const t = tally(reader.id);
+    const t = out.tallies[reader.id];
     if (options.now() - started >= options.datasetTimeMs) {
       t.partial++;
       out.reasons.add("time");
       return;
     }
+    // History keeps headers only: a superseded recording's companions are not looked for.
     const lacking = superseded.has(entry) ? 0 : (missing.get(entry.path) ?? 0);
     let source: ReturnType<typeof cachedSource>;
     let result: Awaited<ReturnType<FormatReader["scan"]>>;
+    // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
+    let patient: string | null = null;
     try {
       source = cachedSource(options.open(entry), reader.limits);
       result = await withTimer(
         reader.scan(source, entry.path, reader.limits),
         reader.limits.timeMs,
       );
+      if (reader.id === "edf" && result.coverage === "complete" && !source.limited) {
+        const head = await source.read(0, EDF_HEADER_BYTES);
+        if (head.length >= EDF_HEADER_BYTES) patient = edfIdentificationText(head).patient;
+      }
     } catch (error) {
       if (options.isFatal?.(error)) throw error;
       if (error instanceof LimitExceeded || error instanceof ReadTimedOut) {
@@ -273,12 +312,6 @@ export async function readRecordings<E extends RecordingEntry>(
       t.failed++;
       fail(`${reader.id}/${options.failureClass(error)}`);
       return;
-    }
-    // EDF/BDF statistics, from the header the reader already read (a cache hit, no new read).
-    let patient: string | null = null;
-    if (reader.id === "edf" && result.coverage === "complete") {
-      const head = await source.read(0, EDF_HEADER_BYTES).catch(() => null);
-      if (head && head.length >= EDF_HEADER_BYTES) patient = edfIdentificationText(head).patient;
     }
     // Everything below only commits; nothing below can throw.
     for (const f of result.findings) out.findings.push(f);
@@ -303,18 +336,22 @@ export async function readRecordings<E extends RecordingEntry>(
       }
     }
     out.companionMissing += lacking;
-    if (result.coverage === "complete" && lacking === 0) {
+    // A reader that says complete after its source refused a read did not read everything.
+    const limited = source.limited;
+    if (result.coverage === "complete" && lacking === 0 && !limited) {
       t.read++;
       return;
     }
     t.partial++;
     if (lacking > 0) out.reasons.add("companion-missing");
+    if (limited) out.reasons.add("limit");
     if (result.coverage === "partial" && result.incomplete) out.reasons.add(result.incomplete);
   });
 
   // A reader other than EDF/BDF whose files did not all get a full or partial read: the EDF/BDF
   // shortfall has its own words (`edf-headers-unread`, `edf-headers-sampled`).
-  for (const [id, t] of Object.entries(out.tallies) as [ReaderId, ReaderTally][]) {
+  for (const id of READER_IDS) {
+    const t = out.tallies[id];
     if (id !== "edf" && t.read + t.partial < t.files) out.reasons.add("recordings-unread");
   }
   return out;
@@ -331,16 +368,16 @@ export function recordingCounts(outcome: Pick<RecordingsOutcome, "tallies">): {
 } {
   let recordings = 0;
   let read = 0;
-  for (const t of Object.values(outcome.tallies) as ReaderTally[]) {
-    recordings += t.files;
-    read += t.read;
+  for (const id of READER_IDS) {
+    recordings += outcome.tallies[id].files;
+    read += outcome.tallies[id].read;
   }
   return { recordings, read };
 }
 
 /** `read_by_format`, `companion_missing` and `readers`, as the report carries them. */
 export function coverageFields(
-  outcome: Pick<RecordingsOutcome, "tallies" | "companionMissing">,
+  outcome: Pick<RecordingsOutcome, "tallies" | "present" | "companionMissing">,
   readers: readonly FormatReader[] = READERS,
 ): {
   read_by_format: Partial<Record<ReaderId, ReaderTally>>;
@@ -348,8 +385,8 @@ export function coverageFields(
   readers: Partial<Record<ReaderId, string>>;
 } {
   const read_by_format: Partial<Record<ReaderId, ReaderTally>> = {};
-  for (const [id, t] of Object.entries(outcome.tallies) as [ReaderId, ReaderTally][]) {
-    read_by_format[id] = { ...t };
+  for (const id of READER_IDS) {
+    if (outcome.present.has(id)) read_by_format[id] = { ...outcome.tallies[id] };
   }
   const versions: Partial<Record<ReaderId, string>> = {};
   for (const reader of readers) versions[reader.id] = reader.version;

@@ -12,8 +12,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ManifestEntry,
+  RANGE_IGNORED,
   ReadFailure,
   createContext,
+  readHead,
   scanDatasetFromManifest,
 } from "../scripts/identifier-fleet-lib";
 import {
@@ -25,6 +27,7 @@ import {
   DEFAULT_READER_LIMITS,
   EDF_READER,
   type FormatReader,
+  LimitExceeded,
   PAGE_BYTES,
   READERS,
   READER_IDS,
@@ -35,6 +38,7 @@ import {
   formatCoverage,
   readerFor,
 } from "../shared/identifier-readers";
+import { shapeOf } from "../shared/identifier-scan";
 import {
   INCOMPLETE_COPY,
   KIND_COPY,
@@ -565,5 +569,121 @@ describe("every kind, state and reason has its words", () => {
     }
     // Counts and fixed words: no value, and the kind's count is the report's.
     expect(lines.join("\n")).not.toMatch(/John|Smith/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Review round 1
+// ---------------------------------------------------------------------------------------
+
+describe("review round 1", () => {
+  test("a 200 answer to a read from a non-zero offset is refused, never taken as the range", async () => {
+    const body = new Uint8Array(4096).map((_, i) => i % 251);
+    // A stand-in server that ignores Range and always sends the whole file.
+    const server = Bun.serve({ port: 0, fetch: () => new Response(body, { status: 200 }) });
+    try {
+      const url = `http://127.0.0.1:${server.port}/object`;
+      await expect(readHead(url, 16, { offset: 1024 })).rejects.toMatchObject({
+        cls: RANGE_IGNORED,
+      });
+      // The twin: from offset 0 the first bytes of the whole file are the range asked for.
+      expect([...(await readHead(url, 16))]).toEqual([...body.slice(0, 16)]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a reader that says complete after its source refused a read is partial, findings kept", async () => {
+    const finding = {
+      kind: "edf-patient-name" as const,
+      severity: "identifier" as const,
+      field: "patient.name",
+      shape: shapeOf("Aaaa"),
+    };
+    const careless = stubReader({
+      limits: { ...DEFAULT_READER_LIMITS, maxBytes: 32 },
+      async scan(src) {
+        try {
+          await src.read(0, 64);
+        } catch (error) {
+          if (!(error instanceof LimitExceeded)) throw error;
+        }
+        return { findings: [finding], coverage: "complete" };
+      },
+    });
+    const { report } = await scan({ "a.snirf": bytes(4096) }, [...READERS, careless]);
+    expect(report.scan?.read_by_format?.snirf).toEqual({
+      files: 1,
+      read: 0,
+      partial: 1,
+      failed: 0,
+    });
+    expect(report.scan?.incomplete_reasons).toEqual(["limit"]);
+    expect(report.scan?.findings_by_kind).toEqual({ "edf-patient-name": 1 });
+    expect(report.scan?.status).toBe("direct-identifiers");
+  });
+
+  test("exactly maxReads reads reach the source, and the next is refused", async () => {
+    const src = cachedSource(bufferSource(bytes(4 * PAGE_BYTES)), {
+      ...DEFAULT_READER_LIMITS,
+      maxReads: 3,
+    });
+    for (let i = 0; i < 3; i++) expect((await src.read(i * PAGE_BYTES, 1)).length).toBe(1);
+    expect(src.limited).toBe(false);
+    await expect(src.read(3 * PAGE_BYTES, 1)).rejects.toBeInstanceOf(LimitExceeded);
+    expect(src.limited).toBe(true);
+    expect(src.tally.reads).toBe(3);
+  });
+
+  test("a read inside one page fetches exactly that page", async () => {
+    const data = bytes(4 * PAGE_BYTES);
+    const fetched: [number, number][] = [];
+    const counting = (): RangeSource => ({
+      size: data.length,
+      read: async (offset, length) => {
+        fetched.push([offset, length]);
+        return data.slice(offset, offset + length);
+      },
+    });
+    await cachedSource(counting(), DEFAULT_READER_LIMITS).read(PAGE_BYTES - 1, 1);
+    expect(fetched).toEqual([[0, PAGE_BYTES]]);
+    fetched.length = 0;
+    await cachedSource(counting(), DEFAULT_READER_LIMITS).read(0, PAGE_BYTES);
+    expect(fetched).toEqual([[0, PAGE_BYTES]]);
+  });
+
+  test("a v2 report whose per-reader counts disagree with themselves or with files is refused", () => {
+    // EDF/BDF files counted two ways that disagree.
+    expect(
+      refusal(
+        v2({
+          files: { total: 10, edf_bdf: 3, header_read: 2, header_read_failed: 0 },
+          read_by_format: { edf: { files: 2, read: 2, partial: 0, failed: 0 } },
+        }),
+      ),
+    ).toBe("scan-status");
+    // More reads ended than there were files.
+    expect(
+      refusal(
+        v2({
+          status: "unchecked",
+          incomplete: true,
+          incomplete_reasons: ["limit"],
+          read_by_format: { edf: { files: 2, read: 2, partial: 1, failed: 0 } },
+        }),
+      ),
+    ).toBe("scan-status");
+    // The twin: the same counts, agreeing, parse.
+    expect(
+      parseScreenReport(
+        v2({
+          status: "unchecked",
+          incomplete: true,
+          incomplete_reasons: ["limit"],
+          files: { total: 10, edf_bdf: 3, header_read: 2, header_read_failed: 0 },
+          read_by_format: { edf: { files: 3, read: 2, partial: 1, failed: 0 } },
+        }),
+      ).scan?.status,
+    ).toBe("unchecked");
   });
 });

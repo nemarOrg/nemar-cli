@@ -261,6 +261,8 @@ const READ_CLASS: ReadonlySet<string> = new Set([
   "unreadable-entry",
   "superseded-absent",
   "limit",
+  // A ranged read from a non-zero offset that the server answered with the whole file.
+  "range-ignored",
   "blob-missing",
   "blob-closed",
   "internal",

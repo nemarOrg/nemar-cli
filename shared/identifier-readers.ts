@@ -136,6 +136,8 @@ export interface ReadTally {
 
 export interface CachedSource extends RangeSource {
   readonly tally: Readonly<ReadTally>;
+  /** True once a read was refused past the limits, whatever the reader did about it. */
+  readonly limited: boolean;
 }
 
 /** An in-memory file. */
@@ -157,6 +159,7 @@ export function bufferSource(bytes: Uint8Array): RangeSource {
 export function cachedSource(src: RangeSource, limits: ReaderLimits): CachedSource {
   const pages = new Map<number, Uint8Array>();
   const tally: ReadTally = { reads: 0, bytes: 0 };
+  let limited = false;
   // The end of the file, once a read has come back short. The declared size is not trusted to
   // shorten a read (a manifest can be wrong, and a store's answer to a read past the end is
   // itself the failure to count), so until a read comes back short the end is unknown.
@@ -174,7 +177,10 @@ export function cachedSource(src: RangeSource, limits: ReaderLimits): CachedSour
     const start = first * PAGE_BYTES;
     const stop = Math.min((last + 1) * PAGE_BYTES, end);
     const budget = limits.maxBytes - tally.bytes;
-    if (need - start > budget || tally.reads >= limits.maxReads) throw new LimitExceeded();
+    if (need - start > budget || tally.reads >= limits.maxReads) {
+      limited = true;
+      throw new LimitExceeded();
+    }
     const want = Math.min(stop - start, budget);
     const got = await src.read(start, want);
     tally.reads++;
@@ -230,6 +236,9 @@ export function cachedSource(src: RangeSource, limits: ReaderLimits): CachedSour
     },
     read,
     tally,
+    get limited() {
+      return limited;
+    },
   };
 }
 
@@ -249,6 +258,18 @@ export interface ReaderResult {
   incomplete?: ReaderIncompleteReason;
 }
 
+/**
+ * A format's reader. The contract:
+ *
+ * - It reads only through the {@link RangeSource} it is given, which refuses past `limits` with
+ *   {@link LimitExceeded}.
+ * - A reader that hits a limit or runs short of time catches it and returns `partial`, with the
+ *   findings it has made so far and the reason (`limit`, `time`, or its own). A `complete` result
+ *   from a source that refused a read is counted `partial` (`limit`) all the same.
+ * - A thrown {@link LimitExceeded}, or a read that outlives `limits.timeMs`, counts as `partial`
+ *   (`limit` or `time`) with NO findings, so catching is how a reader keeps what it found.
+ * - Any other throw is a failed read of that file, never a clean one.
+ */
 export interface FormatReader {
   id: ReaderId;
   /** Lowercase extensions, with the dot (`.edf`, `.fif.gz`). */

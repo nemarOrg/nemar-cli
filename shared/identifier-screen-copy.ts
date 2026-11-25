@@ -490,6 +490,20 @@ export const INCOMPLETE_COPY: Record<IncompleteReason, Copy> = {
   ),
 };
 
+/**
+ * Read-failure classes that a person may need explained. A failure is counted in
+ * `read_failures` and makes its file `failed`; the count lines name the class.
+ */
+export const READ_FAILURE_COPY: Record<"range-ignored", Copy> = {
+  "range-ignored": {
+    statement:
+      "The storage server ignored a request for part of a file and sent the whole file, so that part was not read.",
+    read: "nothing from that file past its first bytes",
+    remedy: READ_AGAIN,
+    anchor: "failure-range-ignored",
+  },
+};
+
 /** Why a screen produced no scan, as a person reads it. */
 export const ERROR_TEXT: Record<ScreenError, string> = {
   "dispatch-unconfigured":

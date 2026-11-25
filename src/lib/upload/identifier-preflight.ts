@@ -297,6 +297,14 @@ const ACKNOWLEDGE_ALIASES: Readonly<Record<string, DatasetStatus>> = {
 };
 
 /**
+ * The words the help text and a refusal name: the acknowledgeable verdicts without the old names,
+ * which are still taken but no longer advertised.
+ */
+export const ACKNOWLEDGE_WORDS: readonly DatasetStatus[] = PREFLIGHT_ACKNOWLEDGEABLE.filter(
+  (word) => !(word in ACKNOWLEDGE_ALIASES),
+);
+
+/**
  * Commander's parser for `--acknowledge-identifier-preflight`: repeatable, and comma-separated
  * within one value, each word one of the verdicts that can be acknowledged (an old name is taken
  * as its new one). Anything else, and `direct-identifiers` in particular, is refused before the
@@ -311,7 +319,7 @@ export function collectAcknowledgment(value: string, previous: string[] | undefi
   const allowed = PREFLIGHT_ACKNOWLEDGEABLE as readonly string[];
   if (words.length === 0 || !words.every((word) => allowed.includes(word))) {
     throw new InvalidArgumentError(
-      `Allowed verdicts are ${allowed.join(", ")}. Direct identifiers cannot be acknowledged.`,
+      `Allowed verdicts are ${ACKNOWLEDGE_WORDS.join(", ")}. Direct identifiers cannot be acknowledged.`,
     );
   }
   return [...(previous ?? []), ...words];

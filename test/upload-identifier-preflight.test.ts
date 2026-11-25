@@ -33,6 +33,7 @@ import {
   parseUploaderPreflight,
 } from "../shared/identifier-screen-report";
 import {
+  ACKNOWLEDGE_WORDS,
   collectAcknowledgment,
   decidePreflight,
   failureWord,
@@ -511,6 +512,35 @@ describe("decidePreflight", () => {
     for (const bad of ["direct-identifiers", "clean", "review,Quillfeather", "", " , "]) {
       expect(() => collectAcknowledgment(bad, undefined)).toThrow(InvalidArgumentError);
     }
+  });
+
+  test("the refusal and the help name the new word only; the old one is still taken", () => {
+    expect(ACKNOWLEDGE_WORDS).toContain("partially-screened");
+    expect(ACKNOWLEDGE_WORDS).not.toContain("clean-edf-only-others-unscreened");
+    let message = "";
+    try {
+      collectAcknowledgment("clean", undefined);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("partially-screened");
+    expect(message).not.toContain("clean-edf-only-others-unscreened");
+    // The help text, as the command prints it, from a process with an environment of its own.
+    const help = Bun.spawnSync(
+      ["bun", "run", join(import.meta.dir, "../src/index.ts"), "dataset", "upload", "--help"],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: tmpdir(),
+          NEMAR_CONFIG_DIR: join(tmpdir(), `nemar-help-${process.pid}`),
+          NO_COLOR: "1",
+        },
+      },
+    );
+    const text = help.stdout.toString().replace(/\s+/g, " ");
+    expect(text).toContain("--acknowledge-identifier-preflight");
+    expect(text).toContain("partially-screened");
+    expect(text).not.toContain("clean-edf-only-others-unscreened");
   });
 });
 

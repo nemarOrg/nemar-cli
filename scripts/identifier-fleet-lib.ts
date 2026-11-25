@@ -323,6 +323,13 @@ export function networkFailure(error: unknown): ReadFailure {
   return new ReadFailure(timedOut ? "timeout" : "network", { retryable: true });
 }
 
+/** The class of a read from a non-zero offset that a server answered with the whole file. */
+export const RANGE_IGNORED = "range-ignored";
+
+/**
+ * The fixed class of a failed read: a {@link ReadFailure}'s own (an HTTP status, `timeout`,
+ * `short-body`, {@link RANGE_IGNORED} and the rest), or the thrown error's class name.
+ */
 export function failureClass(error: unknown): string {
   if (error instanceof ReadFailure) return error.cls;
   return `error-${error instanceof Error ? error.name : "unknown"}`;
@@ -381,7 +388,9 @@ export interface ReadHeadOptions {
  * Read at most `n` bytes of a URL, from `options.offset` (default the start).
  *
  * Only 200 and 206 are reads. A server that ignores `Range` answers 200 with the whole file:
- * this takes the first `n` bytes and cancels the body, so a recording is never downloaded.
+ * from offset 0 this takes the first `n` bytes and cancels the body, so a recording is never
+ * downloaded; from any other offset those bytes are not the range asked for, so the read fails
+ * with the fixed class `range-ignored` and nothing is taken.
  * 404, 416 (an empty object), a short body and a dropped connection are failures to read,
  * thrown as {@link ReadFailure} so the caller counts them; they are never an empty header.
  */
@@ -406,6 +415,10 @@ export async function readHead(
   if (res.status !== 200 && res.status !== 206) {
     await cancelBody(res);
     throw httpFailure(res.status, res.headers.get("retry-after"));
+  }
+  if (res.status === 200 && (options.offset ?? 0) > 0) {
+    await cancelBody(res);
+    throw new ReadFailure(RANGE_IGNORED);
   }
   const reader = res.body?.getReader();
   if (!reader) throw new ReadFailure("no-body");
@@ -1190,12 +1203,12 @@ export async function scanDatasetFromManifest(
   });
   for (const f of recordings.findings) findings.push(f);
   for (const [key, n] of Object.entries(recordings.failures)) failures[key] = n;
-  const edfTally = recordings.tallies.edf ?? { files: 0, read: 0, partial: 0, failed: 0 };
+  const edfTally = recordings.tallies.edf;
   const edfAbsent = recordings.failures[SUPERSEDED_ABSENT] ?? 0;
   const edfCount = edfTally.files;
   const headerRead = edfTally.read;
   const headerFailed = edfTally.failed;
-  const edfSelected = (recordings.selected.edf ?? 0) - edfAbsent;
+  const edfSelected = recordings.selected.edf - edfAbsent;
   const edfStats = recordings.edf;
 
   // participants.tsv: identifier columns in the header row, name-like participant labels below.
