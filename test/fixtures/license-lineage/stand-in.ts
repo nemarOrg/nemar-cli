@@ -38,6 +38,8 @@ function keyOf(method: string, registry: string, pathAndQuery: string, body?: st
 export interface Override {
   status?: number;
   delayMs?: number;
+  /** The body to answer with (with `status`), for a 200 that is not a record. */
+  body?: string;
 }
 
 export interface StandIn {
@@ -82,7 +84,7 @@ export function startStandIn(): StandIn {
       }
       const o = overrides.find(([m]) => key.includes(m))?.[1];
       if (o?.delayMs) await Bun.sleep(o.delayMs);
-      if (o?.status) return new Response("{}", { status: o.status });
+      if (o?.status) return new Response(o.body ?? "{}", { status: o.status });
       const rec = table.get(key);
       if (!rec) {
         misses.push(key);

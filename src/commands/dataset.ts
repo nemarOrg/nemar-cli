@@ -17,7 +17,7 @@
  * - nemar dataset push            - Push commits and data to remotes
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
@@ -39,8 +39,10 @@ import {
   DEFAULT_BASES,
   type LineageInputs,
   type RegistryBases,
+  SOURCE_STATUS_COPY,
   lineageExitCode,
   lineageLines,
+  readLineageInputs,
   resolveLicenseLineage,
 } from "../../shared/license-lineage.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
@@ -6256,34 +6258,31 @@ function licenseCheckBases(): RegistryBases {
 
 /** The lineage inputs of a local dataset copy: everything but the attestation, which is on the server. */
 function localLineageInputs(root: string): LineageInputs {
+  // Every read can throw (a permission error, a directory where a file should be); the caller
+  // turns that into one line and exit 1.
   const read = (name: string): string | null => {
     const p = join(root, name);
     return existsSync(p) ? readFileSync(p, "utf-8") : null;
-  };
-  const json = (name: string): unknown => {
-    const text = read(name);
-    if (text === null) return null;
-    try {
-      return JSON.parse(text);
-    } catch {
-      return null;
-    }
   };
   let readme: string | null = null;
   for (const name of README_CANDIDATES) {
     readme = read(name);
     if (readme !== null) break;
   }
-  const metadata = json(".nemar/metadata.json");
   return {
-    datasetDescription: json("dataset_description.json"),
-    relatedIdentifiers:
-      metadata && typeof metadata === "object" && !Array.isArray(metadata)
-        ? (metadata as Record<string, unknown>).related_identifiers
-        : null,
+    datasetDescription: read("dataset_description.json"),
+    nemarMetadata: read(".nemar/metadata.json"),
     attestationUpstreamSource: null,
     readme,
   };
+}
+
+/** Print one line on stderr and exit 1: the check could not read its inputs. */
+function licenseCheckFail(message: string): never {
+  console.error(chalk.red(message));
+  // The message is the whole report; no "run again with --debug" footer.
+  markReportedExit();
+  process.exit(1);
 }
 
 datasetCommand
@@ -6314,13 +6313,30 @@ Examples:
   )
   .action(async (path: string, options: { json?: boolean }) => {
     const root = resolve(path);
-    if (!existsSync(root)) {
-      console.error(chalk.red(`Path not found: ${path}`));
-      process.exit(1);
+    let inputs: LineageInputs;
+    try {
+      if (!statSync(root).isDirectory()) licenseCheckFail(`Not a directory: ${path}`);
+      if (!existsSync(join(root, "dataset_description.json"))) {
+        licenseCheckFail(`No dataset_description.json in ${path}`);
+      }
+      inputs = localLineageInputs(root);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      licenseCheckFail(
+        code === "ENOENT"
+          ? `Path not found: ${path}`
+          : `Could not read ${path} (${code ?? "error"})`,
+      );
     }
-    const result = await resolveLicenseLineage(localLineageInputs(root), {
-      bases: licenseCheckBases(),
-    });
+    // A file that is there but cannot be parsed is not a lineage: name it and stop.
+    const { states } = readLineageInputs(inputs);
+    if (states.dataset_description === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.description_unreadable.statement);
+    }
+    if (states.nemar_metadata === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.metadata_unreadable.statement);
+    }
+    const result = await resolveLicenseLineage(inputs, { bases: licenseCheckBases() });
     if (options.json) console.log(JSON.stringify(result, null, 2));
     else for (const line of lineageLines(result)) console.log(line);
     process.exit(lineageExitCode(result.outcome));

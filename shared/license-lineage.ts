@@ -116,6 +116,8 @@ export const SOURCE_STATUSES = [
   "unparseable",
   "no_doi",
   "not_checked",
+  "description_unreadable",
+  "metadata_unreadable",
 ] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 
@@ -139,10 +141,34 @@ export interface Copy {
   anchor: string;
 }
 
-const anchor = (id: string) => `${LINEAGE_DOCS_URL}#license-lineage-${id.replace(/_/g, "-")}`;
+/**
+ * The docs anchors this file links to, all on {@link LINEAGE_DOCS_URL}: the section `#license-lineage`
+ * and one `#license-lineage-<outcome>` per outcome. A10 creates exactly these; no other anchor is used.
+ */
+export const LINEAGE_ANCHORS: readonly string[] = [
+  "license-lineage",
+  ...LINEAGE_OUTCOMES.map((o) => `license-lineage-${o.replace(/_/g, "-")}`),
+];
 
-const READ_SOURCES =
-  "The upstream sources declared in dataset_description.json (SourceDatasets), the enrichment's related identifiers, the deposit attestation and the README, and each source's DataCite, Crossref or OpenAlex record (OpenNeuro's or PhysioNet's own record where the registries hold no license).";
+const anchor = (id: LineageOutcome | null) =>
+  `${LINEAGE_DOCS_URL}#license-lineage${id === null ? "" : `-${id.replace(/_/g, "-")}`}`;
+
+/** What each resolver reads from its record. */
+export const RESOLVER_READ: Record<Resolver, string> = {
+  datacite:
+    "DataCite: rightsList (access-rights statements dropped) and types.resourceTypeGeneral.",
+  crossref:
+    "Crossref: license[] (only the vor or unspecified content version, never TDM or STM-ASF terms) and type.",
+  openalex: "OpenAlex: primary_location.license and type.",
+  openneuro:
+    "OpenNeuro: the snapshot's dataset_description.json License, read through its GraphQL API.",
+  physionet:
+    "PhysioNet: the published project's license name and access policy, read through its API.",
+};
+
+const READ_SOURCES = `The upstream sources declared in dataset_description.json (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo), the deposit attestation and the README (data-repository DOIs and OpenNeuro, Zenodo or PhysioNet URLs only). Then, per source: ${Object.values(
+  RESOLVER_READ,
+).join(" ")}`;
 
 export const LINEAGE_COPY: Record<LineageOutcome, Copy> = {
   compatible: {
@@ -220,7 +246,7 @@ export const SOURCE_STATUS_COPY: Record<SourceStatus, Copy> = {
     statement: "The record was read.",
     read: "The source's registry or repository record.",
     remedy: "Nothing to do for this source.",
-    anchor: anchor("resolved"),
+    anchor: anchor(null),
   },
   publication: {
     statement: "The record is a publication, not a dataset.",
@@ -252,6 +278,22 @@ export const SOURCE_STATUS_COPY: Record<SourceStatus, Copy> = {
     remedy: "Give the source as a DOI, or as an OpenNeuro, Zenodo or PhysioNet URL.",
     anchor: anchor("unresolved"),
   },
+  description_unreadable: {
+    statement:
+      "dataset_description.json is missing or is not a JSON object, so no source or target license could be read.",
+    read: "dataset_description.json at the dataset's root.",
+    remedy:
+      "Add a valid dataset_description.json (a JSON object with License and, for derived data, SourceDatasets), then run the check again.",
+    anchor: anchor("unresolved"),
+  },
+  metadata_unreadable: {
+    statement:
+      ".nemar/metadata.json is not a JSON object, so its related identifiers could not be read.",
+    read: ".nemar/metadata.json at the dataset's root.",
+    remedy:
+      "Restore .nemar/metadata.json (NEMAR writes it at enrichment), then run the check again.",
+    anchor: anchor("unresolved"),
+  },
   not_checked: {
     statement: "The source was not read: the dataset declares more sources than one check reads.",
     read: "Nothing; the source is past the limit.",
@@ -259,6 +301,12 @@ export const SOURCE_STATUS_COPY: Record<SourceStatus, Copy> = {
     anchor: anchor("unresolved"),
   },
 };
+
+/** Sentences the upload prompt prints from the same vocabulary. */
+export const LICENSE_NOTE_COPY = {
+  unrecognized:
+    "NEMAR does not recognize this source license, so redistributing data derived from it needs the licensor's permission.",
+} as const;
 
 // ---------------------------------------------------------------------------
 // License normalization
@@ -454,6 +502,9 @@ export type SourceRef =
   | { kind: "physionet"; slug: string; version: string | null; origin: SourceOrigin }
   | { kind: "url"; url: string; origin: SourceOrigin };
 
+/** NEMAR's own DOI prefix (EZID shoulder `doi:10.82901/NEMAR.`, backend/src/services/ezid.ts). */
+export const NEMAR_DOI_PREFIX = "10.82901";
+
 /** DOI prefixes of data repositories, the only DOIs taken from a README. */
 export const DATA_REPOSITORY_DOI_PREFIXES = [
   "10.18112", // OpenNeuro
@@ -546,7 +597,8 @@ export function refKey(ref: SourceRef): string {
 }
 
 /** What a dataset declares about its upstream: the four inputs, as read from the deposit. */
-export interface LineageInputs {
+/** What the sources are extracted from, already parsed. */
+export interface SourceInputs {
   /** The parsed `dataset_description.json`, or null. */
   datasetDescription: unknown;
   /** The enrichment's `related_identifiers` (`.nemar/metadata.json`), or null. */
@@ -555,6 +607,62 @@ export interface LineageInputs {
   attestationUpstreamSource: string | null;
   /** The README text, or null. */
   readme: string | null;
+}
+
+/** What a dataset declares, as the files' text: null is a file that is not there. */
+export interface LineageInputs {
+  /** `dataset_description.json` as text, or null when it is missing. */
+  datasetDescription: string | null;
+  /** `.nemar/metadata.json` as text, or null when it is missing. */
+  nemarMetadata: string | null;
+  /** `datasets.attestation.upstream_source`, or null (a local check has none). */
+  attestationUpstreamSource: string | null;
+  /** The README text, or null. */
+  readme: string | null;
+}
+
+export type InputReadState = "read" | "missing" | "unparseable";
+
+/** How each input file read: a missing file and one that cannot be parsed are different answers. */
+export interface InputReadStates {
+  dataset_description: InputReadState;
+  nemar_metadata: InputReadState;
+  readme: "read" | "missing";
+}
+
+function parseObject(text: string | null): {
+  state: InputReadState;
+  value: Record<string, unknown> | null;
+} {
+  if (text === null) return { state: "missing", value: null };
+  try {
+    const v: unknown = JSON.parse(text);
+    return isRecord(v) ? { state: "read", value: v } : { state: "unparseable", value: null };
+  } catch {
+    return { state: "unparseable", value: null };
+  }
+}
+
+/** Parse the input files and say how each one read. */
+export function readLineageInputs(inputs: LineageInputs): {
+  states: InputReadStates;
+  sources: SourceInputs;
+} {
+  const desc = parseObject(inputs.datasetDescription);
+  const meta = parseObject(inputs.nemarMetadata);
+  return {
+    states: {
+      dataset_description: desc.state,
+      nemar_metadata: meta.state,
+      readme: inputs.readme === null ? "missing" : "read",
+    },
+    sources: {
+      datasetDescription: desc.value,
+      relatedIdentifiers: meta.value?.related_identifiers ?? null,
+      attestationUpstreamSource: inputs.attestationUpstreamSource,
+      readme: inputs.readme,
+    },
+  };
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -569,7 +677,7 @@ export function declaredLicense(datasetDescription: unknown): string | null {
 }
 
 /** Every declared source, in the decided order, de-duplicated. */
-export function extractSourceRefs(inputs: LineageInputs): SourceRef[] {
+export function extractSourceRefs(inputs: SourceInputs): SourceRef[] {
   const refs: SourceRef[] = [];
   const desc = inputs.datasetDescription;
   if (isRecord(desc) && Array.isArray(desc.SourceDatasets)) {
@@ -601,10 +709,23 @@ export function extractSourceRefs(inputs: LineageInputs): SourceRef[] {
   if (inputs.attestationUpstreamSource) {
     refs.push(...refsFromText(inputs.attestationUpstreamSource, "attestation", true));
   }
-  if (inputs.readme) refs.push(...refsFromText(inputs.readme, "readme", false));
+  if (inputs.readme) {
+    // A README names its own dataset: never NEMAR's own DOIs, which no upstream source carries.
+    refs.push(
+      ...refsFromText(inputs.readme, "readme", false).filter(
+        (r) => !(r.kind === "doi" && r.doi.startsWith(`${NEMAR_DOI_PREFIX}/`)),
+      ),
+    );
+  }
 
+  // A dataset is not its own upstream source, whichever input names it.
+  const own =
+    isRecord(desc) && typeof desc.DatasetDOI === "string" && desc.DatasetDOI.trim()
+      ? normalizeDoiKey(desc.DatasetDOI)
+      : null;
   const seen = new Set<string>();
   return refs.filter((r) => {
+    if (own !== null && r.kind === "doi" && r.doi === own) return false;
     const k = refKey(r);
     if (seen.has(k)) return false;
     seen.add(k);
@@ -867,8 +988,9 @@ async function resolvePhysioNet(
   if (!isRecord(p)) return failedRecord(fallbackId, "unparseable", url);
   const id = typeof p.doi === "string" && p.doi ? normalizeDoiKey(p.doi) : fallbackId;
   const name = isRecord(p.license) && typeof p.license.name === "string" ? p.license.name : null;
-  const policy = typeof p.access_policy === "string" ? p.access_policy : null;
-  const value = physionetLicense(name, policy);
+  // The access policy decides the license, so a record without one is not a record we can read.
+  if (typeof p.access_policy !== "string") return failedRecord(fallbackId, "unparseable", url);
+  const value = physionetLicense(name, p.access_policy);
   // PhysioNet calls a data project a "Database"; software and models are not data.
   const resourceType =
     p.resource_type === "Database"
@@ -961,6 +1083,19 @@ async function resolveDoiUncached(
 /** Statuses that are answers and may be cached; a failure is asked again next time. */
 const CACHEABLE: ReadonlySet<SourceStatus> = new Set(["resolved", "publication", "not_found"]);
 
+/** A cached answer is used only when it is a record this version could have written; else a miss. */
+export function isValidCachedRecord(hit: unknown): hit is SourceRecord {
+  return (
+    isRecord(hit) &&
+    typeof hit.id === "string" &&
+    typeof hit.status === "string" &&
+    (SOURCE_STATUSES as readonly string[]).includes(hit.status) &&
+    CACHEABLE.has(hit.status as SourceStatus) &&
+    (hit.license === null ||
+      (NORMALIZED_LICENSES as readonly string[]).includes(String(hit.license)))
+  );
+}
+
 async function cached(
   key: string,
   cache: LineageCache | undefined,
@@ -968,7 +1103,7 @@ async function cached(
 ): Promise<SourceRecord> {
   const k = `${RESOLVER_VERSION}:${key}`;
   const hit = await cache?.get(k).catch(() => undefined);
-  if (hit) return hit;
+  if (isValidCachedRecord(hit)) return hit;
   const rec = await run();
   if (cache && CACHEABLE.has(rec.status)) await cache.put(k, rec).catch(() => undefined);
   return rec;
@@ -1026,7 +1161,8 @@ const NC_LICENSES: ReadonlySet<NormalizedLicense> = new Set([
 const NON_NC_SHARE_ALIKE: ReadonlySet<NormalizedLicense> = new Set(["cc-by-sa", "odbl"]);
 
 function versionAtLeast(target: string | null, source: string | null): boolean {
-  if (!target || !source) return true; // only decidable when both name a version
+  if (!source) return true; // a source that names no version binds no version
+  if (!target) return false; // the source names one and the target does not: not shown to match
   return compareVersions(target, source) >= 0;
 }
 
@@ -1097,6 +1233,8 @@ export interface LineageSource extends SourceRecord {
 
 export interface LineageResult {
   outcome: LineageOutcome;
+  /** How each input file read. */
+  inputs: InputReadStates;
   target_license: NormalizedLicense;
   /** The License value as the dataset declares it. */
   target_license_raw: string | null;
@@ -1115,9 +1253,37 @@ export async function resolveLicenseLineage(
     timeoutMs: options.timeoutMs ?? FETCH_TIMEOUT_MS,
   };
   const now = options.now ?? (() => new Date());
-  const targetRaw = declaredLicense(inputs.datasetDescription);
+  const { states, sources: parsed } = readLineageInputs(inputs);
+  const unreadable: LineageSource[] = [];
+  if (states.dataset_description !== "read") {
+    // Never `no_upstream_declared` from a broken or absent description: nothing was read.
+    unreadable.push({
+      ...failedRecord("dataset_description.json", "description_unreadable", null),
+      origin: "source_datasets",
+      outcome: "unresolved",
+    });
+  }
+  if (states.nemar_metadata === "unparseable") {
+    unreadable.push({
+      ...failedRecord(".nemar/metadata.json", "metadata_unreadable", null),
+      origin: "related_identifiers",
+      outcome: "unresolved",
+    });
+  }
+  if (states.dataset_description !== "read") {
+    return {
+      outcome: "unresolved",
+      inputs: states,
+      target_license: "none",
+      target_license_raw: null,
+      sources: unreadable,
+      resolver_version: RESOLVER_VERSION,
+      fetched_at: now().toISOString(),
+    };
+  }
+  const targetRaw = declaredLicense(parsed.datasetDescription);
   const target = normalizeLicense(targetRaw);
-  const refs = extractSourceRefs(inputs);
+  const refs = extractSourceRefs(parsed);
   const records = await Promise.all(
     refs.map(async (ref, i): Promise<SourceRecord> => {
       if (i >= MAX_SOURCES) {
@@ -1130,13 +1296,17 @@ export async function resolveLicenseLineage(
       }
     }),
   );
-  const sources: LineageSource[] = records.map((rec, i) => ({
-    ...rec,
-    origin: refs[i].origin,
-    outcome: sourceOutcome(rec, target),
-  }));
+  const sources: LineageSource[] = [
+    ...records.map((rec, i) => ({
+      ...rec,
+      origin: refs[i].origin,
+      outcome: sourceOutcome(rec, target),
+    })),
+    ...unreadable,
+  ];
   return {
     outcome: combineOutcomes(sources),
+    inputs: states,
     target_license: target.license,
     target_license_raw: targetRaw,
     sources,
@@ -1170,9 +1340,13 @@ export function lineageLines(result: LineageResult): string[] {
       `  - ${s.id} [${s.origin}]: ${s.outcome}; license ${lic}; type ${s.resource_type ?? "unknown"}; via ${s.resolver ?? "none"}`,
     );
     lines.push(`      ${SOURCE_STATUS_COPY[s.status].statement}`);
+    lines.push(
+      `      read: ${s.resolver ? RESOLVER_READ[s.resolver] : SOURCE_STATUS_COPY[s.status].read}`,
+    );
     if (s.evidence_url) lines.push(`      evidence: ${s.evidence_url}`);
     if (s.status !== "resolved") lines.push(`      remedy: ${SOURCE_STATUS_COPY[s.status].remedy}`);
   }
+  lines.push(`Read: ${copy.read}`);
   lines.push(`Remedy: ${copy.remedy}`);
   lines.push(`Docs: ${copy.anchor}`);
   lines.push(`Resolver: ${result.resolver_version}, fetched ${result.fetched_at}`);

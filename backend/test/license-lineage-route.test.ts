@@ -158,6 +158,27 @@ describe("GET /admin/datasets/:id/license-lineage", () => {
     expect(LINEAGE_COPY[body.outcome as "no_upstream_declared"]).toBeDefined();
   });
 
+  test("a missing description is 200 unresolved; an unparseable file is 422 naming it", async () => {
+    repoFiles.set("nm000901", {});
+    const missing = await get("/admin/datasets/nm000901/license-lineage");
+    expect(missing.status).toBe(200);
+    expect(missing.body.outcome).toBe("unresolved");
+    expect((missing.body.inputs as Record<string, string>).dataset_description).toBe("missing");
+
+    repoFiles.set("nm000901", { "dataset_description.json": "{ broken" });
+    const broken = await get("/admin/datasets/nm000901/license-lineage");
+    expect(broken.status).toBe(422);
+    expect((broken.body.sources as Array<{ id: string }>)[0].id).toBe("dataset_description.json");
+
+    repoFiles.set("nm000901", {
+      "dataset_description.json": JSON.stringify({ License: "CC0" }),
+      ".nemar/metadata.json": "not json",
+    });
+    const badMeta = await get("/admin/datasets/nm000901/license-lineage");
+    expect(badMeta.status).toBe(422);
+    expect((badMeta.body.inputs as Record<string, string>).nemar_metadata).toBe("unparseable");
+  });
+
   test("a repository read failure is a 502, never a lineage from missing inputs", async () => {
     githubFails = true;
     const { status } = await get("/admin/datasets/nm000901/license-lineage");

@@ -11,19 +11,24 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   COMPATIBLE_OUTCOMES,
+  LINEAGE_ANCHORS,
   LINEAGE_COPY,
+  LINEAGE_DOCS_URL,
   LINEAGE_OUTCOMES,
   type LineageInputs,
   type LineageOutcome,
   MAX_SOURCES,
   type NormalizedLicense,
   OUTCOME_RANK,
+  RESOLVER_READ,
   SOURCE_STATUSES,
   SOURCE_STATUS_COPY,
+  type SourceInputs,
   combineOutcomes,
   crossrefLicenses,
   dataciteLicenses,
   extractSourceRefs,
+  isValidCachedRecord,
   lineageExitCode,
   lineageLines,
   mapCache,
@@ -46,18 +51,27 @@ afterEach(() => {
 });
 
 function inputs(
-  over: Partial<LineageInputs> & { license?: string; sources?: unknown[] },
+  over: Partial<LineageInputs> & { license?: string; sources?: unknown[]; datasetDoi?: string },
 ): LineageInputs {
   const desc: Record<string, unknown> = { Name: "fixture" };
   if (over.license !== undefined) desc.License = over.license;
   if (over.sources) desc.SourceDatasets = over.sources;
+  if (over.datasetDoi) desc.DatasetDOI = over.datasetDoi;
   return {
-    datasetDescription: over.datasetDescription ?? desc,
-    relatedIdentifiers: over.relatedIdentifiers ?? null,
+    datasetDescription:
+      over.datasetDescription === undefined ? JSON.stringify(desc) : over.datasetDescription,
+    nemarMetadata: over.nemarMetadata ?? null,
     attestationUpstreamSource: over.attestationUpstreamSource ?? null,
     readme: over.readme ?? null,
   };
 }
+
+const NO_SOURCES: SourceInputs = {
+  datasetDescription: {},
+  relatedIdentifiers: null,
+  attestationUpstreamSource: null,
+  readme: null,
+};
 
 function run(i: LineageInputs, timeoutMs = 2_000) {
   return resolveLicenseLineage(i, { bases: standIn.bases, timeoutMs });
@@ -240,8 +254,28 @@ describe("extractSourceRefs", () => {
 
   test("the attestation takes any DOI, the README only data-repository DOIs", () => {
     const text = "Data: 10.1016/j.neuroimage.2020.116000";
-    expect(extractSourceRefs({ ...inputs({}), attestationUpstreamSource: text })).toHaveLength(1);
-    expect(extractSourceRefs({ ...inputs({}), readme: text })).toHaveLength(0);
+    expect(extractSourceRefs({ ...NO_SOURCES, attestationUpstreamSource: text })).toHaveLength(1);
+    expect(extractSourceRefs({ ...NO_SOURCES, readme: text })).toHaveLength(0);
+  });
+
+  test("the dataset's own DOIs are not its sources", () => {
+    const own = "10.5281/zenodo.24539621";
+    const readme = `Cite this dataset: https://doi.org/${own} and 10.82901/nemar.nm000480.v1.0.0. Raw: 10.5281/zenodo.22967622`;
+    const refs = extractSourceRefs({
+      datasetDescription: { DatasetDOI: `doi:${own}`, SourceDatasets: [{ DOI: own }] },
+      relatedIdentifiers: null,
+      attestationUpstreamSource: null,
+      readme,
+    });
+    expect(refs.map((r) => (r.kind === "doi" ? r.doi : r.kind))).toEqual([
+      "10.5281/zenodo.22967622",
+    ]);
+    // A NEMAR DOI is still a source where a depositor declares one (a NEMAR dataset derived from another).
+    const declared = extractSourceRefs({
+      ...NO_SOURCES,
+      datasetDescription: { SourceDatasets: [{ DOI: "10.82901/nemar.nm000103" }] },
+    });
+    expect(declared).toHaveLength(1);
   });
 });
 
@@ -321,6 +355,10 @@ describe("resolveLicenseLineage, one source", () => {
       "compatible_attribution",
     );
     expect((await run(inputs({ license: "CC-BY-SA-3.0", sources: [ZENODO_SA] }))).outcome).toBe(
+      "share_alike_mismatch",
+    );
+    // The source names 4.0 and the target names no version: not shown to match.
+    expect((await run(inputs({ license: "CC BY-SA", sources: [ZENODO_SA] }))).outcome).toBe(
       "share_alike_mismatch",
     );
     expect((await run(inputs({ license: "CC0", sources: [ZENODO_SA] }))).outcome).toBe(
@@ -437,6 +475,129 @@ describe("unresolved: a fetch error is never compatible", () => {
 // ---------------------------------------------------------------------------
 // Two sources, and the lattice
 // ---------------------------------------------------------------------------
+
+describe("input files", () => {
+  test("a missing description is unresolved, never no_upstream_declared, and nothing is fetched", async () => {
+    const r = await run(inputs({ datasetDescription: null }));
+    expect(r.inputs.dataset_description).toBe("missing");
+    expect(r.outcome).toBe("unresolved");
+    expect(r.sources[0]).toMatchObject({
+      id: "dataset_description.json",
+      status: "description_unreadable",
+    });
+    expect(standIn.requests).toEqual([]);
+  });
+
+  test("a description that is not JSON, or not an object, is unparseable and unresolved", async () => {
+    for (const text of ["{ not json", "[]", "null"]) {
+      const r = await run(inputs({ datasetDescription: text }));
+      expect(r.inputs.dataset_description).toBe("unparseable");
+      expect(r.outcome).toBe("unresolved");
+      expect(r.sources[0].status).toBe("description_unreadable");
+    }
+    expect(SOURCE_STATUS_COPY.description_unreadable.statement).toContain(
+      "dataset_description.json",
+    );
+  });
+
+  test("an unparseable .nemar/metadata.json is reported, and makes a compatible result unresolved", async () => {
+    const r = await run(inputs({ license: "CC0", sources: [ON_CC0], nemarMetadata: "{oops" }));
+    expect(r.inputs.nemar_metadata).toBe("unparseable");
+    expect(r.sources.map((s) => s.status)).toEqual(["resolved", "metadata_unreadable"]);
+    expect(r.outcome).toBe("unresolved");
+    const missing = await run(inputs({ license: "CC0", sources: [ON_CC0] }));
+    expect(missing.inputs.nemar_metadata).toBe("missing");
+    expect(missing.outcome).toBe("compatible");
+  });
+
+  test("enrichment related identifiers are read from .nemar/metadata.json", async () => {
+    const meta = JSON.stringify({
+      related_identifiers: [
+        {
+          identifier: "10.5281/zenodo.24539621",
+          identifier_type: "DOI",
+          relation_type: "IsDerivedFrom",
+        },
+      ],
+    });
+    const r = await run(inputs({ license: "CC0", nemarMetadata: meta }));
+    expect(r.inputs.nemar_metadata).toBe("read");
+    expect(r.sources[0]).toMatchObject({ origin: "related_identifiers", license: "cc-by" });
+  });
+});
+
+describe("a 200 that is not a record: unparseable, unresolved", () => {
+  const cases: Array<[string, string, string]> = [
+    [
+      "HTML",
+      "datacite /dois/10.5281/zenodo.24539621",
+      "<!doctype html><html><body>Service page</body></html>",
+    ],
+    ["{}", "datacite /dois/10.5281/zenodo.24539621", "{}"],
+    ["an array", "datacite /dois/10.5281/zenodo.24539621", "[]"],
+  ];
+  for (const [name, route, body] of cases) {
+    test(`DataCite answering ${name}`, async () => {
+      standIn.override(route, { status: 200, body });
+      const r = await run(inputs({ license: "CC0", sources: [ZENODO_BY] }));
+      expect(r.sources[0].status).toBe("unparseable");
+      expect(r.outcome).toBe("unresolved");
+    });
+  }
+
+  test("OpenNeuro GraphQL answering {errors, data: null}", async () => {
+    standIn.override("openneuro /crn/graphql", {
+      status: 200,
+      body: JSON.stringify({ errors: [{ message: "Internal error" }], data: null }),
+    });
+    const r = await run(inputs({ license: "CC0", sources: [ON_CC0] }));
+    expect(r.sources[0].status).toBe("unparseable");
+    expect(r.outcome).toBe("unresolved");
+  });
+
+  test("a PhysioNet record with no access policy, or a non-string one", async () => {
+    const rec = fixture("10-physionet-physionet-credentialed.json") as Record<string, unknown>;
+    for (const policy of [undefined, 3]) {
+      standIn.stop();
+      standIn = startStandIn();
+      const { access_policy: _dropped, ...rest } = rec;
+      const body = policy === undefined ? rest : { ...rest, access_policy: policy };
+      standIn.override("physionet /api/v1/project/published/mimic-iv-ed/2.2/", {
+        status: 200,
+        body: JSON.stringify(body),
+      });
+      const r = await run(inputs({ license: "CC0", sources: [PN_CRED] }));
+      expect(r.sources[0].status).toBe("unparseable");
+      expect(r.outcome).toBe("unresolved");
+    }
+  });
+});
+
+describe("cached hits", () => {
+  test("a hit with a status outside the vocabulary, or a failure, is a miss", async () => {
+    const good = (await run(inputs({ license: "CC0", sources: [ZENODO_BY] }))).sources[0];
+    const { origin: _o, outcome: _x, ...record } = good;
+    expect(isValidCachedRecord(record)).toBe(true);
+    expect(isValidCachedRecord({ ...record, status: "fine" })).toBe(false);
+    expect(isValidCachedRecord({ ...record, status: "fetch_failed" })).toBe(false);
+    expect(isValidCachedRecord({ ...record, license: "beerware" })).toBe(false);
+    expect(isValidCachedRecord(null)).toBe(false);
+  });
+
+  test("a bad hit is fetched again", async () => {
+    const cache = mapCache();
+    await cache.put("license-lineage/1:doi:10.5281/zenodo.24539621", {
+      id: "10.5281/zenodo.24539621",
+      status: "bogus",
+    } as never);
+    const r = await resolveLicenseLineage(inputs({ license: "CC0", sources: [ZENODO_BY] }), {
+      bases: standIn.bases,
+      cache,
+    });
+    expect(r.outcome).toBe("compatible_attribution");
+    expect(standIn.requests.some((k) => k.includes("zenodo.24539621"))).toBe(true);
+  });
+});
 
 describe("two sources", () => {
   test("CC0 + CC BY -> compatible_attribution", async () => {
@@ -556,5 +717,18 @@ describe("lineageLines", () => {
     expect(text).toContain(LINEAGE_COPY.needs_permission.remedy);
     expect(text).toContain(LINEAGE_COPY.needs_permission.anchor);
     expect(text).toContain("Resolver: license-lineage/1");
+    expect(text).toContain(`read: ${RESOLVER_READ.datacite}`);
+    expect(text).toContain(`Read: ${LINEAGE_COPY.needs_permission.read}`);
+  });
+
+  test("every anchor used is one A10 creates", () => {
+    const used = [
+      ...Object.values(LINEAGE_COPY).map((c) => c.anchor),
+      ...Object.values(SOURCE_STATUS_COPY).map((c) => c.anchor),
+    ];
+    for (const a of used) {
+      expect(a.startsWith(`${LINEAGE_DOCS_URL}#`)).toBe(true);
+      expect(LINEAGE_ANCHORS).toContain(a.slice(a.indexOf("#") + 1));
+    }
   });
 });

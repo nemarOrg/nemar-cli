@@ -13,11 +13,11 @@ import { resolveLicenseLineage } from "../shared/license-lineage";
 describe("license lineage, live", () => {
   test("an OpenNeuro snapshot DOI resolves to CC0 through DataCite and OpenNeuro", async () => {
     const r = await resolveLicenseLineage({
-      datasetDescription: {
+      datasetDescription: JSON.stringify({
         License: "CC0",
         SourceDatasets: [{ DOI: "10.18112/openneuro.ds003645.v2.0.2" }],
-      },
-      relatedIdentifiers: null,
+      }),
+      nemarMetadata: null,
       attestationUpstreamSource: null,
       readme: null,
     });

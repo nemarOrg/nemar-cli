@@ -10,8 +10,10 @@
  * registry answer is cached per DOI for 24 hours in the Worker cache; a failed fetch is not cached.
  *
  * 200 is the lineage result, whatever its outcome (an `unresolved` outcome is a finding, not an
- * error). 400 is a malformed id; 404 an unknown dataset; 409 a dataset with no repository; 502 a
- * repository file that could not be read, since a lineage from missing inputs would be wrong.
+ * error; a missing `dataset_description.json` is `unresolved`, never `no_upstream_declared`).
+ * 422 is the same result when `dataset_description.json` or `.nemar/metadata.json` is there but is
+ * not a JSON object (`result.inputs` and the source entry name the file). 400 is a malformed id;
+ * 404 an unknown dataset; 409 a dataset with no repository; 502 a repository read that failed.
  */
 
 import {
@@ -106,19 +108,23 @@ export function registerLicenseLineageRoutes(admin: AdminRouter): void {
       );
     }
 
-    const enrichment = parseJson(metadata);
     const result = await resolveLicenseLineage(
       {
-        datasetDescription: parseJson(description),
-        relatedIdentifiers:
-          enrichment && typeof enrichment === "object" && !Array.isArray(enrichment)
-            ? (enrichment as Record<string, unknown>).related_identifiers
-            : null,
+        datasetDescription: description,
+        nemarMetadata: metadata,
         attestationUpstreamSource: upstreamSourceOf(row.attestation),
         readme,
       },
       { cache: workerLineageCache() },
     );
+    // A file that is there but cannot be parsed: 422 with the result, which names the file.
+    // A missing description is a 200 whose outcome is `unresolved` (never no_upstream_declared).
+    if (
+      result.inputs.dataset_description === "unparseable" ||
+      result.inputs.nemar_metadata === "unparseable"
+    ) {
+      return c.json({ dataset_id: row.dataset_id, ...result }, 422);
+    }
     return c.json({ dataset_id: row.dataset_id, ...result });
   });
 }

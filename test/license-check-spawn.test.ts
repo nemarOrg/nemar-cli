@@ -12,13 +12,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
 import {
   LINEAGE_COPY,
   type LineageResult,
+  SOURCE_STATUS_COPY,
   lineageLines,
   resolveLicenseLineage,
 } from "../shared/license-lineage";
@@ -153,6 +154,61 @@ describe("nemar dataset license-check", () => {
     expect(standIn.requests.filter((k) => !k.includes(" api "))).toEqual([]);
   }, 30_000);
 
+  test("inputs it cannot use exit 1 with one line naming the problem, and no stack trace", async () => {
+    const cases: Array<[string, () => string, string]> = [
+      [
+        "a file, not a directory",
+        () => {
+          const f = join(scratch, "plain-file");
+          writeFileSync(f, "x");
+          return f;
+        },
+        "Not a directory",
+      ],
+      ["no dataset_description.json", () => dataset, "No dataset_description.json in"],
+      [
+        "an unparseable dataset_description.json",
+        () => {
+          writeFileSync(join(dataset, "dataset_description.json"), "{ not json");
+          return dataset;
+        },
+        SOURCE_STATUS_COPY.description_unreadable.statement,
+      ],
+      [
+        "an unparseable .nemar/metadata.json",
+        () => {
+          writeDataset({ Name: "x", License: "CC0" });
+          mkdirSync(join(dataset, ".nemar"), { recursive: true });
+          writeFileSync(join(dataset, ".nemar", "metadata.json"), "[1, 2");
+          return dataset;
+        },
+        SOURCE_STATUS_COPY.metadata_unreadable.statement,
+      ],
+      [
+        "an unreadable dataset_description.json",
+        () => {
+          writeDataset({ Name: "x", License: "CC0" });
+          chmodSync(join(dataset, "dataset_description.json"), 0o000);
+          return dataset;
+        },
+        "Could not read",
+      ],
+    ];
+    for (const [name, setup, message] of cases) {
+      rmSync(dataset, { recursive: true, force: true });
+      mkdirSync(dataset);
+      const { stdout, stderr, exitCode } = await licenseCheck([setup()]);
+      expect(exitCode, name).toBe(1);
+      expect(stderr.trim().split("\n"), name).toHaveLength(1);
+      expect(stderr, name).toContain(message);
+      expect(stderr, name).not.toContain("    at ");
+      expect(stdout, name).not.toContain("License lineage:");
+      const desc = join(dataset, "dataset_description.json");
+      if (existsSync(desc)) chmodSync(desc, 0o644);
+    }
+    expect(standIn.requests.filter((k) => !k.includes(" api "))).toEqual([]);
+  }, 60_000);
+
   test("a missing path exits 1", async () => {
     const { exitCode, stderr } = await licenseCheck([join(scratch, "absent")]);
     expect(exitCode).toBe(1);
@@ -165,8 +221,11 @@ describe("nemar admin dataset publish license-lineage", () => {
     // The Worker's answer, computed by the same resolver over the recorded registries.
     const result = await resolveLicenseLineage(
       {
-        datasetDescription: { License: "CC0", SourceDatasets: [{ DOI: "10.13026/5ntk-km72" }] },
-        relatedIdentifiers: null,
+        datasetDescription: JSON.stringify({
+          License: "CC0",
+          SourceDatasets: [{ DOI: "10.13026/5ntk-km72" }],
+        }),
+        nemarMetadata: null,
         attestationUpstreamSource: null,
         readme: null,
       },
