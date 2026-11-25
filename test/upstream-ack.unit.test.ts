@@ -24,12 +24,17 @@ import {
   type ScreenFacts,
   UPSTREAM_ACK_ANCHOR,
   UPSTREAM_ACK_COPY,
+  UPSTREAM_ACK_MESSAGES,
+  ackOutcomeLine,
   buildAckReason,
+  exclusionsOf,
   lineageEligibility,
   readD2Exclusions,
+  reasonEligibility,
   screenEligibility,
   treeEligibility,
 } from "../shared/upstream-ack";
+import { UPSTREAM_ACK_EXCLUSIONS } from "../shared/upstream-ack-excluded";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
 const D2_PATH = join(import.meta.dir, "..", ".context/plans/publication-queue/d2-blockers.json");
@@ -42,6 +47,7 @@ function reportFor(
     formats?: Record<string, number>;
     incomplete?: boolean;
     edf?: number;
+    extra?: Record<string, unknown>;
   } = {},
 ): ScreenReport {
   const edf = o.edf ?? (status === "not-screened" ? 0 : 4);
@@ -60,6 +66,7 @@ function reportFor(
       files: { total: 40, edf_bdf: edf, header_read: edf, header_read_failed: 0 },
       ...(o.kinds ? { findings_by_kind: o.kinds } : {}),
       unscreened_formats: o.formats ?? { ".set": 12, ".fdt": 12 },
+      ...o.extra,
     },
   });
 }
@@ -380,6 +387,7 @@ describe("UPSTREAM_ACK_COPY", () => {
       "acknowledged",
       "state_moved",
       ...NOT_ELIGIBLE_REASONS.map((r) => `not_eligible:${r}` as AckOutcome),
+      ...UPSTREAM_ACK_MESSAGES,
     ];
     expect(Object.keys(UPSTREAM_ACK_COPY).sort()).toEqual([...keys].sort());
     for (const k of keys) {
@@ -389,6 +397,104 @@ describe("UPSTREAM_ACK_COPY", () => {
         `https://docs.nemar.org/platform/identifier-screening/#${UPSTREAM_ACK_ANCHOR}`,
       );
     }
+  });
+});
+
+describe("defense in depth and robustness (review round 1)", () => {
+  const images = { "image-or-document-file": 3 };
+  const review = (extra: Record<string, unknown>) =>
+    facts({ report: reportFor("review", { kinds: images, extra }), screenState: "review" });
+
+  test("a flagged EDF/BDF file is never acknowledged; none flagged is", () => {
+    expect(screenEligibility(review({ edf_bdf_files_flagged: 1 }))).toEqual({
+      eligible: false,
+      reason: "finding_kind",
+    });
+    expect(screenEligibility(review({ edf_bdf_files_flagged: 0 })).eligible).toBe(true);
+  });
+
+  test("an EDF/BDF file count of a kind outside the set is never acknowledged", () => {
+    expect(screenEligibility(review({ edf_bdf_files_by_kind: { "edf-patient-code": 1 } }))).toEqual(
+      { eligible: false, reason: "finding_kind" },
+    );
+    expect(
+      screenEligibility(review({ edf_bdf_files_by_kind: { "image-or-document-file": 1 } }))
+        .eligible,
+    ).toBe(true);
+  });
+
+  test("a failed side read is incomplete; none failed is eligible", () => {
+    expect(screenEligibility(review({ side_reads_failed: 2 }))).toEqual({
+      eligible: false,
+      reason: "screen_incomplete",
+    });
+    expect(screenEligibility(review({ side_reads_failed: 0 })).eligible).toBe(true);
+  });
+
+  test("a 600-character license is cut to 80 characters, and the reason still fits", () => {
+    const long = "x".repeat(600);
+    const text = buildAckReason(
+      reportFor("not-screened"),
+      source({ license: "cc-by", license_version: long }),
+      9,
+    );
+    expect(text).toContain(`(cc-by ${"x".repeat(71)}..., read from openneuro)`);
+    expect(text.length).toBeLessThanOrEqual(ACKNOWLEDGMENT_MAX_LENGTH);
+    expect(reasonEligibility(text)).toEqual({ eligible: true, reason: text });
+  });
+
+  test("a reason over the limit is reason_too_long, never cut and recorded", () => {
+    expect(reasonEligibility("r".repeat(ACKNOWLEDGMENT_MAX_LENGTH + 1))).toEqual({
+      eligible: false,
+      reason: "reason_too_long",
+    });
+    expect(reasonEligibility("r".repeat(ACKNOWLEDGMENT_MAX_LENGTH)).eligible).toBe(true);
+  });
+
+  test("a malformed name-class count throws", () => {
+    for (const bad of ["3", -1, 1.5, null]) {
+      expect(() =>
+        readD2Exclusions({ datasets: [{ id: "nm000001", images: { byName: { other: bad } } }] }),
+      ).toThrow("count");
+    }
+    expect(
+      readD2Exclusions({
+        datasets: [{ id: "nm000001", images: { byName: { "photo-face": 2 } } }],
+      }).excluded.has("nm000001"),
+    ).toBe(true);
+  });
+
+  test("ackOutcomeLine prints the bare outcome for one it has no words for", () => {
+    expect(
+      ackOutcomeLine({
+        dataset_id: "nm000001",
+        outcome: "not_eligible:from_the_future" as AckOutcome,
+      }),
+    ).toBe("nm000001  not_eligible:from_the_future");
+    expect(ackOutcomeLine({ dataset_id: "nm000001", outcome: "eligible" })).toContain(
+      UPSTREAM_ACK_COPY.eligible.statement,
+    );
+  });
+});
+
+describe("the generated exclusions module", () => {
+  test("agrees with d2-blockers.json, date and source included", () => {
+    const doc = JSON.parse(readFileSync(D2_PATH, "utf-8"));
+    const { measured, excluded } = readD2Exclusions(doc);
+    expect([...UPSTREAM_ACK_EXCLUSIONS.excluded]).toEqual([...excluded].sort());
+    expect([...UPSTREAM_ACK_EXCLUSIONS.measured]).toEqual([...measured].sort());
+    expect(UPSTREAM_ACK_EXCLUSIONS.generatedOn).toBe(doc.generatedAt);
+    expect(UPSTREAM_ACK_EXCLUSIONS.source).toBe(
+      ".context/plans/publication-queue/d2-blockers.json",
+    );
+    const checked = exclusionsOf(UPSTREAM_ACK_EXCLUSIONS);
+    expect(checked.excluded.size).toBe(excluded.size);
+  });
+
+  test("exclusionsOf fails closed", () => {
+    expect(() => exclusionsOf({ excluded: [], measured: [] })).toThrow();
+    expect(() => exclusionsOf({ excluded: ["nm000002"], measured: ["nm000001"] })).toThrow();
+    expect(() => exclusionsOf({ excluded: [], measured: ["bad"] })).toThrow();
   });
 });
 

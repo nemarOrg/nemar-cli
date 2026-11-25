@@ -25,6 +25,7 @@ import ora from "ora";
 import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
+import { UPSTREAM_ACK_COPY } from "../../shared/upstream-ack.js";
 import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import { getLicenseLineage } from "../lib/api/admin.js";
 import {
@@ -566,6 +567,8 @@ Description:
   counts for your own approval only. A request that changed after the dry run
   is reported as state_moved and nothing is recorded for it.
 
+  ${UPSTREAM_ACK_COPY["never-acknowledged"].statement}
+
 Examples:
   $ nemar admin dataset publish acknowledge-batch --all-requested
   $ nemar admin dataset publish acknowledge-batch --ids queue.txt --apply`,
@@ -574,7 +577,7 @@ Examples:
     async (options: { allRequested?: boolean; ids?: string; apply?: boolean; json?: boolean }) => {
       if (!requireSignedIn(options.json)) return;
       if (Boolean(options.allRequested) === Boolean(options.ids)) {
-        failMessage("Give one of --all-requested or --ids <file>.", {
+        failMessage(UPSTREAM_ACK_COPY["cli:selection"].statement, {
           json: options.json,
           answered: true,
         });
@@ -586,7 +589,7 @@ Examples:
           selection = { ids: parseIdsFile(readFileSync(options.ids, "utf-8")) };
         } catch (error) {
           failMessage(
-            `Could not read --ids: ${error instanceof Error ? error.message : String(error)}.`,
+            `${UPSTREAM_ACK_COPY["cli:ids_unreadable"].statement} ${error instanceof Error ? error.message : String(error)}.`,
             { json: options.json, answered: true },
           );
           return;
@@ -602,10 +605,10 @@ Examples:
           for (const line of policyLines()) console.log(plain(line));
           if (applied)
             for (const line of resultLines("Applied:", applied)) console.log(plain(line));
-          else console.log("Nothing was recorded. Run again with --apply to record.");
+          else console.log(UPSTREAM_ACK_COPY["cli:nothing_recorded"].statement);
         }
       } catch (error) {
-        failWith(error, null, "Failed to run the batch acknowledgment", undefined, {
+        failWith(error, null, UPSTREAM_ACK_COPY["cli:failed"].statement, undefined, {
           json: options.json,
         });
       }

@@ -102,6 +102,8 @@ export const NOT_ELIGIBLE_REASONS = [
   "lineage_unreadable",
   "lineage_outcome",
   "lineage_no_own_record",
+  "reason_too_long",
+  "evaluation_failed",
 ] as const;
 export type NotEligibleReason = (typeof NOT_ELIGIBLE_REASONS)[number];
 
@@ -112,8 +114,21 @@ export type AckOutcome =
   | "state_moved"
   | `not_eligible:${NotEligibleReason}`;
 
-/** Every entry of the copy table: the policy section, then each outcome. */
-export type UpstreamAckEntry = typeof UPSTREAM_ACK_ANCHOR | AckOutcome;
+/** The route's refusals, the command's own sentences, and the "never" line its help prints. */
+export const UPSTREAM_ACK_MESSAGES = [
+  "never-acknowledged",
+  "error:invalid_body",
+  "error:exclusions_unreadable",
+  "error:github_unavailable",
+  "cli:selection",
+  "cli:ids_unreadable",
+  "cli:nothing_recorded",
+  "cli:failed",
+] as const;
+export type UpstreamAckMessage = (typeof UPSTREAM_ACK_MESSAGES)[number];
+
+/** Every entry of the copy table: the policy section, each outcome, and each message. */
+export type UpstreamAckEntry = typeof UPSTREAM_ACK_ANCHOR | AckOutcome | UpstreamAckMessage;
 
 const ack = (statement: string, read: string, remedy: string): Copy => ({
   statement,
@@ -141,9 +156,49 @@ const INDIVIDUAL =
  */
 export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
   "public-upstream-acknowledgment": ack(
-    "An administrator may acknowledge many identifier screens in one act when each request is a conversion of a public, redistributable upstream dataset whose license NEMAR read from the source's own record (DataCite, OpenNeuro or PhysioNet). Such an acknowledgment covers only formats the scanner does not read and image, document or tooling files. A content finding, a direct identifier, an unchecked, incomplete or stale screen, or a request holding a photo, face or questionnaire file is never acknowledged this way. Each acknowledgment records a reason naming the upstream, its license and the unread formats, and is the calling administrator's own act: it satisfies that administrator's approval and no other's. The weekly re-screen reads these datasets again as readers are added.",
+    "An administrator may acknowledge many identifier screens in one act when each request is a conversion of a public, redistributable upstream dataset whose license NEMAR read from the source's own record (DataCite, OpenNeuro or PhysioNet). Such an acknowledgment covers only formats the scanner does not read and image, document or tooling files. A content finding, a direct identifier, an unchecked, incomplete or stale screen, or a request holding a photo, face or questionnaire file or a BIDS photograph is never acknowledged this way. Each acknowledgment records a reason naming the upstream, its license and the unread formats, and is the calling administrator's own act: it satisfies that administrator's approval and no other's. The weekly re-screen reads these datasets again as readers are added.",
     `${READ_SCREEN} ${READ_HEAD} ${READ_TREE} ${READ_D2} ${READ_LINEAGE}`,
     "Nothing to do for an acknowledged request: approve it as usual. A request this does not cover is reviewed individually.",
+  ),
+  "never-acknowledged": ack(
+    "Never acknowledged in a batch: a direct identifier; any finding other than image, document or tooling files (a content finding, an EDF/BDF header finding, a flagged EDF/BDF file); an unchecked, incomplete or stale screen, or one with a failed side read; a request holding a photo, face or questionnaire file or a BIDS photograph; an upstream whose license was not read from its own record.",
+    `${READ_SCREEN} ${READ_TREE} ${READ_D2} ${READ_LINEAGE}`,
+    "Review those requests individually: nemar admin dataset publish show <dataset-id>.",
+  ),
+  "error:invalid_body": ack(
+    "The request body is not one this route accepts, so nothing was evaluated.",
+    "The request body.",
+    "Send a dry run with dataset_ids (1 to 20) or all_requested, or an apply with the expect entries a dry run reported eligible.",
+  ),
+  "error:exclusions_unreadable": ack(
+    "The list of requests excluded by the publication-queue measurement could not be read, so nothing was evaluated.",
+    READ_D2,
+    "Report it to the maintainers; the generated exclusion module is out of step with its source.",
+  ),
+  "error:github_unavailable": ack(
+    "No GitHub credential was available, so nothing was evaluated.",
+    "The Worker's GitHub credential.",
+    "Try again later.",
+  ),
+  "cli:selection": ack(
+    "Give one of --all-requested or --ids <file>.",
+    "The command's options.",
+    "Run it again with exactly one selection.",
+  ),
+  "cli:ids_unreadable": ack(
+    "The --ids file could not be read as dataset ids.",
+    "The --ids file: one dataset id per line, blank lines and # comments skipped.",
+    "Fix the line named and run again.",
+  ),
+  "cli:nothing_recorded": ack(
+    "Nothing was recorded. Run again with --apply to record.",
+    "The dry run only.",
+    "Read the dry run, then run the same selection with --apply.",
+  ),
+  "cli:failed": ack(
+    "The batch acknowledgment did not complete.",
+    "The API's answer.",
+    "Run the dry run again; what was recorded before the failure is reported by the next dry run as already acknowledged.",
   ),
   eligible: ack(
     "The request meets every condition of a batch acknowledgment; a run with --apply records one.",
@@ -225,6 +280,16 @@ export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
     READ_TREE,
     INDIVIDUAL,
   ),
+  "not_eligible:reason_too_long": ack(
+    "The reason this acknowledgment would record does not fit in 500 characters, so nothing was recorded.",
+    READ_LINEAGE,
+    INDIVIDUAL,
+  ),
+  "not_eligible:evaluation_failed": ack(
+    "The request could not be evaluated in full (an unexpected error while reading it, or an audit record too large to keep whole), so nothing was recorded.",
+    READ_SCREEN,
+    "Run the dry run again; if it persists, review the request individually.",
+  ),
   "not_eligible:not_measured": ack(
     "The request was not part of the publication-queue measurement, so whether its history holds a photo, face or questionnaire file is unknown (the Worker reads only the screened commit's files).",
     READ_D2,
@@ -278,13 +343,38 @@ export function readD2Exclusions(doc: unknown): D2Exclusions {
     if (typeof byName !== "object" || byName === null) {
       throw new Error("d2-blockers: a dataset's images have no byName");
     }
+    for (const n of Object.values(byName as Record<string, unknown>)) {
+      if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) {
+        throw new Error("d2-blockers: a name-class count is not a whole number");
+      }
+    }
     measured.add(id);
     for (const cls of EXCLUDED_NAME_CLASSES) {
-      const n = (byName as Record<string, unknown>)[cls];
-      if (typeof n === "number" && n > 0) excluded.add(id);
+      if (((byName as Record<string, number>)[cls] ?? 0) > 0) excluded.add(id);
     }
   }
   return { measured, excluded };
+}
+
+/**
+ * The exclusions as the Worker holds them (`shared/upstream-ack-excluded.ts`, generated from the
+ * measurement by `readD2Exclusions`). Fails closed: no measured dataset, an id that is not a
+ * dataset id, or an excluded id that was not measured throws.
+ */
+export function exclusionsOf(m: {
+  excluded: readonly string[];
+  measured: readonly string[];
+}): D2Exclusions {
+  const ID = /^(nm|on|xx)\d{6}$/;
+  if (m.measured.length === 0) throw new Error("upstream-ack exclusions: nothing measured");
+  if (![...m.measured, ...m.excluded].every((id) => ID.test(id))) {
+    throw new Error("upstream-ack exclusions: an id is not a dataset id");
+  }
+  const measured = new Set(m.measured);
+  if (!m.excluded.every((id) => measured.has(id))) {
+    throw new Error("upstream-ack exclusions: an excluded id was not measured");
+  }
+  return { measured, excluded: new Set(m.excluded) };
 }
 
 // ---------------------------------------------------------------------------
@@ -327,10 +417,23 @@ export function screenEligibility(f: ScreenFacts): Eligibility {
   if (!f.report?.scan || !f.report.head || f.report.scan.status !== f.screenState) {
     return { eligible: false, reason: "no_screen" };
   }
+  const scan = f.report.scan;
   if (kindsOf(f.report).some((k) => !ACK_ELIGIBLE_KINDS.has(k))) {
     return { eligible: false, reason: "finding_kind" };
   }
-  if (f.report.scan.incomplete !== false) return { eligible: false, reason: "screen_incomplete" };
+  // Defense in depth: the header counts are kept apart from the finding counts, and a flagged
+  // EDF/BDF file or a header kind outside the set is never acknowledged in a batch.
+  if ((scan.edf_bdf_files_flagged ?? 0) > 0) return { eligible: false, reason: "finding_kind" };
+  const byFile = scan.edf_bdf_files_by_kind ?? {};
+  if (
+    (Object.keys(byFile) as FindingKind[]).some(
+      (k) => (byFile[k] ?? 0) > 0 && !ACK_ELIGIBLE_KINDS.has(k),
+    )
+  ) {
+    return { eligible: false, reason: "finding_kind" };
+  }
+  if (scan.incomplete !== false) return { eligible: false, reason: "screen_incomplete" };
+  if ((scan.side_reads_failed ?? 0) > 0) return { eligible: false, reason: "screen_incomplete" };
   if (f.exclusions.excluded.has(f.datasetId)) return { eligible: false, reason: "excluded" };
   if (!f.exclusions.measured.has(f.datasetId)) return { eligible: false, reason: "not_measured" };
   return { eligible: true };
@@ -385,8 +488,20 @@ export function lineageEligibility(
 /** The most characters of the source id the reason names; DOIs are far shorter. */
 const MAX_SOURCE_ID = 160;
 
+/** The most characters of the license text the reason names. */
+const MAX_LICENSE_TEXT = 80;
+
 function licenseText(s: LineageSource): string {
-  return `${s.license}${s.license_version ? ` ${s.license_version}` : ""}`;
+  const text = `${s.license}${s.license_version ? ` ${s.license_version}` : ""}`;
+  return text.length > MAX_LICENSE_TEXT ? `${text.slice(0, MAX_LICENSE_TEXT - 3)}...` : text;
+}
+
+/** A reason that does not fit is never recorded (nor cut): the request is reviewed individually. */
+export function reasonEligibility(reason: string): Eligibility<{ reason: string }> {
+  if (reason.length > ACKNOWLEDGMENT_MAX_LENGTH) {
+    return { eligible: false, reason: "reason_too_long" };
+  }
+  return { eligible: true, reason };
 }
 
 /**
@@ -422,7 +537,8 @@ export function buildAckReason(
     const text = build(formats.slice(0, n));
     if (text.length <= ACKNOWLEDGMENT_MAX_LENGTH) return text;
   }
-  // With no format named, the text is at most about 450 characters: the source id is capped.
+  // With no format named, the text is at most about 480 characters (the source id and the license
+  // are capped); `reasonEligibility` refuses anything longer.
   return build([]);
 }
 
@@ -466,5 +582,9 @@ export interface AckBatchResponse {
 
 /** One request's line, as the command prints it. */
 export function ackOutcomeLine(r: { dataset_id: string; outcome: AckOutcome }): string {
-  return `${r.dataset_id}  ${r.outcome}  ${UPSTREAM_ACK_COPY[r.outcome].statement}`;
+  // A newer Worker may send an outcome this CLI has no words for: print the bare outcome.
+  const copy = (UPSTREAM_ACK_COPY as Partial<Record<string, Copy>>)[r.outcome];
+  return copy
+    ? `${r.dataset_id}  ${r.outcome}  ${copy.statement}`
+    : `${r.dataset_id}  ${r.outcome}`;
 }

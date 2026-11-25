@@ -16,7 +16,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { Hono } from "hono";
 import { type ScreenReport, parseScreenReport } from "../../shared/identifier-screen-report";
 import { DEFAULT_BASES } from "../../shared/license-lineage";
-import type { AckBatchRequest, AckBatchResponse, AckResult } from "../../shared/upstream-ack";
+import {
+  type AckBatchRequest,
+  type AckBatchResponse,
+  type AckResult,
+  UPSTREAM_ACK_COPY,
+} from "../../shared/upstream-ack";
 import { applyEligible, dryRun, parseIdsFile } from "../../src/lib/upstream-ack-batch";
 import { type StandIn, startStandIn } from "../../test/fixtures/license-lineage/stand-in";
 import { adminRoutes } from "../src/routes/admin";
@@ -442,6 +447,74 @@ describe("apply", () => {
     for (const id of [EXCLUDED, LOCAL_PATH, DIRECT]) {
       expect(ackRow(id)?.identifier_screen_ack_at).toBeNull();
     }
+  });
+});
+
+describe("failures stay with their request (review round 1)", () => {
+  test("a failed audit write undoes the acknowledgment: never acknowledged without its audit row", async () => {
+    const dry = await dryRun(send(), { ids: [ELIGIBLE, IMAGES] });
+    d1 = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql.includes("INSERT INTO audit_log") && binds[3] === ELIGIBLE) {
+        throw new Error("audit insert refused");
+      }
+    });
+    const applied = await applyEligible(send(), dry);
+    expect(byId(applied)).toEqual({ [ELIGIBLE]: "state_moved", [IMAGES]: "acknowledged" });
+    const row = ackRow(ELIGIBLE);
+    expect(row?.identifier_screen_ack_by).toBeNull();
+    expect(row?.identifier_screen_ack_reason).toBeNull();
+    expect(row?.identifier_screen_ack_at).toBeNull();
+    expect(auditRows().map((a) => a.resource_id)).toEqual([IMAGES]);
+    // The next dry run reads it as eligible again.
+    d1 = realD1(db);
+    expect(byId(await dryRun(send(), { ids: [ELIGIBLE] }))).toEqual({ [ELIGIBLE]: "eligible" });
+  });
+
+  test("an evaluation or a record that throws is that request's outcome; the rest go on", async () => {
+    const dry = await dryRun(send(), { ids: [ELIGIBLE, IMAGES] });
+    const throwOnRead = requestIds.get(ELIGIBLE) as number;
+    d1 = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql.includes("WHERE pr.id = ?") && binds[0] === throwOnRead) {
+        throw new Error("read refused");
+      }
+    });
+    const first = await post({
+      apply: true,
+      expect: dry.map((r) => ({
+        dataset_id: r.dataset_id,
+        request_id: r.request_id,
+        screen_state: r.screen_state,
+        screen_head: r.screen_head,
+      })),
+    });
+    expect(first.status).toBe(200);
+    expect(byId(first.body.results)).toEqual({
+      [ELIGIBLE]: "not_eligible:evaluation_failed",
+      [IMAGES]: "acknowledged",
+    });
+    expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
+
+    // A record that throws: state_moved, nothing recorded.
+    d1 = interceptingD1(realD1(db), (sql, binds) => {
+      if (sql.includes("SET identifier_screen_ack_by = ?,") && binds[2] === throwOnRead) {
+        throw new Error("write refused");
+      }
+    });
+    const again = await applyEligible(
+      send(),
+      dry.filter((r) => r.dataset_id === ELIGIBLE),
+    );
+    expect(byId(again)).toEqual({ [ELIGIBLE]: "state_moved" });
+    expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
+  });
+
+  test("refusals carry the copy table's words", async () => {
+    const r = await post({});
+    expect(r.status).toBe(400);
+    const body = r.body as unknown as { error: string; message: string; docs: string };
+    expect(body.error).toBe("invalid_body");
+    expect(body.message.startsWith(UPSTREAM_ACK_COPY["error:invalid_body"].statement)).toBe(true);
+    expect(body.docs).toBe(UPSTREAM_ACK_COPY["error:invalid_body"].anchor);
   });
 });
 

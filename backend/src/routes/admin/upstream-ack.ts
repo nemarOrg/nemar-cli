@@ -22,19 +22,22 @@
  * a database-only check reads nothing. The command pages at the same size.
  *
  * Photo, face and questionnaire files are looked for twice: in the screened commit's own tree
- * (`treeEligibility`, the same classifier as the measurement), and in D2's measurement
- * (`d2-blockers.json`, bundled, read by `readD2Exclusions`), which also saw files only in history.
- * A measurement that does not read refuses the whole call (fail closed).
+ * (`treeEligibility`, the same classifier as the measurement), and in D2's measurement, which also
+ * saw files only in history (`shared/upstream-ack-excluded.ts`, generated from d2-blockers.json and
+ * checked by `exclusionsOf`; one that does not check refuses the whole call, fail closed).
  *
- * 400 a malformed body; 500 the measurement does not read; 502 no GitHub credential.
+ * Each request is evaluated and recorded on its own: an error in one is that request's outcome
+ * (`not_eligible:evaluation_failed`, or `state_moved` for a failed record), and the response always
+ * carries every request's outcome. An acknowledgment is never left without its audit row.
+ *
+ * 400 a malformed body; 500 the exclusions do not check; 502 no GitHub credential. Every message
+ * is `UPSTREAM_ACK_COPY`'s.
  */
 
-import d2Blockers from "../../../../.context/plans/publication-queue/d2-blockers.json" with {
-  type: "json",
-};
 import type { ScreenReport } from "../../../../shared/identifier-screen-report.js";
 import type { LineageResult } from "../../../../shared/license-lineage.js";
 import { PUBLICATION_DATASET_ID_RE } from "../../../../shared/publication-limits.js";
+import { UPSTREAM_ACK_EXCLUSIONS } from "../../../../shared/upstream-ack-excluded.js";
 import {
   ACK_BATCH_MAX,
   type AckResult,
@@ -42,13 +45,17 @@ import {
   type AckExpected as Expected,
   type NotEligibleReason,
   UPSTREAM_ACK_ANCHOR,
+  UPSTREAM_ACK_COPY,
   UPSTREAM_ACK_DOCS_URL,
+  type UpstreamAckMessage,
   buildAckReason,
+  exclusionsOf,
   lineageEligibility,
-  readD2Exclusions,
+  reasonEligibility,
   screenEligibility,
   treeEligibility,
 } from "../../../../shared/upstream-ack.js";
+import { AUDIT_DETAILS_MAX_BYTES } from "../../db/audit-log";
 import { getDatasetsToken } from "../../services/github-auth";
 import { GITHUB_API, ORG_NAME } from "../../services/github/shared";
 import { githubFetchWithRetry } from "../../services/github/transport";
@@ -266,12 +273,45 @@ async function evaluate(
     license: lineage.source.license,
     resolver: lineage.source.resolver,
   };
-  result.reason = buildAckReason(report, lineage.source, lineage.others);
-  return { ok: true, result, reason: result.reason, lineage: read.result, report };
+  const reason = reasonEligibility(buildAckReason(report, lineage.source, lineage.others));
+  if (!reason.eligible) return no(reason.reason);
+  result.reason = reason.reason;
+  return { ok: true, result, reason: reason.reason, lineage: read.result, report };
 }
 
 function notEligible(r: AckResult, reason: NotEligibleReason): AckResult {
   return { ...r, outcome: `not_eligible:${reason}` };
+}
+
+/** A refusal body: the closed word and the copy table's statement (and a detail, when given). */
+function refusal(entry: UpstreamAckMessage, detail?: string) {
+  const copy = UPSTREAM_ACK_COPY[entry];
+  return {
+    error: entry.slice("error:".length),
+    message: detail ? `${copy.statement} ${detail}` : copy.statement,
+    remedy: copy.remedy,
+    docs: copy.anchor,
+  };
+}
+
+/** The class of an error, never its message: messages can carry values. */
+function errorClass(err: unknown): string {
+  return err instanceof Error ? err.name : typeof err;
+}
+
+/** `baseResult`, which cannot throw: a report that does not read is shown as no state. */
+function baseResultSafe(row: AckRow): AckResult {
+  try {
+    return baseResult(row);
+  } catch {
+    return {
+      dataset_id: row.dataset_id,
+      request_id: row.id,
+      outcome: "eligible",
+      screen_state: null,
+      screen_head: null,
+    };
+  }
 }
 
 /** Run `fn` over `items`, `CONCURRENCY` at a time, keeping order. */
@@ -298,36 +338,23 @@ export function registerUpstreamAckRoutes(admin: AdminRouter): void {
     }
     const body = parseBody(raw);
     if (typeof body === "string") {
-      return c.json({ error: "invalid_body", message: `The body must give ${body}.` }, 400);
+      return c.json(refusal("error:invalid_body", `The body must give ${body}.`), 400);
     }
 
     let exclusions: D2Exclusions;
     try {
-      exclusions = readD2Exclusions(d2Blockers);
+      exclusions = exclusionsOf(UPSTREAM_ACK_EXCLUSIONS);
     } catch (err) {
-      console.error("[acknowledge-batch] the queue measurement does not read:", err);
-      return c.json(
-        {
-          error: "measurement_unreadable",
-          message:
-            "The publication-queue measurement that lists the excluded requests could not be read, so nothing was evaluated.",
-        },
-        500,
-      );
+      console.error(`[acknowledge-batch] the exclusions do not check: ${errorClass(err)}`);
+      return c.json(refusal("error:exclusions_unreadable"), 500);
     }
 
     let token: string;
     try {
       token = await getDatasetsToken(c.env);
     } catch (err) {
-      console.error("[acknowledge-batch] no GitHub credential:", err);
-      return c.json(
-        {
-          error: "github_unavailable",
-          message: "No GitHub credential was available, so nothing was evaluated; try again later.",
-        },
-        502,
-      );
+      console.error(`[acknowledge-batch] no GitHub credential: ${errorClass(err)}`);
+      return c.json(refusal("error:github_unavailable"), 502);
     }
 
     const db = c.env.DB;
@@ -367,9 +394,16 @@ export function registerUpstreamAckRoutes(admin: AdminRouter): void {
           next = rows[rows.length - 1].dataset_id;
         }
       }
-      const evaluated = await mapLimited(rows, (r) => evaluate(c.env, r, exclusions, token));
+      const evaluated = await mapLimited(rows, async (r): Promise<AckResult> => {
+        try {
+          return (await evaluate(c.env, r, exclusions, token)).result;
+        } catch (err) {
+          console.error(`[acknowledge-batch] ${r.dataset_id}: evaluation threw ${errorClass(err)}`);
+          return notEligible(baseResultSafe(r), "evaluation_failed");
+        }
+      });
       const results: AckResult[] = [
-        ...evaluated.map((e) => e.result),
+        ...evaluated,
         ...missing.map(
           (d): AckResult => ({
             dataset_id: d,
@@ -392,30 +426,55 @@ export function registerUpstreamAckRoutes(admin: AdminRouter): void {
         screen_state: e.screen_state,
         screen_head: e.screen_head,
       };
-      const row = await db.prepare(`${ROW_SQL} WHERE pr.id = ?`).bind(e.request_id).first<AckRow>();
-      if (!row || row.dataset_id !== e.dataset_id) return moved;
-      const shown = baseResult(row);
-      if (
-        row.status !== "requested" ||
-        row.identifier_screen_ack_at !== null ||
-        shown.screen_state !== e.screen_state ||
-        shown.screen_head !== e.screen_head
-      ) {
-        return { ...moved, screen_state: shown.screen_state, screen_head: shown.screen_head };
+      let row: AckRow | null;
+      let ev: Evaluation;
+      let details: Record<string, unknown>;
+      try {
+        row = await db.prepare(`${ROW_SQL} WHERE pr.id = ?`).bind(e.request_id).first<AckRow>();
+        if (!row || row.dataset_id !== e.dataset_id) return moved;
+        const shown = baseResult(row);
+        if (
+          row.status !== "requested" ||
+          row.identifier_screen_ack_at !== null ||
+          shown.screen_state !== e.screen_state ||
+          shown.screen_head !== e.screen_head
+        ) {
+          return { ...moved, screen_state: shown.screen_state, screen_head: shown.screen_head };
+        }
+        ev = await evaluate(c.env, row, exclusions, token);
+        if (!ev.ok) return ev.result;
+        details = { via: "acknowledge-batch", policy, lineage: ev.lineage };
+        // The audit row keeps the whole lineage or nothing is recorded: a details payload over the
+        // audit bound would be stored truncated, without it.
+        const bytes = new TextEncoder().encode(
+          JSON.stringify({
+            ...details,
+            request_id: row.id,
+            screen_state: e.screen_state,
+            reason: ev.reason,
+          }),
+        ).byteLength;
+        if (bytes > AUDIT_DETAILS_MAX_BYTES) return notEligible(ev.result, "evaluation_failed");
+      } catch (err) {
+        console.error(`[acknowledge-batch] ${e.dataset_id}: evaluation threw ${errorClass(err)}`);
+        return { ...moved, outcome: "not_eligible:evaluation_failed" };
       }
-      const ev = await evaluate(c.env, row, exclusions, token);
-      if (!ev.ok) return ev.result;
-      const recorded = await recordScreenAcknowledgment(db, {
-        requestId: row.id,
-        datasetId: row.dataset_id,
-        adminUserId: admin.id,
-        reason: ev.reason,
-        state: row.identifier_screen_status as string,
-        shown: { report: row.identifier_screen_report as string },
-        details: { via: "acknowledge-batch", policy, lineage: ev.lineage },
-      });
-      if (!recorded) return { ...ev.result, outcome: "state_moved" };
-      return { ...ev.result, outcome: "acknowledged" };
+      try {
+        const recorded = await recordScreenAcknowledgment(db, {
+          requestId: row.id,
+          datasetId: row.dataset_id,
+          adminUserId: admin.id,
+          reason: ev.reason,
+          state: row.identifier_screen_status as string,
+          shown: { report: row.identifier_screen_report as string },
+          details,
+        });
+        if (!recorded) return { ...ev.result, outcome: "state_moved" };
+        return { ...ev.result, outcome: "acknowledged" };
+      } catch (err) {
+        console.error(`[acknowledge-batch] ${e.dataset_id}: record threw ${errorClass(err)}`);
+        return { ...ev.result, outcome: "state_moved" };
+      }
     });
     return c.json({ apply: true, policy, results, next: null });
   });
