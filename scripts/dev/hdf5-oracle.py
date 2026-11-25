@@ -5,6 +5,7 @@ script printed once and that is committed beside each fixture.
 
     uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py <file>          # print entries
     uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --generate <dir> # write fixtures
+    uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --snirf-variants <dir>  # card A4
 
 The entry list follows the walker's rules exactly (see the module docstring of
 shared/hdf5-meta.ts): one entry per group, dataset and attribute, a value only for a string of at
@@ -320,9 +321,51 @@ def generate(outdir: str) -> None:
         f.create_dataset("ok", data=np.arange(3, dtype="<i2"))
 
 
+# Made-up values for the identifier-screen fixtures (card A4). No real person is named.
+MADE_UP_NAME = "Quillfeather Marlow"
+
+
+def snirf_variants(outdir: str) -> None:
+    """Copies of the real Simple_Probe SNIRF fixture with one change each (card A4): a second
+    `nirs` group copied from the first, and a made-up name in SubjectID. Plus a small synthetic
+    file whose fields carry identifier-shaped values for the generic HDF5 rules."""
+    import shutil
+
+    real = f"{outdir}/snirf-samples-simple-probe.snirf"
+
+    def set_text(f, path, text):
+        del f[path]
+        f[path] = np.bytes_(text)
+
+    two = f"{outdir}/snirf-two-groups.snirf"
+    shutil.copyfile(real, two)
+    with h5py.File(two, "r+") as f:
+        f.copy("/nirs", "/nirs2")
+        set_text(f, "/nirs2/metaDataTags/SubjectID", MADE_UP_NAME)
+    named = f"{outdir}/snirf-subject-name.snirf"
+    shutil.copyfile(real, named)
+    with h5py.File(named, "r+") as f:
+        set_text(f, "/nirs/metaDataTags/SubjectID", MADE_UP_NAME)
+    with h5py.File(f"{outdir}/identifier-fields.h5", "w") as f:
+        g = f.create_group("meta")
+        g.create_dataset("DateOfBirth", data=np.bytes_("1971-04-23"))
+        g.create_dataset("dob", data=np.bytes_("1971-04"))
+        g.create_dataset("BirthDate", data=np.bytes_("unknown"))
+        g.create_dataset("Email", data=np.bytes_("someone@example.org"))
+        g.attrs["ExperimenterName"] = MADE_UP_NAME
+        g.attrs["ManufacturerName"] = "Quillfeather Instruments GmbH"
+        g.attrs["AppName"] = "Marlow Recorder"
+        g.attrs["Notes"] = "Quillfeather Marlow recorded this"
+        g.attrs["SourcePath"] = "/home/qmarlow/data/run1"
+        f.create_dataset("signal", data=np.zeros(1000, dtype="<f8"))
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "--generate":
         generate(argv[2])
+        return 0
+    if len(argv) == 3 and argv[1] == "--snirf-variants":
+        snirf_variants(argv[2])
         return 0
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)

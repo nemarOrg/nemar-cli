@@ -1,6 +1,6 @@
 # HDF5 fixtures for the metadata walker
 
-These files test `shared/hdf5-meta.ts` (`test/hdf5-meta.test.ts`).
+These files test `shared/hdf5-meta.ts` (`test/hdf5-meta.test.ts`) and the SNIRF and generic HDF5 readers (`test/readers-snirf.test.ts`, `test/readers-hdf5-generic.test.ts`).
 Each has the entry list h5py printed for it beside it, `<file>.oracle.json`.
 Regenerate an oracle file, or the synthetic files, with:
 
@@ -12,7 +12,7 @@ uv run --with 'h5py==3.16.0' python scripts/dev/hdf5-oracle.py --generate test/f
 The committed oracle files were printed by h5py 3.16.0.
 CI does not run Python; the tests read the committed JSON.
 
-The seven HDF5 files total 6,128,873 bytes (under 6 MiB).
+The ten HDF5 files total 6,574,680 bytes (under 6.5 MiB).
 They are committed as plain git blobs, not git-annex pointers (`git -c annex.largefiles=nothing add`).
 
 ## Real recordings
@@ -49,3 +49,22 @@ SHA-256:
 - `unsupported-filter.h5`: `d0a8b8b9a9f3e01d408f0367046179db80783fff38f9a286464792e98e468bd6`
 
 Regenerating the synthetic files is not byte-stable (`dense-latest.h5` changed between two runs of the same h5py); regenerate their oracle files and the hashes above in the same change.
+
+## Variants for the identifier screen (card A4)
+
+`scripts/dev/hdf5-oracle.py --snirf-variants test/fixtures/hdf5` writes these with h5py 3.16.0.
+The two SNIRF files are copies of the real `snirf-samples-simple-probe.snirf` (public domain) with one change each; the third is synthetic.
+Every name and value in them is made up (`Quillfeather Marlow`); no real person is named.
+Their oracle files were printed as above.
+
+| File | Bytes | Change |
+|---|---|---|
+| `snirf-two-groups.snirf` | 277,802 | `/nirs` copied to `/nirs2` with h5py's `copy`, and `/nirs2/metaDataTags/SubjectID` set to a made-up name: findings come from both groups |
+| `snirf-subject-name.snirf` | 149,381 | `/nirs/metaDataTags/SubjectID` set to a made-up name |
+| `identifier-fields.h5` | 18,624 | Synthetic: identifier-named fields (`DateOfBirth` at day precision, `dob` at year-month, `BirthDate` = `unknown`, `Email`), person and thing name fields (`ExperimenterName`, `ManufacturerName`, `AppName`), free text (`Notes`), a home-directory path, and a 1,000-element signal |
+
+SHA-256:
+
+- `snirf-two-groups.snirf`: `187f523b7e6932a6b3730065ab232320241497d84a78e3e0f307613fcfcf150c`
+- `snirf-subject-name.snirf`: `b4db1af8df8559fd9b0566a7af8c54138c464270beb20d409b15905de1663b3a`
+- `identifier-fields.h5`: `549c223d5b72e1a9b622045526778f8235718c4212167ad7b11da07f089b7268`
