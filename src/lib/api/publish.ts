@@ -367,13 +367,45 @@ export async function denyPublication(
  * Re-run the identifier screen of a dataset's active publication request
  * (admin; epic #1610, phase 4). The admins are mailed when it reports.
  */
-export async function rerunIdentifierScreen(datasetId: string): Promise<{
+export async function rerunIdentifierScreen(
+  datasetId: string,
+  batchId?: number,
+): Promise<{
   dataset_id: string;
   request_id: number;
   status: string;
   identifier_screen: IdentifierScreenView;
 }> {
-  return request(`/admin/publish/${datasetId}/identifier-screen`, { method: "POST" }, true);
+  // With a batch id this is one screen of a paced re-screen: the Worker mails no per-request
+  // message and counts the screen toward the batch's digest.
+  return request(
+    `/admin/publish/${datasetId}/identifier-screen`,
+    batchId === undefined
+      ? { method: "POST" }
+      : { method: "POST", body: JSON.stringify({ batch_id: batchId }) },
+    true,
+  );
+}
+
+/**
+ * Create a paced re-screen for the active requests of `datasetIds` (admin; ADR 0086 amendment of
+ * 2026-11-25). `skipped` are the ids with no open request that is screened.
+ */
+export async function createScreenBatch(datasetIds: string[]): Promise<{
+  batch_id: number;
+  total: number;
+  skipped: string[];
+}> {
+  return request(
+    "/admin/publish/screen-batches",
+    { method: "POST", body: JSON.stringify({ dataset_ids: datasetIds }) },
+    true,
+  );
+}
+
+/** Stop a batch's dispatching: its digest follows when the screens already started report. */
+export async function closeScreenBatch(batchId: number): Promise<{ closed: boolean }> {
+  return request(`/admin/publish/screen-batches/${batchId}/close`, { method: "POST" }, true);
 }
 
 /**

@@ -85,6 +85,7 @@ const PARAM_VALUES: Record<string, string> = {
   client_id: `oc_${"0".repeat(24)}`,
   kid: "0".repeat(16),
   sub: `nmu_${"0".repeat(32)}`,
+  batch: "1",
   userId: "999999",
   accountId: "999999",
   jobId: "x",

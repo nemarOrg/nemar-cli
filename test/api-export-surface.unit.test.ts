@@ -89,7 +89,9 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   publish: [
     "PUBLICATION_STEPS",
     "approvePublication",
+    "closeScreenBatch",
     "commentOnPublication",
+    "createScreenBatch",
     "denyPublication",
     "getPublicationReview",
     "getPublishStatus",
@@ -394,6 +396,8 @@ const POST_SPLIT_ADDITIONS = [
   "getPublicationReview", // ADR 0102: GET /admin/publish/:id/review
   "startPublicationReview", // ADR 0102: POST /admin/publish/:id/review/start
   "commentOnPublication", // ADR 0102: POST /admin/publish/:id/comment (mails the depositor an administrator's words)
+  "createScreenBatch", // ADR 0086 amendment of 2026-11-25: POST /admin/publish/screen-batches (a paced re-screen)
+  "closeScreenBatch", // ADR 0086 amendment of 2026-11-25: POST /admin/publish/screen-batches/:id/close (stop dispatching)
   "reviewErrorCode", // ADR 0102: the closed word of a review route's refusal (rawBody.code, not ApiError.code)
   "isRouteNotFound", // a backend that predates a route answers its not-found body: say so, do not call it a bug
   "hasReleasedVersion", // ADR 0111 decision 10: the import's upstream-moved guard asks GET /datasets/:id/versions

@@ -1063,9 +1063,9 @@ export default {
         ctx.waitUntil(
           sweepIdentifierScreens(env)
             .then((r) => {
-              if (r.timedOut + r.emailed + r.undelivered + r.errors > 0) {
+              if (r.timedOut + r.emailed + r.undelivered + r.errors + r.digests > 0) {
                 console.log(
-                  `[identifier-screen-sweep] timedOut=${r.timedOut} emailed=${r.emailed} undelivered=${r.undelivered} errors=${r.errors}`,
+                  `[identifier-screen-sweep] timedOut=${r.timedOut} emailed=${r.emailed} digests=${r.digests} undelivered=${r.undelivered} errors=${r.errors}`,
                 );
               }
             })
