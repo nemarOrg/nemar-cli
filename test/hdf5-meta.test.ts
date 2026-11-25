@@ -105,8 +105,8 @@ describe("entries equal h5py's", () => {
   });
 
   test("MATLAB v7.3 EEGLAB .set: user block, references, MATLAB_fields, compact layout", async () => {
-    // Its 1,558 object headers need about 2,000 exact reads; see the read-limit test below.
-    const w = await walk("eeglab-data-v73.set", { limits: { maxReads: 4000 } });
+    // Its 1,558 object headers take about 2,060 exact reads, inside the 20,000 default.
+    const w = await walk("eeglab-data-v73.set");
     expect(sorted(w.entries)).toEqual(oracle("eeglab-data-v73.set"));
     expect(w.complete).toBe(true);
     // A reference is listed and not read, and it does not make the walk incomplete.
@@ -169,7 +169,7 @@ describe("value rules", () => {
   });
 
   test("a numeric over 64 elements is skipped; at 64 it is read", async () => {
-    const w = await walk("eeglab-data-v73.set", { limits: { maxReads: 4000 } });
+    const w = await walk("eeglab-data-v73.set");
     const numeric = w.entries.filter(
       (e) => e.kind === "dataset" && /^(u?int|float)/.test(e.dtype ?? ""),
     );
@@ -249,8 +249,8 @@ describe("bounds", () => {
     expect(w.entries.length).toBeGreaterThan(0);
   });
 
-  test("the default read limit stops the v7.3 .set partway, with what it listed", async () => {
-    const w = await walk("eeglab-data-v73.set");
+  test("a low read limit stops the v7.3 .set partway, with what it listed", async () => {
+    const w = await walk("eeglab-data-v73.set", { limits: { maxReads: 2000 } });
     expect(w.incomplete).toBe("limit-reads");
     expect(w.tally.reads).toBe(2000);
     const all = oracle("eeglab-data-v73.set");

@@ -56,7 +56,11 @@ export class Hdf5Problem extends Error {
 export interface Hdf5Limits {
   /** Bytes requested from the source, in total. */
   maxBytes: number;
-  /** Calls to the source's `read`. */
+  /**
+   * Logical reads: calls to the source's `read`, before any page cache below it coalesces
+   * them. The fetch cap that bounds the network is the source's (A1's page-cached source and the
+   * reader registry's limits); this one bounds the walker's own work.
+   */
   maxReads: number;
   /** Entries (groups, datasets and attributes) the walk returns. */
   maxObjects: number;
@@ -66,7 +70,7 @@ export interface Hdf5Limits {
 
 export const HDF5_LIMITS: Readonly<Hdf5Limits> = Object.freeze({
   maxBytes: 8 * 1024 * 1024,
-  maxReads: 2000,
+  maxReads: 20_000,
   maxObjects: 20_000,
   maxDepth: 32,
 });
