@@ -36,9 +36,8 @@ function indexedFiles(readme: string): string[] {
  */
 // 0120: reserved for the collaborator's reader epic; delete this entry when that ADR lands
 // 0127: reserved for PR #2210 (pull request review regardless of owner role); delete this entry when that ADR lands
-// 0133: reserved for PR #2277 (format conformance vectors live in biosig-zarr); delete this entry when that ADR lands
 // 0137: reserved for the pipeline progress epic (branch feature/issue-2324-epic-pipeline-progress); delete this entry when that ADR lands
-const TOLERATED_GAPS: ReadonlySet<number> = new Set([120, 127, 133, 137]);
+const TOLERATED_GAPS: ReadonlySet<number> = new Set([120, 127, 137]);
 
 /** The numbers missing between 1 and the highest one present, ascending. */
 function findGaps(nums: number[]): number[] {
