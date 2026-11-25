@@ -17,7 +17,7 @@
  * - nemar dataset push            - Push commits and data to remotes
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "bun";
@@ -35,10 +35,21 @@ import {
   PREFLIGHT_ACKNOWLEDGEABLE,
   publicationRequestNotice,
 } from "../../shared/identifier-screen-report.js";
+import {
+  DEFAULT_BASES,
+  type LineageInputs,
+  type RegistryBases,
+  SOURCE_STATUS_COPY,
+  lineageExitCode,
+  lineageLines,
+  readLineageInputs,
+  resolveLicenseLineage,
+} from "../../shared/license-lineage.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { MODALITY_FILTER_CLI_HELP } from "../../shared/modality-filter.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
+import { README_CANDIDATES } from "../../shared/readme-candidates.js";
 import { isAnswered } from "../lib/admin-command.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
@@ -6225,3 +6236,117 @@ function renderAnonymityVerdict(info: {
     console.log(chalk.dim(`               Not checked: ${unchecked.join(", ")}`));
   }
 }
+
+// ============================================================================
+// License lineage (`nemar dataset license-check <path>`; epic #2182 card D1, ADR 0139)
+// ============================================================================
+
+/**
+ * The registry origins, overridable by environment for the CLI spawn test only
+ * (test/license-check-spawn.test.ts serves recorded responses from a local stand-in).
+ */
+function licenseCheckBases(): RegistryBases {
+  const env = process.env;
+  return {
+    datacite: env.NEMAR_LICENSE_DATACITE_URL || DEFAULT_BASES.datacite,
+    crossref: env.NEMAR_LICENSE_CROSSREF_URL || DEFAULT_BASES.crossref,
+    openalex: env.NEMAR_LICENSE_OPENALEX_URL || DEFAULT_BASES.openalex,
+    openneuro: env.NEMAR_LICENSE_OPENNEURO_URL || DEFAULT_BASES.openneuro,
+    physionet: env.NEMAR_LICENSE_PHYSIONET_URL || DEFAULT_BASES.physionet,
+  };
+}
+
+/** The lineage inputs of a local dataset copy: everything but the attestation, which is on the server. */
+function localLineageInputs(root: string): LineageInputs {
+  // Every read can throw (a permission error, a directory where a file should be); the caller
+  // turns that into one line and exit 1.
+  const read = (name: string): string | null => {
+    const p = join(root, name);
+    return existsSync(p) ? readFileSync(p, "utf-8") : null;
+  };
+  let readme: string | null = null;
+  for (const name of README_CANDIDATES) {
+    readme = read(name);
+    if (readme !== null) break;
+  }
+  return {
+    datasetDescription: read("dataset_description.json"),
+    nemarMetadata: read(".nemar/metadata.json"),
+    attestationUpstreamSource: null,
+    readme,
+  };
+}
+
+/** Print one line on stderr and exit 1: the check could not read its inputs. */
+function licenseCheckFail(message: string): never {
+  console.error(chalk.red(message));
+  // The message is the whole report; no "run again with --debug" footer.
+  markReportedExit();
+  process.exit(1);
+}
+
+datasetCommand
+  .command("license-check")
+  .description("Check the dataset's license against its upstream sources' licenses")
+  .argument("<path>", "Path to the local dataset")
+  .option("--json", "Print the result as one JSON document")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Recomputes the upstream license lineage with the same resolver NEMAR's
+  review uses. The sources are read from dataset_description.json
+  (SourceDatasets), .nemar/metadata.json (IsDerivedFrom and IsIdenticalTo),
+  and data-repository DOIs and OpenNeuro, Zenodo or PhysioNet URLs in the
+  README. Each source's license is read from DataCite, Crossref or OpenAlex
+  (OpenNeuro's or PhysioNet's own record where the registries hold none).
+  The deposit attestation is read only by the server's check.
+
+Exit codes:
+  0  compatible, compatible_attribution or compatible_nc
+  1  the path could not be read
+  2  any other outcome (it needs an action; see the remedy)
+
+Examples:
+  $ nemar dataset license-check ./my-dataset
+  $ nemar dataset license-check ./my-dataset --json`,
+  )
+  .action(async (path: string, options: { json?: boolean }) => {
+    const root = resolve(path);
+    // Each step records a failure message; the exit happens outside every `try`, so an exit can
+    // never be caught and reported as a read error.
+    let failure: string | null = null;
+    let inputs: LineageInputs | null = null;
+    try {
+      if (!statSync(root).isDirectory()) failure = `Not a directory: ${path}`;
+      else if (!existsSync(join(root, "dataset_description.json"))) {
+        failure = `No dataset_description.json in ${path}`;
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      failure =
+        code === "ENOENT"
+          ? `Path not found: ${path}`
+          : `Could not read ${path} (${code ?? "error"})`;
+    }
+    if (failure === null) {
+      try {
+        inputs = localLineageInputs(root);
+      } catch (error) {
+        failure = `Could not read ${path} (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+      }
+    }
+    if (failure !== null || inputs === null) licenseCheckFail(failure ?? `Could not read ${path}`);
+    // A file that is there but cannot be parsed is not a lineage: name it and stop.
+    const { states } = readLineageInputs(inputs);
+    if (states.dataset_description === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.description_unreadable.statement);
+    }
+    if (states.nemar_metadata === "unparseable") {
+      licenseCheckFail(SOURCE_STATUS_COPY.metadata_unreadable.statement);
+    }
+    const result = await resolveLicenseLineage(inputs, { bases: licenseCheckBases() });
+    if (options.json) console.log(JSON.stringify(result, null, 2));
+    else for (const line of lineageLines(result)) console.log(line);
+    process.exit(lineageExitCode(result.outcome));
+  });

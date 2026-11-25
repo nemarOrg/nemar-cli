@@ -76,6 +76,7 @@ import type {
   WaiveNamingResponse,
 } from "../../../shared/contract/pr-review-admin.js";
 import type { NeurobagelWeekly, RfcWeekFacts } from "../../../shared/contract/weekly-attention.js";
+import type { LineageResult } from "../../../shared/license-lineage.js";
 import type { RepullWeekFacts } from "../../../shared/repull-observability.js";
 import type {
   UpstreamFleetSummary,
@@ -2095,6 +2096,21 @@ export async function upstreamStatus(options?: {
     }
     throw err;
   }
+}
+
+/**
+ * A dataset's upstream license lineage (epic #2182 card D1, ADR 0139 decision 7):
+ * `GET /admin/datasets/:id/license-lineage`, read-only and computed on demand by the same resolver
+ * `nemar dataset license-check` runs locally.
+ */
+export async function getLicenseLineage(
+  datasetId: string,
+): Promise<LineageResult & { dataset_id: string }> {
+  return request<LineageResult & { dataset_id: string }>(
+    `/admin/datasets/${encodeURIComponent(datasetId)}/license-lineage`,
+    { method: "GET" },
+    true,
+  );
 }
 
 // ============================================================================
