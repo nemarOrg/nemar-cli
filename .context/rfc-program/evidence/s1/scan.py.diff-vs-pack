@@ -1,0 +1,33 @@
+544a545,546
+>         if txt.startswith("+-"):  # real files write a negative onset as "+-0.001"
+>             txt = txt[1:]
+554c556
+<     ns = int(h["ns"])
+---
+>     ns = int(h["ns"].strip(" \x00"))
+560c562
+<     nsamp = [int(hb[nsoff + 8 * i : nsoff + 8 * (i + 1)].decode("latin-1").strip())
+---
+>     nsamp = [int(hb[nsoff + 8 * i : nsoff + 8 * (i + 1)].decode("latin-1").strip(" \x00"))
+564c566
+<     dur = float(h["dur"])
+---
+>     dur = float(h["dur"].strip(" \x00"))
+566c568
+<     nrec = int(h["nrec"])
+---
+>     nrec = int(h["nrec"].strip(" \x00"))
+569a572,575
+>     fits = (size - hdr_len) // rec_bytes
+>     file_short = nrec > fits  # header claims more records than the file holds
+>     if file_short:
+>         nrec = fits
+571c577,578
+<            "rec_bytes": rec_bytes, "size": size, "ann_signals": len(ann)}
+---
+>            "rec_bytes": rec_bytes, "size": size, "ann_signals": len(ann),
+>            "file_short": file_short}
+645c652
+<     out["size_matches"] = (size == hdr_len + nrec * rec_bytes)
+---
+>     out["size_matches"] = (size == hdr_len + nrec * rec_bytes) and not file_short

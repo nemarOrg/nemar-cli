@@ -1,0 +1,2348 @@
+{
+  "seed": 20261120,
+  "per_prefix": 15,
+  "pool": {
+    "nm": 267,
+    "on": 24
+  },
+  "sample": [
+    {
+      "dataset_id": "nm000146",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-04-29 22:29:32",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "135db67980f9ffb4172834f41ea53d5b7be93e9e",
+          "commit_date": "2026-04-29T22:29:21Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000146",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-14 14:09:14",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "871483802eb4a47672f8ecae83d83e47aab82555",
+          "commit_date": "2026-08-14T14:08:02Z",
+          "commit_message_first_line": "Add sourcedata/: original upstream distribution retrieved via MOABB (Weibo2014), with provenance and SHA-256 checksums (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Add sourcedata/: original upstream distribution retrieved via MOABB (Weibo2014), with provenance and SHA-256 checksums (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-14T14:08:03Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 22:07:07",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "18754840807ccf09acc309eb39574f20fcfafc7a",
+          "commit_date": "2026-08-18T22:05:47Z",
+          "commit_message_first_line": "Record which subject each sourcedata file came from (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Record which subject each sourcedata file came from",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-18T22:05:48Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-08 17:25:40",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "3e22adacb574a8ff308abc924c55d6b3ce8421bc",
+          "commit_date": "2026-10-08T17:24:20Z",
+          "commit_message_first_line": "events.tsv: onset at trigger time (undo MOABB export shift of interval[0]=3 s); sample column adjusted accordingly (#3)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "events.tsv: onset at trigger time (undo MOABB export shift of interval[0]=3 s); sample column adjusted accordingly (v1.0.3)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-08T17:24:21Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000169",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-11 16:34:45",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "d9a8f4c330a4f5325b18fe8730423199f4d81cf0",
+          "commit_date": "2026-05-11T16:34:33Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000169",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-11 19:55:22",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "dfef499581034821cf8ce2331973d839c9aadc38",
+          "commit_date": "2026-08-11T19:53:37Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/add-sourcedata-original",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Add sourcedata/: original upstream distribution retrieved via MOABB (BNCI2014_008), with provenance and SHA-256 checksums (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-11T19:53:37Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 18:16:10",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "4abbd1a605a30de6c180b05faa7609ef6a0dbc30",
+          "commit_date": "2026-08-18T18:11:02Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-08 18:18:40",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "fb76537631ae40f69c5a23b8a6383718a445c6e2",
+          "commit_date": "2026-10-08T18:17:30Z",
+          "commit_message_first_line": "events.tsv (8 files): duration set to n/a (previous value was the MOABB epoching window, not the stimulus duration) (#3)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "events.tsv (8 files): duration set to n/a (previous value was the MOABB epoching window, not the stimulus duration) (v1.0.3)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-08T18:17:30Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000191",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-04 13:06:53",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "9288319134196d5d296f9b64ae6501b700f5600d",
+          "commit_date": "2026-05-04T13:06:42Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000191",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-11 22:51:27",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "abbc7c006186c4bfb54ce8b3bf0ea0b2d4bd1425",
+          "commit_date": "2026-08-11T22:49:00Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/add-sourcedata-original",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 18:17:38",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "70d2c01f4a86bba917dd8d3bf014d20e36d67405",
+          "commit_date": "2026-08-18T18:12:01Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: enriched) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000197",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-02 01:35:00",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "ff0bb7bf523dfb034b24cb6ea4dbb9a229a986a3",
+          "commit_date": "2026-06-02T01:34:49Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000197",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-12 16:10:06",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "18a113f45ff4291867ccd50d69307db615fe7571",
+          "commit_date": "2026-08-12T16:08:46Z",
+          "commit_message_first_line": "Merge pull request #2 from nemarDatasets/add-sourcedata-original",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 21:11:57",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "7a3f12b3be5c13d658fe9e93954094fc251cde62",
+          "commit_date": "2026-08-18T18:12:30Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000199",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-02 01:43:50",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "bae80ea598ea37018072ad4ecb6330bd78d20d37",
+          "commit_date": "2026-06-02T01:43:39Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000199",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-12 16:10:52",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "c9be63ebbdb02f38cafee2ed49dc26f5e5bbc6c5",
+          "commit_date": "2026-08-12T16:09:17Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/add-sourcedata-original",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Add sourcedata/: original upstream distribution retrieved via MOABB (Huebner2017), with provenance and SHA-256 checksums (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-12T16:09:18Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 21:11:11",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "a51a24980231d3744029ab3140ab275fa6b6d379",
+          "commit_date": "2026-08-18T18:12:41Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-08 20:48:55",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "3c54cc537f4ad1080481e61f71dbd8e1d5fca507",
+          "commit_date": "2026-10-08T18:36:06Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: enriched) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.4",
+          "tag": "v1.0.4",
+          "created_at": "2026-10-16 14:16:27",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "b4aa4c92db8be5328a1d18f203837840d84194b3",
+          "commit_date": "2026-10-16T14:11:09Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000220",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-06-23 12:52:20",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "c444d66ab76122a52c181a476f09c45466d58c50",
+          "commit_date": "2026-06-21T08:57:10Z",
+          "commit_message_first_line": "fix: descriptive dataset name and substantive README for NEMAR publication",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "fix: use descriptive dataset name for NEMAR publication review (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-06-21T08:57:10Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-14 13:55:12",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "0037f6c043863800cfa9984a721280ae1f787076",
+          "commit_date": "2026-08-14T13:53:04Z",
+          "commit_message_first_line": "Add sourcedata/: original upstream distribution retrieved via MOABB (Beetl2021_A), with provenance and SHA-256 checksums (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Add sourcedata/: original upstream distribution retrieved via MOABB (Beetl2021_A), with provenance and SHA-256 checksums (v1.0.2)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-14T13:53:05Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.4",
+          "tag": "v1.0.4",
+          "created_at": "2026-08-15 16:09:40",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "b9f23b7e1ec7df8203aec2999b20e069cad5c9fd",
+          "commit_date": "2026-08-15T16:07:33Z",
+          "commit_message_first_line": "Fix BIDS filenames: move recording label to acq (#3)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "Fix BIDS filenames: move recording label to acq",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-15T16:07:33Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.5",
+          "tag": "v1.0.5",
+          "created_at": "2026-08-18 18:24:29",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "fedd904b3194fadd5078eb9364bc20d5f09ef962",
+          "commit_date": "2026-08-18T18:17:09Z",
+          "commit_message_first_line": "Record which subject each sourcedata file came from (#4)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 4,
+              "title": "Record which subject each sourcedata file came from",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-18T18:17:10Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.6",
+          "tag": "v1.0.6",
+          "created_at": "2026-08-20 19:21:24",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "7fec02b818a54f98428fa61295a1462b1bad6066",
+          "commit_date": "2026-08-20T19:19:42Z",
+          "commit_message_first_line": "Remove incorrect per-file subject attribution from sourcedata_provenance.json (#5)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 5,
+              "title": "Remove incorrect per-file subject attribution from sourcedata_provenance.json\n\nEvery file was stamped with the dataset's LAST subject (an attribution\nloop bug in the enrichment tooling). For this dataset data_path()\nreturns the same whole-dataset location for every subject, so per-file\nsubject attribution is not derivable from evidence. Without subject\nfields, consumers correctly fall back to fetching the full tree. (v1.0.6)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-20T19:19:43Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000229",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-06-03 03:26:36",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "9ad35e59ea9d004a529fa132571bf6661473b3ec",
+          "commit_date": "2026-06-03T03:26:24Z",
+          "commit_message_first_line": "Remove old README.txt (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-11-08 16:32:09",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "10d39ebe1a301cc0c5c29af82511cd6c7e2f58e8",
+          "commit_date": "2026-11-08T16:31:07Z",
+          "commit_message_first_line": "Merge pull request #2 from nemarDatasets/fix-20261108",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "events: sub-12..27 events.tsv in the sub-01..11 column layout (1.0.2)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-11-08T16:31:08Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000240",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-03 05:06:35",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "75eee780cfad6b84b2225652c2f8684b7cc31d80",
+          "commit_date": "2026-06-03T05:06:23Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000240",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-12 16:42:09",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "0d46dcd485ae61185ca78c9bbb45fae922d65289",
+          "commit_date": "2026-08-12T16:39:56Z",
+          "commit_message_first_line": "Merge pull request #2 from nemarDatasets/complete-sourcedata",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Complete sourcedata/: add 7 missing file(s) from the upstream distribution (MartinezCagigal2023Checker). The initial deposit was incomplete because some subjects failed to download; provenance updated to cover all 16 files. (v1.0.2)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-12T16:39:56Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-08-15 16:24:22",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "45b7df5b43b171e88beb0d3597dbafb4902dfbe4",
+          "commit_date": "2026-08-15T16:22:27Z",
+          "commit_message_first_line": "Fix BIDS filenames: move recording label to acq (#3)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "Fix BIDS filenames: move recording label to acq",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-15T16:22:28Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.4",
+          "tag": "v1.0.4",
+          "created_at": "2026-08-18 21:20:30",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "9627c47be7564a25ccb0ef0a5a1772e774d4e0e1",
+          "commit_date": "2026-08-18T18:15:30Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: enriched) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.5",
+          "tag": "v1.0.5",
+          "created_at": "2026-10-08 21:02:46",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "3574f0aab06fec9a55ba15a63b20d6b561192405",
+          "commit_date": "2026-10-08T19:30:36Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000319",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-08 03:51:43",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "971a6a247b47b9c1c1b946f43d4bfc48251c7d50",
+          "commit_date": "2026-10-08T03:51:15Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 13:22:41",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "cbd225d2f2f1837255fbfa7b38c2696baa746c46",
+          "commit_date": "2026-10-16T13:21:25Z",
+          "commit_message_first_line": "sourcedata: add the data files that the recording headers need (Kueper2024) (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "sourcedata: add the data files that the recording headers need (Kueper2024)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T13:21:26Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-19 19:55:45",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "e15651f75bb201e0a14a934b311d8ccdb119ba07",
+          "commit_date": "2026-10-19T19:54:23Z",
+          "commit_message_first_line": "sourcedata: fix provenance subject labels to MOABB subject ids (Kueper2024 QS70 relabelled 70->4, ZS27 relabelled 27->8) so per-subject NEMAR downloads select the right files; no data files changed (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "sourcedata: fix provenance subject labels to MOABB subject ids (Kueper2024 QS70 relabelled 70->4, ZS27 relabelled 27->8) so per-subject NEMAR downloads select the right files; no data files changed (v1.0.2)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-19T19:54:23Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000346",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-03 13:09:01",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "05f67703ff3780325ae9ccb2dd0e428196799ef6",
+          "commit_date": "2026-06-03T13:08:48Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-08-12 16:18:58",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "31942df3872addbf2b8168ef9472e6a008f85d97",
+          "commit_date": "2026-08-12T16:16:31Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/add-sourcedata-original",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Add sourcedata/: original upstream distribution retrieved via MOABB (CastillosCVEP100), with provenance and SHA-256 checksums (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-08-12T16:16:32Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-08-18 21:24:56",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "75ab021898227ea2d7387e66cf9b74ee128badd9",
+          "commit_date": "2026-08-18T18:19:15Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: enriched) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-08 18:54:11",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "17db62b5ce3da744816e0cd7d63ad6b147804f1f",
+          "commit_date": "2026-10-08T18:20:27Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000390",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-08 06:10:56",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "68acb3d72a31abed2d767638c3b58e37e56090e5",
+          "commit_date": "2026-10-08T06:10:21Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.nm000390",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 11:21:37",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "2664a1a6a8e89f3973164e7c5dcd53412ef22518",
+          "commit_date": "2026-10-16T11:20:11Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/nm000390-mvator40",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Rename dataset to the atlas naming rule FirstAuthorSurname-year-keyword-paperDOI (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T11:20:11Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-16 17:19:15",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "2e12558d788055b811d55939c2b68134763bee24",
+          "commit_date": "2026-10-16T17:17:59Z",
+          "commit_message_first_line": "Restore descriptive Name in nm000390 (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Restore descriptive dataset Name (v1.0.2)",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T17:18:00Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000446",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-13 06:03:49",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "59617158e826090cf78c856e95a12ba0200e02dc",
+          "commit_date": "2026-10-13T06:03:21Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 11:18:35",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "794af54d4c2d4474d7b9d4257918fa0f55c0c5f4",
+          "commit_date": "2026-10-16T11:17:24Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/nm000446-mvauayzh",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Rename dataset to the atlas naming rule FirstAuthorSurname-year-keyword-paperDOI (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T11:17:25Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-16 17:43:19",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "204e697293d8eb9c4906b76dbbee278a385aeb8e",
+          "commit_date": "2026-10-16T17:42:08Z",
+          "commit_message_first_line": "Restore descriptive Name in nm000446 (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Restore descriptive dataset Name (v1.0.2)",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T17:42:08Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-25 01:21:49",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "be3235aebca3701e5ced63bf5756dead295f005f",
+          "commit_date": "2026-10-25T01:20:44Z",
+          "commit_message_first_line": "Units stay n/a for DBS, EEG, EMG and ECG: no source states a scale (README evidence, v1.0.3) (#3)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "Units stay n/a for DBS, EEG, EMG and ECG: no source states a scale (README evidence, v1.0.3)",
+              "author": "julien-gadonneix",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-25T01:20:44Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000465",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-13 06:06:09",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "722f5931e7fc46fa64ad3e00cdfa1936aa615053",
+          "commit_date": "2026-10-13T06:05:38Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 11:17:25",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "d0193459da6cc01a1db6cd9c1ed778985ce21d16",
+          "commit_date": "2026-10-16T11:16:19Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/nm000465-mvauji5v",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Rename dataset to the atlas naming rule FirstAuthorSurname-year-keyword-paperDOI (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T11:16:19Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-16 17:56:42",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "8273c4f2ade3054cb818939508abc127d3e483e9",
+          "commit_date": "2026-10-16T17:55:39Z",
+          "commit_message_first_line": "Restore descriptive Name in nm000465 (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Restore descriptive dataset Name (v1.0.2)",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T17:55:40Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000472",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-13 06:18:38",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "83f803575edc61af8f538ac7c0682c4718087873",
+          "commit_date": "2026-10-13T06:18:14Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 11:17:09",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "6f35251f84a929a6ac8f9549e6e0be6d1c0a30ac",
+          "commit_date": "2026-10-16T11:16:02Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/nm000472-mvaultze",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Rename dataset to the atlas naming rule FirstAuthorSurname-year-keyword-paperDOI (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T11:16:02Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "nm000476",
+      "owner_username": "bruaristimunha",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-13 06:08:09",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "bb3f860b219a340f924f224458b458fbcfedadbb",
+          "commit_date": "2026-10-13T06:07:41Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 11:16:58",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "48deb2bd7f81a471aef03be20eeb1450f112b881",
+          "commit_date": "2026-10-16T11:15:46Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/nm000476-mvaunwcd",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Rename dataset to the atlas naming rule FirstAuthorSurname-year-keyword-paperDOI (v1.0.1)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T11:15:46Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-16 17:58:00",
+          "source_version": null,
+          "source_version_basis": null,
+          "sha": "c983d1c52c4a63e44729457731a468aebd9af01a",
+          "commit_date": "2026-10-16T17:56:57Z",
+          "commit_message_first_line": "Restore descriptive Name in nm000476 (#2)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Restore descriptive dataset Name (v1.0.2)",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T17:56:57Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "bruAristimunha",
+          "permission": "maintain"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on000117",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-03-08 09:59:41",
+          "source_version": "1.1.0",
+          "source_version_basis": "lineage",
+          "sha": "fee96d1599af4f5e9d9e77295ebb7321d0c3b70f",
+          "commit_date": "2026-03-08T09:59:28Z",
+          "commit_message_first_line": "Set initial version to 1.0.0 for DOI publication",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "2.0.0",
+          "tag": "v2.0.0",
+          "created_at": "2026-11-09 02:41:04",
+          "source_version": "2.0.0",
+          "source_version_basis": "lineage",
+          "sha": "703396f2dd34497e0543dad7350118c34f5ea9ce",
+          "commit_date": "2026-11-09T02:39:52Z",
+          "commit_message_first_line": "Merge pull request #3 from nemarDatasets/release/v2.0.0",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 3,
+              "title": "Release v2.0.0",
+              "author": "neuromechanist",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-11-09T02:39:53Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on002578",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 06:46:21",
+          "source_version": "1.1.0",
+          "source_version_basis": "doi",
+          "sha": "de59d76ba89c1ae40fa73f60ee224ffe4f1c8588",
+          "commit_date": "2026-05-13T06:46:10Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-05-26 19:01:43",
+          "source_version": "1.1.0",
+          "source_version_basis": "doi",
+          "sha": "5e5027e73a427b120e35de48856380f07dc938fd",
+          "commit_date": "2026-05-25T22:08:54Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/on002578-mphbnglm",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on002578 to v1.0.2",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-05-25T22:08:54Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on002778",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 06:46:56",
+          "source_version": "1.0.5",
+          "source_version_basis": "doi",
+          "sha": "24a3898bf0563b0ecd711dd7d1e00289f7cc266c",
+          "commit_date": "2026-05-13T06:46:45Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-05-27 23:21:43",
+          "source_version": "1.0.5",
+          "source_version_basis": "doi",
+          "sha": "56640eb0220919c08d90f5b04a8bf4717bbcb812",
+          "commit_date": "2026-05-27T23:20:54Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/update/on002778-mphbnx3h",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on002778 to v1.0.2",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-05-27T23:20:55Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on003061",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-21 16:07:37",
+          "source_version": "1.1.0",
+          "source_version_basis": "lineage",
+          "sha": "433fc82344d8f173b5dc7951d05b60245c36b7cb",
+          "commit_date": "2026-06-21T16:07:11Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on003061",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "2.0.0",
+          "tag": "v2.0.0",
+          "created_at": "2026-11-09 07:35:10",
+          "source_version": "1.1.2",
+          "source_version_basis": "lineage",
+          "sha": "e67f43aacc072f5070575aa6554eb33b14303a7d",
+          "commit_date": "2026-11-09T07:34:00Z",
+          "commit_message_first_line": "Release v2.0.0 (#1)",
+          "upstream_snapshot_trailer": true,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Release v2.0.0",
+              "author": "neuromechanist",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-11-09T07:34:00Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on003078",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-21 16:38:41",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "8f5c1cfad2327219c69927d94c8fcbd4eaf016dd",
+          "commit_date": "2026-06-21T16:37:06Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on003078",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-19 07:26:26",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "56fce4c84e87bacd064389e66049cfa6afa6ebe8",
+          "commit_date": "2026-10-19T07:25:24Z",
+          "commit_message_first_line": "README: known issue, all 72 .fdt signal files are identical (as in OpenNeuro ds003078 1.0.0); Version 1.0.1 (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Known issue: all 72 .fdt signal files are identical (1.0.1, README only)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-19T07:25:24Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on003190",
+      "owner_username": "yahya",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 12:25:24",
+          "source_version": "1.0.1",
+          "source_version_basis": "doi",
+          "sha": "166e0abb915f72bc8ee18bf40837646e5065e666",
+          "commit_date": "2026-05-13T12:25:10Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-14 00:03:16",
+          "source_version": "1.0.1",
+          "source_version_basis": "doi",
+          "sha": "f5ca5a684111cae0cd55fa908b1d2ba221a402ff",
+          "commit_date": "2026-10-14T00:02:08Z",
+          "commit_message_first_line": "Update on003190 to v1.0.2 (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on003190 to v1.0.2",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-14T00:02:08Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on003343",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 06:48:49",
+          "source_version": "2.0.1",
+          "source_version_basis": "doi",
+          "sha": "e454dbf6138faa7242de7dd7698f86adb406484a",
+          "commit_date": "2026-05-13T06:48:38Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-08 19:02:27",
+          "source_version": "2.0.1",
+          "source_version_basis": "doi",
+          "sha": "cf8df3b181e3d0f1dee4ed621713da2320063e5f",
+          "commit_date": "2026-10-08T19:01:16Z",
+          "commit_message_first_line": "Update NEMAR metadata (pipeline: validated) [skip ci]",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on003739",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-19 05:05:14",
+          "source_version": "1.0.2",
+          "source_version_basis": "lineage",
+          "sha": "63636b01df5b83c448e438aebc8f25ae7f465b2b",
+          "commit_date": "2026-06-19T05:04:44Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on003739",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "2.0.0",
+          "tag": "v2.0.0",
+          "created_at": "2026-11-09 02:41:12",
+          "source_version": "1.0.3",
+          "source_version_basis": "lineage",
+          "sha": "e44a43c5a72d23c628b22c851d8af165484b0206",
+          "commit_date": "2026-11-09T02:40:08Z",
+          "commit_message_first_line": "Release v2.0.0 (#1)",
+          "upstream_snapshot_trailer": true,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Release v2.0.0",
+              "author": "neuromechanist",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-11-09T02:40:09Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on004362",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-04-29 22:57:33",
+          "source_version": "1.0.0",
+          "source_version_basis": "lineage",
+          "sha": "d82a21f61d46d9cd3674933518bdd318bb9fa58c",
+          "commit_date": "2026-04-29T22:57:21Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "2.0.0",
+          "tag": "v2.0.0",
+          "created_at": "2026-10-31 05:04:43",
+          "source_version": "1.0.1",
+          "source_version_basis": "lineage",
+          "sha": "8c82186286eb489742101db0a1a2ccce7799c2ce",
+          "commit_date": "2026-10-31T05:02:43Z",
+          "commit_message_first_line": "Release v2.0.0 (#2)",
+          "upstream_snapshot_trailer": true,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Release v2.0.0",
+              "author": "neuromechanist",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-31T05:02:44Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on004850",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 06:56:50",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "8d2c4bbcc31a2d5f89457a0f1d97256641643c2c",
+          "commit_date": "2026-05-13T06:56:38Z",
+          "commit_message_first_line": "Remove old README (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-14 00:10:00",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "f65a85b3df5139639bbb57d9967a8ddd76a7cb6b",
+          "commit_date": "2026-10-14T00:08:58Z",
+          "commit_message_first_line": "Update on004850 to v1.0.2 (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on004850 to v1.0.2",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-14T00:08:59Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on005262",
+      "owner_username": "yahya",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-13 12:41:33",
+          "source_version": "1.0.1",
+          "source_version_basis": "doi",
+          "sha": "26030a9386c846a70cae2eff21355d4c5139f7b8",
+          "commit_date": "2026-05-13T12:41:22Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on005262",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.2",
+          "tag": "v1.0.2",
+          "created_at": "2026-10-14 00:01:18",
+          "source_version": "1.0.1",
+          "source_version_basis": "doi",
+          "sha": "619226b60a47b1a6e62b3910797b4bc919e85dd2",
+          "commit_date": "2026-10-14T00:00:08Z",
+          "commit_message_first_line": "Update on005262 to v1.0.2 (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on005262 to v1.0.2",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-14T00:00:09Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on005574",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-27 12:38:13",
+          "source_version": "1.0.2",
+          "source_version_basis": "doi",
+          "sha": "e3350ba022f94b82c73674c59fde0ac112d0f58c",
+          "commit_date": "2026-06-27T12:37:51Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on005574",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-25 06:29:18",
+          "source_version": "1.0.2",
+          "source_version_basis": "doi",
+          "sha": "6639523354f8b4e3ff9b0ae427ef48ce4854107d",
+          "commit_date": "2026-10-25T06:28:15Z",
+          "commit_message_first_line": "Fix channels.tsv annotation row so recordings read correctly (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Fix channels.tsv annotation row so recordings read correctly",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-25T06:28:16Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on007315",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-05-25 00:23:57",
+          "source_version": null,
+          "source_version_basis": "unknown",
+          "sha": "422f0be32e7a13e7a27b7c5cc28997a9dfea4504",
+          "commit_date": "2026-03-04T19:58:34Z",
+          "commit_message_first_line": "Set initial version to 1.0.0 for DOI publication",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-14 00:02:08",
+          "source_version": null,
+          "source_version_basis": "unknown",
+          "sha": "821eec95a5be10b0b5d56dbb69a75705574bb559",
+          "commit_date": "2026-10-14T00:01:03Z",
+          "commit_message_first_line": "Update on007315 to v1.0.1 (#1)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Update on007315 to v1.0.1",
+              "author": "AmanJaiswal1503",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-14T00:01:04Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "AmanJaiswal1503",
+          "permission": "write"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on007327",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-10-15 22:24:47",
+          "source_version": "1.1.0",
+          "source_version_basis": "doi",
+          "sha": "b20af31188b06c72d99ee926161081f179b6bf8e",
+          "commit_date": "2026-10-15T22:24:18Z",
+          "commit_message_first_line": "Remove old README.txt (renamed to README.md)",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-16 13:29:14",
+          "source_version": "1.1.0",
+          "source_version_basis": "doi",
+          "sha": "89d2967af28e9f683b4edbdb40f40c19a0f8629d",
+          "commit_date": "2026-10-16T13:11:12Z",
+          "commit_message_first_line": "Merge pull request #1 from nemarDatasets/fix/on007327-eeg-datatype-layout",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Fix on007327 EEG datatype paths",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T13:11:12Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        },
+        {
+          "version": "1.0.3",
+          "tag": "v1.0.3",
+          "created_at": "2026-10-16 14:42:45",
+          "source_version": "1.1.0",
+          "source_version_basis": "doi",
+          "sha": "a5d35ca64bdaad13a5fbc9ca3816e5d132fe3dcc",
+          "commit_date": "2026-10-16T14:41:34Z",
+          "commit_message_first_line": "Merge pull request #2 from nemarDatasets/release/v1.0.3",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": [
+            {
+              "number": 2,
+              "title": "Release v1.0.3",
+              "author": "nemarAdmin",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-16T14:41:34Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    },
+    {
+      "dataset_id": "on007473",
+      "owner_username": "nemarAdmin",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "tag": "v1.0.0",
+          "created_at": "2026-06-19 01:14:29",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "1671947c82b4650a7b3403817105e4e6580b1d0d",
+          "commit_date": "2026-06-19T01:14:02Z",
+          "commit_message_first_line": "Add DOI badge: 10.82901/nemar.on007473",
+          "upstream_snapshot_trailer": false,
+          "parents": 1,
+          "pulls": []
+        },
+        {
+          "version": "1.0.1",
+          "tag": "v1.0.1",
+          "created_at": "2026-10-15 22:22:39",
+          "source_version": "1.0.0",
+          "source_version_basis": "doi",
+          "sha": "6568b5808efd2836a1cd362f4fe147be6042754a",
+          "commit_date": "2026-10-15T22:21:33Z",
+          "commit_message_first_line": "Merge pull request #1 from bruAristimunha/enrich-stimuli-20261008",
+          "upstream_snapshot_trailer": false,
+          "parents": 2,
+          "pulls": [
+            {
+              "number": 1,
+              "title": "Stimulus metadata: movie clip identities and run -> clip table (no media)",
+              "author": "bruAristimunha",
+              "author_type": "User",
+              "merged_by": null,
+              "merged_at": "2026-10-15T22:21:33Z",
+              "state": "closed",
+              "base": "main"
+            }
+          ]
+        }
+      ],
+      "collaborators": [
+        {
+          "login": "arnodelorme",
+          "permission": "admin"
+        },
+        {
+          "login": "neuromechanist",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarAdmin",
+          "permission": "admin"
+        },
+        {
+          "login": "nemarOwner",
+          "permission": "admin"
+        }
+      ]
+    }
+  ]
+}
