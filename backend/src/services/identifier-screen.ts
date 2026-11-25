@@ -973,7 +973,9 @@ export async function verifyScreenHead(
  * `shown` narrows the condition further, for a caller that acknowledges without
  * approving (the batch acknowledgment, card D3): the exact stored report the
  * administrator was shown, a request still `requested`, and no acknowledgment
- * already recorded. `details` is added to the audit row's details.
+ * already recorded. `details` is added to the audit row's details. On that path a failed audit
+ * write undoes the acknowledgment and returns false (fail closed); the approval path keeps it, as
+ * the approval it rides on has already been decided.
  */
 export async function recordScreenAcknowledgment(
   db: D1Database,
@@ -1016,6 +1018,25 @@ export async function recordScreenAcknowledgment(
       }),
     }).run();
   } catch (err) {
+    if (args.shown) {
+      // The batch path fails closed: an acknowledgment nobody approved alongside is never left
+      // without its audit row and lineage. Undo exactly this one (same administrator, reason and
+      // report) and report it as not recorded; the next dry run reads it again.
+      console.error(
+        `[identifier-screen] batch acknowledgment audit failed on ${args.datasetId}; undone (${err instanceof Error ? err.name : typeof err})`,
+      );
+      await db
+        .prepare(
+          `UPDATE publication_requests
+              SET identifier_screen_ack_by = NULL, identifier_screen_ack_reason = NULL,
+                  identifier_screen_ack_at = NULL
+            WHERE id = ? AND identifier_screen_ack_by = ? AND identifier_screen_ack_reason = ?
+              AND identifier_screen_status = ? AND identifier_screen_report = ?`,
+        )
+        .bind(args.requestId, args.adminUserId, args.reason, args.state, args.shown.report)
+        .run();
+      return false;
+    }
     // The acknowledgment itself is on the request row; the audit row is the
     // second record, and losing it must not refuse an approval already decided.
     console.error(
