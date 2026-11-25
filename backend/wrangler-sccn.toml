@@ -299,6 +299,19 @@ PR_REVIEW_ENABLED = "1"
 # and reindex-all embed private datasets too: after the deploy, run reindex-all once more to embed
 # them. Staging has it too ([env.dev.vars]), on from 2026-11-18 after its index was relabeled.
 VECTORIZE_VISIBILITY_FILTER = "1"
+# Publication review (ADR 0102), turned on in production by the owner's decision of 2026-11-25
+# (epic #2182, plan step D0), first as a shadow batch of 20 requests started by hand.
+# - What it does: a stored identifier-screen result whose gate is clear or needs an acknowledgment
+#   starts a model review, the admin mail waits for it, and the approval gate reads the verdict.
+#   It never approves or denies.
+# - Item 7 of "Before it is switched on": the executor's workflow masks the dispatch token first,
+#   exports it to the approve step alone, and releases the claim on failure
+#   (nemarDatasets/.github approve-publication.yml, read 2026-11-25). The staging audit query, the
+#   ADR 0105 open question and items 5, 6 and 8 are in the pull request that added this line, and
+#   it was merged only after the owner confirmed each one.
+# - To turn it off: remove this line and release. A Worker secret of the same name would also turn
+#   it on; there must be none.
+PUBLICATION_REVIEW_ENABLED = "1"
 # Support-ticket retention (epic #1893 phase 6a, ADR 0112): days a ticket's raw record is kept
 # before the daily purge keeps only its summary. Two years in production; staging uses 30 days,
 # matching its raw-mail bucket's lifecycle rule. A missing or invalid value deletes nothing.
@@ -863,8 +876,8 @@ VECTORIZE_VISIBILITY_FILTER = "1"
 # [vars]; the owner turns it on in a reviewed change, and the value must be the quoted string "1".
 # Publication review (ADR 0102). On here for the soak: a stored identifier-screen result whose
 # gate is clear or needs an acknowledgment starts a model review of the screened commit, for the
-# datasets this Worker owns. Production is dark by this file: the variable is not in [vars], and
-# it must never be added there by a change that is not reviewed for it. What turning production
+# datasets this Worker owns. Production has it in [vars] since the owner's decision of
+# 2026-11-25 (see the note there). What turning production
 # on takes is ADR 0102's "Before it is switched on": Phases 2, 3 and 4 shipped, the soak done, and
 # then adding PUBLICATION_REVIEW_ENABLED = "1" to [vars]. Phase 3 fixed the approval attribution
 # (#1604, ADR 0105) in code: a web run proves it belongs to its click with a dispatch token, and
