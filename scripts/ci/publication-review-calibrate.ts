@@ -91,6 +91,7 @@ import {
   PUBLICATION_REVIEW_MODEL,
   assemblePublicationReport,
   buildPublicationReviewMessages,
+  publicationInputDigest,
 } from "./publication-review-prompt";
 
 // ---------------------------------------------------------------------------------------------
@@ -233,7 +234,10 @@ async function reviewEntry(
     const modelOutput = await callPublicationReviewModel(system, user, model, (u) => {
       usage = u;
     });
-    const report = assemblePublicationReport(modelOutput, facts, model);
+    const report = assemblePublicationReport(modelOutput, facts, model, {
+      inputDigest: publicationInputDigest({ facts, cleared }),
+      resolverVersion: null,
+    });
     const { outcome, reasons } = deriveOutcome(report);
     return {
       record: {

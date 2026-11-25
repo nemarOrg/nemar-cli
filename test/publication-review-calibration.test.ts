@@ -104,6 +104,7 @@ import {
   isPlaceholderAuthor,
   submissionMinimumFailures,
 } from "../shared/submission-minimums";
+import { emptyInputs } from "./helpers/review-inputs";
 
 let root: string;
 const GIT_ENV = {
@@ -1151,6 +1152,7 @@ describe("calibrate runs the production review over every entry and records one 
         tagsFile: sideFile(""),
         bidsRunsFile: sideFile(null),
         anonymous: false,
+        fetchInputs: async () => emptyInputs(),
       });
       expect(production.outcome, id).toBe("reported");
       await run(oneEntryCorpus(id));
@@ -1180,9 +1182,14 @@ describe("calibrate runs the production review over every entry and records one 
         tagsFile: sideFile(""),
         bidsRunsFile: sideFile(null),
         anonymous: false,
+        fetchInputs: async () => emptyInputs(),
       });
       if (production.outcome !== "reported") throw new Error(`${id}: ${production.error}`);
-      expect(evidenceOf(readEntry(dir)).facts, id).toEqual(production.report.evidence);
+      // The calibration talks to no Worker, so it resolves no lineage; everything else is equal.
+      expect(evidenceOf(readEntry(dir)).facts, id).toEqual({
+        ...production.report.evidence,
+        lineage: null,
+      });
     }
     // The case the two sides used to copy separately: the README exists and could not be read, so the
     // ethics minimum that may rest on it is not recorded as failed, and the review says the text was
@@ -1487,13 +1494,20 @@ describe("the calibration model: Sonnet is accepted here and refused everywhere 
     const report = assemblePublicationReport(PASS_OUTPUT, facts, SONNET);
     expect(report.model).toBe(SONNET);
     const raw = {
-      v: 1,
+      v: 2,
       model: SONNET,
       questions: PASS_ANSWERS,
       findings: [],
       summary: "x",
       steering: false,
       evidence: facts,
+      note_answer: "not_asked",
+      record: {
+        prompt_version: "publication-review-prompt/2",
+        models: [{ model: SONNET, effort: "high" }],
+        input_digest: "0".repeat(64),
+        resolver_version: null,
+      },
     };
     expect(parsePublicationReviewReport(raw, { models: CALIBRATION_MODELS }).model).toBe(SONNET);
     expect(() => parsePublicationReviewReport(raw)).toThrow(PublicationReviewReportError);

@@ -53,6 +53,7 @@ import {
   parsePublicationCallbackOutcome,
 } from "../shared/publication-review";
 import { README_CANDIDATES } from "../shared/readme-candidates";
+import { emptyInputs } from "./helpers/review-inputs";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const LOCAL = join(REPO_ROOT, ".github", "dataset-workflows", "run-publication-review.yml");
@@ -140,7 +141,11 @@ describe("what triggers it", () => {
         .flatMap((t) => [...t.matchAll(/\/webhooks\/(publication-review-[a-z]+)/g)])
         .map((m) => m[1]),
     );
-    expect([...named].sort()).toEqual(["publication-review-claim", "publication-review-result"]);
+    expect([...named].sort()).toEqual([
+      "publication-review-claim",
+      "publication-review-inputs",
+      "publication-review-result",
+    ]);
     for (const name of named) expect(routes).toContain(`webhooks.post("/${name}"`);
   });
 
@@ -687,9 +692,15 @@ describe("the shell steps, run for real", () => {
   let answer = 200;
   /** When set, decides the status of each request in turn instead of {@link answer}. */
   let answerFor: (() => number) | null = null;
+  /** The inputs requests the script made (ADR 0139, decision 6), apart from what it posted. */
+  const inputsSeen: string[] = [];
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
+      if (new URL(req.url).pathname === "/webhooks/publication-review-inputs") {
+        inputsSeen.push(req.headers.get("X-Webhook-Token") ?? "");
+        return Response.json(emptyInputs());
+      }
       seen.push({
         method: req.method,
         path: new URL(req.url).pathname,
@@ -1551,6 +1562,9 @@ describe("the shell steps, run for real", () => {
     }
     expect(code, lines.join("\n")).toBe(0);
     expect(lines).toEqual(["review 77 (request 12): reported; callback delivered"]);
+    // The widened inputs came from the Worker, with the same token, and with no change to this
+    // workflow: the Review step's arguments above are the file's own (ADR 0139, decision 6).
+    expect(inputsSeen).toEqual(["chain-token"]);
     expect(seen).toHaveLength(1);
     expect(seen[0]?.path).toBe("/webhooks/publication-review-result");
     expect(seen[0]?.token).toBe("chain-token");
