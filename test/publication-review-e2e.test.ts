@@ -190,6 +190,19 @@ beforeAll(() => {
         dispatches.push((await req.json()) as Dispatch);
         return new Response(null, { status: 204 });
       }
+      // The contents API at a commit, served from the dataset's own git repository, as GitHub
+      // would: the review's inputs route reads the description and README at the reviewed head.
+      const contents = /^\/repos\/nemarDatasets\/[a-z0-9]+\/contents\/(.+)$/.exec(url.pathname);
+      const ref = url.searchParams.get("ref") ?? "";
+      const dir = repoOfHead.get(ref);
+      if (req.method === "GET" && contents && dir) {
+        try {
+          const text = git(dir, "show", `${ref}:${contents[1]}`);
+          return Response.json({ encoding: "base64", content: btoa(`${text}\n`) });
+        } catch {
+          return new Response("not found", { status: 404 });
+        }
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -277,6 +290,8 @@ interface Dataset {
 }
 
 let datasetSeq = 0;
+/** Each dataset's repository by its head, for the contents API stand-in. */
+const repoOfHead = new Map<string, string>();
 
 /** A dataset on `main`, laid out as the review job finds it on a runner. */
 function newDataset(description: Record<string, unknown> = GOOD_DESCRIPTION): Dataset {
@@ -303,6 +318,7 @@ function newDataset(description: Record<string, unknown> = GOOD_DESCRIPTION): Da
   git(dir, "add", "-A");
   git(dir, "commit", "-q", "-m", "initial");
   const head = git(dir, "rev-parse", "HEAD");
+  repoOfHead.set(head, dir);
   // What the workflow's own steps leave beside the clone: the tags and the BIDS validation runs.
   writeFileSync(join(temp, "tags.txt"), "");
   writeFileSync(
@@ -594,6 +610,15 @@ describe("a request whose review passes", () => {
       });
       expect(reviews()[0]?.claimed_at).not.toBeNull();
       expect(requestRow(requestId).status).toBe("requested");
+      // The record (ADR 0139, decision 9): the job's part from its report, the screen's from the
+      // Worker's own copy of the screen report.
+      expect(reviews()[0]).toMatchObject({
+        scanner_id: "identifier-scan@abcdef1",
+        prompt_version: "publication-review-prompt/2",
+        resolver_version: "license-lineage/1",
+        models: JSON.stringify([{ model: "claude-haiku-5-5", effort: "high" }]),
+      });
+      expect(String(reviews()[0]?.input_digest)).toMatch(/^[0-9a-f]{64}$/);
 
       // MAIL: exactly one, now, carrying the review's section.
       const mails = await adminMails(calls);
@@ -680,6 +705,14 @@ describe("a request whose submission minimum failed at the reviewed commit", () 
         reasons,
       });
       expect(text).not.toContain(MODEL_SUMMARY);
+      // And the review's reproducibility record (ADR 0139, decision 9), in fixed words.
+      const shown = JSON.parse(text) as { review_record: unknown; review_record_lines: string[] };
+      expect(shown.review_record).toMatchObject({
+        head_sha: ds.head,
+        scanner_id: "identifier-scan@abcdef1",
+        prompt_version: "publication-review-prompt/2",
+      });
+      expect(shown.review_record_lines).toContain(`Reviewed commit: ${ds.head}`);
 
       // MAIL: exactly one, after the review, about the blocked request, with the review's section.
       const mails = await adminMails(calls);
