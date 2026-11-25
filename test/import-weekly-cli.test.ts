@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin import-weekly` (#1312, epic #1306 phase 4), driven through the
+ * CLI `nemar admin import weekly` (#1312, epic #1306 phase 4), driven through the
  * real entry point.
  *
  * Harness mirrors test/import-coverage-cli.test.ts: a real subprocess CLI invocation
@@ -11,7 +11,7 @@
  * where it rots unnoticed.
  *
  * The exit code is the other reason: 0 healthy, 1 unhealthy, 2 could-not-determine,
- * matching `nemar admin import-coverage` so one rule works across the family.
+ * matching `nemar admin import coverage` so one rule works across the family.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -232,11 +232,11 @@ const HEALTHY = {
   ok: true,
 };
 
-describe("nemar admin import-weekly: auth", () => {
+describe("nemar admin import weekly: auth", () => {
   test("without a stored apiKey, nothing is sent", async () => {
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -245,12 +245,12 @@ describe("nemar admin import-weekly: auth", () => {
   });
 });
 
-describe("nemar admin import-weekly: the report reads correctly", () => {
+describe("nemar admin import weekly: the report reads correctly", () => {
   test("a clean week exits 0 and shows the headline numbers", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Import summary 2026-W37");
       expect(result.stdout).toContain("imported_this_week=9");
@@ -267,7 +267,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain(
         "upstream: stale=3 current=7 anomaly=0 unknown=0 unchecked=0",
       );
@@ -289,7 +289,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("upstream=unknown");
       expect(result.stdout).not.toContain("upstream: stale=");
       expect(result.exitCode).toBe(2);
@@ -304,7 +304,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     const { upstream: _omitted, ...withoutKey } = HEALTHY.facts;
     const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("upstream=unknown");
       expect(result.stdout).not.toContain("upstream: stale=");
       expect(result.exitCode).toBe(1);
@@ -317,7 +317,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain(
         "repulls: switches=off dispatched=6 opened=3 refused=2 failed=1 unreported=0 not_accepted=0",
       );
@@ -369,7 +369,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain(
         "repulls: switches=off dispatched=21 opened=5 refused=4 failed=3 unreported=2 not_accepted=1",
       );
@@ -398,7 +398,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
         facts: { ...HEALTHY.facts, repulls: { ...HEALTHY.facts.repulls, switches } },
       });
       try {
-        const result = await runCli(["admin", "import-weekly"], server.url);
+        const result = await runCli(["admin", "import", "weekly"], server.url);
         expect(result.stdout).toContain(`repulls: ${word}`);
       } finally {
         server.stop();
@@ -417,7 +417,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("repulls=unknown");
       expect(result.stdout).not.toContain("repulls: switches=");
       expect(result.stdout).toContain("upstream re-pull activity could not be determined");
@@ -431,7 +431,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain(
         "rfcs: listed=2 closed_awaiting_decision=1 clock=active last_run=2026-09-08T14:00Z success",
       );
@@ -455,7 +455,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("clock=disabled_inactivity");
       expect(result.stdout).toContain("the RFC clock workflow is not active (disabled_inactivity)");
       expect(result.exitCode).toBe(1);
@@ -475,7 +475,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("rfcs=unknown");
       expect(result.stdout).not.toContain("rfcs: listed=");
       expect(result.stdout).toContain("the RFC clock could not be determined");
@@ -490,7 +490,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     const { rfcs: _omitted, ...withoutKey } = HEALTHY.facts;
     const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("rfcs=unknown");
       expect(result.stdout).toContain("the RFC clock could not be determined");
       expect(result.exitCode).toBe(1);
@@ -504,7 +504,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     const { repulls: _omitted, ...withoutKey } = HEALTHY.facts;
     const server = startCaptureServer({ ...HEALTHY, facts: withoutKey });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("repulls=unknown");
       expect(result.stdout).toContain("upstream re-pull activity could not be determined");
       expect(result.exitCode).toBe(1);
@@ -535,7 +535,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain(`Needs attention: ${reasons.join("; ")}.`);
       expect(result.stdout).toContain("unreported=1");
       expect(result.stdout).toContain("ended_failed=1");
@@ -552,7 +552,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       facts: { ...HEALTHY.facts, upstream: { ...HEALTHY.facts.upstream, truncated: true } },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("did not reach every mirror");
     } finally {
       server.stop();
@@ -563,7 +563,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("auth-invalid: 2");
       expect(result.stdout).not.toContain("timeout: 0");
       expect(result.stdout).toContain("parked on004148");
@@ -577,7 +577,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly", "--body"], server.url);
+      const result = await runCli(["admin", "import", "weekly", "--body"], server.url);
       // The point of the flag: review the artifact, not a summary of it.
       expect(result.stdout).toContain("rendered issue body");
       expect(result.stdout).toContain("cc @nemarAdmin");
@@ -596,7 +596,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       closedPrevious: 700,
     });
     try {
-      const result = await runCli(["admin", "import-weekly", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "weekly", "--apply"], server.url);
       expect(server.requests[0]?.searchParams.get("apply")).toBe("1");
       expect(result.stdout).toContain("Posted #900");
       expect(result.stdout).toContain("closed #700");
@@ -611,7 +611,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
     // printing it as "Not posted: forced" reads like a refusal that never happened.
     const server = startCaptureServer(HEALTHY);
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("Dry run: nothing was filed");
       expect(result.stdout).not.toContain("Not posted");
       expect(result.stdout).toContain("Re-run with --apply");
@@ -629,7 +629,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
       gateReason: "already posted for 2026-W37",
     });
     try {
-      const result = await runCli(["admin", "import-weekly", "--apply"], server.url);
+      const result = await runCli(["admin", "import", "weekly", "--apply"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Not posted: already posted for 2026-W37");
     } finally {
@@ -638,7 +638,7 @@ describe("nemar admin import-weekly: the report reads correctly", () => {
   });
 });
 
-describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
+describe("nemar admin import weekly: an unknown never prints as a zero", () => {
   /**
    * THE property, checked in the CLI's own renderer. The CLI carries a second copy of
    * the unknown-vs-zero rule -- by convention, not necessity: `shared/` is importable
@@ -660,7 +660,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("imported_this_week=unknown");
       expect(result.stdout).toContain("total=unknown");
       expect(result.stdout).toContain("outstanding=unknown");
@@ -680,7 +680,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, importedThisWeek: 0, issuesClosed: 0 },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       expect(result.stdout).toContain("imported_this_week=0");
       expect(result.stdout).toContain("closed_this_week=0");
       expect(result.stdout).not.toContain("imported_this_week=unknown");
@@ -696,7 +696,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, parked: null },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], nullParked.url);
+      const r = await runCli(["admin", "import", "weekly"], nullParked.url);
       expect(r.stdout).toContain("parked=unknown");
     } finally {
       nullParked.stop();
@@ -707,7 +707,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, parked: [] },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], emptyParked.url);
+      const r = await runCli(["admin", "import", "weekly"], emptyParked.url);
       expect(r.stdout).toContain("parked=0");
     } finally {
       emptyParked.stop();
@@ -721,7 +721,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, autoImportEnabled: false },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], off.url);
+      const r = await runCli(["admin", "import", "weekly"], off.url);
       expect(r.stdout).toContain("auto_import=DISABLED");
     } finally {
       off.stop();
@@ -732,7 +732,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, autoImportEnabled: null },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], unknown.url);
+      const r = await runCli(["admin", "import", "weekly"], unknown.url);
       expect(r.stdout).toContain("auto_import=unknown");
       expect(r.stdout).not.toContain("auto_import=DISABLED");
     } finally {
@@ -751,7 +751,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       },
     });
     try {
-      const result = await runCli(["admin", "import-weekly"], server.url);
+      const result = await runCli(["admin", "import", "weekly"], server.url);
       // 2, matching `import-coverage`: a section that could not be read is a different
       // answer from a week that is merely unhealthy.
       expect(result.exitCode).toBe(2);
@@ -769,7 +769,7 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
       facts: { ...HEALTHY.facts, importedThisWeek: null },
     });
     try {
-      const result = await runCli(["admin", "import-weekly", "--json"], server.url);
+      const result = await runCli(["admin", "import", "weekly", "--json"], server.url);
       const parsed = JSON.parse(result.stdout) as { facts: { importedThisWeek: number | null } };
       // A consumer must be able to tell them apart too, so this must not coalesce.
       expect(parsed.facts.importedThisWeek).toBeNull();
@@ -779,9 +779,9 @@ describe("nemar admin import-weekly: an unknown never prints as a zero", () => {
   });
 });
 
-describe("nemar admin import-weekly: the exit code mirrors the sibling command", () => {
+describe("nemar admin import weekly: the exit code mirrors the sibling command", () => {
   /**
-   * `nemar admin import-coverage` uses 0 healthy / 1 unhealthy / 2 cannot-determine, so
+   * `nemar admin import coverage` uses 0 healthy / 1 unhealthy / 2 cannot-determine, so
    * one rule works across the family. An earlier version of this command set 1 only
    * when a section failed to READ, so a week with auto-import switched off exited 0 --
    * the exact condition the epic exists to detect, reported as success.
@@ -833,7 +833,7 @@ describe("nemar admin import-weekly: the exit code mirrors the sibling command",
       seedAuthenticatedConfig();
       const server = startCaptureServer({ ...HEALTHY, facts: { ...HEALTHY.facts, ...facts } });
       try {
-        const r = await runCli(["admin", "import-weekly"], server.url);
+        const r = await runCli(["admin", "import", "weekly"], server.url);
         expect(r.exitCode).toBe(code);
       } finally {
         server.stop();
@@ -842,7 +842,7 @@ describe("nemar admin import-weekly: the exit code mirrors the sibling command",
   }
 });
 
-describe("nemar admin import-weekly: a week flagged for Neurobagel alone says why", () => {
+describe("nemar admin import weekly: a week flagged for Neurobagel alone says why", () => {
   test("the exit code is 1 and the reason is printed in the headline's own words", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -850,7 +850,7 @@ describe("nemar admin import-weekly: a week flagged for Neurobagel alone says wh
       facts: { ...HEALTHY.facts, neurobagelFindings: 2, neurobagel: neurobagelWeek({ runs: 3 }) },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], server.url);
+      const r = await runCli(["admin", "import", "weekly"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.stdout).toContain("Needs attention:");
       expect(r.stdout).toContain("2 Neurobagel finding(s) need attention (see the audit log)");
@@ -865,7 +865,7 @@ describe("nemar admin import-weekly: a week flagged for Neurobagel alone says wh
     seedAuthenticatedConfig();
     const server = startCaptureServer(HEALTHY);
     try {
-      const r = await runCli(["admin", "import-weekly"], server.url);
+      const r = await runCli(["admin", "import", "weekly"], server.url);
       expect(r.exitCode).toBe(0);
       expect(r.stdout).not.toContain("Needs attention:");
     } finally {
@@ -874,7 +874,7 @@ describe("nemar admin import-weekly: a week flagged for Neurobagel alone says wh
   });
 });
 
-describe("nemar admin import-weekly: a gate refusal is not a blind report", () => {
+describe("nemar admin import weekly: a gate refusal is not a blind report", () => {
   test("null facts print 'nothing computed', not a page of unknowns", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -886,7 +886,7 @@ describe("nemar admin import-weekly: a gate refusal is not a blind report", () =
       renderedBody: null,
     });
     try {
-      const r = await runCli(["admin", "import-weekly", "--apply"], server.url);
+      const r = await runCli(["admin", "import", "weekly", "--apply"], server.url);
       expect(r.stdout).toContain("Nothing computed: already posted for 2026-W37");
       // The table must NOT be rendered: an all-unknown table is indistinguishable from
       // a report where every section failed.
@@ -898,14 +898,14 @@ describe("nemar admin import-weekly: a gate refusal is not a blind report", () =
   });
 });
 
-describe("nemar admin import-weekly: the request-failure path", () => {
+describe("nemar admin import weekly: the request-failure path", () => {
   test("a non-2xx exits 1 and reports the error", async () => {
     seedAuthenticatedConfig();
     // The harness accepted a status all along; no call site had ever passed one, so the
     // spinner-fail branch was unreachable in the suite.
     const server = startCaptureServer({ error: "boom" }, 500);
     try {
-      const r = await runCli(["admin", "import-weekly"], server.url);
+      const r = await runCli(["admin", "import", "weekly"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.stdout + r.stderr).toContain("Weekly import summary failed");
     } finally {
@@ -914,7 +914,7 @@ describe("nemar admin import-weekly: the request-failure path", () => {
   });
 });
 
-describe("nemar admin import-weekly: parked truncation says how many are hidden", () => {
+describe("nemar admin import weekly: parked truncation says how many are hidden", () => {
   test("more parked rows than the CLI lists produces an and-N-more line", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer({
@@ -929,7 +929,7 @@ describe("nemar admin import-weekly: parked truncation says how many are hidden"
       },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], server.url);
+      const r = await runCli(["admin", "import", "weekly"], server.url);
       // A report that stops at N without saying so under-counts, and an under-count
       // reads as good news.
       expect(r.stdout).toContain("... and 4 more parked");
@@ -939,7 +939,7 @@ describe("nemar admin import-weekly: parked truncation says how many are hidden"
   });
 });
 
-describe("nemar admin import-weekly: a reported verdict is not a bug to file", () => {
+describe("nemar admin import weekly: a reported verdict is not a bug to file", () => {
   /**
    * The exit code IS the answer here -- 1 unhealthy, 2 could-not-determine -- and a
    * monitoring caller reads it. The exit hook used to print "Run again with --debug
@@ -955,7 +955,7 @@ describe("nemar admin import-weekly: a reported verdict is not a bug to file", (
       facts: { ...HEALTHY.facts, errors: [{ stage: "parked", error: "D1 timeout" }] },
     });
     try {
-      const r = await runCli(["admin", "import-weekly"], server.url);
+      const r = await runCli(["admin", "import", "weekly"], server.url);
       expect(r.exitCode).not.toBe(0);
       const out = r.stdout + r.stderr;
       expect(out).not.toContain("attach the log to a new issue");

@@ -118,6 +118,14 @@ beforeAll(async () => {
       }
     }),
   );
+  // The scenario is the deploy's: the schema stops at this migration while it runs. The tests after it
+  // run statements of the CURRENT source (the tombstone mask names columns later migrations add), so
+  // the rest of the migrations are applied once the scenario is done.
+  for (const file of readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql") && f > TARGET)
+    .sort()) {
+    db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf-8"));
+  }
 
   // Miniflare D1
   mf = new Miniflare({
@@ -159,6 +167,10 @@ beforeAll(async () => {
         return String(err);
       }
     }),
+  );
+  await applyMigrations(
+    d1,
+    migrationFiles().filter((f) => f > TARGET),
   );
 }, 120_000);
 

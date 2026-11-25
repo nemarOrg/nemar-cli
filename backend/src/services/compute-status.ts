@@ -28,6 +28,7 @@
 import type { ComputeStatusResponse } from "../../../shared/contract/compute-admin";
 import type { Bindings } from "../types/bindings";
 import { CANCEL_PENDING_FAILED_SQL, COPY_ABANDONED_COUNT_SQL } from "./compute-lifecycle";
+import { PARTNER_CAPPED_NO_FINAL_SQL } from "./compute-partner-excess";
 import { pipelinesAccountId } from "./compute-pipeline";
 import { ComputePolicyUnreadable, getPolicy } from "./compute-policy";
 import { RUNNER_ATTENTION_COUNTS } from "./compute-runner-queue";
@@ -99,6 +100,8 @@ const ATTENTION_COUNTS: ReadonlyArray<readonly [key: string, sql: string]> = [
   ["copy_abandoned", COPY_ABANDONED_COUNT_SQL],
   // The same two for runner jobs (portable compute, ADR 0121): the Tapis counts above select Tapis rows only.
   ...RUNNER_ATTENTION_COUNTS,
+  // A partner job capped at its hold whose final settlement never came: the excess is billed to no one.
+  ["partner_capped_no_final", PARTNER_CAPPED_NO_FINAL_SQL],
 ];
 
 async function attentionCounts(

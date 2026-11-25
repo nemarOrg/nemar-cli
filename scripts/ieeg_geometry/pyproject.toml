@@ -1,6 +1,6 @@
 [project]
 name = "ieeg-geometry"
-version = "0.1.0"
+version = "0.1.1"
 description = "Readers, surface reference data and a geometric verifier for iEEG electrode positions"
 requires-python = ">=3.12,<3.13"
 dependencies = [

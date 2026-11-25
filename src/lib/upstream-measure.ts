@@ -1,6 +1,6 @@
 /**
  * What the stale OpenNeuro mirrors would cost to re-pull (epic #1046 phase 4c, #1910; ADR 0111,
- * Phase 4c amendment). `nemar admin upstream-status --measure` runs this on the administrator's
+ * Phase 4c amendment). `nemar admin repull upstream-status --measure` runs this on the administrator's
  * machine after the staleness pass: for each stale mirror it reads OpenNeuro's file listings at
  * the recorded and the latest tag, summarizes the delta, and adds the deltas up next to the DOI
  * volume estimate.

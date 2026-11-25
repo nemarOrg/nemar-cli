@@ -5,7 +5,7 @@
  * where the column has been NULL by design since migration 0026 and nothing
  * has ever filled it. That is now load-bearing rather than cosmetic: an upload
  * request needs a username (it is what the admin review card names and what
- * `nemar admin approve <username>` addresses), the admin listing falls back to
+ * `nemar admin users approve <username>` addresses), the admin listing falls back to
  * printing an email and a numeric id, and the person has no handle to be known
  * by anywhere in the product.
  *
@@ -254,7 +254,7 @@ export function registerUserUsernameRoutes(admin: AdminRouter): void {
       if (!base) {
         // Two different facts, kept apart because they ask different things of
         // the operator: a one-part name needs a human to pick a handle, no
-        // name at all needs `nemar admin backfill-names` first. NEITHER is
+        // name at all needs the person to add one (ORCID or Settings) first. NEITHER is
         // guessed at from the email local part (ADR 0042) -- the production
         // data has 3 single-name rows, and inventing `jsmith` for someone
         // recorded as "Prince" is a handle they never chose.

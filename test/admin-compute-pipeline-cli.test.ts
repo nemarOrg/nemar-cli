@@ -484,7 +484,7 @@ describe("status", () => {
     const lines = r.stdout.trim().split("\n");
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(
-      /nm000106 v1\.0\.0\s+nemar-floor 1\.0\.0 eegprep@0\.5\.0 bids attempt 1\s+dispatched job job_[0-9a-f]{24}/,
+      /nm000106 v1\.0\.0\s+nemar-floor 1\.0\.0-b1 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 bids attempt 1\s+dispatched job job_[0-9a-f]{24}/,
     );
     expect(lines[2]).toContain("nm000104");
   });
@@ -842,7 +842,7 @@ describe("run --executor runner (portable compute, ADR 0121)", () => {
     expect(await count(env, "compute_pipeline_stamps")).toBe(1);
     const status = await runCli("admin", ["status", "--dataset", "nm000104"]);
     expect(status.stdout).toMatch(
-      /nemar-floor 1\.0\.0 eegprep@0\.5\.0 zarr attempt 1\s+dispatched/,
+      /nemar-floor 1\.0\.0-b1 eegprep@0\.5\.0\+edf694c8344b9c4c68672eac3acf9a819f1462a8 zarr attempt 1\s+dispatched/,
     );
   });
 

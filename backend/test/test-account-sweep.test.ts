@@ -71,6 +71,8 @@ interface SeedOpts {
   iam?: string | null;
   uploadRequested?: boolean;
   serviceAccess?: boolean;
+  /** A compute-access state (epic #2021 phase D1); `none` by default, the column's own default. */
+  computeAccess?: string;
 }
 
 /** Insert a user shaped like a live-test account unless told otherwise. */
@@ -78,8 +80,9 @@ function seedUser(email: string, o: SeedOpts = {}): number {
   const status = o.status ?? "verified";
   db.run(
     `INSERT INTO users (email, status, signup_source, role, account_kind, aws_iam_username,
-                        upload_access_requested_at, service_access, deleted_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?), datetime('now', ?))`,
+                        upload_access_requested_at, service_access, deleted_at, compute_access,
+                        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?), datetime('now', ?))`,
     [
       email,
       status,
@@ -90,6 +93,7 @@ function seedUser(email: string, o: SeedOpts = {}): number {
       o.uploadRequested ? "2026-01-01 00:00:00" : null,
       o.serviceAccess ? 1 : 0,
       o.deleted ? "2026-01-02 00:00:00" : null,
+      o.computeAccess ?? "none",
       `-${o.ageDays ?? 30} days`,
       `-${o.ageDays ?? 30} days`,
     ],
@@ -219,6 +223,21 @@ describe("what the sweep tombstones", () => {
     expect(count("SELECT COUNT(*) AS n FROM users WHERE id = ? AND service_access = 0", id)).toBe(
       1,
     );
+  });
+
+  test("an account with any compute-access state but none is left alone, and one at none is swept (MUTATION: drop the predicate)", async () => {
+    // Epic #2021 phase D1: a compute request, a grant, a denial, a suspension and a revocation are
+    // decisions someone made on the record (and an active account may hold a pool and live jobs).
+    const kept = (["requested", "active", "suspended", "denied", "revoked"] as const).map(
+      (computeAccess) => seedUser(generated("pl"), { computeAccess }),
+    );
+    const swept = seedUser(generated("df"), { computeAccess: "none" });
+    const before = kept.map(snapshot);
+    const result = await sweepCiTestAccounts(env());
+    expect(result.tombstoned).toBe(1);
+    expect(isTombstoned(swept)).toBe(true);
+    expect(kept.map(isTombstoned)).toEqual([false, false, false, false, false]);
+    expect(kept.map(snapshot)).toEqual(before);
   });
 
   test("an account just over the age floor is swept, and just under it is not", async () => {

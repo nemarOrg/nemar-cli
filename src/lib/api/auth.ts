@@ -25,6 +25,10 @@ import {
   userMeResponseSchema,
   usernameSuggestionResponseSchema,
 } from "../../../shared/contract/index.js";
+import type {
+  CommunityMailCategory,
+  CommunityMailPreferencesView,
+} from "../../../shared/contract/mail-categories.js";
 import type { OrcidNameLookupStatus } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -277,6 +281,29 @@ export async function requestUploadAccess(why: string): Promise<UploadAccessRequ
       method: "POST",
       body: JSON.stringify({ why }),
     },
+    true,
+  );
+}
+
+// ============================================================================
+// Self-service mail preferences (epic #2260 phase 4, ADR 0132)
+// ============================================================================
+
+/** This account's community mail categories, with the locked recall. */
+export async function getMyEmailPreferences(): Promise<CommunityMailPreferencesView> {
+  return request<CommunityMailPreferencesView>("/users/me/email-preferences", {}, true);
+}
+
+/**
+ * Set any of this account's community mail categories. Answers what is stored afterwards. The
+ * backend refuses `recall` and every admin alert by name; the type admits neither.
+ */
+export async function updateMyEmailPreferences(
+  changes: Partial<Record<CommunityMailCategory, boolean>>,
+): Promise<CommunityMailPreferencesView> {
+  return request<CommunityMailPreferencesView>(
+    "/users/me/email-preferences",
+    { method: "PUT", body: JSON.stringify(changes) },
     true,
   );
 }

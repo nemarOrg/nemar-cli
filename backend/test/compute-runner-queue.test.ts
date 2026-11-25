@@ -1568,7 +1568,7 @@ describe("at most once acceptance, under a race", () => {
 
   test("a completion that lost its lease between the check and the write (the claim released and taken again) ends nothing, records no usage and is lease_lost (MUTATION: drop the lease from RUNNER_TERMINAL_TRANSITION_SQL, or from RECORD_USAGE_SQL)", async () => {
     const { r, jobId, entry } = await claimed();
-    expect(RUNNER_TERMINAL_TRANSITION_SQL).toContain("AND lease_id IS ?17");
+    expect(RUNNER_TERMINAL_TRANSITION_SQL).toContain("AND lease_id IS ?18");
     const hooked = { ...env, DB: hookD1(env.DB, MARK, () => stealLease(jobId, r)) };
     const res = await completeRunnerJob(
       hooked,

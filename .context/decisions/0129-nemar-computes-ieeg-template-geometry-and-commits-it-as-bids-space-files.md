@@ -4,6 +4,8 @@
 **Date:** 2026-11-19
 **Owner:** Seyed Yahya Shirazi
 
+*Annotated 2026-11-20: decision 5's two steps are superseded by the amendment of that date (one integration pull request).*
+
 ## Context
 
 The website's Brain panel draws intracranial EEG (iEEG) contacts on a template brain only when a dataset declares a standard template frame (website ADR 0033).
@@ -64,3 +66,10 @@ NEMAR datasets have no derivatives tree: a mirror (`on`) is a pure copy of its O
 
 - Census and plan: `.context/plans/ieeg-geometry/census.md`, `.context/plans/ieeg-geometry/plan.md`.
 - ADR 0111 (re-pull as N.0.0 and N.0.1), ADR 0027 (raw-only Zarr dispatch), website ADR 0033 (the Brain panel and its template table).
+
+## Amendment 2026-11-20: a mirror's N.0.1 is one integration pull request
+
+The geometry reaches a mirror in one integration pull request, not in two steps.
+The collaborator branch is merged, NEMAR's BIDS fixes are committed, and `pr --from-ref <branch> --bump-version` adds the geometry as one commit on that branch; merging the pull request tags the release and mints the version DOI, so `nemar dataset release` is not run afterwards.
+A collaborator pull request that changes `Version` is never merged on its own, and the pull request is merged only after a CLI release whose `IEEG_GEOMETRY_PIPELINE_VERSION` equals the pipeline version that wrote the files.
+The status of this ADR is unchanged.

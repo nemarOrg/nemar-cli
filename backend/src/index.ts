@@ -36,6 +36,7 @@ import { computeRoutes } from "./routes/compute";
 import { computeRunnerRoutes } from "./routes/compute-runners";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
+import { mailRoutes } from "./routes/mail";
 import { mcpRoutes } from "./routes/mcp";
 import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
@@ -44,7 +45,7 @@ import { oidcDiscoveryRoutes } from "./routes/oidc-discovery";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
-import { userRoutes } from "./routes/users";
+import { userMailPreferenceRoutes, userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
 import { accessReportsLogLine, runAccessReportCron } from "./services/access-attributes";
@@ -61,6 +62,7 @@ import {
   sweepComputeCancellations,
 } from "./services/compute-advance";
 import { derivativesLogLine, runComputeDerivativesCron } from "./services/compute-derivatives";
+import { holdReaperLogLine, reapExpiredHolds } from "./services/compute-hold-reaper";
 import {
   pipelineDispatchLogLine,
   runComputePipelineDispatchCron,
@@ -68,6 +70,7 @@ import {
 import { retentionLogLine, runComputeRetentionSweep } from "./services/compute-retention";
 import { runnerLeaseLogLine, sweepRunnerLeases } from "./services/compute-runner-queue";
 import { sweepTenantJobs, tenantLogLine } from "./services/compute-tenant-sweep";
+import { runUploadExpiryCron, uploadExpiryLogLine } from "./services/compute-uploads";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
 import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
@@ -172,7 +175,8 @@ api.use(
       return null;
     },
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version"],
+    // `Idempotency-Key` is the person's job submission's (phase D3, #2024); the website's job page sends it.
+    allowHeaders: ["Content-Type", "Authorization", "X-CLI-Version", "Idempotency-Key"],
     // The rate limit's answer is for browser callers too: a page on a nemar.org host
     // that is refused can read how long to wait.
     exposeHeaders: [
@@ -183,6 +187,9 @@ api.use(
       "X-RateLimit-Reset",
       "X-RateLimit-Bucket",
       "X-RateLimit-Caller",
+      // The job page reads these (phase D3, #2024): a log that was cut, and a submission that was a repeat.
+      "X-Nemar-Truncated",
+      "Idempotent-Replayed",
     ],
     credentials: true,
     maxAge: 86400,
@@ -236,6 +243,9 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 // posts' images from the NEWS_MEDIA bucket. Admin writes are in
 // routes/admin/news.ts.
 api.route("/news", newsRoutes);
+// Unsubscribe links in community mail (epic #2260 phase 2): public, no session, the signed token is the
+// whole authority. Mounted with the rest of `api`, so it is also at /nemar/mail.
+api.route("/mail", mailRoutes);
 
 // The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
 // and artifacts the node's loader pulls, behind one shared bearer secret, each answer
@@ -283,6 +293,10 @@ api.route("/auth", authPrivateRoutes);
 // /oauth/authorize page server-side with its caller marker. 404 until OIDC_SECRET is set AND
 // HOST_PREFIXED_SESSION_COOKIE is "1" (routes/auth-oidc.ts).
 api.route("/auth", authOidcRoutes);
+// Self-service mail preferences (epic #2260 phase 4, ADR 0132). MUST stay above `/users`: that
+// router's authMiddleware refuses a pending account's session, and this one admits it
+// (routes/users.ts says why). Registered first, its handler answers before that middleware runs.
+api.route("/users/me/email-preferences", userMailPreferenceRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);
@@ -455,7 +469,7 @@ export function __workerRouteTable(): ReadonlyArray<{
  * - Stale nm datasets: private, no DOI, no active pub requests, inactive 90 days.
  *   These are NEVER auto-deleted (#662). The cron emails the owner an escalating
  *   warning runway (30/14/7/2/1 days) and, at the deadline, asks admins to
- *   delete manually via `nemar admin delete-dataset`. Real archive data is only
+ *   delete manually via `nemar admin dataset delete`. Real archive data is only
  *   ever removed by a deliberate human action.
  */
 /**
@@ -722,7 +736,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
 
             if (daysLeft <= 0) {
               // Past the deadline: notify admins once, then leave it for a manual
-              // `nemar admin delete-dataset`. Advance the flag ONLY when an admin
+              // `nemar admin dataset delete`. Advance the flag ONLY when an admin
               // was actually reached, so a transient send failure or a missing
               // RESEND key retries next run instead of silently burying the
               // dataset (the failure mode that lost nm000111/116/117 one step up).
@@ -1248,6 +1262,26 @@ export default {
               ),
             ),
         );
+        // #2024 (epic #2021 phase D3, ADR 0118): the release of abandoned uploads. A person's job with a
+        // code bundle that is still `uploading` an hour after it was made is failed `upload_expired`
+        // and its hold released, ten rows a tick. PRODUCTION-ONLY, and deliberately NOT in
+        // DEV_CRON_ALLOWLIST: it moves the allocation ledger, and the dev database shares real users.
+        // It also refuses outside exact production on its own and reads no switch. One log line, only
+        // when it took a row or failed: counts and fixed words.
+        ctx.waitUntil(
+          runUploadExpiryCron(env)
+            .then((r) => {
+              const log = r ? uploadExpiryLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-uploads] tick failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
         // Portable compute (card DM-07, ADR 0121 decision 4): the runner queue's lease rules. It releases an
         // expired unstarted claim, moves a started job whose lease expired to `unreported`, settles the
         // `unreported` ones (verified, `runner_revoked`, `lease_expired`), fails a job past its deadline, ends
@@ -1290,6 +1324,31 @@ export default {
             .catch((err) =>
               console.error(
                 "[access-report] tick failed:",
+                err instanceof Error ? err.name : typeof err,
+              ),
+            ),
+        );
+        // #2025 (epic #2021 phase D4, ADR 0118): the partner's hold reaper. A reservation no Tapis job was
+        // reported under, older than the owner's reservation wait, is looked up in Tapis BY ITS TAG and
+        // only then released (no Tapis job found: released; one: bound and verified like a report; several:
+        // flagged and kept; any Tapis error: kept, nothing is ever released on an error). The same tick
+        // verifies a Tapis job whose report could not be read back when it was made and carries out a
+        // refusal (the Tapis job cancelled, the hold released, what ran charged to the partner's pool).
+        // PRODUCTION-ONLY, and deliberately NOT in DEV_CRON_ALLOWLIST: it cancels jobs in a tenant and
+        // moves the ledger, and the dev database shares real users. It also refuses outside exact
+        // production on its own and reads no switch. Bounded, and a Tapis call is never inside a batch.
+        // One log line, only when it acted or failed: counts and fixed words.
+        ctx.waitUntil(
+          reapExpiredHolds(env)
+            .then((r) => {
+              const log = r ? holdReaperLogLine(r) : null;
+              if (log?.level === "error") console.error(log.line);
+              else if (log?.level === "warn") console.warn(log.line);
+              else if (log) console.log(log.line);
+            })
+            .catch((err) =>
+              console.error(
+                "[compute-reaper] tick failed:",
                 err instanceof Error ? err.name : typeof err,
               ),
             ),
@@ -1692,7 +1751,7 @@ export default {
       // It drains up to 30/day and stamps only on success, so failures are
       // retried on the next pass (see AVAILABILITY_REPORT_SWEEP_BASE_WHERE for
       // rows the write refuses). A large backlog is meant to be cleared with
-      // `nemar admin availability-report --all`, not by waiting on this.
+      // `nemar admin fleet sweep availability --all`, not by waiting on this.
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
           .then((r) => {

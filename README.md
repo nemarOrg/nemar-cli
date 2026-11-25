@@ -131,7 +131,7 @@ sequenceDiagram
     API-->>U: Verification email
     U->>API: Click verification link
     API->>Admin: Notification: new user pending
-    Admin->>CLI: nemar admin approve <user>
+    Admin->>CLI: nemar admin users approve <user>
     CLI->>API: POST /admin/approve
     API-->>U: Approval email with instructions
     U->>CLI: nemar auth login
@@ -253,7 +253,7 @@ sequenceDiagram
     participant GH as GitHub
 
     Note over A: First release: Admin creates concept DOI
-    A->>CLI: nemar admin doi create nm000104
+    A->>CLI: nemar admin dataset doi create nm000104
     CLI->>API: POST /admin/doi/create
     API->>ZEN: Pre-reserve DOI
     API->>GH: Update dataset_description.json
@@ -282,6 +282,7 @@ nemar auth switch              # Switch between accounts
 nemar auth logout              # Remove active account (--all for all)
 nemar auth setup-ssh           # Configure SSH for GitHub
 nemar auth keys                # List, create, or revoke this account's named API keys
+nemar auth mail                # Show or change which mail NEMAR sends you (set <category> <on|off>)
 ```
 
 ### Dataset Management
@@ -322,35 +323,35 @@ nemar dataset publish resend <dataset-id>  # Resend admin notification
 nemar dataset publish withdraw <dataset-id> # Take back your request (a withdrawn request; no admin step)
 
 # Admin: Manage publication requests
-nemar admin repo publish list                   # List active publication requests
-nemar admin repo publish list --all             # Every request, whatever its state
-nemar admin repo publish list --denied          # One state (also --published, --requested, ...)
-nemar admin repo publish list -s denied         # Same as --denied (--status, as before)
-nemar admin repo publish list --search nm099999 --all
+nemar admin dataset publish list                # List active publication requests
+nemar admin dataset publish list --all          # Every request, whatever its state
+nemar admin dataset publish list --denied       # One state (also --published, --requested, ...)
+nemar admin dataset publish list -s denied      # Same as --denied (--status, as before)
+nemar admin dataset publish list --search nm099999 --all
                                            # Look up a dataset by ID, user or name
-nemar admin repo publish list --needs-me        # Only the requests you can act on now
-nemar admin repo publish show <dataset-id>      # The automated review of one request, in full
-nemar admin repo publish start <dataset-id>     # Start the automated review (--all: every request waiting)
-nemar admin repo publish next                   # One card per request that needs you: y approves, n denies, c comments
-nemar admin repo publish approve <dataset-id>   # Approve and publish dataset
-nemar admin repo publish approve <dataset-id> --force
+nemar admin dataset publish list --needs-me     # Only the requests you can act on now
+nemar admin dataset publish show <dataset-id>   # The automated review of one request, in full
+nemar admin dataset publish start <dataset-id>  # Start the automated review (--all: every request waiting)
+nemar admin dataset publish next                # One card per request that needs you: y approves, n denies, c comments
+nemar admin dataset publish approve <dataset-id>   # Approve and publish dataset
+nemar admin dataset publish approve <dataset-id> --force
                                            # Approve over a review that is not a pass
-nemar admin repo publish approve <dataset-id> --acknowledge-identifier-screen "<reason>"
+nemar admin dataset publish approve <dataset-id> --acknowledge-identifier-screen "<reason>"
                                            # Approve over a screen that needs review
-nemar admin repo publish approve <dataset-id> --request-id <n>
+nemar admin dataset publish approve <dataset-id> --request-id <n>
                                            # Approve only if request n is the one in force
-nemar admin repo publish deny <dataset-id>      # Deny publication request
-nemar admin repo publish deny <dataset-id> --request-id <n>
+nemar admin dataset publish deny <dataset-id>   # Deny publication request
+nemar admin dataset publish deny <dataset-id> --request-id <n>
                                            # Deny only if request n is the one in force
-nemar admin repo publish screen <dataset-id>    # Re-run the identifier screen
+nemar admin dataset publish screen <dataset-id> # Re-run the identifier screen
 ```
 
 A publication request is screened for identifying information before the
-admins are mailed; the mail, `publish status` and `admin repo publish list` state
+admins are mailed; the mail, `publish status` and `admin dataset publish list` state
 the result, and approval waits for a screen that is clear for the current
 `main`.
 Each request also gets an automated review of what the depositor submitted,
-which `admin repo publish list` and `admin repo publish show` state.
+which `admin dataset publish list` and `admin dataset publish show` state.
 An approval over a review that is not a pass needs `--force` and is recorded
 with your account.
 An approval is for the request it showed, and the API refuses it when that
@@ -365,7 +366,7 @@ approver, and `--force`, `--acknowledge-identifier-screen`, `--skip-ci-check`
 and `--sandbox` are refused.
 Without the variable the command is your own approval, recorded under your
 account, and `next` never reads it.
-Every failure of `admin repo publish` exits 1, and so does an outcome that is not
+Every failure of `admin dataset publish` exits 1, and so does an outcome that is not
 what was asked: `publish screen` exits 1 when the API accepted the call but
 could not start the screen (the dispatch failed), and `publish approve` exits 1
 when the API's answer is not `published` (a tail job's warning leaves the
@@ -378,26 +379,50 @@ request `approving`; run it again once the cause the warning names is fixed).
 # User management
 nemar admin users                          # List all users
 nemar admin users --pending                # List pending approvals
-nemar admin approve <username>             # Approve user
-nemar admin revoke <username>              # Revoke user access
-nemar admin role <username> <role>         # Change user role
+nemar admin users approve <username>       # Approve user
+nemar admin users revoke <username>        # Revoke user access
+nemar admin users role <username> <role>   # Change user role
+nemar admin users kind <username> <kind>   # Change account kind (person, service, test)
+nemar admin users keys list <username>     # API keys of a service or test account
 
-# Dataset management
-nemar admin repo unpublish <id>            # Authors pull a published dataset back to private (DOIs untouched, can publish again)
-nemar admin repo withdraw <id>             # Broken or removed dataset: private and DOIs tombstoned
-nemar admin repo restore <id>              # Reverse a withdraw
-nemar admin ci check <id>                  # Check CI status
-nemar admin ci add <id>                    # Deploy CI workflows
-nemar admin s3 regenerate-iam <user>       # Regenerate AWS credentials
-nemar admin make-public <id>               # Make a dataset public (publication can be pulled back with `repo unpublish`)
-nemar admin delete-dataset <id>            # Delete dataset
+# Dataset management (`admin dataset`; `admin repo` is an alias)
+nemar admin dataset unpublish <id>         # Authors pull a published dataset back to private (DOIs untouched, can publish again)
+nemar admin dataset withdraw <id>          # Broken or removed dataset: private and DOIs tombstoned
+nemar admin dataset restore <id>           # Reverse a withdraw
+nemar admin dataset ci check <id>          # Check CI status
+nemar admin dataset ci add <id>            # Deploy CI workflows
+nemar admin dataset s3 lock <id>           # Apply S3 Object Lock to a dataset
+nemar admin dataset delete <id>            # Delete dataset
+nemar admin dataset reindex <id>           # Refresh a dataset's metadata
+nemar admin dataset doctor scan            # Diagnose stuck-dataset patterns (read-only)
+nemar admin dataset doctor fix <check>     # Preview a check's remediation; --apply runs it
 
 # DOI management
-nemar admin doi create <id>                # Create concept DOI
-nemar admin doi info <id>                  # Get DOI info
-nemar admin doi update <id>                # Update DOI metadata
-nemar admin doi enrich <id>                # Enrich DOI metadata
+nemar admin dataset doi create <id>        # Create concept DOI
+nemar admin dataset doi info <id>          # Get DOI info
+nemar admin dataset doi update <id>        # Update DOI metadata
+nemar admin dataset doi enrich <id>        # Enrich DOI metadata
+
+# Changes to an existing dataset
+nemar admin rework revert <id>             # Revert a dataset to a previous version (via PR)
+nemar admin rework annex normalize <id>    # Move data kept in git into the annex; --apply makes the change
+
+# Imports and upstream re-pulls
+nemar admin import openneuro <ds-ids>      # Import an OpenNeuro dataset
+nemar admin import status [id]             # Follow an import job
+nemar admin repull plan <id>               # Plan a re-pull of a newer upstream snapshot
+nemar admin repull upstream-status         # Which mirrors are behind upstream
+
+# Across all datasets
+nemar admin fleet drift                    # Repositories off the governance spec
+nemar admin fleet sweep hed                # A metadata sweep (also recording-stats, signal-defaults, ...)
+nemar admin fleet summary check            # summary.json coverage; --apply dispatches repairs
+nemar admin fleet e2e-test                 # End-to-end test against nm099999
 ```
+
+`nemar admin --help` lists the fourteen groups (ADR 0135).
+`--apply` is the one flag that makes a dry-run-by-default command write; the spellings commands had before (`--execute`, `--write`, `--fix`) still work as hidden aliases.
+A moved admin command, such as `nemar admin ci check`, exits 1 and names its new path; the CHANGELOG lists every one.
 
 ## Access Control
 
@@ -592,7 +617,7 @@ nemar auth login
 
 **"Branch protection not applied after upload"**
 - This is expected for new private datasets
-- Protection is applied when admin creates a DOI (`nemar admin doi create`)
+- Protection is applied when admin creates a DOI (`nemar admin dataset doi create`)
 - Allows owners to freely modify their private workspace
 
 ## Development

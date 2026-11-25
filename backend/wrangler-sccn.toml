@@ -482,6 +482,12 @@ OPENNEURO_MAINTAINER_EMAIL_ENABLED = "false"
 #                           other host is recorded `fenced` and never sent, because the dev Worker shares real accounts. The
 #                           production Worker ignores it, and backend/test/oidc-logout-dev-hosts-var.test.ts refuses it in every
 #                           table but [env.dev.vars]. Setting it is the owner's act, for a test against a partner's staging host.
+# - MAIL_LINK_SECRET       (epic #2260 phase 2, ADR 0132; HMAC key of the unsubscribe links in community mail, 32 characters or
+#                           more: `openssl rand -hex 32`. A DIFFERENT value on dev (`--env dev`) and production. Unset or too short,
+#                           `/mail/unsubscribe/*` answers 503 and a categorized send must refuse (`mail_link_secret_unset`).
+#                           Rotating it ends every link in every mailbox: first copy the old value to MAIL_LINK_SECRET_PREVIOUS.
+#                           The owner sets it; an agent never does. Never a [vars] entry.)
+# - MAIL_LINK_SECRET_PREVIOUS  (optional; the rotation slot, links signed under it still verify while it is set. Never a [vars] entry.)
 # - CLOUDFLARE_API_TOKEN   (epic #684; scoped token with Zone.Cache Purge on the SCCN zone, used by
 #                           /webhooks/zarr-ready cache purge. WARNING: same name as wrangler's own
 #                           deploy-auth env var -- unset it from the shell before `secret put`, e.g.

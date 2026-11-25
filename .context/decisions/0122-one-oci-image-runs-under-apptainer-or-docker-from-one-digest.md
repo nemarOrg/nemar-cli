@@ -1,13 +1,15 @@
 # ADR 0122: One OCI image runs under Apptainer or Docker from one digest
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-13
+**Accepted:** 2026-11-14
 **Owner:** Seyed Yahya Shirazi
 
 Epic #2145.
 This Architecture Decision Record (ADR) records how a compute job's container is built, signed and run, so that the same job runs on a lab workstation and on a cluster.
 It refines [ADR 0118](0118-the-compute-gateway-records-every-tenant-job-and-keeps-the-ledger-in-expanse-service-units.md) decision 14 (the launch specification names a digest-named Singularity image file) and goes with [ADR 0121](0121-a-job-names-its-executor-and-its-accounting-class-and-a-workstation-runner-pulls-its-work.md).
 It supersedes nothing.
+Decision 6's Podman clause is superseded by [ADR 0138](0138-rootless-podman-runs-through-prevention-and-a-verified-oci-configuration.md); the rest of this ADR stands.
 
 ## Context
 
@@ -40,6 +42,7 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
    Podman is unsupported until it is verified on a real host: its site-wide `containers.conf` volumes and devices and its `mounts.conf` entries reach every container, and the launcher can neither disable nor detect them.
    The launcher refuses it.
    On a shared host, where only rootless engines are allowed, Apptainer is therefore the only engine today.
+   **Superseded in part by ADR 0138.** Its Podman clause (unsupported until verified, refused by the launcher, Apptainer the only shared-host engine) is replaced by [ADR 0138](0138-rootless-podman-runs-through-prevention-and-a-verified-oci-configuration.md); the rootful Docker rule stands unchanged.
 7. **An operator-built image is unsigned and must say so.**
    Its source commit and image id are written into a label, a result that used it is labeled "operator-built, unsigned", and it is never presented as built in CI.
    Verifying a signature before first use is a runner feature added later; until then a runner runs the digest the Worker names, unverified.
@@ -53,6 +56,7 @@ SIF builds are not byte-reproducible, so a SIF built separately on each host cou
 - Two engines double the test matrix; the Docker backend is cut only if the probe verdict of PR #2147 is not `docker`, and the Apptainer path stays.
 - Lifting the Podman refusal is a later step: inspect a container's mounts and devices against the declared binds on a real rootless Podman host.
   A Docker-only demo machine is unaffected.
+  (Superseded by ADR 0138, which found inspection not enough and verifies `config.json`.)
 
 ## Alternatives considered
 

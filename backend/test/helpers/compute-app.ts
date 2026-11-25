@@ -1,7 +1,8 @@
 /**
  * The NEMAR admin router as the compute suites need it: the REAL `adminRoutes`, with its real
  * authentication, admin and cookie-origin middleware, mounted at `/admin` as `backend/src/index.ts`
- * mounts it, over a real migrated database. Users carry real API keys (hashed as production hashes
+ * mounts it, and the REAL `userRoutes` (the person's own `/users/me/...` routes, behind the real
+ * `authMiddleware`) mounted at `/users`, over a real migrated database. Users carry real API keys (hashed as production hashes
  * them). Nothing is stood in for.
  *
  * Lives in backend/test/helpers so `hono` resolves from the backend's own dependencies; the root
@@ -11,6 +12,7 @@
 import type { Database } from "bun:sqlite";
 import { Hono } from "hono";
 import { adminRoutes } from "../../src/routes/admin";
+import { userRoutes } from "../../src/routes/users";
 import { hashApiKey } from "../../src/services/token";
 import type { Bindings, Variables } from "../../src/types/bindings";
 import { realD1 } from "./d1";
@@ -65,6 +67,7 @@ export function computeEnv(db: Database, over: Partial<Bindings> = {}): Bindings
 export function makeComputeApp(): (req: Request, env: Bindings) => Response | Promise<Response> {
   const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/admin", adminRoutes);
+  app.route("/users", userRoutes);
   return (req, env) =>
     app.fetch(req, env, {
       waitUntil: () => {},

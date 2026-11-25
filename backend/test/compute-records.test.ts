@@ -63,6 +63,8 @@ import {
 import { interceptingD1 } from "./helpers/d1";
 
 let h: ComputeHarness;
+/** The compute switch, on: `createJob` refuses every hold with it off (ADR 0118, amendment of 2026-11-22). */
+const on = (env: Bindings): Bindings => ({ ...env, COMPUTE_ENABLED: "1" });
 const MIB = 1024 * 1024;
 
 beforeAll(async () => {
@@ -104,7 +106,7 @@ async function bundleJob(
   await fundAccount(env.DB, accountId, 100_000);
   await fundPlatform(env.DB, "people", 1_000_000_000);
   const sha256 = await sha256Hex(archive);
-  const r = await createJob(env, {
+  const r = await createJob(on(env), {
     source: "cli",
     accountId,
     appId: "nemar-launch",
@@ -116,18 +118,29 @@ async function bundleJob(
 }
 
 /** A partner job: its submitted files are uploaded one by one. */
-async function partnerJob(): Promise<{ accountId: number; id: string }> {
+async function partnerJob(
+  options: { verified?: boolean } = {},
+): Promise<{ accountId: number; id: string }> {
   const env = h.env();
   const accountId = await seedUser(env.DB);
   await fundAccount(env.DB, accountId, 100_000);
   await fundPlatform(env.DB, "people", 1_000_000_000);
-  const r = await createJob(env, {
+  const r = await createJob(on(env), {
     source: "partner",
     accountId,
     clientId: "client.one",
     holdBody: holdBody(),
   });
   if (!r.ok) throw new Error(`could not make a job: ${r.code}`);
+  // A partner's files enter the records only for a job NEMAR has verified (phase D4): the default here is a
+  // verified one, and a case about the refusal asks for `verified: false`.
+  if (options.verified !== false) {
+    h.db
+      .query(
+        "UPDATE compute_jobs SET partner_state = 'verified', partner_verified_at = datetime('now') WHERE id = ?",
+      )
+      .run(r.job.id);
+  }
   return { accountId, id: r.job.id };
 }
 
@@ -727,7 +740,10 @@ describe("presignIncomingUploads", () => {
     // The checksum is signed with the URL and the client sends it as a header.
     const base64 = createHash("sha256").update(made.archive).digest("base64");
     expect(u?.headers).toEqual({ "x-amz-checksum-sha256": base64 });
-    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("host;x-amz-checksum-sha256");
+    // The archive's length is signed too (phase D3, #2024), but not handed back: the client sets it.
+    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-length;host;x-amz-checksum-sha256",
+    );
     const put = await fetch(u?.url ?? "", {
       method: "PUT",
       headers: u?.headers,
@@ -747,7 +763,9 @@ describe("presignIncomingUploads", () => {
     ]);
     if (!r.ok) throw new Error(r.code);
     expect(r.uploads[0]?.headers).toEqual({});
-    expect(new URL(r.uploads[0]?.url ?? "").searchParams.get("X-Amz-SignedHeaders")).toBe("host");
+    expect(new URL(r.uploads[0]?.url ?? "").searchParams.get("X-Amz-SignedHeaders")).toBe(
+      "content-length;host",
+    );
   });
 
   test("can be asked again after the address has expired, and the new one works", async () => {
@@ -832,7 +850,12 @@ describe("presignIncomingUploads", () => {
         `/${HARNESS_BUCKETS.records}/incoming/${made.id}/${u.path}`,
       );
       expect(url.searchParams.get("X-Amz-Expires")).toBe("3600");
-      const put = await fetch(u.url, { method: "PUT", body: bytes(`body ${u.path}`) });
+      // The declared length is signed (phase D4): a body of another length is refused by the store, and a
+      // body of the declared length is taken.
+      const size = (files.find((f) => f.path === u.path) as { size: number }).size;
+      const wrong = await fetch(u.url, { method: "PUT", body: bytes("x".repeat(size + 1)) });
+      expect([u.path, wrong.status]).toEqual([u.path, 403]);
+      const put = await fetch(u.url, { method: "PUT", body: bytes("x".repeat(size)) });
       expect(put.status).toBe(200);
     }
     expect((await h.keys(h.records)).filter((k) => k.startsWith("incoming/"))).toEqual(
@@ -1364,6 +1387,28 @@ describe("finalizeSubmittedFiles (a partner's own files)", () => {
   }
   const declared = () => FILES.map(([path, body]) => ({ path, size: bytes(body).length }));
 
+  test("a job NEMAR has not verified copies nothing into the records (the lock cannot be undone)", async () => {
+    const env = h.env();
+    const made = await partnerJob({ verified: false });
+    for (const [path, body] of FILES) await h.records.put(incomingKey(made.id, path), bytes(body));
+    for (const state of [null, "pending", "mismatch"]) {
+      h.db.query("UPDATE compute_jobs SET partner_state = ? WHERE id = ?").run(state, made.id);
+      expect([state, await finalizeSubmittedFiles(env, made.id, { files: declared() })]).toEqual([
+        state,
+        { ok: false, code: "bad_state" },
+      ]);
+    }
+    expect(cp("CopyObject")).toHaveLength(0);
+    for (const [path] of FILES)
+      expect(await h.records.head(submittedKey(made.id, path))).toBeNull();
+    expect((await h.records.list({ prefix: `records/${made.id}/submitted/` })).objects).toEqual([]);
+    expect(
+      h.db.query("SELECT records_written_at FROM compute_jobs WHERE id = ?").get(made.id),
+    ).toEqual({
+      records_written_at: null,
+    });
+  });
+
   test("copies each file once, reads each back, writes the manifest and marks the records written", async () => {
     const env = h.env();
     const made = await uploaded();
@@ -1716,12 +1761,12 @@ describe("a copy is bounded by what R2 copies in one request", () => {
     await fundAccount(env.DB, accountId, 100_000);
     await fundPlatform(env.DB, "people", 1_000_000_000);
     const base = { source: "cli" as const, accountId, appId: "nemar-launch", appVersion: "1.0.0" };
-    const refused = await createJob(env, {
+    const refused = await createJob(on(env), {
       ...base,
       spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES + 1, sha256: sha }),
     });
     expect(refused).toEqual({ ok: false, code: "bundle_too_large" });
-    const exact = await createJob(env, {
+    const exact = await createJob(on(env), {
       ...base,
       spec: bundleJobSpec({ size: COPY_OBJECT_MAX_BYTES, sha256: sha }),
     });

@@ -37,8 +37,11 @@ _GIT_TIMEOUT_S = 900
 DATASET_LEVEL = re.compile(
     r"^(README(\.\w+)?|dataset_description\.json|\.nemar/ieeg-geometry\.json)$"
 )
-_SUBJECT_FILE = re.compile(r"(_electrodes\.tsv|_coordsystem\.json|_channels\.tsv)$")
-_ANY_COORDSYSTEM = re.compile(r"_coordsystem\.json$")
+_SUBJECT_FILE = re.compile(
+    r"(_electrodes\.tsv|_electrodes\.json|_coordsystem\.json|_channels\.tsv)$"
+)
+# a coordsystem or an electrodes sidecar at any level (BIDS inheritance), root `electrodes.json` too
+_ANY_COORDSYSTEM = re.compile(r"(_coordsystem\.json|_electrodes\.json|(^|/)electrodes\.json)$")
 _SURFACE_FILE = re.compile(
     r"(^|/)(?:[lr]h\.pial(?:\.T1)?|[lr]h\.sphere\.reg|y_[^/]*\.nii(?:\.gz)?|[^/]*\.gii|[^/]*\.mat)$",
     re.I,
@@ -92,9 +95,10 @@ def _surface_wanted(path: str) -> bool:
 
 
 def select_paths(entries: list[TreeEntry]) -> list[str]:
-    """The paths the tracks read: electrodes, coordsystem and channels files, the README,
-    `dataset_description.json`, the ownership file, and subject surfaces, `sphere.reg` and SPM
-    `y_` fields. Everything else, recordings included, is left alone."""
+    """The paths the tracks read: electrodes (and their JSON sidecars), coordsystem and
+    channels files, the README, `dataset_description.json`, the ownership file, and subject
+    surfaces, `sphere.reg` and SPM `y_` fields. Everything else, recordings included, is left
+    alone."""
     wanted = []
     for e in entries:
         p = e.path
@@ -171,7 +175,13 @@ NEUTRAL_GIT_CONFIG = (
     "filter.annex.smudge=cat",
     "annex.largefiles=nothing",
     "core.attributesFile=/dev/null",
+    "core.autocrlf=false",  # line endings are never converted: unchanged bytes are unchanged
+    "core.safecrlf=false",
 )
+# Written to the clone's `info/attributes`, which outranks the dataset's own `.gitattributes`: a
+# repository that commits CRLF blobs under `text eol=lf` would otherwise show every such file as
+# modified, and a commit would renormalize authors' files.
+NO_CONVERSION_ATTRIBUTES = "* -text -eol -filter\n"
 
 
 def _git(clone: Path | None, *args: str, stdin: bytes | None = None, attempts: int = 1) -> str:
@@ -200,10 +210,13 @@ def _git(clone: Path | None, *args: str, stdin: bytes | None = None, attempts: i
     return done.stdout.decode("utf-8", errors="replace")
 
 
-def clone_tree(dataset_id: str, workdir: Path, repo_url: str = REPO_URL) -> Path:
+def clone_tree(
+    dataset_id: str, workdir: Path, repo_url: str = REPO_URL, ref: str | None = None
+) -> Path:
     """`<workdir>/<id>`: a blobless, not checked out clone (reused when it already exists)."""
     clone = Path(workdir) / dataset_id
     if (clone / ".git").exists():
+        _no_conversion(clone)
         return clone
     if clone.exists() and any(clone.iterdir()):
         raise FetchError(f"{clone} exists and is not a git checkout; pass an empty --workdir")
@@ -213,11 +226,19 @@ def clone_tree(dataset_id: str, workdir: Path, repo_url: str = REPO_URL) -> Path
         "clone",
         "--no-checkout",
         "--filter=blob:none",
+        *(["--branch", ref] if ref else []),
         repo_url.format(id=dataset_id),
         str(clone),
         attempts=_ATTEMPTS,
     )
+    _no_conversion(clone)
     return clone
+
+
+def _no_conversion(clone: Path) -> None:
+    info = clone / ".git" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text(NO_CONVERSION_ATTRIBUTES)
 
 
 def list_tree(clone: Path) -> list[TreeEntry]:
@@ -282,10 +303,12 @@ def fetch_files(
     data_url: str = DATA_URL,
     api_url: str = API_URL,
     max_bytes: int = MAX_BYTES,
+    ref: str | None = None,
 ) -> FetchResult:
-    """Clone, check out the selected paths and download their annexed content."""
+    """Clone (at branch `ref`, default the remote's), check out the selected paths and download
+    their annexed content."""
     version = version or fetch_version(dataset_id, api_url)
-    clone = clone_tree(dataset_id, workdir, repo_url)
+    clone = clone_tree(dataset_id, workdir, repo_url, ref)
     entries = list_tree(clone)
     wanted = select_paths(entries)
     todo = [p for p in wanted if not os.path.lexists(clone / p)]

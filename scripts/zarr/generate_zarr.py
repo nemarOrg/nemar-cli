@@ -18,7 +18,7 @@ A store holds the data, the events, channel names, types and units, and
 technical recording metadata, and never the subject (#1626). Every store is
 written through ``write_store``, which has biosigIO leave subject and operator
 information out (``exclude_subject_info``, added in biosigio 1.2.11), and ``main``
-refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.13) or one that
+refuses to convert on a biosigIO below ``SUBJECT_INFO_FLOOR`` (1.2.14) or one that
 cannot. Subject information stays at
 dataset scope, in ``participants.tsv``.
 
@@ -1780,6 +1780,11 @@ _FALLBACK_REASONS = {
         "This recording's data file appears truncated or corrupt, so the viewer "
         "could not be generated."
     ),
+    # biosigIO's own code (1.2.14, biosigio#180); the authoritative text is its REASONS.
+    "discontinuous_recording": (
+        "This recording has gaps between its data records (EDF+D/BDF+D), which "
+        "the viewer cannot represent yet."
+    ),
     "unsupported_format": "This file format is not yet supported by the viewer.",
     "empty_recording": "This recording contains no signal channels to display.",
     "file_read_error": "This recording could not be prepared for viewing.",
@@ -2031,6 +2036,56 @@ def _exception_chain(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+# biosigIO's refusal of an EDF+D/BDF+D file whose data records are not contiguous
+# in time (1.2.14, biosigio#180): `DiscontinuousRecordingError`, a `FileReadError`
+# carrying `.gaps`, every discontinuity as `(start, length)` seconds. A property of
+# the file's bytes, so it is a terminal data failure like `corrupt_or_truncated`:
+# in neither `RETRYABLE_CODES` nor `STORAGE_STATE_CODES`, so a run that converts
+# nothing and fails only with this is `deterministic`.
+DISCONTINUOUS_RECORDING = "discontinuous_recording"
+# Room kept at the end of a gap list for ", and 99999 more".
+_DISCONTINUITY_TAIL_CHARS = 20
+
+
+def discontinuity_detail(exc: BaseException) -> str | None:
+    """The published `detail` for a `discontinuous_recording` refusal, built from
+    the exception's `.gaps` rather than its message: the message opens with the
+    scratch path and a paragraph of prose, and `failure_detail` keeps only the
+    first 300 characters of its first line, which cuts a long gap list off. Gaps
+    are named in file order for as long as they fit in `_DETAIL_MAX_CHARS`, and
+    the rest are counted. None when `.gaps` is not a non-empty list of `(start,
+    length)` pairs of numbers, so the exception's own text is published instead;
+    a malformed attribute must not turn a typed refusal into a crash inside
+    `convert_one`'s `except` branch.
+
+    A negative length is an overlap or a record that starts before the previous
+    one ended. The seconds are the file's own time axis."""
+    gaps = getattr(exc, "gaps", None)
+    if not isinstance(gaps, (list, tuple)) or not gaps:
+        return None
+    parts: list[str] = []
+    for gap in gaps:
+        try:
+            start, length = gap
+            parts.append(f"{float(length):g} s at {float(start):g} s")
+        except (TypeError, ValueError):
+            return None
+    noun = "gap or overlap" if len(parts) == 1 else "gaps or overlaps"
+    head = f"{len(parts)} {noun} between EDF+D/BDF+D data records (length at start, in seconds): "
+    budget = _DETAIL_MAX_CHARS - len(head) - _DISCONTINUITY_TAIL_CHARS
+    shown = [parts[0]]
+    used = len(parts[0])
+    for part in parts[1:]:
+        if used + 2 + len(part) > budget:
+            break
+        shown.append(part)
+        used += 2 + len(part)
+    text = head + ", ".join(shown)
+    if len(parts) > len(shown):
+        text += f", and {len(parts) - len(shown)} more"
+    return text
+
+
 def failure_verdict(
     exc: BaseException, primary: str, head_files: set[str] | frozenset[str]
 ) -> tuple[str | None, str | None]:
@@ -2058,6 +2113,10 @@ def failure_verdict(
        types the mismatch itself.
     4. Otherwise the exception's own code, which may be None.
 
+    `discontinuous_recording` (biosigIO 1.2.14) is already a statement of cause and
+    is never refined; only its `detail` is rebuilt, from the gap list
+    (`discontinuity_detail`).
+
     No rule types a bare `OSError` by its text. biosigIO types a streamed
     EDF/BDF refusal itself (`CorruptFileError`, since 1.2.12), and an `OSError`
     that carries an errno (EIO, ENOSPC, EACCES) or is a subclass
@@ -2072,6 +2131,8 @@ def failure_verdict(
     code = getattr(exc, "code", None)
     if not isinstance(code, str) or not code:
         code = None
+    if code == DISCONTINUOUS_RECORDING:
+        return code, discontinuity_detail(exc)
     if code not in _REFINABLE_CODES:
         return code, None
     chain = _exception_chain(exc)
@@ -8503,7 +8564,7 @@ def _recording_size_bytes(primary_local: str) -> int:
 #     writer is referenced anywhere else.
 #   * `sync_store`, the one upload, runs the same read-back on the bytes it is
 #     about to upload, after every later rewrite of the root.
-#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.13.
+#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.14.
 #
 # `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
 # leaves the scratch file's name there instead of its whole path, and the
@@ -8513,17 +8574,20 @@ def _recording_size_bytes(primary_local: str) -> int:
 # is where the name comes from. 1.2.12 types a streamed EDF/BDF refusal itself
 # (`CorruptFileError`), and `failure_verdict` no longer reads a bare `OSError`'s
 # text, so a 1.2.11 run would take every streamed refusal for the node's fault and
-# retry it until `retry_exhausted`. 1.2.13 is the pin's floor: it refuses a
+# retry it until `retry_exhausted`. 1.2.13 refuses a
 # BrainVision data file whose header shows it was cut short, where 1.2.12 read it
 # with the tail dropped, and it adds `allow_partial_frame`, which
 # `convert_recording` passes to read the whole frames of a multiplexed file with a
 # trailing partial frame and no positive `DataPoints` count, and to record the
-# dropped bytes. So the converter takes no older release
-# (TestCutShortBrainVisionThroughConvertOne). A cut exactly at a frame boundary of
+# dropped bytes. 1.2.14 is the pin's floor: it refuses an EDF+D or BDF+D file
+# whose data records have gaps (`discontinuous_recording`), where 1.2.13 read it
+# with every sample after a gap placed too early on the time axis. So the
+# converter takes no older release (TestCutShortBrainVisionThroughConvertOne,
+# TestGappedEdfPlusDThroughConvertOne). A cut exactly at a frame boundary of
 # a file with no positive `DataPoints` count is not detected: multiplexed data
 # reads as a shorter recording, and vectorized data is corrupted from the second
 # channel on, because each channel is stored whole.
-SUBJECT_INFO_FLOOR = "1.2.13"
+SUBJECT_INFO_FLOOR = "1.2.14"
 SUBJECT_INFO_OPTION = "exclude_subject_info"
 SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
 # The writers that put a store on disk, by the names `biosigio_subject_info_problems`
@@ -8742,7 +8806,8 @@ def write_store(
     if not names_keyword(writer, SUBJECT_INFO_OPTION):
         raise SubjectInfoExclusionUnavailable(
             f"{name} does not take {SUBJECT_INFO_OPTION}: this process has a biosigIO "
-            f"older than {SUBJECT_INFO_FLOOR}, so no store was written"
+            f"without subject-information exclusion (added in 1.2.11; the converter "
+            f"requires {SUBJECT_INFO_FLOOR}), so no store was written"
         )
     written = writer(*args, **kwargs, **{SUBJECT_INFO_OPTION: True})
     if isinstance(written, os.PathLike):

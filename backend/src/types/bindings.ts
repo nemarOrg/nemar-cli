@@ -395,6 +395,16 @@ export interface Bindings {
   // running job's launch spec), Tapis webhook address and observer token. Rotating it kills all of
   // them: drain running compute jobs first (compute-tokens.ts, ADR 0118 A5 amendment item 5).
 
+  // Unsubscribe links in community mail (epic #2260 phase 2, ADR 0132). HMAC keys, Worker secrets, a
+  // DIFFERENT value on dev and production (a production link presented to staging must fail). Unset or
+  // shorter than 32 characters, the public routes (`/mail/unsubscribe/*`) answer 503 and a categorized
+  // send must refuse (`mail_link_secret_unset`): no message goes out without a link that works.
+  // MAIL_LINK_SECRET_PREVIOUS is the rotation slot: while set, links signed under the old value still
+  // verify; the owner removes it once the old links need not work. Rotating without it ends every link
+  // in every mailbox at once. Never a [vars] entry.
+  MAIL_LINK_SECRET?: string;
+  MAIL_LINK_SECRET_PREVIOUS?: string;
+
   // Dataset pull-request review (ADR 0092). When PR_REVIEW_ENABLED is "1", a pull request opened
   // or updated against `main` of a dataset repository is reviewed by a model and the result is
   // published as a check-run and a pull-request comment. Default (unset) keeps the webhook
@@ -599,7 +609,19 @@ export interface Variables {
    *  authenticated the request, read live. Only the OIDC resource routes carry `oidcBearer`; every
    *  other route refuses such a token (`resolveApiKeyUser`'s `oidc_token`). */
   oidcToken?: OidcTokenContext;
+  /** Set by the `/compute` read routes' credential rule (epic #2021 phase D2): who the request is, whichever
+   *  credential proved it. See `routes/compute/auth.ts`. */
+  computeCredential?: ComputeCredential;
 }
+
+/**
+ * What a `/compute` read route knows of its caller (`routes/compute/auth.ts`): a person, by a CLI key, the
+ * session cookie or an OpenID Connect access token (with that token's scopes), or a machine client by a
+ * client credentials token (which names no account).
+ */
+export type ComputeCredential =
+  | { kind: "user"; userId: number; via: "key" | "cookie" | "oidc"; scopes?: string[] }
+  | { kind: "client"; clientId: string };
 
 /**
  * What `oidcBearer` knows of a live access token: the client it was issued to, the account it names

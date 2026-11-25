@@ -24,7 +24,7 @@ export const OWNERSHIP_PATH = ".nemar/ieeg-geometry.json";
  * report names it (`test/repull-pipeline-run.test.ts` keeps it equal to the package's
  * `pyproject.toml`). A release that moves the package moves this value in the same change.
  */
-export const IEEG_GEOMETRY_PIPELINE_VERSION = "0.1.0";
+export const IEEG_GEOMETRY_PIPELINE_VERSION = "0.1.1";
 
 const OUTPUT_NAME = /_(?:electrodes\.tsv|coordsystem\.json)$/;
 

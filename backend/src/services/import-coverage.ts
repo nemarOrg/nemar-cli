@@ -457,7 +457,7 @@ export function buildCoverageIssueBody(args: {
     '1. Is `AUTO_IMPORT_ENABLED` `"true"` on the deployed worker? Only the exact string counts.',
     "2. Are the `*/30 * * * *` cron triggers still registered?",
     "3. Does the last dispatch name a dataset that never acquired an import row? Then the hand-off is failing after the audit row is written: check the datasets PAT and the onboard workflow.",
-    "4. `nemar admin import-coverage` runs this same sweep on demand.",
+    "4. `nemar admin import coverage` runs this same sweep on demand.",
     "",
     `Closed automatically once fewer than ${COVERAGE_BACKLOG_ALARM} datasets are outstanding and the importer is enabled. Filed by the import coverage sweep (nemarOrg/nemar-cli#1311).`,
   ].join("\n");

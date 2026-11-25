@@ -91,6 +91,7 @@ import {
   COMPUTE_POOLS,
   type ComputePool,
 } from "../../../shared/contract/compute.js";
+import { ACTIVE_ACCOUNT_STATUSES, ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier.js";
 
 /** A ledger key: 1 to 128 letters, digits and `. _ : -`, which is what the table accepts. */
 export const LEDGER_KEY_RE = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -112,6 +113,7 @@ const REASON = {
   expired: "expired",
   final: "final_settlement",
   unreserved: "unreserved_usage",
+  moved: "charge_moved",
 } as const satisfies Record<string, (typeof COMPUTE_LEDGER_REASONS)[number]>;
 
 export interface PoolRow {
@@ -714,6 +716,233 @@ export function unreservedChargeStatements(
       .prepare(unreservedChargeInsertSql(gate?.sql))
       .bind(job, pool, budget, used, REASON.unreserved, ...values),
   ];
+}
+
+// --- Moving the charge of a job that skipped the reservation (phase D4, #2025) --------------------
+
+/** The keys of the two entries of a move, made of the job so that a job's charge moves once. */
+export const moveKey = (jobId: string, side: "out" | "in"): string => `move:${jobId}:${side}`;
+
+/** The audit action of a move. */
+export const MOVE_CHARGE_ACTION = "compute.charge.move";
+
+/**
+ * THE MOVE, out of the partner's pool. `?1` the job, `?2` the target account (as text, the pool's holder
+ * reference), `?3` the actor, `?4` the reason word, `?5` the account statuses' SQL is inlined. It writes an
+ * `adjust` entry LOWERING the charge of the partner pool the job's unreserved entry (`overrun`, key
+ * `job:<id>:unreserved`) was written to, by exactly that entry's figure, NAMING NO BUDGET, and only if EVERY
+ * term holds, so that the entry and its pair (`MOVE_IN_INSERT_SQL`) are written together or not at all:
+ *   - the job exists, SKIPPED THE RESERVATION (`flag_unreserved = 1`) and is over (terminal): a reserved
+ *     job's charge is never the partner's to move, and a live one's is not final;
+ *   - the entry is the job's unreserved charge, on a partner pool, above 0;
+ *   - the pool's total can pay it (it never goes negative);
+ *   - the target is an account that is not deleted and is in good standing (a verified or approved
+ *     account), and has a pool of the same word whose charge plus this stays within 2^53 - 1;
+ *   - the job's charge was not moved already (the key).
+ * THE BUDGET IS COUNTED ONCE. The unreserved entry was counted against the `people` budget when it was
+ * written (it is consumption). The move is a correction BETWEEN two pools: lowering the partner's pool
+ * names no budget (option A: nothing a correction does gives budget back), and raising the person's names
+ * none either, which `adjustPool` would not do for a raise (a raise there is NEW consumption and names the
+ * budget). Naming the budget on the person's side would count this consumption twice. The table allows an
+ * adjustment of a charge that names no job to name a budget or none.
+ */
+export const MOVE_OUT_INSERT_SQL = `INSERT INTO compute_ledger
+  (kind, pool_id, budget_pool_id, charged_delta_milli, actor_user_id, reason, idempotency_key)
+  SELECT 'adjust', t.id, NULL, -u.charged_delta_milli, ?3, ?4, 'move:' || ?1 || ':out'
+    FROM compute_ledger u
+    JOIN compute_pools t ON t.id = u.pool_id
+    JOIN compute_jobs j ON j.id = ?1
+   WHERE u.idempotency_key = 'job:' || ?1 || ':unreserved'
+     AND u.kind = 'overrun' AND u.charged_delta_milli > 0
+     AND t.holder_kind = 'partner'
+     AND j.flag_unreserved = 1 AND j.state IN ('finished', 'failed', 'cancelled')
+     AND t.charged_milli >= u.charged_delta_milli
+     AND EXISTS (SELECT 1 FROM compute_pools p
+                  WHERE p.holder_kind = 'account' AND p.holder_ref = ?2 AND p.pool = t.pool
+                    AND p.charged_milli + u.charged_delta_milli <= ${TOTAL_MAX})
+     AND EXISTS (SELECT 1 FROM users a
+                  WHERE a.id = CAST(?2 AS INTEGER) AND a.deleted_at IS NULL
+                    AND a.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST})
+     AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'move:' || ?1 || ':out')`;
+
+/**
+ * THE MOVE, into the person's pool: `?1` the job, `?2` the target account, `?3` the actor, `?4` the reason.
+ * It raises the charge of the target's pool of the same word by the figure of the entry the first
+ * statement just wrote (`move:<job>:out`), naming no budget, and only while that entry exists, so the pair
+ * is one batch's two halves. A pool that does not take it makes the table refuse the entry (the batch is
+ * one transaction, so the first half goes with it).
+ */
+export const MOVE_IN_INSERT_SQL = `INSERT INTO compute_ledger
+  (kind, pool_id, budget_pool_id, charged_delta_milli, actor_user_id, reason, idempotency_key)
+  SELECT 'adjust', p.id, NULL, -o.charged_delta_milli, ?3, ?4, 'move:' || ?1 || ':in'
+    FROM compute_ledger o
+    JOIN compute_pools t ON t.id = o.pool_id
+    JOIN compute_pools p ON p.holder_kind = 'account' AND p.holder_ref = ?2 AND p.pool = t.pool
+   WHERE o.idempotency_key = 'move:' || ?1 || ':out'
+     AND NOT EXISTS (SELECT 1 FROM compute_ledger WHERE idempotency_key = 'move:' || ?1 || ':in')`;
+
+/** The audit row of a move, written only if the second half was: `?1` the actor, `?2` the job, `?3` the account. */
+export const MOVE_AUDIT_SQL = `INSERT INTO audit_log (user_id, action, resource_type, resource_id, details)
+  SELECT ?1, '${MOVE_CHARGE_ACTION}', 'compute_job', ?2,
+         json_object('to_account', CAST(?3 AS INTEGER), 'pool', p.pool,
+                     'moved_milli', i.charged_delta_milli, 'reason', i.reason,
+                     'attributed_account', ?4, 'owner_proven', CASE WHEN ?4 = CAST(?3 AS INTEGER) THEN 1 ELSE 0 END,
+                     'confirmed_unproven_owner', ?5)
+    FROM compute_ledger i JOIN compute_pools p ON p.id = i.pool_id
+   WHERE i.idempotency_key = 'move:' || ?2 || ':in' AND changes() > 0`;
+
+export type MoveRefusal =
+  | "job_not_found"
+  | "job_reserved"
+  | "no_unreserved_charge"
+  | "already_moved"
+  | "account_not_found"
+  | "target_not_in_good_standing"
+  | "target_has_no_pool"
+  | "owner_not_proven"
+  | "would_go_negative"
+  | "would_exceed_limit";
+
+export type MoveResult =
+  | {
+      ok: true;
+      replayed: boolean;
+      pool: ComputePool;
+      movedMilli: number;
+      /** The account the job's Tapis owner mapped to when the sweep indexed it, or null (unattributed). */
+      attributedAccountId: number | null;
+    }
+  | { ok: false; code: MoveRefusal };
+
+interface MoveFacts {
+  job_id: string | null;
+  job_account: number | null;
+  flag_unreserved: number | null;
+  state: string | null;
+  charge_milli: number | null;
+  charge_pool_id: number | null;
+  charge_pool_kind: string | null;
+  charge_pool_charged: number | null;
+  pool_word: string | null;
+  out_account: string | null;
+  moved_to: string | null;
+  account_status: string | null;
+  account_deleted: number | null;
+  target_pool_charged: number | null;
+}
+
+const MOVE_FACTS_SQL = `SELECT
+  (SELECT id FROM compute_jobs WHERE id = ?1) AS job_id,
+  (SELECT account_id FROM compute_jobs WHERE id = ?1) AS job_account,
+  (SELECT flag_unreserved FROM compute_jobs WHERE id = ?1) AS flag_unreserved,
+  (SELECT state FROM compute_jobs WHERE id = ?1) AS state,
+  (SELECT charged_delta_milli FROM compute_ledger WHERE idempotency_key = 'job:' || ?1 || ':unreserved') AS charge_milli,
+  (SELECT pool_id FROM compute_ledger WHERE idempotency_key = 'job:' || ?1 || ':unreserved') AS charge_pool_id,
+  (SELECT p.holder_kind FROM compute_ledger e JOIN compute_pools p ON p.id = e.pool_id
+     WHERE e.idempotency_key = 'job:' || ?1 || ':unreserved') AS charge_pool_kind,
+  (SELECT p.charged_milli FROM compute_ledger e JOIN compute_pools p ON p.id = e.pool_id
+     WHERE e.idempotency_key = 'job:' || ?1 || ':unreserved') AS charge_pool_charged,
+  (SELECT p.pool FROM compute_ledger e JOIN compute_pools p ON p.id = e.pool_id
+     WHERE e.idempotency_key = 'job:' || ?1 || ':unreserved') AS pool_word,
+  (SELECT idempotency_key FROM compute_ledger WHERE idempotency_key = 'move:' || ?1 || ':out') AS out_account,
+  (SELECT p.holder_ref FROM compute_ledger i JOIN compute_pools p ON p.id = i.pool_id
+     WHERE i.idempotency_key = 'move:' || ?1 || ':in') AS moved_to,
+  (SELECT status FROM users WHERE id = CAST(?2 AS INTEGER)) AS account_status,
+  (SELECT CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 END FROM users WHERE id = CAST(?2 AS INTEGER)) AS account_deleted,
+  (SELECT p.charged_milli FROM compute_pools p, compute_pools t
+     WHERE t.id = (SELECT pool_id FROM compute_ledger WHERE idempotency_key = 'job:' || ?1 || ':unreserved')
+       AND p.holder_kind = 'account' AND p.holder_ref = ?2 AND p.pool = t.pool) AS target_pool_charged`;
+
+/**
+ * Move the charge of a job that skipped the reservation from the partner's pool to a person's: the
+ * ledger operation ADR 0118 (the A7 amendment, item 1) promised Epic D's partner phase. ONE batch of two
+ * `adjust` entries and an audit row, both entries gated on every term of the move, so a refusal writes
+ * nothing and no half is ever left. The refusal is read AFTER the batch and never decided by a second
+ * attempt: a job that was reserved, one with no unreserved charge, a charge already moved, an account that
+ * does not exist or is deleted or not in good standing, one with no pool of the word. A repeat of the same
+ * move (the same job to the same account) is a replay and writes nothing. The caller checks the role.
+ */
+export async function moveCharge(
+  db: D1Database,
+  input: {
+    jobId: string;
+    toAccountId: number;
+    actorUserId: number;
+    /** The owner's explicit word that the account is not the one the job's Tapis owner mapped to. */
+    confirmUnprovenOwner?: boolean;
+  },
+): Promise<MoveResult> {
+  const job = jobIdArg(input.jobId);
+  const account = positiveId("an account", input.toAccountId);
+  const actor = positiveId("an actor", input.actorUserId);
+  const ref = String(account);
+  const confirmed = input.confirmUnprovenOwner === true;
+  // WHO THE JOB WAS: the account the sweep mapped the job's Tapis owner to, or none. A tag or an owner
+  // proves little (a partner can mint any username), so charging a DIFFERENT account, or any account for a
+  // job nothing attributed, is the owner's explicit word and is recorded in the audit row. Without the word
+  // the batch is not run at all; every other refusal is still told first, so `owner_not_proven` is only
+  // ever the answer for a move that would otherwise have been made.
+  const before = await db.prepare(MOVE_FACTS_SQL).bind(job, ref).first<MoveFacts>();
+  const attributed = before?.job_account ?? null;
+  const proven = attributed === account;
+  let wroteOut = false;
+  if (proven || confirmed) {
+    const results = await db.batch([
+      db.prepare(MOVE_OUT_INSERT_SQL).bind(job, ref, actor, REASON.moved),
+      db.prepare(MOVE_IN_INSERT_SQL).bind(job, ref, actor, REASON.moved),
+      db.prepare(MOVE_AUDIT_SQL).bind(actor, job, ref, attributed, confirmed && !proven ? 1 : 0),
+    ]);
+    // D1 counts the rows a trigger writes in a statement's changes, so "written" is more than none, never
+    // exactly one.
+    wroteOut = (results[0]?.meta?.changes ?? 0) > 0;
+    const wroteIn = (results[1]?.meta?.changes ?? 0) > 0;
+    if (wroteOut !== wroteIn) {
+      // Unreachable by construction (the second half is gated on the first, and a table refusal rolls the
+      // batch back); if it is ever reached the books are inconsistent and nothing may go on quietly.
+      throw new Error("a charge move wrote one half of its pair");
+    }
+  }
+  const facts = await db.prepare(MOVE_FACTS_SQL).bind(job, ref).first<MoveFacts>();
+  if (facts === null || facts.job_id === null) return { ok: false, code: "job_not_found" };
+  const pool = (facts.pool_word ?? "cpu") as ComputePool;
+  const done = (replayed: boolean): MoveResult => ({
+    ok: true,
+    replayed,
+    pool,
+    movedMilli: facts.charge_milli ?? 0,
+    attributedAccountId: facts.job_account ?? null,
+  });
+  if (wroteOut) return done(false);
+  if (facts.out_account !== null) {
+    return facts.moved_to === ref ? done(true) : { ok: false, code: "already_moved" };
+  }
+  if (facts.flag_unreserved !== 1) return { ok: false, code: "job_reserved" };
+  if (
+    facts.charge_milli === null ||
+    facts.charge_milli <= 0 ||
+    facts.charge_pool_kind !== "partner" ||
+    !["finished", "failed", "cancelled"].includes(facts.state ?? "")
+  ) {
+    return { ok: false, code: "no_unreserved_charge" };
+  }
+  if (facts.account_status === null) return { ok: false, code: "account_not_found" };
+  if (
+    facts.account_deleted === 1 ||
+    !(ACTIVE_ACCOUNT_STATUSES as readonly string[]).includes(facts.account_status)
+  ) {
+    return { ok: false, code: "target_not_in_good_standing" };
+  }
+  if (facts.target_pool_charged === null) return { ok: false, code: "target_has_no_pool" };
+  if (facts.target_pool_charged + facts.charge_milli > TOTAL_MAX) {
+    return { ok: false, code: "would_exceed_limit" };
+  }
+  if ((facts.charge_pool_charged ?? 0) < facts.charge_milli) {
+    return { ok: false, code: "would_go_negative" };
+  }
+  // Everything else holds: the one thing missing is the owner's word about an account the job was not
+  // attributed to.
+  if (!proven && !confirmed) return { ok: false, code: "owner_not_proven" };
+  return { ok: false, code: "would_go_negative" };
 }
 
 export type CloseRefusal =

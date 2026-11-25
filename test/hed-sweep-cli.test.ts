@@ -1,6 +1,6 @@
 /**
- * CLI `nemar admin hed-sweep` (#869), driven through the real entry point
- * (`bun run src/index.ts admin hed-sweep ...`).
+ * CLI `nemar admin fleet sweep hed` (#869), driven through the real entry point
+ * (`bun run src/index.ts admin fleet sweep hed ...`).
  *
  * PR #1223 review, suggestion 5: hed-sweep's batch-loop control flow (the
  * do-while loop, progress guard, GitHub-pacing sleep, and the try/catch
@@ -120,11 +120,11 @@ const HED_SWEEP_DONE = {
   remaining: 0,
 };
 
-describe("nemar admin hed-sweep: auth", () => {
+describe("nemar admin fleet sweep hed: auth", () => {
   test("without a stored apiKey, requireAuth blocks before any request is sent", async () => {
     const server = startCaptureServer([HED_SWEEP_DONE]);
     try {
-      const result = await runCli(["admin", "hed-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -133,12 +133,15 @@ describe("nemar admin hed-sweep: auth", () => {
   });
 });
 
-describe("nemar admin hed-sweep: request shape", () => {
+describe("nemar admin fleet sweep hed: request shape", () => {
   test("--limit is forwarded as ?limit=N on the real request", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([HED_SWEEP_DONE]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--limit", "10", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "hed", "--limit", "10", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests.length).toBe(1);
       expect(server.requests[0].pathname).toBe("/admin/datasets/hed-sweep");
@@ -152,7 +155,7 @@ describe("nemar admin hed-sweep: request shape", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([HED_SWEEP_DONE]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--json"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed", "--json"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests[0].searchParams.get("limit")).toBe("15");
     } finally {
@@ -164,7 +167,10 @@ describe("nemar admin hed-sweep: request shape", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([{ reset: 9 }]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--reset", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "hed", "--reset", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests.length).toBe(1);
       expect(server.requests[0].searchParams.get("reset")).toBe("1");
@@ -175,7 +181,7 @@ describe("nemar admin hed-sweep: request shape", () => {
   });
 });
 
-describe("nemar admin hed-sweep: loop and output", () => {
+describe("nemar admin fleet sweep hed: loop and output", () => {
   test("loops across batches until remaining reaches 0, then reports totals", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([
@@ -183,7 +189,7 @@ describe("nemar admin hed-sweep: loop and output", () => {
       { processed: 3, withHed: 1, withoutHed: 2, unknown: 0, errors: [], remaining: 0 },
     ]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--json"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed", "--json"], server.url);
       expect(result.exitCode).toBe(0);
       expect(server.requests.length).toBe(2);
       const parsed = JSON.parse(result.stdout);
@@ -202,7 +208,7 @@ describe("nemar admin hed-sweep: loop and output", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([HED_SWEEP_DONE]);
     try {
-      const result = await runCli(["admin", "hed-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("processed=1");
       expect(result.stdout).toContain("hed=1");
@@ -239,7 +245,7 @@ describe("nemar admin hed-sweep: loop and output", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--json"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed", "--json"], server.url);
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -252,7 +258,7 @@ describe("nemar admin hed-sweep: loop and output", () => {
       { processed: 1, withHed: 1, withoutHed: 0, unknown: 0, errors: [], remaining: null },
     ]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--json"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed", "--json"], server.url);
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -266,7 +272,7 @@ describe("nemar admin hed-sweep: loop and output", () => {
       { processed: 0, withHed: 0, withoutHed: 0, unknown: 0, errors: [], remaining: 2 },
     ]);
     try {
-      const result = await runCli(["admin", "hed-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed"], server.url);
       // Mirrors recording-stats-sweep/signal-defaults-sweep: a stuck (but
       // non-null, error-free) `remaining` breaks the loop with a warning
       // rather than exiting non-zero.
@@ -279,11 +285,11 @@ describe("nemar admin hed-sweep: loop and output", () => {
   });
 });
 
-describe("nemar admin hed-sweep: help", () => {
+describe("nemar admin fleet sweep hed: help", () => {
   test("--help documents the reset flag", async () => {
     const server = startCaptureServer([HED_SWEEP_DONE]);
     try {
-      const result = await runCli(["admin", "hed-sweep", "--help"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "hed", "--help"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("--limit");
       expect(result.stdout).toContain("--reset");

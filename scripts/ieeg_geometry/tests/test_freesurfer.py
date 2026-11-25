@@ -497,3 +497,39 @@ def test_an_equal_count_hemisphere_swap_is_refused(ds):
         fsm.check_registration(paired, swapped)
     assert exc.value.reason == "registration-check-failed"
     assert fsm.failed_conditions(fsm.measure_registration(paired, swapped))
+
+
+def test_a_dirty_source_gives_a_valid_table(ds):
+    src = ds / (P02 + "_electrodes.tsv")
+    lines = src.read_text().splitlines()
+    header = lines[0].split("\t") + ["seizure_zone"]
+    rows = []
+    for i, line in enumerate(lines[1:]):
+        cells = dict(zip(lines[0].split("\t"), line.split("\t"), strict=True))
+        cells["size"] = "NaN"
+        cells["hemisphere"] = {"R": "right", "L": "lh"}.get(cells["hemisphere"], "")
+        cells["seizure_zone"] = "n/a" if i % 2 else "yes"
+        rows.append("\t".join(cells[c] for c in header))
+    src.write_text("\n".join(["\t".join(header), *rows]) + "\n")
+    results = fsm.plan_dataset(ds)
+    fsm.write_outputs(ds, results)
+    out_header, out_rows = _read_tsv(ds / P02_FS)
+    assert out_header[:5] == ["name", "x", "y", "z", "size"]
+    assert "seizure_zone" not in out_header  # no sidecar of the dataset defines it
+    assert {r["size"] for r in out_rows} == {"n/a"}
+    assert {r["hemisphere"] for r in out_rows} <= {"L", "R", "n/a"}
+    assert "nan" not in (ds / P02_FS).read_text().lower()
+    (out,) = _by_sub(results, "p02").outputs
+    cleaning = fsm._table(out).cleaning
+    assert cleaning.dropped_columns == ("seizure_zone",)
+    assert cleaning.coerced_cells["size"] == len(out_rows)
+    assert cleaning.hemisphere_rewritten == len(out_rows)
+
+
+def test_a_repeated_electrode_name_is_refused_by_the_freesurfer_track(ds):
+    src = ds / (P02 + "_electrodes.tsv")
+    lines = src.read_text().splitlines()
+    lines[2] = "\t".join([lines[1].split("\t")[0], *lines[2].split("\t")[1:]])
+    src.write_text("\n".join(lines) + "\n")
+    res = _by_sub(fsm.plan_dataset(ds), "p02")
+    assert [r.reason for r in res.refusals] == ["electrodes-names"] and not res.outputs

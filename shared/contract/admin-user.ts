@@ -104,11 +104,11 @@ export type AdminUserEditBody = z.infer<typeof adminUserEditBodySchema>;
 const NOT_EDITABLE_HINTS: Readonly<Record<string, string>> = {
   orcid_verified:
     "the flag is set by attesting the iD with --orcid (owners only, ADR 0106) or by the person linking it with ORCID sign-in",
-  role: "use 'nemar admin role <username> <role>' (owner only)",
-  status: "use 'nemar admin approve' or 'nemar admin revoke'",
-  service_access: "upload access is granted only by 'nemar admin approve' (ADR 0040)",
-  account_kind: "use 'nemar admin kind <username> <kind>' (owner only)",
-  identity_conflict: "use 'nemar admin duplicates --clear <id>'",
+  role: "use 'nemar admin users role <username> <role>' (owner only)",
+  status: "use 'nemar admin users approve' or 'nemar admin users revoke'",
+  service_access: "upload access is granted only by 'nemar admin users approve' (ADR 0040)",
+  account_kind: "use 'nemar admin users kind <username> <kind>' (owner only)",
+  identity_conflict: "use 'nemar admin users duplicates --clear <id>'",
   email_verified:
     "set when the person proves their inbox; changing the email address resets it for you",
   description: "that is the person's own statement, and an admin does not rewrite it",
@@ -245,6 +245,18 @@ export const adminUserDetailSchema = z
     service_access_granted_by: z.number().int().nullable().optional(),
     upload_access_requested_at: z.string().nullable().optional(),
     upload_access_notified_at: z.string().nullable().optional(),
+    /**
+     * Compute access (epic #2021 phase D1; migration 0131): its own grant, never `service_access`. The
+     * state is one of `shared/compute-access-state.ts`; the purpose text is not here (it is read in the
+     * compute access queue, `GET /admin/compute/access`).
+     */
+    compute_access: z.string().optional(),
+    compute_access_requested_at: z.string().nullable().optional(),
+    compute_access_notified_at: z.string().nullable().optional(),
+    compute_access_granted_at: z.string().nullable().optional(),
+    compute_access_granted_by: z.number().int().nullable().optional(),
+    compute_terms_version: z.string().nullable().optional(),
+    compute_terms_accepted_at: z.string().nullable().optional(),
     identity_conflict: z.number().int().nullable().optional(),
     username_auto_assigned: z.number().int().nullable().optional(),
     sandbox_completed: z.number().int().nullable().optional(),

@@ -7,6 +7,10 @@
  * Cloudflare path calls the `send_email` binding (epic #1893, ADR 0110).
  */
 
+import {
+  COMMUNITY_MAIL_CATEGORIES,
+  type CommunityMailPreferences,
+} from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
@@ -126,6 +130,11 @@ export interface EmailDeliveryEnv {
   EMAIL_FALLBACK?: string;
   /** The Cloudflare Email Service `send_email` binding. */
   EMAIL?: CloudflareSendEmail;
+  /**
+   * This API's origin. A `List-Unsubscribe` header is accepted only on exactly this origin
+   * ({@link validateMailHeaders}), so a send can never carry an unsubscribe URL that points elsewhere.
+   */
+  API_BASE_URL?: string;
 }
 
 /** The provider a send goes through; the Cloudflare case carries its binding. */
@@ -284,10 +293,15 @@ function sendFailureText(error: unknown, address: string): string {
   return redactAddressIn(error instanceof Error ? error.message : String(error), address);
 }
 
-export interface EmailPreferences {
-  user_approval: boolean;
-  publication_request: boolean;
-  announcements: boolean;
+/**
+ * The alerts an admin or owner receives about their own work. Each is switched per account in
+ * `users.email_preferences` and read by {@link getAdminEmailsForCategory}, which is why none of the
+ * community categories (news, RFCs, maintenance, recalls) is among them: a community message has
+ * no "at least one admin must receive it" fallback and must never reach that code (ADR 0132).
+ */
+export const ADMIN_ALERT_CATEGORIES = [
+  "user_approval",
+  "publication_request",
   /**
    * The anonymity sweep found something on an anonymous deposit (#1409).
    *
@@ -297,7 +311,7 @@ export interface EmailPreferences {
    * have been disclosed. Coupling the two would let the second be switched off
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
-  dataset_anonymity: boolean;
+  "dataset_anonymity",
   /**
    * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
    *
@@ -306,24 +320,45 @@ export interface EmailPreferences {
    * hearing which published datasets carry identifiers. Opted in by default,
    * like every category here, so a stored row from before it existed receives it.
    */
-  identifier_sweep: boolean;
+  "identifier_sweep",
   /**
    * A support ticket was assigned to the admin, or arrived unassigned in a queue they can work, or
    * was escalated to them (epic #1893 phase 3, ADR 0112). Its own category so an admin can leave
    * the ticket stream without losing approval or publication mail. Opted in by default.
    */
-  support_tickets: boolean;
-}
+  "support_tickets",
+  /**
+   * A person asked for compute access (epic #2021 phase D1, ADR 0118). Its own category, not
+   * `user_approval`, for the reason `dataset_anonymity` has one: an admin who stops watching upload
+   * requests has said nothing about wanting to stop hearing about compute, which is a separate
+   * export-control review of a separate grant. Opted in by default, so a stored row from before it
+   * existed receives it.
+   */
+  "compute_requests",
+] as const;
 
-export type EmailCategory = keyof EmailPreferences;
+export type AdminAlertCategory = (typeof ADMIN_ALERT_CATEGORIES)[number];
+
+export type AdminAlertPreferences = { [K in AdminAlertCategory]: boolean };
+
+/**
+ * Everything `users.email_preferences` can say: the admin alerts plus the three community
+ * categories a person may turn off. A recall is not here, because nothing may turn it off.
+ * `announcements`, the one key that used to cover all community mail, is retired (ADR 0132,
+ * migration 0146); it is carried into `news`, `rfcs` and `maintenance` and no longer stored.
+ */
+export type EmailPreferences = AdminAlertPreferences & CommunityMailPreferences;
 
 export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
-  announcements: true,
   dataset_anonymity: true,
   identifier_sweep: true,
   support_tickets: true,
+  compute_requests: true,
+  news: true,
+  rfcs: true,
+  maintenance: true,
 };
 
 interface ResendResponse {
@@ -338,23 +373,23 @@ interface AdminRow {
 }
 
 /**
- * Parse email preferences from DB JSON string, defaulting to all enabled
+ * Parse email preferences from DB JSON string, defaulting to all enabled.
+ *
+ * `!== false` for every key, so a key a row has never seen opts IN rather than out: defaulting a
+ * new alert to off would silently give every current admin no anonymity mail at all, and a
+ * community category an account never chose is on by default (ADR 0132, owner decision of
+ * 2026-11-20: news is opt-out). A row stored before the community keys existed is rewritten
+ * with explicit values by migration 0146, so "missing" here means "created after it".
  */
 export function parseEmailPreferences(raw: string | null): EmailPreferences {
   if (!raw) return { ...DEFAULT_EMAIL_PREFERENCES };
   try {
     const parsed = JSON.parse(raw);
-    return {
-      user_approval: parsed.user_approval !== false,
-      publication_request: parsed.publication_request !== false,
-      announcements: parsed.announcements !== false,
-      // `!== false` throughout, so a row stored before this key existed opts
-      // IN rather than out. Defaulting a new alert to off would silently give
-      // every current admin no anonymity mail at all.
-      dataset_anonymity: parsed.dataset_anonymity !== false,
-      identifier_sweep: parsed.identifier_sweep !== false,
-      support_tickets: parsed.support_tickets !== false,
-    };
+    const result = { ...DEFAULT_EMAIL_PREFERENCES };
+    for (const key of [...ADMIN_ALERT_CATEGORIES, ...COMMUNITY_MAIL_CATEGORIES]) {
+      result[key] = parsed[key] !== false;
+    }
+    return result;
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
     return { ...DEFAULT_EMAIL_PREFERENCES };
@@ -415,7 +450,7 @@ export function isAdminNotificationAllowed(env: AdminNotificationEnv | undefined
  */
 export async function getAdminEmailsForCategory(
   db: D1Database,
-  category: EmailCategory,
+  category: AdminAlertCategory,
   env: AdminNotificationEnv,
 ): Promise<string[]> {
   if (!isAdminNotificationAllowed(env)) {
@@ -578,7 +613,7 @@ export async function sendEmail(
   headers?: Record<string, string>,
 ): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
-  const extraHeaders = validateMailHeaders(headers);
+  const extraHeaders = validateMailHeaders(headers, deliveryEnv?.API_BASE_URL);
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
       `[email] suppressed send to ${redactRecipient(to)} (subject: "${subject}"): ENVIRONMENT=${deliveryEnv?.ENVIRONMENT ?? "unset"} is not production and the recipient is not on DEV_EMAIL_ALLOWLIST`,
@@ -672,12 +707,51 @@ export class MailHeaderError extends Error {
 }
 
 /**
- * The only extra headers a caller may set: the threading pair. Names compare case-insensitively.
+ * The only extra headers a caller may set: the threading pair, and the RFC 8058 one-click pair that
+ * community mail carries (epic #2260 phase 3). Names compare case-insensitively.
  * `Message-ID` is deliberately absent: the Cloudflare Email Service controls it and refuses the
  * whole send for it (`E_HEADER_NOT_ALLOWED`); the id a send went out under is read back from
- * {@link SendResult} instead.
+ * {@link SendResult} instead. The two `List-Unsubscribe` headers have value rules of their own
+ * (see {@link validateMailHeaders}); no other `List-*` header is allowed.
  */
-export const ALLOWED_MAIL_HEADERS: readonly string[] = ["In-Reply-To", "References"];
+export const ALLOWED_MAIL_HEADERS: readonly string[] = [
+  "In-Reply-To",
+  "References",
+  "List-Unsubscribe",
+  "List-Unsubscribe-Post",
+];
+
+/** The one value `List-Unsubscribe-Post` may have (RFC 8058, section 3.1). */
+export const LIST_UNSUBSCRIBE_POST_VALUE = "List-Unsubscribe=One-Click";
+
+/**
+ * `List-Unsubscribe` is exactly one angle-bracketed HTTPS URI on this API's unsubscribe path, with a
+ * token in the exact shape `services/mail-links.ts` mints: no `mailto:`, no list of URIs, no plain
+ * HTTP (RFC 8058 requires HTTPS, and Cloudflare refuses HTTP). The mailbox provider POSTs to it, so
+ * it must be the route of `routes/mail.ts` on the configured API origin and nothing else.
+ * Group 1 is the origin, compared with the configured one.
+ */
+const LIST_UNSUBSCRIBE_RE =
+  /^<(https:\/\/[^\s<>,/?#@]+)\/mail\/unsubscribe\/v1\.\d{1,12}\.(?:news|rfcs|maintenance)\.\d{1,12}\.[A-Za-z0-9_-]{43}>$/;
+
+/**
+ * The origin unsubscribe URLs are built on, or null when `API_BASE_URL` cannot carry one: it must
+ * be a bare https origin (a trailing slash is dropped), with no credentials, path, query or
+ * fragment, because the unsubscribe path is appended to it as given.
+ */
+export function unsubscribeOrigin(apiBaseUrl: string | undefined): string | null {
+  const raw = (apiBaseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!raw.startsWith("https://")) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return null;
+  if (/[?#]/.test(raw) || raw.slice("https://".length).includes("/")) return null;
+  return raw;
+}
 
 /**
  * The headers the Cloudflare Email Service accepts from a sender
@@ -735,11 +809,13 @@ const MAIL_HEADER_VALUE_MAX = 998;
 /**
  * Check the extra headers of a send against {@link ALLOWED_MAIL_HEADERS} and return them under
  * their canonical names, or undefined when none. A name outside the list, a value with a control
- * character (CR or LF would inject a header) or an over-long value throws a plain Error before any
- * provider is called.
+ * character (CR or LF would inject a header), an over-long value or a malformed one throws
+ * {@link MailHeaderError} before any provider is called. `apiBaseUrl` is this API's origin: a
+ * `List-Unsubscribe` URI is accepted only on it, so with none (or an unusable one) it is refused.
  */
 export function validateMailHeaders(
   headers: Record<string, string> | undefined,
+  apiBaseUrl?: string,
 ): Record<string, string> | undefined {
   if (!headers) return undefined;
   const out: Record<string, string> = {};
@@ -755,7 +831,29 @@ export function validateMailHeaders(
         `mail header ${canonical} must be 1 to ${MAIL_HEADER_VALUE_MAX} characters`,
       );
     }
+    if (canonical === "List-Unsubscribe") {
+      const match = LIST_UNSUBSCRIBE_RE.exec(value);
+      const origin = unsubscribeOrigin(apiBaseUrl);
+      if (
+        !match ||
+        origin === null ||
+        (match[1] as string).toLowerCase() !== origin.toLowerCase()
+      ) {
+        throw new MailHeaderError(
+          "mail header List-Unsubscribe must be exactly one <https://...> unsubscribe URI on this API's origin",
+        );
+      }
+    }
+    if (canonical === "List-Unsubscribe-Post" && value !== LIST_UNSUBSCRIBE_POST_VALUE) {
+      throw new MailHeaderError(
+        `mail header List-Unsubscribe-Post must be exactly ${LIST_UNSUBSCRIBE_POST_VALUE}`,
+      );
+    }
     out[canonical] = value;
+  }
+  // RFC 8058: the Post header means nothing without the URI it applies to.
+  if (out["List-Unsubscribe-Post"] && !out["List-Unsubscribe"]) {
+    throw new MailHeaderError("mail header List-Unsubscribe-Post requires List-Unsubscribe");
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -1212,7 +1310,7 @@ export async function sendKeyRegenerationVerificationEmail(
  * `username` and `github_username` are nullable because a web/ORCID account
  * has neither (migration 0026): the mail names the account by id and its
  * approve command by `--id` in that case, rather than rendering an empty
- * GitHub link and a `nemar admin approve` with no argument.
+ * GitHub link and a `nemar admin users approve` with no argument.
  */
 export async function sendAdminNotificationEmail(
   adminEmails: string[],
@@ -1231,8 +1329,8 @@ export async function sendAdminNotificationEmail(
 ): Promise<void> {
   const label = user.username ?? (user.id ? `id ${user.id}` : user.email);
   const approveCommand = user.username
-    ? `nemar admin approve</span> ${escapeHtml(user.username)}`
-    : `nemar admin approve</span> --id ${escapeHtml(String(user.id ?? ""))}`;
+    ? `nemar admin users approve</span> ${escapeHtml(user.username)}`
+    : `nemar admin users approve</span> --id ${escapeHtml(String(user.id ?? ""))}`;
   const githubCell = user.github_username
     ? `<a href="https://github.com/${escapeHtml(user.github_username)}" style="color: #2563eb;">${escapeHtml(user.github_username)}</a>`
     : "<em>not linked</em>";
@@ -1421,7 +1519,7 @@ export async function sendUploadAccessRequestEmail(
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Granting upload access</h2>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin approve</span> ${escapeHtml(request.username)}
+    <span style="color: #16a34a;">nemar admin users approve</span> ${escapeHtml(request.username)}
   </div>
 
   <p style="color: #666; font-size: 14px;">
@@ -1467,6 +1565,260 @@ export async function sendUploadAccessRequestEmail(
     }
   }
   return outcome;
+}
+
+/**
+ * Tell the admins a person asked for compute access (epic #2021 phase D1; ADR 0118). Same delivery shape
+ * as {@link sendUploadAccessRequestEmail}, whose per-recipient results it returns for the same reason: a
+ * request that nobody receives is a person waiting forever for a review that was never queued, so the
+ * route stamps `compute_access_notified_at` only when one send landed and re-sends when none did.
+ *
+ * The card carries every field the review reads (name, institution, location, ORCID iD, the purpose
+ * and the terms version accepted) and LINKS to the administrator's compute tab (`adminUrl`), never to a
+ * file or a result. Nothing is sent to the requester: they asked, and the answer arrives as the decision
+ * mail. Recipients in `failures` are redacted.
+ */
+export async function sendComputeAccessRequestEmail(
+  adminEmails: string[],
+  request: {
+    id: number;
+    username: string | null;
+    given_name: string;
+    family_name: string;
+    email: string;
+    orcid: string | null;
+    affiliation: string;
+    city: string;
+    country: string;
+    purpose: string;
+    terms_version: string;
+    /** The administrator's compute tab, built by the caller from the app base address. */
+    adminUrl: string;
+  },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<AdminNotificationOutcome> {
+  const notSet = "<em>not set</em>";
+  const row = (label: string, value: string) =>
+    `<tr>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb; background: #f9fafb; font-weight: bold;">${label}</td>
+      <td style="padding: 8px 12px; border: 1px solid #e5e7eb;">${value}</td>
+    </tr>`;
+  const who = request.username ?? `id ${request.id}`;
+  const grantCommand = request.username
+    ? `nemar admin compute access grant ${escapeHtml(request.username)}`
+    : `nemar admin compute access grant --id ${request.id}`;
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #f59e0b;">Compute Access Requested</h1>
+
+  <p>A verified account with a proven ORCID iD has asked for compute access. This is a separate grant from
+  upload access: check the person, their institution, their location and what they intend to compute, then
+  grant or decline. A grant lets the person use compute within the limits an administrator sets; the owner policy's default allocation applies, if there is one.</p>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Requester</h2>
+
+  <table style="border-collapse: collapse; width: 100%; margin: 16px 0;">
+    ${row("Username", request.username ? escapeHtml(request.username) : notSet)}
+    ${row("Name", escapeHtml(`${request.given_name} ${request.family_name}`))}
+    ${row("Email", escapeHtml(request.email))}
+    ${row(
+      "ORCID",
+      request.orcid
+        ? `<a href="https://orcid.org/${escapeHtml(request.orcid)}" style="color: #2563eb;">${escapeHtml(request.orcid)}</a>`
+        : notSet,
+    )}
+    ${row("Affiliation", escapeHtml(request.affiliation))}
+    ${row("City", escapeHtml(request.city))}
+    ${row("Country", escapeHtml(request.country))}
+    ${row("Terms accepted", escapeHtml(request.terms_version))}
+  </table>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">What they intend to compute</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(request.purpose)}</div>
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Deciding</h2>
+
+  <p>Review the request on the compute tab:
+  <a href="${escapeHtml(request.adminUrl)}" style="color: #2563eb;">${escapeHtml(request.adminUrl)}</a></p>
+
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    <span style="color: #16a34a;">${grantCommand}</span>
+  </div>
+
+  <p style="color: #666; font-size: 14px;">
+    To see every open request:<br>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin compute access list --state requested</code>
+  </p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        `[NEMAR] Compute access requested: ${who}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      outcome.delivered++;
+    } catch (error) {
+      const detail = sendFailureText(error, adminEmail);
+      console.error(
+        `Failed to send compute-access request to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
+    }
+  }
+  return outcome;
+}
+
+/** What an administrator decided about a person's compute access, as the person is told it. */
+export type ComputeAccessDecisionMail = "granted" | "denied" | "suspended" | "revoked";
+
+const COMPUTE_DECISION_MAIL: Record<
+  ComputeAccessDecisionMail,
+  { subject: string; heading: string; color: string; body: string }
+> = {
+  granted: {
+    subject: "Compute access granted on NEMAR",
+    heading: "Compute access granted",
+    color: "#16a34a",
+    body: "An administrator has reviewed your request and granted compute access to your NEMAR account. You can use compute within the limits an administrator sets, and your balances are on your compute page.",
+  },
+  denied: {
+    subject: "Your NEMAR compute access request",
+    heading: "Compute access not granted",
+    color: "#dc2626",
+    body: "An administrator has reviewed your request and has not granted compute access to your NEMAR account. The request has been answered and cannot be made again.",
+  },
+  suspended: {
+    subject: "NEMAR compute access suspended",
+    heading: "Compute access suspended",
+    color: "#d97706",
+    body: "An administrator has suspended compute access on your NEMAR account. Jobs that were running are being stopped.",
+  },
+  revoked: {
+    subject: "NEMAR compute access ended",
+    heading: "Compute access ended",
+    color: "#dc2626",
+    body: "An administrator has ended compute access on your NEMAR account. Jobs that were running are being stopped.",
+  },
+};
+
+/** The fixed heading the administrator's notice is mailed under. */
+export const COMPUTE_DECISION_NOTICE_HEADING = "The reason for this decision";
+
+/** The support address the review sentence names when the Worker has no REPLY_TO configured. */
+export const COMPUTE_DECISION_SUPPORT_FALLBACK = "support@nemar.org";
+
+/**
+ * The fixed sentence every decision that takes or withholds access ends with (the compute terms promise
+ * it, nemarOrg/docs#105). It names the same address the mail's Reply-To carries (the configured
+ * REPLY_TO, `support@test.nemar.org` on staging), so a reply and a written mail reach the same inbox;
+ * {@link COMPUTE_DECISION_SUPPORT_FALLBACK} only when none is configured.
+ */
+export function computeDecisionReviewSentence(replyTo?: string): string {
+  const configured = replyTo?.trim() ? parseMailbox(replyTo) : undefined;
+  const address =
+    (typeof configured === "string" ? configured : configured?.email) ||
+    COMPUTE_DECISION_SUPPORT_FALLBACK;
+  return `To ask for a review of this decision, reply to this email or write to ${address}.`;
+}
+
+/**
+ * Tell a person what an administrator decided about their compute access (epic #2021 phase D1). One
+ * function for the four decisions, so the mails cannot drift apart. Sent AFTER the decision commits and
+ * never inside it: a send that fails leaves the decision standing, and the route reports that.
+ *
+ * The audit `reason` is NOT in the mail and never reaches this function: free text typed for the record
+ * is not text to send a person. The `notice` is: the administrator typed it FOR the person, and it is
+ * mailed escaped under {@link COMPUTE_DECISION_NOTICE_HEADING} (required for a suspension and an ending,
+ * optional for a denial, never for a grant: `COMPUTE_ACCESS_NOTICE_RULE`). A denial, a suspension and an
+ * ending close with {@link computeDecisionReviewSentence}, naming the Reply-To address. The link, for a
+ * grant only, is the person's compute page. The mail is HTML only: `sendEmail` sends no plain-text part.
+ *
+ * These sentences live here and not in `shared/contract/account-copy.ts`: that file is the copy the CLI
+ * and the website render (mirrored to the website and drift-tested), and neither renders a mail; every
+ * mail body in the Worker is declared in this module, next to the function that sends it.
+ */
+export async function sendComputeAccessDecisionEmail(
+  kind: ComputeAccessDecisionMail,
+  to: string,
+  givenName: string | null,
+  computeUrl: string,
+  notice: string | null,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const m = COMPUTE_DECISION_MAIL[kind];
+  const noticeBlock =
+    kind !== "granted" && notice?.trim()
+      ? `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">${COMPUTE_DECISION_NOTICE_HEADING}</h2>
+  <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; margin: 16px 0; white-space: pre-wrap;">${escapeHtml(notice.trim())}</div>
+`
+      : "";
+  const review =
+    kind !== "granted" ? `<p>${escapeHtml(computeDecisionReviewSentence(replyTo))}</p>` : "";
+  const greeting = givenName?.trim() ? escapeHtml(givenName.trim()) : "there";
+  const link =
+    kind === "granted"
+      ? `<p style="margin: 24px 0;"><a href="${escapeHtml(computeUrl)}" style="color: #2563eb; word-break: break-all;">${escapeHtml(computeUrl)}</a></p>`
+      : "";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: ${m.color};">${m.heading}</h1>
+
+  <p>Hello ${greeting},</p>
+
+  <p>${m.body}</p>
+  ${noticeBlock}
+  ${review}
+  ${link}
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+  await sendEmail(to, m.subject, html, resendApiKey, fromEmail, replyTo, isDev, deliveryEnv);
 }
 
 /**
@@ -1771,13 +2123,13 @@ ${screenSection}${reviewSection}
   <p>Review the dataset and approve or deny the request:</p>
 
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #16a34a;">nemar admin repo publish approve</span> ${escapeHtml(datasetId)}<br>
-    <span style="color: #dc2626;">nemar admin repo publish deny</span> ${escapeHtml(datasetId)} --reason "..."
+    <span style="color: #16a34a;">nemar admin dataset publish approve</span> ${escapeHtml(datasetId)}<br>
+    <span style="color: #dc2626;">nemar admin dataset publish deny</span> ${escapeHtml(datasetId)} --reason "..."
   </div>
 
   <p style="color: #666; font-size: 14px;">
     To see all pending requests:<br>
-    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin repo publish list</code>
+    <code style="background: #f4f4f5; padding: 2px 6px; border-radius: 4px;">nemar admin dataset publish list</code>
   </p>
 
   <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -2620,7 +2972,7 @@ export async function sendStalenessAdminReviewEmail(
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset, then keep or delete it:</p>
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
-    <span style="color: #dc2626;">nemar admin delete-dataset</span> ${escapeHtml(datasetId)}
+    <span style="color: #dc2626;">nemar admin dataset delete</span> ${escapeHtml(datasetId)}
   </div>
   <p style="color: #666; font-size: 14px;">To keep it instead, help the owner publish it or mint a DOI; either removes it from cleanup permanently.</p>
 

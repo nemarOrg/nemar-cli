@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import json
 import os
 import re
@@ -62,9 +61,11 @@ from .bids import (
     Discovered,
     ElectrodeSet,
     GeometryRefusal,
+    check_source_table,
     discover,
     read_electrode_set,
 )
+from .bids_clean import Cleaning, Table, electrodes_tsv, is_missing
 from .ownership import OwnedPath, Verification, blob_id, read_ownership, write_ownership
 from .reference import load_reference
 from .surfaces import Surface
@@ -330,6 +331,7 @@ class PlannedFile:
     inputs: tuple[tuple[str, str], ...]
     method: str
     verification: Verification
+    cleaning: Cleaning | None = None  # what the electrodes table writer changed, for the report
 
     @property
     def entry(self) -> OwnedPath:
@@ -409,19 +411,18 @@ def _prefix(path: Path) -> str:
     return path.name[: -len("_electrodes.tsv")]
 
 
-def _tsv_in_mm(path: Path, scale: float) -> bytes:
-    raw = path.read_bytes()
-    if scale == 1.0:
-        return raw
-    rows = [r for r in csv.reader(io.StringIO(raw.decode("utf-8-sig")), delimiter="\t") if r]
-    idx = [rows[0].index(a) for a in ("x", "y", "z")]
-    for row in rows[1:]:
-        for i in idx:
-            if row[i].strip().lower() not in ("", "n/a", "na", "nan"):
-                row[i] = f"{float(row[i]) * scale:.6f}".rstrip("0").rstrip(".")
-    out = io.StringIO()
-    csv.writer(out, delimiter="\t", lineterminator="\n").writerows(rows)
-    return out.getvalue().encode("utf-8")
+def _tsv_in_mm(path: Path, scale: float, output: Path) -> Table:
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        header = list(reader.fieldnames or [])
+        rows: list[dict[str, str | None]] = list(reader)
+    if scale != 1.0:
+        for row in rows:
+            for axis in ("x", "y", "z"):
+                value = row.get(axis)
+                if not is_missing(value):
+                    row[axis] = f"{float(value or '') * scale:.6f}".rstrip("0").rstrip(".")
+    return electrodes_tsv(header, rows, output)
 
 
 def _coordsystem_bytes(label: str, system_description: str, description: str) -> bytes:
@@ -494,14 +495,16 @@ def _build_files(
     coord_in = tuple(
         sorted(elec_in + ((rel(item.coordsystem_path), blob_id(item.coordsystem_path)),))
     )
+    table = _tsv_in_mm(item.electrodes_path, eset.scale_to_mm, elec_target)
     return (
         PlannedFile(
             rel(elec_target),
-            _tsv_in_mm(item.electrodes_path, eset.scale_to_mm),
+            table.data,
             "electrodes",
             elec_in,
             method,
             verification,
+            table.cleaning,
         ),
         PlannedFile(
             rel(coord_target),
@@ -617,6 +620,7 @@ def propose(
 
     try:
         eset = read_electrode_set(item, assume_units="mm")
+        check_source_table(item.electrodes_path)  # table writer: refuse what it cannot copy
     except GeometryRefusal as exc:
         return done(SKIPPED, f"unreadable: {exc.reason}")
     except (OSError, UnicodeDecodeError, csv.Error, ValueError, KeyError) as exc:

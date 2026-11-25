@@ -1,5 +1,5 @@
 /**
- * CLI `nemar admin recording-stats-sweep` / `nemar admin signal-defaults-sweep`
+ * CLI `nemar admin fleet sweep recording-stats` / `nemar admin fleet sweep signal-defaults`
  * (issue #1194), driven through the real entry point (`bun run src/index.ts
  * admin ... `). Mirrors test/zarr-fidelity-sweep-cli.test.ts's harness: a
  * real subprocess CLI invocation pointed at a real local HTTP server via
@@ -135,11 +135,11 @@ const SIGNAL_DEFAULTS_DONE = {
   remaining: 0,
 };
 
-describe("nemar admin recording-stats-sweep: auth", () => {
+describe("nemar admin fleet sweep recording-stats: auth", () => {
   test("without a stored apiKey, requireAuth blocks before any request is sent", async () => {
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "recording-stats"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -148,13 +148,13 @@ describe("nemar admin recording-stats-sweep: auth", () => {
   });
 });
 
-describe("nemar admin recording-stats-sweep: request shape", () => {
+describe("nemar admin fleet sweep recording-stats: request shape", () => {
   test("--limit is forwarded as ?limit=N on the real request", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
       const result = await runCli(
-        ["admin", "recording-stats-sweep", "--limit", "10", "--json"],
+        ["admin", "fleet", "sweep", "recording-stats", "--limit", "10", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -170,7 +170,10 @@ describe("nemar admin recording-stats-sweep: request shape", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "recording-stats", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests[0].searchParams.get("limit")).toBe("50");
     } finally {
@@ -183,7 +186,7 @@ describe("nemar admin recording-stats-sweep: request shape", () => {
     const server = startCaptureServer([{ reset: 7 }]);
     try {
       const result = await runCli(
-        ["admin", "recording-stats-sweep", "--reset", "--json"],
+        ["admin", "fleet", "sweep", "recording-stats", "--reset", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -196,7 +199,7 @@ describe("nemar admin recording-stats-sweep: request shape", () => {
   });
 });
 
-describe("nemar admin recording-stats-sweep: loop and output", () => {
+describe("nemar admin fleet sweep recording-stats: loop and output", () => {
   test("loops across batches until remaining reaches 0, then reports totals", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([
@@ -204,7 +207,10 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
       { processed: 2, measured: 2, unmeasured: 0, errors: [], remaining: 0 },
     ]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "recording-stats", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests.length).toBe(2);
       const parsed = JSON.parse(result.stdout);
@@ -222,7 +228,7 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "recording-stats"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("processed=1");
       expect(result.stdout).toContain("measured=1");
@@ -245,7 +251,10 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "recording-stats", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -258,7 +267,10 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
       { processed: 1, measured: 1, unmeasured: 0, errors: [], remaining: null },
     ]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "recording-stats", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -272,7 +284,7 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
       { processed: 0, measured: 0, unmeasured: 0, errors: [], remaining: 3 },
     ]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "recording-stats"], server.url);
       // Mirrors hedSweepCommand/availabilityReportCommand: a stuck (but
       // non-null, error-free) `remaining` breaks the loop with a warning
       // rather than exiting non-zero -- only a null `remaining` or a
@@ -290,11 +302,11 @@ describe("nemar admin recording-stats-sweep: loop and output", () => {
   });
 });
 
-describe("nemar admin signal-defaults-sweep: auth", () => {
+describe("nemar admin fleet sweep signal-defaults: auth", () => {
   test("without a stored apiKey, requireAuth blocks before any request is sent", async () => {
     const server = startCaptureServer([SIGNAL_DEFAULTS_DONE]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "signal-defaults"], server.url);
       expect(result.stdout).toContain("Not authenticated");
       expect(server.requests.length).toBe(0);
     } finally {
@@ -303,13 +315,13 @@ describe("nemar admin signal-defaults-sweep: auth", () => {
   });
 });
 
-describe("nemar admin signal-defaults-sweep: request shape", () => {
+describe("nemar admin fleet sweep signal-defaults: request shape", () => {
   test("--limit is forwarded as ?limit=N on the real request", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([SIGNAL_DEFAULTS_DONE]);
     try {
       const result = await runCli(
-        ["admin", "signal-defaults-sweep", "--limit", "5", "--json"],
+        ["admin", "fleet", "sweep", "signal-defaults", "--limit", "5", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -325,7 +337,10 @@ describe("nemar admin signal-defaults-sweep: request shape", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([SIGNAL_DEFAULTS_DONE]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "signal-defaults", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests[0].searchParams.get("limit")).toBe("15");
     } finally {
@@ -338,7 +353,7 @@ describe("nemar admin signal-defaults-sweep: request shape", () => {
     const server = startCaptureServer([{ reset: 4 }]);
     try {
       const result = await runCli(
-        ["admin", "signal-defaults-sweep", "--reset", "--json"],
+        ["admin", "fleet", "sweep", "signal-defaults", "--reset", "--json"],
         server.url,
       );
       expect(result.exitCode).toBe(0);
@@ -351,7 +366,7 @@ describe("nemar admin signal-defaults-sweep: request shape", () => {
   });
 });
 
-describe("nemar admin signal-defaults-sweep: loop and output", () => {
+describe("nemar admin fleet sweep signal-defaults: loop and output", () => {
   test("loops across batches until remaining reaches 0, then reports totals", async () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([
@@ -359,7 +374,10 @@ describe("nemar admin signal-defaults-sweep: loop and output", () => {
       { processed: 1, populated: 0, noData: 1, errors: [], remaining: 0 },
     ]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "signal-defaults", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(server.requests.length).toBe(2);
       const parsed = JSON.parse(result.stdout);
@@ -377,7 +395,7 @@ describe("nemar admin signal-defaults-sweep: loop and output", () => {
     seedAuthenticatedConfig();
     const server = startCaptureServer([SIGNAL_DEFAULTS_DONE]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "signal-defaults"], server.url);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("processed=1");
       expect(result.stdout).toContain("populated=1");
@@ -400,7 +418,10 @@ describe("nemar admin signal-defaults-sweep: loop and output", () => {
       },
     ]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep", "--json"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "signal-defaults", "--json"],
+        server.url,
+      );
       expect(result.exitCode).toBe(1);
     } finally {
       server.stop();
@@ -408,11 +429,14 @@ describe("nemar admin signal-defaults-sweep: loop and output", () => {
   });
 });
 
-describe("nemar admin recording-stats-sweep / signal-defaults-sweep: help", () => {
+describe("nemar admin fleet sweep recording-stats / signal-defaults: help", () => {
   test("recording-stats-sweep --help documents the reset flag", async () => {
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
-      const result = await runCli(["admin", "recording-stats-sweep", "--help"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "recording-stats", "--help"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("--limit");
       expect(result.stdout).toContain("--reset");
@@ -425,7 +449,10 @@ describe("nemar admin recording-stats-sweep / signal-defaults-sweep: help", () =
   test("signal-defaults-sweep --help documents the reset flag", async () => {
     const server = startCaptureServer([SIGNAL_DEFAULTS_DONE]);
     try {
-      const result = await runCli(["admin", "signal-defaults-sweep", "--help"], server.url);
+      const result = await runCli(
+        ["admin", "fleet", "sweep", "signal-defaults", "--help"],
+        server.url,
+      );
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("--limit");
       expect(result.stdout).toContain("--reset");
@@ -435,13 +462,13 @@ describe("nemar admin recording-stats-sweep / signal-defaults-sweep: help", () =
     }
   });
 
-  test("nemar admin --help lists both new sweep commands", async () => {
+  test("nemar admin fleet sweep --help lists both sweep commands", async () => {
     const server = startCaptureServer([RECORDING_STATS_DONE]);
     try {
-      const result = await runCli(["admin", "--help"], server.url);
+      const result = await runCli(["admin", "fleet", "sweep", "--help"], server.url);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("recording-stats-sweep");
-      expect(result.stdout).toContain("signal-defaults-sweep");
+      expect(result.stdout).toMatch(/^ {2}recording-stats\b/m);
+      expect(result.stdout).toMatch(/^ {2}signal-defaults\b/m);
     } finally {
       server.stop();
     }

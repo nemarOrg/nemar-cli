@@ -211,8 +211,8 @@ describe("regression: --flag = value split-token form (bash's default COMP_WORDB
 });
 
 // #1173 review: subcommandNames() walked cmd.commands with no hidden check,
-// so `admin regenerate-iam` (registered `{ hidden: true }` in
-// src/commands/admin.ts specifically to stay out of --help) leaked into
+// so `admin regenerate-iam` (then a hidden alias, now a hidden moved-command
+// stub from src/lib/moved-commands.ts, kept out of --help either way) leaked into
 // `nemar __complete -- admin ""`. A synthetic tree built fresh in each test
 // above could not have caught this even in principle -- none of those trees
 // ever registered a hidden command, so the gap was never exercised, hidden
@@ -231,8 +231,8 @@ describe("regression: hidden commands do not leak into completion (#1173)", () =
     expect(result).not.toContain("regenerate-iam");
   });
 
-  test("a visible sibling (admin s3) still completes from the same real tree", () => {
+  test("a visible sibling (admin dataset) still completes from the same real tree", () => {
     const result = getCandidates(adminCommand, [""]);
-    expect(result).toContain("s3");
+    expect(result).toContain("dataset");
   });
 });

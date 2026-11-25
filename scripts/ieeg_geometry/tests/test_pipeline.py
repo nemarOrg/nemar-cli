@@ -109,6 +109,8 @@ def test_select_paths_takes_what_the_tracks_read_and_never_recordings():
         "participants.tsv",
         "sub-1/ieeg/sub-1_electrodes.tsv",
         "sub-1/ieeg/sub-1_coordsystem.json",
+        "sub-1/ieeg/sub-1_electrodes.json",
+        "electrodes.json",
         "sub-1/ieeg/sub-1_task-x_channels.tsv",
         "sub-1/ieeg/sub-1_task-x_ieeg.edf",
         "sub-1/ieeg/sub-1_task-x_events.tsv",
@@ -134,6 +136,8 @@ def test_select_paths_takes_what_the_tracks_read_and_never_recordings():
         "dataset_description.json",
         ".nemar/ieeg-geometry.json",
         "task-x_coordsystem.json",
+        "electrodes.json",
+        "sub-1/ieeg/sub-1_electrodes.json",
         "sub-1/ieeg/sub-1_task-x_channels.tsv",
         "derivatives/freesurfer/sub-1/surf/lh.pial",
         "derivatives/freesurfer/sub-1/surf/rh.sphere.reg",
@@ -150,6 +154,54 @@ def test_fetch_downloads_only_the_selected_annexed_content(remote, tmp_path):
     link = clone / "derivatives/freesurfer/sub-p02/surf/lh.pial"
     assert link.is_symlink() and link.exists()  # the annex object is in place
     assert not (clone / "sub-p02" / "ses-umcuiemu01" / "ieeg" / "x_ieeg.edf").exists()
+
+
+def test_fetch_checks_out_electrodes_sidecars_at_every_level(tmp_path):
+    src = tmp_path / "src"
+    (src / "sub-1" / "ieeg").mkdir(parents=True)
+    for rel in (
+        "README.md",
+        "dataset_description.json",
+        "electrodes.json",
+        "sub-1/ieeg/sub-1_electrodes.tsv",
+        "sub-1/ieeg/sub-1_electrodes.json",
+    ):
+        (src / rel).write_text("{}\n" if rel.endswith(".json") else "x\n")
+    remote = build_remote(src, tmp_path / "remote")
+    got = fetch.fetch_files(
+        DATASET_ID,
+        tmp_path / "w",
+        version=VERSION,
+        repo_url=remote.repo_url,
+        data_url=remote.data_url,
+        api_url=remote.api_url,
+    )
+    assert not got.failed
+    assert (got.clone / "electrodes.json").is_file()
+    assert (got.clone / "sub-1/ieeg/sub-1_electrodes.json").is_file()
+
+
+def test_a_dirty_source_gives_a_cleaning_entry_and_a_valid_report(source, tmp_path):
+    dirty = tmp_path / "src"
+    shutil.copytree(source, dirty)
+    table = dirty / P02
+    lines = table.read_text().splitlines()
+    cols = lines[0].split("\t")
+    size = cols.index("size")
+    body = [lines[0]]
+    for line in lines[1:]:
+        cells = line.split("\t")
+        cells[size] = "NaN"
+        body.append("\t".join(cells))
+    table.write_text("\n".join(body) + "\n")
+    remote = build_remote(dirty, tmp_path / "remote")
+    analysis, written = _run(remote, tmp_path / "w")
+    assert written == []
+    report = analysis.report
+    assert not list(Draft202012Validator(SCHEMA).iter_errors(report))
+    (entry,) = [e for e in report["electrodes_cleaning"] if "sub-p02" in e["path"]]
+    assert entry["path"].endswith("_electrodes.tsv") and "_space-" in entry["path"]
+    assert entry["coerced_cells"]["size"] == len(lines) - 1
 
 
 def test_fetch_resolves_the_version_from_the_api(remote, tmp_path):

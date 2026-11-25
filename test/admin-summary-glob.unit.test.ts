@@ -1,5 +1,5 @@
 /**
- * Unit tests for the `--match <glob>` filter on `nemar admin summary check`.
+ * Unit tests for the `--match <glob>` filter on `nemar admin fleet summary check`.
  *
  * `globToRegExp` is the only branchy piece — the dispatch loop is exercised
  * by integration. Pin the glob semantics so a future "let me use regex

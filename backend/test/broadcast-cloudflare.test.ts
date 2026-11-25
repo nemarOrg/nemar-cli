@@ -46,7 +46,7 @@ function broadcast(db: Database, recipients: string[], env: EmailDeliveryEnv, ap
     FROM,
     {
       sentById: seedSender(db),
-      group: "admins",
+      group: "user:broadcastadmin",
       subject: "Maintenance window",
       bodyMarkdown: "Hello",
       recipients,
@@ -139,7 +139,7 @@ describe("sendBroadcast on the Cloudflare provider", () => {
       FROM,
       {
         sentById: seedSender(db),
-        group: "admins",
+        group: "user:broadcastadmin",
         subject: "Maintenance window",
         bodyMarkdown: "Hello",
         recipients: ["a@nemar.test", "slow@nemar.test", "c@nemar.test"],

@@ -1,7 +1,8 @@
 # ADR 0123: Derivatives live in a keyed store, named by what they read
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-11-14
+**Accepted:** 2026-11-22
 **Owner:** Seyed Yahya Shirazi
 
 Epic #2145.
