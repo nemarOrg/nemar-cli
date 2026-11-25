@@ -1,0 +1,5 @@
+[
+{"dtype":null,"kind":"group","name":"","path":"/","shape":null,"value":null},
+{"dtype":"int32","kind":"dataset","name":"checksummed","path":"/checksummed","shape":[8],"storage":{"address":null,"layout":"chunked","size":null},"value":[0,1,2,3,4,5,6,7]},
+{"dtype":"int16","kind":"dataset","name":"ok","path":"/ok","shape":[3],"storage":{"address":3532,"layout":"contiguous","size":6},"value":[0,1,2]}
+]
