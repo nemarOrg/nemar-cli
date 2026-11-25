@@ -31,13 +31,16 @@ import {
   type ScreenState,
   isScreenState,
   kindsPhrase,
+  screenErrorText,
   screenStateLabel,
 } from "../../../shared/identifier-screen-report.js";
 import { SCREEN_BATCH_MAX_SIZE } from "../../../shared/publication-limits.js";
 import type { Bindings } from "../types/bindings.js";
 import { OPEN_REQUEST_STATUSES_SQL } from "./approval-dispatch.js";
 import {
+  SCREEN_BATCH_REFUSAL_TEXT,
   type ScreenBatchDigest,
+  type ScreenBatchRefusal,
   getAdminEmailsForCategory,
   resolveEmailConfig,
   sendScreenBatchDigestEmail,
@@ -190,10 +193,25 @@ export async function noteBatchDispatch(env: Bindings, batchId: number): Promise
  * One request of the batch has settled (a stored report, a screen that could not start, a
  * dispatch the Worker refused): count it, and send the digest if that was the last. Never throws.
  */
-export async function settleBatchEntry(env: Bindings, batchId: number): Promise<void> {
+export async function settleBatchEntry(
+  env: Bindings,
+  batchId: number,
+  refusal?: { datasetId: string; reason: ScreenBatchRefusal },
+): Promise<void> {
   try {
-    await env.DB.prepare("UPDATE screen_batches SET reported = reported + 1 WHERE id = ?")
-      .bind(batchId)
+    // A refused dispatch is recorded with its reason, so the digest can say it apart from a
+    // screen that could not start and from one that never reported.
+    await env.DB.prepare(
+      refusal
+        ? `UPDATE screen_batches
+              SET reported = reported + 1,
+                  refused = json_insert(COALESCE(refused, '[]'), '$[#]', json(?))
+            WHERE id = ?`
+        : "UPDATE screen_batches SET reported = reported + 1 WHERE id = ?",
+    )
+      .bind(
+        ...(refusal ? [JSON.stringify([refusal.datasetId, refusal.reason]), batchId] : [batchId]),
+      )
       .run();
   } catch (err) {
     console.error(`[screen-batch] could not count a report of batch ${batchId}: ${errorText(err)}`);
@@ -233,7 +251,7 @@ export type DigestOutcome = "sent" | "not-due" | "undelivered";
  */
 export async function sendDigestIfDue(env: Bindings, batchId: number): Promise<DigestOutcome> {
   const db = env.DB;
-  let claim: { claim: string; selection: string } | null;
+  let claim: { claim: string; selection: string; refused: string | null } | null;
   try {
     claim = await db
       .prepare(
@@ -243,7 +261,7 @@ export async function sendDigestIfDue(env: Bindings, batchId: number): Promise<D
             AND (digest_claimed_at IS NULL OR digest_claimed_at < ${LEASE_EXPIRED_SQL})
             AND (reported >= total
                  OR last_dispatch_at < datetime('now', '-${DIGEST_AFTER_LAST_DISPATCH_MINUTES} minutes'))
-        RETURNING digest_claimed_at AS claim, selection`,
+        RETURNING digest_claimed_at AS claim, selection, refused`,
       )
       .bind(batchId)
       .first();
@@ -257,7 +275,12 @@ export async function sendDigestIfDue(env: Bindings, batchId: number): Promise<D
 
   let delivered = 0;
   try {
-    const digest = await buildDigest(env, batchId, parseSelection(claim.selection));
+    const digest = await buildDigest(
+      env,
+      batchId,
+      parseSelection(claim.selection),
+      parseRefused(claim.refused),
+    );
     const emails = await getAdminEmailsForCategory(env.DB, "publication_request", env);
     if (emails.length > 0) {
       const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
@@ -297,11 +320,41 @@ export async function sendDigestIfDue(env: Bindings, batchId: number): Promise<D
   return "undelivered";
 }
 
-/** What the digest says, read from the requests' rows now. */
+/** The `refused` column, read back without trusting it: dataset id to reason, unknown words dropped. */
+export function parseRefused(raw: string | null): Map<string, ScreenBatchRefusal> {
+  const out = new Map<string, ScreenBatchRefusal>();
+  if (!raw) return out;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const e of parsed) {
+        if (
+          Array.isArray(e) &&
+          typeof e[0] === "string" &&
+          typeof e[1] === "string" &&
+          e[1] in SCREEN_BATCH_REFUSAL_TEXT
+        ) {
+          out.set(e[0], e[1] as ScreenBatchRefusal);
+        }
+      }
+    }
+  } catch {
+    // An unreadable column names nobody; every request without a stored result is still listed.
+  }
+  return out;
+}
+
+/**
+ * What the digest says, read from the requests' rows now. Every request of the selection is in
+ * exactly one of three places: reported (a screen result is stored), not started (the screen could
+ * not start, the dispatch was refused or never made, each with its reason), or did not report
+ * (dispatched, no result by the deadline).
+ */
 async function buildDigest(
   env: Bindings,
   batchId: number,
   selection: SelectionEntry[],
+  refused: Map<string, ScreenBatchRefusal>,
 ): Promise<ScreenBatchDigest> {
   const rows = new Map<
     number,
@@ -333,12 +386,14 @@ async function buildDigest(
   }
 
   const NO_SCREEN = "no screen on record";
+  const NOT_STARTED = "not started";
   const beforeCounts = new Map<string, number>();
   const afterCounts = new Map<string, number>();
   const kinds: Partial<Record<FindingKind, number>> = {};
   const changed: ScreenBatchDigest["changed"] = [];
   const blocked: string[] = [];
   const notReported: string[] = [];
+  const notStarted: ScreenBatchDigest["notStarted"] = [];
   const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   let reported = 0;
 
@@ -348,21 +403,31 @@ async function buildDigest(
     bump(beforeCounts, before);
     const row = rows.get(requestId);
     const state: ScreenState | null = row ? readStoredState(row.screen) : null;
-    const settled =
-      row !== undefined &&
-      row.batch === batchId &&
-      state !== null &&
-      state !== "pending" &&
-      state !== "unreported";
-    if (!settled || !row || state === null) {
+    const inBatch = row !== undefined && row.batch === batchId;
+    if (!row || !inBatch) {
+      // Never dispatched by this batch: refused (with the reason the route gave) or not reached.
+      bump(afterCounts, NOT_STARTED);
+      notStarted.push({
+        datasetId,
+        reason: SCREEN_BATCH_REFUSAL_TEXT[refused.get(datasetId) ?? "not-dispatched"],
+      });
+      continue;
+    }
+    if (state === null || state === "pending" || state === "unreported") {
       bump(afterCounts, "did not report");
       notReported.push(datasetId);
+      continue;
+    }
+    const report = readStoredReport(row.report);
+    if (report?.error === "dispatch-unconfigured" || report?.error === "dispatch-failed") {
+      // The screen could not start: its error is stored, but no screen ran.
+      bump(afterCounts, NOT_STARTED);
+      notStarted.push({ datasetId, reason: screenErrorText(report.error) });
       continue;
     }
     reported++;
     const after = screenStateLabel(state);
     bump(afterCounts, after);
-    const report = readStoredReport(row.report);
     for (const [kind, n] of Object.entries(report?.scan?.findings_by_kind ?? {})) {
       kinds[kind as FindingKind] = (kinds[kind as FindingKind] ?? 0) + (n ?? 0);
     }
@@ -384,6 +449,7 @@ async function buildDigest(
     kinds: kindsPhrase(kinds),
     changed,
     blocked,
+    notStarted,
     notReported,
   };
 }

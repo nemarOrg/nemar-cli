@@ -329,7 +329,7 @@ describe("--apply", () => {
       const mails = sends(calls);
       expect(mails).toHaveLength(1);
       expect(mails[0].subject).toBe(
-        "[NEMAR] Re-screen batch 1 finished: 1 of 3 reported, 2 did not",
+        "[NEMAR] Re-screen batch 1 finished: 1 of 3 reported, 2 not started",
       );
       const html = mails[0].html;
       for (const id of ["nm000501", "nm000502", "nm000503"].filter((x) => x !== first)) {

@@ -2276,9 +2276,26 @@ export interface ScreenBatchDigest {
   changed: { datasetId: string; from: string; to: string; nowBlocked: boolean }[];
   /** Requests the batch blocked; their depositors were NOT mailed. */
   blocked: string[];
-  /** Requests with no stored result from this batch, by dataset id. */
+  /** Requests that could not start, or whose dispatch was refused, or was never made, with the reason. */
+  notStarted: { datasetId: string; reason: string }[];
+  /** Requests dispatched whose screen did not report by the deadline, by dataset id. */
   notReported: string[];
 }
+
+/**
+ * Why a dispatch of a batch was refused, in the words the digest states. Closed: the route names
+ * one of these and nothing the request carried is quoted.
+ */
+export const SCREEN_BATCH_REFUSAL_TEXT = {
+  "no-request": "it has no active publication request",
+  "request-changed": "its request changed after the batch selected it",
+  "publishing-started": "its approval had already started publishing",
+  "screen-running": "a screen dispatched less than 50 minutes before had not reported",
+  "write-failed": "the database refused the write",
+  "not-dispatched":
+    "the batch never dispatched it (it was stopped first, or the request was screened again since)",
+} as const;
+export type ScreenBatchRefusal = keyof typeof SCREEN_BATCH_REFUSAL_TEXT;
 
 /**
  * The words of the digest, in one place (the style of the other copy tables): the template below
@@ -2287,10 +2304,15 @@ export interface ScreenBatchDigest {
  */
 const SCREEN_BATCH_DIGEST_COPY = {
   subject: (d: ScreenBatchDigest): string => {
-    const missing = d.total - d.reported;
-    return missing > 0
-      ? `[NEMAR] Re-screen batch ${d.batchId} finished: ${d.reported} of ${d.total} reported, ${missing} did not`
-      : `[NEMAR] Re-screen batch ${d.batchId} finished: all ${d.total} reported`;
+    const parts =
+      d.notStarted.length + d.notReported.length === 0
+        ? `all ${d.total} reported`
+        : [
+            `${d.reported} of ${d.total} reported`,
+            ...(d.notStarted.length > 0 ? [`${d.notStarted.length} not started`] : []),
+            ...(d.notReported.length > 0 ? [`${d.notReported.length} did not report`] : []),
+          ].join(", ");
+    return `[NEMAR] Re-screen batch ${d.batchId} finished: ${parts}`;
   },
   heading: (d: ScreenBatchDigest): string => `Re-screen batch ${d.batchId}`,
   intro: (d: ScreenBatchDigest): string =>
@@ -2305,9 +2327,12 @@ const SCREEN_BATCH_DIGEST_COPY = {
   blockedHeading: "Blocked by this batch; the depositor was not mailed",
   blockedNext:
     "Each depositor still has to be told what to fix. A request blocked on findings is released by a clear screen after the data is fixed.",
-  notReportedHeading: "Did not report",
+  notStartedHeading: "Could not start, or refused (not screened by this batch)",
+  notStartedNext:
+    "These were not screened. Re-run one with: nemar admin repo publish screen <dataset-id>.",
+  notReportedHeading: "Did not report by the deadline",
   notReportedNext:
-    "No result from this batch is stored for these requests. Re-run one with: nemar admin repo publish screen <dataset-id>. A report that arrives late is mailed as usual.",
+    "Their screens were dispatched and no result is stored. A report that arrives late is mailed as usual; to run one again: nemar admin repo publish screen <dataset-id>.",
   none: "None.",
 } as const;
 
@@ -2354,6 +2379,12 @@ export async function sendScreenBatchDigestEmail(
               }</li>`,
           )
           .join("")}</ul>`;
+  const notStartedHtml =
+    digest.notStarted.length === 0
+      ? `<p>${copy.none}</p>`
+      : `<ul style="margin: 8px 0 16px 0; padding-left: 20px;">${digest.notStarted
+          .map((n) => `<li><code>${escapeHtml(n.datasetId)}</code>: ${escapeHtml(n.reason)}</li>`)
+          .join("")}</ul>`;
   const html = `
 <!DOCTYPE html>
 <html>
@@ -2377,6 +2408,9 @@ export async function sendScreenBatchDigestEmail(
   <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.blockedHeading}</h2>
   ${digestIds(digest.blocked)}
   ${digest.blocked.length > 0 ? `<p>${copy.blockedNext}</p>` : ""}
+  <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notStartedHeading}</h2>
+  ${notStartedHtml}
+  ${digest.notStarted.length > 0 ? `<p>${escapeHtml(copy.notStartedNext)}</p>` : ""}
   <h2 style="color: #dc2626; font-size: 18px; margin-top: 24px;">${copy.notReportedHeading}</h2>
   ${digestIds(digest.notReported)}
   ${digest.notReported.length > 0 ? `<p>${escapeHtml(copy.notReportedNext)}</p>` : ""}

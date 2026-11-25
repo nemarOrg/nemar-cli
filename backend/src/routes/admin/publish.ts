@@ -34,6 +34,7 @@ import {
   approvalInFlightSql,
 } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
+import type { ScreenBatchRefusal } from "../../services/email";
 import { getDatasetsAuth } from "../../services/github-auth";
 import { signApprovalDispatchToken } from "../../services/github/callback-tokens";
 import {
@@ -1138,8 +1139,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       batchRequestId = entry[0];
     }
     // The batch is waiting on this request: every way out below that is not a dispatch settles it.
-    const settled = async (): Promise<void> => {
-      if (batchId !== null) await settleBatchEntry(c.env, batchId);
+    const settled = async (reason?: ScreenBatchRefusal): Promise<void> => {
+      if (batchId !== null) {
+        await settleBatchEntry(c.env, batchId, reason ? { datasetId, reason } : undefined);
+      }
     };
 
     if (isScreenExempt(datasetId)) {
@@ -1156,12 +1159,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       .bind(datasetId)
       .first<{ id: number; status: string; steps_completed: string | null }>();
     if (!request) {
-      await settled();
+      await settled("no-request");
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
     }
     if (batchRequestId !== null && request.id !== batchRequestId) {
       // The request the batch selected was withdrawn, denied or replaced since.
-      await settled();
+      await settled("request-changed");
       return c.json(
         {
           error: "batch_request_changed",
@@ -1172,7 +1175,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
     if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
-      await settled();
+      await settled("publishing-started");
       return c.json(APPROVAL_IN_PROGRESS, 409);
     }
     const dataset = await db
@@ -1190,7 +1193,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     } catch (err) {
       console.error(`[identifier-screen] re-run for ${datasetId} failed:`, errorMessage(err));
-      await settled();
+      await settled("write-failed");
       return c.json(
         {
           error: "identifier_screen_rerun_failed",
@@ -1212,7 +1215,15 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         .first<{ status: string; steps_completed: string | null; batch: number | null }>();
       // A repeated call for a request this batch already dispatched finds its screen pending:
       // that screen is still the batch's to wait for, so it is not settled a second time.
-      if (batchId === null || now?.batch !== batchId) await settled();
+      if (batchId === null || now?.batch !== batchId) {
+        await settled(
+          !now || !["requested", "blocked", "approving"].includes(now.status)
+            ? "no-request"
+            : now.status === "approving" && hasStartedPublishing(now.steps_completed)
+              ? "publishing-started"
+              : "screen-running",
+        );
+      }
       if (!now || !["requested", "blocked", "approving"].includes(now.status)) {
         return c.json({ error: "not_found", message: "No active publication request found" }, 404);
       }

@@ -13,6 +13,9 @@
 --   * `selection`: JSON array of [request_id, dataset_id, screen_state_before, status_before],
 --     the screen state and the request status read when the batch was created. It is how the
 --     digest says what changed and names a request that never reported. Bounded at 500 entries.
+--   * `refused`: JSON array of [dataset_id, reason word] for the dispatches the Worker refused
+--     (no active request, a request that changed, a screen still running, ...). The digest says
+--     them apart from a screen that could not start and from one that never reported.
 --   * `digest_claimed_at` / `digest_sent_at`: the digest's lease and its stamp. The lease is taken
 --     in one conditional UPDATE, so of two callbacks racing for the last report exactly one sends;
 --     `digest_sent_at` is set only after a send that reached at least one administrator, and a
@@ -33,6 +36,7 @@ CREATE TABLE screen_batches (
   reported INTEGER NOT NULL DEFAULT 0,
   last_dispatch_at TEXT NOT NULL DEFAULT (datetime('now')),
   selection TEXT NOT NULL,
+  refused TEXT,
   digest_claimed_at TEXT,
   digest_sent_at TEXT
 );

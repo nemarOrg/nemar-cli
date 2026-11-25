@@ -561,10 +561,10 @@ describe("a screen that never reports", () => {
       expect(swept.digests).toBe(1);
       // One mail, the digest: not the per-request mail of the timed-out screen.
       expect(subjectsOf(calls)).toEqual([
-        `[NEMAR] Re-screen batch ${batchId} finished: 1 of 2 reported, 1 did not`,
+        `[NEMAR] Re-screen batch ${batchId} finished: 1 of 2 reported, 1 did not report`,
       ]);
       const html = digestsOf(calls)[0].html;
-      expect(html).toContain("Did not report");
+      expect(html).toContain("Did not report by the deadline");
       expect(html).toContain(`<code>${B}</code>`);
       expect(html).not.toMatch(new RegExp(`Did not report[\\s\\S]*<code>${A}</code>`));
       // A later tick sends nothing more.
@@ -610,8 +610,8 @@ describe("a screen that never reports", () => {
       await callback(A, reportBody(A, "clean"));
       const digests = digestsOf(calls);
       expect(digests).toHaveLength(1);
-      expect(digests[0].html).toContain(`<code>${B}</code>`);
-      expect(digests[0].html).toContain(`<code>${C}</code>`);
+      expect(digests[0].html).toContain(`<code>${B}</code>: the batch never dispatched it`);
+      expect(digests[0].html).toContain(`<code>${C}</code>: the batch never dispatched it`);
       // Closing a batch whose digest has gone out, or one that does not exist, is a 404.
       const again = await asAdmin(`/admin/publish/screen-batches/${batchId}/close`);
       expect(again.status).toBe(404);
@@ -649,8 +649,12 @@ describe("every way out of a dispatch settles the request, and is named", () => 
       await callback(B, reportBody(B, "clean"));
       expect(perRequestMails(calls)).toHaveLength(0);
       const html = digestsOf(calls)[0].html;
-      expect(html).toContain("DID NOT RUN: 1");
-      expect(html).toContain(`<code>${A}</code>: no screen on record to DID NOT RUN`);
+      // Not a report: its own section, with the reason the screen could not start.
+      expect(subjectsOf(calls)).toEqual([
+        `[NEMAR] Re-screen batch ${batchId} finished: 1 of 2 reported, 1 not started`,
+      ]);
+      expect(html).toContain("not started: 1");
+      expect(html).toContain(`<code>${A}</code>: GitHub refused to start the screen workflow`);
     });
   });
 
@@ -674,7 +678,66 @@ describe("every way out of a dispatch settles the request, and is named", () => 
       expect(digestsOf(calls)).toHaveLength(0);
       await callback(B, reportBody(B, "clean"));
       expect(digestsOf(calls)).toHaveLength(1);
-      expect(digestsOf(calls)[0].html).toContain(`<code>${A}</code>`);
+      expect(digestsOf(calls)[0].html).toContain(
+        `<code>${A}</code>: it has no active publication request`,
+      );
+    });
+  });
+
+  test("the digest keeps reported, not started or refused, and did not report apart, each with its own count and list", async () => {
+    seedRequest(A);
+    seedRequest(B);
+    seedRequest(C);
+    seedRequest(D);
+    await withFakeResend(async (calls) => {
+      const batchId = await createBatch([A, B, C, D]);
+      // A reports.
+      await screen(A, batchId);
+      await callback(A, reportBody(A, "clean"));
+      // B is refused: its request ended after the batch selected it.
+      db.run("UPDATE publication_requests SET status = 'denied' WHERE dataset_id = ?", [B]);
+      await screen(B, batchId);
+      // C cannot start: GitHub refuses the dispatch.
+      dispatchStatus = 500;
+      await screen(C, batchId);
+      dispatchStatus = 204;
+      // D is dispatched and never reports.
+      await screen(D, batchId);
+      expect(digestsOf(calls)).toHaveLength(0);
+      db.run(
+        `UPDATE screen_batches SET last_dispatch_at = datetime('now', '-${
+          DIGEST_AFTER_LAST_DISPATCH_MINUTES + 1
+        } minutes') WHERE id = ?`,
+        [batchId],
+      );
+      await sendDigestIfDue(env(), batchId);
+
+      const digests = digestsOf(calls);
+      expect(digests).toHaveLength(1);
+      expect(digests[0].subject).toBe(
+        `[NEMAR] Re-screen batch ${batchId} finished: 1 of 4 reported, 2 not started, 1 did not report`,
+      );
+      const html = digests[0].html;
+      const section = (heading: string, next: string): string =>
+        html.slice(html.indexOf(heading), html.indexOf(next));
+      const started = "Could not start, or refused (not screened by this batch)";
+      const notReported = "Did not report by the deadline";
+      const notStarted = section(started, notReported);
+      expect(notStarted).toContain(`<code>${B}</code>: it has no active publication request`);
+      expect(notStarted).toContain(
+        `<code>${C}</code>: GitHub refused to start the screen workflow`,
+      );
+      expect(notStarted).not.toContain(`<code>${A}</code>`);
+      expect(notStarted).not.toContain(`<code>${D}</code>`);
+      const late = html.slice(html.indexOf(notReported));
+      expect(late).toContain(`<code>${D}</code>`);
+      expect(late).not.toContain(`<code>${A}</code>`);
+      expect(late).not.toContain(`<code>${B}</code>`);
+      expect(late).not.toContain(`<code>${C}</code>`);
+      // The states after count them apart as well.
+      expect(html).toContain("clean: 1");
+      expect(html).toContain("not started: 2");
+      expect(html).toContain("did not report: 1");
     });
   });
 
