@@ -25,6 +25,7 @@ import {
   formatAjvErrors,
 } from "../../test/contract/neuroschema-validator";
 import { dataRoutes } from "../src/routes/data";
+import { CURRENT_QUALITY_DOCUMENTS_SQL } from "../src/services/quality-documents";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 import { fixtureEntry, newJobId, seedDerivative, seedIcaStamp } from "./helpers/quality-fixture";
@@ -61,6 +62,8 @@ async function run(
     key?: string;
     summaryDataset?: string;
     recipe?: string;
+    supersededAt?: string | null;
+    expiresAt?: string | null;
   } = {},
 ) {
   const d1 = realD1(db);
@@ -86,6 +89,8 @@ async function run(
     state: over.state,
     storedAt: over.storedAt,
     key: over.key,
+    supersededAt: over.supersededAt,
+    expiresAt: over.expiresAt,
   });
   const entry = over.entry === undefined ? ENTRY : over.entry;
   if (entry !== null) {
@@ -173,6 +178,42 @@ describe("which derivative's summary a page shows", () => {
       storedAt: "2026-11-22 10:00:00",
     });
     expect((await quality("nm000907"))?.recipes["nemar-ica"].dataset_version).toBe("v1.0.1");
+  });
+
+  test("a superseded catalog row is never current, however new (MUTATION: drop either superseded term)", async () => {
+    seedDataset("nm000913");
+    // The newer row was superseded by a later promotion of the older one (ADR 0123).
+    await run("nm000913", {
+      entry: { ...ENTRY, dataset_version: "superseded" },
+      storedAt: "2026-11-22 10:00:00",
+      supersededAt: "2026-11-23 10:00:00",
+      expiresAt: "2099-01-01 00:00:00",
+    });
+    await run("nm000913", {
+      entry: { ...ENTRY, dataset_version: "current" },
+      storedAt: "2026-11-20 10:00:00",
+    });
+    expect((await quality("nm000913"))?.recipes["nemar-ica"].dataset_version).toBe("current");
+    // One current derivative per recipe: the superseded row is not a second one the read would overwrite.
+    const rows = db.query(CURRENT_QUALITY_DOCUMENTS_SQL).all("nm000913") as Loose[];
+    expect(rows.map((r) => JSON.parse(r.entry).dataset_version)).toEqual(["current"]);
+  });
+
+  test("a row past its date is never current, and never hides an older one (MUTATION: drop either date term)", async () => {
+    seedDataset("nm000914");
+    await run("nm000914", {
+      entry: { ...ENTRY, dataset_version: "dated" },
+      storedAt: "2026-01-02 10:00:00",
+      expiresAt: "2026-01-03 00:00:00",
+    });
+    await run("nm000914", {
+      entry: { ...ENTRY, dataset_version: "current" },
+      storedAt: "2026-01-01 10:00:00",
+    });
+    expect((await quality("nm000914"))?.recipes["nemar-ica"].dataset_version).toBe("current");
+    seedDataset("nm000915");
+    await run("nm000915", { storedAt: "2026-01-02 10:00:00", expiresAt: "2026-01-03 00:00:00" });
+    expect(await quality("nm000915")).toBeUndefined();
   });
 
   test("a tie on stored_at goes to the larger key", async () => {

@@ -30,6 +30,7 @@ import {
   readPipelineExtensions,
   reconcilePipelineProgress,
 } from "../src/services/compute-pipeline-progress";
+import { CURRENT_QUALITY_DOCUMENTS_SQL } from "../src/services/quality-documents";
 import type { Bindings } from "../src/types/bindings";
 import { type ComputeHarness, startComputeHarness } from "./helpers/compute-harness";
 import { seedEegDataset } from "./helpers/compute-pipeline-fixture";
@@ -94,12 +95,19 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 async function finishedRun(
   edit: (files: Map<string, Uint8Array>) => void = () => {},
   state: "succeeded" | "failed" = "succeeded",
+  /** Another run of a dataset already seeded, at another version (its summary says so). */
+  of?: { datasetId: string; version: string },
 ) {
-  const datasetId = `nm${String(9100 + ++seq).padStart(6, "0")}`;
-  await seedEegDataset(env, datasetId);
+  const datasetId = of?.datasetId ?? `nm${String(9100 + ++seq).padStart(6, "0")}`;
+  if (of === undefined) await seedEegDataset(env, datasetId);
   const jobId = newJobId();
-  const stampId = await seedIcaStamp(env.DB, { datasetId, jobId, state });
+  const stampId = await seedIcaStamp(env.DB, { datasetId, jobId, state, version: of?.version });
   const files = productFiles();
+  if (of !== undefined) {
+    edited(files, DOCUMENT, (doc) => {
+      doc.recipes["nemar-ica"].dataset_version = of.version;
+    });
+  }
   edit(files);
   for (const [rel, bytes] of files) {
     await harness.results.put(resultsOutputKey(jobId, `product/${rel}`), bytes);
@@ -287,5 +295,51 @@ describe("a page shows a summary once its derivative is promoted", () => {
       recipes: { "nemar-ica": fixtureEntry() },
     });
     if (!validateExtensions(extensions)) throw new Error(formatAjvErrors(validateExtensions));
+  });
+
+  test("a superseded catalog row is replaced, however new it is (MUTATION: drop either superseded term)", async () => {
+    // A is stored after B; promoting A then B supersedes A (ADR 0123), so the page shows B's summary.
+    const a = await finishedRun();
+    const b = await finishedRun(() => {}, "succeeded", {
+      datasetId: a.datasetId,
+      version: "v1.0.1",
+    });
+    await reconcilePipelineProgress(env);
+    expect(await kept(a.stampId)).not.toBeNull();
+    expect(await kept(b.stampId)).not.toBeNull();
+    const keyA = await seedDerivative(env.DB, {
+      datasetId: a.datasetId,
+      stampId: a.stampId,
+      jobId: a.jobId,
+      storedAt: "2026-11-21 10:00:00",
+    });
+    const keyB = await seedDerivative(env.DB, {
+      datasetId: a.datasetId,
+      stampId: b.stampId,
+      jobId: b.jobId,
+      storedAt: "2026-11-20 10:00:00",
+    });
+    const shown = async () =>
+      (
+        (await readPipelineExtensions(env.DB, a.datasetId)).dataQuality?.recipes["nemar-ica"] as
+          | Loose
+          | undefined
+      )?.dataset_version;
+    const admin = { to: "catalog" as const, userId: 1, role: "admin" };
+    expect((await promoteDerivative(env, { key: keyA, ...admin })).ok).toBe(true);
+    expect(await shown()).toBe("v1.0.0");
+    expect((await promoteDerivative(env, { key: keyB, ...admin })).ok).toBe(true);
+    const superseded = await env.DB.prepare(
+      "SELECT superseded_at FROM compute_derivatives WHERE key = ?1",
+    )
+      .bind(keyA)
+      .first<{ superseded_at: string | null }>();
+    expect(superseded?.superseded_at).not.toBeNull();
+    expect(await shown()).toBe("v1.0.1");
+    // B alone is current: A is not a second row the read happens to overwrite.
+    const current = await env.DB.prepare(CURRENT_QUALITY_DOCUMENTS_SQL)
+      .bind(a.datasetId)
+      .all<Loose>();
+    expect(current.results.map((r) => JSON.parse(r.entry).dataset_version)).toEqual(["v1.0.1"]);
   });
 });

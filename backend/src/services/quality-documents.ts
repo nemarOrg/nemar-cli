@@ -332,15 +332,25 @@ export function checkDatasetQualityDocument(
 // --- Reading the current summaries ----------------------------------------------------------------------
 
 /**
- * A derivative row `d` that is its dataset and recipe's CURRENT PUBLIC derivative (ADR 0137 decision 7):
- * stored, of retention `catalog` or `published`, and the newest such row by `stored_at`, the larger key
- * winning a tie. A `canary` row, a row being copied, a failed row and an expired one are never public.
+ * A derivative row that may be shown on a public page (ADR 0137 decision 7, ADR 0123): stored, of
+ * retention `catalog` or `published`, not superseded (a later `catalog` row of its dataset, recipe, input
+ * and profile replaced it), and not past its date (a deletion dates its rows to now). A `canary` row, a row
+ * being copied, a failed row and an expired one are never public.
+ */
+const PUBLIC_DERIVATIVE_SQL = (d: string): string =>
+  `${d}.state = 'stored' AND ${d}.retention IN ('catalog', 'published')
+   AND ${d}.superseded_at IS NULL
+   AND (${d}.expires_at IS NULL OR ${d}.expires_at > datetime('now'))`;
+
+/**
+ * A derivative row `d` that is its dataset and recipe's CURRENT PUBLIC derivative (ADR 0137 decision 7): a
+ * public row (`PUBLIC_DERIVATIVE_SQL`), and the newest such row by `stored_at`, the larger key winning a tie.
  */
 export const CURRENT_PUBLIC_DERIVATIVE_SQL = (d: string): string =>
-  `${d}.state = 'stored' AND ${d}.retention IN ('catalog', 'published')
+  `${PUBLIC_DERIVATIVE_SQL(d)}
    AND NOT EXISTS (SELECT 1 FROM compute_derivatives n
      WHERE n.dataset_id = ${d}.dataset_id AND n.recipe = ${d}.recipe
-       AND n.state = 'stored' AND n.retention IN ('catalog', 'published')
+       AND ${PUBLIC_DERIVATIVE_SQL("n")}
        AND (n.stored_at > ${d}.stored_at OR (n.stored_at = ${d}.stored_at AND n.key > ${d}.key)))`;
 
 /**

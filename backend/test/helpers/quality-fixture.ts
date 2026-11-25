@@ -94,6 +94,10 @@ export async function seedDerivative(
     state?: "copying" | "stored" | "failed" | "expired";
     storedAt?: string;
     key?: string;
+    /** When a later `catalog` row superseded it; null by default. */
+    supersededAt?: string | null;
+    /** Its date; by default a canary's far future and none for any other class. */
+    expiresAt?: string | null;
   },
 ): Promise<string> {
   const key = input.key ?? (++keySeq).toString(16).padStart(64, "0");
@@ -106,9 +110,9 @@ export async function seedDerivative(
       `INSERT INTO compute_derivatives
          (key, dataset_id, version, recipe, recipe_version, engine, input, profile, input_digest,
           image_digest, job_id, stamp_id, state, retention, failure, copied, object_count, bytes,
-          stored_at, expires_at)
+          stored_at, expires_at, superseded_at)
        VALUES (?1, ?2, 'v1.0.0', ?3, ?4, ?5, 'bids', 'archive', ?6, ?7, ?8, ?9, ?10, ?11, ?12, 20, 20,
-               1000, ?13, ?14)`,
+               1000, ?13, ?14, ?15)`,
     )
     .bind(
       key,
@@ -124,7 +128,12 @@ export async function seedDerivative(
       retention,
       state === "failed" ? "copy_failed" : null,
       storedAt,
-      retention === "canary" ? "2099-01-01 00:00:00" : null,
+      input.expiresAt !== undefined
+        ? input.expiresAt
+        : retention === "canary"
+          ? "2099-01-01 00:00:00"
+          : null,
+      input.supersededAt ?? null,
     )
     .run();
   return key;
