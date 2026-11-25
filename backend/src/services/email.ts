@@ -12,9 +12,16 @@ import {
   type CommunityMailPreferences,
 } from "../../../shared/contract/mail-categories.js";
 import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
+import {
+  RESUBMISSION_NOTE_LABEL,
+  RESUBMISSION_NOTE_PROVENANCE,
+  resubmissionNoteText,
+  resubmissionNoteUnreadable,
+} from "../../../shared/resubmission-note.js";
 import { escapeHtml } from "../lib/escape";
 import { htmlToText } from "../lib/html-to-text";
 import { SCREEN_REPORT_DEADLINE_MINUTES } from "./identifier-screen-stored";
+import type { NoteRead } from "./resubmission-note";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
 /** Fallback sender when FROM_EMAIL env var is unset. Mirrors the FROM_EMAIL set
@@ -612,6 +619,7 @@ export async function sendEmail(
   deliveryEnv?: EmailDeliveryEnv,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  text?: string,
 ): Promise<SendResult> {
   // Validated first, before the fence or any provider: a rejected header is a caller bug.
   const extraHeaders = validateMailHeaders(headers, deliveryEnv?.API_BASE_URL);
@@ -637,6 +645,7 @@ export async function sendEmail(
         replyTo,
         timeoutMs,
         extraHeaders,
+        text,
       );
     } catch (error) {
       const fallbackOn = (deliveryEnv?.EMAIL_FALLBACK ?? "").trim().toLowerCase() === "resend";
@@ -658,6 +667,7 @@ export async function sendEmail(
           replyTo,
           timeoutMs,
           extraHeaders,
+          text,
         );
       } catch (resendError) {
         console.error(
@@ -676,6 +686,7 @@ export async function sendEmail(
     replyTo,
     timeoutMs,
     extraHeaders,
+    text,
   );
 }
 
@@ -868,6 +879,7 @@ async function sendViaResend(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  text?: string,
 ): Promise<SendResult> {
   const body: Record<string, unknown> = {
     from: fromEmail,
@@ -875,6 +887,8 @@ async function sendViaResend(
     subject,
     html,
   };
+  // A caller's own text part; without one Resend gets the HTML alone.
+  if (text !== undefined) body.text = text;
   if (replyTo) body.reply_to = replyTo;
   if (headers) body.headers = headers;
   const response = await fetch(RESEND_API_URL, {
@@ -909,6 +923,7 @@ async function sendViaCloudflare(
   replyTo?: string,
   timeoutMs?: number,
   headers?: Record<string, string>,
+  textPart?: string,
 ): Promise<SendResult> {
   // Before the binding is touched: one platform-controlled header fails the whole send there.
   assertCloudflareHeaders(headers);
@@ -921,7 +936,7 @@ async function sendViaCloudflare(
       html,
       // Resend gets the HTML alone; this provider is sent a text part too, for clients and
       // spam filters that prefer one.
-      text: htmlToText(html),
+      text: textPart ?? htmlToText(html),
       ...(replyTo ? { replyTo: parseMailbox(replyTo) } : {}),
       ...(headers ? { headers } : {}),
     });
@@ -2053,6 +2068,30 @@ function sectionHtml(section: PublicationScreenSection | PublicationReviewSectio
 }
 
 /**
+ * The depositor's resubmission note, as a labeled, quoted block (ADR 0139, decision 5). The label
+ * and the provenance sentence come from the one copy (`shared/resubmission-note.ts`); the note is
+ * the depositor's text, so it is escaped whole, its line breaks are kept by `white-space`, and it
+ * sits in a block that reads as a quotation, never as part of the mail's own words. This is the
+ * ADMINISTRATORS' mail: no mail to the depositor carries the note.
+ */
+export function resubmissionNoteHtml(note: string): string {
+  return `
+  <div style="border-left: 4px solid #6b7280; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong>${escapeHtml(RESUBMISSION_NOTE_LABEL)}</strong>
+    <p style="margin: 4px 0 8px 0; color: #666; font-size: 13px;">${escapeHtml(RESUBMISSION_NOTE_PROVENANCE)}</p>
+    <blockquote style="margin: 0; padding: 8px 12px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: monospace; font-size: 13px;">${escapeHtml(note)}</blockquote>
+  </div>`;
+}
+
+/** The fixed sentence for a note that could not be read for the mail, in the note's own block. */
+function resubmissionNoteUnreadableHtml(datasetId: string): string {
+  return `
+  <div style="border-left: 4px solid #d97706; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <p style="margin: 0;">${escapeHtml(resubmissionNoteUnreadable(datasetId))}</p>
+  </div>`;
+}
+
+/**
  * The verdict as it appears at the end of the subject line:
  * "IDENTIFIER SCREEN: FOUND IDENTIFIERS", "IDENTIFIER SCREEN: clean". The
  * prefix is shouted so the verdict survives an inbox that truncates subjects.
@@ -2084,6 +2123,11 @@ export async function sendPublicationRequestEmail(
     anonymous?: boolean;
     screen?: PublicationScreenSection;
     review?: PublicationReviewSection;
+    /**
+     * What a read of the depositor's resubmission note found (ADR 0139, decision 5): a note, none,
+     * or a read that failed, which the mail says in a fixed sentence and never words as "none".
+     */
+    resubmissionNote?: NoteRead;
   },
 ): Promise<AdminNotificationOutcome> {
   // #1408: an anonymous release and a publication are different runs with
@@ -2106,7 +2150,8 @@ export async function sendPublicationRequestEmail(
   // Placed on the screen's own line below: with no review the mail is byte for byte what it was
   // before the review existed.
   const reviewSection = opts?.review ? sectionHtml(opts.review) : "";
-  const html = `
+  const noteRead = opts?.resubmissionNote ?? { kind: "none" as const };
+  const render = (noteSection: string): string => `
 <!DOCTYPE html>
 <html>
 <head>
@@ -2118,7 +2163,7 @@ export async function sendPublicationRequestEmail(
 
   <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 ${anonymousNotice}
-${screenSection}${reviewSection}
+${screenSection}${reviewSection}${noteSection}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -2140,6 +2185,24 @@ ${screenSection}${reviewSection}
 </body>
 </html>
   `;
+  const html = render(
+    noteRead.kind === "note"
+      ? resubmissionNoteHtml(noteRead.note)
+      : noteRead.kind === "unreadable"
+        ? resubmissionNoteUnreadableHtml(datasetId)
+        : "",
+  );
+  // The plain-text part is sent only for a note: it keeps the note's line breaks as quoted lines,
+  // which the generic conversion of the HTML (it folds all whitespace) cannot. The marker stands
+  // where the note goes and is replaced after the conversion, so the note is never decoded or
+  // scanned again as markup; it is not in the HTML the conversion reads.
+  const NOTE_MARKER = "NEMAR-RESUBMISSION-NOTE-HERE";
+  const text =
+    noteRead.kind === "note"
+      ? htmlToText(render(`<p>${NOTE_MARKER}</p>`)).replace(NOTE_MARKER, () =>
+          resubmissionNoteText(noteRead.note),
+        )
+      : undefined;
 
   const subject = `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}${
     screen ? ` - ${screenSubjectSuffix(screen.headline)}` : ""
@@ -2160,6 +2223,9 @@ ${screenSection}${reviewSection}
         replyTo,
         isDev,
         deliveryEnv,
+        undefined,
+        undefined,
+        text,
       );
       outcome.delivered++;
     } catch (error) {

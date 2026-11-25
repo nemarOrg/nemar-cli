@@ -25,6 +25,7 @@ import ora from "ora";
 import { lineageExitCode, lineageLines } from "../../shared/license-lineage.js";
 import { DENIAL_REASON_MAX_LENGTH } from "../../shared/publication-limits.js";
 import { searchLimitProblem } from "../../shared/publish-list-search.js";
+import { RESUBMISSION_NOTE_LABEL } from "../../shared/resubmission-note.js";
 import { checkedDatasetId, failMessage, failWith, requireSignedIn } from "../lib/admin-command.js";
 import { getLicenseLineage } from "../lib/api/admin.js";
 import { denyPublication, listPublishRequests, rerunIdentifierScreen } from "../lib/api/publish.js";
@@ -201,6 +202,13 @@ Examples:
               `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
                 "repository stays private, DOI stays reserved, depositor is not named",
               )}`,
+            );
+          }
+          // ADR 0139, decision 5: a resubmission carries the depositor's own words. Only the fact
+          // is listed, with where to read it; the text is long, theirs, and printed by `show`.
+          if (typeof req.resubmission_note === "string" && req.resubmission_note !== "") {
+            console.log(
+              `    ${chalk.cyan("!")} ${RESUBMISSION_NOTE_LABEL} ${chalk.dim(`(read it: nemar admin dataset publish show ${plain(req.dataset_id)})`)}`,
             );
           }
           // Epic #1610 phase 4: the identifier screen, in the backend's words.

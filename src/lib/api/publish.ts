@@ -22,6 +22,7 @@ import { APPROVAL_DISPATCH_TOKEN_HEADER } from "../../../shared/contract/publica
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { isExactIdMatch, matchesListSearch } from "../../../shared/publish-list-search.js";
+import type { PreviousDenialBy } from "../../../shared/resubmission-note.js";
 import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -56,6 +57,9 @@ export interface PublishStatusResponse {
   approved_at?: string | null;
   denied_at?: string | null;
   denied_reason?: string | null;
+  // Who denied the request (ADR 0139, decision 5): null for anything but a denial that was not a
+  // withdrawal. Absent from an older backend, which means unknown, never "an administrator".
+  denied_by_kind?: PreviousDenialBy | null;
   // True when the depositor ended the request themselves; `status` is still
   // "denied" so older clients read a finished request. Absent from an older
   // backend, which means unknown, never "no".
@@ -119,6 +123,10 @@ export interface PublishRequestsResponse {
     approval_in_flight?: boolean;
     // The request's block reason when it is blocked (`pr.*` carries the column).
     block_reason?: string | null;
+    // The depositor's resubmission note and the denial this request answers (ADR 0139, decision
+    // 5; `pr.*` carries both columns). Absent from an older backend, which means unknown.
+    resubmission_note?: string | null;
+    previous_request_id?: number | null;
   }>;
   count: number;
 }
@@ -142,6 +150,9 @@ export interface PublishRequestResponse {
   dataset_id: string;
   status: string;
   anonymous?: boolean;
+  // Whether the note sent with the request was recorded (ADR 0139, decision 5). Echoed like
+  // `anonymous`; absent from an older backend, which means unknown, never "dropped".
+  resubmission_note_recorded?: boolean;
   identifier_screen?: IdentifierScreenView;
   request_notice?: string[];
 }
@@ -186,12 +197,15 @@ export interface PublishApproveResponse {
  * `anonymous` asks for a RELEASE rather than a publication (#1408): the data
  * goes public while the repository stays private, the DOI stays reserved with
  * no curator, and the depositor is withheld everywhere NEMAR writes them. The
- * body is only sent when the flag is set, so an ordinary request stays exactly
- * the bodyless POST it has always been.
+ * body is only sent when the flag or a note is set, so an ordinary request stays
+ * exactly the bodyless POST it has always been.
+ *
+ * `note` is the resubmission note (ADR 0139, decision 5), already read by
+ * `readResubmissionNote`; the Worker reads it again and refuses what it cannot keep.
  */
 export async function requestPublication(
   datasetId: string,
-  options: { anonymous?: boolean } = {},
+  options: { anonymous?: boolean; note?: string } = {},
 ): Promise<PublishRequestResponse> {
   // `anonymous` is echoed by the server (#1408). The caller must print from
   // the ECHO rather than from `options.anonymous`: what matters to a depositor
@@ -200,11 +214,14 @@ export async function requestPublication(
   // older backend that does not know the flag.
   return request<PublishRequestResponse>(
     `/datasets/${datasetId}/publish/request`,
-    options.anonymous
+    options.anonymous || options.note !== undefined
       ? {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ anonymous: true }),
+          body: JSON.stringify({
+            ...(options.anonymous ? { anonymous: true } : {}),
+            ...(options.note !== undefined ? { resubmission_note: options.note } : {}),
+          }),
         }
       : { method: "POST" },
     true,

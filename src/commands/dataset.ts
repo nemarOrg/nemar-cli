@@ -50,6 +50,18 @@ import { MODALITY_FILTER_CLI_HELP } from "../../shared/modality-filter.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
 import { README_CANDIDATES } from "../../shared/readme-candidates.js";
+import {
+  RESUBMISSION_NOTE_CANCELLED,
+  RESUBMISSION_NOTE_FLAGS_EXCLUSIVE,
+  RESUBMISSION_NOTE_NOT_CONFIRMED,
+  RESUBMISSION_NOTE_NOT_REQUESTED,
+  RESUBMISSION_NOTE_OFFER,
+  RESUBMISSION_NOTE_RECORDED,
+  RESUBMISSION_NOTE_REFUSAL_SENTENCES,
+  readResubmissionNote,
+  resubmissionNoteFileUnreadable,
+  resubmissionPrompt,
+} from "../../shared/resubmission-note.js";
 import { isAnswered } from "../lib/admin-command.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
@@ -4507,6 +4519,91 @@ function printAnonymousNotConfirmed(datasetId: string): void {
   );
 }
 
+/** The options of `publish request` that carry a resubmission note (ADR 0139, decision 5). */
+interface NoteOptions {
+  note?: string;
+  noteFile?: string;
+}
+
+/** A refusal of what was typed for the note: said plainly, nothing is sent, and it is no bug. */
+function refuseNote(sentence: string): never {
+  console.log(chalk.red(`Error: ${sentence}`));
+  console.log(chalk.dim(`  ${RESUBMISSION_NOTE_NOT_REQUESTED}`));
+  markUsageExit();
+  process.exit(1);
+}
+
+/**
+ * The note to send with a publication request, or none (ADR 0139, decision 5).
+ *
+ * A note given with `--note` or `--note-file` is read by the one rule the Worker applies
+ * (`readResubmissionNote`) and refused here before anything is sent. With neither flag, the dataset's
+ * last request is read: when it was DENIED and not withdrawn, a terminal is asked once (Enter
+ * skips) and a session with no terminal is told a note can be added, and goes on without one. A
+ * request that cannot be read changes nothing: the request itself will say what is wrong.
+ */
+async function settleResubmissionNote(
+  datasetId: string,
+  options: NoteOptions,
+): Promise<string | undefined> {
+  if (options.note !== undefined && options.noteFile !== undefined) {
+    refuseNote(RESUBMISSION_NOTE_FLAGS_EXCLUSIVE);
+  }
+  let given = options.note;
+  if (options.noteFile !== undefined) {
+    try {
+      given = readFileSync(options.noteFile, "utf8");
+    } catch {
+      refuseNote(resubmissionNoteFileUnreadable(clip(options.noteFile, 200)));
+    }
+  }
+  if (given !== undefined) {
+    const read = readResubmissionNote(given);
+    if (!read.ok) refuseNote(RESUBMISSION_NOTE_REFUSAL_SENTENCES[read.refusal]);
+    return read.note ?? undefined;
+  }
+
+  let previous: Awaited<ReturnType<typeof getPublishStatus>>;
+  try {
+    previous = await getPublishStatus(datasetId);
+  } catch {
+    return undefined;
+  }
+  if (previous.status !== "denied" || previous.withdrawn === true) return undefined;
+  if (process.stdin.isTTY !== true) {
+    console.log(chalk.dim(`  ${RESUBMISSION_NOTE_OFFER}`));
+    return undefined;
+  }
+  const day = (previous.denied_at ?? "").slice(0, 10) || "an earlier date";
+  // A rule-breaking answer is asked again by the prompt itself, with the rule's own sentence. The
+  // author is passed as the status answer gave it: an older backend sends none, and the question
+  // then names nobody rather than an administrator.
+  // Ctrl+C at inquirer 9's prompt does not reject it: the prompt's own handler signals this
+  // process with SIGINT (`baseUI.onForceClose`), which Bun may not deliver before the event loop
+  // drains, and the command then ends with exit code 0 as if nothing had been asked. So this
+  // listens on the same readline interface, after inquirer's, and exits 130 itself (the code of a
+  // walked-away prompt, which the exit hook does not read as a failure to report).
+  const asking = inquirer.prompt<{ value: string }>([
+    {
+      type: "input",
+      name: "value",
+      message: resubmissionPrompt(day, previous.denied_by_kind ?? null),
+      validate: (typed: string) => {
+        const check = readResubmissionNote(typed);
+        return check.ok ? true : RESUBMISSION_NOTE_REFUSAL_SENTENCES[check.refusal];
+      },
+    },
+  ]);
+  // `rl` is protected in inquirer's types and public at run time.
+  (asking.ui as unknown as { rl: NodeJS.EventEmitter }).rl.on("SIGINT", () => {
+    console.log(chalk.dim(`\n  ${RESUBMISSION_NOTE_CANCELLED}`));
+    process.exit(130);
+  });
+  const { value } = await asking;
+  const read = readResubmissionNote(value);
+  return read.ok ? (read.note ?? undefined) : undefined;
+}
+
 publishCommand
   .command("request")
   .description("Request publication of a dataset")
@@ -4525,6 +4622,12 @@ Description:
   - Have S3 Object Lock enabled (prevents data deletion)
 
   You can only have one active publication request per dataset.
+
+  After a denial, add a note for the reviewer (--note <text>, or --note-file
+  <path>): what changed, or why the decision was wrong. At most 2000 characters,
+  line breaks allowed, no other control characters. At a terminal the command
+  asks for one when the last request was denied (a withdrawal does not count);
+  elsewhere it says a note can be added and goes on. Only administrators read it.
 
   BIDS validation runs on GitHub after the upload. A request made before it has
   completed is recorded, and NEMAR continues it once validation passes.
@@ -4550,11 +4653,20 @@ Anonymous deposit (--anonymous):
 Examples:
   $ nemar dataset publish request nm000104
   $ nemar dataset publish request nm000104 --anonymous   # blind, for review
+  $ nemar dataset publish request nm000104 --note "Added the missing participants.tsv"
   $ nemar dataset publish status nm000104     # Check request status`,
   )
   .option("--anonymous", "Release the data with your identity withheld until publication")
-  .action(async (datasetId, options: { anonymous?: boolean }) => {
+  .option(
+    "--note <text>",
+    "Tell the reviewer what changed, or why a denial was wrong (at most 2000 characters)",
+  )
+  .option("--note-file <path>", "Read the note from a file instead of the command line")
+  .action(async (datasetId, options: { anonymous?: boolean } & NoteOptions) => {
     requireAuth();
+
+    // Settled before the spinner starts, so a question at a terminal is not drawn over by it.
+    const note = await settleResubmissionNote(datasetId, options);
 
     const spinner = ora(
       options.anonymous
@@ -4563,8 +4675,15 @@ Examples:
     ).start();
 
     try {
-      const result = await requestPublication(datasetId, { anonymous: options.anonymous });
+      const result = await requestPublication(datasetId, { anonymous: options.anonymous, note });
       spinner.succeed(result.message);
+      if (note !== undefined && result.resubmission_note_recorded === true) {
+        console.log(chalk.dim(`  ${RESUBMISSION_NOTE_RECORDED}`));
+      } else if (note !== undefined) {
+        // The server did not confirm it (an older backend, or a note lost on the way): said, so
+        // the depositor does not rely on a reviewer having read what was never stored.
+        console.log(chalk.yellow(`  ${RESUBMISSION_NOTE_NOT_CONFIRMED}`));
+      }
       // Printed from the server's ECHO, not from the flag that was typed. A
       // request whose body never arrived would otherwise succeed with a
       // message indistinguishable from a correct one, and the depositor would

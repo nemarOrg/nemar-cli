@@ -72,6 +72,7 @@ import {
 } from "./identifier-screen-stored.js";
 import { reviewInFlightSql } from "./publication-review-rows.js";
 import { publicationReviewEmailSection, reviewEnabled } from "./publication-review-view.js";
+import { readResubmissionNoteOf } from "./resubmission-note.js";
 import { MAIL_COVERED_BY_DIGEST_SQL, sendDueScreenBatchDigests } from "./screen-batch.js";
 
 // The two readers of a stored screen, the sandbox exemption and the screen's status view live in
@@ -190,10 +191,17 @@ export async function mailPublicationRequest(
     anonymous: boolean;
     screen: PublicationScreenSection;
     review?: PublicationReviewSection | null;
+    /**
+     * The request the mail is about, or null when it could not be tied to a row. Required, not
+     * optional, so a new caller cannot send the mail of a resubmission without its note: the
+     * note (ADR 0139, decision 5) is read from the row here, whichever caller sends the mail.
+     */
+    requestId: number | null;
   },
 ): Promise<{ attempted: number; delivered: number }> {
   const adminEmails = await getAdminEmailsForCategory(env.DB, "publication_request", env);
   if (adminEmails.length === 0) return { attempted: 0, delivered: 0 };
+  const resubmissionNote = await readResubmissionNoteOf(env.DB, args.requestId);
   const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
   const outcome = await sendPublicationRequestEmail(
     adminEmails,
@@ -204,7 +212,12 @@ export async function mailPublicationRequest(
     replyTo,
     isDev,
     env,
-    { anonymous: args.anonymous, screen: args.screen, review: args.review ?? undefined },
+    {
+      anonymous: args.anonymous,
+      screen: args.screen,
+      review: args.review ?? undefined,
+      resubmissionNote,
+    },
   );
   return { attempted: outcome.attempted, delivered: outcome.delivered };
 }
@@ -303,6 +316,7 @@ export async function notifyAdminsOfScreen(
       .bind(claim.requested_by)
       .first<{ username: string | null }>();
     const outcome = await mailPublicationRequest(env, {
+      requestId,
       datasetId: claim.dataset_id,
       username: user?.username ?? `user ${claim.requested_by}`,
       anonymous: claim.anonymous === 1,
@@ -372,6 +386,7 @@ export async function mailScreenNotStarted(env: Bindings, requestId: number): Pr
       }>();
     if (!row) return;
     await mailPublicationRequest(env, {
+      requestId,
       datasetId: row.dataset_id,
       username: row.username ?? `user ${row.requested_by}`,
       anonymous: row.anonymous === 1,
