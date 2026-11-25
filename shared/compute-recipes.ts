@@ -320,9 +320,10 @@ export const COMPUTE_RECIPES: readonly ComputeRecipe[] = Object.freeze([
       checkpoint("iclabel", ["iclabel"]),
       checkpoint("quality", ["nemar-quality", "nemar-spectrum"]),
     ]),
-    // About 16 files per recording with its views (ADR 0137: `_chanlocs.tsv`, `_icclasses.json` and
-    // `_spectrum.tsv` beside the 13 it wrote), plus the dataset's: the policy's 5,000 stops at about 312
-    // recordings; 25,000 admits about 1,560, headroom over a 1,000-recording dataset.
+    // 17 files per recording with its views, the record included (the floor's five, the recipe's nine, the
+    // two plugin views `_icclasses.json` and `_spectrum.tsv`, and the record; ADR 0137, nemar-process P7),
+    // plus the dataset's three: the policy's 5,000 stops at about 294 recordings; 25,000 admits about
+    // 1,470, headroom over a 1,000-recording dataset.
     resultLimits: Object.freeze({ maxFiles: 25_000 }),
   }),
 ]) as readonly ComputeRecipe[];
