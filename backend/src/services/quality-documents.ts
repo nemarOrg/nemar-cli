@@ -467,7 +467,8 @@ export const RecordRecipeResultsSchema = z
  * Why a recording's entry is not projected, a fixed word: the record is not UTF-8 I-JSON, or not in the
  * shape a recipe writes; it names another recipe or version than the stamp's; a recipe metric carries a
  * plugin's prefix, a plugin step's metric does not carry its plugin's, or a metric names a plugin the recipe
- * does not run; the entry breaks the schema; or `nemar.record-checks.v1` finds something.
+ * does not run; the entry breaks the schema (a metric name that is not a `metricName` is refused before it
+ * is copied); or `nemar.record-checks.v1` finds something.
  */
 export const RECORD_ENTRY_REFUSALS = [
   "record_unreadable",
@@ -487,6 +488,9 @@ export type RecordEntry =
 
 const objectOf = (v: unknown): Record<string, unknown> | null =>
   typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+/** Whether a name is a neuroschema `metricName` (a letter first, so never `__proto__`). */
+const isMetricName = (name: string): boolean => metricName.safeParse(name).success;
 
 /**
  * One recording's `dataQuality` entry for its recipe (`recordRecipeResults`), projected from the bytes of
@@ -534,7 +538,10 @@ export async function recordQualityEntry(
     return refuse("record_shape");
   }
   const metrics: Record<string, unknown> = {};
+  // A name is checked before it is copied: a member named `__proto__` (an own member, as the reader makes
+  // it) would otherwise set the prototype of `metrics` and leave the schema nothing to refuse.
   for (const [name, metric] of Object.entries(own)) {
+    if (!isMetricName(name)) return refuse("entry_invalid");
     if (metricPlugin(name) !== null) return refuse("metric_not_bare");
     metrics[name] = metric;
   }
@@ -546,6 +553,7 @@ export async function recordQualityEntry(
     const reported = step?.qualityMetrics === undefined ? {} : objectOf(step.qualityMetrics);
     if (reported === null) return refuse("record_shape");
     for (const [name, metric] of Object.entries(reported)) {
+      if (!isMetricName(name)) return refuse("entry_invalid");
       if (metricPlugin(name) !== p.name) return refuse("metric_not_prefixed");
       metrics[name] = metric;
     }

@@ -687,6 +687,20 @@ describe("checkDatasetQualityDocument, against the fixture's run", () => {
     }
     expect(await refusal(bytes)).toBe("entry_too_large");
   });
+
+  test("a metric named __proto__ is refused by the schema, never taken as a prototype", async () => {
+    const text = readFileSync(join(PRODUCT, "desc-nemarica_dataquality.json"), "utf8");
+    const enc = new TextEncoder();
+    for (const value of ["7", '{"max": 1, "min": 0}']) {
+      const proto = text.replace(
+        '"observed_range": {',
+        `"observed_range": {"__proto__": ${value},`,
+      );
+      expect(proto).not.toBe(text);
+      expect(await refusal(enc.encode(proto))).toBe("document_invalid");
+    }
+  });
+
   test("the recipe's plugins are its quality checkpoint's plugin steps", () => {
     expect(recipeQualityPlugins(ICA)).toEqual(["nemar-quality", "nemar-spectrum"]);
     expect(recipeQualityPlugins(FLOOR)).toEqual([]);
@@ -865,6 +879,24 @@ describe("recordQualityEntry over the fixture's recording", () => {
       r.extensions.nemar.views[1].inputs[1].store.profile = "serving";
     });
     expect(await reasonOf(serving)).toBe("entry_invalid");
+  });
+
+  test("a metric named __proto__, a number or an object, is refused before it is copied (MUTATION: copy before checking the name)", async () => {
+    const compact = JSON.stringify(RECORD);
+    const enc = new TextEncoder();
+    expect(compact.split('"metrics":{').length).toBe(2);
+    for (const value of ["7", JSON.stringify(RECORD.extensions.nemar.metrics.icaRank)]) {
+      const own = compact.replace('"metrics":{', `"metrics":{"__proto__":${value},`);
+      expect(await reasonOf(enc.encode(own))).toBe("entry_invalid");
+    }
+    // In a plugin step's qualityMetrics too.
+    const step = '"qualityMetrics":{"nemar-quality:percentBrainComponents"';
+    expect(compact.split(step).length).toBe(2);
+    const reported = compact.replace(
+      step,
+      `"qualityMetrics":{"__proto__":${JSON.stringify(RECORD.extensions.nemar.metrics.icaRank)},"nemar-quality:percentBrainComponents"`,
+    );
+    expect(await reasonOf(enc.encode(reported))).toBe("entry_invalid");
   });
 
   test("record checks refuse an entry (MUTATION: skip the record checks)", async () => {
