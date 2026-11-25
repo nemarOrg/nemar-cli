@@ -971,14 +971,21 @@ describe("recording data this scanner cannot parse is counted by what the file i
     expect(alone.record.status).toBe("clean");
   });
 
-  test(".hdf5 only is not-screened, not no-recordings; a dataset with no data file is no-recordings", async () => {
-    const file = bids("eeg", "hdf5");
+  test(".nwb only is not-screened, not no-recordings; a dataset with no data file is no-recordings", async () => {
+    const file = bids("ieeg", "nwb");
     const { w, record } = await scanFiles({ [file]: "x", "dataset_description.json": "{}" });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".hdf5": 1 });
+    expect(record.unscreened_formats).toEqual({ ".nwb": 1 });
     never(w, file);
     const none = await scanFiles({ "dataset_description.json": "{}" });
     expect(none.record.status).toBe("no-recordings");
+  });
+
+  test(".hdf5 that is not HDF5 is read by the HDF5 reader and is partial, never clean", async () => {
+    const file = bids("eeg", "hdf5");
+    const { record } = await scanFiles({ [file]: "x", "dataset_description.json": "{}" });
+    expect(record.status).toBe("unchecked");
+    expect(record.unscreened_formats ?? {}).toEqual({});
   });
 
   test(".edf.gz only is not-screened and is never read as an EDF header", async () => {
@@ -1005,14 +1012,14 @@ describe("recording data this scanner cannot parse is counted by what the file i
     expect(companions.record.status).toBe("no-recordings");
   });
 
-  test("other signal files count wherever they sit: .mat, .h5, .bdf.gz", async () => {
+  test("other signal files count wherever they sit: .mat, .nwb, .bdf.gz", async () => {
     const { record } = await scanFiles({
       "sourcedata/export.mat": "x",
-      "sourcedata/run1.h5": "y",
+      "sourcedata/run1.nwb": "y",
       [bids("emg", "bdf.gz")]: "z",
     });
     expect(record.status).toBe("not-screened");
-    expect(record.unscreened_formats).toEqual({ ".mat": 1, ".h5": 1, ".bdf.gz": 1 });
+    expect(record.unscreened_formats).toEqual({ ".mat": 1, ".nwb": 1, ".bdf.gz": 1 });
   });
 
   test("the other directory formats count once per directory: .mff/, .mefd/, .zarr/", async () => {
