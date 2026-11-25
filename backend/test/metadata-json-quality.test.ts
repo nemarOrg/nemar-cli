@@ -125,7 +125,13 @@ async function bundleMetadata(id: string) {
   if (res.status !== 200) return { status: res.status, data: null };
   const body = (await res.json()) as Loose;
   expect(body.metadata.ok).toBe(true);
-  return { status: res.status, data: body.metadata.data as Loose, complete: body.complete };
+  return {
+    status: res.status,
+    data: body.metadata.data as Loose,
+    complete: body.complete,
+    pipelineDegraded: body.pipeline_degraded,
+    cacheControl: res.headers.get("Cache-Control"),
+  };
 }
 
 const quality = async (id: string) => (await metadata(id)).body?.extensions.dataQuality;
@@ -307,6 +313,42 @@ describe("a withdrawn dataset (owner ruling of 2026-11-25)", () => {
     expect((await bundleMetadata("nm000923")).status).toBe(404);
   });
 });
+
+describe("the page bundle when the pipeline read fails (#2375 review)", () => {
+  test("keeps the metadata, leaves the namespaces out and is not cached; metadata.json still answers (MUTATION: fail the component, or call it complete)", async () => {
+    seedDataset("nm000924");
+    db.run(
+      "UPDATE datasets SET description = 'A description that must survive.' WHERE dataset_id = 'nm000924'",
+    );
+    await run("nm000924");
+    // A real failure of the read: the table it reads is gone.
+    db.run("DROP TABLE compute_quality_documents");
+    const bundle = await bundleMetadata("nm000924");
+    expect(bundle.status).toBe(200);
+    expect(bundle.data?.name).toBe("nm000924");
+    expect(bundle.data?.description).toBe("A description that must survive.");
+    for (const ns of ["processing", "signalJourney", "dataQuality"]) {
+      expect(bundle.data?.extensions, ns).not.toHaveProperty(ns);
+    }
+    expect(bundle.pipelineDegraded).toBe(true);
+    expect(bundle.complete).toBe(false);
+    expect(bundle.cacheControl).toBe("no-store");
+    const meta = await metadata("nm000924");
+    expect(meta.status).toBe(200);
+    expect(meta.body?.description).toBe("A description that must survive.");
+    expect(meta.body?.extensions).not.toHaveProperty("dataQuality");
+  });
+
+  test("a bundle whose pipeline read succeeds is complete and says so", async () => {
+    seedDataset("nm000925");
+    await run("nm000925");
+    const bundle = await bundleMetadata("nm000925");
+    expect(bundle.pipelineDegraded).toBe(false);
+    expect(bundle.complete).toBe(true);
+    expect(bundle.data?.extensions.dataQuality.recipes["nemar-ica"]).toEqual(ENTRY);
+  });
+});
+
 describe("metadata.json and the page bundle agree (#2331)", () => {
   test("processing, signalJourney with an in_progress link, and dataQuality (MUTATION: drop the bundle's read)", async () => {
     seedDataset("nm000930");
