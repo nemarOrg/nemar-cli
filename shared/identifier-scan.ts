@@ -59,7 +59,9 @@ export type FindingKind =
   | "brainvision-segment-date"
   | "nirx-subject-name"
   | "nirx-demographics"
-  | "nirx-header-date";
+  | "nirx-header-date"
+  | "nirx-freetext"
+  | "brainvision-marker-text";
 
 /**
  * Finding kinds that name a person or a clinical record: what must not stay public. A finding
@@ -77,6 +79,7 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "json-identifier-key",
   "participants-identifier-column",
   "nirx-subject-name",
+  "nirx-demographics",
 ]);
 
 /**
@@ -571,6 +574,20 @@ function findDates(text: string): DateMatch[] {
  */
 export function hasDateFinerThanYear(text: string): boolean {
   return findDates(text).some((d) => !isYearOnly(d.candidates));
+}
+
+/**
+ * The finest date in some text: `day` for a calendar date that is not 1 January, `month` for a
+ * year and month, `year` for a year-only date (1 January, or a bare four-digit year), or null
+ * when the scanner reads no date in it. For the text-header readers' birth-date rule.
+ */
+export function datePrecision(text: string): "day" | "month" | "year" | null {
+  const dates = findDates(text);
+  const fine = dates.filter((d) => !isYearOnly(d.candidates));
+  if (fine.some((d) => d.candidates.some((c) => c.day > 0))) return "day";
+  if (fine.length > 0) return "month";
+  if (dates.length > 0 || /(?<!\d)(19|20)\d{2}(?!\d)/.test(text)) return "year";
+  return null;
 }
 
 /** The text with every date found in it replaced by a space, so month names are not read as names. */

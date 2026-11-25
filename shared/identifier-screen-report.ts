@@ -27,6 +27,7 @@ import {
   INCOMPLETE_COPY,
   KIND_COPY,
   LINES,
+  NOTE_COPY,
   READER_LABEL,
   READ_FAILURE_COPY,
   STATUS_COPY,
@@ -70,6 +71,8 @@ const KIND_TABLE: Record<FindingKind, true> = {
   "nirx-subject-name": true,
   "nirx-demographics": true,
   "nirx-header-date": true,
+  "nirx-freetext": true,
+  "brainvision-marker-text": true,
 };
 export const FINDING_KINDS: readonly FindingKind[] = Object.keys(KIND_TABLE) as FindingKind[];
 const KIND_SET: ReadonlySet<string> = new Set(FINDING_KINDS);
@@ -143,6 +146,11 @@ export interface DatasetRecord {
   read_by_format?: Partial<Record<ReaderId, ReaderTally>>;
   /** Version 2: companion files a recording's header needs and the dataset lacks. */
   companion_missing?: number;
+  /**
+   * Version 2, optional: headers that name a companion other than their own base name. A note,
+   * never gating; absent when there is none.
+   */
+  companion_name_mismatch?: number;
   /** Version 2: the version of each reader the scanner had. */
   readers?: Partial<Record<ReaderId, string>>;
   /** The fleet scan writes this; the publication report does not carry it (a pattern is not a vocabulary). */
@@ -440,13 +448,15 @@ function checkStatusOf(version: ReportVersion, record: DatasetRecord | Preflight
 
 /** The keys a version-2 scan adds to version 1's. */
 const V2_SCAN_KEYS = ["read_by_format", "companion_missing", "readers"] as const;
+/** Version-2 keys a scan carries only when they are non-zero: a report without one reads as before. */
+const V2_OPTIONAL_SCAN_KEYS = ["companion_name_mismatch"] as const;
 
 function parseRecord(x: unknown, version: ReportVersion): DatasetRecord {
   if (!isObject(x)) return bad("scan-shape");
   onlyKeys(
     x,
     [
-      ...(version === 2 ? V2_SCAN_KEYS : []),
+      ...(version === 2 ? [...V2_SCAN_KEYS, ...V2_OPTIONAL_SCAN_KEYS] : []),
       "id",
       "version",
       "scanned_at",
@@ -513,6 +523,10 @@ function parseV2Fields(x: Record<string, unknown>, out: Record<string, unknown>)
   if (x.companion_missing !== undefined) {
     if (!isCount(x.companion_missing)) bad("scan-count");
     out.companion_missing = x.companion_missing;
+  }
+  if (x.companion_name_mismatch !== undefined) {
+    if (!isCount(x.companion_name_mismatch)) bad("scan-count");
+    out.companion_name_mismatch = x.companion_name_mismatch;
   }
   if (x.readers !== undefined) {
     const m = x.readers;
@@ -850,6 +864,7 @@ type ScanLineInput = Pick<
   | "incomplete_reasons"
   | "read_by_format"
   | "companion_missing"
+  | "companion_name_mismatch"
   | "read_failures"
 >;
 
@@ -909,6 +924,10 @@ function scanLinesV2(scan: ScanLineInput): string[] {
     lines.push(LINES.notScreened(formats.map(([f, n]) => `${f} x${n}`).join(", ")));
   }
   if (scan.companion_missing) lines.push(LINES.companionMissing(scan.companion_missing));
+  if (scan.companion_name_mismatch) {
+    const copy = NOTE_COPY["companion-name-mismatch"];
+    lines.push(LINES.note(scan.companion_name_mismatch, copy), ...remedyLines(copy));
+  }
   for (const [key, n] of Object.entries(scan.read_failures ?? {})) {
     const cls = readFailureClassOf(key);
     if (!cls) continue;
@@ -1086,6 +1105,7 @@ export interface PreflightScan {
   /** Version 2 only, and required there. */
   read_by_format?: Partial<Record<ReaderId, ReaderTally>>;
   companion_missing?: number;
+  companion_name_mismatch?: number;
   readers?: Partial<Record<ReaderId, string>>;
 }
 
@@ -1184,7 +1204,7 @@ export function parsePreflightScan(
 ): PreflightScan {
   if (!isObject(x)) return bad("scan-shape");
   const keys = version === 2 ? [...PREFLIGHT_SCAN_KEYS, ...V2_SCAN_KEYS] : PREFLIGHT_SCAN_KEYS;
-  onlyKeys(x, keys, "scan-key");
+  onlyKeys(x, version === 2 ? [...keys, ...V2_OPTIONAL_SCAN_KEYS] : keys, "scan-key");
   for (const key of keys) if (x[key] === undefined) bad("scan-missing");
   const scan = parseScanBody(x) as unknown as PreflightScan;
   // Narrower than the publication report's pattern: only names from the closed list.

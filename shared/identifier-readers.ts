@@ -254,10 +254,25 @@ export interface CompanionCheck {
   missing: string[];
 }
 
+/**
+ * Something a reader noticed that is neither a finding nor a coverage gap: counted and printed
+ * with its remedy, never gating and never changing completeness. Each has its entry in the copy
+ * table (`NOTE_COPY`).
+ */
+export const READER_NOTES = ["companion-name-mismatch"] as const;
+export type ReaderNote = (typeof READER_NOTES)[number];
+
 export interface ReaderResult {
   findings: Finding[];
-  coverage: "complete" | "partial";
+  /**
+   * `not-applicable`: the file has the reader's extension but is not the reader's format (an
+   * Analyze `.hdr` beside NIRx's). It is counted as unscreened under its extension, never as
+   * read, partial or failed, and its companions are not looked for.
+   */
+  coverage: "complete" | "partial" | "not-applicable";
   incomplete?: ReaderIncompleteReason;
+  /** Informational notes, one per kind per file (see {@link READER_NOTES}). */
+  notes?: ReaderNote[];
 }
 
 /**
@@ -271,12 +286,20 @@ export interface ReaderResult {
  * - A thrown {@link LimitExceeded}, or a read that outlives `limits.timeMs`, counts as `partial`
  *   (`limit` or `time`) with NO findings, so catching is how a reader keeps what it found.
  * - Any other throw is a failed read of that file, never a clean one.
+ * - A file with the reader's extension that is not its format returns `not-applicable` (phase A2):
+ *   it is counted as unscreened under its extension, so it never makes a dataset `unchecked`.
+ * - A note (`notes`) is informational: counted and printed, never gating.
  */
 export interface FormatReader {
   id: ReaderId;
   /** Lowercase extensions, with the dot (`.edf`, `.fif.gz`). */
   extensions: readonly string[];
   limits: ReaderLimits;
+  /**
+   * Limits for some of its extensions, in place of `limits` (BrainVision marker files may be far
+   * longer than their headers). Keyed by an entry of `extensions`.
+   */
+  extensionLimits?: Readonly<Record<string, ReaderLimits>>;
   /** Recorded in the report beside the reader's id, so a verdict names the code that made it. */
   version: string;
   companions?: (path: string, siblings: ReadonlySet<string>) => CompanionCheck;
@@ -303,6 +326,13 @@ export const EDF_READER: FormatReader = {
 
 /** The registry. A reader registered here is what makes its extension screened. */
 export const READERS: readonly FormatReader[] = [EDF_READER, BRAINVISION_READER, NIRX_READER];
+
+/** The limits a reader reads one path under: its extension's own, else the reader's. */
+export function limitsFor(reader: FormatReader, path: string): ReaderLimits {
+  if (!reader.extensionLimits) return reader.limits;
+  const match = readerMatch(path, [reader]);
+  return (match && reader.extensionLimits[match.extension]) ?? reader.limits;
+}
 
 /** The reader whose extension the path ends with, longest extension first; null when none. */
 export function readerFor(
