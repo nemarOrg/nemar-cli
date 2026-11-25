@@ -464,7 +464,10 @@ describe("failures stay with their request (review round 1)", () => {
     db.run(`CREATE TRIGGER refuse_audit BEFORE INSERT ON audit_log
             WHEN NEW.resource_id = '${ELIGIBLE}' BEGIN SELECT RAISE(ABORT, 'audit refused'); END`);
     const applied = await applyEligible(send(), dry);
-    expect(byId(applied)).toEqual({ [ELIGIBLE]: "state_moved", [IMAGES]: "acknowledged" });
+    expect(byId(applied)).toEqual({
+      [ELIGIBLE]: "not_recorded:write_failed",
+      [IMAGES]: "acknowledged",
+    });
     const row = ackRow(ELIGIBLE);
     expect(row?.identifier_screen_ack_by).toBeNull();
     expect(row?.identifier_screen_ack_reason).toBeNull();
@@ -499,7 +502,7 @@ describe("failures stay with their request (review round 1)", () => {
     });
     expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
 
-    // A record that throws (the acknowledgment UPDATE refused by the database): state_moved, and
+    // A record that throws (the acknowledgment UPDATE refused by the database): write_failed, and
     // the audit insert in the same transaction is rolled back with it.
     d1 = realD1(db);
     const auditsBefore = auditRows().length;
@@ -509,7 +512,7 @@ describe("failures stay with their request (review round 1)", () => {
       send(),
       dry.filter((r) => r.dataset_id === ELIGIBLE),
     );
-    expect(byId(again)).toEqual({ [ELIGIBLE]: "state_moved" });
+    expect(byId(again)).toEqual({ [ELIGIBLE]: "not_recorded:write_failed" });
     expect(ackRow(ELIGIBLE)?.identifier_screen_ack_at).toBeNull();
     expect(auditRows().length).toBe(auditsBefore);
   });

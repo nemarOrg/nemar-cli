@@ -386,6 +386,7 @@ describe("UPSTREAM_ACK_COPY", () => {
       "eligible",
       "acknowledged",
       "state_moved",
+      "not_recorded:write_failed",
       ...NOT_ELIGIBLE_REASONS.map((r) => `not_eligible:${r}` as AckOutcome),
       ...UPSTREAM_ACK_MESSAGES,
     ];

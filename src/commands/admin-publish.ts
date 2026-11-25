@@ -555,8 +555,8 @@ publishCommand
 Description:
   Reads each selected request's identifier screen, the dataset's license
   lineage and the publication-queue measurement, and reports per request:
-  eligible, not_eligible:<reason>, or (with --apply) acknowledged or
-  state_moved. A request is eligible only when it is a conversion of a
+  eligible, not_eligible:<reason>, or (with --apply) acknowledged,
+  state_moved, or not_recorded:write_failed (nothing written; repeat the run). A request is eligible only when it is a conversion of a
   public, redistributable upstream whose license was read from the source's
   own record, and its screen found nothing but unread formats and image,
   document or tooling files. Nothing is approved.

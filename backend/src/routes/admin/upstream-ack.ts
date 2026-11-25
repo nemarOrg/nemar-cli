@@ -27,7 +27,8 @@
  * checked by `exclusionsOf`; one that does not check refuses the whole call, fail closed).
  *
  * Each request is evaluated and recorded on its own: an error in one is that request's outcome
- * (`not_eligible:evaluation_failed`, or `state_moved` for a failed record), and the response always
+ * (`not_eligible:evaluation_failed`, or `not_recorded:write_failed` for a write that failed; a guard
+ * that no longer matches is `state_moved`), and the response always
  * carries every request's outcome. An acknowledgment is never left without its audit row.
  *
  * 400 a malformed body; 500 the exclusions do not check; 502 no GitHub credential. Every message
@@ -450,7 +451,7 @@ export function registerUpstreamAckRoutes(admin: AdminRouter): void {
           JSON.stringify({
             ...details,
             request_id: row.id,
-            screen_state: e.screen_state,
+            screen_state: row.identifier_screen_status,
             reason: ev.reason,
           }),
         ).byteLength;
@@ -473,7 +474,7 @@ export function registerUpstreamAckRoutes(admin: AdminRouter): void {
         return { ...ev.result, outcome: "acknowledged" };
       } catch (err) {
         console.error(`[acknowledge-batch] ${e.dataset_id}: record threw ${errorClass(err)}`);
-        return { ...ev.result, outcome: "state_moved" };
+        return { ...ev.result, outcome: "not_recorded:write_failed" };
       }
     });
     return c.json({ apply: true, policy, results, next: null });

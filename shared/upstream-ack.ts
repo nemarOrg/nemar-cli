@@ -112,6 +112,7 @@ export type AckOutcome =
   | "eligible"
   | "acknowledged"
   | "state_moved"
+  | "not_recorded:write_failed"
   | `not_eligible:${NotEligibleReason}`;
 
 /** The route's refusals, the command's own sentences, and the "never" line its help prints. */
@@ -214,6 +215,11 @@ export const UPSTREAM_ACK_COPY: Record<UpstreamAckEntry, Copy> = {
     "The request or its screen changed after the dry run read it, so nothing was recorded for it.",
     READ_SCREEN,
     "Run the dry run again and read what it reports before applying.",
+  ),
+  "not_recorded:write_failed": ack(
+    "The acknowledgment could not be written (the database refused the write or its audit record), so nothing was recorded for this request: neither the acknowledgment nor its audit row.",
+    READ_SCREEN,
+    "Run the same selection again; the dry run reads the request afresh and the apply can be repeated.",
   ),
   "not_eligible:no_request": ack(
     "The dataset has no publication request awaiting an administrator.",
